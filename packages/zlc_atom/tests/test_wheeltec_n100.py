@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zlc_atom.authoring import TuneRefused
+from zlc_atom.devices.waveform.wheeltec_n100.console import OK
 from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
@@ -138,7 +139,10 @@ class _FakeModule:
         if line == "#fconfig":
             self.streaming = False
             self._out.clear()
-            self._say("Config Mode")
+            # What a REAL module answers -- not the "Config Mode" the manual
+            # prints.  Judging entry by that banner is what broke on the
+            # bench; entry is the stream stopping.
+            self._say(OK)
         elif line == "#fdeconfig":
             self.streaming = True
             self._say("*#OK")
@@ -315,7 +319,7 @@ def test_a_module_whose_console_stays_silent_still_streams() -> None:
         assert point.settings["settings"] == {}
         # It kept streaming through #fconfig, which is exactly how a module
         # without the console announces itself.
-        assert "did not enter config mode" in point.settings["settings_refusal"]
+        assert "never entered config mode" in point.settings["settings_refusal"]
         assert point.sample_interval_seconds == pytest.approx(0.01)
         source.arm(None, buffer_record_count=4)
         assert source.read_records(1, timeout=2.0, exact=True)
@@ -406,3 +410,35 @@ def test_a_module_left_in_its_console_is_found_and_opened_again() -> None:
         assert "#fdeconfig" in stuck.commands
     finally:
         source.close()
+
+
+def test_entry_is_the_stream_stopping_not_a_banner() -> None:
+    """A module that answers something else has still entered; one that
+    keeps streaming has not, whatever it printed.
+
+    The manual prints "Config Mode" as the reply to #fconfig and a real
+    module answers "*#OK". Reading entry off the banner failed on the first
+    real module it met. The manual's other sentence is the one that holds:
+    if the data stops, config mode was entered.
+    """
+
+    class _Terse(_FakeModule):
+        def _answer(self, line: str) -> None:
+            self.commands.append(line)
+            if line == "#fconfig":
+                self.streaming = False
+                self._out.clear()          # enters, and says nothing at all
+            else:
+                super()._answer(line)
+
+    terse = _Terse()
+    with FdiConfigConsole(terse) as console:
+        assert terse.streaming is False
+        assert console.greeting == ""
+
+    class _Deaf(_FakeModule):
+        def _answer(self, line: str) -> None:
+            self.commands.append(line)     # prints nothing, keeps streaming
+
+    with pytest.raises(RuntimeError, match="kept streaming through #fconfig"):
+        FdiConfigConsole(_Deaf()).enter()

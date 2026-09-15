@@ -819,10 +819,15 @@ class WheeltecN100WaveformSource:
             # of its choices, not as the number the console printed.
             return self._field_for(selected, taken).current
 
-    def save_settings(self) -> None:
-        """Commit the module's settings to its flash, to survive power-off."""
+    def save_settings(self) -> str:
+        """Commit the module's settings to its flash, and say what it answered.
 
-        self._in_console(lambda console: console.save())
+        Nothing reports what is in flash, so this cannot be verified the way
+        a written setting is read back; the module's own reply is handed
+        on rather than judged here.
+        """
+
+        return self._in_console(lambda console: console.save())
 
     def arm(self, records: int | None, *, buffer_record_count: int) -> None:
         self._records.arm(records, buffer_record_count=buffer_record_count)

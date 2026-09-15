@@ -27,6 +27,14 @@ argument makes the module list its own packets and their current rates, and
 every write is read back, so the rate ladder, the packet set and the
 refusals are all the module's answers rather than a table in this file that
 a firmware revision would quietly falsify.
+
+And nothing here judges the module by a BANNER.  The manual prints
+``Config Mode`` as the reply to ``#fconfig``; a real one answers ``*#OK``.
+The manual also states the judgement that actually holds -- "if the data
+stops being sent, config mode was entered" -- and that is the one used
+here: entering is the stream STOPPING, leaving is the stream COMING BACK.
+A string a document printed once is not a contract; what the module does
+with its serial line is.
 """
 
 from __future__ import annotations
@@ -37,13 +45,21 @@ import time
 
 from zlc_atom.authoring import TuneRefused
 
+#: The first byte of every FDILink frame -- what the module's stream looks
+#: like, and therefore what "it is navigating again" looks like.
+FRAME_HEAD = 0xFC
+
 
 #: What the console appends to every command, and what it answers with.
 #: These are the literal bytes the vendor's own FDILinkTool puts on the wire
 #: (``#fconfig\r\n`` / ``#fdeconfig\r\n``), not a guess at the line ending.
 LINE_END = "\r\n"
 
-#: The module's success token, and the banner it prints on entering.
+#: What the module says when a command went through.  Both of these have
+#: been seen: the manual documents ``*#OK`` for most commands and
+#: ``Config Mode`` for ``#fconfig``, while a real module answers ``*#OK``
+#: to ``#fconfig`` as well.  They are logged and passed on, never used to
+#: decide whether a command worked -- see the module docstring.
 OK = "*#OK"
 CONFIG_BANNER = "Config Mode"
 
@@ -110,6 +126,9 @@ class FdiConfigConsole:
         self._port = port
         self._reply_timeout = float(reply_timeout)
         self._entered = False
+        #: Whatever the module printed on the way in, for the record.  Not
+        #: a judgement: see the module docstring.
+        self.greeting = ""
 
     # ------------------------------------------------------------ session
     def __enter__(self) -> "FdiConfigConsole":
@@ -122,29 +141,28 @@ class FdiConfigConsole:
     def enter(self) -> None:
         """Stop the stream and take the module into config mode.
 
-        The module answers ``Config Mode``; frames already on the wire keep
-        arriving for a moment, so the line is read until it goes quiet and
-        everything before the banner is discarded as the tail of the
-        stream.
+        The judgement is the LINE GOING QUIET, which is the manual's own
+        test and the only one that holds across firmwares: a module that
+        entered stops navigating and stops emitting, so whatever it printed
+        on the way in -- ``Config Mode``, ``*#OK``, nothing at all -- the
+        silence that follows is the answer.  A module still streaming after
+        the command never entered.
         """
 
         if self._entered:
             return
         self._port.reset_input_buffer()
         self._write("#fconfig")
-        answer = self._read_until_quiet(ENTER_QUIET_SECONDS)
+        answer, went_quiet = self._read(ENTER_QUIET_SECONDS)
         self._entered = True
-        if CONFIG_BANNER.lower() not in answer.lower():
-            # The banner is the documented reply, but the stream stopping is
-            # what the manual calls the success signal, so a module that
-            # went quiet without printing it is still in config mode -- and
-            # has to be taken back out.
-            if answer.strip():
-                self.close()
-                raise RuntimeError(
-                    "the module did not enter config mode; it answered "
-                    f"{answer.strip()[:200]!r}"
-                )
+        self.greeting = answer.decode("ascii", "replace").strip()
+        if not went_quiet:
+            self.close()
+            raise RuntimeError(
+                f"the module on this port kept streaming through #fconfig, so "
+                f"it never entered config mode (it said "
+                f"{self.greeting[:120]!r})"
+            )
 
     def close(self) -> None:
         """Put the module back on the air, whatever happened in between."""
@@ -153,10 +171,11 @@ class FdiConfigConsole:
             return
         try:
             self._write("#fdeconfig")
-            # Waiting for quiet would wait forever: the module answers this
-            # one by going back on the air, so the acknowledgement itself is
-            # what ends the reply.
-            self._read_until_quiet(ENTER_QUIET_SECONDS, until=OK)
+            # Waiting for quiet would wait forever, because the module
+            # answers this one by going back ON the air.  So the judgement
+            # is again what it does: the first frame header off the stream
+            # says it is navigating, whatever it printed first.
+            self._read(ENTER_QUIET_SECONDS, until=bytes((FRAME_HEAD,)))
         finally:
             self._entered = False
 
@@ -251,15 +270,18 @@ class FdiConfigConsole:
             )
         return reading
 
-    def save(self) -> None:
-        """Commit to flash, without which every change dies at power-off."""
+    def save(self) -> str:
+        """Commit to flash, and answer with whatever the module said.
 
-        answer = self.query("#fsave")
-        if OK not in answer:
-            raise RuntimeError(
-                f"the module did not confirm the save; it answered "
-                f"{answer.strip()[:200]!r}"
-            )
+        There is nothing to read back: no command reports what is in flash,
+        so a save cannot be verified the way a written setting can.  Judging
+        it by the reply text would put this back on a banner -- which is
+        exactly what got entering config mode wrong -- so the reply is
+        returned for the operator to see rather than turned into a verdict
+        this code is not entitled to reach.
+        """
+
+        return self.query("#fsave")
 
     # -------------------------------------------------------------- lines
     def _write(self, text: str) -> None:
@@ -268,15 +290,25 @@ class FdiConfigConsole:
         if callable(flush):
             flush()
 
-    def _read_until_quiet(self, quiet: float, *, until: str | None = None) -> str:
-        """Everything the module says, until it stops or says ``until``.
+    def _read_until_quiet(self, quiet: float) -> str:
+        """What the module said, as text."""
+
+        return self._read(quiet)[0].decode("ascii", "replace")
+
+    def _read(self, quiet: float, *, until: bytes | None = None) -> tuple[bytes, bool]:
+        """What the module said, and whether the line then went quiet.
 
         The console has no general end-of-reply marker: ``#fmsg`` answers
         with one line per packet, ``#faxis`` with three, ``#fsave`` with
         one.  So a reply is normally "what arrived before the line went
-        quiet", bounded by the command timeout.  ``until`` is for the one
-        command whose reply is followed by the navigation stream starting
-        again, where quiet never comes.
+        quiet", bounded by the command timeout.
+
+        The second half of the answer is the important one.  Quiet is how
+        this driver knows the module stopped navigating; running out of
+        time with bytes still arriving is how it knows the module never
+        did.  ``until`` short-circuits the wait for the one command whose
+        reply is followed by the stream starting again, where quiet never
+        comes.
         """
 
         deadline = time.monotonic() + self._reply_timeout
@@ -289,11 +321,15 @@ class FdiConfigConsole:
             if chunk:
                 chunks.append(chunk)
                 last = now
-                if until is not None and until.encode("ascii") in b"".join(chunks):
-                    break
+                if until is not None and until in b"".join(chunks):
+                    return b"".join(chunks), False
             elif chunks and now - last >= quiet:
-                break
-        return b"".join(chunks).decode("ascii", "replace")
+                return b"".join(chunks), True
+            elif not chunks and now - last >= quiet:
+                # It never said anything at all, which for a module that
+                # was not streaming is itself quiet.
+                return b"", True
+        return b"".join(chunks), False
 
 
 __all__ = [
