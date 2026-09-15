@@ -58,9 +58,14 @@ ENTER_QUIET_SECONDS = 0.15
 #: replies back to back, so a gap this long is the end of the reply.
 REPLY_QUIET_SECONDS = 0.08
 
-#: ``IMU        [40]  100.0Hz`` -- one line per packet the module can emit.
-_RATE_LINE = re.compile(
-    r"^\s*(?P<name>\S+)\s*\[\s*(?P<id>[0-9A-Fa-f]{1,2})\s*\]\s*"
+#: ``IMU        [40]  100.0Hz`` -- one packet the module can emit, with its
+#: id and its current rate.  Searched for across the whole reply rather than
+#: matched per line: the manual's own transcript of this reply reaches us
+#: through a PDF table, so whether the module puts the three parts on one
+#: line or three is not something the archive can settle.  The three parts
+#: in that order are the reply either way.
+_RATE_ENTRY = re.compile(
+    r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*\[\s*(?P<id>[0-9A-Fa-f]{1,2})\s*\]\s*"
     r"(?P<hz>[0-9]+(?:\.[0-9]+)?)\s*Hz",
     re.IGNORECASE,
 )
@@ -169,17 +174,10 @@ class FdiConfigConsole:
         """
 
         answer = self.command("#fmsg")
-        rates = []
-        for line in answer.splitlines():
-            found = _RATE_LINE.match(line)
-            if found:
-                rates.append(
-                    PacketRate(
-                        found["name"],
-                        int(found["id"], 16),
-                        float(found["hz"]),
-                    )
-                )
+        rates = [
+            PacketRate(found["name"], int(found["id"], 16), float(found["hz"]))
+            for found in _RATE_ENTRY.finditer(answer)
+        ]
         if not rates:
             raise ConsoleRefused(
                 "the module listed no packets; it answered "
@@ -197,9 +195,8 @@ class FdiConfigConsole:
 
         wanted = float(rate_hz)
         answer = self.command(f"#fmsg {packet_id:02x} {wanted:g}")
-        for line in answer.splitlines():
-            found = _RATE_LINE.match(line)
-            if found and int(found["id"], 16) == int(packet_id):
+        for found in _RATE_ENTRY.finditer(answer):
+            if int(found["id"], 16) == int(packet_id):
                 return float(found["hz"])
         raise ConsoleRefused(
             f"the module did not confirm packet 0x{packet_id:02x} at {wanted:g} Hz; "

@@ -235,8 +235,18 @@ def test_device_control_moves_the_packet_rate_and_the_records_follow() -> None:
         assert source.tune(rate_field, 137.0) == 100.0
         assert source.tunable_values()[rate_field] == 100.0
 
+        # A parameter's NAME says what it is: a frequency is offered in
+        # hertz and a switch as a switch, though the module spells both as
+        # bare decimals.
+        fields = {field.metadata.name: field.metadata for field in source.tunable_fields()}
+        assert fields["FILT_NOTCH_CENTER_FREQUENCY"].unit == "Hz"
+        assert [choice.value for choice in fields["AID_MAG_V_MAGNETIC"].choices] == ["0", "1"]
+        assert fields[rate_field].unit == "Hz"
+
         assert source.tune("FILT_NOTCH_CENTER_FREQUENCY", 50.0) == 50.0
         assert module.parameters["FILT_NOTCH_CENTER_FREQUENCY"] == "50"
+        assert source.tune("AID_MAG_V_MAGNETIC", "0") == "0"
+        assert module.parameters["AID_MAG_V_MAGNETIC"] == "0"
 
         before = source.settings_provenance()["settings_epoch"]
         source.save_settings()

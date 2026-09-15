@@ -43,7 +43,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from zlc_atom.authoring import AuthoringField, TunableField
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, TunableField
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
@@ -130,6 +130,30 @@ MAX_PACKET_RATE_HZ = 1000.0
 #: scale factors, cross-axis terms and biases beside them are calibration,
 #: and are deliberately not offered.
 OPERATOR_PARAMETER_PREFIXES = ("FILT_", "AID_")
+
+#: A parameter's NAME says what kind of value it holds.  The module gives
+#: every one of them as a bare decimal, which would put a frequency and a
+#: switch in the same nondescript number box; the vendor's naming is
+#: consistent enough to do better, and unlike a list of parameter names a
+#: suffix convention survives a firmware revision.  A name ending in
+#: ``_FREQUENCY`` is hertz, and a switch is a switch -- the fusion
+#: parameters are called switches in the vendor's own manual, and the
+#: filter ones say ``_ENABLED``.
+_FREQUENCY_SUFFIX = "_FREQUENCY"
+_SWITCH_SUFFIX = "_ENABLED"
+_SWITCH_PREFIX = "AID_"
+
+
+def parameter_shape(name: str) -> tuple[str, str | None]:
+    """The ``(kind, unit)`` a named parameter should be offered as."""
+
+    upper = str(name).upper()
+    if upper.endswith(_SWITCH_SUFFIX) or upper.startswith(_SWITCH_PREFIX):
+        return "switch", None
+    if upper.endswith(_FREQUENCY_SUFFIX):
+        return "float", "Hz"
+    return "float", None
+
 
 #: How a packet's rate is named among the settings.  The module's own packet
 #: id is in the name, because the NAME differs between firmwares while the
@@ -616,12 +640,32 @@ class WheeltecN100WaveformSource:
                 live_write=True,
                 dependency_group=(name,),
             )
+        kind, unit = parameter_shape(name)
+        if kind == "switch":
+            return TunableField(
+                metadata=AuthoringField(
+                    name,
+                    "choice",
+                    name,
+                    None,
+                    choices=(
+                        AuthoringChoice("0", "Off"),
+                        AuthoringChoice("1", "On"),
+                    ),
+                    description="a module switch, read and written with #fparam",
+                ),
+                current=str(int(float(value))),
+                live_write=True,
+                dependency_group=(name,),
+            )
         return TunableField(
             metadata=AuthoringField(
                 name,
                 "float",
                 name,
                 None,
+                minimum=0.0,
+                unit=unit,
                 description="a module parameter, read and written with #fparam",
             ),
             current=float(value),
@@ -697,7 +741,9 @@ class WheeltecN100WaveformSource:
                 # This is the rate the records are stamped at, so it is
                 # measured off the stream again rather than believed.
                 self._remeasure_rate()
-            return taken
+            # Answer in the field's own spelling: a switch reads back as one
+            # of its choices, not as the number the console printed.
+            return self._field_for(selected, taken).current
 
     def save_settings(self) -> None:
         """Commit the module's settings to its flash, to survive power-off."""
@@ -719,16 +765,26 @@ class WheeltecN100WaveformSource:
         return self._records.armed
 
     def close(self) -> None:
-        """Stop reading and release the port; the handle goes only once it has."""
+        """Stop reading and release the port; the handle goes only once it has.
 
-        self._stop.set()
-        try:
-            if self._records.armed:
-                self._records.finish()
-        finally:
-            if self._reader.is_alive() and self._reader is not threading.current_thread():
-                self._reader.join(timeout=self.config.timeout_seconds)
-            self._serial.close()
+        Taken under the settings lock: a configuration round trip owns the
+        port for its duration, and closing the handle out from under it
+        would leave the module in config mode -- silent, with nobody left
+        to send it ``#fdeconfig``.
+        """
+
+        with self._settings_lock:
+            self._stop.set()
+            try:
+                if self._records.armed:
+                    self._records.finish()
+            finally:
+                if (
+                    self._reader.is_alive()
+                    and self._reader is not threading.current_thread()
+                ):
+                    self._reader.join(timeout=self.config.timeout_seconds)
+                self._serial.close()
 
 
 def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> tuple[str, ...]:
@@ -773,6 +829,7 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
 
 __all__ = [
     "DEFAULT_BAUD",
+    "parameter_shape",
     "MAX_PACKET_RATE_HZ",
     "N100_OUTPUTS",
     "OPERATOR_PARAMETER_PREFIXES",
