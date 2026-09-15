@@ -30,8 +30,6 @@ import hashlib
 import os
 import pathlib
 import sys
-import threading
-import traceback
 import tempfile
 from typing import Any, Callable
 
@@ -250,12 +248,26 @@ def _image_snapshot(
     return owned_snapshot_from_arrays(schema=schema, values=values, revision=1)
 
 
-def _series_snapshot(repeats: int, points: int) -> Any:
-    """One scalar series with repeats, the shape a band is formed over."""
+def _series_snapshot(
+    repeats: int,
+    points: int,
+    *,
+    sites: int | None = None,
+    two_populations: bool = False,
+) -> Any:
+    """One scalar series with repeats, the shape a band is formed over.
+
+    With ``sites``, the same series once per site on a cell axis: the
+    console's scan grid, cells by site and x the scan point.  With
+    ``two_populations``, the values are a readout's -- most shots in one
+    population and the rest in another -- which is the histogram the
+    two-population model is authored for.
+    """
 
     from zlc_data import (  # noqa: PLC0415
         REPEAT,
         SCAN_POINT,
+        SITE,
         AxisId,
         AxisSpec,
         DatasetSchema,
@@ -284,15 +296,26 @@ def _series_snapshot(repeats: int, points: int) -> Any:
                 ),),
             (tuple(range(points)),),
         ),
-        SCALAR_DOMAIN,
+        SCALAR_DOMAIN
+        if sites is None
+        else DomainSpec(
+            (sites,),
+            (AxisSpec(AxisId("site"), "site", SITE, sites,
+                      tuple(float(index) for index in range(sites))),),
+        ),
         ValueSchema.scalar(np.dtype(np.float64), None),
     )
     generator = np.random.default_rng(1)
-    values = np.sin(coordinates)[None, :] + generator.normal(
-        0.0, 0.1, (repeats, points)
-    )
     # A scalar cell is still a cell: the block carries its trailing axis.
-    values = values[..., None]
+    shape = (repeats, points, 1 if sites is None else sites)
+    if two_populations:
+        values = np.where(
+            generator.random(shape) < 0.75,
+            generator.normal(12.0, 2.0, shape),
+            generator.normal(40.0, 3.0, shape),
+        )
+    else:
+        values = np.sin(coordinates)[None, :, None] + generator.normal(0.0, 0.1, shape)
     return owned_snapshot_from_arrays(schema=schema, values=values, revision=1)
 
 
@@ -614,7 +637,7 @@ def representative_work(
 
 # ------------------------------------------------------ a fresh process
 def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
-    """The work a fresh process pays once, done before anyone asks for it.
+    """The first-render costs EVERY panel pays, paid before one asks.
 
     The disk cache spares a process the COMPILE; it does not spare it the
     rest of a first render.  Matplotlib's figure, axes and text modules
@@ -626,14 +649,25 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     render child calls this the moment it starts, on a thread of its own,
     so the first panel finds the process as warm as the second.
 
+    THE FIRST OF TWO LEVELS, and the one a spare child stops at.  Nothing
+    warmed is shared: Windows spawns a child with nothing of its parent's,
+    so every kernel read here is private memory the child holds for as
+    long as it lives.  A spare that had also loaded the solvers held all
+    three families' fit kernels for a panel it had not met, of which the
+    panel it was finally given takes one -- measured on the product's pool,
+    an idle spare went from 283 MB committed and 204 resident to 200 and
+    162.  So this level is what every panel draws, and the
+    reserve of cells the common opening panel takes; the fit is
+    :func:`warm_fit`, run by the child once its panel is showing, for that
+    panel's kind alone.
+
     A short slice of :func:`representative_work`, and a cheap one: a
     request that arrives while this runs shares the process with it, so
     every second here is a second that request may wait.  The pictures a
     panel most often opens on -- a camera frame drawn larger than it is
     and one reduced, a floating derived plane, a histogram, a curve with
     its band, a grid of cells -- on frames just big enough to take each
-    path; not the zooms, saves or 3D scene, which have first uses of their
-    own.
+    path; not the zooms or saves, which have first uses of their own.
 
     ORDER IS THE WHOLE DESIGN, because this gets cut off.  ``proceed`` is
     asked before every step and answers False from the moment a panel is
@@ -641,14 +675,6 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     and the front had better hold what every renderer pays once, cheapest
     first.  Measured on this machine, in the order they now run:
 
-    * THE SOLVER IMPORTS, on a thread of their own, started first and
-      never asked ``proceed``.  They buy the most: without them the
-      operator's FIRST fit costs 0.6 s against one or two milliseconds
-      after, and a live fit has a one-second deadline to expire against.
-      They are also the only part of this that is pure module loading, so
-      they overlap with the drawing below rather than queueing behind it
-      -- 1.65 s for the pair against 2.08 s in turn -- and, being off this
-      thread, they finish even when a panel cuts the rest of this short.
     * the grid of camera frames, 0.5 s: Matplotlib's own import, the first
       text measured loading the font, and the raster kernels' first
       dispatch.  It is what a console opens on.
@@ -661,16 +687,10 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
       picture variety.  Measured, a sixty-four cell mount on a child warmed
       three seconds was 693 ms with the reserve still ahead and 368 once
       it had run.
-    * a curve's fit and a histogram's fit: numba's first dispatch of the
-      fit kernels, which needs the imports above and so waits for them.
     * the remaining picture variety, which is the only part that is about
       what a panel happens to show rather than what every panel pays.
     * the 3D scene, last: 72 ms, and only for a panel presented as height
       bars.
-
-    Listed last, as the solvers were, none of it ran at all: a child is
-    taken about a second into its warming, and the operator paid the fit
-    on the first shot of a running experiment.
     """
 
     from . import (  # noqa: PLC0415
@@ -681,170 +701,12 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
         ImagePlot,
     )
 
-    def load_solvers() -> None:
-        """Everything a first fit costs that has nothing to do with drawing.
-
-        The engine's modules, and then one fit per target family through
-        the engine rather than through a plot: numba's first dispatch of
-        the fit kernels is the other half of what a first fit costs, and it
-        needs no figure, no font and no Matplotlib.  Doing it here is what
-        makes it survive the panel that cuts the drawing below short.
-
-        No scipy.  The solvers are compiled; the classifier threshold is a
-        quadratic's root; the doublet seed finds its own peaks; the camera
-        seed filters its own medians; the site rings measure their own
-        distances.  Importing scipy.optimize and scipy.signal here for the
-        one scalar fallback no registered model reaches cost every child
-        0.85 s of this thread and 45 MB it kept.
-        """
-
-        from .fit import (  # noqa: PLC0415
-            FitEngine,
-            FitTarget,
-            RegularImageFitInput,
-            default_fit_registry,
-        )
-
-        engine = FitEngine()
-        registry = default_fit_registry()
-        rows, columns = 24, 32
-        y_grid, x_grid = np.mgrid[0:rows, 0:columns].astype(np.float64)
-        series_x = np.linspace(-6.0, 6.0, 256)
-        samples = np.concatenate(
-            [
-                np.linspace(8.0, 16.0, 600),
-                np.linspace(34.0, 46.0, 200),
-            ]
-        )
-        counts, edges = np.histogram(samples, bins=40)
-        inputs = {
-            FitTarget.SERIES: (
-                (series_x,),
-                5.0 * np.exp(-0.5 * ((series_x - 0.4) / 1.3) ** 2) + 0.8,
-            ),
-            FitTarget.HISTOGRAM: (
-                (0.5 * (edges[:-1] + edges[1:]),),
-                counts.astype(np.float64),
-            ),
-            FitTarget.IMAGE: (
-                (y_grid.ravel(), x_grid.ravel()),
-                (
-                    120.0
-                    * np.exp(
-                        -0.5
-                        * (
-                            ((x_grid - 16.0) / 4.0) ** 2
-                            + ((y_grid - 12.0) / 5.0) ** 2
-                        )
-                    )
-                    + 4.0
-                ).ravel(),
-            ),
-        }
-        for target, (coordinates, observations) in inputs.items():
-            models = registry.models_for(target)
-            if not models:
-                continue
-            try:
-                engine.fit(models[0], coordinates, observations)
-            except Exception:  # noqa: BLE001 -- warming, never fatal
-                traceback.print_exc()
-
-    def load_batch_solvers(proceed: Callable[[], bool]) -> None:
-        """The solver entries a GRID takes, once the drawing is warm.
-
-        A single fit takes the compiled routine's serial wrapper and a
-        grid's cells the same routine under prange; a camera fit hands the
-        engine a whole image and takes the separable stripe solver.  Three
-        dispatches, and warming the first leaves the operator the other
-        two: measured, a four-cell grid's first fit cost 104 ms in a fresh
-        process against 26 in the same one afterwards, and an image
-        panel's first fit 15 ms over its second.
-
-        They are LAST and they ask ``proceed``, unlike the imports above,
-        because compiling a parallel entry saturates the machine: run on
-        the uninterruptible thread it delayed a mounting panel's picture by
-        six seconds and let a live fit hit its one-second deadline.  A
-        child taken before it gets here pays the dispatch on its first grid
-        fit, which is what it paid before this existed; a spare child that
-        is left alone does not.
-        """
-
-        from .fit import (  # noqa: PLC0415
-            FitEngine,
-            FitTarget,
-            RegularImageFitInput,
-            default_fit_registry,
-        )
-
-        engine = FitEngine()
-        registry = default_fit_registry()
-        rows, columns = 24, 32
-        y_grid, x_grid = np.mgrid[0:rows, 0:columns].astype(np.float64)
-        series_x = np.linspace(-6.0, 6.0, 256)
-        series_y = 5.0 * np.exp(-0.5 * ((series_x - 0.4) / 1.3) ** 2) + 0.8
-        samples = np.concatenate(
-            [np.linspace(8.0, 16.0, 600), np.linspace(34.0, 46.0, 200)]
-        )
-        counts, edges = np.histogram(samples, bins=40)
-        batches = {
-            FitTarget.SERIES: ((series_x,), series_y),
-            FitTarget.HISTOGRAM: (
-                (0.5 * (edges[:-1] + edges[1:]),),
-                counts.astype(np.float64),
-            ),
-        }
-        for target, (coordinates, observations) in batches.items():
-            if not proceed():
-                return
-            models = registry.models_for(target)
-            if not models:
-                continue
-            try:
-                engine.fit_batch(
-                    models[0],
-                    (coordinates, coordinates),
-                    (observations, observations),
-                )
-            except Exception:  # noqa: BLE001 -- warming, never fatal
-                traceback.print_exc()
-        image_models = registry.models_for(FitTarget.IMAGE)
-        if image_models and proceed():
-            frame = (
-                120.0
-                * np.exp(
-                    -0.5
-                    * (
-                        ((x_grid - 16.0) / 4.0) ** 2
-                        + ((y_grid - 12.0) / 5.0) ** 2
-                    )
-                )
-                + 4.0
-            )
-            regular = RegularImageFitInput(
-                np.arange(columns, dtype=np.float64),
-                np.arange(rows, dtype=np.float64),
-                frame,
-            )
-            try:
-                engine.fit(image_models[0], regular)
-                if proceed():
-                    engine.fit_batch(
-                        image_models[0], (regular, regular), (None, None)
-                    )
-            except Exception:  # noqa: BLE001 -- warming, never fatal
-                traceback.print_exc()
-
-    solvers = threading.Thread(
-        target=load_solvers, name="zlc-warm-solvers", daemon=True
-    )
-    solvers.start()
-
     if not proceed():
         return
     image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
-    camera = _image_snapshot(96, 128, np.uint16)
-    _render(camera, FacetGridPlot(None, image), size="4x4")
+    _render(
+        _image_snapshot(96, 128, np.uint16), FacetGridPlot(None, image), size="4x4"
+    )
     if not proceed():
         return
     # The same grid over a floating frame: a grid's cells colour a small
@@ -886,24 +748,6 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     from .rendering import CELL_RESERVE  # noqa: PLC0415
 
     CELL_RESERVE.fill(DEFAULTS.style, int(DEFAULTS.layout.facet_max_cells))
-    if not proceed():
-        return
-    # The fits below solve, so they need what that thread was loading.
-    solvers.join()
-    series = _series_snapshot(8, 400)
-    _render(
-        series,
-        CurvePlot(AxisRef.point("x")),
-        {"uncertainty": True},
-        size="2x2",
-        fit=True,
-    )
-    if not proceed():
-        return
-    _render(series, HistogramPlot(), size="2x2", fit=True)
-    if not proceed():
-        return
-    _render(camera, image, size="4x4", fit=True)
     for dtype in (np.uint16, np.float32, np.float64):
         if not proceed():
             return
@@ -933,20 +777,120 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     if not proceed():
         return
     _render(mixed, ImagePlot(AxisRef.point("x"), AxisRef.cell_data("site")), size="2x2")
-    load_batch_solvers(proceed)
-    if proceed():
-        # And the 3D scene, which was left out of the list above because it
-        # is a presentation only some panels open on.  It costs the process
-        # 72 ms the first time and nothing after -- measured, a second 3D
-        # panel in the same process opens in 98 ms against the first one's
-        # 170 -- and a render child hosts ONE panel, so without this every
-        # 3D panel there has ever been paid it.
-        _render(
-            _image_snapshot(24, 32, np.float64),
-            image,
-            {"presentation": "height_bars"},
-            size="2x2",
+    if not proceed():
+        return
+    # And the 3D scene, which was left out of the list above because it
+    # is a presentation only some panels open on.  It costs the process
+    # 72 ms the first time and nothing after -- measured, a second 3D
+    # panel in the same process opens in 98 ms against the first one's
+    # 170 -- and a render child hosts ONE panel, so without this every
+    # 3D panel there has ever been paid it.
+    _render(
+        _image_snapshot(24, 32, np.float64),
+        image,
+        {"presentation": "height_bars"},
+        size="2x2",
+    )
+
+
+def _fit_picture(
+    target: Any, grid: bool, storage: Any
+) -> tuple[Any, Any, dict | None, str]:
+    """The picture a panel of ``target``'s family fits, in the panel's shape.
+
+    Snapshot, spec, display parameters and size: the same pictures the
+    first level draws, so a fit warmed on one loads the fit and nothing
+    of the drawing.  A single plot's fit takes the serial solver; a grid's
+    live fit is a batch over every cell and takes the same routine under
+    prange, which is its own first dispatch; a camera's hands the engine
+    a whole image and takes the separable stripe solver -- compiled per
+    STORAGE, so the image is drawn in the panel's: a floating derived
+    plane loaded a kernel of its own after a camera frame's warm.
+    """
+
+    from . import (  # noqa: PLC0415
+        AxisRef,
+        CurvePlot,
+        FacetGridPlot,
+        HistogramPlot,
+        ImagePlot,
+    )
+    from .fit import FitTarget  # noqa: PLC0415
+
+    if target is FitTarget.IMAGE:
+        image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+        frame = _image_snapshot(96, 128, storage)
+        return frame, FacetGridPlot(None, image) if grid else image, None, "4x4"
+    if target is FitTarget.HISTOGRAM:
+        if grid:
+            return (
+                _image_snapshot(24, 32, np.float64),
+                FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()),
+                None,
+                "2x2",
+            )
+        return _series_snapshot(8, 400, two_populations=True), HistogramPlot(), None, "2x2"
+    if target is FitTarget.SERIES:
+        # The scan grid a console opens on: cells by site, x the scan
+        # point, the mean over repeats.  Not the mixed-axes grid the first
+        # level draws for its strided raster signature: its live fit
+        # selects no cell and dispatches nothing.
+        return (
+            _series_snapshot(8, 64 if grid else 400, sites=4 if grid else None),
+            FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("x")))
+            if grid
+            else CurvePlot(AxisRef.point("x")),
+            {"uncertainty": True},
+            "2x2",
         )
+    raise ValueError(f"no fit picture for {target!r}")
+
+
+def warm_fit(
+    spec: Any, *, storage: Any, proceed: Callable[[], bool] = lambda: True
+) -> None:
+    """The second level: the fit a panel of ``spec``'s kind may ask for.
+
+    Run by a render child once the panel it was given is showing, for that
+    panel's family, in that panel's shape and its ``storage`` -- the dtype
+    its values are kept in -- and by nothing else.  A first
+    fit unwarmed is 0.6 s -- numba's first dispatch of the family's kernels
+    read off the disk cache, and the session's own request machinery:
+    arming, the batch a grid's live fit takes, accepting and presenting a
+    result -- and a live fit has a one-second deadline to expire against.
+    Warmed here it is the solve and the overlay.
+
+    THROUGH ``configure``, on the panel's own picture, which is the call
+    the panel makes.  Warming the engine directly, as the first level used
+    to, left the session's machinery cold -- a child's first configure(fit=)
+    still cost 140 ms after everything else was hot -- and loaded all
+    three families for a panel that takes one.
+
+    AFTER THE PANEL'S FIRST FRONT, never beside it: loading a kernel holds
+    numba's compiler lock and a parallel entry's first dispatch saturates
+    the machine, so run beside a mounting panel this was paid by that
+    panel's picture -- six seconds, once, and a live fit past its
+    deadline.  And ON THE PANEL'S OWN WORKER THREAD, because what a batch
+    fit's first run commits is per OpenMP team and a team is per master
+    thread: the render child queues this onto its panel's worker.  A spare
+    child never gets here, which is the other half of the point: the
+    kernels a fit loads are private to the process that loads them.
+    ``proceed`` is asked once, before the picture, so a child that is
+    closing draws nothing.
+    """
+
+    from . import FacetGridPlot  # noqa: PLC0415
+    from ._kinds import handler_for  # noqa: PLC0415
+    from .fit import FitTarget  # noqa: PLC0415
+    from .specs import semantic_spec  # noqa: PLC0415
+
+    target = handler_for(semantic_spec(spec)).fit_target
+    if target is None or not proceed():
+        return
+    snapshot, picture, parameters, size = _fit_picture(
+        FitTarget(target), isinstance(spec, FacetGridPlot), np.dtype(storage)
+    )
+    _render(snapshot, picture, parameters, size=size, fit=True)
 
 
 # ------------------------------------------------------------ the warmer

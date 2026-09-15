@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -375,34 +376,17 @@ def test_the_defaults_are_a_board_then_what_an_operator_adds() -> None:
 def _child_report(connection) -> None:
     """What a render child sees: its BLAS thread bound and its commit charge."""
 
-    import ctypes
-    from ctypes import wintypes
-
     import numpy  # noqa: F401  -- the library whose thread pool is bounded
+    import psutil
 
-    class Counters(ctypes.Structure):
-        _fields_ = [
-            ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
-            ("PrivateUsage", ctypes.c_size_t),
-        ]
-
-    counters = Counters()
-    counters.cb = ctypes.sizeof(counters)
-    ctypes.WinDLL("psapi").GetProcessMemoryInfo(
-        ctypes.WinDLL("kernel32").GetCurrentProcess(), ctypes.byref(counters), counters.cb
-    )
     connection.send(
-        (os.environ.get("OPENBLAS_NUM_THREADS"), counters.PrivateUsage / 2**20)
+        (os.environ.get("OPENBLAS_NUM_THREADS"), psutil.Process().memory_info().private / 2**20)
     )
     connection.close()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="commit charge is read through psapi")
-def test_a_render_child_uses_one_blas_thread() -> None:
+def test_a_render_child_uses_one_blas_thread(monkeypatch) -> None:
     """OpenBLAS commits a scratch buffer per thread it may use the moment it
     loads, and a child never multiplies a matrix: a child on a sixteen-core
     machine committed 1258 MB, about a gigabyte of it two thread pools.
@@ -411,9 +395,14 @@ def test_a_render_child_uses_one_blas_thread() -> None:
     is not re-run by a spawned process -- so the child sets it itself, in
     the first module it imports, keyed on the name every child is spawned
     under.  Spawned the way the pool spawns, the child says so, and its
-    commit charge says the library heard it.
+    commit charge says the library heard it.  And it says so OVER the
+    parent's own bound: the product's bootstrap sizes the console's pool to
+    a worker team, a spawned child inherits that, and a default would have
+    kept it.
     """
 
+    # What a child of the console inherits.
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "4")
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
     process = context.Process(
@@ -433,3 +422,42 @@ def test_a_render_child_uses_one_blas_thread() -> None:
     # and under a hundred with one; the ceiling leaves room for a smaller
     # machine's pool without admitting a full one.
     assert private_mb < 250.0, f"a child still committed {private_mb:.0f} MB"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="commit charge is a Windows counter")
+def test_the_console_bounds_its_own_blas_pool_to_a_worker_team() -> None:
+    """The parent multiplies matrices -- the hologram solver, the feedback
+    regressions -- and so keeps a pool, but a pool of its worker team's
+    size, not the machine's.  OpenBLAS commits 32 MB per thread the moment
+    it loads and numpy and scipy each carry a copy: on a sixteen-core
+    machine that was over a gigabyte of the console's commit charge, for a
+    solver that runs a few times an hour and is no faster on sixteen
+    threads than on four at the SLM's own size.  The bound is the product's
+    bootstrap, in place before numpy loads, and an operator's explicit
+    setting stands over it.
+    """
+
+    environment = {
+        key: value for key, value in os.environ.items() if key != "OPENBLAS_NUM_THREADS"
+    }
+    code = """
+import os
+import zou_lab_control  # noqa: F401  -- the bootstrap, before numpy
+import numpy  # noqa: F401
+import psutil
+print(os.environ["OPENBLAS_NUM_THREADS"], psutil.Process().memory_info().private / 2**20)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    threads, private = completed.stdout.split()[-2:]
+    assert threads == str(min(4, os.cpu_count() or 1))
+    assert float(private) < 250.0, (
+        f"the console still committed {float(private):.0f} MB on numpy alone"
+    )

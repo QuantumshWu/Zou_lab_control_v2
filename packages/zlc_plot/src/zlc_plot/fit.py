@@ -7,9 +7,9 @@ parameters a panel publishes and never solves anything, while the render
 children solve and never list.  So the engine is reached from inside the
 functions that solve, and importing this module to read the catalogue costs
 a GUI process nothing it does not use.  A process that will solve warms the
-engine on purpose instead: see :func:`zlc_plot._kernel_warm.warm_process`,
-which every render child runs on a thread of its own before any panel asks
-it for anything.
+engine on purpose instead: see :func:`zlc_plot._kernel_warm.warm_fit`,
+which a render child runs for its panel's own kind once that panel is
+showing -- and which a spare child, holding no panel, never runs at all.
 
 scipy stays out of the render child altogether.  The one scalar solver left
 here, ``least_squares`` for a model without a compiled descriptor, is

@@ -389,11 +389,15 @@ def test_the_cells_follow_the_last_grid_and_the_scene_comes_last(monkeypatch) ->
 
 def test_a_fresh_process_is_warmed_before_its_first_request() -> None:
     """A render child pays its first-render costs at start, on its own.  In
-    a fresh interpreter, after ``warm_process`` alone, the panels a console
-    opens on -- a camera frame and its grid of frames at the screen's own
-    scale, a histogram, a curve with its band -- find the figure modules
-    imported and every kernel they call already answering: their first
-    render loads and compiles nothing."""
+    a fresh interpreter, after ``warm_process`` and then ``warm_fit`` for
+    the panel's own spec -- the two levels a child runs, the second once
+    its panel is showing -- the panels a console opens on, a camera frame
+    and its grid of frames at the screen's own scale, a histogram, a curve
+    with its band, and the grids of each, find the figure modules imported
+    and every kernel they call already answering: their first render and
+    their first fit load and compile nothing.  And the first level alone
+    leaves the solvers cold, which is what a spare child holds instead of
+    three families of fit kernels."""
 
     import subprocess
     import sys
@@ -406,25 +410,48 @@ from zlc_plot._kernel_warm import _image_snapshot, _series_snapshot
 
 _kernel_warm.warm_process()
 figure_ready = 'matplotlib.figure' in sys.modules and 'matplotlib.textpath' in sys.modules
-warmed = set(_kernel_warm.cold_kernels())
+def loaded():
+    return {name: len(kernel.overloads) for name, kernel in _kernel_warm.kernel_dispatchers().items()}
+spare = loaded()
+solvers_loaded_by_a_spare = sorted(
+    name for name, count in spare.items()
+    if name.startswith(("_fit_compiled.", "_fit_radial.")) and count
+)
 image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
 series = _series_snapshot(8, 400)
+loaded_by_a_panel = []
 for snapshot, spec, parameters in (
     (_image_snapshot(96, 128, np.uint16), image, None),
     (_image_snapshot(96, 128, np.uint16), FacetGridPlot(None, image), None),
     (_image_snapshot(1200, 1920, np.float32), image, None),
     (series, HistogramPlot(), None),
+    (_image_snapshot(24, 32, np.float64), FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()), None),
     (series, CurvePlot(AxisRef.point("x")), {"uncertainty": True}),
+    (_series_snapshot(12, 5, sites=25), FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("x"))), {"uncertainty": True}),
 ):
+    _kernel_warm.warm_fit(spec, storage=snapshot.block.values.dtype)
+    before = loaded()
     session = PlotSession(snapshot, spec, size="4x4", parameters=parameters, device_pixel_ratio=3.0)
     session.rgba()
     models = session.fit_models
-    if models:
-        session.configure(fit={"model": str(models[0].model_id)})
+    assert models, f"{spec!r} offers no fit to warm"
+    events = []
+    session.subscribe_fit(events.append)
+    session.configure(fit={"model": str(models[0].model_id)})
+    # A fit that selects nothing dispatches nothing, and would pass the
+    # check below by never asking for a kernel: the fit has to have solved.
+    result = events[-1].result
+    assert any(result.results) if hasattr(result, "results") else result is not None, f"{spec!r} solved nothing"
     session.close()
-print(sorted(warmed - set(_kernel_warm.cold_kernels())))
+    after = loaded()
+    loaded_by_a_panel.extend(sorted(
+        f"{name}+{after[name] - before.get(name, 0)}"
+        for name in after if after[name] != before.get(name, 0)
+    ))
+print(loaded_by_a_panel)
 print(figure_ready)
 print(sorted(name for name in sys.modules if name.startswith("scipy.") and name.count(".") == 1 and not name.startswith("scipy._")))
+print(solvers_loaded_by_a_spare)
 """
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -434,9 +461,15 @@ print(sorted(name for name in sys.modules if name.startswith("scipy.") and name.
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    still_cold, figure_ready, scipy_loaded = completed.stdout.strip().splitlines()[-3:]
-    assert still_cold == "[]", f"a first panel still had to warm {still_cold}"
+    loaded, figure_ready, scipy_loaded, spare_solvers = completed.stdout.strip().splitlines()[-4:]
+    assert loaded == "[]", f"a first panel still had to load {loaded}"
     assert figure_ready == "True"
+    # THE SPARE STOPS SHORT OF THE FIT: after the first level no solver has
+    # a signature loaded in the process.  Read from each dispatcher's own
+    # overloads, not ``cold_kernels``: that one counts the disk cache too,
+    # and asks whether anything needs COMPILING, which with a full cache is
+    # nothing before any warming at all.
+    assert spare_solvers == "[]", f"the first level loaded the solvers {spare_solvers}"
     # No scipy of OURS: the solvers are compiled, and the seeds, the
     # classifier threshold and the site rings do their own arithmetic.
     # scipy.optimize, .signal, .ndimage and .spatial were 0.85 s of every
@@ -487,6 +520,69 @@ def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch
     _kernel_warm.warm_process(proceed=lambda: False)
     assert rendered == []
     assert constructed == []
+
+
+def test_the_fit_is_warmed_for_the_panels_kind_and_shape_alone(monkeypatch) -> None:
+    """The second level draws ONE picture: the panel's own family, in the
+    panel's own shape.  A single plot's fit takes the serial solver, a
+    grid's live fit is a batch over its cells under prange, and a camera's
+    hands the engine a whole image -- each its own first dispatch, and the
+    picture that pays it is the one the panel will ask for.  A panel with
+    no fit warms nothing; so does a child that is closing.  And the first
+    level draws no fit at all, which is what leaves a spare's memory at
+    what every panel needs.
+    """
+
+    from zlc_plot import (
+        AxisRef,
+        CurvePlot,
+        FacetGridPlot,
+        HistogramPlot,
+        ImagePlot,
+        PulseTimelinePlot,
+        RollingPlot,
+    )
+
+    drawn: list[tuple[str, str | None, bool]] = []
+    storages: list[str] = []
+
+    def record(snapshot, spec, parameters=None, **kw):
+        cell = getattr(spec, "cell", None)
+        drawn.append(
+            (type(spec).__name__, None if cell is None else type(cell).__name__,
+             bool(kw.get("fit", False)))
+        )
+        storages.append(str(np.asarray(snapshot.block.values).dtype))
+
+    monkeypatch.setattr(_kernel_warm, "_render", record)
+    image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    curve = CurvePlot(AxisRef.point("x"))
+    for spec, expected in (
+        (curve, ("CurvePlot", None, True)),
+        (RollingPlot(), ("CurvePlot", None, True)),
+        (HistogramPlot(), ("HistogramPlot", None, True)),
+        (image, ("ImagePlot", None, True)),
+        (FacetGridPlot(AxisRef.cell_data("site"), curve), ("FacetGridPlot", "CurvePlot", True)),
+        (FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()), ("FacetGridPlot", "HistogramPlot", True)),
+        (FacetGridPlot(None, image), ("FacetGridPlot", "ImagePlot", True)),
+    ):
+        drawn.clear()
+        _kernel_warm.warm_fit(spec, storage=np.uint16)
+        assert drawn == [expected], (spec, drawn)
+
+    # In the panel's storage: an image fit's kernels are compiled per dtype.
+    storages.clear()
+    _kernel_warm.warm_fit(image, storage=np.float32)
+    _kernel_warm.warm_fit(FacetGridPlot(None, image), storage=np.float64)
+    assert storages == ["float32", "float64"]
+
+    drawn.clear()
+    _kernel_warm.warm_fit(PulseTimelinePlot(), storage=np.float64)
+    _kernel_warm.warm_fit(curve, storage=np.float64, proceed=lambda: False)
+    assert drawn == []
+
+    _kernel_warm.warm_process()
+    assert drawn and not any(fit for _kind, _cell, fit in drawn), drawn
 
 
 def test_an_inlined_helper_is_not_a_kernel_to_warm() -> None:

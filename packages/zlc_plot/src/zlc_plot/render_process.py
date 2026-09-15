@@ -46,10 +46,13 @@ _CHILD_NAME_PREFIX = "zlc-render-"
 # has loaded, and the environment is read when the library loads.  The
 # product's own bootstrap never runs in a child -- a package ``__main__`` is
 # not re-run by a spawned process -- so the child's environment is the
-# parent's plus what this line adds.  The parent is ``MainProcess`` and
-# keeps its threads.
+# parent's plus what this line adds.  The parent bounds its own pool to a
+# worker team of four in its bootstrap, and a child inherits that: SET
+# here, not defaulted, because an inherited four is the parent's answer
+# for the parent, not an operator's word about a child that multiplies
+# nothing.
 if multiprocessing.current_process().name.startswith(_CHILD_NAME_PREFIX):
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import numpy as np  # noqa: E402
 
@@ -2937,6 +2940,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
     """Child entry: multiplex commands over unchanged local RasterPlotHosts."""
 
     from .config import DEFAULTS
+    from .data_contract import snapshot_schema
     from .raster import RasterPlotHost
     from .session import PlotSession
     from . import _raster_kernels as kernels
@@ -3011,21 +3015,30 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: Set by the first create request: from then on the warming below
     #: stops before its next picture, so a panel never queues behind it.
     requested = Event()
+    #: The panel this child was given -- its host, its spec and its storage,
+    #: appended by the create that builds it -- and the moment its first
+    #: front went out.  What the warming goes on to after that is that
+    #: panel's own fit, on that panel's own worker.
+    panel: list[tuple[RasterPlotHost, object, object]] = []
+    shown = Event()
 
     def warm() -> None:
         """Pay the process's first-render costs now, before a panel asks.
 
-        On a thread of its own, and only until a panel asks: a request
-        shares this process's one interpreter with the warming, so a
-        picture warmed while a panel waits is a picture the panel waited
-        for.  A failure here costs the first panel what it would have cost
-        anyway, and is written to the child's stderr, not allowed to end
-        the child.
+        On a thread of its own, in two levels.  The first is what every
+        panel pays, and runs only until a panel asks: a request shares
+        this process's one interpreter with the warming, so a picture
+        warmed while a panel waits is a picture the panel waited for.  The
+        second is that panel's own fit, once its first front is out, queued
+        onto the panel's own worker -- a spare child never reaches it,
+        which is what keeps a spare's memory to what every panel needs.  A
+        failure in either costs the panel what it would have cost anyway,
+        and is written to the child's stderr, not allowed to end the child.
         """
 
         import gc
 
-        from ._kernel_warm import warm_process
+        from ._kernel_warm import warm_fit, warm_process
 
         try:
             warm_process(proceed=lambda: not requested.is_set())
@@ -3047,6 +3060,32 @@ def _render_process_main(connection: Connection, name: str) -> None:
         gc.collect()
         gc.freeze()
         gc.set_threshold(20000, 50, 50)
+        # THE PANEL'S OWN FIT, AFTER ITS FIRST FRONT, ON ITS OWN WORKER.
+        # After: loading a kernel holds numba's compiler lock and a parallel
+        # entry's first dispatch saturates the machine, so beside the first
+        # frame it would be paid by the first frame.  On the worker: what a
+        # batch fit's first run commits is per OpenMP team, and a team is
+        # per master thread -- warmed here, the panel's worker met its own
+        # team cold and committed the same again, 33 MB on a sixty-four
+        # cell grid.  Queued on the worker it is the worker's team that
+        # warms, serially with the panel's frames: a frame that lands
+        # during it waits the once, instead of sharing the interpreter.
+        shown.wait()
+        if stopping.is_set():
+            return
+        host, spec, storage = panel[0]
+        try:
+            host.dispatch_control(
+                lambda: warm_fit(
+                    spec, storage=storage, proceed=lambda: not stopping.is_set()
+                )
+            ).result()
+        except Exception:  # noqa: BLE001 -- reported, never fatal
+            traceback.print_exc()
+        # As permanent as the pictures' tables: frozen the same way, so the
+        # panel's frames never rescan them either.
+        gc.collect()
+        gc.freeze()
 
     Thread(target=warm, name=f"zlc-render-{name}-warm", daemon=True).start()
 
@@ -3089,6 +3128,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 int(front.buffer.height),
             )
         )
+        shown.set()
 
     def complete(request_id: int, completed: Future) -> None:
         pending.pop(request_id, None)
@@ -3242,6 +3282,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
             return session
 
         host = RasterPlotHost(factory, host_id=host_id)
+        # The warming needs the panel's storage along with its spec: which
+        # of a fit's kernels an image takes is decided by its dtype.
+        snapshot = getattr(plot_input, "snapshot", plot_input)
+        panel.append((host, spec, snapshot_schema(snapshot).value_schema.dtype))
         with state_lock:
             hosts[host_id] = host
             last_front_sequence[host_id] = -1

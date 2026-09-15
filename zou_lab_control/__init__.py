@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _configure_compiled_worker_threads() -> None:
-    """Size the native pool, bound each ZLC worker team, and let it sleep.
+    """Size the native pools, bound each ZLC worker team, and let them sleep.
 
     Parallel compiled kernels in this product run on Numba's OpenMP pool.
     Its worker threads busy-wait after each parallel
@@ -43,18 +43,33 @@ def _configure_compiled_worker_threads() -> None:
     progress together without each claiming the machine.  Explicit operator
     thread settings remain authoritative.
 
-    Set both policies here because the environment must be in place before
-    Numba/OpenMP initializes, and this bootstrap is what every entry point
-    imports first.  ``setdefault`` preserves an operator's explicit choice.
+    OpenBLAS is bounded to the same team.  It commits a 32 MB scratch
+    buffer per thread it may use the moment its library loads, and numpy
+    and scipy each carry a copy: on this sixteen-core machine the console
+    committed 533 MB on ``import numpy`` alone, 147 with four threads.
+    Nothing is slower for it.  The matrices this process multiplies are
+    the hologram solver's, and at the X15213's 1024 x 1272 its forward
+    took 103 ms on four threads against 121 on sixteen -- 110 against 201
+    microseconds at the simulation's 128 x 128 -- because past four,
+    threads on a matrix of that size wait on each other, and on the render
+    children they share the machine with.  A render child sets its own to
+    one, over this.
+
+    Set every policy here because the environment must be in place before
+    Numba/OpenMP and OpenBLAS initialize, and this bootstrap is what every
+    entry point imports first.  ``setdefault`` preserves an operator's
+    explicit choice.
     """
 
     logical = max(1, os.cpu_count() or 1)
+    team = str(min(4, logical))
     authored = os.environ.get("NUMBA_NUM_THREADS")
     if authored is None:
         os.environ["NUMBA_NUM_THREADS"] = str(logical)
-        os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", str(min(4, logical)))
+        os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", team)
     else:
         os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", authored)
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", team)
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 

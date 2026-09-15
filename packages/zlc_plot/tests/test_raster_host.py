@@ -2653,3 +2653,45 @@ def test_a_promoted_front_does_not_pin_the_first_one() -> None:
         assert host.wait_for_front(timeout=10) is second
     finally:
         host.close(timeout=10)
+
+
+def test_a_render_childs_first_fit_finds_its_family_loaded() -> None:
+    """A spare child stops its warming short of the fit; the child that is
+    given a panel goes on to that panel's own family once the panel's
+    first front is out.  So the operator's first fit on a panel that has
+    been showing for a moment costs the solve and the overlay, not the
+    engine's machine code read off the disk cache: tens of milliseconds
+    against six hundred cold.  Timed, because the child's kernels are its
+    own to see; the bound is well under cold with the overlay inside it.
+    """
+
+    from zlc_plot import RenderProcess
+
+    snapshots = _fit_curve_series("render-process-warm-fit", offset=0.1)
+    service = RenderProcess("raster-warm-fit-test")
+    remote = None
+    release = None
+    try:
+        remote = service.build_host(snapshots(0, center=0.2), CurvePlot(AxisRef.point("x")))
+        remote.wait_for_front(timeout=30)
+        models = remote.fit_models().result(timeout=30).value
+        assert models, "a curve offers a fit"
+        # The child was taken the moment it started, so its first level is
+        # still drawing; the second waits for the front above and then for
+        # nothing.  Both are done well inside this.
+        time.sleep(4.0)
+        events: list[object] = []
+        release = remote.subscribe_fit(events.append).result(timeout=30).value
+        started = time.perf_counter()
+        remote.configure(fit={"model": str(models[0].model_id)}).result(timeout=30)
+        while not events and time.perf_counter() - started < 30.0:
+            time.sleep(0.005)
+        elapsed = time.perf_counter() - started
+        assert events, "no fit arrived"
+        assert elapsed < 0.25, f"the first fit took {elapsed:.3f} s"
+    finally:
+        if release is not None:
+            release().result(timeout=30)
+        if remote is not None:
+            remote.close(timeout=30)
+        service.close(30.0)
