@@ -610,7 +610,7 @@ class WheeltecN100WaveformSource:
         solution uses.
         """
 
-        answer = console.command("#fparam")
+        answer = console.query("#fparam")
         found: list[str] = []
         for line in answer.splitlines():
             name = line.split("=")[0].strip()

@@ -13,11 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from zlc_atom.authoring import TuneRefused
 from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
     FRAME_TAIL,
     IMU_PACKET,
-    ConsoleRefused,
     FdiConfigConsole,
     WheeltecN100Config,
     WheeltecN100WaveformSource,
@@ -197,9 +197,18 @@ def test_the_console_asks_the_module_what_it_can_do() -> None:
         assert console.get_parameter("AID_MAG_V_MAGNETIC") == "1"
         assert console.get_parameter("NO_SUCH_PARAMETER") is None
         assert console.set_parameter("FILT_NOTCH_ENABLED", "1") == "1"
-        with pytest.raises(ConsoleRefused, match="no parameter"):
+        with pytest.raises(TuneRefused, match="no parameter"):
             console.set_parameter("NO_SUCH_PARAMETER", "1")
         console.save()
+
+        # It is the bench's own text-command link, the same shape a Rigol
+        # and a Tektronix are driven through.
+        from zlc_atom.devices.visa import ScpiLink
+
+        assert all(
+            callable(getattr(console, name, None))
+            for name in ScpiLink.__protocol_attrs__
+        ), sorted(ScpiLink.__protocol_attrs__)
     assert module.streaming is True, "leaving config mode puts it back on the air"
     assert module.commands[0] == "#fconfig" and module.commands[-1] == "#fdeconfig"
 

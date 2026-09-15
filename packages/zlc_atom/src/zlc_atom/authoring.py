@@ -146,6 +146,25 @@ class AuthoringField:
         object.__setattr__(self, "choices", choices)
 
 
+class TuneRefused(ValueError):
+    """The instrument would not take this value, and nothing was written.
+
+    A grid step it does not land on, a number that is not finite, a name
+    this firmware does not have: the knob is still where it was, so the
+    reading this session holds is still true.  That is what tells this
+    apart from a write that REACHED the instrument and then lost its
+    readback, where the value really is unknown and the honest answer is to
+    have none.
+
+    It lives here, beside the field a device declares and the call that
+    moves it, because a refusal is a fact about TUNING and not about any
+    one device family.  It began in the RF contract, where the first
+    quantized instrument needed it, and a waveform device that wanted to
+    say the same thing could not reach it across the family boundary --
+    which is how a second, identical exception gets written.
+    """
+
+
 @dataclass(frozen=True)
 class TunableField:
     """One runtime setting: stable form metadata beside current device truth."""
@@ -478,4 +497,5 @@ def _project_integer(value: object, *, label: str) -> int:
 
 
 __all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",
-           "refresh_tunable_fields", "read_tunable_in_unit", "tune_in_unit", "convert_tunable_value"]
+           "TuneRefused", "refresh_tunable_fields", "read_tunable_in_unit",
+           "tune_in_unit", "convert_tunable_value"]

@@ -1,6 +1,6 @@
 """The WHEELTEC N100 inertial module as a waveform source."""
 
-from .console import ConsoleRefused, FdiConfigConsole, PacketRate
+from .console import FdiConfigConsole, PacketRate
 from .source import (
     DEFAULT_BAUD,
     FRAME_HEAD,
@@ -20,7 +20,6 @@ from .source import (
 )
 
 __all__ = [
-    "ConsoleRefused",
     "DEFAULT_BAUD",
     "FdiConfigConsole",
     "FRAME_HEAD",

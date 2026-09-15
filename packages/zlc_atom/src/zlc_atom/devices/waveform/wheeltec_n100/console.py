@@ -7,7 +7,14 @@ emitting frames, every ``#f`` command is answered in plain text, and
 ``#fdeconfig`` (or a confirmed ``#freboot``) puts it back on the air.  That
 is the whole of this module.
 
-Two facts shape the code.  The console is the ONLY documented way to move a
+What it IS, this bench already has a name for: a ``ScpiLink`` -- write a
+text command, query one and read the answer, close when done.  A Rigol and
+a Tektronix speak that over VISA; an N100 speaks it over the bare serial
+line it streams on, and the difference is confined to how a reply ends.
+So the only things here that are the N100's own are entering and leaving
+the console, and what its two configuration commands print.
+
+Two facts shape the rest.  The console is the ONLY documented way to move a
 setting -- the vendor's own ground station uses a MAVLink parameter path
 whose wire format is nowhere in the shipped material, and the binary config
 packets (0x7C/0x7D) have no units, no stated direction and two contradictory
@@ -27,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import time
+
+from zlc_atom.authoring import TuneRefused
 
 
 #: What the console appends to every command, and what it answers with.
@@ -74,15 +83,6 @@ _RATE_ENTRY = re.compile(
 _PARAM_LINE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>\S+)")
 
 
-class ConsoleRefused(RuntimeError):
-    """The module answered, and the answer was not what was asked for.
-
-    The setting is still whatever it was: the console reports per command,
-    so a refusal here means nothing was written, which is what tells this
-    apart from a write whose readback was lost.
-    """
-
-
 @dataclass(frozen=True)
 class PacketRate:
     """One packet the module can emit, and how often it is emitting it."""
@@ -93,7 +93,13 @@ class PacketRate:
 
 
 class FdiConfigConsole:
-    """A conversation with one module, held while its stream is stopped.
+    """The module's text-command link, open while its stream is stopped.
+
+    Satisfies ``devices.visa.ScpiLink`` -- ``write``, ``query``, ``close`` --
+    so it is the same shape as the link a Rigol or a Tektronix is driven
+    through, over a different transport.  ``enter`` is the one thing that
+    has no counterpart there: a VISA instrument is always listening, and
+    this one has to be taken off the air first.
 
     The caller owns the port and is responsible for having parked whatever
     reads it; this class only talks.  Use it as a context manager so the
@@ -111,7 +117,7 @@ class FdiConfigConsole:
         return self
 
     def __exit__(self, *_exc) -> None:
-        self.leave()
+        self.close()
 
     def enter(self) -> None:
         """Stop the stream and take the module into config mode.
@@ -134,13 +140,13 @@ class FdiConfigConsole:
             # went quiet without printing it is still in config mode -- and
             # has to be taken back out.
             if answer.strip():
-                self.leave()
-                raise ConsoleRefused(
+                self.close()
+                raise RuntimeError(
                     "the module did not enter config mode; it answered "
                     f"{answer.strip()[:200]!r}"
                 )
 
-    def leave(self) -> None:
+    def close(self) -> None:
         """Put the module back on the air, whatever happened in between."""
 
         if not self._entered:
@@ -154,17 +160,26 @@ class FdiConfigConsole:
         finally:
             self._entered = False
 
-    # ------------------------------------------------------------ commands
-    def command(self, text: str) -> str:
-        """One command, and everything the module said back."""
+    # --------------------------------------------------------------- link
+    def write(self, command: str) -> None:
+        """Send one command and do not wait for what it says back."""
 
-        if not self._entered:
-            raise ConsoleRefused(
-                f"{text!r} is a config-mode command and this console is not in "
-                "config mode"
-            )
-        self._write(text)
+        self._require_console(command)
+        self._write(command)
+
+    def query(self, command: str) -> str:
+        """Send one command and answer with everything the module said back."""
+
+        self._require_console(command)
+        self._write(command)
         return self._read_until_quiet(REPLY_QUIET_SECONDS)
+
+    def _require_console(self, command: str) -> None:
+        if not self._entered:
+            raise RuntimeError(
+                f"{command!r} is a config-mode command and this console is not "
+                "in config mode"
+            )
 
     def packet_rates(self) -> tuple[PacketRate, ...]:
         """Every packet this module can emit, with its current rate.
@@ -173,13 +188,13 @@ class FdiConfigConsole:
         has, and what each is set to.  Nothing here is assumed.
         """
 
-        answer = self.command("#fmsg")
+        answer = self.query("#fmsg")
         rates = [
             PacketRate(found["name"], int(found["id"], 16), float(found["hz"]))
             for found in _RATE_ENTRY.finditer(answer)
         ]
         if not rates:
-            raise ConsoleRefused(
+            raise RuntimeError(
                 "the module listed no packets; it answered "
                 f"{answer.strip()[:200]!r}"
             )
@@ -194,11 +209,11 @@ class FdiConfigConsole:
         """
 
         wanted = float(rate_hz)
-        answer = self.command(f"#fmsg {packet_id:02x} {wanted:g}")
+        answer = self.query(f"#fmsg {packet_id:02x} {wanted:g}")
         for found in _RATE_ENTRY.finditer(answer):
             if int(found["id"], 16) == int(packet_id):
                 return float(found["hz"])
-        raise ConsoleRefused(
+        raise TuneRefused(
             f"the module did not confirm packet 0x{packet_id:02x} at {wanted:g} Hz; "
             f"it answered {answer.strip()[:200]!r}"
         )
@@ -211,7 +226,7 @@ class FdiConfigConsole:
         missing name is a fact about this module, not an error.
         """
 
-        answer = self.command(f"#fparam get {name}")
+        answer = self.query(f"#fparam get {name}")
         for line in answer.splitlines():
             found = _PARAM_LINE.match(line)
             if found and found["name"].upper() == name.upper():
@@ -227,10 +242,10 @@ class FdiConfigConsole:
         as nothing, which is a refusal rather than a silent no-op.
         """
 
-        self.command(f"#fparam set {name} {value}")
+        self.query(f"#fparam set {name} {value}")
         reading = self.get_parameter(name)
         if reading is None:
-            raise ConsoleRefused(
+            raise TuneRefused(
                 f"this module has no parameter {name!r}: it would not read "
                 "the name back after the write"
             )
@@ -239,9 +254,9 @@ class FdiConfigConsole:
     def save(self) -> None:
         """Commit to flash, without which every change dies at power-off."""
 
-        answer = self.command("#fsave")
+        answer = self.query("#fsave")
         if OK not in answer:
-            raise ConsoleRefused(
+            raise RuntimeError(
                 f"the module did not confirm the save; it answered "
                 f"{answer.strip()[:200]!r}"
             )
@@ -283,7 +298,6 @@ class FdiConfigConsole:
 
 __all__ = [
     "CONFIG_BANNER",
-    "ConsoleRefused",
     "ENTER_QUIET_SECONDS",
     "FdiConfigConsole",
     "LINE_END",

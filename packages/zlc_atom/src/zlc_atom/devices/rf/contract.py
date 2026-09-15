@@ -48,7 +48,7 @@ import threading
 from typing import Any, Mapping, Protocol, runtime_checkable
 from uuid import uuid4
 
-from zlc_atom.authoring import AuthoringField, TunableField
+from zlc_atom.authoring import AuthoringField, TunableField, TuneRefused
 
 FREQUENCY_FIELD = "frequency"
 POWER_FIELD = "power"
@@ -107,17 +107,6 @@ class RfSource(Protocol):
     def settings_provenance(self) -> Mapping[str, Any]: ...
 
     def close(self) -> None: ...
-
-
-class TuneRefused(ValueError):
-    """The instrument would not take this value, and nothing was written.
-
-    A grid step it does not land on, a number that is not finite: the knob is
-    still where it was, so the reading this session holds is still true.  That
-    is what tells this apart from a write that REACHED the instrument and then
-    lost its readback, where the value really is unknown and the honest answer
-    is to have none.
-    """
 
 
 def snap_to_grid(value: float, step: float, *, name: str, unit: str) -> float:
