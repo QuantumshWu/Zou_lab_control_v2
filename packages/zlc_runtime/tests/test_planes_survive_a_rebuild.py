@@ -91,6 +91,7 @@ def test_indexed_history_keeps_each_shots_stated_error() -> None:
             2,
             None,
             {},
+            None,
         )
     )
     assert built.block.sigma is not None
@@ -119,6 +120,7 @@ def test_an_index_nobody_published_has_an_unknown_error_not_a_zero_one() -> None
             2,
             None,
             {},
+            None,
         )
     )
     sigma = np.asarray(built.block.sigma).reshape(-1)
@@ -146,6 +148,7 @@ def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
             2,
             None,
             {},
+            None,
         )
     )
     assert built.block.sigma is None
@@ -197,6 +200,7 @@ def test_an_indexed_materialization_is_stamped_with_its_window() -> None:
             7,
             None,
             {},
+            None,
             stable_since=4,
         )
     )
