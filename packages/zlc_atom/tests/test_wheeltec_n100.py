@@ -309,8 +309,15 @@ def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
     with pytest.raises(TuneRefused, match="not one of this module's rates"):
         rate_ladder_index(137.0)
     with pytest.raises(TuneRefused):
-        # Rung 0 stops the packets this bench finds the module by.
+        # Rung 0 stops the packets this bench finds the module by...
         rate_ladder_index(0.0)
+    with pytest.raises(TuneRefused, match="not one of this module's rates"):
+        # ...and 1 Hz hides them from a scan that listens for half a second,
+        # which applying would then write to flash. Same hazard, slower.
+        rate_ladder_index(1.0)
+    assert rate_ladder_index(1.0, may_turn_off=True) == 1, (
+        "a packet this bench does not find the module by may go that slow"
+    )
 
     module = _FakeModule(rate_hz=10.0)
     source = _source(module)
@@ -324,8 +331,8 @@ def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
             field.metadata.name: field.metadata for field in source.tunable_fields()
         }[IMU_RATE_PARAMETER]
         assert [choice.value for choice in offered.choices] == [
-            "1", "2", "5", "10", "20", "50", "100", "200", "400"
-        ]
+            "5", "10", "20", "50", "100", "200", "400"
+        ], "1 and 2 Hz are too slow for a scan to hear, so they are not offered"
 
         assert source.tune(IMU_RATE_PARAMETER, "100") == "100"
         assert module.parameters[IMU_RATE_PARAMETER] == "7", "written as its index"
@@ -544,13 +551,16 @@ def test_a_module_whose_console_stays_silent_still_streams() -> None:
 
 
 # ------------------------------------------------------------- the magnetics
-def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
-    """A magnetometer slower than the packet rate is caught by counting repeats.
+def test_the_module_says_how_often_its_magnetic_field_changes() -> None:
+    """Counting repeats bounds the magnetometer's rate from above.
 
     Nothing the vendor ships states the magnetometer's own output rate --
     its specification table is a verbatim lift from another manufacturer's
     part -- so raising the packet rate could buy nothing but duplicate
-    readings.
+    readings. What is counted is how often the published field CHANGES,
+    which is the slower of the magnetometer's sampling and the field's own
+    movement, so it is an upper bound on the first rather than a
+    measurement of it.
     """
 
     packets_per_reading = 4
@@ -559,7 +569,7 @@ def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
     try:
         point = source.working_point()
         assert point.settings["packet_rate_hz"] == pytest.approx(200.0, rel=0.05)
-        assert point.settings["magnetic_update_hz"] == pytest.approx(
+        assert point.settings["magnetic_change_hz"] == pytest.approx(
             200.0 / packets_per_reading, rel=0.15
         )
     finally:
@@ -569,7 +579,7 @@ def test_the_module_says_how_fast_its_magnetic_field_actually_moves() -> None:
     source = _source(quick)
     try:
         point = source.working_point()
-        assert point.settings["magnetic_update_hz"] == pytest.approx(200.0, rel=0.05)
+        assert point.settings["magnetic_change_hz"] == pytest.approx(200.0, rel=0.05)
     finally:
         source.close()
 
@@ -650,3 +660,81 @@ def test_a_packet_that_is_off_reads_as_off_and_can_be_switched() -> None:
         assert source.tune("MSG_AHRS", "0") == "0"
     finally:
         source.close()
+
+
+def test_a_heartbeat_does_not_block_entering_config_mode() -> None:
+    """The 1 Hz heartbeat is what a module sends when it is NOT navigating.
+
+    Counting it as "still streaming" made the two halves of this driver read
+    the same two bytes in opposite directions: leaving the console refuses a
+    heartbeat as proof the stream is back, while entering used to accept it
+    as proof the stream never stopped. A module whose tick fell on the wrong
+    side of #fconfig was then refused.
+    """
+
+    class _Ticks(_FakeModule):
+        def _answer(self, line: str) -> None:
+            super()._answer(line)
+            if line == "#fconfig":
+                # Not navigating any more -- and saying so the way the
+                # module does, once a second.
+                self._out += bytes((FRAME_HEAD, 0xF0))
+
+    module = _Ticks(rate_hz=10.0)
+    with FdiConfigConsole(module) as console:
+        assert module.streaming is False, "it entered, heartbeat and all"
+        assert console.get_parameter(IMU_RATE_PARAMETER) == "4", "rung 4 is 10 Hz"
+
+
+def test_a_refused_save_is_not_a_save() -> None:
+    """*#ERROR is this console's own word for no, and a save is built on."""
+
+    class _RefusesSave(_FakeModule):
+        def _answer(self, line: str) -> None:
+            if line == "#fsave":
+                self.commands.append(line)
+                self._say("*#ERROR")
+                return
+            super()._answer(line)
+
+    module = _RefusesSave()
+    source = _source(module)
+    try:
+        with pytest.raises((TuneRefused, RuntimeError)):
+            source.tune("AID_MAG_V_MAGNETIC", "0")
+        assert source.tunable_values()["AID_MAG_V_MAGNETIC"] == "1", (
+            "the settings must not claim a value the module would not keep"
+        )
+    finally:
+        source.close()
+
+
+def test_somebody_else_s_reply_is_not_a_missing_parameter() -> None:
+    """Absence is what the module SAYS, not what a regex fails to find.
+
+    Reading "no such parameter" off "nothing matched" is what emptied Device
+    Control: any stray text satisfies it, so a knob the panel was showing a
+    moment ago vanishes with no reason recorded.
+    """
+
+    class _AnswersLate(_FakeModule):
+        """Replies to a get with the tail of some earlier command."""
+
+        stray = ""
+
+        def _answer(self, line: str) -> None:
+            if line.startswith("#fparam get ") and self.stray:
+                self.commands.append(line)
+                self._say(self.stray)
+                return
+            super()._answer(line)
+
+    module = _AnswersLate()
+    with FdiConfigConsole(module) as console:
+        # The module's own way of saying it has not got one.
+        assert console.get_parameter("NO_SUCH_PARAMETER") is None
+
+        for stray in ("*#OK", "(y/n)", "MSG_ODOMETER[6f]   0.0Hz", "Config Mode"):
+            module.stray = stray
+            with pytest.raises(RuntimeError, match="lost step"):
+                console.get_parameter(IMU_RATE_PARAMETER)

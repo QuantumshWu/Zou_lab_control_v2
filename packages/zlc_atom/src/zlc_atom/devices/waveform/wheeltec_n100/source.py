@@ -149,6 +149,14 @@ PACKET_RATE_LADDER_HZ = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400
 #: The parameter that holds the rate of the one packet this driver reads.
 IMU_RATE_PARAMETER = "MSG_IMU"
 
+#: The slowest rate the IMU packet may be set to.  Discovery recognises
+#: this module by hearing whole packets, and it listens for a moment --
+#: below this, a scan can pass over a module that is working perfectly,
+#: and since applying a rate writes it to flash, the module would be
+#: invisible from then on, power cycle included.  Rung 0 is excluded for
+#: the same reason; these are the same hazard at different speeds.
+SLOWEST_DISCOVERABLE_HZ = 5.0
+
 #: The NON-RATE settings offered to an operator, tried by name because a
 #: bare ``#fparam`` answers ``*#ERROR`` on this firmware: parameters cannot
 #: be enumerated, so this is a menu to try rather than a claim about what
@@ -186,13 +194,17 @@ def rate_ladder_index(rate_hz: float, *, may_turn_off: bool = False) -> int:
     """
 
     wanted = float(rate_hz)
-    for index, rung in enumerate(PACKET_RATE_LADDER_HZ):
-        if abs(rung - wanted) < 1e-6 and (index or may_turn_off):
-            return index
-    offered = ", ".join(
-        "off" if rung == 0 else f"{rung:g}"
-        for rung in (PACKET_RATE_LADDER_HZ if may_turn_off else PACKET_RATE_LADDER_HZ[1:])
+    allowed = (
+        PACKET_RATE_LADDER_HZ
+        if may_turn_off
+        else tuple(
+            rung for rung in PACKET_RATE_LADDER_HZ if rung >= SLOWEST_DISCOVERABLE_HZ
+        )
     )
+    for index, rung in enumerate(PACKET_RATE_LADDER_HZ):
+        if abs(rung - wanted) < 1e-6 and rung in allowed:
+            return index
+    offered = ", ".join("off" if rung == 0 else f"{rung:g}" for rung in allowed)
     raise TuneRefused(
         f"{wanted:g} Hz is not one of this module's rates; it offers {offered}"
     )
@@ -245,6 +257,22 @@ def _hertz_of_rung(reading: object) -> float | None:
     if 0 <= rung < len(PACKET_RATE_LADDER_HZ):
         return PACKET_RATE_LADDER_HZ[rung]
     return None
+
+
+def _read_one(console, name: str) -> object:
+    """One setting as the module is RUNNING it, not as its table holds it.
+
+    A rate comes from ``#fmsg``, which prints the hertz the module is
+    sending at; anything else from ``#fparam get``, read after the restart
+    that made it live.
+    """
+
+    if parameter_shape(name)[0] == "rate":
+        for listed, _packet_id, rate_hz in console.packet_rates():
+            if listed.upper() == name.upper():
+                return rate_hz
+        return None
+    return _as_number(console.get_parameter(name))
 
 
 def _spelling_of(name: str, value: object) -> str:
@@ -487,7 +515,7 @@ class WheeltecN100WaveformSource:
         self._sample_interval: float | None = None
         # How many of the packets counted so far carried a magnetic field
         # that had actually moved since the packet before.  See
-        # ``magnetic_update_interval``.
+        # ``magnetic_change_interval``.
         #: The first bytes this port produced, kept only to explain a
         #: silence.  "No packets arrived" has at least four causes -- wrong
         #: port, wrong baud, a module still in its console, a module with
@@ -685,13 +713,21 @@ class WheeltecN100WaveformSource:
         self._magnetic_field = current
 
     @property
-    def magnetic_update_interval(self) -> float | None:
-        """Seconds between genuinely new magnetic readings, or None if unknown.
+    def magnetic_change_interval(self) -> float | None:
+        """Seconds between packets whose magnetic field DIFFERS, or None.
 
-        This is the packet interval multiplied by how many packets pass per
-        change.  It answers the question the datasheet does not: whether the
-        magnetic field this bench plots is really arriving as fast as the
-        packets are.
+        Read this as an upper bound on the magnetometer's own output rate,
+        not as a measurement of it.  What is counted is how often the three
+        published values change, which is the slower of two things: how fast
+        the magnetometer samples, and how fast the field is actually moving.
+        A magnetometer whose noise is below its last digit, sitting in a
+        still field, repeats itself and reads slow here even though it is
+        sampling fast.
+
+        It still answers the question the datasheet does not -- whether the
+        magnetic field this bench plots carries new information as fast as
+        the packets arrive -- because for the purpose of plotting a field,
+        a repeated value IS no new information.
         """
 
         interval = self._sample_interval
@@ -784,10 +820,10 @@ class WheeltecN100WaveformSource:
                 "port": self.config.port,
                 "baud": self.config.baud,
                 "packet_rate_hz": round(1.0 / interval, 3),
-                "magnetic_update_hz": (
+                "magnetic_change_hz": (
                     None
-                    if self.magnetic_update_interval is None
-                    else round(1.0 / self.magnetic_update_interval, 3)
+                    if self.magnetic_change_interval is None
+                    else round(1.0 / self.magnetic_change_interval, 3)
                 ),
                 "settings": dict(self._settings),
                 "settings_refusal": self._settings_refusal,
@@ -855,7 +891,10 @@ class WheeltecN100WaveformSource:
         would have read a silent module as a navigating one.
         """
 
-        attempts = 1 if window > _STREAM_BACK_SECONDS else 2
+        # Two goes, always.  This used to be one whenever the window was
+        # long, which is only ever the restart path -- the very path where a
+        # module is most likely to need telling to come back out.
+        attempts = 2
         for attempt in range(attempts):
             mark = time.monotonic()
             deadline = mark + window
@@ -923,7 +962,15 @@ class WheeltecN100WaveformSource:
             # which frees line rate for the one it does.  Turning THAT one
             # off would make the module invisible to discovery.
             may_turn_off = name.upper() != IMU_RATE_PARAMETER
-            rungs = PACKET_RATE_LADDER_HZ if may_turn_off else PACKET_RATE_LADDER_HZ[1:]
+            rungs = (
+                PACKET_RATE_LADDER_HZ
+                if may_turn_off
+                else tuple(
+                    rung
+                    for rung in PACKET_RATE_LADDER_HZ
+                    if rung >= SLOWEST_DISCOVERABLE_HZ
+                )
+            )
             return TunableField(
                 metadata=AuthoringField(
                     name,
@@ -1049,21 +1096,37 @@ class WheeltecN100WaveformSource:
                 self._require_stream_back(_RESTART_SECONDS)
             except BaseException as silenced:
                 self._put_back(selected, previous, silenced, value)
-            if is_rate:
-                # A rate is HELD in hertz, because that is how #fmsg reports
-                # it, and the readback is the rung's index -- so it has to
-                # be turned back into a rate rather than stored as it came.
-                taken = _hertz_of_rung(reading)
-                if selected.upper() == IMU_RATE_PARAMETER:
-                    # And for the packet this bench actually reads, the
-                    # stream itself is the better answer: it says what is
-                    # happening, where the parameter says what was asked
-                    # for.
-                    self._remeasure_rate()
-                    if self._sample_interval:
-                        taken = round(1.0 / self._sample_interval, 1)
-            else:
-                taken = reading
+            # What the module came up ON, asked after the restart.  The
+            # readback inside the write is taken from the PARAMETER TABLE,
+            # before the save and before the restart, so it says what was
+            # asked for and not what is running -- a firmware that clamps a
+            # value on restart would have had this bench reporting, and
+            # recording, a setting the module is not using.
+            taken = self._in_console(
+                lambda console: _read_one(console, selected), stream_back=True
+            )
+            # Every restart reloads the module's WHOLE configuration from
+            # flash, so the rate can move even when the knob that turned was
+            # a filter.  Re-time the stream after any of them.
+            self._remeasure_rate()
+            if is_rate and selected.upper() == IMU_RATE_PARAMETER:
+                # The module's own rung stays the value -- it is one of the
+                # nine the panel offers, and a free-running measurement is
+                # not: at 400 Hz one microsecond of clock error reads as
+                # 399.84, which no choice list contains.  The measurement is
+                # the CHECK, not the answer.
+                measured = (
+                    1.0 / self._sample_interval if self._sample_interval else 0.0
+                )
+                wanted = _as_number(taken) or 0.0
+                if wanted and abs(measured - wanted) > max(1.0, wanted * 0.25):
+                    raise TuneRefused(
+                        f"the module says it is sending {wanted:g} Hz and the "
+                        f"stream measures {measured:.1f} Hz; the rate this "
+                        "bench would stamp its records with is not the rate "
+                        "the module reports, so neither is recorded"
+                    )
+            del reading
             if taken is None:
                 raise TuneRefused(
                     f"the module acknowledged {selected} but would not read it "
@@ -1086,11 +1149,13 @@ class WheeltecN100WaveformSource:
     ) -> None:
         """Undo a write that stopped the module sending, and say what happened.
 
-        Writing the previous value back is tried first.  It cannot be
-        relied on -- a module that read the new value in a spelling this
-        driver did not intend reads the old one the same way -- so a bare
-        restart follows it, which at least returns the module to what is in
-        its flash.
+        The bad value is already IN FLASH: applying a setting saves before
+        it restarts, so there is nothing for a bare restart to discard -- it
+        would reload the very value that silenced the module, and so would
+        a power cycle.  The only undo is to write the previous value the
+        same five-step way, and if that will not take, to say plainly that
+        the module needs its rate put back by other means rather than to
+        recommend a power cycle that boots straight back into silence.
         """
 
         def write_back(console):
@@ -1104,21 +1169,18 @@ class WheeltecN100WaveformSource:
             return _apply(console, name, _spelling_of(name, previous))
 
         restored = False
-        for undo in (write_back, lambda console: console.reboot()):
+        for _ in range(_UNDO_LISTEN_ROUNDS):
             try:
-                self._in_console(undo, stream_back=False)
-            except BaseException:  # noqa: BLE001 -- the next undo is the answer
+                self._in_console(write_back, stream_back=False)
+            except BaseException:  # noqa: BLE001 -- keep trying, then report
                 pass
-            for _ in range(_UNDO_LISTEN_ROUNDS):
-                try:
-                    self._require_stream_back(_RESTART_SECONDS)
-                    self._remeasure_rate()
-                    restored = True
-                    break
-                except BaseException:  # noqa: BLE001 -- keep listening
-                    continue
-            if restored:
+            try:
+                self._require_stream_back(_RESTART_SECONDS)
+                self._remeasure_rate()
+                restored = True
                 break
+            except BaseException:  # noqa: BLE001 -- one more go
+                continue
         said = self._last_exchange[1].strip()
         if restored:
             raise TuneRefused(
@@ -1127,11 +1189,12 @@ class WheeltecN100WaveformSource:
                 f"module answered {said[:120]!r}."
             )
         raise RuntimeError(
-            f"asking this module for {wanted} stopped it sending, and "
-            f"neither writing {name} back nor restarting brought the stream "
-            f"back. The module answered "
-            f"{said[:120]!r}. Power-cycle the module: nothing was written to "
-            "its flash, so a cold start restores the configuration it had."
+            f"asking this module for {wanted} stopped it sending, and writing "
+            f"{name} back did not bring the stream returned. The module "
+            f"answered {said[:120]!r}. A POWER CYCLE WILL NOT HELP: applying "
+            "a setting writes it to flash before restarting, so the module "
+            f"boots into this same state. Put {name} back with the vendor's "
+            "ground station, or over its serial console by hand."
         ) from silenced
 
     def save_settings(self) -> str:
@@ -1205,16 +1268,20 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
     program holds cannot be opened and is passed over, which is the ordinary
     case on a bench whose pulse board owns one.
 
-    A port that says nothing is asked once more, after ``#fdeconfig``: a
+    A port that says nothing is asked once more, after ``#fdeconfig`` -- a
     module left in its configuration console is silent, and silence is
-    exactly what this function reads as "not an N100".  Without that line a
-    module whose console was opened and never closed would disappear from
-    every scan until someone power-cycled it.
+    exactly what this function otherwise reads as "not an N100".  But that
+    line is written ONLY once listening alone has found nothing at all,
+    because a scan runs against every serial port on the bench: the pulse
+    board's side-channel, an SLM, whatever else is idle.  Twelve ASCII
+    bytes into one of those is not something to do on the off-chance, so it
+    is done only when the alternative is not finding the module.
     """
 
     from serial.tools import list_ports
 
     found: list[str] = []
+    silent: list[str] = []
     for info in sorted(list_ports.comports(), key=lambda item: item.device):
         try:
             port = _open_serial(info.device, baud)
@@ -1222,9 +1289,6 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
             continue
         try:
             packets = _listen_for_packets(port, listen_seconds)
-            if packets < 2:
-                wake_from_config_mode(port)
-                packets = _listen_for_packets(port, listen_seconds)
         except Exception:
             continue
         finally:
@@ -1234,6 +1298,28 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
                 pass
         if packets >= 2:
             found.append(info.device)
+        else:
+            silent.append(info.device)
+    if found:
+        return tuple(found)
+    # Nothing answered on its own.  NOW it is worth asking a silent port
+    # whether it is a module someone left in its console.
+    for device in silent:
+        try:
+            port = _open_serial(device, baud)
+        except Exception:
+            continue
+        try:
+            wake_from_config_mode(port)
+            if _listen_for_packets(port, listen_seconds) >= 2:
+                found.append(device)
+        except Exception:
+            continue
+        finally:
+            try:
+                port.close()
+            except Exception:
+                pass
     return tuple(found)
 
 
@@ -1242,6 +1328,7 @@ __all__ = [
     "IMU_RATE_PARAMETER",
     "OFFERED_PARAMETERS",
     "PACKET_RATE_LADDER_HZ",
+    "SLOWEST_DISCOVERABLE_HZ",
     "parameter_shape",
     "rate_ladder_index",
     "MAX_PACKET_RATE_HZ",

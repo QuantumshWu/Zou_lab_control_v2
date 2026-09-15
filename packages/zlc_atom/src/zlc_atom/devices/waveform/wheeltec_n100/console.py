@@ -70,16 +70,25 @@ from zlc_atom.authoring import TuneRefused
 #: like, and therefore what "it is navigating again" looks like.
 FRAME_HEAD = 0xFC
 
-#: A frame header followed by a packet type this module actually sends.
-#: Used to tell the binary stream from a printed reply, which is safe
-#: because every console reply is ASCII and 0xFC is not.
-_STREAM_MARKS = (b"\xfc\x40", b"\xfc\x41", b"\xfc\xf0")
+#: A frame header followed by a NAVIGATION packet type.  0xF0 is the
+#: module's 1 Hz heartbeat, which it sends while it is NOT navigating --
+#: this driver's own stream check says exactly that, and counting it here
+#: as "still streaming" made the two halves read the same two bytes in
+#: opposite directions, so a module that entered config mode on the wrong
+#: side of a heartbeat tick was refused.
+_STREAM_MARKS = (b"\xfc\x40", b"\xfc\x41", b"\xfc\x42")
 
 
 #: What the console appends to every command, and what it answers with.
 #: These are the literal bytes the vendor's own FDILinkTool puts on the wire
 #: (``#fconfig\r\n`` / ``#fdeconfig\r\n``), not a guess at the line ending.
 LINE_END = "\r\n"
+
+#: The module's own refusal token, seen in the ground truth: a bare
+#: ``#fparam`` answers ``*#ERROR``.  It is not a banner being judged -- it
+#: is the one word this console uses to say NO, and a command whose reply
+#: is that word did not happen.
+ERROR = "*#ERROR"
 
 #: What the module says when a command went through.  Both of these have
 #: been seen: the manual documents ``*#OK`` for most commands and
@@ -128,6 +137,51 @@ _PACKET_LINE = re.compile(
     r"(?P<hz>[0-9]+(?:\.[0-9]+)?)Hz",
     re.IGNORECASE,
 )
+
+#: The packet every N100 sends, and the one this bench reads.  Discovery
+#: recognises the module by these frames, so a module that is here at all
+#: lists this packet -- which makes its absence from a ``#fmsg`` answer a
+#: statement about the ANSWER, not about the module.
+IMU_PACKET_NAME = "MSG_IMU"
+
+#: Anything that is neither printable ASCII nor a line ending: a frame's
+#: bytes, and nothing the console prints.  A run between two of these is a
+#: candidate for something the module SAID.
+_NOT_PRINTED = re.compile(rb"[^\x09\x0a\x0d\x20-\x7e]+")
+
+#: A noise floor, not a reply shape.  A binary payload can land on a short
+#: run of printable bytes followed by CRLF by chance -- measured at 30 in
+#: 200 000 IMU frames at one character, 6 at three -- and the shortest
+#: thing this module is recorded printing is ``*#OK``, four characters.
+#: So three is below everything it says and above most of what a frame
+#: can fake.  It judges that the module printed SOMETHING, never
+#: what.
+_SHORTEST_PRINTED = 3
+
+
+def printed_lines(data: bytes) -> tuple[str, ...]:
+    """The console's own words in ``data``, without the stream's bytes.
+
+    A reply is printed text ending in CRLF; a frame is binary, starts 0xFC
+    and ends 0xFD.  So the stream's bytes are cut out as separators and
+    what survives, terminated, is what the module said.  It has to be done
+    this way round rather than by splitting on the line ending first: the
+    frames that drain out after ``#fconfig`` carry no CRLF of their own, so
+    they and the acknowledgement behind them arrive as ONE piece, and a
+    test that asked whether that piece was printable would throw the
+    acknowledgement away with them.
+
+    This is what tells the module's ANSWER from the module still draining
+    out, which a quiet rule cannot do: bytes arriving and then stopping
+    look the same either way.
+    """
+
+    lines: list[str] = []
+    for run in _NOT_PRINTED.split(data):
+        for piece in run.split(LINE_END.encode("ascii"))[:-1]:
+            if len(piece.strip()) >= _SHORTEST_PRINTED:
+                lines.append(piece.decode("ascii").strip("\r\n"))
+    return tuple(lines)
 
 
 class FdiConfigConsole:
@@ -189,15 +243,25 @@ class FdiConfigConsole:
         Second, it must have stopped navigating -- and that is read off the
         line, by looking for frame headers rather than for a banner.  A
         module still streaming never entered, whatever it printed.
+
+        The first of those is why this read is told the reply will be
+        PRINTED.  The frames already in flight when ``#fconfig`` landed
+        arrive before the acknowledgement does, and to a plain quiet rule
+        they are indistinguishable from it: bytes came, then the line went
+        quiet, so the reply must be over.  It is not -- the module has not
+        started speaking yet -- and returning there puts its ``*#OK`` in
+        ``#fmsg``'s window, which is how Device Control came up with no
+        packet rates on it.  What separates them is not timing but kind:
+        the answer is text, the stream is not.
         """
 
         if self._entered:
             return
         self._port.reset_input_buffer()
         self._write("#fconfig")
-        answer, _quiet = self._read(ENTER_QUIET_SECONDS)
+        answer, _quiet = self._read(ENTER_QUIET_SECONDS, printed_reply=True)
         self._entered = True
-        self.greeting = answer.decode("ascii", "replace").strip()
+        self.greeting = LINE_END.join(printed_lines(answer)).strip()
         # Whatever it said is said; now look at what it is doing.
         self._port.reset_input_buffer()
         listening, _ = self._read(ENTER_QUIET_SECONDS, silence_ends_it=True)
@@ -259,10 +323,19 @@ class FdiConfigConsole:
     def get_parameter(self, name: str) -> str | None:
         """One named parameter's value, or None when this firmware lacks it.
 
-        Observed: ``#fparam get MSG_IMU`` answers ``MSG_IMU=4`` -- the name
-        echoed, no spaces, no ``*#OK``.  The name has to match, because a
-        firmware without it answers ``*#ERROR``, and an unmatched reply is
-        exactly what "not present" looks like.
+        Absence is something the module SAYS, not something a regex fails
+        to find.  Recorded: ``#fparam get MSG_IMU`` answers ``MSG_IMU=4``
+        -- the name echoed, no spaces, no ``*#OK`` -- and a name it has not
+        got draws ``*#ERROR``, the same word a bare ``#fparam`` draws.  So
+        there are three answers here and not two: the value, a refusal, or
+        somebody else's reply.
+
+        That third one is the important one.  Reading "no such parameter"
+        off "nothing matched" is what emptied Device Control: any stray
+        text satisfies it -- a leftover packet line, a stale ``*#OK``, a
+        ``(y/n)`` -- and a knob the panel was showing a moment ago vanishes
+        with no reason recorded, while a write that reached the module is
+        reported as refused.
         """
 
         answer = self.query(f"#fparam get {name}")
@@ -272,16 +345,13 @@ class FdiConfigConsole:
             if found["name"].upper() == wanted:
                 return found["value"]
             others.append(found["name"])
-        if others:
-            # It answered with a DIFFERENT parameter's name.  That is not
-            # "no such parameter", it is this conversation having lost its
-            # place, and carrying on would quietly attribute every later
-            # reply to the wrong name.
-            raise RuntimeError(
-                f"asked for {name} and the module answered about "
-                f"{others[0]}: the console has lost step with its replies"
-            )
-        return None
+        if not others and ERROR in answer:
+            return None
+        raise RuntimeError(
+            f"asked for {name} and the module answered "
+            f"{answer.strip()[:120]!r}: the console has lost step with its "
+            "replies"
+        )
 
     def packet_rates(self) -> tuple[tuple[str, int, float], ...]:
         """Every packet this module has, as ``(name, id, hertz)``.
@@ -290,13 +360,31 @@ class FdiConfigConsole:
         is for a rate: the parameter holding one reads back as the ladder
         index that was just written to it, which proves nothing, while this
         prints the hertz the module will actually send at.
+
+        Which is why the answer has to be shown to BE this command's.  An
+        N100 lists ``MSG_IMU`` -- that packet is what discovery finds it by,
+        so a module that is on this port has one.  Text that does not list
+        it therefore says nothing about the module's packets; it says this
+        console is reading the wrong command's reply, and an empty rate list
+        handed back from here is a settings page that quietly loses every
+        rate control and a write that is told it was refused after it
+        reached flash.  ``#fparam get`` has always been checked this way,
+        against the name it echoes.  This is the same check, against the
+        one name the module cannot fail to print.
         """
 
         answer = self.query("#fmsg")
-        return tuple(
-            (found["name"], int(found["id"], 16), float(found["hz"]))
-            for found in _PACKET_LINE.finditer(answer)
+        found = tuple(
+            (match["name"], int(match["id"], 16), float(match["hz"]))
+            for match in _PACKET_LINE.finditer(answer)
         )
+        if not any(name.upper() == IMU_PACKET_NAME for name, _id, _hz in found):
+            raise RuntimeError(
+                f"#fmsg did not list {IMU_PACKET_NAME}, which every N100 has, "
+                "so this is not #fmsg's answer and the console has lost step "
+                f"with its replies; it said {answer.strip()[:200]!r}"
+            )
+        return found
 
     def set_parameter(self, name: str, value: str) -> str:
         """Write one named parameter and answer with what it reads back as.
@@ -332,22 +420,39 @@ class FdiConfigConsole:
         """
 
         self._write("#freboot")
-        self._read(self._reply_quiet, until=CONFIRM_PROMPT.encode("ascii"))
+        answer, _finished = self._read(
+            self._reply_quiet, until=CONFIRM_PROMPT.encode("ascii")
+        )
+        if CONFIRM_PROMPT.encode("ascii") not in answer:
+            # No prompt means the module is not waiting for a yes, and
+            # sending one anyway puts a bare "y" on the wire for it to read
+            # as a command.  It is still in the console, so say so and let
+            # the caller's exit take it out properly.
+            raise RuntimeError(
+                "the module did not ask to confirm the restart; it answered "
+                f"{answer.decode('ascii', 'replace').strip()[:120]!r}"
+            )
         self._write("y")
         self._entered = False
 
     def save(self) -> str:
-        """Commit to flash, and answer with whatever the module said.
+        """Commit to flash, and refuse only on the module's own refusal word.
 
-        There is nothing to read back: no command reports what is in flash,
-        so a save cannot be verified the way a written setting can.  Judging
-        it by the reply text would put this back on a banner -- which is
-        exactly what got entering config mode wrong -- so the reply is
-        returned for the operator to see rather than turned into a verdict
-        this code is not entitled to reach.
+        Nothing reports what is in flash, so a save cannot be CONFIRMED the
+        way a written setting can, and this does not try to: a reply that
+        is not a refusal is passed back unjudged.  But ``*#ERROR`` is not a
+        banner -- it is this console's word for no, recorded in its own
+        answers -- and a save that was refused must not be reported as
+        done, because everything after it is built on the value having
+        reached flash.
         """
 
-        return self.query("#fsave")
+        answer = self.query("#fsave")
+        if ERROR in answer:
+            raise TuneRefused(
+                f"the module refused to save: {answer.strip()[:120]!r}"
+            )
+        return answer
 
     # -------------------------------------------------------------- lines
     def _write(self, text: str) -> None:
@@ -357,9 +462,26 @@ class FdiConfigConsole:
             flush()
 
     def _read_until_quiet(self, quiet: float) -> str:
-        """What the module said, as text."""
+        """What the module said, once it had finished saying it.
 
-        return self._read(quiet)[0].decode("ascii", "replace")
+        Running out of time with bytes still arriving is NOT the module
+        finishing: the rest of that reply is still on its way and will land
+        inside the next command's window.  The console has no sequence
+        numbers, so from there on every command reads the one before it --
+        which is how a whole settings page came back as "this firmware has
+        none of these parameters".  A truncated reply therefore ends the
+        session instead of being handed back as if it were whole.
+        """
+
+        answer, finished = self._read(quiet)
+        if not finished:
+            raise RuntimeError(
+                "the module was still talking when the reply timed out after "
+                f"{self._reply_timeout:g} s; the rest of it would be read as "
+                "the next command's answer, so this settings session is "
+                f"abandoned (it had said {answer.decode('ascii', 'replace')[:80]!r})"
+            )
+        return answer.decode("ascii", "replace")
 
     def _read(
         self,
@@ -367,6 +489,7 @@ class FdiConfigConsole:
         *,
         until: bytes | None = None,
         silence_ends_it: bool = False,
+        printed_reply: bool = False,
     ) -> tuple[bytes, bool]:
         """What the module said, and whether the line then went quiet.
 
@@ -388,6 +511,14 @@ class FdiConfigConsole:
         prints some 1900 bytes and takes its time about starting -- and
         treating the pause before it as "the module said nothing" is what
         emptied Device Control.
+
+        ``printed_reply`` says the same thing about bytes that are not
+        text.  Quiet only ends a reply that has BEGUN, and what begins it
+        is a printed line; frames draining out of a module that has just
+        been told to stop are the previous state of affairs ending, not
+        this command's answer starting.  Waiting out the full timeout for a
+        module that prints nothing is the right price: by then nothing is
+        left in flight, and the session stays in step.
         """
 
         deadline = time.monotonic() + self._reply_timeout
@@ -402,6 +533,13 @@ class FdiConfigConsole:
                 last = now
                 if until is not None and until in b"".join(chunks):
                     return b"".join(chunks), False
+            elif printed_reply and now - last >= quiet:
+                if printed_lines(b"".join(chunks)):
+                    return b"".join(chunks), True
+                # Bytes arrived and stopped, but none of them were words:
+                # that was the stream draining, and the answer has not
+                # started.  Re-arm the quiet window and keep listening.
+                last = now
             elif chunks and now - last >= quiet:
                 return b"".join(chunks), True
             elif silence_ends_it and now - last >= quiet:
@@ -412,10 +550,13 @@ class FdiConfigConsole:
 
 __all__ = [
     "CONFIG_BANNER",
+    "ERROR",
     "CONFIRM_PROMPT",
     "ENTER_QUIET_SECONDS",
     "FdiConfigConsole",
+    "IMU_PACKET_NAME",
     "LINE_END",
     "OK",
+    "printed_lines",
     "REPLY_QUIET_SECONDS",
 ]
