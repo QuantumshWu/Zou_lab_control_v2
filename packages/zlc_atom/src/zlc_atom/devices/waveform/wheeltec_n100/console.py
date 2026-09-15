@@ -26,12 +26,19 @@ each with its reply read in full::
     #fparam get MSG_IMU  then 0.05 s
     #fmsg                                *#ERROR
 
-Same command, and the only difference is that the last one was sent 0.05 s
-behind the one before it.  ``#fmsg`` takes no argument and cannot be
-refused for any other reason, so this is the console refusing a command
-that arrived too soon -- and it is why a driver that reads a reply and
-fires the next command straight away gets nonsense out of a module that
-answers a human typing perfectly.
+Same command, and the only difference is what happened between it and the
+one before.  Every call that worked was followed by a LISTEN -- the host
+reading the line continuously until the next command went out.  The one
+that failed slept instead, and read nothing.
+
+Two things could be behind that, and this file does not need to know which:
+the module may want a gap, or it may want its reply taken off the line.  So
+after recognising an answer the reading GOES ON until the module falls
+silent, and the next command waits out a gap measured from the moment the
+answer was recognised -- the time is spent reading rather than sleeping, so
+covering both costs no more than covering one.  ``#fmsg`` takes no argument
+and cannot be refused for any other reason, which is what makes that pair
+of readings evidence rather than anecdote.
 
 That is the whole cure for the fault this file was rewritten over.  The
 console has no sequence numbers, so a reply that arrives after its command
@@ -126,13 +133,20 @@ CONFIRM_PROMPT = "(y/n)"
 #: The packet every N100 sends, and the one this bench reads.
 IMU_PACKET_NAME = "MSG_IMU"
 
-#: How long to leave the module alone between commands.  See the module
-#: docstring: 0.05 s is measurably too short and the bench answered every
-#: command correctly at two seconds, so this sits inside that bracket with
-#: the margin on the short side.  It is only ever the time SINCE THE LAST
-#: REPLY, so a command that follows a long read -- ``#fmsg``'s 1904 bytes,
-#: or a restart -- pays nothing for it.
+#: How long one command is spaced from the one before it, measured from
+#: the moment the previous answer was RECOGNISED.  Most of it is spent
+#: reading, so it is not dead time: a reply with more to say after the part
+#: that identified it goes on being read for free, and a command that
+#: follows a long read -- ``#fmsg``'s 1904 bytes, or a restart -- pays
+#: nothing at all.  See the module docstring for the pair of bench readings
+#: that put 0.05 s on the wrong side of this and two seconds on the right.
 SETTLE_BETWEEN_COMMANDS = 0.5
+
+#: How long the module must have been silent for its reply to be over.  A
+#: reply is recognised by its first identifying words, which can arrive
+#: before the rest of it; this is what takes the rest off the line instead
+#: of leaving it for the next command to find.
+TRAILING_QUIET_SECONDS = 0.15
 
 #: How long one command may take to answer.  Generous on purpose:
 #: configuring is something an operator does now and then, never a hot
@@ -330,7 +344,8 @@ class FdiConfigConsole:
             # module starts reading again, and the probe that works on this
             # bench never found out, because it waited 1.2 s after every
             # command and never asked the question.
-            self._drain()
+            self._drain(ENTER_QUIET_SECONDS)
+            self._listened_until = time.monotonic()
         self.close()
         raise RuntimeError(
             "the module on this port stopped streaming for #fconfig but then "
@@ -338,26 +353,30 @@ class FdiConfigConsole:
             f"it said {transcript.strip()[:160]!r}"
         )
 
-    def _drain(self) -> None:
-        """Read until the module has stopped saying anything at all.
+    def _drain(self, quiet: float) -> str:
+        """Read on until the module has been silent for ``quiet``.
 
-        Only entering uses this, and only between its two attempts.  What
-        it throws away is whatever an attempt that timed out may still have
-        been owed, which is what makes asking again clean rather than the
-        move that loses step.
+        Two jobs, one loop.  After an answer it takes the rest of that
+        answer off the line, so nothing is left for the next command's
+        window -- the whole subject of this file.  Between entering's two
+        attempts it throws away whatever the first may still have been
+        owed, which is what makes asking again clean rather than the move
+        that loses step.
         """
 
         deadline = time.monotonic() + self._reply_timeout
         last = time.monotonic()
+        rest = bytearray()
         while time.monotonic() < deadline:
             waiting = getattr(self._port, "in_waiting", 0)
             chunk = self._port.read(waiting if waiting else 1)
             now = time.monotonic()
             if chunk:
+                rest += chunk
                 last = now
-            elif now - last >= ENTER_QUIET_SECONDS:
+            elif now - last >= quiet:
                 break
-        self._listened_until = time.monotonic()
+        return _as_text(rest)
 
     def close(self) -> None:
         """Put the module back on the air, whatever happened in between."""
@@ -581,7 +600,12 @@ class FdiConfigConsole:
             + (self._reply_timeout if timeout is None else timeout),
             silent_for=silent_for,
         )
+        # The gap to the next command is measured from HERE, and what
+        # follows spends it reading: whatever the module still had to say
+        # comes off the line now rather than turning up in the next
+        # command's window.
         self._listened_until = time.monotonic()
+        transcript += self._drain(TRAILING_QUIET_SECONDS)
         self.last_exchange = (command, transcript)
         return transcript, answered
 
@@ -672,6 +696,7 @@ __all__ = [
     "REPLY_TIMEOUT_SECONDS",
     "SETTLE_BETWEEN_COMMANDS",
     "SLOWEST_RUNG_SECONDS",
+    "TRAILING_QUIET_SECONDS",
     "packets_in",
     "parameters_in",
 ]
