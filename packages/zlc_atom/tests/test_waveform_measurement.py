@@ -1,4 +1,4 @@
-"""A waveform source is a camera for time: the same host drives it, in blocks."""
+"""A waveform source is a camera for time: one record, one shot, the same host."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from zlc_atom.devices.simulation.waveform import (
     VirtualWaveformConfig,
     VirtualWaveformSource,
 )
-from zlc_atom.devices.waveform.contract import WaveformOutput
 from zlc_atom.devices.waveform.tek_scope import (
     TIME_PER_DIV_FIELD,
     TekScopeConfig,
@@ -38,6 +37,7 @@ from zlc_atom.nodes.waveform import (
     WaveformMeasurementNode,
     WaveformMeasurementRequest,
 )
+from zlc_data import PRIMARY_INDEX, AxisId
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
@@ -96,13 +96,13 @@ def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
 
 
 def _imu_like_source(rate_hz: float) -> VirtualWaveformSource:
-    rng = np.random.default_rng(7)
+    """Packets whose x field counts the packet, so a shot says which packet it was."""
 
     def samples(times: np.ndarray) -> np.ndarray:
         out = np.zeros((times.size, 10), dtype=np.float32)
-        out[:, 0] = 20.0 + np.sin(2.0 * np.pi * 50.0 * times)
+        out[:, 0] = np.round(times * rate_hz)
         out[:, 1] = -5.0
-        out[:, 2] = 45.0 + rng.normal(0.0, 0.1, times.size)
+        out[:, 2] = 45.0
         out[:, 8] = 9.8
         out[:, 9] = 300.0
         return out
@@ -134,44 +134,60 @@ def _drive(host: NodeHost, until, timeout: float = 5.0):
     return None
 
 
-def test_a_node_host_runs_and_stops_a_repeat_zero_waveform_monitor() -> None:
-    """Records group into aligned events; every quantity of a packet is one
-    signal of (1) x () x (channel, time) in its own unit, and a Stop leaves
-    the last event on the plane."""
+def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> None:
+    """Each record publishes at once as (1) x () x (channel) per quantity, in
+    its own unit; a history lease makes the plane keep the last N shots by
+    the measurement's own sequence, which is what a Rolling panel reads."""
 
     plane = SignalDataPlane()
-    source = _imu_like_source(2000.0)
+    source = _imu_like_source(500.0)
     node = WaveformMeasurementNode(
         sampler=source,
-        request=WaveformMeasurementRequest("imu", repeat=0, records_per_event=40),
+        request=WaveformMeasurementRequest("imu", repeat=0, read_interval_seconds=0.0),
         signal_plane=plane,
         outputs=IMU_OUTPUTS,
         producer="imu-live",
     )
     wake = Event()
     host = _host(node, plane, wake)
+    history = None
     try:
         host.start()
         assert host.wait_ready(5), "the monitor did not report ready"
         assert source.capture_state()
         key = host.signal_key(MAGNETIC_FIELD_OUTPUT.name)
         value = _drive(host, lambda: plane.freeze().value(key))
-        assert value is not None, "the hosted monitor published no event"
+        assert value is not None, "the hosted monitor published no shot"
         schema = value.snapshot.block.schema
-        assert schema.physical_shape == (1, 1, 3, 40)
-        channel_axis, time_axis = schema.cell_domain.axes
+        assert schema.physical_shape == (1, 1, 3)
+        (channel_axis,) = schema.cell_domain.axes
         assert channel_axis.coordinate_labels == ("x", "y", "z")
-        assert time_axis.unit == "s"
-        assert time_axis.coordinates[1] == pytest.approx(0.0005)
         assert schema.value_schema.value_unit == "uT"
-        block = np.asarray(value.snapshot.block.values)
-        assert block[0, 0, 1].mean() == pytest.approx(-5.0)
+        assert np.asarray(value.snapshot.block.values)[0, 0, 1] == pytest.approx(-5.0)
         assert value.run_record["named_devices"] == {"sampler": "imu"}
-        assert value.run_record["device_snapshots"]["sampler"]["record_samples"] == 1
+        assert value.run_record["parameters"]["read_interval_seconds"] == 0.0
         temperature = plane.freeze().value(host.signal_key("temperature"))
         assert temperature is not None
         assert temperature.snapshot.block.schema.value_schema.value_unit == "K"
-        assert temperature.snapshot.block.schema.physical_shape == (1, 1, 1, 40)
+        assert temperature.snapshot.block.schema.physical_shape == (1, 1, 1)
+
+        assert plane.supports_indexed_history(key)
+        history = plane.acquire_indexed_history(key, 8)
+        first = plane.latest_publication(key).event_ref.sequence
+        _drive(host, lambda: (
+            True if plane.latest_publication(key).event_ref.sequence >= first + 20 else None
+        ))
+        publication = plane.latest_publication(key)
+        snapshot, _record = plane.current_dataset_view(key, publication)
+        source_index = snapshot.block.schema.point_domain.axis(
+            AxisId("zlc_data.primary-index")
+        )
+        assert source_index.role == PRIMARY_INDEX
+        assert source_index.coordinates == tuple(range(-7, 1))
+        # The window holds eight consecutive shots: their x fields are the
+        # packet numbers, eight of them in a row.
+        packets = np.asarray(snapshot.block.values)[0, :, 0]
+        assert np.all(np.diff(packets) == 1.0)
 
         host.cancel("test completed")
         assert _drive(host, lambda: True if host.observation.terminal else None)
@@ -180,6 +196,8 @@ def test_a_node_host_runs_and_stops_a_repeat_zero_waveform_monitor() -> None:
         assert publication is not None
         assert plane.retains(key, publication)
     finally:
+        if history is not None:
+            history.close()
         if host.observation.running:
             host.cancel("test cleanup")
             _drive(host, lambda: True if not host.observation.running else None)
@@ -188,35 +206,48 @@ def test_a_node_host_runs_and_stops_a_repeat_zero_waveform_monitor() -> None:
         plane.close()
 
 
-def test_a_finite_waveform_measurement_fills_its_repeat_axis() -> None:
-    plane = SignalDataPlane()
-    source = _imu_like_source(2000.0)
-    node = WaveformMeasurementNode(
-        sampler=source,
-        request=WaveformMeasurementRequest("imu", repeat=3, records_per_event=20),
-        signal_plane=plane,
-        outputs=IMU_OUTPUTS,
-        producer="imu-finite",
-    )
-    wake = Event()
-    host = _host(node, plane, wake)
-    try:
-        host.start()
-        assert host.wait_ready(5)
-        assert _drive(host, lambda: True if host.observation.terminal else None)
-        key = host.signal_key(MAGNETIC_FIELD_OUTPUT.name)
-        publication = plane.latest_publication(key)
-        assert publication is not None
-        value = publication.value(key)
-        assert value.coverage.written_cells == 3 and value.coverage.total_cells == 3
-        dataset = plane.current_dataset(key, publication)
-        assert dataset.block.schema.physical_shape == (3, 1, 3, 20)
-        assert source.capture_state() is False
-        assert source.produced_count == 60
-    finally:
-        host.shutdown()
-        source.close()
-        plane.close()
+def test_a_finite_measurement_takes_its_shots_contiguously_or_at_its_own_cadence() -> None:
+    for interval, expect_contiguous in ((0.0, True), (0.004, False)):
+        plane = SignalDataPlane()
+        source = _imu_like_source(500.0)
+        node = WaveformMeasurementNode(
+            sampler=source,
+            request=WaveformMeasurementRequest(
+                "imu", repeat=4, read_interval_seconds=interval
+            ),
+            signal_plane=plane,
+            outputs=IMU_OUTPUTS,
+            producer="imu-finite",
+        )
+        wake = Event()
+        host = _host(node, plane, wake)
+        try:
+            host.start()
+            assert host.wait_ready(5)
+            assert _drive(host, lambda: True if host.observation.terminal else None)
+            key = host.signal_key(MAGNETIC_FIELD_OUTPUT.name)
+            publication = plane.latest_publication(key)
+            assert publication is not None
+            value = publication.value(key)
+            assert value.coverage.written_cells == 4 and value.coverage.total_cells == 4
+            dataset = plane.current_dataset(key, publication)
+            assert dataset.block.schema.physical_shape == (4, 1, 3)
+            packets = np.asarray(dataset.block.values)[:, 0, 0]
+            if expect_contiguous:
+                assert packets.tolist() == [0.0, 1.0, 2.0, 3.0]
+                assert source.produced_count == 4
+            else:
+                # Read every 4 ms off a 500 Hz source: the three intervals
+                # between four shots span about six packets, each shot a new
+                # packet.  A cadence paced by a timed lock wait would sit on
+                # the 15 ms OS timer tick and span twenty.
+                assert np.all(np.diff(packets) >= 1)
+                assert 5 <= packets[-1] - packets[0] <= 10
+            assert source.capture_state() is False
+        finally:
+            host.shutdown()
+            source.close()
+            plane.close()
 
 
 class _ScopeInstrument:

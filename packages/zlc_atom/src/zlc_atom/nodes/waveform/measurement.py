@@ -1,28 +1,34 @@
-"""Finite exact and live-monitor capture of a waveform source.
+"""Finite exact and live-monitor capture of a waveform source: one record, one shot.
 
 This package is a LIBRARY, not a node: it carries no ``logic_node.py``.
 Two nodes stand on it -- the IMU measurement and the scope measurement --
 and what differs between them is only what they publish: an IMU packet is
-four quantities, a scope acquisition is one.  The capture itself, the
-event grouping, the ordinal discipline and the commit are the same for
-both, and live here once.
+four quantities, a scope acquisition is one.  The capture, the read
+cadence and the commit are the same for both, and live here once.
 
-An event is ``records_per_event`` consecutive records concatenated along
-time and published as ``(repeat) x () x (channel, time)``: the channels are
-a labelled COMPONENT axis, the samples a READOUT_EVENT axis whose
-coordinates are seconds from the event's first sample.  Time lives in the
-cell domain and not the point domain on purpose: a point axis is
-multiplied by every scan a signal is composed into, and a thousand samples
-times a hundred scan points is a hundred thousand Python codes per commit;
-a cell axis stays one dense dimension whatever wraps it.
+Every record the measurement takes is one shot, published the moment it
+is read: an IMU packet becomes ``(1) x () x (channel)`` per quantity, a
+scope acquisition ``(1) x () x (channel, time)`` with the samples on a
+READOUT_EVENT axis whose coordinates are seconds from the trigger.  The
+history of shots is the Runtime's: every output declares
+``index_by_source``, so a Rolling panel leases a window and the plane
+keeps the last N shots by their own sequence.
+
+What the measurement is told, besides how many shots, is HOW OFTEN TO READ
+THE HARDWARE.  Zero means every record the source produces is a shot; an
+interval means that at each due time the newest record is the reading and
+whatever arrived in between is not published -- a magnetometer streaming
+at 400 Hz read every 100 ms is ten shots a second, each the field right
+then.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from time import monotonic
+from math import ceil
+from time import monotonic, sleep
 
 import numpy as np
 from zlc_data import COMPONENT, READOUT_EVENT, AxisSpec, DomainSpec, OwnedSnapshot
@@ -31,7 +37,6 @@ from zlc_runtime import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
     MonitorCoverage,
-    SignalPublication,
     SignalValue,
 )
 
@@ -51,18 +56,19 @@ from zlc_atom.devices.waveform.contract import (
 _CANCEL_RESPONSE_SECONDS = 0.05
 
 
-def waveform_authoring_schema(*, records_per_event: int) -> AuthoringSchema:
-    """The two things a waveform measurement is told: how many events, how big."""
+def waveform_authoring_schema(*, read_interval_seconds: float) -> AuthoringSchema:
+    """What a waveform measurement is told: how many shots, how often to read."""
 
     return AuthoringSchema(
         (
             AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
             AuthoringField(
-                "records_per_event",
-                "int",
-                "Records per event",
-                int(records_per_event),
-                minimum=1,
+                "read_interval_seconds",
+                "float",
+                "Read interval",
+                float(read_interval_seconds),
+                minimum=0.0,
+                unit="s",
             ),
         )
     )
@@ -81,10 +87,10 @@ def _channel_axis(producer: str, signal: str, labels: tuple[str, ...]) -> AxisSp
 
 @lru_cache(maxsize=64)
 def _sample_axis(producer: str, signal: str, interval: float, samples: int) -> AxisSpec:
-    """The time axis of one event, built once per working point.
+    """The time axis inside one acquisition, built once per working point.
 
-    Coordinates are seconds from the event's own first sample, so every
-    event of a run shares one axis object and the schema cache hits.
+    Coordinates are seconds from the record's own first sample, so every
+    shot of a run shares one axis object and the schema cache hits.
     """
 
     return AxisSpec(
@@ -97,8 +103,8 @@ def _sample_axis(producer: str, signal: str, interval: float, samples: int) -> A
     )
 
 
-def event_snapshot(
-    records: Sequence[WaveformRecord],
+def shot_snapshot(
+    record: WaveformRecord,
     *,
     output: WaveformOutput,
     producer: str,
@@ -106,58 +112,104 @@ def event_snapshot(
     revision: int,
     sample_interval_seconds: float,
 ) -> OwnedSnapshot:
-    """One event of one output as a dataset: (1) x () x (channel, time)."""
+    """One record of one output as a dataset: (1) x () x (channel[, time])."""
 
-    block = np.concatenate([record.samples for record in records], axis=0)
-    values = np.ascontiguousarray(block[:, list(output.columns)].T)[None]
+    picked = record.samples[:, list(output.columns)]
+    labels = output.channel_labels
+    if picked.shape[0] == 1:
+        values = np.ascontiguousarray(picked[0])[None]
+        cell_axes: tuple[AxisSpec, ...] = (_channel_axis(producer, output.name, labels),)
+    else:
+        values = np.ascontiguousarray(picked.T)[None]
+        cell_axes = (
+            _channel_axis(producer, output.name, labels),
+            _sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0]),
+        )
     return snapshot_from_array(
         values,
         producer=producer,
         signal=output.name,
-        cell_axes=(
-            _channel_axis(producer, output.name, output.channel_labels),
-            _sample_axis(producer, output.name, sample_interval_seconds, block.shape[0]),
-        ),
+        cell_axes=cell_axes,
         value_unit=output.unit,
         generation=str(getattr(generation, "value", generation)),
         revision=int(revision),
     )
 
 
-def _strict_event_ordinals(
-    records: Sequence[WaveformRecord],
-    *,
-    expected_start: int,
-    records_per_event: int,
-) -> tuple[WaveformRecord, ...]:
-    event = tuple(records)
-    expected = tuple(range(expected_start, expected_start + records_per_event))
-    observed = tuple(int(record.source_ordinal) for record in event)
-    if len(event) != records_per_event or observed != expected:
-        raise RuntimeError(
-            "waveform event source ordinals are not contiguous: "
-            f"expected {expected}, received {observed}"
-        )
-    return event
+def _newest_at_due(node: "WaveformMeasurementNode", due: float) -> WaveformRecord | None:
+    """The newest record once ``due`` has passed; before it, nothing.
+
+    Until the due time the source is only drained -- those records are not
+    the reading -- and the time to the due is slept, a cancel slice at
+    most.  It is slept, not waited on the source: a timed lock wait has
+    the OS timer tick as its resolution (15 ms on Windows) while the sleep
+    keeps well under a millisecond, and the cadence is the reading.  At
+    the due time the first record is waited for (a source may not have
+    produced one since the last drain) and everything behind it is taken,
+    so the reading is the newest record there is, not the oldest.
+    """
+
+    remaining = due - monotonic()
+    if remaining > 0.0:
+        node.sampler.read_records(node.read_batch, timeout=0.0, exact=False)
+        sleep(min(_CANCEL_RESPONSE_SECONDS, remaining))
+        return None
+    arrived = node.sampler.read_records(1, timeout=_CANCEL_RESPONSE_SECONDS, exact=False)
+    if not arrived:
+        return None
+    newest = arrived[-1]
+    while True:
+        behind = node.sampler.read_records(node.read_batch, timeout=0.0, exact=False)
+        if not behind:
+            return newest
+        newest = behind[-1]
+
+
+def _due_after(due: float, interval: float) -> float:
+    """The next due on the cadence grid.
+
+    A shot that ran late stays on the grid, so the average cadence is the
+    interval exactly; only a grid a whole interval or more behind re-anchors
+    at now, which is a source or a node that cannot keep the cadence, and
+    then the shots simply come as fast as they can.
+    """
+
+    due += interval
+    now = monotonic()
+    return now if due <= now - interval else due
 
 
 def _strict_terminal(
     terminal: WaveformCaptureTerminalRecord,
     *,
-    expected_records: int,
+    expected_records: int | None,
     stopped: bool = False,
 ) -> WaveformCaptureTerminalRecord:
-    if not (terminal.source_stopped and terminal.no_more_records and terminal.joined):
+    """The device's terminal, checked against what the capture took.
+
+    ``expected_records`` is None for a capture that read at its own
+    cadence: it took the newest record at each due time and let the rest
+    go, so the source's count says nothing about its shots.
+    """
+
+    if not (terminal.source_stopped and terminal.joined):
         raise RuntimeError(
-            "waveform terminal evidence is incomplete: the capture did not stop, "
-            "drain and join"
+            "waveform terminal evidence is incomplete: the capture did not stop and join"
+        )
+    if expected_records is None:
+        # What the source still holds unread is what a sampling read let go.
+        return terminal
+    if not terminal.no_more_records:
+        raise RuntimeError(
+            "waveform terminal evidence is incomplete: the source still holds "
+            "records a contiguous capture never took"
         )
     produced = terminal.produced_count
     if produced < expected_records or (produced != expected_records and not stopped):
         raise RuntimeError(
-            "waveform terminal count differs from completed events: "
-            f"completed events account for {expected_records} record(s), the "
-            f"source produced {produced} (a partial event may be present)"
+            "waveform terminal count differs from completed shots: "
+            f"{expected_records} shot(s) were published, the source produced "
+            f"{produced} record(s)"
         )
     return terminal
 
@@ -181,11 +233,11 @@ def _working_point_snapshot(point: WaveformWorkingPoint) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class WaveformMeasurementRequest:
-    """One frozen selection: which source, how many events, how big each is."""
+    """One frozen selection: which source, how many shots, how often to read."""
 
     sampler_key: str
     repeat: int
-    records_per_event: int
+    read_interval_seconds: float
 
     def __post_init__(self) -> None:
         key = str(self.sampler_key).strip()
@@ -193,15 +245,16 @@ class WaveformMeasurementRequest:
             raise ValueError("sampler_key must be non-empty")
         if int(self.repeat) < 0:
             raise ValueError("repeat must be non-negative")
-        if int(self.records_per_event) <= 0:
-            raise ValueError("records_per_event must be positive")
+        interval = float(self.read_interval_seconds)
+        if not np.isfinite(interval) or interval < 0.0:
+            raise ValueError("read_interval_seconds must be finite and non-negative")
         object.__setattr__(self, "sampler_key", key)
         object.__setattr__(self, "repeat", int(self.repeat))
-        object.__setattr__(self, "records_per_event", int(self.records_per_event))
+        object.__setattr__(self, "read_interval_seconds", interval)
 
 
 class FiniteCapture:
-    """An armed finite capture: ``repeat`` events, each read as one exact group."""
+    """An armed finite capture: ``repeat`` shots, each one record."""
 
     def __init__(
         self,
@@ -214,29 +267,30 @@ class FiniteCapture:
         self.owns_generation = bool(owns_generation)
         self.should_stop = should_stop
         self.closed = False
-        self.completed_events = 0
+        self.completed_shots = 0
         self.stopped = False
         self.terminal: WaveformCaptureTerminalRecord | None = None
+        self._next_due = monotonic()
 
     def collect(
         self,
         *,
-        commit_event: Callable[[tuple[WaveformRecord, ...], int], None] | None = None,
+        commit_shot: Callable[[WaveformRecord, int], None] | None = None,
     ) -> int:
-        """Read every event and publish it; answers how many events were kept."""
+        """Read every shot and publish it; answers how many shots were kept."""
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
-        if commit_event is None:
+        if commit_shot is None:
             if not self.owns_generation:
-                raise TypeError("hosted finite capture requires commit_event")
-            commit_event = self.node._commit_direct_event
+                raise TypeError("hosted finite capture requires commit_shot")
+            commit_shot = self.node._commit_direct_shot
         try:
             for index in range(self.node.repeat):
-                event = self.next_event()
-                if event is None:
+                record = self.next_shot()
+                if record is None:
                     break
-                commit_event(event, index)
+                commit_shot(record, index)
             self.close()
         except BaseException:
             if not self.closed:
@@ -246,56 +300,57 @@ class FiniteCapture:
                 self.node.signal_plane.retire(self.node)
             raise
         if self.owns_generation:
-            if self.completed_events:
+            if self.completed_shots:
                 self.node.signal_plane.seal_committed(
-                    self.node, cut_short=self.completed_events < self.node.repeat
+                    self.node, cut_short=self.completed_shots < self.node.repeat
                 )
             else:
                 self.node.signal_plane.retire(self.node)
-        return self.completed_events
+        return self.completed_shots
 
-    def next_event(self) -> tuple[WaveformRecord, ...] | None:
-        """The next complete event, or None if asked to stop."""
+    def next_shot(self) -> WaveformRecord | None:
+        """The next shot, or None if asked to stop.
+
+        At zero interval it is the next record, and the records must be
+        contiguous from the arm: a record the source lost is a shot this
+        run cannot account for.  At an interval it is the newest record at
+        the due time; what arrived before it is let go.
+        """
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
-        wanted = self.node.records_per_event
-        records: tuple[WaveformRecord, ...] = ()
-        timeout = float(self.node.sampler.timeout)
+        node = self.node
+        interval = node.read_interval_seconds
+        timeout = float(node.sampler.timeout)
         deadline = monotonic() + timeout
-        while len(records) < wanted:
+        while True:
             if self.should_stop is not None and self.should_stop():
                 self.stopped = True
                 return None
-            arrived = self.node.sampler.read_records(
-                wanted - len(records),
-                timeout=min(_CANCEL_RESPONSE_SECONDS, max(0.0, deadline - monotonic())),
-                exact=False,
-            )
-            if arrived:
-                records += tuple(arrived)
-                deadline = monotonic() + timeout
-                continue
-            if monotonic() >= deadline:
+            if interval > 0.0:
+                record = _newest_at_due(node, self._next_due)
+            else:
+                arrived = node.sampler.read_records(
+                    1,
+                    timeout=min(_CANCEL_RESPONSE_SECONDS, max(0.0, deadline - monotonic())),
+                    exact=False,
+                )
+                record = arrived[0] if arrived else None
+            if record is not None:
                 break
-        if len(records) != wanted:
+            if monotonic() >= deadline:
+                raise RuntimeError(
+                    f"the waveform source delivered no record within its {timeout:g} s timeout"
+                )
+        if interval > 0.0:
+            self._next_due = _due_after(self._next_due, interval)
+        elif int(record.source_ordinal) != self.completed_shots:
             raise RuntimeError(
-                f"the waveform source returned {len(records)} record(s) of a "
-                f"{wanted}-record event before its {timeout:g} s timeout"
+                "waveform records are not contiguous: expected ordinal "
+                f"{self.completed_shots}, received {int(record.source_ordinal)}"
             )
-        event = _strict_event_ordinals(
-            records,
-            expected_start=self.completed_events * wanted,
-            records_per_event=wanted,
-        )
-        missing = self.node._missing_samples(event)
-        if missing:
-            raise RuntimeError(
-                f"the waveform source lost {missing} sample(s) inside one event; "
-                "its time axis would not be true"
-            )
-        self.completed_events += 1
-        return event
+        self.completed_shots += 1
+        return record
 
     def close(self) -> WaveformCaptureTerminalRecord:
         if self.terminal is not None:
@@ -304,7 +359,9 @@ class FiniteCapture:
             raise RuntimeError("finite capture closed without terminal evidence")
         terminal = _strict_terminal(
             self.node.sampler.finish_record_capture(),
-            expected_records=self.completed_events * self.node.records_per_event,
+            expected_records=(
+                None if self.node.read_interval_seconds > 0.0 else self.completed_shots
+            ),
             stopped=self.stopped,
         )
         self.closed = True
@@ -313,7 +370,7 @@ class FiniteCapture:
 
 
 class MonitorCapture:
-    """A repeat-zero monitor: every complete event replaces the last."""
+    """A repeat-zero monitor: every shot replaces the last on the plane."""
 
     def __init__(
         self,
@@ -326,8 +383,8 @@ class MonitorCapture:
         self.owns_generation = bool(owns_generation)
         self.closed = False
         self.terminal: WaveformCaptureTerminalRecord | None = None
-        self._pending: list[WaveformRecord] = []
         self._revision = 0
+        self._next_due = monotonic()
         if self.owns_generation:
             if commit_live is not None:
                 raise ValueError("a direct monitor cannot use a host commit function")
@@ -342,46 +399,29 @@ class MonitorCapture:
         return self._revision
 
     def poll(self) -> int:
-        """Take what has arrived and publish every complete event in it."""
+        """Take what has arrived and publish what the cadence says is a shot."""
 
         if self.closed:
             raise RuntimeError("monitor capture is closed")
-        wanted = self.node.records_per_event
-        records = self.node.sampler.read_records(
-            wanted, timeout=_CANCEL_RESPONSE_SECONDS, exact=False
-        )
-        published = 0
-        for record in records:
-            published += self._accept(record)
-        return published
-
-    def _accept(self, record: WaveformRecord) -> int:
-        """Publish only an aligned, contiguous event; drop what does not line up."""
-
-        wanted = self.node.records_per_event
-        ordinal = int(record.source_ordinal)
-        pending = self._pending
-        if not pending:
-            if ordinal % wanted:
-                return 0
-            pending.append(record)
-        else:
-            if ordinal != pending[0].source_ordinal + len(pending):
-                pending.clear()
-                if ordinal % wanted:
-                    return 0
-            pending.append(record)
-        if len(pending) < wanted:
+        node = self.node
+        interval = node.read_interval_seconds
+        if interval <= 0.0:
+            records = node.sampler.read_records(
+                node.read_batch, timeout=_CANCEL_RESPONSE_SECONDS, exact=False
+            )
+            for record in records:
+                self._publish(record)
+            return len(records)
+        newest = _newest_at_due(node, self._next_due)
+        if newest is None:
             return 0
-        event = _strict_event_ordinals(
-            pending, expected_start=int(pending[0].source_ordinal), records_per_event=wanted
-        )
-        pending.clear()
-        if self.node._missing_samples(event):
-            return 0
-        self._revision += 1
-        self._commit_live(self.node._event_outputs(event, revision=self._revision))
+        self._publish(newest)
+        self._next_due = _due_after(self._next_due, interval)
         return 1
+
+    def _publish(self, record: WaveformRecord) -> None:
+        self._revision += 1
+        self._commit_live(self.node._shot_outputs(record, revision=self._revision))
 
     def close(self) -> WaveformCaptureTerminalRecord:
         if self.terminal is not None:
@@ -398,7 +438,7 @@ class MonitorCapture:
 
 
 class WaveformMeasurementNode:
-    """Commit each event of a waveform source to its declared signals."""
+    """Commit each shot of a waveform source to its declared signals."""
 
     def __init__(
         self,
@@ -440,8 +480,8 @@ class WaveformMeasurementNode:
         return self._request.repeat
 
     @property
-    def records_per_event(self) -> int:
-        return self._request.records_per_event
+    def read_interval_seconds(self) -> float:
+        return self._request.read_interval_seconds
 
     @property
     def sampler_key(self) -> str:
@@ -459,6 +499,16 @@ class WaveformMeasurementNode:
         if point is None:
             raise RuntimeError("waveform working point is not frozen")
         return point
+
+    @property
+    def read_batch(self) -> int:
+        """Records one read may take: everything a cancel slice can bring."""
+
+        point = self.working_point
+        per_slice = _CANCEL_RESPONSE_SECONDS / (
+            point.record_samples * point.sample_interval_seconds
+        )
+        return max(4, int(ceil(per_slice)) + 1)
 
     @property
     def run_record(self) -> dict[str, object]:
@@ -497,34 +547,16 @@ class WaveformMeasurementNode:
             "node": self.instance_id,
             "parameters": {
                 "repeat": self.repeat,
-                "records_per_event": self.records_per_event,
+                "read_interval_seconds": self.read_interval_seconds,
             },
             "named_devices": {"sampler": self.sampler_key},
             "device_snapshots": {"sampler": _working_point_snapshot(point)},
         }
         return point
 
-    def _missing_samples(self, event: Sequence[WaveformRecord]) -> int:
-        """Samples the source lost inside this event, by its own clock; 0 without one.
-
-        An event's time axis says its samples are one interval apart.  A
-        source that stamps its records lets that be checked: a stream that
-        dropped a packet inside the event would publish a time axis that
-        lies by one interval from the gap on, so such an event is not
-        published at all.
-        """
-
-        first, last = event[0], event[-1]
-        if first.device_timestamp_seconds is None or last.device_timestamp_seconds is None:
-            return 0
-        point = self.working_point
-        expected = (len(event) - 1) * point.record_samples * point.sample_interval_seconds
-        span = last.device_timestamp_seconds - first.device_timestamp_seconds
-        return max(0, int(round((span - expected) / point.sample_interval_seconds)))
-
-    def _event_outputs(
+    def _shot_outputs(
         self,
-        event: Sequence[WaveformRecord],
+        record: WaveformRecord,
         *,
         revision: int,
         index: int | None = None,
@@ -532,8 +564,8 @@ class WaveformMeasurementNode:
         point = self.working_point
         outputs: dict[str, LiveDatasetOutput] = {}
         for declaration in self._outputs:
-            snapshot = event_snapshot(
-                event,
+            snapshot = shot_snapshot(
+                record,
                 output=point.output(declaration.name),
                 producer=self.instance_id,
                 generation=self.generation,
@@ -573,10 +605,25 @@ class WaveformMeasurementNode:
     ) -> Mapping[str, SignalValue]:
         return self.signal_plane.commit_live(self, outputs)
 
-    def _commit_direct_event(self, event: tuple[WaveformRecord, ...], index: int) -> None:
+    def _commit_direct_shot(self, record: WaveformRecord, index: int) -> None:
         self._commit_direct_outputs(
-            self._event_outputs(event, revision=index + 1, index=index)
+            self._shot_outputs(record, revision=index + 1, index=index)
         )
+
+    def _arm(self, records: int | None) -> None:
+        """Arm for exactly ``records`` contiguous records, or for sampling.
+
+        Sampling reads the newest record at each due time and drains the
+        rest, so the buffer only has to hold a few slices' worth; a source
+        that outruns it drops the oldest, which a sampling read would have
+        let go anyway.
+        """
+
+        timeout = float(self.sampler.timeout)
+        if records is not None:
+            self.sampler.arm(records, buffer_record_count=records, timeout=timeout)
+            return
+        self.sampler.arm(None, buffer_record_count=4 * self.read_batch, timeout=timeout)
 
     # ------------------------------------------------------------- capture
     def prepare(
@@ -592,10 +639,7 @@ class WaveformMeasurementNode:
             self._generation = self.signal_plane.begin_generation(self)
         try:
             self._configure()
-            total = self.repeat * self.records_per_event
-            self.sampler.arm(
-                total, buffer_record_count=total, timeout=float(self.sampler.timeout)
-            )
+            self._arm(None if self.read_interval_seconds > 0.0 else self.repeat)
             return FiniteCapture(
                 self, owns_generation=owns_generation, should_stop=should_stop
             )
@@ -622,14 +666,7 @@ class WaveformMeasurementNode:
             raise TypeError("a hosted monitor requires commit_live")
         try:
             self._configure()
-            # Four events of slack: a monitor that falls behind loses the
-            # oldest records, and an event that lost one is dropped whole
-            # by the ordinal check rather than published with a seam.
-            self.sampler.arm(
-                None,
-                buffer_record_count=4 * self.records_per_event,
-                timeout=float(self.sampler.timeout),
-            )
+            self._arm(None)
             return MonitorCapture(
                 self, owns_generation=owns_generation, commit_live=commit_live
             )
@@ -661,12 +698,12 @@ class WaveformMeasurementNode:
             capture.close()
             raise
 
-        def commit_event(event: tuple[WaveformRecord, ...], index: int) -> None:
-            context.commit_live(self._event_outputs(event, revision=index + 1, index=index))
+        def commit_shot(record: WaveformRecord, index: int) -> None:
+            context.commit_live(self._shot_outputs(record, revision=index + 1, index=index))
             context.report_progress("Capturing", current=index + 1, total=int(self.repeat))
 
-        completed = capture.collect(commit_event=commit_event)
-        return {"events": completed, "signals": signals}
+        completed = capture.collect(commit_shot=commit_shot)
+        return {"shots": completed, "signals": signals}
 
 
 __all__ = [
@@ -674,6 +711,6 @@ __all__ = [
     "MonitorCapture",
     "WaveformMeasurementNode",
     "WaveformMeasurementRequest",
-    "event_snapshot",
+    "shot_snapshot",
     "waveform_authoring_schema",
 ]

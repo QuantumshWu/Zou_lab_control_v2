@@ -18,11 +18,15 @@ from zlc_atom.nodes.waveform import (
 )
 
 
-VOLTAGE_OUTPUT = DatasetOutputDeclaration("voltage", "waveform.voltage")
+#: One acquisition is one shot: a scope's record is already a whole
+#: triggered window, and a shot is what triggers it.  The history the
+#: output declares is what lets a Rolling panel follow a derived scalar.
+VOLTAGE_OUTPUT = DatasetOutputDeclaration(
+    "voltage", "waveform.voltage", index_by_source=True
+)
 
-#: One acquisition is one event: a scope's record is already a whole
-#: triggered window, and a shot is what triggers it.
-SCOPE_MEASUREMENT_SCHEMA = waveform_authoring_schema(records_per_event=1)
+#: Every acquisition the scope completes is read.
+SCOPE_MEASUREMENT_SCHEMA = waveform_authoring_schema(read_interval_seconds=0.0)
 
 #: The knobs this run takes over: the time base and every channel's scale
 #: decide the record's geometry and volts, and a change under a capture
@@ -46,7 +50,7 @@ def _build(
         request=WaveformMeasurementRequest(
             sampler_key=sampler_key,
             repeat=int(authored["repeat"]),
-            records_per_event=int(authored["records_per_event"]),
+            read_interval_seconds=float(authored["read_interval_seconds"]),
         ),
         signal_plane=signal_plane,
         outputs=(VOLTAGE_OUTPUT,),

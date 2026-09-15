@@ -18,19 +18,21 @@ from zlc_atom.nodes.waveform import (
 )
 
 
-#: One signal per quantity, named by the packet's own vocabulary; the axes
-#: of each are a COMPONENT axis on the dataset, so the vocabulary does not
-#: change with how the stream is grouped into events.
+#: One signal per quantity, named by the packet's own vocabulary, each a
+#: COMPONENT axis of its channels.  Every packet read is one shot, and each
+#: signal declares source-index history so a Rolling panel can lease the
+#: last N shots from the Runtime.
 IMU_OUTPUTS = tuple(
-    DatasetOutputDeclaration(output.name, f"waveform.{output.name}")
+    DatasetOutputDeclaration(
+        output.name, f"waveform.{output.name}", index_by_source=True
+    )
     for output in N100_OUTPUTS
 )
 MAGNETIC_FIELD_OUTPUT = IMU_OUTPUTS[0]
 
-#: A hundred packets an event: at the module's 100-400 Hz that is a quarter
-#: to a whole second of field per publication, and four to ten commits a
-#: second whatever the rate.
-IMU_MEASUREMENT_SCHEMA = waveform_authoring_schema(records_per_event=100)
+#: Read every packet the module sends: at its 100-400 Hz that is a shot
+#: every 2.5 to 10 ms.  An interval turns the stream into a sampling.
+IMU_MEASUREMENT_SCHEMA = waveform_authoring_schema(read_interval_seconds=0.0)
 
 
 def _build(
@@ -46,7 +48,7 @@ def _build(
         request=WaveformMeasurementRequest(
             sampler_key=sampler_key,
             repeat=int(authored["repeat"]),
-            records_per_event=int(authored["records_per_event"]),
+            read_interval_seconds=float(authored["read_interval_seconds"]),
         ),
         signal_plane=signal_plane,
         outputs=IMU_OUTPUTS,
@@ -60,7 +62,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     IMU_MEASUREMENT_SCHEMA,
     reports_ready=True,
     outputs=IMU_OUTPUTS,
-    node_previews=(NodePreviewSpec(MAGNETIC_FIELD_OUTPUT, "curve"),),
+    node_previews=(NodePreviewSpec(MAGNETIC_FIELD_OUTPUT, "rolling"),),
     device_requirements=(DeviceRequirement("waveform.source", "sampler"),),
     build=_build,
 )

@@ -449,7 +449,6 @@ class TekScopeWaveformSource:
                     record = WaveformRecord(
                         np.stack(columns, axis=1),
                         self._next_ordinal,
-                        None,
                         time.time_ns(),
                     )
                     self._next_ordinal += 1

@@ -223,7 +223,6 @@ class WheeltecN100WaveformSource:
                 record = WaveformRecord(
                     np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS),
                     self._next_ordinal,
-                    stamp,
                     received,
                 )
                 self._next_ordinal += 1

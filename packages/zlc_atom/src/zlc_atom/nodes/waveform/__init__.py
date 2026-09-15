@@ -5,7 +5,7 @@ from .measurement import (
     MonitorCapture,
     WaveformMeasurementNode,
     WaveformMeasurementRequest,
-    event_snapshot,
+    shot_snapshot,
     waveform_authoring_schema,
 )
 
@@ -14,6 +14,6 @@ __all__ = [
     "MonitorCapture",
     "WaveformMeasurementNode",
     "WaveformMeasurementRequest",
-    "event_snapshot",
+    "shot_snapshot",
     "waveform_authoring_schema",
 ]

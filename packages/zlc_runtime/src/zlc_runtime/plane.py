@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import math
 import threading
 from types import MappingProxyType
 from collections.abc import Callable, Iterable, Mapping
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import Protocol, runtime_checkable
 import uuid
 from weakref import WeakKeyDictionary
 
@@ -2333,9 +2333,12 @@ class SignalDataPlane:
                     revision=sequence,
                 )
                 history_demand = self._indexed_history_demand_locked(qualified)
+                # A producer's shots index its own history by its own
+                # sequence, exactly as a processor's index their source's:
+                # ``primary_index`` above is already the sequence when
+                # there is no route source.
                 if (
-                    source_publication is not None
-                    and output.declaration.index_by_source
+                    output.declaration.index_by_source
                     and isinstance(output.coverage, MonitorCoverage)
                     and history_demand is not None
                 ):

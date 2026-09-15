@@ -18,6 +18,13 @@ from zlc_atom.devices.waveform.contract import (
     WaveformWorkingPoint,
 )
 
+# The producer sleeps to its record clock in slices no longer than this, so a
+# stop is noticed within one slice whatever the record period is.  It sleeps
+# rather than waiting on its condition because a timed lock wait has the OS
+# timer tick as its resolution (15 ms on Windows) and would bunch the records
+# of a fast sampler into bursts; the sleep keeps under a millisecond.
+_STOP_RESPONSE_SECONDS = 0.05
+
 
 @dataclass(frozen=True)
 class VirtualWaveformConfig:
@@ -148,15 +155,13 @@ class VirtualWaveformSource:
                 with self._condition:
                     if not self._accepting:
                         break
-                    while self._accepting and not stop.is_set():
-                        remaining = due - time.monotonic()
-                        if remaining <= 0.0:
-                            break
-                        self._condition.wait(timeout=remaining)
-                    if not self._accepting or stop.is_set():
-                        break
-                    ordinal = self._next_ordinal
-                    self._next_ordinal += 1
+                    remaining = due - time.monotonic()
+                    if remaining <= 0.0:
+                        ordinal = self._next_ordinal
+                        self._next_ordinal += 1
+                if remaining > 0.0:
+                    time.sleep(min(remaining, _STOP_RESPONSE_SECONDS))
+                    continue
                 first = due - started
                 values = np.asarray(self._sample_source(first + offsets), dtype=np.float32)
                 if values.shape != (samples, self._columns):
@@ -164,7 +169,7 @@ class VirtualWaveformSource:
                         "virtual sample source returned the wrong shape: "
                         f"{values.shape} for {(samples, self._columns)}"
                     )
-                record = WaveformRecord(values, ordinal, first, time.time_ns())
+                record = WaveformRecord(values, ordinal, time.time_ns())
                 with self._condition:
                     if stop.is_set() or not self._armed:
                         break

@@ -111,9 +111,6 @@ class WaveformRecord:
 
     samples: np.ndarray
     source_ordinal: int
-    #: The source's own clock at the record's first sample, when it has one
-    #: (an IMU stamps every packet); None for a source that keeps no clock.
-    device_timestamp_seconds: float | None = None
     host_received_at_ns: int = 0
     __hash__ = None
 
@@ -122,11 +119,6 @@ class WaveformRecord:
         if ordinal < 0:
             raise ValueError("source_ordinal must be non-negative")
         object.__setattr__(self, "source_ordinal", ordinal)
-        if self.device_timestamp_seconds is not None:
-            stamp = float(self.device_timestamp_seconds)
-            if not np.isfinite(stamp):
-                raise ValueError("device_timestamp_seconds must be finite")
-            object.__setattr__(self, "device_timestamp_seconds", stamp)
         host = int(self.host_received_at_ns or time.time_ns())
         if host <= 0:
             raise ValueError("host_received_at_ns must be positive")
