@@ -123,6 +123,13 @@ ENTER_QUIET_SECONDS = 0.25
 #: to be fast pass their own timeout to the console instead.
 REPLY_QUIET_SECONDS = 0.35
 
+#: And for the one reply that is thirty lines long.  Measured on a real
+#: module: ``#fmsg`` does not arrive in one piece, it comes in batches with
+#: gaps between them, and a gap wider than the ordinary quiet window cut it
+#: off mid-line -- five packets read as the module's whole enumeration,
+#: with the remaining twenty-five spilling into the next command.
+LISTING_QUIET_SECONDS = 1.5
+
 #: ``MSG_IMU=4`` from ``#fparam get``, and ``imu_algn_yaw = 0.000000``
 #: from ``#faxis``: the same shape with and without spaces, which is why
 #: the spaces are optional here rather than assumed to be there.
@@ -294,12 +301,24 @@ class FdiConfigConsole:
         self._require_console(command)
         self._write(command)
 
-    def query(self, command: str) -> str:
-        """Send one command and answer with everything the module said back."""
+    def query(self, command: str, *, quiet: float | None = None) -> str:
+        """Send one command and answer with everything the module said back.
+
+        ``quiet`` lengthens the window for a reply that arrives in batches
+        rather than in one go.
+        """
 
         self._require_console(command)
+        # Whatever is still on the line belongs to the command before this
+        # one.  This console has no sequence numbers, so an unread tail
+        # would be read as THIS command's answer and every command after it
+        # would read the one before -- which is exactly how a settings page
+        # came back as "this firmware has none of these parameters".  The
+        # previous command has already had whatever it could get from those
+        # bytes; nothing here wants them.
+        self._port.reset_input_buffer()
         self._write(command)
-        answer = self._read_until_quiet(self._reply_quiet)
+        answer = self._read_until_quiet(self._reply_quiet if quiet is None else quiet)
         self.last_exchange = (command, answer)
         if not answer.strip():
             # Nothing came back within the timeout.  It may still be on its
@@ -373,7 +392,7 @@ class FdiConfigConsole:
         one name the module cannot fail to print.
         """
 
-        answer = self.query("#fmsg")
+        answer = self.query("#fmsg", quiet=LISTING_QUIET_SECONDS)
         found = tuple(
             (match["name"], int(match["id"], 16), float(match["hz"]))
             for match in _PACKET_LINE.finditer(answer)
@@ -555,6 +574,7 @@ __all__ = [
     "ENTER_QUIET_SECONDS",
     "FdiConfigConsole",
     "IMU_PACKET_NAME",
+    "LISTING_QUIET_SECONDS",
     "LINE_END",
     "OK",
     "printed_lines",
