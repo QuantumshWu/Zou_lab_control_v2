@@ -120,13 +120,13 @@ def payload_crc16(payload: bytes) -> int:
 _IMU_PAYLOAD = struct.Struct("<12fq")
 DEFAULT_BAUD = 921600
 
-#: The highest rate any shipped firmware's ladder reaches, used only as the
-#: outer edge of what Device Control will let an operator TYPE.  What this
-#: particular module accepts is its own answer: ``#fmsg`` echoes the rung it
-#: actually took, and that echo is what the bench records.  An N-class
-#: module tops out at 400 Hz on the IMU packet and 200 Hz on everything
-#: else; a larger firmware reaches 1000.
-MAX_PACKET_RATE_HZ = 1000.0
+#: The outer edge of what Device Control will let an operator TYPE.  This
+#: is the documented ceiling for this product -- 用户手册 and the FAQ both
+#: answer "数据包发布的最大频率为400HZ" -- and NOT the 1000 Hz the same
+#: manual quotes, which is the internal sensor sampling rate and reaches no
+#: packet.  What this particular module accepts is still its own answer;
+#: this only keeps a typo from asking for something no firmware has.
+MAX_PACKET_RATE_HZ = 400.0
 
 #: Which KINDS of named parameter belong to an operator rather than to the
 #: factory.  Filters shape what the sensors report -- a notch on the mains
@@ -354,6 +354,11 @@ _EVIDENCE_BYTES = 96
 #: warm restart takes seconds, and each round is one rate-measuring window.
 _UNDO_LISTEN_ROUNDS = 4
 
+#: How long to wait for whole packets after the console closes.  A module
+#: that is going to resume does it at once; this is the margin, not the
+#: expectation.
+_STREAM_BACK_SECONDS = 1.5
+
 #: How many packets the rate is measured over when the port opens, and how
 #: long to wait for them: at the slowest configurable rate (1 Hz) this is
 #: not enough, and a module set that slow is not a magnetometer anyone is
@@ -389,6 +394,10 @@ class WheeltecN100WaveformSource:
         #: no power -- and the bytes tell them apart, so they are reported
         #: rather than left for the operator to guess between.
         self._first_bytes = bytearray()
+        #: When the last whole IMU packet arrived.  Leaving the console is
+        #: judged by this: a module that is navigating sends packets, and
+        #: nothing else it does proves it.
+        self._last_packet_at = 0.0
         self._magnetic_field: tuple[float, float, float] | None = None
         self._magnetic_changes = 0
         self._magnetic_packets = 0
@@ -453,7 +462,7 @@ class WheeltecN100WaveformSource:
         """
 
         try:
-            self._settings = self._in_console(self._read_settings)
+            self._settings = self._in_console(self._read_settings, stream_back=False)
         except Exception as refusal:  # noqa: BLE001 -- reported, not raised
             self._settings = {}
             self._settings_refusal = f"{type(refusal).__name__}: {refusal}"
@@ -522,6 +531,7 @@ class WheeltecN100WaveformSource:
 
     def _accept(self, samples: list[tuple[float, tuple[float, ...]]]) -> None:
         received = time.time_ns()
+        self._last_packet_at = time.monotonic()
         for stamp, values in samples:
             self._stamp(stamp)
             self._watch_magnetic(values[0:3])
@@ -703,12 +713,19 @@ class WheeltecN100WaveformSource:
         self._park.clear()
         self._parked.clear()
 
-    def _in_console(self, work):
+    def _in_console(self, work, *, stream_back: bool = True):
         """Run ``work(console)`` with the module in its configuration console.
 
         Entering stops the stream, so this refuses while a capture is armed:
         a capture that lost its packets mid-flight would publish a gap no
         reader could tell from the module having gone quiet.
+
+        And EVERY command verifies the way out, not just the one that
+        changes the sample rate.  Config mode is a state in the module: a
+        parameter write, or a save, that reported success while leaving the
+        module silent would put it exactly where a crashed session used to
+        -- invisible to discovery, unusable until power-cycled -- with the
+        operator told the write had worked.
         """
 
         with self._settings_lock:
@@ -721,11 +738,41 @@ class WheeltecN100WaveformSource:
             try:
                 with FdiConfigConsole(self._serial) as console:
                     try:
-                        return work(console)
+                        answer = work(console)
                     finally:
                         self._last_exchange = console.last_exchange
             finally:
                 self._release_reader()
+            if stream_back:
+                self._require_stream_back()
+            return answer
+
+    def _require_stream_back(self) -> None:
+        """Wait for whole packets again, asking once more if they do not come.
+
+        Whole packets, not a frame header: this module emits a 1 Hz
+        heartbeat whose first byte is a frame header too, so a header alone
+        would have read a silent module as a navigating one.
+        """
+
+        for attempt in range(2):
+            mark = time.monotonic()
+            deadline = mark + _STREAM_BACK_SECONDS
+            while time.monotonic() < deadline:
+                if self._last_packet_at >= mark:
+                    return
+                time.sleep(0.005)
+            if attempt == 0:
+                self._park_reader()
+                try:
+                    wake_from_config_mode(self._serial)
+                finally:
+                    self._release_reader()
+        raise RuntimeError(
+            f"the module on {self.config.port} did not start sending again "
+            "after its configuration console was closed, so it is still in "
+            "config mode and nothing can see it. " + self._what_the_port_said()
+        )
 
     def _remeasure_rate(self) -> None:
         """Forget the measured packet interval and time the stream again.
@@ -804,13 +851,13 @@ class WheeltecN100WaveformSource:
                     "float",
                     f"Packet 0x{packet:02X} rate",
                     None,
-                    minimum=0.0,
+                    minimum=1.0,
                     maximum=MAX_PACKET_RATE_HZ,
                     unit="Hz",
                     description=(
-                        "how often the module sends this packet; 0 turns it "
-                        "off.  The module answers with the rate it actually "
-                        "took, which is its own ladder and not a table here"
+                        "how often the module sends this packet.  The rate "
+                        "that takes effect is the module's own rung, measured "
+                        "off the stream rather than read from a table here"
                     ),
                 ),
                 current=float(value),
@@ -908,7 +955,10 @@ class WheeltecN100WaveformSource:
                 return _as_number(console.set_parameter(selected, _as_text(value)))
 
             previous = self._settings.get(selected)
-            taken = self._in_console(write)
+            # The IMU rate's own re-measurement below is a STRONGER check than
+            # "packets came back" -- it has to time them too -- so it is the
+            # one that runs, and it is the one whose failure triggers the undo.
+            taken = self._in_console(write, stream_back=packet != IMU_PACKET)
             self._settings_epoch += 1
             if packet == IMU_PACKET:
                 # This is the rate the records are stamped at, so it is
@@ -962,7 +1012,7 @@ class WheeltecN100WaveformSource:
         restored = False
         for undo in (write_back, lambda console: console.reboot()):
             try:
-                self._in_console(undo)
+                self._in_console(undo, stream_back=False)
             except BaseException:  # noqa: BLE001 -- the next undo is the answer
                 pass
             for _ in range(_UNDO_LISTEN_ROUNDS):

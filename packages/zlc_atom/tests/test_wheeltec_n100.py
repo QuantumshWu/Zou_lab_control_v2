@@ -571,3 +571,60 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
         source.finish_record_capture()
     finally:
         source.close()
+
+
+def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
+    """A parameter write that left the module silent used to report success.
+
+    Only an IMU-rate change re-checked the stream; a parameter write, a
+    save, a refresh all trusted #fdeconfig. Config mode is a state in the
+    module, so any of them could leave it exactly where a crashed session
+    does -- silent, invisible to discovery, unusable until power-cycled --
+    while telling the operator the write had worked.
+    """
+
+    class _StaysQuiet(_FakeModule):
+        """Acknowledges #fdeconfig and keeps its mouth shut, once armed."""
+
+        armed = False
+
+        def _answer(self, line: str) -> None:
+            super()._answer(line)
+            if line == "#fdeconfig" and self.armed:
+                self.streaming = False
+
+    module = _StaysQuiet()
+    source = _source(module)
+    try:
+        module.armed = True   # from here on, leaving does not resume
+        with pytest.raises(RuntimeError, match="did not start sending again"):
+            source.tune("FILT_NOTCH_ENABLED", "1")
+    finally:
+        source.close()
+
+
+def test_a_heartbeat_is_not_a_navigating_module() -> None:
+    """The module emits a 1 Hz heartbeat whose first byte is a frame header.
+
+    Judging "the stream is back" by a frame header would read that
+    heartbeat as navigation resumed, which is how a silent module gets
+    reported as a working one. It takes a WHOLE IMU packet.
+    """
+
+    class _HeartbeatOnly(_FakeModule):
+        armed = False
+
+        def _answer(self, line: str) -> None:
+            super()._answer(line)
+            if line == "#fdeconfig" and self.armed:
+                self.streaming = False
+                self._out += bytes((FRAME_HEAD, 0xF0))   # the documented heartbeat
+
+    module = _HeartbeatOnly()
+    source = _source(module)
+    try:
+        module.armed = True
+        with pytest.raises(RuntimeError, match="did not start sending again"):
+            source.tune("FILT_NOTCH_ENABLED", "1")
+    finally:
+        source.close()
