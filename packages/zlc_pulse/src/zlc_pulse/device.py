@@ -1192,6 +1192,22 @@ class PulseStreamer(ConfigValueHolder):
             self._scan_next_chunk += 1
 
     def _stop_worker(self) -> None:
+        """Stop the observer, and refuse to go on if it will not stop.
+
+        This runs BEFORE CMD_SAFE in ``safe`` and that order is deliberate,
+        though it looks like the wrong one: the observer holds the I/O lock
+        while it reads, so a transport that ignores the stop event would
+        make CMD_SAFE block on that lock for ever.  Failing here is a fast,
+        true answer -- "this link cannot be made to stop" -- where trying
+        anyway is a hang with nothing said.  `test_safe_does_not_claim_
+        observer_exit_when_transport_ignores_stop` pins it.
+
+        What this must NOT be is an excuse for a transport that CAN be
+        cancelled and tears itself down instead of yielding: see
+        transport/axi.py, where an aborted read used to close the transport
+        and kill Vivado, so the CMD_SAFE behind it had nothing to travel on.
+        """
+
         self._stop.set()
         self._done.set()
         worker = self._worker

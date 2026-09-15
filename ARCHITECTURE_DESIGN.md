@@ -405,7 +405,7 @@ Node new chunk
 
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。
 - Count必须是合法hardware range内整数，不clamp/wrap。
-- Hardware SAFE独立gate TTL/DAC data/clock；LOAD/FIRE前pins保持safe。
+- Hardware SAFE把TTL拉低、把DAC data置safe码，并让DAC latch strobe继续走足够长以把该safe码真正锁进外部转换器，之后才gate住strobe；只gate而不锁存等于把safe码摆上引脚却永远送不进DAC，模拟输出会保持run的最后一个edge/ramp值。LOAD/FIRE前pins保持safe。
 - Public DONE等待delay FIFOs和final DAC latch完成并进入安全态。
 - Underflow与engine delay-FIFO overflow sticky且loud；scan point0必须resident。UART CRC/framing/address fault由framed reply与独立LINK_ERROR报告，不能污染engine ERROR。命令使用独立32-bit ID；板端仅保留最后一次命令结果，重试同ID不得重复Fire。SAFE完成安全gating、LOAD完成装载、FIRE被接受后才返回完成/接受ACK；SAFE可抢占mini-loader。普通寄存器写ACK不充当命令完成证明。观察一次连续CTRL读取中的status/cursor；DONE后cursor固定，结果不是逐word读取的“原子快照”。Observer失败保存真实exception和已取得的状态，不虚构双读或board ERROR。新command ABI与server能力在既有握手严格检查。
 - 50MHz engine有真实clock/STA constraints。

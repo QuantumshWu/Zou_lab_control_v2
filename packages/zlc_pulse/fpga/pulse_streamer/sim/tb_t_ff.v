@@ -179,12 +179,38 @@ module tb_safe_gate;
     .da_bias_y(da_bias_y),.da_clk1(da_clk1),.da_bias_x(da_bias_x),.da_clk2(da_clk2),
     .da_bias_z(da_bias_z),.da_clk3(da_clk3));
 
-  task expect_safe; begin
+  integer safe_cycle;
+  reg     saw_the_latch;
+
+  task expect_safe_data; begin
     #1;
-    if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b0000)
-      $fatal(1,"DAC clocks were not gated safe: %b",{da_clk3,da_clk2,da_clk1,da_clk0});
     if ({da_bias_z,da_bias_x,da_bias_y,da_dipole} !== {4{10'd512}})
       $fatal(1,"DAC data was not midpoint-safe");
+  end endtask
+
+  // AFTER the park window: nothing strobes while the board is idle.
+  task expect_parked; begin
+    expect_safe_data;
+    if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b0000)
+      $fatal(1,"DAC clocks kept running once the safe code was taken: %b",
+             {da_clk3,da_clk2,da_clk1,da_clk0});
+  end endtask
+
+  // The safe code has to be LATCHED, not merely presented: these are
+  // external parallel converters and the data only reaches them on a rising
+  // strobe.  Gating the strobe in the same clock as the safe data -- which
+  // this testbench used to assert as correct -- left the converters driving
+  // the run's last edge value after every Stop.
+  task expect_safe_is_latched_then_parked; begin
+    saw_the_latch = 1'b0;
+    for (safe_cycle = 0; safe_cycle < 8; safe_cycle = safe_cycle + 1) begin
+      @(negedge clk); expect_safe_data;
+      if ({da_clk3,da_clk2,da_clk1,da_clk0} === 4'b1111) saw_the_latch = 1'b1;
+      @(posedge clk); expect_safe_data;
+    end
+    if (!saw_the_latch)
+      $fatal(1,"the safe code was never latched: the DAC still holds the run's last value");
+    repeat(3) begin @(posedge clk); expect_parked; @(negedge clk); expect_parked; end
   end endtask
 
   initial begin
@@ -193,7 +219,7 @@ module tb_safe_gate;
     force dut.zlc_bus_out = {4{10'd37}};
     force dut.zlc_physical_active = 1'b1;
     force dut.eng_reset = 1'b1;
-    repeat(3) begin @(posedge clk); expect_safe; @(negedge clk); expect_safe; end
+    expect_safe_is_latched_then_parked;
 
     force dut.eng_reset = 1'b0;
     @(posedge clk); #1;
@@ -203,9 +229,10 @@ module tb_safe_gate;
     if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b1111)
       $fatal(1,"enabled DAC clocks did not toggle while physically active");
 
-    // A single SAFE assertion dominates an active engine and arbitrary bus data.
+    // A single SAFE assertion dominates an active engine and arbitrary bus
+    // data -- and takes the safe code all the way into the converters.
     force dut.eng_reset = 1'b1;
-    repeat(3) begin @(posedge clk); expect_safe; @(negedge clk); expect_safe; end
+    expect_safe_is_latched_then_parked;
 
     // Decoder faults remain visible without poisoning the pulse engine: a
     // recovered UART retry latches LINK_ERROR, never ENGINE_ERROR.

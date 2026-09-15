@@ -2849,16 +2849,21 @@ class PulseEditorPresenter:
             if callable(safe):
                 safe()
         except ConnectionError as error:
-            # The connection is already gone, and with it both this editor's
-            # command lease and its safety obligation: the pulse server's own
-            # law drives AUTO-SAFE the moment a client disconnects, and on
-            # its own shutdown.  There is nothing left HERE to make safe --
-            # refusing to close would hold the window hostage to a board it
-            # has no channel to.
+            # There is nothing left HERE to make safe, and refusing to close
+            # would hold the window hostage to a board it has no channel to
+            # -- so this does not block.  What it must not do is CLAIM the
+            # board is safe: the server's AUTO-SAFE runs in its handler's
+            # finally, which needs that server still alive and still able to
+            # reach the board, and a ConnectionError is raised exactly when
+            # that is in doubt.  If the server went with the connection, the
+            # sequence is still playing.
             self._release_drive()
             self._warn(
-                "the pulse server connection has already ended; the server "
-                f"drives the board safe on disconnect ({error})"
+                "the pulse server connection ended before the board could be "
+                f"told to stop ({error}). If that server is still running it "
+                "drives the board safe when a client disconnects; if it is "
+                "not, THE SEQUENCE IS STILL PLAYING and the board must be "
+                "stopped another way."
             )
             return True
         except Exception as error:
@@ -3229,8 +3234,17 @@ class PulseEditorPresenter:
             elif payload is not None:
                 fault = str(getattr(payload, "fault", "") or "")
                 if fault:
+                    # A faulted end is NOT an end the board made safe. A
+                    # clean DONE is: the engine drains, parks its outputs
+                    # and stops, which is why that case needs no SAFE. An
+                    # UNDERFLOW does not stop it at all -- the engine sets
+                    # the sticky bit and stalls, still running -- so
+                    # releasing the lease here and saying nothing left the
+                    # sequence playing behind an idle-looking window.
                     self._warn(f"finite pulse stopped: {fault}")
-                self._release_drive()
+                    self._safe_drive(release=True)
+                else:
+                    self._release_drive()
             elif state.answering and not state.firing:
                 self._release_drive()
         self._adopt_board_state(state)

@@ -118,6 +118,12 @@ class VivadoAxiRegisterTransport:
         self._process: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._queue: queue.Queue[str | None] = queue.Queue()
+        #: A command whose reply was abandoned mid-block, and whose lines are
+        #: therefore still coming.  The next command drains them before it
+        #: issues, because ``_read_until_marker`` keeps every line it sees
+        #: until the end marker -- leftovers would be read as part of the
+        #: next reply.
+        self._abandoned_marker: str | None = None
         self._counter = 0
         self._closed = True
         self._log_path = self.state_dir / "vivado_axi_transport.log"
@@ -393,6 +399,7 @@ class VivadoAxiRegisterTransport:
                 )
             if stop is not None and stop.is_set():
                 raise TransportAborted(f"{action} aborted before issue")
+            self._discard_abandoned_reply(deadline)
             if self._external_executor is not None:
                 try:
                     return self._external_executor(
@@ -400,8 +407,12 @@ class VivadoAxiRegisterTransport:
                         action,
                         self._remaining(deadline, action),
                     )
-                except (TimeoutError, TransportAborted):
+                except TimeoutError:
                     self._closed = True
+                    raise
+                except TransportAborted:
+                    # Cancelled, not broken.  An external executor owns its
+                    # own framing, so there is nothing here to drain.
                     raise
             return self._execute(
                 lines,
@@ -520,8 +531,20 @@ class VivadoAxiRegisterTransport:
                 self._stop_process(graceful=False)
                 raise TransportAborted(f"transport closed waiting for {marker}")
             if stop is not None and stop.is_set():
-                self._closed = True
-                self._stop_process(graceful=False)
+                # A CANCELLED read is not a broken transport.  Closing here
+                # and killing Vivado is what made STOP unable to stop the
+                # board: ``safe()`` sets this very event first, to stop the
+                # observer, and the NEXT thing it does is send CMD_SAFE --
+                # down a transport this branch had just torn down.  The
+                # sequence went on playing, every output stayed where the
+                # program left it, and the link the operator would have
+                # retried on was gone.  The UART transport raises and keeps
+                # its port, which is why STOP has always worked there.
+                #
+                # What is remembered instead is that this reply is still on
+                # its way, so the next command can drain it rather than read
+                # its lines as its own.
+                self._abandoned_marker = marker
                 raise TransportAborted(f"read aborted waiting for {marker}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -538,6 +561,38 @@ class VivadoAxiRegisterTransport:
             lines.append(item)
             if f"{marker}_END" in item:
                 return "".join(lines)
+
+    def _discard_abandoned_reply(self, deadline: float) -> None:
+        """Read past the reply a cancelled read walked away from.
+
+        Vivado answers one command at a time, so an abandoned block is
+        still arriving and its lines would be taken for the next reply's.
+        Waiting it out costs the round trip that command was going to cost
+        anyway; only a block that never ends is a broken transport, and
+        that is the one case that closes.
+        """
+
+        marker = self._abandoned_marker
+        if marker is None:
+            return
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._closed = True
+                self._stop_process(graceful=False)
+                raise TimeoutError(
+                    f"the abandoned Vivado reply {marker} never finished"
+                )
+            try:
+                item = self._queue.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                continue
+            if item is None:
+                self._abandoned_marker = None
+                raise RuntimeError("persistent Vivado process exited unexpectedly")
+            if f"{marker}_END" in item:
+                self._abandoned_marker = None
+                return
 
     @staticmethod
     def _remaining(deadline: float, action: str) -> float:

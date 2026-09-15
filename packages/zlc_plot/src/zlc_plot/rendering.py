@@ -7004,15 +7004,27 @@ class MatplotlibRenderer:
         state = command.get("state")
         if cells is not None and options is not None and state is not None:
             handler = handler_for(self.semantic_spec)
+            requested = self._requested_view_limits
             for key, axis, index in self.painted_surfaces:
                 cell = cells[index]
+                shown = options[index]
+                if requested is not None and "limits" in shown:
+                    # The same rule as the single-axes branch below.  A
+                    # cell's pooled "limits" is the HOME of these cells --
+                    # the data range shared across the grid -- and the
+                    # operator's view overrules it.  present() renders and
+                    # THEN applies the view, so the live picture is right;
+                    # a materialization for an export or a compose fallback
+                    # has no such second pass, and the picture that left
+                    # the window was the un-zoomed one.
+                    shown = {**shown, "limits": requested}
                 handler.render(
                     self,
                     getattr(cell, "payload", cell),
                     state,
                     axes=axis,
                     key=key,
-                    **options[index],
+                    **shown,
                 )
             return
         series_by_cell = tuple(command.get("series", ()))
@@ -10224,10 +10236,24 @@ class MatplotlibRenderer:
                     policy.distribution_max_bins,
                 ),
             )
-            y_limits = tuple(float(value) for value in history.get_ylim())
-            # No sample in the window is an empty distribution over the
-            # history's own range -- all-zero counts, never a bar invented
-            # at the lower limit to steady the axis.
+            # The range the operator is LOOKING at, which is the requested
+            # view when there is one.  This runs inside _update_plot, and
+            # _apply_requested_view does not run until afterwards, so
+            # reading the axis here gives the range a zoom has already
+            # replaced -- the trace would move and the distribution beside
+            # it would go on describing the old window.
+            requested_view = self._requested_view_limits
+            y_limits = tuple(
+                float(value)
+                for value in (
+                    requested_view[1]
+                    if requested_view is not None
+                    else history.get_ylim()
+                )
+            )
+            # No sample in the window is an empty distribution over that
+            # range -- all-zero counts, never a bar invented at the lower
+            # limit to steady the axis.
             counts, edges = np.histogram(
                 values[np.isfinite(values)],
                 bins=bin_count,

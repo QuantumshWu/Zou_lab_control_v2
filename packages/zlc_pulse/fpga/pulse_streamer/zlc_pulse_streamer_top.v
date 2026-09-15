@@ -300,11 +300,49 @@ module zlc_pulse_streamer_top #(
         end
     endgenerate
     assign clk_en = clk_enable_pack[CHANNEL_COUNT-1:0];
+
+    // PARKING THE DACs ON SAFE (do NOT remove this window).
+    //
+    // The four DAC buses are EXTERNAL PARALLEL converters: the data pins
+    // only reach the converter on a rising latch strobe (da_clk0..3, the
+    // clk-enabled channels; see the DAC LATCH PHASE note above).
+    // `eng_reset` puts the safe code on the data pins -- bus_out_final,
+    // above -- and used to hold every strobe low from the same clock
+    // onwards.  So the safe code was PRESENTED and never LATCHED, and the
+    // converters went on driving the last code of the run: a stopped
+    // sequence left coils and modulators energised at their last edge or
+    // mid-ramp value while the TTL lines went low and the log said
+    // outputs=SAFE.  A finite program reaching DONE parked correctly, and
+    // only because its drain keeps zlc_physical_active high long enough
+    // for the strobe to run -- which is the same mechanism, by accident.
+    //
+    // So the strobe goes on running for a few clocks after SAFE, with the
+    // safe code already on the pins, and stops once it has certainly been
+    // taken.  It is NOT left free-running: stopping it while the board is
+    // idle is what the gate was added for, and only the clk-enabled
+    // channels are driven during the window -- every other channel is low,
+    // as SAFE requires.  The counter is armed while the engine runs, so
+    // the window opens on the transition into SAFE however SAFE is
+    // reached, and it starts armed so that configuration itself parks the
+    // converters at 0 V rather than at whatever they powered up holding.
+    localparam [3:0] SAFE_LATCH_TICKS = 4'd4;
+    reg [3:0] safe_latch_left = SAFE_LATCH_TICKS;
+    always @(posedge clk) begin
+        if (!eng_reset) begin
+            safe_latch_left <= SAFE_LATCH_TICKS;
+        end else if (safe_latch_left != 4'd0) begin
+            safe_latch_left <= safe_latch_left - 4'd1;
+        end
+    end
+    wire zlc_safe_latching = eng_reset && (safe_latch_left != 4'd0);
+
     genvar cmx;
     generate
         for (cmx = 0; cmx < CHANNEL_COUNT; cmx = cmx + 1) begin : zlc_clk_mux_gen
-            assign out_final[cmx] = eng_reset ? 1'b0 :
-                ((zlc_physical_active && clk_en[cmx]) ? ~clk : out[cmx]);
+            assign out_final[cmx] = zlc_safe_latching
+                ? (clk_en[cmx] ? ~clk : 1'b0)
+                : (eng_reset ? 1'b0
+                    : ((zlc_physical_active && clk_en[cmx]) ? ~clk : out[cmx]));
         end
     endgenerate
 

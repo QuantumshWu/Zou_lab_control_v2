@@ -393,6 +393,12 @@ class FiniteCapture:
         self.stopped = False
         self.terminal: WaveformCaptureTerminalRecord | None = None
         self._next_due = monotonic()
+        # The SOURCE'S KIND decides how a reading is taken; the count is
+        # only how big one is.  Branching on the count instead let a
+        # streaming source whose cadence happens to be one record long fall
+        # back into "newest, drop the rest" -- the same decimation, at the
+        # one cadence where it is least visible.
+        self._streaming = _streaming(node)
         self._per_reading = _records_per_reading(node)
         self._gathering: list[WaveformRecord] = []
 
@@ -451,17 +457,26 @@ class FiniteCapture:
             raise RuntimeError("finite capture is closed")
         node = self.node
         timeout = float(node.sampler.timeout)
-        # The source's timeout is how long it may take to deliver a record
+        # The source's timeout is how long it may take to deliver ONE record
         # once one is due, so it counts from the due time: a cadence longer
-        # than the timeout is a slow reading, not a silent source.
-        deadline = max(monotonic(), self._next_due) + timeout
+        # than the timeout is a slow reading, not a silent source.  A
+        # streaming reading is several records, and they arrive at the
+        # instrument's pace -- judging it by a one-record deadline calls a
+        # source silent that is answering perfectly, and says so in an error
+        # that sends the operator after the wrong thing.
+        deadline = max(monotonic(), self._next_due) + timeout + (
+            self._per_reading * int(node.sampler.record_samples)
+            * node.working_point.sample_interval_seconds
+            if self._streaming
+            else 0.0
+        )
         while True:
             if self.should_stop is not None and self.should_stop():
                 self.stopped = True
                 return None
             record = (
                 _stream_reading(node, self._per_reading, self._gathering)
-                if self._per_reading > 1
+                if self._streaming
                 else _newest_at_due(node, self._next_due)
             )
             if record is not None:
@@ -501,6 +516,7 @@ class MonitorCapture:
         self.terminal: WaveformCaptureTerminalRecord | None = None
         self._revision = 0
         self._next_due = monotonic()
+        self._streaming = _streaming(node)
         self._per_reading = _records_per_reading(node)
         self._gathering: list[WaveformRecord] = []
         if self.owns_generation:
@@ -524,7 +540,7 @@ class MonitorCapture:
         node = self.node
         reading = (
             _stream_reading(node, self._per_reading, self._gathering)
-            if self._per_reading > 1
+            if self._streaming
             else _newest_at_due(node, self._next_due)
         )
         if reading is None:
