@@ -282,8 +282,14 @@ class FdiConfigConsole:
         for _attempt in (1, 2):
             transcript, answered = self._exchange(
                 opening,
+                # The echo, or the module's word for no -- NOT its word for
+                # yes.  A get does not draw *#OK from this module, and the
+                # one *#OK nobody here has claimed is #fconfig's own: this
+                # command's window is exactly where a slow one lands, and
+                # accepting it would leave the real answer in flight for
+                # #fmsg to trip over.
                 lambda heard: IMU_PACKET_NAME in parameters_in(heard)
-                or _said_yes_or_no(heard),
+                or ERROR in heard,
             )
             if answered:
                 return
@@ -571,28 +577,46 @@ class FdiConfigConsole:
     def _navigation_stopped(self) -> bool:
         """Wait until no navigation frame has arrived for a moment.
 
-        Everything read here is thrown away: the acknowledgement, the
-        frames still draining out, whatever a module left in an earlier
-        session had to say.  None of it is a judgement and none of it is
-        owed to anybody, which is what makes this a safe way in.
+        Two things end this: the frames stopping, which is the state
+        change, and the acknowledgement arriving, which is the reply to
+        ``#fconfig`` and has to be READ rather than left for the next
+        command's window to find.  Leaving it there is how the door itself
+        put the session one command out of step.
+
+        The frames stopping is the one that decides.  A module that stops
+        navigating and never prints goes on, because entering is about what
+        the module did, not about what it said -- the next command is what
+        proves the console is listening.
         """
 
-        deadline = time.monotonic() + self._reply_timeout
-        quiet_since = time.monotonic()
+        now = time.monotonic()
+        deadline = now + self._reply_timeout
+        quiet_since = now
         carry = b""
+        heard = bytearray()
         while time.monotonic() < deadline:
             waiting = getattr(self._port, "in_waiting", 0)
             chunk = self._port.read(waiting if waiting else 1)
             now = time.monotonic()
             if chunk:
+                heard += chunk
                 window = carry + chunk
                 if any(mark in window for mark in _STREAM_MARKS):
                     quiet_since = now
                 # A mark split across two reads is still a mark.
                 carry = window[-1:]
-            if now - quiet_since >= self._enter_quiet:
+            if now - quiet_since < self._enter_quiet:
+                continue
+            # The stream has stopped.  Wait for the acknowledgement too, so
+            # that it is CONSUMED here: #fconfig is a command like any
+            # other, and the one reply this file used to leave unclaimed is
+            # the one that goes on to end somebody else's.
+            if _said_yes_or_no(_as_text(heard)):
                 return True
-        return False
+        # It stopped navigating and never said so.  Entering is about what
+        # the module DID, and it did stop -- so this goes on, and the
+        # command that follows is what proves the console is listening.
+        return now - quiet_since >= self._enter_quiet
 
 
 __all__ = [
