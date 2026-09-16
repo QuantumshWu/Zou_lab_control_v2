@@ -354,6 +354,7 @@ Node new chunk
 - `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；Pylon无法证明live tune前后的buffer边界，因此本次arm内tune之后的每个readback都保守标为old/new mixed，只有重新arm才回到单一epoch——一次read碰巧取走部分旧队列不是其余帧已是新设置的证据。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Pulse Editor每个channel保留同一组编辑/单位/全开/全关列；DAC不支持全开时保留按钮但disabled，不隐藏列。全关仍可用。
+- Pulse Period字段的无变化判断只读取该卡片当前accepted PeriodVM（名字、duration/unit、DAC mode/value），不保存上次发送intent的数值。Load/Sync/Clear及拒绝后的回显共用原投影；未被owner接受的输入不能被视作已提交，控件复用不得吞掉再次输入。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile只在schema改变时重建dependency graph；同schema成功adopt只更新值。隐藏Setting延后构造/度量到实际打开，Manual Data单格修改只通知实际变化的格子。Pulse显示切换保留原timeline/滚动与bracket对象，不拆装未变控件。
 - 隐藏Setting在原Card保留待消费更新（包括runtime choice目录变化），显式重开或随父Tab重新Show时只消费一次；不得丢掉hidden force，也不得靠后续数据帧碰巧刷新。Pulse容器仍由原SetFixedSize layout定尺寸，真实LayoutRequest只同步已有gap指示线，不恢复多次scroll补偿。

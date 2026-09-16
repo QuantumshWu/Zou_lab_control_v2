@@ -13,6 +13,8 @@
 - Waveform采集收口完成：删除Measurement Read interval、latest抽取和主机定时拼批；一条adapter原生record对应一次发布，receive容量与finite记录数分离，普通Stop发布已接收尾部后封存。time_basis区分设备/采样/主机时钟，记录时间由Runtime保留；N100采集期校验帧流水/CRC/设备时钟，Tek/DAQ arm与Stop反映真实硬件命令，DAQ按实际读回时钟投影。
 - Index/Time声明为同一物理轴的替代坐标，Setting单fate、Scope切换、Derive与Manual共同处理坐标组；连续记录的sample time在Runtime物化为真实普通Dataset坐标。Curve/Facet Curve增加现有Window默认1，Histogram/Curve的显示、selector/Fit与派生统计按同一窗口裁剪。Rolling使用实际run时间，删除renderer负时间原点假设及重复标签实现。当前Figure/selection grammar明确保存坐标选择/窗口，不兼容缺字段格式。
 - 本轮验证：400Hz虚拟源400条原始record顺序完整，四输出经真实NodeHost约1.008秒完成；普通Stop尾部、队列溢出/坏包/时钟、DAQ量化时钟、跨record选区、不同Panel Window和已画ROI随Window更新、Derive/Manual及Figure roundtrip的定向用例通过。正式TaskConsole真实Qt Start/Stop、Index↔Time、Window输入、保存与截图验收通过，窗口全部关闭。没有实际N100/Tek/DAQ硬件验收；探针/截图/性能证据不入Git，无新增Numba kernel。
+- Pulse DAC输入回归（2648c834）根修：删除PeriodCard的last-analog/last-duration/last-name历史缓存，输入只与当前accepted PeriodVM比较。Load/Sync/清除/拒绝回显后再次输入旧值不再被吞；同值退出仍不提交，不改Config覆盖规则、编译、通信或RTL。
+- 本次直接Qt用例3 passed；正式bound Pulse窗口复用同一card，Load/Sync方波后输入0/0并点击Start，两次MemoryRegisterTransport装载均为512/512，duration修改正常，errors/warnings均空，窗口已关闭。未访问真实硬件、未build；不以软件装载证据冒充外部DAC电气验收。
 
 - 渲染发布改为零拷贝并按面板分进程。测量在操作者真实密度（1470×1071、DPR 3）下取，分两层：console（display beat 100 ms 的真实窗口、py-spy 采样稳态 CPU）、capacity（去掉 beat、每个 host 前一帧到就喂下一帧，测管线自己的天花板）。**run_host 那层是 DPR 1**（Qt5PlotWidget 在 ratio 3 的屏上报 1.0，前端 490×357），不能拿来读任何像素相关的数，本轮未用。
   - **零拷贝**：raster worker 自时间里 `publish` 12.5→0 ms/s、合计 108→85 ms/s（−21%）；console 的渲染线程 4 面板 0.331→0.224 核、8 面板 0.396→0.237 核。满速下每帧渲染 CPU heatmap 4×4 进程 32.0→27.7 ms（−13%）、8 面板 32.1→28.2、curve 21.6→20.2（−7%）、camera 28.2→26.8（−5%）、facet64 36.1→34.7（−4%），单次 10 s 的运行间抖动约 ±3%。**零拷贝不省投影**：一帧的渲染 CPU 是 20–36 ms，被省掉的整帧搬运约 0.6 ms/帧/面板，所以它是 worker 自时间的 20%、整帧的 2–13%。
