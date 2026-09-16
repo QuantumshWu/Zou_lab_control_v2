@@ -6494,6 +6494,17 @@ def test_display_state_synchronizes_both_panel_surfaces(
     assert _operation_value(grouped.host.describe_display()).presentation["series_readout"]["mode"] == "locked"
     from zlc_workbench.panel_state import PanelState
     assert PanelState.from_document(grouped.state.document()).interaction == grouped.state.interaction
+    group_fate = "fate:cell_data:series.channel"
+    assert presenter.update_panel_state(grouped.panel_id, {"semantic": {group_fate: "reduce"}})
+    assert beat(lambda: grouped.configuration is None and grouped.editor_configuration is None
+                and grouped.state.interaction.get("series_lock") is None)
+    assert all(("interaction", "series_lock") not in values
+               for values in grouped.display_sync_targets.values())
+    assert presenter.update_panel_state(grouped.panel_id, {"semantic": {group_fate: "group"}})
+    assert beat(lambda: grouped.configuration is None and grouped.editor_configuration is None)
+    grouped.host.configure(interaction={"series_lock": lock}).result(timeout=10)
+    assert beat(lambda: grouped.state.interaction.get("series_lock") == lock
+                and _operation_value(grouped.editor_host.describe_display()).display_state.interaction.get("series_lock") == lock)
     grouped.host.configure(interaction={"series_lock": None}).result(timeout=10)
     assert beat(lambda: _operation_value(grouped.editor_host.describe_display()).display_state.interaction.get("series_lock") is None
                 and grouped.editor_configuration is None)

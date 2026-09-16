@@ -1353,10 +1353,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             view_limits=view_limits,
             presentation=presentation,
         )
+        previous_display = renderer._last_state
         if compose:
             renderer.present(frame)
         else:
             renderer.present(frame, compose=False)
+        before_interaction = self.display_state
+        interaction = renderer.series_interaction()
+        if interaction != before_interaction.interaction:
+            state = self._display_store._commit_interaction(interaction)
+            self._notify_display(replace(
+                state, changed_names=(before_interaction.changed_names
+                                      if previous_display is not before_interaction else frozenset()),
+            ))
         if not compose:
             return
         self._presentation_epoch += 1
@@ -1870,19 +1879,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     state = self._display_store._commit_interaction(interaction_target)
                     if state is not before_interaction:
                         self._configuration_effects |= RenderEffect.OVERLAY
-                        changed = frozenset().union(*(item.changed_names for item in self._configuration_display_events))
-                        self._notify_display(replace(state, changed_names=changed))
+                        self._notify_display(state)
                 if presentation_target is not None:
                     self._configuration_effects |= RenderEffect.OVERLAY
                 effects = self._configuration_effects
-                display_events = tuple(self._configuration_display_events or ())
                 fit_events = tuple(self._configuration_fit_events or ())
                 self._configuration_effects = None
-                self._configuration_display_events = None
                 self._configuration_fit_events = None
                 if effects != RenderEffect.NONE:
                     render_started = True
                     self._render_current(effects, presentation=presentation_target)
+                display_events = tuple(self._configuration_display_events or ())
+                self._configuration_display_events = None
                 fit_commit_actions = tuple(
                     self._configuration_fit_commit_actions or ()
                 )
@@ -1901,7 +1909,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         for action in fit_commit_actions:
             action()
         if display_events:
-            self._notify_display(display_events[-1])
+            changed = frozenset().union(*(item.changed_names for item in display_events))
+            self._notify_display(replace(display_events[-1], changed_names=changed))
         for event in fit_events:
             self._notify_fit(event)
 
@@ -2584,9 +2593,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 raise
             if fit_cancel is not None:
                 self._commit_fit_actions(fit_cancel.set)
-        if accepted_changes:
-            self._notify_display(state)
-        return state
+        if accepted_changes and self.display_state is state:
+            self._notify_display(replace(self.display_state, changed_names=accepted_changes))
+        return self.display_state
 
     def _prepare_replacement(
         self,

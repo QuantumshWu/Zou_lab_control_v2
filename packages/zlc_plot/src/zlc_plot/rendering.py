@@ -3118,9 +3118,8 @@ class MatplotlibRenderer:
                     self._capture_home_limits(axes)
             elif style_only:
                 self._update_base_style(state)
-            if frame.presentation is not None or fresh_axes or (
-                state_changed and state.interaction != previous_state.interaction
-            ):
+            if (frame.presentation is not None or fresh_axes
+                    or state.interaction != self.series_interaction()):
                 self.restore_series_interaction(state.interaction, frame.presentation)
             # Freshly built axes -- the first frame, or the ones a relayout
             # just rebuilt -- carry no text and no chrome yet, whatever the
@@ -7212,7 +7211,11 @@ class MatplotlibRenderer:
         # the overview.
         for attribute in ("_series_locked", "_series_hover"):
             state = getattr(self, attribute)
-            if state is not None and not self._series_focus_allowed(state[0]):
+            if state is not None and (
+                not self._series_focus_allowed(state[0])
+                or not any(identity == state[1]
+                           for _line, identity, _label in self._series_lines.get(state[0], ()))
+            ):
                 setattr(self, attribute, None)
         locked = self._series_locked
         active = locked or self._series_hover
@@ -9530,8 +9533,9 @@ class MatplotlibRenderer:
         extent = frame[0]
         row, column = cell
         z = float(values[row, column])
-        xp = _selector_precision(abs(extent[1] - extent[0]))
-        yp = _selector_precision(abs(extent[3] - extent[2]))
+        x_scale, y_scale = self._artists.get(f"image:coordinate_scales:{id(axes)}", (LINEAR, LINEAR))
+        xp = _selector_precision(abs(axis_value(extent[1], x_scale) - axis_value(extent[0], x_scale)))
+        yp = _selector_precision(abs(axis_value(extent[3], y_scale) - axis_value(extent[2], y_scale)))
         zp = _selector_precision(abs(scene.value_high - scene.value_low))
         text = (
             f"({_selector_number(float(crosshair.value.x), xp)}, "

@@ -308,6 +308,21 @@ def test_irregular_image_coordinates_share_the_pixel_and_selection_mapping(coord
     finally:
         session.close()
 
+    # The 3D readout's precision is measured in scientific coordinates,
+    # not in the ordinal lattice used to make equally sized screen cells.
+    small_x = x * 1e-4
+    small = PlotSession(_coordinate_image_snapshot(small_x, np.array([0., 1e-4])), spec,
+                        parameters={"presentation": "height_bars"})
+    try:
+        small.set_crosshair_selector(float(small_x[1]), 1e-4, display=False)
+        renderer = small._renderer
+        text = renderer._artists[f"{renderer.primary_surface[0]}:h3d_cage_readout"].get_text()
+        shown_x, shown_y, _value = map(float, text.strip("()").split(","))
+        assert shown_x == pytest.approx(small_x[1])
+        assert shown_y == pytest.approx(1e-4)
+    finally:
+        small.close()
+
 
 def test_a_narrow_colour_range_on_a_large_background_exports_its_contrast() -> None:
     """The PNG shows the colour range the operator chose, wherever it sits.

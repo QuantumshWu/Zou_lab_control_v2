@@ -1828,6 +1828,13 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         transported = _unwire_value(pickle.loads(pickle.dumps(_wire_value(session.describe_display()))))
         assert transported.display_state.interaction == state.interaction
         assert transported.presentation == session.describe_display().presentation
+        # A pointer lock bypasses full-frame present. A sibling's immediate
+        # unlock must compare against that live focus, not the last frame's
+        # pre-click DisplayState, which can still say "unlocked".
+        session.configure(interaction={"series_lock": None})
+        assert renderer.series_interaction()["series_lock"] is None
+        assert session.display_state.interaction["series_lock"] is None
+        session.configure(interaction=state.interaction)
         peer = PlotSession(make_snapshot(schema, values, 0), session.spec)
         try:
             peer.configure(interaction=state.interaction)
@@ -1898,6 +1905,32 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         pointer("release", 2.0, 3.25, button=1)
         assert "site=17" in renderer._series_locked[2]
         assert isolated.get_markeredgewidth() == pytest.approx(2.0 * base_width)
+        locked_state = session.display_state
+        notifications = len(shared_states)
+        present = renderer.present
+
+        def refuse_unlock(frame, **kwargs):
+            if frame.state.interaction.get("series_lock") is None:
+                raise ValueError("refused final interaction render")
+            return present(frame, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(renderer, "present", refuse_unlock)
+            with pytest.raises(ValueError, match="refused final interaction"):
+                session.configure(interaction={"series_lock": None})
+        assert session.display_state is locked_state
+        assert renderer.series_interaction()["series_lock"] == locked_state.interaction["series_lock"]
+        assert len(shared_states) == notifications
+        # A lock which the new projection cannot draw must leave the accepted
+        # display state too; otherwise saving or regrouping resurrects it.
+        session.configure(semantic={"group": None}, parameters={"title": "ungrouped"})
+        assert renderer.series_interaction()["series_lock"] is None
+        assert session.display_state.interaction["series_lock"] is None
+        assert shared_states[-1].interaction["series_lock"] is None
+        assert "title" in shared_states[-1].changed_names
+        assert decode_plot_recipe(session._figure_recipe())["interaction"]["series_lock"] is None
+        session.configure(semantic={"group": AxisRef.point("site")})
+        assert renderer.series_interaction()["series_lock"] is None
     finally:
         session.close()
 

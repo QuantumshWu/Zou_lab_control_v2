@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 对前轮交互/Image整改的独立复核又关闭三处实证遗漏：Group消失后的隐藏锁回写、pointer锁定后以旧整帧状态误判解锁no-op，以及非均匀Image height坐标注释按ordinal跨度错误舍入。均在原Session/renderer owner修复，没有额外Workbench状态或补偿重试。原用例先红后绿；正式Qt完成Live锁→Frozen→Group移除/恢复→重新锁→Frozen解锁，等同步目标退役后两Host确实清锁，hover PNG/NPZ一致；窗口关闭。DCAM四种非法早帧仍在copy前拒绝，没有新增硬件结论。
+
 - Seamless允许Plan省略模板里的Scan Slot：只有实际计划的slot留在执行副本里参与硬件扫描，其余字段保留当前Pulse默认值并由既有编译器作为常量；作者模板、Plan和原绑定编号不变。不增加隐式UI行或Dataset扫描轴；固定字段保存于实际Pulse/run record。部分slot扫描（含非零DAC默认值与默认duration）及manual-only省略全部slot的既有两条NodeHost用例红→绿，点数/重复顺序不变；后者编译digest与普通默认Pulse完全相同，无额外wire table。没有硬件/RTL改动。
 
 - 本轮交互/坐标整改：Rolling固定记录横轴，只选Index/Time坐标，不给记录族Fate或让其它轴抢X；普通坐标切换不偷分配角色，完整表可从错误Group状态恢复，数值在分桶前拒绝record自分组，消除B²退化。显式series lock进入DisplayState.interaction，Live/Frozen、PanelState/Layout/Figure共用既有display通知与configure；Save在实际host内冻结可见hover/series readout，不依赖旧cached description，不清空导出注释。Rolling两行注释按真实字体高度分开。
