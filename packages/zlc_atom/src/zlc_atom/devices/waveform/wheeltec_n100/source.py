@@ -38,6 +38,7 @@ DOING is read off the stream afterwards rather than asked for.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 import struct
 import threading
@@ -309,12 +310,17 @@ N100_OUTPUTS = (
 _COLUMNS = 10
 
 
-def drain_imu_samples(buffer: bytearray) -> list[tuple[float, tuple[float, ...]]]:
+def drain_imu_samples(
+    buffer: bytearray, *, on_frame: Callable[[int | None, tuple | None], None] | None = None,
+) -> list[tuple[float, tuple[float, ...]]]:
     """Take every complete packet off the front of ``buffer``.
 
     Returns ``(timestamp_seconds, samples)`` for each IMU packet, in arrival
     order, with the samples already in the published units and column
-    order; every other packet type is stepped over by the length its own
+    order. When ``on_frame`` is supplied, deliver each validated frame there
+    instead, including non-IMU frames with no sample and damaged frames with
+    no serial, so an active capture can reject data loss. Every other packet
+    type is stepped over by the length its own
     header states.  A frame is accepted only once its header CRC8 and its
     payload CRC16 both check, so a float containing 0xFC cannot start a
     false frame and a corrupted packet is dropped instead of published.
@@ -335,6 +341,8 @@ def drain_imu_samples(buffer: bytearray) -> list[tuple[float, tuple[float, ...]]
             at = head
             break
         if buffer[head + 4] != header_crc8(bytes(buffer[head:head + 4])):
+            if on_frame is not None:
+                on_frame(None, None)
             at = head + 1
             continue
         kind = buffer[head + 1]
@@ -344,31 +352,40 @@ def drain_imu_samples(buffer: bytearray) -> list[tuple[float, tuple[float, ...]]
             at = head
             break
         if buffer[end - 1] != FRAME_TAIL:
+            if on_frame is not None:
+                on_frame(None, None)
             at = head + 1
             continue
         payload = bytes(buffer[head + HEADER_LENGTH:head + HEADER_LENGTH + size])
         if payload_crc16(payload) != (buffer[head + 5] << 8 | buffer[head + 6]):
+            if on_frame is not None:
+                on_frame(None, None)
             at = head + 1
             continue
         if kind == IMU_PACKET and size == IMU_PAYLOAD_LENGTH:
             values = _IMU_PAYLOAD.unpack(payload)
-            found.append(
+            stamp = values[12] * 1e-6
+            sample = (
+                stamp,
                 (
-                    values[12] * 1e-6,
-                    (
-                        values[6] / _MILLIGAUSS_PER_MICROTESLA,
-                        values[7] / _MILLIGAUSS_PER_MICROTESLA,
-                        values[8] / _MILLIGAUSS_PER_MICROTESLA,
-                        values[0],
-                        values[1],
-                        values[2],
-                        values[3],
-                        values[4],
-                        values[5],
-                        values[9] + _CELSIUS_TO_KELVIN,
-                    ),
-                )
+                    values[6] / _MILLIGAUSS_PER_MICROTESLA,
+                    values[7] / _MILLIGAUSS_PER_MICROTESLA,
+                    values[8] / _MILLIGAUSS_PER_MICROTESLA,
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    values[4],
+                    values[5],
+                    values[9] + _CELSIUS_TO_KELVIN,
+                ),
             )
+            if on_frame is None:
+                found.append(sample)
+            else:
+                on_frame(buffer[head + 3], sample)
+        elif on_frame is not None:
+            on_frame(buffer[head + 3], None)
         at = end
     del buffer[:at]
     return found
@@ -478,6 +495,9 @@ class WheeltecN100WaveformSource:
         self._park = threading.Event()
         self._parked = threading.Event()
         self._settings_lock = threading.RLock()
+        self._capture_lock = threading.Lock()
+        self._last_frame_serial: int | None = None
+        self._last_imu_stamp: float | None = None
         self._device_session_id = uuid4().hex
         self._settings_epoch = 0
         self._stamps: deque[float] = deque(maxlen=_RATE_SAMPLE_PACKETS)
@@ -600,25 +620,43 @@ class WheeltecN100WaveformSource:
                     self._first_bytes += chunk[
                         : _EVIDENCE_BYTES - len(self._first_bytes)
                     ]
-                samples = drain_imu_samples(buffer)
-                if samples:
-                    self._accept(samples)
+                with self._capture_lock:
+                    drain_imu_samples(buffer, on_frame=self._accept_frame)
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
             self._stamps_ready.set()
 
-    def _accept(self, samples: list[tuple[float, tuple[float, ...]]]) -> None:
+    def _accept_frame(self, serial: int | None, sample: tuple | None) -> None:
+        """A capture must not hide missing frames or a reset device clock."""
+
+        if self._records.accepting:
+            if serial is None:
+                raise RuntimeError("N100 damaged FDILink frame during capture")
+            previous = self._last_frame_serial
+            if previous is not None and serial != (previous + 1) & 0xFF:
+                raise RuntimeError(f"N100 frame sequence gap: expected {(previous + 1) & 0xFF}, received {serial}")
+            self._last_frame_serial = serial
+        if sample is None:
+            return
+        stamp, values = sample
+        if self._records.accepting:
+            previous_stamp = self._last_imu_stamp
+            if previous_stamp is not None:
+                elapsed = stamp - previous_stamp
+                if elapsed <= 0:
+                    raise RuntimeError(f"N100 device timestamp did not advance: {previous_stamp} -> {stamp}")
+                # More than half a packet period beyond the measured interval
+                # is no longer the next sample. Do not bridge that gap.
+                if self._sample_interval is not None and elapsed > 1.5 * self._sample_interval:
+                    raise RuntimeError(f"N100 device timestamp gap: {elapsed:g} s at {1 / self._sample_interval:g} Hz")
+            self._last_imu_stamp = stamp
         received = time.time_ns()
         self._last_packet_at = time.monotonic()
-        for stamp, values in samples:
-            self._stamp(stamp)
-            self._watch_magnetic(values[0:3])
-            # The module's own packet clock is the record's time: it ticks
-            # with the sampling, where the host's clock ticks with the
-            # serial delivery.
-            self._records.push(
-                np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS), stamp, received
-            )
+        self._stamp(stamp)
+        self._watch_magnetic(values[0:3])
+        self._records.push(
+            np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS), stamp, received
+        )
 
     def _stamp(self, stamp: float) -> None:
         """The packet interval off the module's own clock, measured on the reader.
@@ -791,6 +829,7 @@ class WheeltecN100WaveformSource:
                 "settings_refusal": self._settings_refusal,
                 "last_console_exchange": self._last_exchange,
             },
+            time_basis="device_clock",
         )
 
 
@@ -1099,7 +1138,19 @@ class WheeltecN100WaveformSource:
         """
 
         with self._settings_lock:
-            self._records.arm(records, buffer_record_count=buffer_record_count)
+            with self._capture_lock:
+                self._records.arm(records, buffer_record_count=buffer_record_count)
+                self._last_frame_serial = None
+                self._last_imu_stamp = None
+                if not self._reader.is_alive():
+                    self._records.fail(RuntimeError("the N100 receive thread is not running"))
+                else:
+                    self._records.mark_ready()
+            try:
+                self._records.wait_ready(self.timeout)
+            except BaseException:
+                self._records.finish()
+                raise
 
     def read_records(
         self, n: int, *, timeout: float, exact: bool
@@ -1107,7 +1158,8 @@ class WheeltecN100WaveformSource:
         return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
-        return self._records.finish()
+        with self._capture_lock:
+            return self._records.finish()
 
     def capture_state(self) -> bool:
         return self._records.armed

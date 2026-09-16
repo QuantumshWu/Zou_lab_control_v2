@@ -929,11 +929,15 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     repeat = AxisSpec(AxisId("manual.shot"), "shot", REPEAT, 2, (10, 20))
     scan_x = AxisSpec(AxisId("manual.x"), "x", SCAN_POINT, 3, (0, 1, 2))
     scan_y = AxisSpec(AxisId("manual.y"), "y", SCAN_POINT, 2, (5, 6))
+    time = AxisSpec(
+        AxisId("manual.time"), "time", SCAN_POINT, 3, (0.1, 0.2, 0.5),
+        "s", coordinate_of=scan_x.axis_id,
+    )
     repeat_domain = DomainSpec((2,), (repeat,), ((0, 1),))
     point_domain = DomainSpec(
         (4,),
-        (scan_x, scan_y),
-        ((0, 1, 2, 1), (0, 0, 0, 1)),
+        (scan_x, scan_y, time),
+        ((0, 1, 2, 1), (0, 0, 0, 1), (0, 1, 2, 1)),
     )
     schema = DatasetSchema(
         repeat_domain,
@@ -977,6 +981,35 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     expected = source_values.copy()
     expected[1, 3, 0] = 123.0
     np.testing.assert_array_equal(restored.block.values, expected)
+    assert draft["values"].shape == (2, 3, 2, 1)
+    assert len(viewer_module._data_projection(draft)["table"]["axes"]) == 3
+    viewer_module._set_axis_values(draft, str(time.axis_id), ((0, 0, "0.15"),))
+    viewer_module._edit_axis(
+        draft, str(time.axis_id), name="elapsed", length=3, unit="ms", domain="point",
+    )
+    edited = viewer_module._manual_snapshot(draft)
+    assert edited.block.schema.point_domain.axis(time.axis_id).coordinate_of == scan_x.axis_id
+    assert edited.block.schema.point_domain.axis(time.axis_id).coordinates == (0.15, 0.2, 0.5)
+    assert edited.block.schema.point_domain.axis(scan_x.axis_id).coordinates == scan_x.coordinates
+    np.testing.assert_array_equal(edited.block.values, expected)
+    with pytest.raises(ValueError, match="alternative coordinates"):
+        viewer_module._edit_axis(
+            draft, str(time.axis_id), name="elapsed", length=3, unit="ms", domain="cell_data",
+        )
+    viewer_module._edit_axis(
+        draft, str(time.axis_id), name="elapsed", length=4, unit="ms", domain="repeat",
+    )
+    edited = viewer_module._manual_snapshot(draft)
+    assert edited.block.schema.repeat_domain.logical_shape == (2, 4)
+    assert edited.block.schema.repeat_domain.axis(time.axis_id).coordinate_of == scan_x.axis_id
+    assert draft["values"].shape == (2, 4, 2, 1)
+    draft["scopes"][str(scan_x.axis_id)] = 1
+    expected_slice = draft["values"][:, 1].copy()
+    viewer_module._delete_axis(draft, str(time.axis_id))
+    edited = viewer_module._manual_snapshot(draft)
+    assert edited.block.schema.repeat_domain.axes == (repeat,)
+    assert edited.block.schema.point_domain.axes == (scan_y,)
+    np.testing.assert_array_equal(edited.block.values, expected_slice)
 
 @pytest.mark.parametrize("source_only", (False, True))
 def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(

@@ -311,6 +311,13 @@ def _curve_plan(families: AxisFamilies, *, facet: AxisRef | None) -> _Plan:
     """
 
     taken = set() if facet is None else {facet}
+    if families.sample_time is not None and families.sample_time[0] not in taken:
+        x = families.sample_time[0]
+        return _Plan(x=x, group=_group(families, (x, facet)))
+    if (families.history_time is not None and families.history_time[0] not in taken
+            and (families.history is None or families.history[0] not in taken)):
+        x = families.history_time[0]
+        return _Plan(x=x, group=_group(families, (x, facet)))
     scan = [entry for entry in families.live_scan() if entry[0] not in taken]
     if scan:
         x = scan[-1][0]
@@ -358,6 +365,7 @@ def _rolling_spec(schema: DatasetSchema, families: AxisFamilies) -> RollingPlot:
         group=_group(families, ()),
         reduction=Reduction.MEAN,
         scope=_event_scope(schema, families, ()),
+        x=None if families.history_time is None else families.history_time[0],
     )
 
 

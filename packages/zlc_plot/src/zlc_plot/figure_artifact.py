@@ -107,6 +107,7 @@ def _encode_plot_spec(spec: object) -> dict[str, object]:
         raise TypeError("unsupported data-backed plot specification")
     common = {"kind": spec.kind.value, "labels": _labels_document(spec.labels)}
     common["scope"] = _scope_document(spec.scope)
+    common["coordinates"] = [_axis_document(ref) for ref in spec.coordinates]
     if isinstance(spec, HistogramPlot):
         return {
             **common,
@@ -139,8 +140,11 @@ def _decode_plot_spec(value: object) -> object:
         raise ValueError("Pulse timelines are not data-backed Figure artifacts")
     base = {"labels": _labels(value.get("labels"))}
     base["scope"] = _scope(value.get("scope"))
+    if not isinstance(value.get("coordinates"), list):
+        raise TypeError("plot coordinate choices must be an array")
+    base["coordinates"] = tuple(_axis(ref, "plot coordinate choice") for ref in value["coordinates"])
     if kind is PlotKind.HISTOGRAM:
-        _keys(value, {"kind", "labels", "scope", "reduction", "reduced"}, "histogram recipe")
+        _keys(value, {"kind", "labels", "scope", "coordinates", "reduction", "reduced"}, "histogram recipe")
         if not isinstance(value["reduced"], list):
             raise TypeError("histogram reduced axes must be an array")
         return HistogramPlot(
@@ -149,13 +153,13 @@ def _decode_plot_spec(value: object) -> object:
             **base,
         )
     if kind is PlotKind.FACET_GRID:
-        _keys(value, {"kind", "labels", "scope", "facet", "cell"}, "facet recipe")
+        _keys(value, {"kind", "labels", "scope", "coordinates", "facet", "cell"}, "facet recipe")
         return FacetGridPlot(
             facet=_axis(value["facet"], "facet axis"),
             cell=_decode_plot_spec(value["cell"]),
             **base,
         )
-    expected = {"kind", "labels", "scope", "reduction"}
+    expected = {"kind", "labels", "scope", "coordinates", "reduction"}
     arguments = {
         **base,
         "reduction": Reduction(value.get("reduction")),

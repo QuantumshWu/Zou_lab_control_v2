@@ -12,7 +12,7 @@ packet and a scope carries one quantity on four channels.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import threading
 from typing import Callable, Mapping, Protocol, Sequence, runtime_checkable
@@ -88,6 +88,7 @@ class WaveformWorkingPoint:
     #: The instrument's own read-back of its settings, as archive-ready
     #: plain values: a scope's time per division, an IMU's packet rate.
     settings: Mapping[str, object]
+    time_basis: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         mode = str(getattr(self.acquisition_mode, "value", self.acquisition_mode))
@@ -97,6 +98,8 @@ class WaveformWorkingPoint:
             raise ValueError("sample_interval_seconds must be finite and positive")
         if not isinstance(self.settings, Mapping):
             raise TypeError("working point settings must be a mapping")
+        if self.time_basis not in {"device_clock", "sample_clock", "host_receive"}:
+            raise ValueError("time_basis must be device_clock, sample_clock or host_receive")
         object.__setattr__(self, "acquisition_mode", mode)
         object.__setattr__(self, "sample_interval_seconds", interval)
         object.__setattr__(self, "settings", dict(self.settings))
@@ -106,11 +109,10 @@ class WaveformWorkingPoint:
 class WaveformRecord:
     """Source-owned copy of one record: ``(record_samples, columns)`` float32.
 
-    ``time_seconds`` is when the record was taken, on the clock the source
-    keeps: the module's own packet timestamp for an IMU that has one, the
-    host's monotonic clock for a scope read over a link.  Only differences
-    between records of one capture mean anything; the measurement anchors
-    them at its first shot.
+    ``time_seconds`` follows the working point's explicit ``time_basis``:
+    device packet clock, continuous sample-clock count, or host receipt.
+    A host receipt timestamp is not the instrument's trigger time. Only
+    differences within one capture share a clock origin.
     """
 
     samples: np.ndarray
@@ -167,7 +169,7 @@ class WaveformRecordQueue:
 
     Arming says how many records are expected and how many the ring holds.
     The source pushes each record as it produces it; the ring numbers it,
-    drops the oldest when full, stops accepting once the expected count is
+    fails on overflow, stops accepting once the expected count is
     reached, and answers reads.  A source that acquires on a thread of its
     own per capture hands that thread in at arm and the ring stops and
     joins it at finish; a source whose reader outlives captures (a serial
@@ -189,6 +191,7 @@ class WaveformRecordQueue:
         self._worker: threading.Thread | None = None
         self._stop: threading.Event | None = None
         self._terminal: WaveformCaptureTerminalRecord | None = None
+        self._ready = threading.Event()
 
     @property
     def armed(self) -> bool:
@@ -223,8 +226,8 @@ class WaveformRecordQueue:
         if buffer_count <= 0:
             raise ValueError("buffer_record_count must be positive")
         expected = None if records is None else int(records)
-        if expected is not None and (expected <= 0 or buffer_count != expected):
-            raise ValueError("a finite arm buffers exactly the records it expects")
+        if expected is not None and expected <= 0:
+            raise ValueError("finite records must be positive")
         with self._condition:
             if self._armed:
                 raise RuntimeError(f"{self._what} is already armed")
@@ -242,6 +245,7 @@ class WaveformRecordQueue:
             self._next_ordinal = 0
             self._produced_count = 0
             self._terminal = None
+            self._ready.clear()
             if worker is None:
                 return
             self._failure = None
@@ -258,6 +262,20 @@ class WaveformRecordQueue:
                 self._accepting = False
                 raise
 
+    def mark_ready(self) -> None:
+        """The producer has started the hardware needed for this capture."""
+
+        self._ready.set()
+
+    def wait_ready(self, timeout: float) -> None:
+        if not self._ready.wait(timeout):
+            raise TimeoutError(f"{self._what} did not become ready")
+        with self._condition:
+            if self._failure is not None:
+                raise RuntimeError(f"{self._what} failed while arming: {self._failure}") from self._failure
+            if not self._armed:
+                raise RuntimeError(f"{self._what} stopped before becoming ready")
+
     def push(
         self, samples: np.ndarray, time_seconds: float, host_received_at_ns: int
     ) -> bool:
@@ -266,13 +284,17 @@ class WaveformRecordQueue:
         with self._condition:
             if not self._accepting:
                 return False
+            if len(self._queue) >= self._buffer_record_count:
+                self.fail(RuntimeError(
+                    f"{self._what} capture buffer overflow at record {self._next_ordinal} "
+                    f"(capacity {self._buffer_record_count}); no queued record was discarded"
+                ))
+                return False
             record = WaveformRecord(
                 samples, self._next_ordinal, time_seconds, host_received_at_ns
             )
             self._next_ordinal += 1
             self._produced_count += 1
-            while len(self._queue) >= self._buffer_record_count:
-                self._queue.popleft()
             self._queue.append(record)
             if self._expected is not None and self._produced_count >= self._expected:
                 self._accepting = False
@@ -283,8 +305,10 @@ class WaveformRecordQueue:
         """The producer has died; readers learn it, the capture stops accepting."""
 
         with self._condition:
-            self._failure = error
+            if self._failure is None:
+                self._failure = error
             self._accepting = False
+            self._ready.set()
             self._condition.notify_all()
 
     def read(self, n: int, *, timeout: float, exact: bool) -> list[WaveformRecord]:
@@ -293,11 +317,13 @@ class WaveformRecordQueue:
             raise ValueError("n must be positive")
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._condition:
-            while len(self._queue) < requested:
+            while True:
                 if self._failure is not None:
                     raise RuntimeError(
-                        f"{self._what} failed while producing records"
+                        f"{self._what} failed while producing records: {self._failure}"
                     ) from self._failure
+                if len(self._queue) >= requested:
+                    break
                 if not self._armed or not self._accepting:
                     break
                 remaining = deadline - time.monotonic()

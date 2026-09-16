@@ -164,6 +164,7 @@ def _same_panel_selection(left: object, right: object) -> bool:
             selection.selector_kind,
             selection.ranges,
             selection.facets,
+            selection.source_window,
         )
 
     return signature(left) == signature(right)
@@ -2795,6 +2796,33 @@ class ConsolePresenter:
                 effective = {}
             for name, value in dict(effective).items():
                 authored.setdefault(str(name), value)
+            from zlc_plot.semantics import (
+                COORDINATE_PREFIX, composed_spec, describe_semantics,
+            )
+            coordinate_edits = {
+                name: value for name, value in edited.items()
+                if name.startswith(COORDINATE_PREFIX)
+            }
+            if coordinate_edits:
+                # A coordinate switch inherits the actual Scope position;
+                # persisted complete tables already contain the new value.
+                try:
+                    previous = project_panel_state(
+                        candidate_schema, base_spec,
+                        replace(base_state, semantic=authored),
+                    ).spec
+                    if previous is not None:
+                        switched = composed_spec(
+                            candidate_schema, previous, coordinate_edits
+                        )
+                        authored = {
+                            field.name: field.value
+                            for field in describe_semantics(candidate_schema, switched).fields
+                            if field.name != "kind"
+                        }
+                except (KeyError, TypeError, ValueError) as error:
+                    self._report(f"{panel_id}: {_error_text(error)}", severity="error")
+                    return False
             for name, value in edited.items():
                 if value not in ROLE_FATES:
                     continue

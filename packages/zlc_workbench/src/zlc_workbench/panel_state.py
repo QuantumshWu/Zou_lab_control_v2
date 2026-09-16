@@ -18,6 +18,7 @@ from zlc_plot import (
 from zlc_plot.specs import FACET_FIT_PARAMETER, GRID_CELL_KINDS, limit_pair_for
 from zlc_plot.semantics import (
     FATE_PREFIX,
+    COORDINATE_PREFIX,
     SemanticVacancy,
     axis_admits_scope,
     composed_spec,
@@ -616,11 +617,18 @@ def project_panel_state(
     # facet and cell x trade places collides with itself either way round --
     # and the panel silently came back as something else.
     description = describe_semantics(schema, candidate)
+    coordinate_choices = {
+        name: value for name, value in saved_values.items()
+        if name.startswith(COORDINATE_PREFIX) and description.declares(name)
+    }
+    if coordinate_choices:
+        candidate = composed_spec(schema, candidate, coordinate_choices)
+        description = describe_semantics(schema, candidate)
     wanted: dict[str, object] = {}
     for name, saved in saved_values.items():
         key = str(name)
         if not description.declares(key):
-            if key.startswith(FATE_PREFIX):
+            if key.startswith((FATE_PREFIX, COORDINATE_PREFIX)):
                 # A fate names an AXIS.  The same signal legally changes
                 # its schema representation -- the Runtime's indexed
                 # history adds a source-index axis to the Point domain, and

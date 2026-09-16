@@ -12,8 +12,8 @@ import math
 
 import numpy as np
 
-from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID, restrict_snapshot, value_selection
+from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot, Selection
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID, indexed_history_layout, restrict_snapshot, value_selection
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -686,7 +686,13 @@ class FitProjection:
 
         assert isinstance(self._data, OwnedSnapshot)
         scope = projection_scope(self._data.block.schema, self._spec)
-        if not scope:
+        layout = (
+            indexed_history_layout(self._data.block.schema)
+            if isinstance(self._semantic_spec(), (CurvePlot, HistogramPlot)) else None
+        )
+        window = int(self.display_state.values["window"]) if layout is not None else None
+        narrowed = layout is not None and window < layout.shot_count
+        if not scope and not narrowed:
             return self._data
         source = self._data
         schema = source.block.schema
@@ -698,7 +704,7 @@ class FitProjection:
             identity.append(
                 (ref.domain.value, ref.axis_id, value)
             )
-        digest = ",".join(
+        digest = f"window={window};" + ",".join(
             f"{domain}:{axis_id}={value!r}"
             for domain, axis_id, value in sorted(identity)
         )
@@ -722,11 +728,19 @@ class FitProjection:
                 source.ref.revision,
             )
 
-        scoped = restrict_snapshot(
-            source,
-            value_selection(schema, terms),
-            reference_for=reference_for,
-        )
+        scoped = source
+        if narrowed:
+            scoped = restrict_snapshot(
+                source, Selection.index_range(PRIMARY_INDEX_AXIS_ID, layout.shot_count - window, layout.shot_count),
+                reference_for=lambda derived: DatasetRevisionRef(
+                    BlockId(f"{source.ref.block_id.value}|window:{window}"),
+                    source.ref.stream_generation, derived.fingerprint, source.ref.revision,
+                ),
+            )
+        if scope:
+            scoped = restrict_snapshot(
+                scoped, value_selection(scoped.block.schema, terms), reference_for=reference_for,
+            )
         self._scoped_cache = (key, scoped)
         return scoped
 
@@ -814,16 +828,8 @@ class FitProjection:
             sem_plane = np.where(
                 valid_plane, np.asarray(history.sem, dtype=float)[start:], np.nan
             )
-        # x is how far back each point is from the newest: 0 is the newest,
-        # and the ones behind it count back -- in shots, or, when the spec
-        # places the shots along the history's shot-time axis, in seconds.
-        # A rolling window shows the last N shots, so what a point MEANS is
-        # its distance from now -- the absolute shot number or run time is
-        # a fact about the run, not about the picture, and using it slid
-        # every label forward on every single revision.  Once the window is
-        # full the shot axis stops moving, which is also what lets a
-        # composed frame keep its cached chrome instead of re-laying the
-        # tick labels on each shot.
+        # Runtime supplies both coordinates: relative source index and actual
+        # run-relative time. A window selects records without rebasing either.
         along = self._spec.x
         if along is None or along == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value):
             if history.source_indices is not None:
@@ -831,30 +837,29 @@ class FitProjection:
                     history.source_indices[start:], dtype=float
                 )
             else:
-                source_coordinates = np.arange(start, total, dtype=float)
+                source_coordinates = np.arange(start, total, dtype=float) - (total - 1)
             x_unit = resolve_unit("1", DEFAULT_UNITS)
             x_label = "Shots from latest"
         elif along == AxisRef.point(SHOT_TIME_AXIS_ID.value) and history.source_times is not None:
             source_coordinates = np.asarray(history.source_times[start:], dtype=float)
-            x_unit = resolve_unit("s", DEFAULT_UNITS)
-            x_label = "Seconds from latest"
+            x_unit = self._view.coordinate(along).canonical_unit
+            x_label = self._view.coordinate(along).label
         else:
             raise ValueError(
                 "a rolling plot places its shots along the shot index or, for a "
                 f"history that stamps its shots, the shot-time axis; not {along!r}"
             )
-        x_values = source_coordinates - source_coordinates[-1]
+        x_values = source_coordinates
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
         display_plane = canonical_unit.convert_value_to(masked_plane, unit)
         x = QuantityArray(
             x_values,
-            x_values,
+            (x_values if along is None else x_unit.convert_value_to(
+                x_values, self._view.coordinate(along).display_unit
+            )),
             x_unit,
-            x_unit,
-            # Not a shot NUMBER or a run time: the axis says how far back
-            # a point is from the newest one, which is what a rolling
-            # window shows.
+            x_unit if along is None else self._view.coordinate(along).display_unit,
             x_label,
         )
         series: list[CurveSeries] = []
@@ -1144,17 +1149,15 @@ class FitProjection:
     def _rolling_sample_offsets(self) -> np.ndarray:
         """The rolling x that each sample of THIS revision sits at.
 
-        The rolling axis is "shots from latest", and one revision is one
-        shot: every sample of it shares a single offset.  That offset is
-        zero, because the window is a SUFFIX of the history and its x is
-        measured from the newest entry (``absolute - absolute[-1]``), so
-        the point the window ends on is this revision.  The points behind
-        it are history entries, not samples of this snapshot -- nothing
-        here can be selected at a negative offset.
+        Indexed samples use the same Dataset coordinate as the drawn series.
+        An unindexed current event has only its present-shot offset, zero.
         """
 
         if self._view is None:
             raise TypeError("rolling offsets require zlc_data.OwnedSnapshot")
+        if self._view.has_primary_index:
+            ref = self._spec.x or AxisRef.point(str(PRIMARY_INDEX_AXIS_ID))
+            return np.asarray(self._view.coordinate(ref).canonical, dtype=float)
         return np.zeros(self._view.samples.shape, dtype=float)
 
     def _x_sample_canonical(self) -> np.ndarray:
@@ -1220,7 +1223,9 @@ class FitProjection:
             y_values = np.full(samples.shape, target.y, dtype=float)
         else:
             x_values = (
-                np.asarray(self._x_sample_canonical(), dtype=float)
+                np.asarray(self._x_quantity().canonical_unit.convert_value_to(
+                    self._x_sample_canonical(), self._x_quantity().display_unit
+                ), dtype=float)
                 if isinstance(self._spec, RollingPlot)
                 else np.asarray(self._coordinate(self._x_ref()).display, dtype=float)
             )
@@ -1347,6 +1352,8 @@ class FitProjection:
     ) -> np.ndarray:
         samples = self._view.samples
         mask = np.array(samples.valid_mask, copy=True, dtype=bool)
+        if isinstance(self._spec, RollingPlot):
+            mask &= self._rolling_visible_mask()
         cell = self._facet_mask(state.facet_index)
         if cell is not None:
             mask &= cell
@@ -1930,12 +1937,6 @@ class FitProjection:
         target_quantity = self._fit_relation_quantity(display_relation)
         if source_quantity is None or target_quantity is None:
             raise ValueError("fit coordinate display requires physical axis relations")
-        if isinstance(self._spec, RollingPlot) and (
-            solver_relation is UnitRelation.AXIS_0
-            and display_relation is UnitRelation.AXIS_0
-        ):
-            # Shot ordinals: canonical and display coincide.
-            return np.asarray(values, dtype=float)
         source_unit = source_quantity.canonical_unit
         target_unit = target_quantity.display_unit
         if not source_unit.compatible_with(target_unit):
@@ -2219,17 +2220,15 @@ class FitProjection:
             return _FitParameterConversion(
                 name, None, None, "count", _Crossing.POINT, "count",
             )
-        if isinstance(self._spec, RollingPlot) and relation in {
+        if (isinstance(self._spec, RollingPlot)
+                and self._spec.x != AxisRef.point(SHOT_TIME_AXIS_ID.value)) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
         }:
             if solver_relation is not relation:
                 raise ValueError("rolling fit parameters cannot cross unit relations")
-            # The rolling shot axis is a plain ordinal (canonical == display
-            # == shots from the latest) or, along the shot time, seconds
-            # from the latest; either way fit parameters cross unchanged.
-            along = "s" if self._spec.x == AxisRef.point(SHOT_TIME_AXIS_ID.value) else "point"
-            symbol = f"1/{along}" if relation is UnitRelation.INVERSE_AXIS_0 else along
+            # The default rolling coordinate is the unit-free shot ordinal.
+            symbol = "1/point" if relation is UnitRelation.INVERSE_AXIS_0 else "point"
             return _FitParameterConversion(
                 name, None, None, symbol, _Crossing.POINT, symbol,
             )
@@ -2523,8 +2522,6 @@ class FitProjection:
         return NumericRange(value.low * factor, value.high * factor)
 
     def _canonical_x_scalar_to_display(self, value: float) -> float:
-        if isinstance(self._spec, RollingPlot):
-            return float(value)
         source = self._x_selector_source()
         quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
         return self._canonical_scalar_to_display(value, quantity)

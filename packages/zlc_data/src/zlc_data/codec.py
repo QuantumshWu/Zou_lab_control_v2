@@ -84,6 +84,7 @@ def axis_to_tree(axis: AxisSpec) -> dict[str, Any]:
         "coordinate_labels": None
         if axis.coordinate_labels is None
         else list(axis.coordinate_labels),
+        **({"coordinate_of": axis.coordinate_of.value} if axis.coordinate_of is not None else {}),
     }
 
 
@@ -101,7 +102,7 @@ def axis_from_tree(tree: Any) -> AxisSpec:
             "coordinate_frame",
             "index_origin",
             "coordinate_labels",
-        },
+        } | ({"coordinate_of"} if isinstance(tree, dict) and "coordinate_of" in tree else set()),
         AXIS_SCHEMA,
     )
     coordinates = data["coordinates"]
@@ -123,6 +124,7 @@ def axis_from_tree(tree: Any) -> AxisSpec:
         coordinate_labels=None
         if coordinate_labels is None
         else tuple(coordinate_labels),
+        coordinate_of=None if data.get("coordinate_of") is None else AxisId(data["coordinate_of"]),
     )
     if _encode(axis_to_tree(axis)) != _encode(tree):
         raise ValueError("AxisSpec tree is typed but non-canonical")

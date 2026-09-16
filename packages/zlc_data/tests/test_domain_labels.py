@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from zlc_data import (
     READOUT_EVENT,
@@ -79,3 +80,16 @@ def test_a_cropped_domain_crops_coordinates_labels_and_codes_together() -> None:
 def test_domain_labels_round_trip_through_the_codec() -> None:
     domain = _schema().point_domain
     assert domain_from_tree(domain_to_tree(domain)) == domain
+    alternate = AxisSpec(AxisId("pair.time"), "time", READOUT_EVENT, 3, (0.1, 0.3, 0.8), "s", coordinate_of=PAIR)
+    paired = replace(domain, axes=domain.axes + (alternate,), axis_codes=domain.axis_codes * 2)
+    assert paired.logical_shape == (3,)
+    assert paired.coordinate_axis(alternate.axis_id) is domain.axes[0]
+    assert paired.codes(PAIR) is paired.codes(alternate.axis_id)
+    assert paired.axis_codes[0] is paired.axis_codes[1]
+    assert paired.coordinate_counts() == (3, 3)
+    assert domain_from_tree(domain_to_tree(paired)) == paired
+    cropped = restricted_schema(replace(_schema(), point_domain=paired), range(1), (1,), {SITE_ID: range(2)})
+    assert cropped.point_domain.axis(alternate.axis_id).coordinate_of == PAIR
+    assert cropped.point_domain.axis(alternate.axis_id).coordinates == (0.3,)
+    with pytest.raises(ValueError, match="same physical rows"):
+        replace(paired, axis_codes=(domain.axis_codes[0], (2, 1, 0)))

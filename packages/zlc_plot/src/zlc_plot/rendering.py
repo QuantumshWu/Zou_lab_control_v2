@@ -32,6 +32,7 @@ import numpy as np
 from matplotlib.artist import Artist
 from matplotlib.collections import LineCollection, PolyCollection
 from matplotlib.patches import Rectangle
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
 from ._image_raster import ImageFrontStore, PreparedImageFront, _all_true
 from ._fit_scene import FitOverlay, FitPolyline
@@ -6321,7 +6322,7 @@ class MatplotlibRenderer:
                 index = min(max(index, 0), len(cells) - 1)
                 payload = getattr(cells[index], "payload", cells[index])
         labels = getattr(semantic, "labels", None)
-        if isinstance(semantic, CurvePlot):
+        if isinstance(semantic, (CurvePlot, RollingPlot)):
             x_label, y_label = self._curve_labels(
                 semantic, self._series(payload), state
             )
@@ -6371,25 +6372,6 @@ class MatplotlibRenderer:
                 _quantity_label(payload.y, "y", explicit_y),
                 value_label,
             )
-        if isinstance(semantic, RollingPlot):
-            source = self._series(payload)
-            # The rolling payload owns its x-axis meaning (absolute shot
-            # index); rendering only falls back to it, never restates it.
-            payload_x = source[0].x.label if source else "Shot"
-            explicit_x = _state_label(state, "x_label", labels.x or payload_x)
-            explicit_y = _state_label(state, "y_label", None)
-            if explicit_y is None:
-                explicit_y = _state_label(
-                    state,
-                    "value_label",
-                    labels.y or labels.value,
-                )
-            y_label = (
-                _quantity_label(source[0].y, "value", explicit_y)
-                if source
-                else ("value" if explicit_y is None else explicit_y)
-            )
-            return payload_x if explicit_x is None else explicit_x, y_label, None
         if isinstance(semantic, PulseTimelinePlot):
             _factor, unit = pulse_time_scale(payload, state["x_display_unit"])
             x_label = _state_label(state, "x_label", f"Time ({unit})")
@@ -10090,44 +10072,18 @@ class MatplotlibRenderer:
         series = self._series(payload)
         sliced = self._prepare_curve_series(series)
 
-        labels = self.spec.labels
-        explicit_y = _state_label(state, "y_label", None)
-        if explicit_y is None:
-            explicit_y = _state_label(
-                state,
-                "value_label",
-                labels.y or labels.value,
-            )
-        payload_x = series[0].x.label if series else "Shot"
-        explicit_x = _state_label(state, "x_label", labels.x or payload_x)
-        y_label = (
-            _quantity_label(series[0].y, "value", explicit_y)
-            if series
-            else ("value" if explicit_y is None else explicit_y)
-        )
-        # The shot axis frames the FULL configured window and then stands
-        # still: x counts back from the newest shot at 0, so the frame is
-        # [-(window - 1), 0] whatever the run has reached.  The window
-        # parameter is what you see, from the first revision on, and the
-        # axis stops re-laying its tick labels once it is full.  It is
-        # resolved BEFORE the series painter runs and handed to it,
-        # because an axis with two owners is an axis that moves twice.
+        x_text, y_label = self._curve_labels(self.spec, series, state)
+        # Index frames the configured window; time frames the actual
+        # displayed coordinates. Resolve it once before either painter.
         window = int(state["window"])
-        if self.spec.x is None:
+        if self.spec.x is None or self.spec.x.axis_id == PRIMARY_INDEX_AXIS_ID.value:
             frame = _curve_x_limits(np.asarray([1.0 - window, 0.0]))
         else:
-            # Along the shot time the frame is what the window's shots span:
-            # the newest at 0, the oldest as many seconds back as it was.
-            oldest = min(
-                (
-                    float(np.min(np.asarray(item.x, dtype=float)[item.valid]))
-                    for item in sliced
-                    if bool(np.any(item.valid))
-                ),
-                default=0.0,
-            )
-            frame = _curve_x_limits(np.asarray([min(oldest, 0.0), 0.0]))
-        x_text = payload_x if explicit_x is None else explicit_x
+            extents = [
+                (np.min(item.x[item.valid]), np.max(item.x[item.valid]))
+                for item in sliced if bool(np.any(item.valid))
+            ]
+            frame = _curve_x_limits(np.asarray(extents, dtype=float).reshape(-1))
         native_direct = (
             kernels.engaged()
             and self._series_hover is None

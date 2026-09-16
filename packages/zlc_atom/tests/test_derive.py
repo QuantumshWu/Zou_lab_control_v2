@@ -166,6 +166,26 @@ def test_sparse_logical_axes_reduce_without_densifying_or_averaging_means() -> N
     assert tuple(reordered.schema.point_domain.codes(b.axis_id)) == (0, 0, 1, 1)
     np.testing.assert_array_equal(reordered.values, values[:, [1, 4, 0, 2], :])
     np.testing.assert_array_equal(reordered.valid, valid[:, [1, 4, 0, 2], :])
+    time = AxisSpec(
+        AxisId("scan.time"), "time", READOUT_EVENT, 3, (0.1, 0.2, 0.4),
+        "s", coordinate_of=b.axis_id,
+    )
+    paired = Operand(replace(schema, point_domain=DomainSpec(
+        (5,), (a, b, time), (a_codes, b_codes, b_codes),
+    )), values, valid)
+    for coordinate in ("b", "time"):
+        result = paired.mean(coordinate)
+        assert result.schema == source.mean("b").schema
+        np.testing.assert_array_equal(result.values, source.mean("b").values)
+        selected = paired.isel({coordinate: 1})
+        assert selected.schema == source.isel(b=1).schema
+        np.testing.assert_array_equal(selected.values, source.isel(b=1).values)
+        selected = paired.isel({coordinate: [2, 0]})
+        points = selected.schema.point_domain
+        assert points.axis(b.axis_id).coordinates == (3, 1)
+        assert points.axis(time.axis_id).coordinates == (0.4, 0.1)
+        assert points.codes(b.axis_id) is points.codes(time.axis_id)
+        np.testing.assert_array_equal(selected.values, reordered.values)
 
 
 def test_where_and_reductions_keep_invalid_and_empty_groups_explicit(monkeypatch) -> None:

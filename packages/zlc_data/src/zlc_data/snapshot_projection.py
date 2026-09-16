@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -11,6 +11,7 @@ from ._arrays import immutable_array
 from .axis import (
     PRIMARY_INDEX,
     SHOT_TIME,
+    SAMPLE_TIME,
     AxisId,
     AxisSpec,
     LATEST_COORDINATE,
@@ -72,11 +73,11 @@ _NOT_INDEXED = object()
 class IndexedHistoryLayout:
     """The one reading of a Runtime indexed history's Point domain.
 
-    Its rows are ``shots x event rows``: the primary-index column holds each
+    Its primary-index column holds each
     shot's relative offset (oldest first; the latest shot the source holds is
     0, and a restriction that keeps only earlier shots keeps their negative
-    offsets) repeated once per event row, and every other point-axis code
-    repeats the event's own rows under each shot. That structure is derived here ONCE
+    offsets) repeated once per retained event row. Ordinary regions may keep
+    different numbers of rows from different records. That structure is read ONCE
     per schema and read by every consumer: the plot's window mask and shot
     codes, the compatibility gate that lets a sliding window keep its host,
     and the title's shot count.  None of them walks the rows again -- the
@@ -87,10 +88,11 @@ class IndexedHistoryLayout:
     #: Each shot's relative offset, oldest first; none is above 0.  Holes are
     #: legal: a shot the history never received is simply absent.
     cells: np.ndarray
-    #: Event rows under every shot.
-    inner_count: int
+    #: Rows owned by each shot; cropped records need not have equal lengths.
+    row_codes: np.ndarray
+    inner_count: int | None = field(init=False)
     #: What does not change as the window slides -- the Repeat, Cell and
-    #: value contracts plus the event's own Point domain -- and so
+    #: value contracts plus the event's Point geometry -- and so
     #: what two windows of one history must share.
     event: tuple[object, ...]
     #: When each shot was taken, seconds from the run's first shot, oldest
@@ -105,6 +107,12 @@ class IndexedHistoryLayout:
             shape=source.shape,
         )
         object.__setattr__(self, "cells", cells)
+        codes = np.asarray(self.row_codes, dtype=np.int64)
+        object.__setattr__(self, "row_codes", immutable_array(
+            codes, dtype=np.dtype("<i8"), shape=codes.shape,
+        ))
+        counts = np.bincount(codes, minlength=cells.size)
+        object.__setattr__(self, "inner_count", int(counts[0]) if np.all(counts == counts[0]) else None)
         if self.times is not None:
             times = np.asarray(self.times, dtype=np.float64)
             if times.shape != cells.shape:
@@ -119,14 +127,12 @@ class IndexedHistoryLayout:
 
     @property
     def row_count(self) -> int:
-        return int(self.cells.size) * int(self.inner_count)
+        return int(self.row_codes.size)
 
     def codes(self) -> np.ndarray:
         """Each point row's shot position, oldest shot first."""
 
-        return np.repeat(
-            np.arange(self.cells.size, dtype=np.int64), int(self.inner_count)
-        )
+        return self.row_codes
 
     def row_mask(self, window: int) -> np.ndarray:
         """Which point rows the last ``window`` shots occupy."""
@@ -139,9 +145,8 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
     """The indexed-history layout of ``schema``, or None without a shot index.
 
     A schema that names the primary index but breaks its contract -- a
-    non-integer or unordered offset, an offset above 0 (an absolute ordinal,
-    never a relative coordinate), shots of unequal size, or event-axis codes
-    that do not repeat under every shot -- is a producer error and is
+    non-integer or unordered offset or an offset above 0 (an absolute ordinal,
+    never a relative coordinate) -- is a producer error and is
     refused, not read leniently.  A last offset BELOW 0 is not a broken
     index: Runtime materializes the latest shot as 0, and a restriction of
     that Dataset to past shots -- a Scope on the source index, like a Scope
@@ -195,8 +200,7 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         raise ValueError("primary-index rows must cover every retained cell")
     counts = np.diff(np.concatenate((starts, [point_domain.size])))
     inner_count = int(counts[0])
-    if np.any(counts != inner_count):
-        raise ValueError("every shot of an indexed history holds the same event rows")
+    uniform = bool(np.all(counts == inner_count))
     shots = int(cells.size)
     # The shot-time axis is the shot index's twin: one coordinate per
     # shot, on the same rows, and no part of the event's own domain.
@@ -214,25 +218,34 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
             dtype=np.float64,
         )
     event_axes = tuple(
-        axis for axis in point_domain.axes if axis is not primary and axis is not time_axis
+        axis for axis in point_domain.axes
+        if axis is not primary and axis is not time_axis and axis.role != SAMPLE_TIME
+    )
+    sample_axes = tuple(
+        (axis.axis_id, axis.name, axis.role, axis.unit, axis.coordinate_frame)
+        for axis in point_domain.axes if axis.role == SAMPLE_TIME
     )
     event_codes: list[tuple[int, ...]] = []
+    repeated = uniform
     for axis in event_axes:
-        codes = point_domain.codes(axis.axis_id).reshape(shots, inner_count)
-        if shots > 1 and bool(np.any(codes[1:] != codes[0])):
-            raise ValueError(
-                "an indexed history repeats the event's Point domain under every shot"
-            )
-        event_codes.append(tuple(codes[0].tolist()))
-    event_domain = DomainSpec((inner_count,), event_axes, tuple(event_codes))
+        codes = point_domain.codes(axis.axis_id)
+        if uniform and shots > 1:
+            rows = codes.reshape(shots, inner_count)
+            repeated = repeated and bool(np.all(rows[1:] == rows[0]))
+        event_codes.append(tuple(codes.tolist()))
+    event_domain = (
+        (inner_count if repeated else point_domain.size,), event_axes,
+        tuple(codes[:inner_count] if repeated else codes for codes in event_codes),
+    )
     layout = IndexedHistoryLayout(
         cells,
-        inner_count,
+        primary_codes,
         (
             schema.repeat_domain,
             schema.cell_domain,
             schema.value_schema,
             event_domain,
+            sample_axes,
         ),
         times,
     )
@@ -459,6 +472,7 @@ def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
         axis.unit,
         axis.coordinate_frame,
         coordinate_labels=labels,
+        coordinate_of=axis.coordinate_of,
     )
 
 

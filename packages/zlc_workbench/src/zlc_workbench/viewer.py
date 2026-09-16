@@ -152,11 +152,14 @@ def _mapped_domain(axes: tuple[object, ...]) -> object:
 
     if not axes:
         return DomainSpec((1,), (), ())
-    shape = tuple(int(axis.size) for axis in axes)
+    physical_axes = tuple(axis for axis in axes if axis.coordinate_of is None)
+    shape = tuple(int(axis.size) for axis in physical_axes)
     size = int(np.prod(shape, dtype=np.int64))
     codes = np.indices(shape, dtype=np.int64).reshape((len(shape), size))
+    positions = {axis.axis_id: index for index, axis in enumerate(physical_axes)}
     return DomainSpec(
-        (size,), axes, tuple(codes[position] for position in range(len(shape)))
+        (size,), axes,
+        tuple(codes[positions[axis.coordinate_of or axis.axis_id]] for axis in axes),
     )
 
 
@@ -184,7 +187,7 @@ def _domain_flat_rows(domain: object) -> np.ndarray:
     if not domain.axes:
         return np.zeros(int(domain.size), dtype=np.intp)
     result = np.ravel_multi_index(
-        tuple(domain.codes(axis.axis_id) for axis in domain.axes),
+        tuple(domain.codes(axis.axis_id) for axis in domain.axes if axis.coordinate_of is None),
         domain.logical_shape,
     )
     if np.unique(result).size != result.size:
@@ -196,8 +199,8 @@ def _expand_snapshot_for_edit(snapshot: object) -> tuple[np.ndarray, np.ndarray,
     from zlc_data import expand_snapshot_validity
 
     schema = snapshot.block.schema
-    repeat_shape = tuple(int(axis.size) for axis in schema.repeat_domain.axes)
-    point_shape = tuple(int(axis.size) for axis in schema.point_domain.axes)
+    repeat_shape = schema.repeat_domain.logical_shape
+    point_shape = schema.point_domain.logical_shape
     cell_shape = tuple(schema.cell_domain.shape)
     dense_shape = (*repeat_shape, *point_shape, *cell_shape)
     repeat_size = int(np.prod(repeat_shape, dtype=np.int64)) if repeat_shape else 1
@@ -223,22 +226,17 @@ def _expand_snapshot_for_edit(snapshot: object) -> tuple[np.ndarray, np.ndarray,
 
 def _visible_axes(draft: Mapping[str, object]) -> tuple[object, ...]:
     return tuple(
-        axis
-        for axis in (
-            *tuple(draft["repeat_axes"]),
-            *tuple(draft["point_axes"]),
-            *tuple(draft["cell_axes"]),
-        )
+        axis for axis in _storage_axes(draft)
         if str(axis.role) != "scalar"
     )
 
 
 def _storage_axes(draft: Mapping[str, object]) -> tuple[object, ...]:
-    return (
+    return tuple(axis for axis in (
         *tuple(draft["repeat_axes"]),
         *tuple(draft["point_axes"]),
         *tuple(draft["cell_axes"]),
-    )
+    ) if axis.coordinate_of is None)
 
 
 def _normalize_table_axes(draft: dict[str, object]) -> None:
@@ -435,8 +433,8 @@ def _pack_manual_array(
 ) -> np.ndarray:
     """Project the editor's logical tensor back onto the Dataset carriers."""
 
-    repeat_axes = tuple(draft["repeat_axes"])
-    point_axes = tuple(draft["point_axes"])
+    repeat_axes = tuple(axis for axis in draft["repeat_axes"] if axis.coordinate_of is None)
+    point_axes = tuple(axis for axis in draft["point_axes"] if axis.coordinate_of is None)
     cell_shape = tuple(int(axis.size) for axis in tuple(draft["cell_axes"]))
     repeat_size = (
         int(np.prod(tuple(int(axis.size) for axis in repeat_axes), dtype=np.int64))
@@ -517,7 +515,8 @@ def _manual_snapshot(draft: Mapping[str, object]) -> object:
 
 
 def _axis_id_set(draft: Mapping[str, object]) -> set[str]:
-    return {str(axis.axis_id) for axis in _storage_axes(draft)}
+    return {str(axis.axis_id) for key in ("repeat_axes", "point_axes", "cell_axes")
+            for axis in draft[key]}
 
 
 def _new_axis_id(draft: Mapping[str, object], stem: str) -> object:
@@ -593,6 +592,7 @@ def _axis_spec(
         None if previous is None else previous.coordinate_frame,
         index_origin,
         previous.coordinate_labels if same_coordinates else None,
+        coordinate_of=None if previous is None else previous.coordinate_of,
     )
 
 
@@ -660,14 +660,16 @@ def _add_axis(
     key = _domain_key(domain)
     axis = _axis_spec(_new_axis_id(draft, name), name, int(length), unit, domain)
     axes = list(draft[key])
+    repeat_count = sum(axis.coordinate_of is None for axis in draft["repeat_axes"])
+    point_count = sum(axis.coordinate_of is None for axis in draft["point_axes"])
     if key == "cell_axes" and len(axes) == 1 and str(axes[0].role) == "scalar":
         axes[0] = axis
         draft[key] = axes
-        _resize_storage_axis(draft, len(tuple(draft["repeat_axes"])) + len(tuple(draft["point_axes"])), int(length))
+        _resize_storage_axis(draft, repeat_count + point_count, int(length))
     else:
         insertion = {
-            "repeat_axes": len(tuple(draft["repeat_axes"])),
-            "point_axes": len(tuple(draft["repeat_axes"])) + len(tuple(draft["point_axes"])),
+            "repeat_axes": repeat_count,
+            "point_axes": repeat_count + point_count,
             "cell_axes": len(_storage_axes(draft)),
         }[key]
         _insert_storage_axis(draft, insertion, int(length))
@@ -692,15 +694,19 @@ def _edit_axis(
     old_domain, position, previous = _axis_location(draft, axis_id)
     target_domain = str(domain)
     _domain_key(target_domain)
-    replacement = _axis_spec(
-        previous.axis_id,
-        name,
-        int(length),
-        unit,
-        target_domain,
-        previous=previous,
-        preserve_role=old_domain == target_domain,
-    )
+    old_key = _domain_key(old_domain)
+    primary_id = previous.coordinate_of or previous.axis_id
+    family = tuple(axis for axis in draft[old_key]
+                   if (axis.coordinate_of or axis.axis_id) == primary_id)
+    if target_domain == "cell_data" and len(family) > 1:
+        raise ValueError(
+            "Cell-data axes cannot carry alternative coordinates; keep this axis in Repeat or Point"
+        )
+    replacements = {axis.axis_id: _axis_spec(
+        axis.axis_id, name if axis is previous else axis.name, int(length),
+        unit if axis is previous else axis.unit or "", target_domain,
+        previous=axis, preserve_role=old_domain == target_domain,
+    ) for axis in family}
     # Every step below works on a scratch copy and the working copy takes
     # the whole result at the end.  The array helpers replace arrays, they
     # never write into one, so a refused step leaves the draft exactly as it
@@ -708,21 +714,19 @@ def _edit_axis(
     edited = dict(draft)
     old_storage = list(_storage_axes(edited))
     old_dimension = next(
-        index for index, axis in enumerate(old_storage) if str(axis.axis_id) == axis_id
+        index for index, axis in enumerate(old_storage) if axis.axis_id == primary_id
     )
     _resize_storage_axis(edited, old_dimension, int(length))
     if old_domain == target_domain:
         key = _domain_key(old_domain)
         axes = list(edited[key])
-        axes[position] = replacement
+        axes = [replacements.get(axis.axis_id, axis) for axis in axes]
         edited[key] = axes
         _normalize_table_axes(edited)
         draft.update(edited)
-        return replacement != previous
-    old_key = _domain_key(old_domain)
+        return any(replacements[axis.axis_id] != axis for axis in family)
     target_key = _domain_key(target_domain)
-    old_axes = list(edited[old_key])
-    old_axes.pop(position)
+    old_axes = [axis for axis in edited[old_key] if axis.axis_id not in replacements]
     edited[old_key] = old_axes
     storage_ids = [str(axis.axis_id) for axis in old_storage]
     if old_key == "cell_axes" and not old_axes:
@@ -733,7 +737,7 @@ def _edit_axis(
         _take_storage_axis(edited, scalar_dimension)
         storage_ids.pop(scalar_dimension)
         target_axes = []
-    target_axes.append(replacement)
+    target_axes.extend(replacements.values())
     edited[target_key] = target_axes
 
     # The arrays are reordered by the axes they actually hold.  The scalar
@@ -766,14 +770,15 @@ def _delete_axis(draft: dict[str, object], axis_id: str) -> None:
     from zlc_data.axis import SCALAR_AXIS
 
     domain, position, axis = _axis_location(draft, axis_id)
+    primary_id = axis.coordinate_of or axis.axis_id
     storage = list(_storage_axes(draft))
-    dimension = next(index for index, item in enumerate(storage) if str(item.axis_id) == axis_id)
+    dimension = next(index for index, item in enumerate(storage) if item.axis_id == primary_id)
     key = _domain_key(domain)
-    axes = list(draft[key])
-    axes.pop(position)
+    axes = [item for item in draft[key]
+            if (item.coordinate_of or item.axis_id) != primary_id]
     draft[key] = axes
     kept_index = min(
-        max(0, int(dict(draft.get("scopes", {})).get(axis_id, 0))),
+        max(0, int(dict(draft.get("scopes", {})).get(str(primary_id), 0))),
         int(axis.size) - 1,
     )
     if domain == "cell_data" and not axes:
@@ -823,6 +828,7 @@ def _set_axis_values(
         axis.coordinate_frame,
         0,
         axis.coordinate_labels,
+        coordinate_of=axis.coordinate_of,
     )
     key = _domain_key(domain)
     axes = list(draft[key])

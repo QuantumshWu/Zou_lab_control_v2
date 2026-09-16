@@ -242,11 +242,14 @@ class ZishuDaq4211WaveformSource:
                     for reading in self.config.readings
                 ],
             },
+            time_basis="sample_clock",
         )
 
     def arm(self, records: int | None, *, buffer_record_count: int) -> None:
         """Configure the card, start its task, and read the stream it makes."""
 
+        if self._records.armed:
+            raise RuntimeError(f"the {SUPPORTED_MODEL} is already armed")
         serial, module = self.config.serial, ADC_MODULE
         self._daq.set_int(serial, module, "InputRange", INPUT_RANGES[self.config.input_range_volts])
         self._daq.set_int(serial, module, "Channels", self._columns)
@@ -278,6 +281,11 @@ class ZishuDaq4211WaveformSource:
                 daemon=True,
             ),
         )
+        try:
+            self._records.wait_ready(self.timeout)
+        except BaseException:
+            self.finish_record_capture()
+            raise
 
     def _acquire(self, stop: threading.Event) -> None:
         serial, module = self.config.serial, ADC_MODULE
@@ -293,13 +301,14 @@ class ZishuDaq4211WaveformSource:
         try:
             self._daq.command(serial, module, "StartTask")
             self._daq.command(serial, module, "SoftTrigger")
+            self._records.mark_ready()
             while not stop.is_set() and self._records.accepting:
                 arrived = self._daq.read_analog(
                     serial, module, block - carry.size, slice_ms
                 )
                 if arrived.size:
                     carry = np.concatenate((carry, arrived))
-                while carry.size >= block and not stop.is_set():
+                while carry.size >= block and not stop.is_set() and self._records.accepting:
                     values = carry[:block].reshape(
                         self.config.record_samples, self._columns
                     )
@@ -336,7 +345,7 @@ class ZishuDaq4211WaveformSource:
     def close(self) -> None:
         try:
             if self._records.armed:
-                self._records.finish()
+                self.finish_record_capture()
         finally:
             self._daq.close(self.config.serial)
 

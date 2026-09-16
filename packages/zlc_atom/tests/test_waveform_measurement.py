@@ -37,7 +37,6 @@ from zlc_atom.devices.waveform.wheeltec_n100 import (
 )
 from zlc_atom.nodes.waveform_measurement import (
     LOGIC_NODE,
-    MIN_READ_INTERVAL_SECONDS,
     WaveformMeasurementNode,
     WaveformMeasurementRequest,
 )
@@ -199,8 +198,8 @@ def test_one_measurement_publishes_what_its_source_carries() -> None:
 
     An IMU packet is four quantities and is watched as a rolling trace of
     shots; a scope acquisition is one voltage and is watched as the trace
-    it is.  Until a draft binds a source it publishes nothing, and the
-    cadence it may be read at has a floor.
+    it is. Until a draft binds a source it publishes nothing; receive
+    capacity never changes the source's sampling clock.
     """
 
     imu = _imu_like_source(500.0)
@@ -224,13 +223,8 @@ def test_one_measurement_publishes_what_its_source_carries() -> None:
         (requirement,) = LOGIC_NODE.device_requirements
         assert requirement.fields_frozen_by(imu) == ()
         with pytest.raises(ValueError, match="at least"):
-            WaveformMeasurementRequest("imu", repeat=0, read_interval_seconds=0.0)
-        field = next(
-            field
-            for field in LOGIC_NODE.authoring_schema.fields
-            if field.name == "read_interval_seconds"
-        )
-        assert field.minimum == MIN_READ_INTERVAL_SECONDS
+            WaveformMeasurementRequest("imu", repeat=0, buffer_seconds=0.0)
+        assert {field.name for field in LOGIC_NODE.authoring_schema.fields} == {"repeat", "buffer_seconds"}
     finally:
         imu.close()
         scope.close()
@@ -246,7 +240,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
     source = _imu_like_source(500.0)
     node = WaveformMeasurementNode(
         sampler=source,
-        request=WaveformMeasurementRequest("imu", repeat=0, read_interval_seconds=0.001),
+        request=WaveformMeasurementRequest("imu", repeat=0, buffer_seconds=0.5),
         signal_plane=plane,
         producer="imu-live",
     )
@@ -267,7 +261,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         assert schema.value_schema.value_unit == "uT"
         assert np.asarray(value.snapshot.block.values)[0, 0, 1] == pytest.approx(-5.0)
         assert value.run_record["named_devices"] == {"sampler": "imu"}
-        assert value.run_record["parameters"]["read_interval_seconds"] == 0.001
+        assert value.run_record["parameters"]["buffer_seconds"] == 0.5
         assert value.run_record["device_snapshots"]["sampler"]["record_samples"] == 1
         temperature = plane.freeze().value(host.signal_key("temperature"))
         assert temperature is not None
@@ -306,6 +300,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         publication = plane.latest_publication(key)
         assert publication is not None
         assert plane.retains(key, publication)
+        assert publication.event_ref.sequence == source.produced_count
     finally:
         if history is not None:
             history.close()
@@ -317,18 +312,13 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         plane.close()
 
 
-def test_a_finite_measurement_takes_its_shots_at_its_own_cadence() -> None:
-    for interval, expect_every_packet in ((0.001, True), (0.004, False)):
+def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity() -> None:
+    for capacity in (0.02, 0.5):
         plane = SignalDataPlane()
-        source = _imu_like_source(500.0)
-        node = WaveformMeasurementNode(
-            sampler=source,
-            request=WaveformMeasurementRequest(
-                "imu", repeat=4, read_interval_seconds=interval
-            ),
-            signal_plane=plane,
-            producer="imu-finite",
-        )
+        source = _imu_like_source(400.0)
+        node = WaveformMeasurementNode(sampler=source,
+            request=WaveformMeasurementRequest("imu", repeat=12, buffer_seconds=capacity),
+            signal_plane=plane, producer="imu-finite")
         wake = Event()
         host = _host(node, plane, wake)
         try:
@@ -339,31 +329,76 @@ def test_a_finite_measurement_takes_its_shots_at_its_own_cadence() -> None:
             publication = plane.latest_publication(key)
             assert publication is not None
             value = publication.value(key)
-            assert value.coverage.written_cells == 4 and value.coverage.total_cells == 4
+            assert value.coverage.written_cells == 12 and value.coverage.total_cells == 12
             dataset = plane.current_dataset(key, publication)
-            if expect_every_packet:
-                # Read every 1 ms off a 500 Hz source: the cadence is
-                # shorter than a packet, so a reading is one packet and the
-                # shots are the packets.
-                assert dataset.block.schema.physical_shape == (4, 1, 3)
-                packets = np.asarray(dataset.block.values)[:, 0, 0]
-                assert packets.tolist() == [0.0, 1.0, 2.0, 3.0]
-            else:
-                # Read every 4 ms off a 500 Hz source: a reading is the
-                # interval's worth of packets, so each shot carries two and
-                # the four shots are eight CONSECUTIVE packets. The source
-                # is free-running, so its records are slices of one signal:
-                # a shot that took the newest and let the other go would
-                # drop half the signal, and a periodic one read that way
-                # stops looking periodic.
-                assert dataset.block.schema.physical_shape == (4, 1, 3, 2)
-                packets = np.asarray(dataset.block.values)[:, 0, 0, :].reshape(-1)
-                assert np.all(np.diff(packets) == 1.0), packets.tolist()
-            assert source.capture_state() is False
+            assert dataset.block.schema.physical_shape == (12, 1, 3)
+            assert np.asarray(dataset.block.values)[:, 0, 0].tolist() == list(range(12))
+            timing = value.event_record["record_timing"]["imu-finite"]["11"]
+            assert timing["time_basis"] == "sample_clock"
+            assert timing["record_time_seconds"] == pytest.approx(11 / 400)
+            _, run = plane.current_dataset_view(key, publication)
+            assert len(run["record_timing"]["imu-finite"]) == 12
+            assert not source.capture_state()
         finally:
             host.shutdown()
             source.close()
             plane.close()
+
+    # Stop ends production first, then publishes every already accepted
+    # record, for a finite run and for a live monitor alike.
+    for repeat in (12, 0):
+        plane = SignalDataPlane()
+        source = _imu_like_source(400)
+        node = WaveformMeasurementNode(sampler=source,
+            request=WaveformMeasurementRequest("imu", repeat=repeat, buffer_seconds=0.5),
+            signal_plane=plane, producer="imu-stop")
+        capture = node.prepare(should_stop=lambda: True) if repeat else node.monitor()
+        try:
+            with source._records._condition:
+                assert source._records._condition.wait_for(lambda: source.produced_count >= 3, timeout=1)
+            if repeat:
+                completed = capture.collect()
+                assert completed == source.produced_count >= 3
+            else:
+                capture.close()
+                assert capture.revision == source.produced_count >= 3
+            key = node.signal_key("magnetic_field")
+            publication = plane.latest_publication(key)
+            assert publication.event_ref.sequence == source.produced_count
+            record = publication.value(key).event_record["record_timing"]["imu-stop"]
+            assert str(source.produced_count - 1) in record
+            assert source.read_records(1, timeout=0, exact=False) == []
+            assert not source.capture_state()
+        finally:
+            source.close()
+            plane.close()
+
+    # A publication failure must neither drain more records nor be replaced
+    # by a later failure while the already running producer is stopped.
+    plane = SignalDataPlane()
+    source = _imu_like_source(400)
+    node = WaveformMeasurementNode(sampler=source,
+        request=WaveformMeasurementRequest("imu", repeat=12, buffer_seconds=0.5),
+        signal_plane=plane, producer="imu-failed")
+    capture = node.prepare()
+    failure = ValueError("publication failed")
+    finish = source.finish_record_capture
+    def cleanup_failure():
+        finish()
+        raise RuntimeError("cleanup failed")
+    def failed_commit(record, index):
+        raise failure
+    source.finish_record_capture = cleanup_failure
+    try:
+        with pytest.raises(ValueError) as raised:
+            capture.collect(commit_shot=failed_commit)
+        assert raised.value is failure
+        assert any("cleanup failed" in note for note in failure.__notes__)
+        assert capture.completed_shots == 1 and not source.capture_state()
+        assert plane.latest_publication(node.signal_key("magnetic_field")) is None
+    finally:
+        source.close()
+        plane.close()
 
 
 class _ScopeInstrument:
@@ -377,6 +412,7 @@ class _ScopeInstrument:
         self.record_length = 8
         self.acquired = 0
         self.armed = False
+        self.auto_trigger = True
 
     def write(self, command: str) -> None:
         self.log.append(command)
@@ -395,6 +431,8 @@ class _ScopeInstrument:
             self.volts_per_div[channel] = float(command.split()[-1])
         elif upper == ":ACQUIRE:STATE RUN":
             self.armed = True
+        elif upper == ":ACQUIRE:STATE STOP":
+            self.armed = False
 
     def query(self, command: str) -> str:
         self.log.append(command)
@@ -416,10 +454,10 @@ class _ScopeInstrument:
         if upper == ":WFMOUTPRE:YZERO?":
             return "0.0"
         if upper == ":ACQUIRE:STATE?":
-            if self.armed:
+            if self.armed and self.auto_trigger:
                 self.armed = False
                 self.acquired += 1
-            return "0"
+            return "1" if self.armed else "0"
         raise AssertionError(f"unexpected query {command!r}")
 
     def query_int16(self, command: str) -> np.ndarray:
@@ -431,7 +469,9 @@ class _ScopeInstrument:
         self.log.append("<closed>")
 
 
-def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs() -> None:
+def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
     instrument = _ScopeInstrument()
     scope = TekScopeWaveformSource(
         TekScopeConfig(resource="USB0::0x0699::0x0401::C012345::INSTR", channels=(1, 2)),
@@ -444,6 +484,7 @@ def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs() -> None:
         (voltage,) = scope.outputs
         assert voltage.channel_labels == ("CH1", "CH2") and voltage.unit == "V"
         point = scope.working_point()
+        assert point.time_basis == "host_receive"
         assert point.sample_interval_seconds == pytest.approx(1e-3 * 10.0 / 8)
         assert point.settings[volts_per_div_field(2)] == 0.5
 
@@ -470,6 +511,39 @@ def test_the_tek_scope_driver_scales_curves_and_snaps_its_knobs() -> None:
         assert terminal.produced_count == 2 and terminal.joined
         assert instrument.acquired == 2
         assert scope.capture_state() is False
+
+        instrument.auto_trigger = False
+        started, release = Event(), Event()
+        write = instrument.write
+        def held_start(command):
+            if command.upper() == ":ACQUIRE:STATE RUN":
+                started.set()
+                assert release.wait(2)
+            write(command)
+        monkeypatch.setattr(instrument, "write", held_start)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            arming = worker.submit(scope.arm, 1, buffer_record_count=2)
+            try:
+                assert started.wait(2)
+                assert not arming.done(), "arm returned before the scope accepted RUN"
+            finally:
+                release.set()
+            arming.result(timeout=2)
+        assert instrument.armed and instrument.acquired == 2
+        assert scope.finish_record_capture().produced_count == 0
+        assert instrument.log[-1].upper() == ":ACQUIRE:STATE STOP"
+        assert not instrument.armed
+
+        def failed_start(command):
+            write(command)
+            if command.upper() == ":ACQUIRE:STATE RUN":
+                raise RuntimeError("scope RUN failed")
+        monkeypatch.setattr(instrument, "write", failed_start)
+        with pytest.raises(RuntimeError) as failure:
+            scope.arm(1, buffer_record_count=1)
+        assert str(failure.value.__cause__) == "scope RUN failed"
+        assert not scope.capture_state() and not instrument.armed
+        assert instrument.log[-1].upper() == ":ACQUIRE:STATE STOP"
     finally:
         scope.close()
     assert instrument.log[-1] == "<closed>"

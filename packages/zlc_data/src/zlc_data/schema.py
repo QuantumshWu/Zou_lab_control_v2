@@ -72,6 +72,14 @@ class DomainSpec:
                     raise ValueError("domain axis coordinates must be unique")
 
         authored_codes = self.axis_codes
+        for axis in axes:
+            if axis.coordinate_of is None:
+                continue
+            primary = next((item for item in axes if item.axis_id == axis.coordinate_of), None)
+            if primary is None or primary.coordinate_of is not None or axis.size != primary.size:
+                raise ValueError("alternative coordinates need one same-sized primary axis in their domain")
+            if authored_codes is None:
+                raise ValueError("alternative coordinates require an explicitly mapped domain")
         normalized_codes: tuple[tuple[int, ...], ...] | None
         cached_codes: list[np.ndarray] = []
         if authored_codes is None:
@@ -108,13 +116,20 @@ class DomainSpec:
                     raise ValueError("axis code is outside its coordinate domain")
                 canonical = tuple(codes.tolist())
                 cached_codes.append(
-                    immutable_array(
+                    codes if axis.coordinate_of is not None else immutable_array(
                         codes,
                         dtype=np.dtype("<i8"),
                         shape=(carrier_size,),
                     )
                 )
                 normalized.append(canonical)
+            for index, axis in enumerate(axes):
+                if axis.coordinate_of is not None:
+                    primary_index = next(i for i, item in enumerate(axes) if item.axis_id == axis.coordinate_of)
+                    if normalized[index] != normalized[primary_index]:
+                        raise ValueError("alternative coordinates must name the same physical rows")
+                    cached_codes[index] = cached_codes[primary_index]
+                    normalized[index] = normalized[primary_index]
             normalized_codes = tuple(normalized)
             if not axes and carrier_size != 1:
                 raise ValueError("a mapped domain with multiple rows needs a named axis")
@@ -131,7 +146,7 @@ class DomainSpec:
 
     @property
     def logical_shape(self) -> tuple[int, ...]:
-        return tuple(axis.size for axis in self.axes)
+        return tuple(axis.size for axis in self.axes if axis.coordinate_of is None)
 
     def axis(self, axis_id: AxisId) -> AxisSpec:
         if not isinstance(axis_id, AxisId):
@@ -147,6 +162,15 @@ class DomainSpec:
         axis = self.axis(axis_id)
         return self._codes[self.axes.index(axis)]
 
+    def coordinate_axis(self, axis_id: AxisId) -> AxisSpec:
+        """The physical axis whose positions this coordinate names."""
+        axis = self.axis(axis_id)
+        return axis if axis.coordinate_of is None else self.axis(axis.coordinate_of)
+
+    def coordinate_axes(self, axis_id: AxisId) -> tuple[AxisSpec, ...]:
+        primary = self.coordinate_axis(axis_id)
+        return (primary,) + tuple(axis for axis in self.axes if axis.coordinate_of == primary.axis_id)
+
     def coordinate_counts(self, current_row: int = -1) -> tuple[int, ...]:
         """Distinct coordinates along each axis, the other axes held at ``current_row``.
 
@@ -161,10 +185,11 @@ class DomainSpec:
         counts = self._coordinate_counts.get(row)
         if counts is None:
             result: list[int] = []
+            primary_ids = tuple(axis.coordinate_of or axis.axis_id for axis in self.axes)
             for target, target_codes in enumerate(self._codes):
                 rows = np.ones(self.size, dtype=bool)
                 for index, other_codes in enumerate(self._codes):
-                    if index != target:
+                    if primary_ids[index] != primary_ids[target]:
                         rows &= other_codes == other_codes[row]
                 result.append(int(np.unique(target_codes[rows]).size))
             counts = tuple(result)

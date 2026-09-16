@@ -3459,6 +3459,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         with self._lock:
             callbacks = tuple(self._display_callbacks)
         self._notify_callbacks(callbacks, state)
+        if "window" in state.changed_names:
+            for selector in self.selectors:
+                if selector.kind in {SelectorKind.AREA, SelectorKind.X_RANGE}:
+                    self._emit_selection(SelectionChange.COMMITTED, selector)
 
     @staticmethod
     def _notify_surface_callbacks(
@@ -4064,6 +4068,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return self._view.selection_subject(
             self._spec,
             self._payload,
+            source_window=self.display_state.values.get("window"),
             facet_index=(
                 self._facet_focus_index if state is None else state.facet_index
             ),
@@ -4443,9 +4448,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
 
     def _display_x_scalar_to_canonical(self, value: float) -> float:
-        if isinstance(self._spec, RollingPlot):
-            # The rolling shot axis is a plain ordinal: display == canonical.
-            return float(value)
         source = self._projected._x_selector_source()
         quantity = self._projected._coordinate(source) if isinstance(source, AxisRef) else source
         return self._projected._display_scalar_to_canonical(value, quantity)

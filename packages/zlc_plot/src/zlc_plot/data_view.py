@@ -27,6 +27,7 @@ from zlc_data import (
     canonical_coordinate_scalar,
 )
 from zlc_data.snapshot_projection import (
+    PRIMARY_INDEX_AXIS_ID,
     IndexedHistoryLayout,
     indexed_history_layout,
     restrict_snapshot,
@@ -84,10 +85,13 @@ class SelectionSubject:
     x_coordinate_frame: str | None = None
     y_coordinate_frame: str | None = None
     scope: tuple[tuple[AxisRef, CoordinateScalar], ...] = ()
+    source_window: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.plot_kind, PlotKind):
             raise TypeError("selection subject plot_kind must be PlotKind")
+        if self.source_window is not None and (type(self.source_window) is not int or self.source_window < 1):
+            raise ValueError("selection source_window must be a positive integer or None")
         for name in ("x", "y"):
             ref = getattr(self, name)
             if ref is not None and not isinstance(ref, AxisRef):
@@ -844,8 +848,14 @@ class DataView:
 
         from .semantics import axis_choices_for_schema
 
+        families = {
+            self._resolve(ref).contract.domain.coordinate_axis(self._resolve(ref).contract.axis_id).axis_id
+            for ref in keep
+        }
         refs = tuple(reduced) if reduced is not None else tuple(
-            ref for ref in axis_choices_for_schema(self._schema) if ref not in keep
+            ref for ref in axis_choices_for_schema(self._schema)
+            if self._resolve(ref).contract.domain.axis(self._resolve(ref).contract.axis_id).coordinate_of is None
+            and self._resolve(ref).contract.axis_id not in families
         )
         if all(self._resolve(ref).contract.size == 1 for ref in refs):
             return self
@@ -871,6 +881,7 @@ class DataView:
         payload: CurveData | ImageData | HistogramData | FacetData,
         *,
         facet_index: int | None = None,
+        source_window: int | None = None,
     ) -> SelectionSubject:
         """Interaction identity of this already accepted view and payload.
 
@@ -923,6 +934,9 @@ class DataView:
             x_ref, y_ref = selected_payload.x_ref, selected_payload.y_ref
             if (x_ref, y_ref) != (semantic.x, semantic.y):
                 raise ValueError("accepted image payload has the wrong axes")
+        elif isinstance(semantic, RollingPlot) and self.has_primary_index:
+            x_ref = semantic.x or AxisRef.point(str(PRIMARY_INDEX_AXIS_ID))
+            y_ref = None
         else:
             if isinstance(semantic, HistogramPlot) and not isinstance(
                 selected_payload, HistogramData
@@ -983,6 +997,7 @@ class DataView:
             x_frame,
             y_frame,
             tuple(scope),
+            source_window if self.has_primary_index else None,
         )
 
     def validate_curve(
@@ -2840,7 +2855,7 @@ class DataView:
             siblings = tuple(
                 axis
                 for axis in resolved.domain.axes
-                if resolved.domain.physical_dimension(axis.axis_id)
+                if axis.coordinate_of is None and resolved.domain.physical_dimension(axis.axis_id)
                 == local_dimension
             )
             if len(siblings) == 1:
@@ -2868,12 +2883,12 @@ class DataView:
             resolved_coordinates[0].axis_id
         )
         named = {
-            resolved.axis_id for resolved in resolved_coordinates
+            domain.coordinate_axis(resolved.axis_id).axis_id for resolved in resolved_coordinates
         }
         kept = tuple(
             axis
             for axis in domain.axes
-            if axis.axis_id not in named
+            if axis.coordinate_of is None and axis.axis_id not in named
             and domain.physical_dimension(axis.axis_id) == local_dimension
         )
         if not kept:
@@ -3162,6 +3177,9 @@ class DataView:
         if layout is None or provenance is None or values.dtype.kind not in "iu":
             return None
         window = _history_window(window)
+        if layout.inner_count is None:
+            self._frequency_carry = None
+            return self._count_frequency(window)
         carry = self._frequency_carry
         if (
             carry is not None
@@ -3472,17 +3490,9 @@ class DataView:
 
         if aggregation is Reduction.LAST:
             from .semantics import axis_choices_for_schema
-            from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
 
             retained = (
-                tuple(
-                    ref
-                    for ref in axis_choices_for_schema(self._schema)
-                    if ref in (
-                        AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),
-                        AxisRef.point(SHOT_TIME_AXIS_ID.value),
-                    )
-                )
+                (AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),)
                 if self.has_primary_index
                 else tuple(ref for ref in axis_choices_for_schema(self._schema)
                            if ref.domain.value == "repeat")

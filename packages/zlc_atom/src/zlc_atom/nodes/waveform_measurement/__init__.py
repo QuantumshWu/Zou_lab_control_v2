@@ -2,7 +2,6 @@
 
 from .logic_node import LOGIC_NODE
 from .measurement import (
-    MIN_READ_INTERVAL_SECONDS,
     WAVEFORM_MEASUREMENT_SCHEMA,
     FiniteCapture,
     MonitorCapture,
@@ -14,7 +13,6 @@ from .measurement import (
 )
 
 __all__ = [
-    "MIN_READ_INTERVAL_SECONDS",
     "WAVEFORM_MEASUREMENT_SCHEMA",
     "FiniteCapture",
     "LOGIC_NODE",

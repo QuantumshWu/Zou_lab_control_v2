@@ -95,6 +95,7 @@ class VirtualWaveformSource:
                 "sample_rate_hz": self.config.sample_rate_hz,
                 "record_samples": self.config.record_samples,
             },
+            time_basis="sample_clock",
         )
 
     def arm(self, records: int | None, *, buffer_record_count: int) -> None:
@@ -108,6 +109,11 @@ class VirtualWaveformSource:
                 daemon=True,
             ),
         )
+        try:
+            self._records.wait_ready(self.timeout)
+        except BaseException:
+            self._records.finish()
+            raise
 
     def _produce(self, stop: threading.Event) -> None:
         interval = 1.0 / self.config.sample_rate_hz
@@ -116,22 +122,25 @@ class VirtualWaveformSource:
         record_seconds = samples * interval
         started = time.monotonic()
         due = started
+        record_index = 0
         try:
+            self._records.mark_ready()
             while not stop.is_set() and self._records.accepting:
                 remaining = due - time.monotonic()
                 if remaining > 0.0:
                     time.sleep(min(remaining, _STOP_RESPONSE_SECONDS))
                     continue
                 values = np.asarray(
-                    self._sample_source(due - started + offsets), dtype=np.float32
+                    self._sample_source(record_index * record_seconds + offsets), dtype=np.float32
                 )
                 if values.shape != (samples, self._columns):
                     raise ValueError(
                         "virtual sample source returned the wrong shape: "
                         f"{values.shape} for {(samples, self._columns)}"
                     )
-                self._records.push(values, due, time.time_ns())
-                due += record_seconds
+                self._records.push(values, record_index * record_seconds, time.time_ns())
+                record_index += 1
+                due = started + record_index * record_seconds
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
 

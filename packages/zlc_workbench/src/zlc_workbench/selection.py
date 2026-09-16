@@ -241,6 +241,7 @@ def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]
     return {
         "plot_kind": str(selection.plot_kind),
         "selector_kind": str(selection.selector_kind),
+        "source_window": selection.source_window,
         "drawn": (
             None
             if selection.drawn is None
@@ -286,7 +287,7 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
 
     if not document:
         return None
-    expected = {"plot_kind", "selector_kind", "drawn", "ranges", "facets"}
+    expected = {"plot_kind", "selector_kind", "drawn", "ranges", "facets", "source_window"}
     if set(document) != expected:
         raise ValueError("panel selector fields do not match the current grammar")
     raw_ranges = document["ranges"]
@@ -319,6 +320,7 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
         raise ValueError("panel selector drawn fields do not match the current grammar")
     return SelectionState(
         plot_kind=str(document["plot_kind"]),
+        source_window=document["source_window"],
         selector_kind=str(document["selector_kind"]),
         drawn=(
             None
@@ -432,7 +434,7 @@ def panel_selection_matches_subject(
         return False
     dummy = NumericRange(0.0, 1.0)
     try:
-        if plot_kind == "rolling":
+        if plot_kind == "rolling" and subject.x is None:
             # Same rule that built it, so a rolling region is recognised on
             # the surface that drew it instead of being dropped one frame
             # later.  Only its RANGES are its own; its scope is the
@@ -854,7 +856,7 @@ class PlotSelectionSource:
             raise _Unbridgeable(
                 f"a {_name_of(selector.kind)} selector marks a point, not a region"
             )
-        if plot_kind == "rolling":
+        if plot_kind == "rolling" and subject.x is None:
             # A rolling trace's own two bounds: the shot ordinal it counts
             # publications on, and the measured value.  The Dataset names
             # neither, which is why the subject reports no axes -- and why
@@ -870,6 +872,7 @@ class PlotSelectionSource:
             facets = _subject_scope(subject)
             return SelectionState(
                 plot_kind=plot_kind,
+                source_window=subject.source_window,
                 selector_kind=selector_kind,
                 ranges=ranges,
                 facets=facets,
@@ -931,6 +934,7 @@ class PlotSelectionSource:
         facets = _subject_scope(subject)
         return SelectionState(
             plot_kind=plot_kind,
+            source_window=subject.source_window,
             selector_kind=selector_kind,
             ranges=ranges,
             facets=facets,

@@ -578,8 +578,11 @@ class SelectionState:
     #: What the hand drew, when that differs from what is derived.  The
     #: runtime never reads it; the panel's two surfaces do.
     drawn: "DrawnRegion | None" = None
+    source_window: int | None = None
 
     def __post_init__(self) -> None:
+        if self.source_window is not None and (type(self.source_window) is not int or self.source_window < 1):
+            raise ValueError("selection source_window must be a positive integer or None")
         plot_kind = canonical_text(self.plot_kind, "selection plot_kind")
         if plot_kind not in SELECTION_PLOT_KINDS:
             raise ValueError(
@@ -1438,7 +1441,8 @@ class SelectionBridge:
                     != (previous.plot_kind, previous.selector_kind, previous.ranges, previous.facets)
                 ):
                     raise ValueError("selection revisions must increase")
-                if not rearm and state.revision == previous.revision:
+                if (not rearm and state.revision == previous.revision
+                        and state.source_window == previous.source_window):
                     parent = self._selection_publication
                     if parent is not None and (
                         parent.event_ref.stream_id, parent.event_ref.generation
@@ -1477,7 +1481,7 @@ class SelectionBridge:
                     "exact source publication has no selected signal"
                 )
             try:
-                source_snapshot, source_record = self._source_view(publication)
+                source_snapshot, source_record = self._source_view(publication, source_window=state.source_window)
                 outputs = self._materialize_selection_outputs(
                     source_snapshot,
                     state,
@@ -1679,7 +1683,6 @@ class SelectionBridge:
         source: SignalValue,
         source_publication: SignalPublication,
     ) -> Mapping[str, LiveDatasetOutput]:
-        snapshot, record = self._source_view(source_publication)
         with self._lock:
             if processor._role == "selection":
                 state = self._selection
@@ -1693,15 +1696,15 @@ class SelectionBridge:
                 trigger_revision = self._fit_trigger_revision
                 if event is None:
                     raise RuntimeError("SelectionBridge has no accepted fit event")
-                if (
-                    str(snapshot.ref.stream_generation.value)
-                    != event.source_generation
-                    or snapshot.ref.revision.value != event.source_revision
-                ):
-                    raise _StaleFit(
-                        "fit result is stale for the current source publication"
-                    )
                 trigger = ("fit", trigger_revision)
+        snapshot, record = self._source_view(
+            source_publication, source_window=None if state is None else state.source_window,
+        )
+        if event is not None and (
+            str(snapshot.ref.stream_generation.value) != event.source_generation
+            or snapshot.ref.revision.value != event.source_revision
+        ):
+            raise _StaleFit("fit result is stale for the current source publication")
         source_value = source_publication.value(self._source_signal)
         shot_time = None if source_value is None else source_value.shot_time
         outputs = (
@@ -1749,6 +1752,8 @@ class SelectionBridge:
     def _source_view(
         self,
         publication: SignalPublication,
+        *,
+        source_window: int | None = None,
     ) -> tuple[OwnedSnapshot, Mapping[str, object]]:
         """The exact dataset prefix the panel and this derivation both mean,
         with the event record of the rows that prefix actually contains.
@@ -1763,6 +1768,7 @@ class SelectionBridge:
         return self._plane.current_dataset_view(
             self._source_signal,
             publication,
+            history_window=source_window,
         )
 
     def _accept_processor_result(

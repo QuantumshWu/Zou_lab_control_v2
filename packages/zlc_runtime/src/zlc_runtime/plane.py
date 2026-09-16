@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import threading
 from types import MappingProxyType
@@ -35,6 +35,7 @@ from zlc_data import (
     INVALID,
     PRIMARY_INDEX,
     SHOT_TIME,
+    SAMPLE_TIME,
     AxisSpec,
     BlockId,
     CellValidity,
@@ -51,6 +52,7 @@ from zlc_data import (
     repeat_coordinate_counts,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
+from zlc_data.units import resolve_unit
 from zlc_data.value import dataset_validity_storage, compact_dataset_validity
 from .dataset_output import (
     DatasetOutputDeclaration,
@@ -614,10 +616,24 @@ def _merge_event_records(
 
     merged: dict[str, object] = {}
     devices: dict[str, dict[str, object]] = {}
+    record_timing: dict[str, dict[str, object]] = {}
     for record in records:
         if not isinstance(record, Mapping):
             raise TypeError("event record must be a mapping")
         for key, value in record.items():
+            if key == "record_timing":
+                if not isinstance(value, Mapping):
+                    raise TypeError("record_timing must map sources to record clocks")
+                for source, entries in value.items():
+                    if not isinstance(entries, Mapping):
+                        raise TypeError("record_timing entries must be a mapping")
+                    target = record_timing.setdefault(str(source), {})
+                    for ordinal, timing in entries.items():
+                        ordinal = str(ordinal)
+                        if ordinal in target and not _run_records_equal(target[ordinal], timing):
+                            raise ValueError("one acquisition record has conflicting timestamps")
+                        target[ordinal] = timing
+                continue
             if key == "device_settings":
                 if not isinstance(value, Mapping):
                     raise TypeError("device_settings event record must be a mapping")
@@ -668,6 +684,8 @@ def _merge_event_records(
                 "mixed": len(ranges) > 1 or bool(ranges and ranges[0][0] != ranges[0][1]),
             }
         merged["device_settings"] = compact
+    if record_timing:
+        merged["record_timing"] = record_timing
     return merged
 
 
@@ -736,17 +754,37 @@ def _indexed_schema(
         if len(times) != retained_count:
             raise ValueError("an indexed window stamps every retained shot or none")
         shot_axes = (
-            AxisSpec(SHOT_TIME_AXIS_ID, "shot time", SHOT_TIME, retained_count, times, unit="s"),
+            AxisSpec(SHOT_TIME_AXIS_ID, "shot time", SHOT_TIME, retained_count, times, unit="s",
+                     coordinate_of=PRIMARY_INDEX_AXIS_ID),
         )
         shot_codes = (primary_codes,)
-    event_codes = tuple(
-        code * retained_count for code in event_schema.point_domain.axis_codes
-    )
+    event_axes, event_codes = [], []
+    for axis in event_schema.point_domain.axes:
+        codes = event_schema.point_domain.codes(axis.axis_id)
+        if axis.role == SAMPLE_TIME and times is not None:
+            offsets = (
+                np.arange(axis.size, dtype=np.float64) + axis.index_origin
+                if axis.coordinates is None else np.asarray(axis.coordinates, dtype=np.float64)
+            )[codes]
+            origins = resolve_unit("s").convert_value_to(
+                np.asarray(times, dtype=np.float64), resolve_unit(axis.unit)
+            )
+            coordinates = (origins[:, None] + offsets[None, :]).reshape(-1)
+            event_axes.append(replace(
+                axis, size=coordinates.size, coordinates=tuple(coordinates.tolist()),
+                coordinate_labels=(None if axis.coordinate_labels is None else tuple(
+                    np.tile(np.asarray(axis.coordinate_labels)[codes], retained_count).tolist()
+                )),
+            ))
+            event_codes.append(tuple(range(coordinates.size)))
+        else:
+            event_axes.append(axis)
+            event_codes.append(tuple(codes.tolist()) * retained_count)
     return DatasetSchema(
         event_schema.repeat_domain,
         DomainSpec(
             (point_count * retained_count,),
-            (primary, *shot_axes, *event_schema.point_domain.axes),
+            (primary, *shot_axes, *event_axes),
             (primary_codes, *shot_codes, *event_codes),
         ),
         event_schema.cell_domain,

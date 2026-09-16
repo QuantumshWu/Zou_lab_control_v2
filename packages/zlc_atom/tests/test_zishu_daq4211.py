@@ -129,7 +129,7 @@ def _source(card: _FakeCard, **overrides) -> ZishuDaq4211WaveformSource:
     return ZishuDaq4211WaveformSource(authored_config(values), daq=card)
 
 
-def test_the_card_publishes_what_its_pins_are_wired_to() -> None:
+def test_the_card_publishes_what_its_pins_are_wired_to(monkeypatch) -> None:
     """Three FLC 100 heads on AI0..AI2 are ONE three-component field in uT.
 
     The card knows volts.  What those volts mean -- 50 uT per volt about a
@@ -137,6 +137,9 @@ def test_the_card_publishes_what_its_pins_are_wired_to() -> None:
     the measurement publishes microtesla beside the N100's rather than
     volts nobody can compare.
     """
+
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
 
     # 2.5 V is zero field; +0.02 V is +1 uT.
     card = _FakeCard(volts=lambda index, channel: 2.5 + 0.02 * (channel + 1))
@@ -147,7 +150,22 @@ def test_the_card_publishes_what_its_pins_are_wired_to() -> None:
         assert field.channel_labels == ("x", "y", "z") and field.columns == (0, 1, 2)
         assert source.record_samples == 4
 
-        source.arm(2, buffer_record_count=2)
+        started, release = Event(), Event()
+        command = card.command
+        def held_start(serial, module, name):
+            if name == "SoftTrigger":
+                started.set()
+                assert release.wait(2)
+            command(serial, module, name)
+        monkeypatch.setattr(card, "command", held_start)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            arming = worker.submit(source.arm, 2, buffer_record_count=2)
+            try:
+                assert started.wait(2)
+                assert not arming.done(), "arm returned before SoftTrigger completed"
+            finally:
+                release.set()
+            arming.result(timeout=2)
         assert card.properties == {
             "InputRange": 1,
             "Channels": 3,
@@ -168,6 +186,7 @@ def test_the_card_publishes_what_its_pins_are_wired_to() -> None:
         assert [record.source_ordinal for record in (first, second)] == [0, 1]
 
         point = source.working_point()
+        assert point.time_basis == "sample_clock"
         assert point.sample_interval_seconds == pytest.approx(0.001)
         assert point.settings["model"] == SUPPORTED_MODEL
         assert point.settings["input_range_volts"] == 5.0
@@ -177,6 +196,17 @@ def test_the_card_publishes_what_its_pins_are_wired_to() -> None:
         assert terminal.produced_count >= 2 and terminal.joined
         assert card.log[-2:] == ["Stop", "StopTask"]
         assert source.capture_state() is False
+
+        def failed_start(serial, module, name):
+            command(serial, module, name)
+            if name == "SoftTrigger":
+                raise RuntimeError("DAQ trigger failed")
+        monkeypatch.setattr(card, "command", failed_start)
+        with pytest.raises(RuntimeError) as failure:
+            source.arm(1, buffer_record_count=1)
+        assert str(failure.value.__cause__) == "DAQ trigger failed"
+        assert card.log[-2:] == ["Stop", "StopTask"]
+        assert not card.running and not source.capture_state()
     finally:
         source.close()
     assert card.opened is False
@@ -192,7 +222,7 @@ def test_a_record_is_cut_from_the_stream_however_the_reads_land() -> None:
     card = _FakeCard(volts=lambda index, channel: 2.5 + 0.02 * (100 * index + channel))
     source = _source(card, record_samples=3)
     try:
-        source.arm(None, buffer_record_count=8)
+        source.arm(3, buffer_record_count=8)
         records = []
         deadline = time.monotonic() + 5.0
         while len(records) < 3 and time.monotonic() < deadline:
@@ -200,9 +230,7 @@ def test_a_record_is_cut_from_the_stream_however_the_reads_land() -> None:
         assert len(records) >= 3
         # Each sample says which sample of the stream it is, so a record cut
         # on the wrong boundary -- or one that lost a sample to a short read
-        # -- shows up as a row that does not follow the one above it.  Which
-        # records survive is the ring's business: a free-running source
-        # keeps the newest.
+        # -- shows up as a row that does not follow the one above it.
         for record in records[:3]:
             values = np.asarray(record.samples, dtype=np.float64)
             first = values[0, 0]

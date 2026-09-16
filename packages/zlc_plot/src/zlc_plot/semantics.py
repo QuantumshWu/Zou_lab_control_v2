@@ -22,12 +22,8 @@ from zlc_data import (
     DatasetSchema,
     canonical_coordinate_scalar,
 )
-from zlc_data.axis import SCALAR
-from zlc_data.snapshot_projection import (
-    PRIMARY_INDEX_AXIS_ID,
-    SHOT_TIME_AXIS_ID,
-    indexed_history_layout,
-)
+from zlc_data.axis import SCALAR, PRIMARY_INDEX, AxisId
+from zlc_data.snapshot_projection import indexed_history_layout
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -326,7 +322,7 @@ def axis_structure(
         tuple(axis for axis in tuple(cell_axes) if axis.role != SCALAR),
     )
     return tuple(
-        tuple((str(axis.name), int(axis.size)) for axis in axes)
+        tuple((str(axis.name), int(axis.size)) for axis in axes if axis.coordinate_of is None)
         for axes in groups
     )
 
@@ -387,6 +383,7 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
 #: unaccounted for, or claim two at once, and then the panel has to invent a
 #: repair the operator never asked for.
 FATE_PREFIX = "fate:"
+COORDINATE_PREFIX = "coordinate:"
 ROLE_FATES = ("x", "y", "group", "facet")
 #: Roles a plot can do without.  No group means one series; no FacetGrid facet
 #: means one cell.  X/Y remain required because their cell would otherwise
@@ -480,6 +477,17 @@ def fate_field_name(ref: AxisRef) -> str:
     if not isinstance(ref, AxisRef):
         raise TypeError("fate field axis must be AxisRef")
     return f"{FATE_PREFIX}{ref.domain.value}:{ref.axis_id}"
+
+
+def coordinate_axis_ref(schema: DatasetSchema, ref: AxisRef) -> AxisRef:
+    """One physical-axis identity for all declared coordinate alternatives."""
+    domain = resolve_axis(schema, ref).domain
+    return AxisRef(ref.domain, domain.coordinate_axis(AxisId(ref.axis_id)).axis_id.value)
+
+
+def _coordinate_field_name(schema: DatasetSchema, ref: AxisRef) -> str:
+    primary = coordinate_axis_ref(schema, ref)
+    return f"{COORDINATE_PREFIX}{primary.domain.value}:{primary.axis_id}"
 
 
 def _with_reduced(spec: PlotSpec, reduced: tuple[AxisRef, ...]) -> PlotSpec:
@@ -580,24 +588,14 @@ def projection_scope(
     scope = _scope_terms(spec)
     if getattr(semantic_spec(spec), "reduction", None) is Reduction.LAST:
         indexed = indexed_history_layout(schema) if spec.kind is PlotKind.ROLLING else None
-        axes = axis_choices_for_schema(schema)
-        primary = AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
-        shot_time = AxisRef.point(SHOT_TIME_AXIS_ID.value)
-        twins = {primary: shot_time, shot_time: primary}
+        axes = _fate_row_axes(schema, spec)
         for ref in axes:
             if _fate_of(spec, ref) != FATE_REDUCE:
                 continue
             if spec.kind is PlotKind.ROLLING and (
-                _is_shot_axis(ref) if indexed is not None
+                _is_shot_axis(schema, ref) if indexed is not None
                 else ref.domain is AxisDomain.REPEAT
             ):
-                continue
-            twin = twins.get(ref)
-            if twin is not None and twin in axes and _fate_of(spec, twin) != FATE_REDUCE:
-                # The shot index and the shot time are twins -- the same
-                # rows read two ways -- so a kind walking, pinning or
-                # faceting one of them keeps every shot: pinning the other
-                # to its latest coordinate would keep one, or none.
                 continue
             scope[ref] = LATEST_COORDINATE
     return tuple(scope.items())
@@ -609,17 +607,14 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _is_shot_axis(ref: AxisRef) -> bool:
+def _is_shot_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
     """Whether this fate row is a per-shot axis of a Runtime indexed history.
 
     The shot index and the shot time are the same shots read two ways: a
     rolling plot rolls along them and never reduces either away.
     """
 
-    return ref in (
-        AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),
-        AxisRef.point(SHOT_TIME_AXIS_ID.value),
-    )
+    return resolve_axis(schema, ref).domain.coordinate_axis(AxisId(ref.axis_id)).role == PRIMARY_INDEX
 
 
 def _fate_row_axes(
@@ -630,13 +625,21 @@ def _fate_row_axes(
     """The one exact editable row for each physical source axis."""
 
     axes = axis_choices_for_schema(schema) if offered_axes is None else offered_axes
-    used_axes = _axes_used_by(spec)
-    preferred = {axis: axis for axis in used_axes}
+    preferred = {coordinate_axis_ref(schema, axis): axis for axis in getattr(spec, "coordinates", ())}
+    used_axes = _axes_used_by(spec) + tuple(getattr(semantic_spec(spec), "reduced", ()))
+    active: dict[AxisRef, AxisRef] = {}
+    for ref in used_axes:
+        primary = coordinate_axis_ref(schema, ref)
+        if primary in active and active[primary] != ref:
+            raise ValueError("alternative coordinates of one axis cannot have different fates")
+        active[primary] = ref
+    preferred.update(active)
     listed: dict[AxisRef, AxisRef] = {}
     for offered in axes:
-        listed.setdefault(offered, preferred.pop(offered, offered))
-    for used in used_axes:
-        listed.setdefault(used, used)
+        primary = coordinate_axis_ref(schema, offered)
+        listed.setdefault(primary, preferred.get(primary, primary))
+    for primary, used in preferred.items():
+        listed.setdefault(primary, used)
     return tuple(listed.values())
 
 
@@ -750,6 +753,37 @@ def updated_spec(
     return composed_spec(schema, spec, {name: value})
 
 
+def _coordinate_spec(schema: DatasetSchema, spec: PlotSpec, primary: AxisRef, selected: AxisRef) -> PlotSpec:
+    """Change a coordinate, preserving the axis fate and pinned row position."""
+    def remap(ref):
+        return selected if isinstance(ref, AxisRef) and coordinate_axis_ref(schema, ref) == primary else ref
+
+    semantic = semantic_spec(spec)
+    changes = {role: remap(getattr(semantic, role)) for role in ("x", "y", "group") if hasattr(semantic, role)}
+    if (spec.kind is PlotKind.ROLLING and semantic.x is None and _is_shot_axis(schema, selected)
+            and not any(coordinate_axis_ref(schema, ref) == primary for ref, _value in spec.scope)):
+        changes["x"] = selected
+    if hasattr(semantic, "reduced"):
+        changes["reduced"] = tuple(remap(ref) for ref in semantic.reduced)
+    scope = []
+    for ref, value in spec.scope:
+        target = remap(ref)
+        if target != ref:
+            old_axis = resolve_axis(schema, ref)
+            position = old_axis.coordinate_position(value)
+            if position is None:
+                continue
+            value = resolve_axis(schema, target).coordinates[position]
+        scope.append((target, value))
+    choices = tuple(ref for ref in spec.coordinates if coordinate_axis_ref(schema, ref) != primary)
+    if selected != primary:
+        choices += (selected,)
+    if isinstance(spec, FacetGridPlot):
+        return replace(spec, cell=replace(semantic, **changes), facet=remap(spec.facet),
+                       scope=tuple(scope), coordinates=choices)
+    return replace(spec, **changes, scope=tuple(scope), coordinates=choices)
+
+
 def composed_spec(
     schema: DatasetSchema | None,
     spec: PlotSpec,
@@ -799,6 +833,24 @@ def composed_spec(
                 raise ValueError(
                     f"{kind.value} cannot be built for this dataset"
                 )
+            if schema is not None:
+                for ref in spec.coordinates:
+                    candidate = _coordinate_spec(
+                        schema, candidate, coordinate_axis_ref(schema, ref), ref
+                    )
+
+    if schema is not None:
+        for old in _fate_row_axes(schema, candidate):
+            field_name = _coordinate_field_name(schema, old)
+            if field_name not in rest:
+                continue
+            selected = AxisRef(old.domain, str(rest.pop(field_name)))
+            primary = coordinate_axis_ref(schema, old)
+            if coordinate_axis_ref(schema, selected) != primary:
+                raise ValueError("coordinate choice belongs to another axis")
+            candidate = _coordinate_spec(schema, candidate, primary, selected)
+        if any(str(name).startswith(COORDINATE_PREFIX) for name in values):
+            scope = _scope_terms(candidate)
 
     # A fate table is ONE assignment, not a sequence of role edits.  First
     # resolve every row against the same base candidate, then assign roles.
@@ -814,7 +866,7 @@ def composed_spec(
         if terms != tuple(_scope_terms(candidate).items()):
             row_spec = replace(candidate, scope=terms)
         fate_rows = {
-            fate_field_name(axis): axis
+            fate_field_name(coordinate_axis_ref(schema, axis)): axis
             for axis in _fate_row_axes(schema, row_spec)
         }
     for name in tuple(rest):
@@ -1174,14 +1226,21 @@ def describe_semantics(
     # spec diagnosable until its replacement transaction settles.
     for ref in _fate_row_axes(schema, spec, axes):
         label = _axis_label(schema, ref)
-        name = fate_field_name(ref)
+        primary = coordinate_axis_ref(schema, ref)
+        name = fate_field_name(primary)
+        family = resolve_axis(schema, ref).domain.coordinate_axes(AxisId(ref.axis_id))
+        if len(family) > 1:
+            fields.append(SemanticField(
+                _coordinate_field_name(schema, ref), f"{_axis_label(schema, primary)} coordinate", ref.axis_id,
+                tuple((axis.axis_id.value, axis.name) for axis in family), True,
+            ))
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
         if default_fate == FATE_POOL and _declares_reduced(spec):
             # Pooling is the default, not the only choice: an axis may be
             # collapsed under the reduction before the values are binned.
             offered.append((FATE_REDUCE, "reduced"))
-        if spec.kind is PlotKind.ROLLING and _is_shot_axis(ref):
+        if spec.kind is PlotKind.ROLLING and _is_shot_axis(schema, ref):
             # Rolling does not reduce the Runtime's shot index or shot time
             # away -- it ROLLS along them.  Their ordinary relative-coordinate
             # pins genuinely narrow the window; only the default's label
@@ -1244,6 +1303,8 @@ __all__ = [
     "axis_size",
     "describe_semantics",
     "fate_field_name",
+    "coordinate_axis_ref",
+    "COORDINATE_PREFIX",
     "is_scope_fate",
     "schema_structure",
     "schema_summary",

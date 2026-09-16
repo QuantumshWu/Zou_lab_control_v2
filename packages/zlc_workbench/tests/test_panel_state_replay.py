@@ -9,6 +9,8 @@ offer must be dropped as "nothing to say", never raised as a typo.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import zou_lab_control  # noqa: F401  (layer path bootstrap)
 
@@ -18,12 +20,14 @@ from zlc_data import (
     DatasetSchema,
     DomainSpec,
     PRIMARY_INDEX,
+    SHOT_TIME,
     REPEAT,
     SCALAR_DOMAIN,
     ValueSchema,
 )
 from zlc_plot import PlotKind
-from zlc_plot.semantics import FATE_PREFIX, describe_semantics
+from zlc_plot import AxisRef, RollingPlot
+from zlc_plot.semantics import FATE_PREFIX, describe_semantics, scope_fate
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import PanelState, project_panel_state
 
@@ -106,6 +110,30 @@ def test_fates_saved_under_one_representation_replay_under_the_other() -> None:
         assert set(semantic) >= _fate_names(target) - {"kind"}, (
             sorted(_fate_names(target) - set(semantic))
         )
+
+    domain = indexed.point_domain
+    source = domain.axes[0]
+    time = AxisSpec(
+        AxisId("shot-time"), "shot time", SHOT_TIME, 4,
+        (0.0, 0.1, 0.3, 0.4), unit="s", coordinate_of=source.axis_id,
+    )
+    stamped = replace(indexed, point_domain=DomainSpec(
+        domain.shape, (source, time), (domain.axis_codes[0], domain.axis_codes[0]),
+    ))
+    coordinate_field = "coordinate:point:zlc_data.primary-index"
+    fate_field = "fate:point:zlc_data.primary-index"
+    saved = {coordinate_field: "shot-time", fate_field: scope_fate(0.0)}
+    projection = project_panel_state(stamped, RollingPlot(), _state(saved))
+    assert projection.spec.scope == ((AxisRef.point("shot-time"), 0.0),)
+    assert projection.semantic[coordinate_field] == "shot-time"
+    assert projection.semantic[fate_field] == scope_fate(0.0)
+    assert project_panel_state(
+        stamped, RollingPlot(), _state(projection.semantic)
+    ).spec == projection.spec
+    # A retired history removes both the axis fate and its coordinate choice.
+    projection = project_panel_state(event, RollingPlot(), _state(saved))
+    assert coordinate_field not in projection.semantic
+    assert fate_field not in projection.semantic
 
 
 def test_a_crosshair_is_owned_and_judged_at_the_panel_state_door() -> None:

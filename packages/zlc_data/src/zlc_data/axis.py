@@ -92,6 +92,7 @@ PRIMARY_INDEX = AxisRoleId("primary-index")
 #: When each shot of an indexed history was taken, in seconds from the
 #: run's first shot: one coordinate per shot, beside the primary index.
 SHOT_TIME = AxisRoleId("shot-time")
+SAMPLE_TIME = AxisRoleId("sample-time")
 SCAN_POINT = AxisRoleId("scan-point")
 READOUT_EVENT = AxisRoleId("readout-event")
 SPATIAL_X = AxisRoleId("spatial-x")
@@ -111,6 +112,7 @@ class AxisSpec:
     coordinate_frame: CoordinateFrameId | None = None
     index_origin: int = 0
     coordinate_labels: tuple[str, ...] | None = None
+    coordinate_of: AxisId | None = None
     _coordinate_positions: Any = field(
         init=False,
         repr=False,
@@ -121,6 +123,10 @@ class AxisSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.axis_id, AxisId):
             raise TypeError("axis_id must be AxisId")
+        if self.coordinate_of is not None and not isinstance(self.coordinate_of, AxisId):
+            raise TypeError("coordinate_of must be AxisId or None")
+        if self.coordinate_of == self.axis_id:
+            raise ValueError("an alternative coordinate cannot name itself")
         if not isinstance(self.role, AxisRoleId):
             raise TypeError("role must be AxisRoleId")
         _nonempty_text(self.name, "axis name")

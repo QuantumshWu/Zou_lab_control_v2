@@ -115,7 +115,6 @@ def test_a_schema_without_a_shot_index_has_no_layout() -> None:
     (
         ((-1.5, 0.0), (0, 1), "integer"),
         ((0, -1), (0, 1), "ordered"),
-        ((-1, 0), (0, 0, 1), "same event rows"),
         ((-1, 1), (0, 1), "latest offset 0"),
     ),
 )
@@ -170,16 +169,15 @@ def test_a_history_restricted_to_past_shots_keeps_their_coordinates() -> None:
     assert indexed_schemas_compatible(schema, past.block.schema)
 
 
-def test_the_event_codes_must_repeat_under_every_shot() -> None:
-    with pytest.raises(ValueError, match="Point domain"):
-        indexed_history_layout(
-            _schema(
-                (-1, 0),
-                (0, 0, 1, 1),
-                frame_coordinates=(0, 1, 2),
-                frame_codes=(0, 1, 0, 2),
-            )
-        )
+def test_cropped_records_keep_their_actual_row_membership() -> None:
+    layout = indexed_history_layout(_schema(
+        (-1, 0), (0, 0, 1),
+        frame_coordinates=(0, 1, 2), frame_codes=(0, 1, 2),
+    ))
+    assert layout.inner_count is None
+    assert layout.row_count == 3
+    assert layout.codes().tolist() == [0, 0, 1]
+    assert layout.row_mask(1).tolist() == [False, False, True]
 
     mislabelled = _schema((0,), (0,), primary_role=READOUT_EVENT)
     with pytest.raises(ValueError, match="primary-index role"):

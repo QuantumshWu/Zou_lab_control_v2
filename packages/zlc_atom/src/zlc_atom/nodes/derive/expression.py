@@ -118,6 +118,7 @@ class Operand(NDArrayOperatorsMixin):
             domains = list(result.domains)
             domain = domains[d]
             if d < 2:
+                family = {a.axis_id: a for a in domain.coordinate_axes(axis.axis_id)}
                 codes = domain.codes(axis.axis_id)
                 rank = np.full(axis.size, -1, dtype=np.int64)
                 rank[list(indexes)] = np.arange(len(indexes))
@@ -130,15 +131,15 @@ class Operand(NDArrayOperatorsMixin):
                         if np.all(np.diff(rows) == 1) else tuple(int(row) for row in rows))
                 domain = _subset_mapped_domain(domain, rows)
                 if scalar:
-                    kept = tuple(a for a in domain.axes if a.axis_id != axis.axis_id)
+                    kept = tuple(a for a in domain.axes if a.axis_id not in family)
                     domain = DomainSpec(domain.shape, kept, tuple(tuple(domain.codes(a.axis_id)) for a in kept))
                 else:
                     # The general row subset preserves source coordinate order;
                     # isel's selected axis instead follows the requested order.
-                    kept = tuple(_subset_axis(axis, indexes) if a.axis_id == axis.axis_id else a
+                    kept = tuple(_subset_axis(family[a.axis_id], indexes) if a.axis_id in family else a
                                  for a in domain.axes)
                     domain = DomainSpec(domain.shape, kept, tuple(
-                        tuple(rank[codes[list(rows)]]) if a.axis_id == axis.axis_id
+                        tuple(rank[codes[list(rows)]]) if a.axis_id in family
                         else tuple(domain.codes(a.axis_id)) for a in kept))
                 domains[d] = domain
                 values = take_indices(result.values, rows, axis=d)
@@ -178,10 +179,12 @@ class Operand(NDArrayOperatorsMixin):
     def _reduce(self, operation, axis, *, where=None):
         source = self if where is None else self.where(where)
         names = (axis,) if isinstance(axis, (str, AxisId)) else tuple(axis)
-        axes = [source._axis(name)[1] for name in names]
-        ids = {a.axis_id for a in axes}
-        if not axes or len(ids) != len(axes):
+        axes = [source._axis(name) for name in names]
+        primaries = {source.domains[d].coordinate_axis(a.axis_id).axis_id for d, a in axes}
+        if not axes or len(primaries) != len(axes):
             raise ValueError("reduction needs unique named axes")
+        ids = {member.axis_id for d, a in axes
+               for member in source.domains[d].coordinate_axes(a.axis_id)}
         if operation in ("all", "any") and source.dtype.kind != "b":
             raise TypeError(f"{operation} needs boolean data")
         if operation in ("sum", "mean", "std", "min", "max") and source.dtype.kind == "b":

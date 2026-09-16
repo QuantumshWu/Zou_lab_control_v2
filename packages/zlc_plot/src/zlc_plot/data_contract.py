@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 from zlc_data import (
     PRIMARY_INDEX,
     SHOT_TIME,
+    SAMPLE_TIME,
     READOUT_EVENT,
     SCAN_POINT,
     SPATIAL_X,
@@ -141,6 +142,7 @@ class AxisFamilies:
     ``history``  the Runtime's shot index (a PRIMARY_INDEX point axis).
     ``history_time``  when each of those shots was taken (a SHOT_TIME point
                  axis on the same rows), when the history is stamped.
+    ``sample_time`` the actual sample coordinates of a continuous waveform.
     ``scan``     authored scan dimensions (SCAN_POINT), slowest first.
     ``events``   event sequences inside one cycle (READOUT_EVENT: frames,
                  frame pairs).
@@ -157,6 +159,7 @@ class AxisFamilies:
     repeat_size: int
     history: AxisEntry | None
     history_time: AxisEntry | None
+    sample_time: AxisEntry | None
     scan: tuple[AxisEntry, ...]
     events: tuple[AxisEntry, ...]
     picture: tuple[AxisEntry, AxisEntry] | None
@@ -198,6 +201,7 @@ def classify_axes(schema: DatasetSchema) -> AxisFamilies:
     )
     history: AxisEntry | None = None
     history_time: AxisEntry | None = None
+    sample_time: AxisEntry | None = None
     scan: list[AxisEntry] = []
     events: list[AxisEntry] = []
     point_content: list[AxisEntry] = []
@@ -208,6 +212,9 @@ def classify_axes(schema: DatasetSchema) -> AxisFamilies:
         elif role == SHOT_TIME:
             if history_time is None:
                 history_time = (ref, size)
+        elif role == SAMPLE_TIME:
+            if sample_time is None:
+                sample_time = (ref, size)
         elif role == SCAN_POINT:
             scan.append((ref, size))
         elif role == READOUT_EVENT or role is None:
@@ -238,6 +245,7 @@ def classify_axes(schema: DatasetSchema) -> AxisFamilies:
         repeat_size=int(schema.repeat_domain.size),
         history=history,
         history_time=history_time,
+        sample_time=sample_time,
         scan=tuple(scan),
         events=tuple(events),
         picture=picture,

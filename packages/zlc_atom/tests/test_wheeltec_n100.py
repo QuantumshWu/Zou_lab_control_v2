@@ -387,7 +387,7 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
     module = _FakeModule()
     source = _source(module)
     try:
-        source.arm(None, buffer_record_count=4)
+        source.arm(1, buffer_record_count=4)
         assert source.read_records(1, timeout=3.0, exact=True)
         with pytest.raises(RuntimeError, match="capture must be finished"):
             source.tune(IMU_PACKET_NAME, "200")
@@ -399,6 +399,83 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
         assert source.tune(IMU_PACKET_NAME, "200") == "200"
     finally:
         source.close()
+
+    # Capture boundaries reset stream continuity; all frame kinds participate
+    # in the serial counter, and native device timestamps remain untouched.
+    class _ControlledModule(_FakeModule):
+        def _fill(self):
+            if self._packets < 40:
+                super()._fill()
+
+    def packet(serial, stamp):
+        return _frame(IMU_PACKET, struct.pack("<12fq", *([0.0] * 12), stamp), serial)
+
+    module = _ControlledModule(rate_hz=400)
+    source = _source(module)
+    try:
+        assert source.working_point().time_basis == "device_clock"
+        source.arm(2, buffer_record_count=4)
+        with module._lock:
+            module._out += (packet(255, 1_000_000) + _frame(0x41, bytes(48), 0)
+                            + packet(1, 1_002_500))
+        records = source.read_records(2, timeout=1, exact=True)
+        assert [record.source_ordinal for record in records] == [0, 1]
+        assert [record.time_seconds for record in records] == pytest.approx([1.0, 1.0025])
+        assert source.finish_record_capture().produced_count == 2
+        source.arm(1, buffer_record_count=1)
+        with module._lock:
+            module._out += packet(18, 8_000_000)
+        record, = source.read_records(1, timeout=1, exact=True)
+        assert record.source_ordinal == 0 and record.time_seconds == 8.0
+        source.finish_record_capture()
+    finally:
+        source.close()
+
+    damaged = bytearray(packet(1, 1_002_500))
+    damaged[20] ^= 1
+    for next_frame, error in (
+        (packet(2, 1_002_500), "sequence gap"),
+        (packet(1, 1_007_500), "timestamp gap"),
+        (packet(1, 1_000_000), "timestamp did not advance"),
+        (damaged, "damaged FDILink"),
+    ):
+        module = _ControlledModule(rate_hz=400)
+        source = _source(module)
+        try:
+            source.arm(None, buffer_record_count=4)
+            with module._lock:
+                module._out += packet(0, 1_000_000) + next_frame
+            with pytest.raises(RuntimeError, match=error):
+                source.read_records(2, timeout=1, exact=True)
+            # Even the valid first record cannot hide the later stream fault.
+            with pytest.raises(RuntimeError, match=error):
+                source.read_records(1, timeout=0, exact=True)
+            with pytest.raises(RuntimeError):
+                source.finish_record_capture()
+        finally:
+            source.close()
+
+    # The shared FIFO retains every accepted record and fails instead of
+    # replacing its oldest entry, even when the caller asks for only one.
+    import numpy as np
+    from zlc_atom.devices.waveform.contract import WaveformRecordQueue
+    queue = WaveformRecordQueue("test capture", join_timeout_seconds=1)
+    queue.arm(3, buffer_record_count=1)
+    queue.mark_ready()
+    queue.wait_ready(0)
+    for ordinal in range(3):
+        assert queue.push(np.asarray([[ordinal]]), ordinal * 0.0025, time.time_ns())
+        record, = queue.read(1, timeout=0, exact=True)
+        assert record.source_ordinal == ordinal and record.samples[0, 0] == ordinal
+    assert queue.finish().produced_count == 3
+    queue.arm(None, buffer_record_count=1)
+    assert queue.push(np.asarray([[1]]), 1, time.time_ns())
+    assert not queue.push(np.asarray([[2]]), 2, time.time_ns())
+    assert queue.produced_count == 1
+    with pytest.raises(RuntimeError, match="buffer overflow"):
+        queue.read(1, timeout=0, exact=True)
+    with pytest.raises(RuntimeError):
+        queue.finish()
 
 
 def test_a_write_that_silences_the_module_is_put_back() -> None:
@@ -435,7 +512,7 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
             source.tune(IMU_PACKET_NAME, "100")
         assert module.rate_hz == 50.0, "the restart put it back"
         assert module.streaming is True
-        source.arm(None, buffer_record_count=4)
+        source.arm(1, buffer_record_count=4)
         assert source.read_records(1, timeout=3.0, exact=True)
         source.finish_record_capture()
     finally:
@@ -548,7 +625,7 @@ def test_a_module_whose_console_stays_silent_still_streams() -> None:
         assert not point.settings["settings_refusal"]
         assert not module.commands, "opening it asked the console nothing"
         assert point.sample_interval_seconds == pytest.approx(0.01)
-        source.arm(None, buffer_record_count=4)
+        source.arm(1, buffer_record_count=4)
         assert source.read_records(1, timeout=3.0, exact=True)
     finally:
         source.close()

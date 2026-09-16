@@ -247,6 +247,13 @@ def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
     return tuple(terms)
 
 
+def _validated_coordinates(value: tuple[AxisRef, ...]) -> tuple[AxisRef, ...]:
+    result = tuple(value)
+    if any(not isinstance(ref, AxisRef) for ref in result) or len(set(result)) != len(result):
+        raise ValueError("coordinate choices must be distinct AxisRef values")
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class CurvePlot:
     x: AxisRef
@@ -254,9 +261,11 @@ class CurvePlot:
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
+    coordinates: tuple[AxisRef, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.CURVE
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "coordinates", _validated_coordinates(self.coordinates))
         if not isinstance(self.x, AxisRef):
             raise TypeError("CurvePlot.x must be AxisRef")
         if self.group is not None and not isinstance(self.group, AxisRef):
@@ -277,9 +286,11 @@ class ImagePlot:
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
+    coordinates: tuple[AxisRef, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.IMAGE
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "coordinates", _validated_coordinates(self.coordinates))
         if not isinstance(self.x, AxisRef) or not isinstance(self.y, AxisRef):
             raise TypeError("ImagePlot x and y must be AxisRef")
         if not isinstance(self.reduction, Reduction):
@@ -309,9 +320,11 @@ class HistogramPlot:
     reduced: tuple[AxisRef, ...] = ()
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
+    coordinates: tuple[AxisRef, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.HISTOGRAM
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "coordinates", _validated_coordinates(self.coordinates))
         if not isinstance(self.reduction, Reduction):
             raise TypeError("HistogramPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
@@ -339,9 +352,11 @@ class RollingPlot:
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
+    coordinates: tuple[AxisRef, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.ROLLING
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "coordinates", _validated_coordinates(self.coordinates))
         if self.group is not None and not isinstance(self.group, AxisRef):
             raise TypeError("RollingPlot.group must be AxisRef or None")
         if self.x is not None and not isinstance(self.x, AxisRef):
@@ -379,9 +394,11 @@ class FacetGridPlot:
     cell: CellPlot
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
+    coordinates: tuple[AxisRef, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.FACET_GRID
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "coordinates", _validated_coordinates(self.coordinates))
         if self.facet is not None and not isinstance(self.facet, AxisRef):
             raise TypeError("FacetGridPlot.facet must be AxisRef or None")
         if not isinstance(self.cell, get_args(CellPlot)):
@@ -406,6 +423,10 @@ class FacetGridPlot:
         if self.cell.scope:
             raise ValueError(
                 "FacetGrid cell.scope is invalid; scope belongs to FacetGridPlot"
+            )
+        if self.cell.coordinates:
+            raise ValueError(
+                "FacetGrid cell.coordinates is invalid; coordinates belong to FacetGridPlot"
             )
         scope = _validated_scope(self.scope)
         _require_distinct_axes(
@@ -597,20 +618,17 @@ def _bin_count_parameter(
     )
 
 
-def _window_parameter(default: int) -> ParameterSpec[object]:
+def _window_parameter(default: int, *, effects: RenderEffect = _ROLLING_WINDOW_EFFECTS) -> ParameterSpec[object]:
     """How many shots of history this panel looks back over.
 
-    Only the two kinds that HAVE a history offer it, and each consumes it its
-    own fixed way: a rolling trace plots the window along x, a distribution
-    pools it.  Which way is not the operator's to choose -- a distribution
-    with a shot axis is not a distribution -- so the parameter carries only
-    the size.
+    Runtime owns retention; the plot applies its normal roles and reduction
+    to the records inside this bounded window.
     """
 
     return ParameterSpec(
         "window",
         int,
-        _ROLLING_WINDOW_EFFECTS,
+        effects,
         default=default,
         normalizer=_normalize_integer,
         label="Window",
@@ -1022,12 +1040,12 @@ def history_window_requirement(
     if not isinstance(display, Mapping):
         raise TypeError("display must be a mapping")
     semantic = semantic_spec(spec)
-    if not isinstance(semantic, (RollingPlot, HistogramPlot)):
+    if not isinstance(semantic, (RollingPlot, HistogramPlot, CurvePlot)):
         return None
     window = display.get("window")
     if type(window) is not int or window <= 0:
         return None
-    if isinstance(semantic, HistogramPlot) and window == 1:
+    if isinstance(semantic, (HistogramPlot, CurvePlot)) and window == 1:
         return None
     if isinstance(semantic, RollingPlot) and semantic.reduction.statistic is Reduction.MEAN:
         # The window is how many points are shown; trailing is how many
@@ -1069,7 +1087,7 @@ def _build_parameter_schema(
     if kind is PlotKind.PULSE_TIMELINE:
         entries.append(_PULSE_X_UNIT_PARAMETER)
     else:
-        if semantic_kind in {PlotKind.CURVE, PlotKind.IMAGE}:
+        if semantic_kind in {PlotKind.CURVE, PlotKind.IMAGE, PlotKind.ROLLING}:
             entries.append(_unit_parameter("x_display_unit"))
         if semantic_kind is PlotKind.IMAGE:
             entries.append(_unit_parameter("y_display_unit"))
@@ -1094,6 +1112,8 @@ def _build_parameter_schema(
         entries.append(_unit_parameter("value_display_unit"))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())
+    if semantic_kind is PlotKind.CURVE:
+        entries.append(_window_parameter(1, effects=_ROLLING_WINDOW_EFFECTS | RenderEffect.VIEW_PROJECTION))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         # A display choice, not a data declaration: the operator flips the
         # band on a live panel and the projection computes the MEAN's
@@ -1123,7 +1143,7 @@ def _build_parameter_schema(
         # larger window pools that many of the most recent shots into the same
         # picture, which is how a per-site histogram gets enough counts to
         # separate two peaks.
-        entries.append(_window_parameter(1))
+        entries.append(_window_parameter(1, effects=_ROLLING_WINDOW_EFFECTS | RenderEffect.VIEW_PROJECTION))
     if semantic_kind is PlotKind.IMAGE:
         # A FacetGrid whose cell is an image carries the FULL image surface:
         # the focused cell is the standalone Image kind, so its parameters

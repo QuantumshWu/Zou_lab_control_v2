@@ -256,7 +256,8 @@ class TekScopeWaveformSource:
                     f":CH{channel}:SCAle?"
                 )
         return WaveformWorkingPoint(
-            WaveformAcquisitionMode.EXTERNAL_TRIGGERED, interval, settings
+            WaveformAcquisitionMode.EXTERNAL_TRIGGERED, interval, settings,
+            time_basis="host_receive",
         )
 
     # -------------------------------------------------------------- knobs
@@ -356,8 +357,14 @@ class TekScopeWaveformSource:
                     daemon=True,
                 ),
             )
+        try:
+            self._records.wait_ready(self.timeout)
+        except BaseException:
+            self.finish_record_capture()
+            raise
 
     def _acquire(self, stop: threading.Event) -> None:
+        acquiring = False
         try:
             # The vertical scaling of every channel, read once: the knobs
             # are frozen for the whole capture, so the preamble cannot
@@ -378,7 +385,9 @@ class TekScopeWaveformSource:
             while not stop.is_set() and self._records.accepting:
                 with self._link_lock:
                     self._link.write(":ACQuire:STOPAfter SEQuence")
+                    acquiring = True
                     self._link.write(":ACQuire:STATE RUN")
+                    self._records.mark_ready()
                 # The scope triggers when its trigger says so; until then
                 # only a Stop is worth waking for.
                 while True:
@@ -387,8 +396,9 @@ class TekScopeWaveformSource:
                     with self._link_lock:
                         state = self._link.query(":ACQuire:STATE?").strip()
                     if state in ("0", "STOP"):
+                        acquiring = False
                         break
-                    time.sleep(_ACQUISITION_POLL_SECONDS)
+                    stop.wait(_ACQUISITION_POLL_SECONDS)
                 with self._link_lock:
                     columns = []
                     for channel, multiplier, offset, zero in scaling:
@@ -411,6 +421,13 @@ class TekScopeWaveformSource:
                 )
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
+        finally:
+            if acquiring:
+                try:
+                    with self._link_lock:
+                        self._link.write(":ACQuire:STATE STOP")
+                except BaseException as error:  # noqa: BLE001 -- Stop failure remains capture failure
+                    self._records.fail(error)
 
     def read_records(
         self, n: int, *, timeout: float, exact: bool
@@ -426,7 +443,7 @@ class TekScopeWaveformSource:
     def close(self) -> None:
         try:
             if self._records.armed:
-                self._records.finish()
+                self.finish_record_capture()
         finally:
             self._link.close()
 
