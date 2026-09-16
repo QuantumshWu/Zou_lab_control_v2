@@ -10,6 +10,9 @@
 
 ## 1. 当前实施范围
 
+- Pulse DAC输入回归（2648c834）根修：删除PeriodCard的last-analog/last-duration/last-name历史缓存，输入只与当前accepted PeriodVM比较。Load/Sync/清除/拒绝回显后再次输入旧值不再被吞；同值退出仍不提交，不改Config覆盖规则、编译、通信或RTL。
+- 本次直接Qt用例3 passed；正式bound Pulse窗口复用同一card，Load/Sync方波后输入0/0并点击Start，两次MemoryRegisterTransport装载均为512/512，duration修改正常，errors/warnings均空，窗口已关闭。未访问真实硬件、未build；不以软件装载证据冒充外部DAC电气验收。
+
 - 渲染发布改为零拷贝并按面板分进程。测量在操作者真实密度（1470×1071、DPR 3）下取，分两层：console（display beat 100 ms 的真实窗口、py-spy 采样稳态 CPU）、capacity（去掉 beat、每个 host 前一帧到就喂下一帧，测管线自己的天花板）。**run_host 那层是 DPR 1**（Qt5PlotWidget 在 ratio 3 的屏上报 1.0，前端 490×357），不能拿来读任何像素相关的数，本轮未用。
   - **零拷贝**：raster worker 自时间里 `publish` 12.5→0 ms/s、合计 108→85 ms/s（−21%）；console 的渲染线程 4 面板 0.331→0.224 核、8 面板 0.396→0.237 核。满速下每帧渲染 CPU heatmap 4×4 进程 32.0→27.7 ms（−13%）、8 面板 32.1→28.2、curve 21.6→20.2（−7%）、camera 28.2→26.8（−5%）、facet64 36.1→34.7（−4%），单次 10 s 的运行间抖动约 ±3%。**零拷贝不省投影**：一帧的渲染 CPU 是 20–36 ms，被省掉的整帧搬运约 0.6 ms/帧/面板，所以它是 worker 自时间的 20%、整帧的 2–13%。
   - **分进程**：4 面板满速 camera 4M 54.5→156.6 fps（2.87×）、facet64 image 35.1→104.6（2.98×）、heatmap 44.3→102.1（2.30×）、curve 65.8→108.2（1.64×）。**100 ms 的 beat 下不改任何帧率**（四面板 1.13 核，从没有人在等），代价是进程数与内存：4 面板 console 峰值 RSS 1037→1557 MB（3→6 进程），总 CPU 1.126→1.232 核。

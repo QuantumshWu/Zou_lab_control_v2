@@ -90,9 +90,6 @@ class PeriodCard(FluentGroupBox):
         self.bus_mode_combos: dict[str, FluentComboBox] = {}
         self.bus_value_edits: dict[str, FluentScanLineEdit] = {}
         self.port_rows: dict[str, QtWidgets.QWidget] = {}
-        self._last_duration: tuple[float, str] = (0.0, "")
-        self._last_analog: dict[str, tuple[str, int]] = {}
-        self._last_name = ""
 
         width = period_card_width()
         self.setFixedWidth(width)
@@ -161,11 +158,6 @@ class PeriodCard(FluentGroupBox):
             self.unit_combo.setCurrentText(period.unit)
         _apply_field(self.duration_edit, period.duration)
         self.name_edit.setText(period.name)
-        self._last_name = period.name
-        try:
-            self._last_duration = (float(period.duration.text), period.unit)
-        except ValueError:
-            self._last_duration = (0.0, period.unit)
         self._analog_mode_choices = tuple(analog_mode_choices)
         self._reconcile_ports(tuple(ports), period)
 
@@ -293,9 +285,8 @@ class PeriodCard(FluentGroupBox):
 
     def _commit_name(self) -> None:
         value = self.name_edit.text()
-        if value == self._last_name:
+        if value == self._period.name:
             return
-        self._last_name = value
         self.period_name_committed.emit(self.period_id, value)
 
     def _commit_duration(self, _unit: str | None = None) -> None:
@@ -306,9 +297,11 @@ class PeriodCard(FluentGroupBox):
         except ValueError:
             return
         unit = self.unit_combo.currentText()
-        if (value, unit) == self._last_duration:
-            return
-        self._last_duration = (value, unit)
+        try:
+            if (value, unit) == (float(self._period.duration.text), self._period.unit):
+                return
+        except ValueError:
+            pass  # The previous projection can be a non-numeric binding label.
         self.duration_committed.emit(self.period_id, value, unit)
 
     def _commit_analog(self, port: str) -> None:
@@ -323,13 +316,16 @@ class PeriodCard(FluentGroupBox):
             value = int(float(edit.text()))
         except ValueError:
             return
-        # Leaving a box is not editing it: the duration beside this one has
-        # said so since it was written, and without the same guard merely
-        # tabbing past a DAC value ran the whole edit pipeline for a number
-        # nobody touched.
-        if self._last_analog.get(port) == (mode, value):
-            return
-        self._last_analog[port] = (mode, value)
+        # Only the accepted projection says what is unchanged. A previous
+        # intent may have been refused, or superseded by Load/Sync/Clear.
+        for key, previous_mode, field in self._period.analog:
+            if key == port:
+                try:
+                    if (mode, value) == (previous_mode, int(float(field.text))):
+                        return
+                except ValueError:
+                    pass
+                break
         self.analog_committed.emit(self.period_id, port, mode, value)
 
     def set_port_label(self, port: str, label: str) -> None:

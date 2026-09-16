@@ -150,6 +150,42 @@ else:
     raise AssertionError("same revision must reject a different projection")
 assert not view.set_schedule(ScheduleVM(1, 1, vm.document_name, vm.clock_text, vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text, vm.summary_text, vm.ports, vm.periods, analog_mode_choices=vm.analog_mode_choices))
 assert view._cards["p1"] is first
+
+# A reused card must compare against the newly projected period, not what
+# was last typed into this widget before Load/Sync/Clear changed the model.
+from dataclasses import replace
+from PyQt5 import QtCore, QtTest
+committed = []
+first.analog_committed.connect(lambda *args: committed.append(args))
+def enter(widget, text):
+    widget.selectAll()
+    QtTest.QTest.keyClicks(widget, text)
+    QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+enter(first.bus_value_edits["a0"], "0")
+assert committed[-1] == ("p1", "a0", "edge", 0)
+view.set_period(periods[0])  # model is 4 again, same live widget
+committed.clear()
+enter(first.bus_value_edits["a0"], "0")
+assert committed == [("p1", "a0", "edge", 0)]
+accepted = replace(periods[0], analog=(("a0", "edge", replace(field, text="0")),))
+view.set_schedule(replace(vm, document_generation=2, revision=0, periods=(accepted, periods[1])))
+assert view._cards["p1"] is first
+committed.clear()
+enter(first.bus_value_edits["a0"], "0")
+assert committed == [], "unchanged accepted value should not be submitted"
+first.bus_mode_combos["a0"].setCurrentIndex(first.bus_mode_combos["a0"].findData("ramp"))
+assert committed == [("p1", "a0", "ramp", 0)]
+# No owner accepted that intent. A retry must not be swallowed either.
+enter(first.bus_value_edits["a0"], "0")
+assert len(committed) == 2
+names, durations = [], []
+first.period_name_committed.connect(lambda *args: names.append(args))
+first.duration_committed.connect(lambda *args: durations.append(args))
+for _ in range(2):
+    enter(first.name_edit, "Changed")
+    enter(first.duration_edit, "6")
+assert names == [("p1", "Changed")] * 2
+assert durations == [("p1", 6.0, "us")] * 2
 '''
     )
 
