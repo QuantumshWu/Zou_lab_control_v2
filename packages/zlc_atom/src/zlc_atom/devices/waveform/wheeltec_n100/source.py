@@ -246,20 +246,38 @@ def _spelling_of(name: str, value: object, *, standing_at: object = None) -> str
     )
 
 
+#: How far a measured rate may sit from a rung and still BE that rung.
+#: A quarter, and no absolute floor: the rungs are a factor of two or more
+#: apart, so a quarter of each never reaches its neighbour -- 1 Hz owns
+#: 0.75..1.25 and 2 Hz owns 1.5..2.5, with a gap between them.  A floor of
+#: one hertz, which is what this had, made those two bands OVERLAP, and
+#: since the search ran up the ladder a stream measured at 2 Hz was named
+#: 1 Hz.  Nothing needs a floor: the measurement is the median of intervals
+#: off the module's own microsecond clock, not a stopwatch.
+_RUNG_TOLERANCE = 0.25
+
+
 def _rung_the_stream_is_on(measured_hz: float) -> float | None:
     """Which rung a measured stream rate is standing on, or None.
 
-    The rungs are a factor of two or more apart, so a measurement anywhere
-    near one names it and no other.  That is what lets the STREAM answer
-    for the rate after a restart: the packets arriving are what this bench
-    stamps its records with, and asking the console instead would cost
-    another trip through it to be told something less true.
+    The NEAREST rung, and only when the measurement is near enough to be
+    that rung rather than the gap between two.  That is what lets the
+    STREAM answer for the rate after a restart: the packets arriving are
+    what this bench stamps its records with, and asking the console instead
+    would cost another trip through it to be told something less true.
     """
 
+    nearest: tuple[float, float] | None = None
     for rung in PACKET_RATE_LADDER_HZ:
-        if rung and abs(measured_hz - rung) <= max(1.0, rung * 0.25):
-            return rung
-    return None
+        if rung <= 0.0:
+            continue
+        gap = abs(measured_hz - rung)
+        if nearest is None or gap < nearest[0]:
+            nearest = (gap, rung)
+    if nearest is None:
+        return None
+    gap, rung = nearest
+    return rung if gap <= rung * _RUNG_TOLERANCE else None
 
 
 def _apply(console, name: str, spelling: str) -> str | None:
@@ -652,17 +670,24 @@ class WheeltecN100WaveformSource:
             self._stamps_ready.set()
 
     def _watch_magnetic(self, field: tuple[float, ...]) -> None:
-        """Count how often the magnetic field is a NEW reading.
+        """Count how often the published magnetic field CHANGES.
 
         The three magnetometer axes ride inside the IMU packet, so they are
-        SENT at the packet rate whether or not the magnetometer has taken a
-        new measurement in between.  Nothing the vendor ships states the
-        magnetometer's own output rate -- the specification table is a
-        verbatim lift from another manufacturer's part -- so the only
-        honest answer is the module's: count the packets whose field
-        differs from the one before.  A field that repeats every other
-        packet is a magnetometer running at half the packet rate, and
-        raising the packet rate past it buys nothing but duplicates.
+        SENT at the packet rate whether or not anything new went into them.
+        Nothing the vendor ships states the magnetometer's own output rate
+        -- its specification table is a verbatim lift from another
+        manufacturer's part -- so what is counted here is the one thing
+        this bench can actually see: how often the three published values
+        differ from the ones before.
+
+        That is NOT the magnetometer's rate, in either direction, and it
+        must not be read as a bound on it.  Two independent conversions can
+        land on the same quantised value, so a repeat does not mean no new
+        sample was taken; and whatever filtering or fusion sits between the
+        sensor and the packet can make the published number move on packets
+        where no conversion happened at all, so a change does not mean one
+        did.  It is the rate of change of what is published, and that is
+        all it is.
         """
 
         if self._stamps_ready.is_set():
@@ -676,20 +701,25 @@ class WheeltecN100WaveformSource:
 
     @property
     def magnetic_change_interval(self) -> float | None:
-        """Seconds between packets whose magnetic field DIFFERS, or None.
+        """Seconds between packets whose published magnetic field DIFFERS.
 
-        Read this as an upper bound on the magnetometer's own output rate,
-        not as a measurement of it.  What is counted is how often the three
-        published values change, which is the slower of two things: how fast
-        the magnetometer samples, and how fast the field is actually moving.
-        A magnetometer whose noise is below its last digit, sitting in a
-        still field, repeats itself and reads slow here even though it is
-        sampling fast.
+        An OBSERVATION, not a rate of anything in the instrument.  It is
+        neither an upper nor a lower bound on how fast the magnetometer
+        converts: a repeated value may be two conversions landing on the
+        same quantised number, and a changed value may be filtering moving
+        the published figure on a packet where nothing was converted.  It
+        must not be reported as an ODR, and nothing about rise time can be
+        read out of it.
 
-        It still answers the question the datasheet does not -- whether the
-        magnetic field this bench plots carries new information as fast as
-        the packets arrive -- because for the purpose of plotting a field,
-        a repeated value IS no new information.
+        What it does answer is the question the datasheet does not, and the
+        only one this bench is entitled to ask: whether the field being
+        PLOTTED is carrying new numbers as fast as the packets arrive.  For
+        drawing a field, a repeated value is no new information whatever
+        produced it.
+
+        It is counted over the opening window only -- the packets the rate
+        is timed from -- so it describes how the module was behaving when
+        it was opened, not how it is behaving now.
         """
 
         interval = self._sample_interval

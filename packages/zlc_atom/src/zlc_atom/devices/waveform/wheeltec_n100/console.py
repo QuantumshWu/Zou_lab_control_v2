@@ -191,11 +191,28 @@ class FdiConfigConsole:
     def enter(self) -> None:
         """Stop the stream and take the module into config mode.
 
-        One command and one window, like everything else.  What the window
-        holds -- the frames still draining, then ``*#OK`` -- is read and
-        kept for the record; what decides is whether the module is STILL
-        NAVIGATING afterwards, which is the state change itself rather than
-        anything it printed.
+        TWO things are checked, and the second one is the one that costs a
+        command.
+
+        It must have stopped navigating.  That is the state change itself,
+        so it is what is watched for -- not the acknowledgement, which is a
+        string the handler prints, and not a banner, which the manual and
+        the module disagree about.
+
+        And it must be LISTENING, which needs positive evidence.  A silence
+        is not evidence: an unplugged module, a dead port and a module that
+        entered perfectly all send no frames, so "no frames" alone let a
+        port with nothing on it enter, and the failure surfaced one command
+        later as a timeout on ``#fparam set`` -- a clear fault dragged into
+        a later one, pointing the operator at the wrong thing.
+
+        So one question is asked, and EITHER answer proves the console is
+        there: the echo says it read a parameter, and ``*#ERROR`` says it
+        parsed a line and refused it.  Only this console prints either.
+        ``*#ERROR`` is deliberately not read as a failure to enter -- a
+        module already sitting in its console from a session that never
+        closed may well answer ``#fconfig`` that way, and refusing it would
+        turn the one state this is meant to recover from into a dead end.
         """
 
         if self._entered:
@@ -211,6 +228,15 @@ class FdiConfigConsole:
                 "it never entered config mode"
             )
         self._entered = True
+        asked = f"#fparam get {IMU_PACKET_NAME}"
+        answered = self.say(asked)
+        if IMU_PACKET_NAME not in parameters_in(answered) and ERROR not in answered:
+            self._entered = False
+            raise RuntimeError(
+                "the module on this port stopped streaming for #fconfig but "
+                f"then would not answer {asked!r}, so there is no console "
+                f"here; it said {answered.strip()[:160]!r}"
+            )
 
     def close(self) -> None:
         """Put the module back on the air, whatever happened in between."""
@@ -323,6 +349,18 @@ class FdiConfigConsole:
         if ERROR in transcript:
             raise TuneRefused(
                 f"the module refused to save: {transcript.strip()[:120]!r}"
+            )
+        if OK not in transcript:
+            # Silence is not a save.  It used to be returned as one, and
+            # the restart that follows would then make live whatever flash
+            # happened to hold -- a value nobody wrote, or the one the
+            # operator thought they had just replaced.  Not knowing is a
+            # refusal here, and the caller discards the uncommitted table
+            # rather than commit on a guess.
+            raise TuneRefused(
+                "the module did not acknowledge #fsave, so nothing is known "
+                "to have reached its flash; it said "
+                f"{transcript.strip()[:120]!r}"
             )
         return transcript
 
