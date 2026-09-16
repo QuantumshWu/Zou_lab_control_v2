@@ -95,12 +95,33 @@ CONFIRM_PROMPT = "(y/n)"
 #: The packet every N100 sends, and the one this bench reads.
 IMU_PACKET_NAME = "MSG_IMU"
 
-#: How far apart two commands must go out.  Measured on the bench, not
-#: chosen: 0.05 s is answered ``*#ERROR`` and so is every gap up to 0.8 s,
-#: while the probe that works leaves two seconds.  It is a spacing and
-#: never a timeout -- it is spent reading the line, and it is charged to
-#: the command that comes next rather than to the one that just answered.
-SPACING_SECONDS = 2.0
+#: How far apart two commands must go out, measured from the previous
+#: WRITE -- which is the reference the bench confirmed, not a guess.
+#:
+#: Swept on the real module, write to write, five trials a step::
+#:
+#:     0.70 s  0/5      1.00 s  5/5
+#:     0.80 s  0/5      1.10 s  5/5
+#:     0.90 s  0/5      1.20 s  5/5
+#:                      1.30 s  5/5
+#:
+#: and 20/20 at 1.01 s against 0/15 below 0.90 s: a hard boundary in
+#: (0.90, 1.00], not a probability.  1.2 s is a fifth above the top of
+#: that bracket, which is the right shape of margin for a sharp edge.
+#:
+#: Two things that sweep also settled, and both matter here.  Reading the
+#: line during the gap makes no difference (0.30 s failed both ways, 1.00 s
+#: worked both ways) -- the module wants TIME, not attention.  And a heavy
+#: first command changes nothing: ``#fmsg`` takes about a second to answer
+#: and the next command still went through at 1.00 s write-to-write, three
+#: for three.  So the module counts from being SPOKEN TO, not from finishing
+#: -- which is exactly how ``_write`` below paces itself, and why ``#fsave``
+#: needs no extra allowance of its own.
+#:
+#: It is a spacing and never a timeout: it is spent reading the line, and it
+#: is charged to the command that comes next rather than to the one that
+#: just answered, so the last command of a session pays nothing.
+SPACING_SECONDS = 1.2
 
 #: A reply is over when the module has said nothing for this long.  There
 #: is no end marker on this console, so this is what says the whole of it
