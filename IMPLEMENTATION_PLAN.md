@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Processor持续跟随不再被一次输入计算失败永久清除。NodeHost复用唯一实际输入publication，Console只在源generation变化后重接失败输入，同代新shot不重试；新源已经sealed也执行一次。等待时保留原因，Logic行和Editor的Stop均可取消跟随。原Camera→Occupancy跟随用例扩展Frame Survival，真实virtual链1帧失败→3帧自动发布三对→再1帧等待且旧结果退休通过；原无源Start/Stop与armed-before-first-publication用例通过。无帧数特判、无新增重试owner。
+
 - LMS关闭整改：厂商Windows SDK手册§3.2及LMSTest::CheckAPISet规定bit31为错误标志，旧Close把所有nonzero判失败（f5f2ab9b首次增加该检查）。现与Init/频率/功率/RF开关共用命令状态检查，真实错误带名称及hex；Installation成功才释放、失败仍持有。DeviceManager原_one_line展开异常组，单设备Close/reconcile/Shutdown均显示真实原因并记录完整traceback。LMS关闭成功非零/错误重试与virtual驱动两例、Manager两例通过。厂商DLL在TestMode下通过生产wrapper打开并关闭2个模拟设备，未接真实设备；现场具体返回码尚未知，不能据顶层'1 sub-exception'保证现场唯一根因。
 
 - Facet直接文件导出丢边框/刻度/cell标题根修：把统一chrome准备从screen-only compose移到RenderFrame公共present最终几何之后、compose分支之前；屏幕与文件消费同一份场景，Save不补Calibration特判、不补无用screen draw。原caller-owned classifier导出例先红（0边框/0标题）后绿（2cell共8边框/2标题），其PNG与同DPI普通screen-prepared导出逐像素一致；DPR1/2 Facet Image更新及复用后的导出共4项直接验证通过。截图/诊断产物在ignored research，未改导出参数或拟合数据。

@@ -567,6 +567,7 @@ class NodeHost:
         if self._mode == "processor":
             if run_root is not None or input_summary is not None:
                 raise ValueError("only a Task start accepts run metadata")
+            self._source_publication = self._data_plane.latest_publication(self._source_signal)
             try:
                 if self._input_view == "window":
                     names = tuple(self._processor_signal_names().values())
@@ -682,6 +683,12 @@ class NodeHost:
         """The producer generation reserved for the current run, if any."""
 
         return self._generation
+
+    @property
+    def source_publication(self) -> SignalPublication | None:
+        """The exact input most recently attempted by this processor."""
+
+        return self._source_publication
 
     def _reset_generation(self) -> None:
         self._generation = None
@@ -1241,7 +1248,7 @@ class NodeHost:
 
     def _start_processor(self) -> None:
         assert self._source_signal is not None
-        publication = self._data_plane.latest_publication(self._source_signal)
+        publication = self._source_publication
         if publication is None:
             if (
                 self._input_delivery == "exact"
@@ -1328,7 +1335,6 @@ class NodeHost:
             self._refuse_start(error)
             raise
         self._plane_state = True
-        self._source_publication = publication
         owner = self._ensure_owner()
         self._active = True
         self._phase = "running"
@@ -1462,7 +1468,6 @@ class NodeHost:
             self._refuse_start(error)
             raise
         self._plane_state = True
-        self._source_publication = publication
         self._follow_tap = tap
         owner = self._ensure_owner()
         self._active = True
@@ -1610,6 +1615,7 @@ class NodeHost:
         *,
         inputs: Mapping[str, SignalValue] | None = None,
     ) -> Mapping[str, LiveDatasetOutput]:
+        self._source_publication = source_publication
         selected_inputs = self._publication_inputs(source_publication) if inputs is None else inputs
         if self._input_siblings:
             evaluate_inputs = getattr(self._node, "evaluate_inputs", None)

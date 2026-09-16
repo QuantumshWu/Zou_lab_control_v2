@@ -5902,6 +5902,29 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     assert binding.host is not None and binding.host.running
     assert binding.following
 
+    survival_id = presenter.add_logic(
+        "frame_survival", source_signal=stable_signal_key(occupancy_id, "occupied"),
+        open_editor=False,
+    )
+    assert presenter.start_logic(survival_id)
+    survival = presenter.logic[survival_id]
+    _settle_panel_hosts(
+        presenter,
+        lambda: survival.host is not None and survival.host.observation.terminal,
+    )
+    failed_host = survival.host
+    assert "at least two frames" in failed_host.observation.error
+    assert survival.following
+    assert next(row for row in presenter.view.logic_rows if row.title == survival_id).commands[1]
+    assert presenter.logic_editor_projection(survival_id)["can_stop"]
+    assert presenter._logic_state(survival)[0] == "running"
+    assert "waiting for a new source generation" in presenter._logic_state(survival)[1]
+    # More shots from the same incompatible schema must not spin restarts.
+    session.fire(shots=1)
+    for _ in range(3):
+        presenter.beat()
+    assert survival.host is failed_host
+
     # The operator stops the CAMERA -- not the processor.
     assert presenter.stop_logic(camera_id)
     deadline = time.monotonic() + 10.0
@@ -5923,6 +5946,7 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
 
     # On Pulse: the camera starts a new generation; the processor follows
     # with no operator action at all.
+    assert presenter.update_logic_draft(camera_id, values={"frames_per_cycle": 3})
     assert presenter.start_logic(camera_id)
     restarted = None
     deadline = time.monotonic() + 10.0
@@ -5940,6 +5964,42 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
         f"following={binding.following}"
     )
     assert binding.following
+
+    survival_signal = stable_signal_key(survival_id, "survival")
+    session.fire(shots=1)
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.latest_publication(survival_signal) is not None,
+    )
+    assert survival.host is not failed_host
+    assert survival.host.running and survival.following
+    result = session.signal_plane.freeze().value(survival_signal)
+    assert result.snapshot.block.schema.point_domain.axes[0].coordinate_labels == (
+        "0-1", "0-2", "1-2",
+    )
+
+    # A later incompatible run waits again, without leaving the old result
+    # current. Stop remains an explicit way to cancel that standing intent.
+    assert presenter.stop_logic(camera_id)
+    _settle_panel_hosts(presenter, lambda: not presenter.logic[camera_id].host.running)
+    old_camera = presenter.logic[camera_id].host
+    assert presenter.update_logic_draft(camera_id, values={"frames_per_cycle": 1})
+    assert presenter.start_logic(camera_id)
+    _settle_panel_hosts(presenter, lambda: presenter.logic[camera_id].host is not old_camera)
+    assert presenter.logic[camera_id].host.wait_ready(5.0)
+    session.fire(shots=1)
+    _settle_panel_hosts(
+        presenter,
+        lambda: survival.host.observation.phase == "failed",
+    )
+    assert survival.following
+    assert session.signal_plane.latest_publication(survival_signal) is None
+    assert presenter.stop_logic(survival_id)
+    assert not survival.following
+    stopped_host = survival.host
+    session.fire(shots=1)
+    presenter.beat()
+    assert survival.host is stopped_host
 
 
 def test_bound_rolling_panel_offers_the_uncertainty_switch(

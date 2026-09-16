@@ -164,6 +164,7 @@ Node new chunk
 - Run record在generation内只冻结一次，event record每次atomic commit只冻结一次，内部siblings/publication复用同一不可变记录；外部构造仍独立冻结和校验。finite物化仅合并新增chunks与已有prefix，indexed窗口滚动时记录只覆盖仍保留的事件。仅更换DataBlock身份不重扫已验证且未改变的数值内容。
 - Exact scientific Processor逐publication有序处理；pure display derivation可latest。交付策略由input contract声明，不从coverage猜；同一交付publication的event/run/window输入范围是另一项显式选择，exact并不强制只读event chunk。
 - 不同Processor可并发，同一Processor保持有序。
+- Processor的Start是持续跟随意图，只有操作者Stop才取消；源暂时不满足计算条件（如Frame Survival少于两帧）保留原因并等待，不伪造结果。失败的同一源generation不反复执行；新generation有publication后复用原Start重新接入，包含已经sealed的新数据。实际尝试的输入publication由NodeHost唯一持有，Workbench不另存重试世代或判断插件帧数。
 
 ### 4.3 Logic Node contract
 

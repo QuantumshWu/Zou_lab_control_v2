@@ -154,8 +154,8 @@ class LogicBinding:
     #: A started processor keeps FOLLOWING its source: absent signal means
     #: wait for it, a source restart means start again.  Only the operator's
     #: own Stop clears it -- their stop is a decision, a source restart is
-    #: not.  Failures clear it too: silently retrying an error loop is how
-    #: an error gets ignored.
+    #: not. Failed inputs wait for a new source generation, without retrying
+    #: every publication of the same incompatible schema.
     following: bool = False
     draft_revision: int = 0
     finalization_key: tuple = ()

@@ -7113,7 +7113,7 @@ class ConsolePresenter:
             form_values[field.name] = display_value(value)
         can_start = finalization.can_start and binding.pending is None
         can_stop = bool(
-            binding.pending is not None
+            binding.following or binding.pending is not None
             or (binding.host is not None and binding.host.running)
         )
         source_specs = dataset_inputs(binding.descriptor)
@@ -7359,9 +7359,9 @@ class ConsolePresenter:
             )
             return True
         activated = self._activate_candidate(binding, candidate)
+        if self._is_processor(binding) and (activated or binding.host is candidate.host):
+            binding.following = True
         if activated:
-            if self._is_processor(binding):
-                binding.following = True
             self._begin_task_takeover(binding)
             self._refresh_console_projection()
         return activated
@@ -7404,22 +7404,25 @@ class ConsolePresenter:
             host = binding.host
             if host is not None and (
                 host.running
-                or host.observation.phase not in ("done", "cancelled")
+                or host.observation.phase not in ("done", "cancelled", "failed")
             ):
-                # Running follows by itself; a failure is the operator's to
-                # read, not this beat's to retry.  A CANCELLED host whose
-                # following survived was cancelled by something other than
-                # the operator (their Stop clears the flag) -- a device
-                # takeover, say -- and follows again like a finished one.
-                if host.observation.phase == "failed":
-                    binding.following = False
                 continue
             finalization = binding.finalization
             signal = str(getattr(finalization, "source_signal", "") or "")
             if not signal:
                 continue
             plane = self.session.signal_plane
-            if not plane.is_generation_live(signal):
+            publication = plane.latest_publication(signal)
+            attempted = None if host is None else host.source_publication
+            new_source = publication is not None and (
+                attempted is None
+                or publication.event_ref.stream_id != attempted.event_ref.stream_id
+                or publication.event_ref.generation != attempted.event_ref.generation
+            )
+            if host is not None and host.observation.phase == "failed" and not new_source:
+                # Show the failure, but don't repeatedly run the same input.
+                continue
+            if not new_source and not plane.is_generation_live(signal):
                 # Not armed, or the retained tail of a finished run: a
                 # frozen pass already answered the latter, and re-running
                 # forever would spin.  An armed source needs no publication
@@ -7427,19 +7430,10 @@ class ConsolePresenter:
                 # causes the first one.
                 continue
             if not self.start_logic(binding.node_id):
-                # A start the source's own lifecycle refused -- it ended or
-                # moved on between this beat's gate and the bind, which the
-                # host reports by ending CANCELLED -- is the exact race
-                # this follower exists for: keep following and let a later
-                # beat complete it.  A start refused with the source alive
-                # and the host not cancelled is structural, and the
-                # operator's to read.
-                host = binding.host
-                lifecycle = (
-                    host is not None
-                    and host.observation.phase == "cancelled"
-                )
-                if not lifecycle and plane.is_generation_live(signal):
+                # Source admission failures belong to the new host and wait
+                # under the same generation rule. A rejected authoring/build
+                # never installed a host and requires an operator correction.
+                if binding.host is host and plane.is_generation_live(signal):
                     binding.following = False
 
     def stop_logic(self, node_id: str) -> bool:
@@ -7650,6 +7644,9 @@ class ConsolePresenter:
             observed = host.observation
             if observed.error:
                 state, status = "error", observed.error
+                if binding.following:
+                    state = "running"
+                    status = f"waiting for a new source generation: {observed.error}"
             elif observed.running:
                 state, status = "running", self._observation_status(observed)
             elif binding.draft_error:
@@ -7720,7 +7717,8 @@ class ConsolePresenter:
         artifacts = self._artifact_results(binding)
         can_start = finalization.can_start and binding.pending is None
         can_stop = bool(
-            binding.pending is not None or (host is not None and host.running)
+            binding.following or binding.pending is not None
+            or (host is not None and host.running)
         )
         shown = (
             state,
