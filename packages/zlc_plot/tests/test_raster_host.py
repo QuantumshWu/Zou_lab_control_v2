@@ -1129,13 +1129,19 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         from zlc_plot import RenderProcess, open_figure_host, save_figure_artifact
         from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
 
-        presentations, restores, captures = [], [], []
+        presentations, restores, captures, export_chrome = [], [], [], []
         original_present, original_draw = MatplotlibRenderer.present, MatplotlibRenderer.draw
         original_capture = RasterPlotHost._capture_front
 
         def present_final(self, frame, **kwargs):
             presentations.append(kwargs.get("compose", True))
-            return original_present(self, frame, **kwargs)
+            result = original_present(self, frame, **kwargs)
+            if not kwargs.get("compose", True):
+                export_chrome.append((
+                    len(self._artists.get("facet:chrome_spines", ())),
+                    len(self._artists.get("facet:chrome_titles", ())),
+                ))
+            return result
 
         def capture_front(self, *args, **kwargs):
             captures.append(True)
@@ -1175,11 +1181,26 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         assert (tmp_path / "known-model.npz").is_file()
         assert unnecessary_solves == []
         assert presentations == [False]
+        assert export_chrome == [(8, 2)], "shared preparation must include all cell frames and titles before Save"
         assert restores == []
         assert captures == []
         monkeypatch.setattr(MatplotlibRenderer, "present", original_present)
         monkeypatch.setattr(MatplotlibRenderer, "draw", original_draw)
         monkeypatch.setattr(RasterPlotHost, "_capture_front", original_capture)
+
+        from PIL import Image
+        from zlc_plot.config import DEFAULTS
+        reference = PlotSession(
+            snapshot, spec, parameters=configured.value.display_state.values,
+            size=configured.value.size, device_pixel_ratio=DEFAULTS.layout.export_scale,
+            initial_configuration={"classifier_thresholds": targets},
+        )
+        try:
+            reference.save(tmp_path / "screen-prepared.png", restore_display=False)
+        finally:
+            reference.close()
+        with Image.open(tmp_path / "known-model.png") as direct, Image.open(tmp_path / "screen-prepared.png") as shown:
+            np.testing.assert_array_equal(np.asarray(direct), np.asarray(shown))
 
         service = RenderProcess("authored-classifier-test")
         remote = None

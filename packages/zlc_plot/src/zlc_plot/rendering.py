@@ -3030,7 +3030,7 @@ class MatplotlibRenderer:
         )
 
     def present(self, frame: RenderFrame, *, compose: bool = True) -> None:
-        """Mutate all layers and publish exactly one complete canvas front."""
+        """Prepare every scene layer, then optionally compose one canvas front."""
 
         if not isinstance(frame, RenderFrame):
             raise TypeError("frame must be RenderFrame")
@@ -3192,6 +3192,10 @@ class MatplotlibRenderer:
                     else getattr(cell, "facet_value_canonical", None),
                 )
             self._settle_owned_boxes()
+            # Chrome is part of the prepared scene, not a side effect of
+            # painting it. Screen and file consumers must receive the same
+            # frames, ticks and titles even when no screen front is requested.
+            self._sync_facet_cell_chrome()
             if not compose:
                 return
             self._compose_frame(
@@ -5468,11 +5472,8 @@ class MatplotlibRenderer:
         capture path, so a stale background can never reach a front.
         """
 
-        # BEFORE the background is judged reusable: a grid's boundary tick
-        # labels are part of that background, so a chrome group that has to
-        # be rebuilt is a background that can no longer be restored, and the
-        # rebuild marks its cells dirty to say so.
-        self._sync_facet_cell_chrome()
+        # Consume the complete scene prepared by present/draw. Pointer-only
+        # overlays reuse it; they do not reconstruct the cell geometry.
         canvas = self._figure.canvas
         restore = getattr(canvas, "restore_region", None)
         capture = getattr(canvas, "copy_from_bbox", None)

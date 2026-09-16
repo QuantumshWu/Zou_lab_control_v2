@@ -68,6 +68,7 @@
 ### 3.2 Figure archive
 
 - 一个writer、一个reader、一个format owner。
+- RenderFrame的公共present准备完整data、边框、刻度、标题及overlay后才选择输出；compose=False只省去屏幕像素合成，不能省去场景组成。Facet边框/刻度/标题在最终axes几何确定后统一准备，屏幕compose与文件save消费同一份；Save不得依赖此前显示过一帧、另建Calibration修补路径或补一次无用屏幕draw。
 - Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit。纯文件导出由已有save worker直接使用同一PlotSession/MatplotlibRenderer，按最终导出DPI准备数据和artist，不创建无人观看的RasterPlotHost、屏幕front或返回假的accepted description；规范化配置仍由同一Session与Figure codec保存。先写NPZ，再绘制真实文件，不恢复不存在的屏幕。已有交互Host保存仍恢复原屏幕。
 - FigureViewer开图只创建真正的Monitor A Host，不在C先画一遍来取配置；首个真实accept才从其SelectionSubject恢复交互并同步Port/PanelState的规范化target。新图成功前保留旧板，失败或Close清理候选；A沿普通live fit契约首帧求解并继续处理新数据，C的静态保存策略不复制到A。
 - 编辑任意archive Dataset的数据只需要typed数据和已有recipe，不能先创建隐藏Host求fit/description；包括非默认Dataset。修改后的实际Preview才进入同一个A接受流程，纯数据草稿不保存第二份display description。
