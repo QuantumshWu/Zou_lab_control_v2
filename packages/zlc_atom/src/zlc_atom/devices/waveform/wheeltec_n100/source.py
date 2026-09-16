@@ -2,12 +2,10 @@
 
 The module talks first: from the moment it has power it emits binary
 FDILink packets on its serial port at the rate it was configured to (the
-factory default is 100 Hz; the operator may have set 200 or 400 with the
-vendor tool), and nothing here ever writes to it.  One IMU packet carries
-the three gyroscope axes, the three accelerometer axes, the three
-magnetometer axes, the die temperature, the barometer pair and the
-module's own microsecond clock, so this source publishes four quantities
-from one record column set.
+factory default is 100 Hz).  One IMU packet carries the three gyroscope
+axes, the three accelerometer axes, the three magnetometer axes, the die
+temperature, the barometer pair and the module's own microsecond clock, so
+this source publishes four quantities from one record column set.
 
 What is published is what the packet says, in units the registry knows:
 the magnetometer's milligauss become microtesla (one milligauss is a tenth
@@ -26,10 +24,15 @@ to hold a payload length that a firmware revision could falsify.  (The
 vendor's own material gives three different lengths for the INS/GPS
 packet, which is exactly the trap a length table walks into.)
 
-Settings are the operator's, through Device Control: the module carries an
-ASCII configuration console on the same line, and ``console.py`` speaks it.
-Entering it stops the stream, so the reader is parked for the round trip
-and the packet rate is re-measured afterwards rather than assumed.
+Opening this source asks the module NOTHING.  The rate is measured off
+the stream that is already arriving -- those packets are what every record
+gets stamped with, so they are the truth about the rate, and a trip
+through the console would cost seconds to be told something less true.
+
+The console is entered only to WRITE, when the operator changes the rate
+in Device Control.  ``console.py`` speaks it; entering stops the stream,
+so the reader is parked for the round trip, and what the module comes back
+DOING is read off the stream afterwards rather than asked for.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ from zlc_atom.devices.waveform.contract import (
     WaveformWorkingPoint,
 )
 
-from .console import LINE_END, FdiConfigConsole
+from .console import IMU_PACKET_NAME, LINE_END, FdiConfigConsole
 
 
 FRAME_HEAD = 0xFC
@@ -120,26 +123,19 @@ def payload_crc16(payload: bytes) -> int:
 _IMU_PAYLOAD = struct.Struct("<12fq")
 DEFAULT_BAUD = 921600
 
-#: The outer edge of what Device Control will let an operator TYPE.  This
-#: is the documented ceiling for this product -- 用户手册 and the FAQ both
-#: answer "数据包发布的最大频率为400HZ" -- and NOT the 1000 Hz the same
-#: manual quotes, which is the internal sensor sampling rate and reaches no
-#: packet.  What this particular module accepts is still its own answer;
-#: this only keeps a typo from asking for something no firmware has.
-MAX_PACKET_RATE_HZ = 400.0
-
 #: How this firmware spells a packet's rate: an INDEX into this ladder,
 #: written to a named parameter, never a number of hertz.  The manual's
 #: ``#fmsg 40 100`` is answered ``*#OK`` and changes nothing; the vendor's
 #: own parameter cache gives ``MSG_IMU`` the values 0..9 against exactly
-#: these rungs, and its ground station writes that parameter.  Index 0 is
-#: "no output" and is deliberately not offered: this bench recognises the
-#: module by its packets, so a module told to stop sending them is a module
-#: it can no longer find.
+#: these rungs, and its ground station writes that parameter.
+#:
+#: The ladder is also the ceiling, so nothing else holds one: 400 Hz is the
+#: top rung and the documented maximum -- 用户手册 and the FAQ both answer
+#: "数据包发布的最大频率为400HZ" -- while the 1000 Hz the same manual
+#: quotes is the internal sampling rate and reaches no packet.  Rung 0 is
+#: "no output"; ``offered_rungs`` says why it and the slow rungs are not
+#: offered.
 PACKET_RATE_LADDER_HZ = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 400.0)
-
-#: The parameter that holds the rate of the one packet this driver reads.
-IMU_RATE_PARAMETER = "MSG_IMU"
 
 #: The slowest rate the IMU packet may be set to.  Discovery recognises
 #: this module by hearing whole packets, and it listens for a moment --
@@ -149,15 +145,17 @@ IMU_RATE_PARAMETER = "MSG_IMU"
 #: the same reason; these are the same hazard at different speeds.
 SLOWEST_DISCOVERABLE_HZ = 5.0
 
-def offered_rungs(
-    *, may_turn_off: bool, standing_at: float | None = None
-) -> tuple[float, ...]:
-    """The rates a packet may be set to, and always the one it is ON.
 
-    Two rungs are withheld by policy, and both are ways of losing the
-    module: turning off the packet this bench recognises it by, or slowing
-    that packet below the rate a scan can hear -- either writes a module
-    into flash that no scan will ever find again.
+def offered_rungs(standing_at: float | None = None) -> tuple[float, ...]:
+    """The rates the IMU packet may be set to, and always the one it is ON.
+
+    The slow end of the ladder is withheld, and every rung withheld is a
+    way of losing the module: this bench recognises an N100 by hearing
+    whole packets and it listens for a moment, so a packet turned off --
+    rung 0 -- or slowed below what a scan can hear is a module no scan will
+    find again.  Applying a rate writes it to FLASH, so that is permanent,
+    power cycle included.  One comparison covers both, because rung 0 is
+    simply the slowest rung of all.
 
     But policy says where an operator may MOVE the module, never what the
     module is DOING.  A module standing on a rung this driver would not
@@ -169,9 +167,7 @@ def offered_rungs(
     """
 
     allowed = [
-        rung
-        for rung in PACKET_RATE_LADDER_HZ
-        if may_turn_off or rung >= SLOWEST_DISCOVERABLE_HZ
+        rung for rung in PACKET_RATE_LADDER_HZ if rung >= SLOWEST_DISCOVERABLE_HZ
     ]
     if standing_at is not None and not any(
         abs(rung - float(standing_at)) < 1e-6 for rung in allowed
@@ -180,9 +176,7 @@ def offered_rungs(
     return tuple(sorted(allowed))
 
 
-def rate_ladder_index(
-    rate_hz: float, *, may_turn_off: bool = False, standing_at: float | None = None
-) -> int:
+def rate_ladder_index(rate_hz: float, *, standing_at: float | None = None) -> int:
     """The ladder rung an asked-for rate belongs to, or a refusal.
 
     Only the rungs are offerable, so a value off the ladder is refused here
@@ -193,7 +187,7 @@ def rate_ladder_index(
     """
 
     wanted = float(rate_hz)
-    allowed = offered_rungs(may_turn_off=may_turn_off, standing_at=standing_at)
+    allowed = offered_rungs(standing_at)
     for index, rung in enumerate(PACKET_RATE_LADDER_HZ):
         if abs(rung - wanted) < 1e-6 and rung in allowed:
             return index
@@ -214,19 +208,7 @@ def _as_number(value: object) -> float | None:
         return None
 
 
-def _hertz_of_rung(reading: object) -> float | None:
-    """A ladder index as read back, in hertz, or None if it is not one."""
-
-    index = _as_number(reading)
-    if index is None:
-        return None
-    rung = int(index)
-    if 0 <= rung < len(PACKET_RATE_LADDER_HZ):
-        return PACKET_RATE_LADDER_HZ[rung]
-    return None
-
-
-def _spelling_of(name: str, value: object, *, standing_at: object = None) -> str:
+def _spelling_of(value: object, *, standing_at: object = None) -> str:
     """How the rate is written on the wire: its rung's index, never hertz.
 
     The settings map holds it in hertz, because that is what an operator
@@ -237,13 +219,7 @@ def _spelling_of(name: str, value: object, *, standing_at: object = None) -> str
     the value that silenced it while reporting that the undo was tried.
     """
 
-    return str(
-        rate_ladder_index(
-            float(value),
-            may_turn_off=name.upper() != IMU_RATE_PARAMETER,
-            standing_at=_as_number(standing_at),
-        )
-    )
+    return str(rate_ladder_index(float(value), standing_at=_as_number(standing_at)))
 
 
 #: How far a measured rate may sit from a rung and still BE that rung.
@@ -280,7 +256,7 @@ def _rung_the_stream_is_on(measured_hz: float) -> float | None:
     return rung if gap <= rung * _RUNG_TOLERANCE else None
 
 
-def _apply(console, name: str, spelling: str) -> str | None:
+def _apply(console, name: str, spelling: str) -> None:
     """Write one setting so that it actually takes effect.
 
     Measured on a real module: writing the parameter alone changes nothing
@@ -296,11 +272,13 @@ def _apply(console, name: str, spelling: str) -> str | None:
         #freboot                  ->  (y/n)
         y                         ->  back in about 2.5 s, now at 100 Hz
 
-    The readback is taken before the restart, because that is where it can
-    still be had; what the module then DOES is the caller's to check.
+    ``set_parameter`` reads the value back before the restart, because that
+    is where a readback can still be had, and it proves only that the TABLE
+    took it.  What the module then DOES is the caller's to check, and it is
+    checked off the stream rather than asked for.
     """
 
-    reading = console.set_parameter(name, spelling)
+    console.set_parameter(name, spelling)
     try:
         console.save()
     except BaseException:
@@ -316,14 +294,6 @@ def _apply(console, name: str, spelling: str) -> str | None:
             pass
         raise
     console.reboot()
-    return reading
-
-
-def _as_text(value: object) -> str:
-    """One value as the console spells it: whole numbers without a point."""
-
-    number = float(value)
-    return str(int(number)) if number.is_integer() else f"{number:g}"
 
 
 _MILLIGAUSS_PER_MICROTESLA = 10.0
@@ -604,7 +574,7 @@ class WheeltecN100WaveformSource:
                 "which is not one of its rates, so there is nothing here to turn"
             )
             return
-        self._settings = {IMU_RATE_PARAMETER: rung}
+        self._settings = {IMU_PACKET_NAME: rung}
         self._settings_refusal = ""
 
     # ------------------------------------------------------------- reading
@@ -950,7 +920,7 @@ class WheeltecN100WaveformSource:
         # driver would not have chosen is still the rate it found, and a
         # choice list that cannot express it fails the whole Device Control
         # window rather than one row.
-        rungs = offered_rungs(may_turn_off=False, standing_at=current)
+        rungs = offered_rungs(current)
         return TunableField(
             metadata=AuthoringField(
                 name,
@@ -1030,7 +1000,7 @@ class WheeltecN100WaveformSource:
                     f"{offered or 'none -- its configuration console did not answer'}"
                 )
             previous = self._settings.get(selected)
-            spelling = _spelling_of(selected, value, standing_at=previous)
+            spelling = _spelling_of(value, standing_at=previous)
 
             self._in_console(
                 lambda console: _apply(console, selected, spelling),
@@ -1065,15 +1035,6 @@ class WheeltecN100WaveformSource:
             self._settings[selected] = taken
             return self._field_for(selected, taken).current
 
-    def _apply_note(self) -> str:
-        """Why a settings change costs a restart, in one line for an error."""
-
-        return (
-            "a setting takes effect on this module only once it is saved and "
-            "the module restarts, which takes a few seconds and interrupts "
-            "the stream"
-        )
-
     def _put_back(
         self, name: str, previous: object, silenced: BaseException, wanted: object
     ) -> None:
@@ -1096,9 +1057,7 @@ class WheeltecN100WaveformSource:
             # undo has to spell it the same way the write did, or it asks
             # for rung 10 when it means 10 Hz -- off the end of the ladder,
             # which is another way of saying "stop sending".
-            return _apply(
-                console, name, _spelling_of(name, previous, standing_at=previous)
-            )
+            _apply(console, name, _spelling_of(previous, standing_at=previous))
 
         restored = False
         for _ in range(_UNDO_LISTEN_ROUNDS):
@@ -1257,12 +1216,10 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
 
 __all__ = [
     "DEFAULT_BAUD",
-    "IMU_RATE_PARAMETER",
     "SLOWEST_DISCOVERABLE_HZ",
     "offered_rungs",
     "PACKET_RATE_LADDER_HZ",
     "rate_ladder_index",
-    "MAX_PACKET_RATE_HZ",
     "N100_OUTPUTS",
     "WheeltecN100Config",
     "WheeltecN100WaveformSource",

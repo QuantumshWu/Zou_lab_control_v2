@@ -348,7 +348,6 @@ def test_new_world_preflight_can_borrow_and_retain_independent_physical_leaf() -
         "test",
         AuthoringSchema(()),
         (),
-        dependencies=(physical.type_id,),
         factory=virtual_factory,
         world_config=lambda _values: SimulationWorldConfig(),
     )
@@ -417,42 +416,6 @@ def test_template_default_simulation_does_not_conflict_with_explicit_world() -> 
     installation.close()
 
 
-def test_preflight_owns_transitive_dependency_closure() -> None:
-    def descriptor(type_id: str, dependencies=()):
-        return DeviceTypeDescriptor(
-            type_id,
-            "test",
-            AuthoringSchema(()),
-            (),
-            dependencies=tuple(dependencies),
-            factory=lambda _context, key, _values, tid=type_id: InstalledLeaf(
-                key, tid, object(), {}
-            ),
-        )
-
-    base = descriptor("test.base")
-    child = descriptor("test.child", (base.type_id,))
-    grandchild = descriptor("test.grandchild", (child.type_id,))
-    blueprint = preflight_installation(
-        (
-            DeviceSpec("grandchild", grandchild.type_id),
-            DeviceSpec("child", child.type_id),
-            DeviceSpec("base", base.type_id),
-        ),
-        world=object(),
-        catalog=DeviceCatalogSnapshot((base, child, grandchild), ()),
-    )
-    assert tuple(spec.key for spec in blueprint.specs) == (
-        "base",
-        "child",
-        "grandchild",
-    )
-    assert blueprint.dependent_keys((base.type_id,)) == {
-        "child",
-        "grandchild",
-    }
-
-
 def test_successor_factory_can_borrow_retained_dependency_without_owning_it() -> None:
     broker = DeviceBroker()
     world = object()
@@ -485,7 +448,6 @@ def test_successor_factory_can_borrow_retained_dependency_without_owning_it() ->
         "test",
         AuthoringSchema(()),
         (),
-        dependencies=(retained.type_id,),
         factory=factory,
     )
     successor = create_installation(
@@ -538,7 +500,6 @@ def test_successor_build_pins_borrowed_owner_against_close_and_transfer() -> Non
         "test",
         AuthoringSchema(()),
         (),
-        dependencies=(retained.type_id,),
         factory=factory,
     )
     catalog = DeviceCatalogSnapshot((descriptor,), ())
@@ -714,7 +675,6 @@ def test_factory_admission_rejects_foreign_binding_and_keeps_its_prefix_for_reco
         "test",
         AuthoringSchema(()),
         (),
-        dependencies=(good.type_id,),
         factory=bad_factory,
     )
     with pytest.raises(InstallationCompositionError) as captured:

@@ -4523,14 +4523,19 @@ class MatplotlibRenderer:
                 set_num_threads(previous_threads)
         return True
 
-    def _raster_facet_curve_command(
+    def _raster_prepared_curve_command(
         self, canvas: Any, underlay: Any = None
     ) -> bool:
-        """Paint projected Facet Curve data without maintaining cell artists.
+        """Paint a prepared curve scene without maintaining artists for it.
 
-        ``underlay`` is called once, after every refusal and before the first
-        pixel: what a full draw stacks BELOW the cells' data -- their tick
-        marks -- goes down there, so that the bars and lines lie over it.
+        EVERY prepared curve scene, not only a facet grid's: a standalone
+        Curve and a Rolling history are one surface each and come through
+        here as a grid of one, which is why this is named for the command
+        it paints rather than for the layout it was first written for.
+
+        ``underlay`` is called once, after every refusal and before the
+        first pixel: what a full draw stacks BELOW the data -- the tick
+        marks -- goes down there, so the bars and lines lie over it.
         """
 
         command = self._artists.get("curve:prepared")
@@ -4899,7 +4904,7 @@ class MatplotlibRenderer:
         valid = np.asarray(command["valid"], dtype=np.bool_)
         if valid.shape != values.shape:
             return False, frozenset()
-        low, high = map(float, command["limits"])
+        low, high = map(float, command["color_limits"])
         span = high - low
         if not math.isfinite(span) or span <= 0.0:
             return False, frozenset()
@@ -5761,7 +5766,7 @@ class MatplotlibRenderer:
             self._artists.get("curve:prepared"), dict
         )
         native_curve_command = (
-            self._raster_facet_curve_command(
+            self._raster_prepared_curve_command(
                 canvas,
                 underlay=lambda: paint(
                     band(None, series_floor), at_split=False, phase="under"
@@ -6630,11 +6635,6 @@ class MatplotlibRenderer:
             self._apply_curve_ticks(axes, series, label_pt=self.style.fonts.tick_pt)
             self._artists["curve:prepared"] = {
                 "series": (series,),
-                # The range this scene was built AT HOME -- for a curve its
-                # data range.  Never the operator's view: this runs inside
-                # _update_plot, before _apply_requested_view, so a view
-                # recorded here is by construction the one a zoom replaced.
-                "home_limits": (tuple(axes.get_xlim()), tuple(axes.get_ylim())),
                 "state": state,
                 "key": key,
                 "x_label": x_label,
@@ -7008,7 +7008,7 @@ class MatplotlibRenderer:
             for key, axis, index in self.painted_surfaces:
                 cell = cells[index]
                 shown = options[index]
-                if requested is not None and "limits" in shown:
+                if requested is not None:
                     # The same rule as the single-axes branch below.  A
                     # cell's pooled "limits" is the HOME of these cells --
                     # the data range shared across the grid -- and the
@@ -7037,7 +7037,15 @@ class MatplotlibRenderer:
             str(command["key"]),
             x_label=str(command["x_label"]),
             y_label=str(command["y_label"]),
-            limits=self._requested_view_limits or command.get("home_limits"),
+            # Exactly what _apply_requested_view resolves, and off the
+            # same store: the operator's view if there is one, otherwise
+            # the range this axis was built at.  That range is captured
+            # right after _update_plot and before any view is applied, so
+            # it is the home whatever a later zoom did -- and reading it
+            # here rather than baking a copy into the command is what keeps
+            # ONE axis range with ONE owner.
+            limits=self._requested_view_limits
+            or self._home_limits.get(id(self.primary_axes)),
             paint_labels=True,
             isolated_glyphs=True,
         )
@@ -7058,7 +7066,7 @@ class MatplotlibRenderer:
                 tuple(command["extents"][0]),
                 command["state"],
                 key,
-                command["limits"],
+                command["color_limits"],
                 coordinate_aspect=command["coordinate_aspect"],
                 materialize=not self._exporting,
             )
@@ -9772,7 +9780,11 @@ class MatplotlibRenderer:
                 "values": z[np.newaxis, ...],
                 "valid": valid[np.newaxis, ...],
                 "extents": np.asarray((extent,), dtype=np.float64),
-                "limits": (float(vmin), float(vmax)),
+                # The COLOUR range, spelled as the cell options already
+                # spell it.  A curve command's "limits" is a pair of axis
+                # ranges, and the two were read by sibling methods fifty
+                # lines apart under the one name.
+                "color_limits": (float(vmin), float(vmax)),
                 "lut": self._image_color_lut(cmap_name, cmap),
             }
         else:
@@ -10173,14 +10185,6 @@ class MatplotlibRenderer:
             apply_smart_ticks(history, label_pt=self.style.fonts.tick_pt)
             self._artists["curve:prepared"] = {
                 "series": (tuple(sliced),),
-                # A rolling panel OWNS its x axis: this is its window, not a
-                # data range and not the operator's view, and a
-                # materialization that recomputed it from the data would
-                # put the history somewhere the pointer cannot find it.
-                "home_limits": (
-                    tuple(history.get_xlim()),
-                    tuple(history.get_ylim()),
-                ),
                 "state": state,
                 "key": f"{key}:history",
                 "x_label": x_text,
@@ -11213,7 +11217,7 @@ class MatplotlibRenderer:
                     "values": np.stack(native_image_values),
                     "valid": np.stack(native_image_valid),
                     "extents": np.asarray(native_image_extents, dtype=np.float64),
-                    "limits": tuple(map(float, image_limits)),
+                    "color_limits": tuple(map(float, image_limits)),
                     "lut": self._image_color_lut(cmap_name, cmap),
                     "state_revision": state.revision,
                     "view_limits": self._requested_view_limits,
@@ -11936,7 +11940,7 @@ class MatplotlibRenderer:
                 isinstance(native_command, dict)
                 and native_command.get("key") == key
             ):
-                native_command["limits"] = limits
+                native_command["color_limits"] = limits
                 image.set_clim(*limits)
                 return
             prepared = self._artists.get(f"{key}:prepared_current")

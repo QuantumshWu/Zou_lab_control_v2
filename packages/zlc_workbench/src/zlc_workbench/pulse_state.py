@@ -30,6 +30,14 @@ class PulseEditorState:
     scan_source: str = ""
     scan_rows: tuple[tuple[float, ...], ...] = ()
     scan_source_dirty: bool = False
+    #: How many sweeps a scan runs when nobody has said: none, meaning
+    #: until Stop.  On Pulse is a cycle an experiment holds running and a
+    #: scan is no different; the alternative is a finite run, which the
+    #: client waits out by asking the server every 10 ms whether it is done
+    #: yet.  This is the one place the default is decided -- it was once
+    #: spelled 1 in the editor and 0 in the control that shows it, so every
+    #: scan silently became that finite run and one five-second shot printed
+    #: four hundred lines of "state=PENDING".
     scan_repeats: int = 0
 
     def __post_init__(self) -> None:

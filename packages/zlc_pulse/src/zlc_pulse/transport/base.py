@@ -17,7 +17,6 @@ class TransportAborted(RuntimeError):
 
 
 class RegisterTransport(Protocol):
-    transport_id: str
     observer_interval: float
 
     def start(self) -> None: ...

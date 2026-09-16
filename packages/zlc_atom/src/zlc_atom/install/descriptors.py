@@ -51,6 +51,11 @@ class InstallationFactoryContext:
     # any simulation implementation.
     world: object | None
     broker: object
+    #: The leaves this installation INHERITED from the one it succeeds, by
+    #: key -- what a reconcile kept open rather than closing and reopening.
+    #: Never a device being built beside this one: an apparatus's devices
+    #: are independent instruments and they all open at once, so there is
+    #: no order in which a sibling would be there to see.
     devices: Mapping[str, InstalledLeaf]
     #: How to reach a pulse server, supplied by the composition root.
     #:
@@ -67,7 +72,6 @@ class DeviceTypeDescriptor:
     domain: str
     authoring_schema: AuthoringSchema
     capabilities: tuple[str, ...]
-    dependencies: tuple[str, ...] = ()
     factory: Callable[[InstallationFactoryContext, str, Mapping[str, Any]], InstalledLeaf] | None = None
     world_config: Callable[[Mapping[str, Any]], object] | None = None
     discover: Callable[[], tuple[DeviceInstanceConfig, ...]] | None = None
@@ -104,9 +108,6 @@ class DeviceTypeDescriptor:
         unknown = set(capabilities) - set(CAPABILITY_TYPES)
         if unknown:
             raise ValueError(f"device type uses unknown capability tokens: {sorted(unknown)}")
-        dependencies = tuple(self.dependencies)
-        if self.type_id in dependencies:
-            raise ValueError("device type cannot depend on itself")
         if self.factory is None or not callable(self.factory):
             raise TypeError("device type factory must be callable")
         if self.world_config is not None and not callable(self.world_config):
@@ -124,7 +125,6 @@ class DeviceTypeDescriptor:
             raise TypeError("device type log_channels must be non-empty strings")
         object.__setattr__(self, "log_channels", log_channels)
         object.__setattr__(self, "capabilities", capabilities)
-        object.__setattr__(self, "dependencies", dependencies)
 
 
 __all__ = ["CAPABILITY_TYPES", "DeviceTypeDescriptor", "InstallationFactoryContext", "InstalledLeaf"]

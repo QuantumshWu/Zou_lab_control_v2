@@ -652,11 +652,6 @@ class ExperimentSession:
         for key in closed:
             affected_types.add(current_by_key[key].type_id)
 
-        # Factories receive dependency leaves at construction time.  Reusing a
-        # dependant after replacing its dependency would preserve a stale
-        # object reference even when the logical keys look unchanged.
-        affected.update(target_blueprint.dependent_keys(affected_types))
-
         # Close is an operational request, not an edit to apparatus.json.  Its
         # dependency closure is omitted from the live target; the untouched
         # draft remains available for an explicit Apply that opens it again.

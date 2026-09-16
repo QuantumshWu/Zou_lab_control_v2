@@ -522,17 +522,3 @@ def test_installation_isolates_one_factory_failure_and_closes_successful_leaves(
     assert closed == ["good"]
 
 
-def test_missing_dependency_is_a_graph_error_not_a_partial_device() -> None:
-    descriptor = DeviceTypeDescriptor(
-        "test.dependent",
-        "test",
-        AuthoringSchema(()),
-        (),
-        dependencies=("test.missing",),
-        factory=lambda _context, key, _values: InstalledLeaf(key, "test.dependent", object(), {}),
-    )
-    with pytest.raises(ValueError, match="missing dependencies"):
-        create_installation(
-            (DeviceSpec("dependent", "test.dependent"),),
-            catalog=DeviceCatalogSnapshot((descriptor,), ()),
-        )

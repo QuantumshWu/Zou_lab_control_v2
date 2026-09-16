@@ -48,19 +48,6 @@ def _catalog(events: list[str]) -> DeviceCatalogSnapshot:
             closer=lambda key=key: events.append(f"close:{key}"),
         )
 
-    def dependent(context, key, _config):
-        nonlocal serial
-        serial += 1
-        assert "base" in context.devices
-        device = _Device(key, serial)
-        return InstalledLeaf(
-            key,
-            "test.dependent",
-            device,
-            {},
-            closer=lambda key=key: events.append(f"close:{key}"),
-        )
-
     return DeviceCatalogSnapshot(
         (
             DeviceTypeDescriptor(
@@ -70,26 +57,13 @@ def _catalog(events: list[str]) -> DeviceCatalogSnapshot:
                 (),
                 factory=factory,
             ),
-            DeviceTypeDescriptor(
-                "test.dependent",
-                "test",
-                _VALUE_SCHEMA,
-                (),
-                dependencies=("test.base",),
-                factory=dependent,
-            ),
         ),
         (),
     )
 
 
-def _device(key: str, *, role: str | None = None, value: int = 0, dependent=False):
-    return DeviceInstanceConfig(
-        key,
-        role or key,
-        "test.dependent" if dependent else "test.base",
-        {"value": value},
-    )
+def _device(key: str, *, role: str | None = None, value: int = 0):
+    return DeviceInstanceConfig(key, role or key, "test.base", {"value": value})
 
 
 def test_reconcile_reuses_unchanged_leaf_and_only_builds_added_device(tmp_path):
@@ -145,22 +119,6 @@ def test_reconcile_parameter_change_rebuilds_only_that_leaf(tmp_path):
     assert session.installation.device("base") is not original_base
     assert session.installation.device("other") is original_other
     assert events == ["close:base"]
-    session.close()
-
-
-def test_close_device_also_closes_factory_dependants_and_does_not_reopen(tmp_path):
-    events: list[str] = []
-    catalog = _catalog(events)
-    config = InstallationConfig((_device("base"), _device("consumer", dependent=True)))
-    session = ExperimentSession.from_config(tmp_path, config, catalog=catalog)
-
-    plan = session.plan_device_reconcile(config, close_keys=frozenset({"base"}))
-    assert set(plan.affected_keys) == {"base", "consumer"}
-    assert plan.build_keys == ()
-    session.reconcile_devices(plan)
-
-    assert session.installation.devices == {}
-    assert events == ["close:consumer", "close:base"]
     session.close()
 
 
@@ -264,35 +222,6 @@ def test_invalid_target_is_rejected_before_any_live_device_closes(tmp_path):
     session.close()
 
 
-def test_world_and_physical_change_rebuilds_physical_dependants(tmp_path):
-    from zlc_atom.devices.simulation.camera.device_types import DEVICE_TYPES
-
-    events: list[str] = []
-    base_catalog = _catalog(events)
-    virtual = next(item for item in DEVICE_TYPES if item.type_id == "camera.virtual")
-    catalog = DeviceCatalogSnapshot((*base_catalog.available, virtual), ())
-    sim = DeviceInstanceConfig(
-        "sim",
-        "sim",
-        virtual.type_id,
-        virtual.authoring_schema.project_values({}),
-    )
-    initial = InstallationConfig(
-        (_device("base"), _device("consumer", dependent=True), sim),
-        simulation={"seed": 1},
-    )
-    session = ExperimentSession.from_config(tmp_path, initial, catalog=catalog)
-    wanted = InstallationConfig(
-        (_device("base", value=2), _device("consumer", dependent=True), sim),
-        simulation={"seed": 2},
-    )
-
-    plan = session.plan_device_reconcile(wanted)
-    assert set(plan.build_keys) == {"base", "consumer", "sim"}
-    assert plan.retained_keys == ()
-    session.close()
-
-
 def test_operational_close_can_continue_after_last_virtual_leaf(tmp_path):
     from zlc_atom.devices.simulation.camera.device_types import DEVICE_TYPES
 
@@ -341,14 +270,18 @@ def test_operational_close_can_continue_after_last_virtual_leaf(tmp_path):
     session.close()
 
 
-def test_partial_close_projects_effective_config_and_retries_dependencies(tmp_path):
+def test_partial_close_projects_effective_config_and_retries_what_is_left(tmp_path):
+    """A close of several devices that gets part way through is retryable.
+
+    What actually closed leaves the installation and the effective config;
+    what refused stays, reachable, and a second request finishes the job.
+    """
+
     events: list[str] = []
     dependent_attempts = 0
 
-    def leaf_factory(type_id, *, dependency_key=None, closer=None):
-        def factory(context, key, _config):
-            if dependency_key is not None:
-                assert dependency_key in context.devices
+    def leaf_factory(type_id, *, closer=None):
+        def factory(_context, key, _config):
             return InstalledLeaf(
                 key,
                 type_id,
@@ -372,15 +305,11 @@ def test_partial_close_projects_effective_config_and_retries_dependencies(tmp_pa
     )
     dependent = DeviceTypeDescriptor(
         "test.dependent", "test", AuthoringSchema(()), (),
-        dependencies=(base.type_id,),
-        factory=leaf_factory(
-            "test.dependent", dependency_key="base", closer=close_dependent
-        ),
+        factory=leaf_factory("test.dependent", closer=close_dependent),
     )
     grand = DeviceTypeDescriptor(
         "test.grand", "test", AuthoringSchema(()), (),
-        dependencies=(dependent.type_id,),
-        factory=leaf_factory("test.grand", dependency_key="dependent"),
+        factory=leaf_factory("test.grand"),
     )
     catalog = DeviceCatalogSnapshot((base, dependent, grand), ())
     config = InstallationConfig(
@@ -392,9 +321,10 @@ def test_partial_close_projects_effective_config_and_retries_dependencies(tmp_pa
     )
     session = ExperimentSession.from_config(tmp_path, config, catalog=catalog)
 
+    everything = frozenset({"base", "dependent", "grand"})
     with pytest.raises(BaseExceptionGroup, match="installation close failed"):
         session.reconcile_devices(
-            session.plan_device_reconcile(config, close_keys=frozenset({"base"}))
+            session.plan_device_reconcile(config, close_keys=everything)
         )
 
     assert set(session.installation.devices) == {"base", "dependent"}
@@ -403,10 +333,11 @@ def test_partial_close_projects_effective_config_and_retries_dependencies(tmp_pa
     ) == ("base", "dependent")
     assert events == ["close:grand"]
     effective = session.installation_config
+    # Only what is still loaded: "grand" closed the first time, and a
+    # close of something already gone is a mistake this session refuses.
     session.reconcile_devices(
         session.plan_device_reconcile(
-            effective,
-            close_keys=frozenset({"base"}),
+            effective, close_keys=frozenset({"base", "dependent"})
         )
     )
     assert session.installation.devices == {}

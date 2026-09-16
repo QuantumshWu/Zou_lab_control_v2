@@ -254,7 +254,6 @@ class PySerialLink:
 
 
 class UartRegisterTransport:
-    transport_id = "uart"
     observer_interval = UART_OBSERVER_INTERVAL
 
     def __init__(

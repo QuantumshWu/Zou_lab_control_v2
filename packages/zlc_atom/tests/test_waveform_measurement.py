@@ -1,4 +1,4 @@
-"""A waveform source is a camera for time: one record, one shot, one measurement."""
+"""A waveform source is a camera for time: one reading, one shot, one measurement."""
 
 from __future__ import annotations
 

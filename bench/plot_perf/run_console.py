@@ -80,7 +80,7 @@ _COMPOSE_SEAMS = (
     "_cached_image_range",
     "_blit_exact_rgba_image",
     "_dynamic_artists",
-    "_raster_facet_curve_command",
+    "_raster_prepared_curve_command",
     "_raster_prepared_error_bars",
     "_raster_prepared_images",
     "_thin_overlapping_chrome",

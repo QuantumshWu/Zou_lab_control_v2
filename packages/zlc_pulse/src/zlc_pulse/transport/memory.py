@@ -23,7 +23,6 @@ from .base import DEFAULT_OBSERVER_INTERVAL
 
 
 class MemoryRegisterTransport:
-    transport_id = "memory"
     observer_interval = DEFAULT_OBSERVER_INTERVAL
 
     def __init__(

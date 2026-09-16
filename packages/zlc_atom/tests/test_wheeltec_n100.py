@@ -29,7 +29,7 @@ from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
     FRAME_TAIL,
     IMU_PACKET,
-    IMU_RATE_PARAMETER,
+    IMU_PACKET_NAME,
     PACKET_RATE_LADDER_HZ,
     FdiConfigConsole,
     WheeltecN100Config,
@@ -76,7 +76,7 @@ class _FakeModule:
             parameters
             if parameters is not None
             else {
-                IMU_RATE_PARAMETER: str(PACKET_RATE_LADDER_HZ.index(rate_hz)),
+                IMU_PACKET_NAME: str(PACKET_RATE_LADDER_HZ.index(rate_hz)),
                 "MSG_AHRS": "0",
                 "FILT_LPF_ENABLED": "0",
                 "FILT_NOTCH_ENABLED": "0",
@@ -115,7 +115,7 @@ class _FakeModule:
     def rate_hz(self) -> float:
         """The rate the ladder index names; index 0 is no output at all."""
 
-        return self._rate_of(IMU_RATE_PARAMETER)
+        return self._rate_of(IMU_PACKET_NAME)
 
     def _rate_of(self, name: str) -> float:
         """From what the module is RUNNING, not from the table."""
@@ -223,7 +223,7 @@ class _FakeModule:
             # The module enumerating itself, verbatim in this layout:
             #     MSG_IMU[40]   10.0Hz
             for name, packet_id in (
-                (IMU_RATE_PARAMETER, IMU_PACKET), ("MSG_AHRS", 0x41)
+                (IMU_PACKET_NAME, IMU_PACKET), ("MSG_AHRS", 0x41)
             ):
                 self._say(f"{name}[{packet_id:02x}]   {self._rate_of(name):.1f}Hz")
         elif line.startswith("#fmsg "):
@@ -290,15 +290,6 @@ def test_the_console_is_this_bench_s_own_text_link() -> None:
         with pytest.raises(TuneRefused, match="no parameter"):
             console.set_parameter("NO_SUCH_PARAMETER", "1")
         console.save()
-
-        # It is the bench's own text-command link, the same shape a Rigol
-        # and a Tektronix are driven through.
-        from zlc_atom.devices.visa import ScpiLink
-
-        assert all(
-            callable(getattr(console, name, None))
-            for name in ScpiLink.__protocol_attrs__
-        ), sorted(ScpiLink.__protocol_attrs__)
     assert module.streaming is True, "leaving puts it back on the air"
     assert module.commands[0] == "#fconfig" and module.commands[-1] == "#fdeconfig"
 
@@ -325,7 +316,7 @@ def test_entry_is_the_stream_stopping_not_a_banner() -> None:
         assert terse.streaming is False
         # It printed nothing at all, and it is in config mode: what says so
         # is that it answers the question every module answers.
-        assert console.get_parameter(IMU_RATE_PARAMETER) is not None
+        assert console.get_parameter(IMU_PACKET_NAME) is not None
 
     class _Deaf(_FakeModule):
         def _answer(self, line: str) -> None:
@@ -357,28 +348,29 @@ def test_the_rate_is_a_ladder_rung_written_as_its_index() -> None:
         # ...and 1 Hz hides them from a scan that listens for half a second,
         # which applying would then write to flash. Same hazard, slower.
         rate_ladder_index(1.0)
-    assert rate_ladder_index(1.0, may_turn_off=True) == 1, (
-        "a packet this bench does not find the module by may go that slow"
+    assert rate_ladder_index(1.0, standing_at=1.0) == 1, (
+        "unless the module is already ON it: putting a rate back where it "
+        "was cannot be a new way of losing the module, and the undo needs it"
     )
 
     module = _FakeModule(rate_hz=10.0)
     source = _source(module)
     try:
         values = source.tunable_values()
-        assert values[IMU_RATE_PARAMETER] == "10", "reported in hertz by #fmsg"
+        assert values[IMU_PACKET_NAME] == "10", "reported in hertz by #fmsg"
         assert source.working_point().sample_interval_seconds == pytest.approx(0.1)
 
         # Only the rungs are offered, so a wrong number cannot be typed.
         offered = {
             field.metadata.name: field.metadata for field in source.tunable_fields()
-        }[IMU_RATE_PARAMETER]
+        }[IMU_PACKET_NAME]
         assert [choice.value for choice in offered.choices] == [
             "5", "10", "20", "50", "100", "200", "400"
         ], "1 and 2 Hz are too slow for a scan to hear, so they are not offered"
 
-        assert source.tune(IMU_RATE_PARAMETER, "100") == "100"
-        assert module.parameters[IMU_RATE_PARAMETER] == "7", "written as its index"
-        assert module.saved[IMU_RATE_PARAMETER] == "7", "and committed to flash"
+        assert source.tune(IMU_PACKET_NAME, "100") == "100"
+        assert module.parameters[IMU_PACKET_NAME] == "7", "written as its index"
+        assert module.saved[IMU_PACKET_NAME] == "7", "and committed to flash"
         assert module.rate_hz == 100.0, "and live, which takes the restart"
         assert "#fsave" in module.commands and "#freboot" in module.commands
         assert source.working_point().sample_interval_seconds == pytest.approx(
@@ -398,13 +390,13 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
         source.arm(None, buffer_record_count=4)
         assert source.read_records(1, timeout=3.0, exact=True)
         with pytest.raises(RuntimeError, match="capture must be finished"):
-            source.tune(IMU_RATE_PARAMETER, "200")
+            source.tune(IMU_PACKET_NAME, "200")
         # Reading the rate never touches the console -- the stream says it --
         # so there is nothing here for a capture to refuse.
-        assert source.tunable_values()[IMU_RATE_PARAMETER] == "100"
+        assert source.tunable_values()[IMU_PACKET_NAME] == "100"
         assert module.rate_hz == 100.0, "nothing was written"
         source.finish_record_capture()
-        assert source.tune(IMU_RATE_PARAMETER, "200") == "200"
+        assert source.tune(IMU_PACKET_NAME, "200") == "200"
     finally:
         source.close()
 
@@ -429,9 +421,9 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
         """
 
         def _answer(self, line: str) -> None:
-            if line == "#fparam set %s 7" % IMU_RATE_PARAMETER:
+            if line == "#fparam set %s 7" % IMU_PACKET_NAME:
                 self.commands.append(line)
-                self.parameters[IMU_RATE_PARAMETER] = "0"   # no output
+                self.parameters[IMU_PACKET_NAME] = "0"   # no output
                 self._say(OK)
                 return
             super()._answer(line)
@@ -440,7 +432,7 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
     source = _source(module)
     try:
         with pytest.raises(TuneRefused, match="stopped it sending"):
-            source.tune(IMU_RATE_PARAMETER, "100")
+            source.tune(IMU_PACKET_NAME, "100")
         assert module.rate_hz == 50.0, "the restart put it back"
         assert module.streaming is True
         source.arm(None, buffer_record_count=4)
@@ -476,7 +468,7 @@ def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
         # back on the air, and the driver says so rather than reporting the
         # write as done.
         with pytest.raises(RuntimeError, match="stopped it sending"):
-            source.tune(IMU_RATE_PARAMETER, 50.0)
+            source.tune(IMU_PACKET_NAME, 50.0)
     finally:
         source.close()
 
@@ -506,7 +498,7 @@ def test_a_heartbeat_is_not_a_navigating_module() -> None:
         # back on the air, and the driver says so rather than reporting the
         # write as done.
         with pytest.raises(RuntimeError, match="stopped it sending"):
-            source.tune(IMU_RATE_PARAMETER, 50.0)
+            source.tune(IMU_PACKET_NAME, 50.0)
     finally:
         source.close()
 
@@ -550,9 +542,9 @@ def test_a_module_whose_console_stays_silent_still_streams() -> None:
     module = _Mute()
     source = _source(module)
     try:
-        assert source.tunable_values() == {IMU_RATE_PARAMETER: "100"}
+        assert source.tunable_values() == {IMU_PACKET_NAME: "100"}
         point = source.working_point()
-        assert point.settings["settings"] == {IMU_RATE_PARAMETER: 100.0}
+        assert point.settings["settings"] == {IMU_PACKET_NAME: 100.0}
         assert not point.settings["settings_refusal"]
         assert not module.commands, "opening it asked the console nothing"
         assert point.sample_interval_seconds == pytest.approx(0.01)
@@ -615,7 +607,7 @@ def test_a_module_that_takes_its_time_is_still_answering() -> None:
     source = _source(module)
     try:
         values = source.tunable_values()
-        assert values[IMU_RATE_PARAMETER] == "10"
+        assert values[IMU_PACKET_NAME] == "10"
     finally:
         source.close()
 
@@ -640,7 +632,7 @@ def test_a_slow_console_never_reads_the_previous_reply() -> None:
     source = _source(module)
     try:
         values = source.tunable_values()
-        assert values[IMU_RATE_PARAMETER] == "10"
+        assert values[IMU_PACKET_NAME] == "10"
     finally:
         source.close()
 
@@ -666,7 +658,7 @@ def test_a_heartbeat_does_not_block_entering_config_mode() -> None:
     module = _Ticks(rate_hz=10.0)
     with FdiConfigConsole(module) as console:
         assert module.streaming is False, "it entered, heartbeat and all"
-        assert console.get_parameter(IMU_RATE_PARAMETER) == "4", "rung 4 is 10 Hz"
+        assert console.get_parameter(IMU_PACKET_NAME) == "4", "rung 4 is 10 Hz"
 
 
 def test_a_refused_save_is_not_a_save() -> None:
@@ -684,8 +676,8 @@ def test_a_refused_save_is_not_a_save() -> None:
     source = _source(module)
     try:
         with pytest.raises((TuneRefused, RuntimeError)):
-            source.tune(IMU_RATE_PARAMETER, 50.0)
-        assert source.tunable_values()[IMU_RATE_PARAMETER] == "100", (
+            source.tune(IMU_PACKET_NAME, 50.0)
+        assert source.tunable_values()[IMU_PACKET_NAME] == "100", (
             "the settings must not claim a value the module would not keep"
         )
     finally:
@@ -720,4 +712,4 @@ def test_somebody_else_s_reply_is_not_a_missing_parameter() -> None:
         for stray in ("*#OK", "(y/n)", "MSG_ODOMETER[6f]   0.0Hz", "Config Mode"):
             module.stray = stray
             with pytest.raises(RuntimeError, match="neither the value nor"):
-                console.get_parameter(IMU_RATE_PARAMETER)
+                console.get_parameter(IMU_PACKET_NAME)

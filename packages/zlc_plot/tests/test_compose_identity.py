@@ -885,7 +885,7 @@ def test_a_facet_grids_live_frames_carry_no_past_after_a_materialization(
         if materialization == "export":
             session.save(tmp_path / "grid.png", export_scale=1.0)
         else:
-            native = MatplotlibRenderer._raster_facet_curve_command
+            native = MatplotlibRenderer._raster_prepared_curve_command
             declined: list[bool] = []
 
             def decline_once(self, canvas, underlay=None):
@@ -895,7 +895,7 @@ def test_a_facet_grids_live_frames_carry_no_past_after_a_materialization(
                 return native(self, canvas, underlay=underlay)
 
             monkeypatch.setattr(
-                MatplotlibRenderer, "_raster_facet_curve_command", decline_once
+                MatplotlibRenderer, "_raster_prepared_curve_command", decline_once
             )
             _live_advance(session, landed(4))
             assert declined, "the fallback compose must have run"

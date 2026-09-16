@@ -175,13 +175,6 @@ STANDALONE_CONNECTION_CHOICES = (
 #: as one pixel, so a legal pulse looks like no pulse.  1 us is the established
 #: PulseGUI's answer and reads on the timeline at its default zoom.
 NEW_PULSE_PERIOD_NS = 1000.0
-#: How many sweeps a scan runs when nobody has said: none, meaning until Stop.
-#: On Pulse is a cycle an experiment holds running, and a scan is no different
-#: -- and the alternative is a finite run, which the client waits out by asking
-#: the server every 10 ms whether it is done yet.  The default was 1 here and 0
-#: in the control that shows it, so every scan silently became that finite run
-#: and one five-second shot printed four hundred lines of "state=PENDING".
-SCAN_UNTIL_STOP = 0
 #: The page whose contents cost something to produce.  Drawing a timeline
 #: starts a render worker and a drawing session, and doing that for a page
 #: nobody has turned to is most of what a window spends before it appears.
@@ -1939,13 +1932,19 @@ class PulseEditorPresenter:
         holding_lease = self._drive_lease is not None
         dial = self._dial
         had_sequence = self.sequence is not None
+        #: A previous board this editor was driving that could not be told
+        #: to stop.  It does not stop the new connection -- the old board is
+        #: unreachable either way -- but the operator has to be told.
+        unsafe: list[BaseException] = []
 
         def work(_operation: int) -> object:
             if previous is not None:
                 try:
-                    self._hang_up(previous, holding_lease)
+                    failed_safe = self._hang_up(previous, holding_lease)
                 except BaseException as error:  # noqa: BLE001 -- delivered
                     return "release", None, error
+                if failed_safe is not None:
+                    unsafe.append(failed_safe)
             if mode == CONNECTION_OFFLINE:
                 return "offline", None, None
             try:
@@ -1967,6 +1966,14 @@ class PulseEditorPresenter:
             return "described", (sequencer, board, state), None
 
         def delivered(result: object, failure: BaseException | None) -> None:
+            if unsafe:
+                self._warn(
+                    "the pulse server connection ended before the previous "
+                    f"board could be told to stop ({unsafe[0]}). If that "
+                    "server is still running it drives the board safe when a "
+                    "client disconnects; if it is not, THAT SEQUENCE IS STILL "
+                    "PLAYING and the board must be stopped another way."
+                )
             if failure is not None:
                 self._show_connection(f"failed: {failure}")
                 self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {failure}")
@@ -2009,24 +2016,33 @@ class PulseEditorPresenter:
         return self._run_device_command(work, delivered, summary="Connecting...")
 
     @staticmethod
-    def _hang_up(sequencer: object, holding_lease: bool) -> None:
+    def _hang_up(sequencer: object, holding_lease: bool) -> BaseException | None:
         """End one connection on the thread that owns the device conversation.
 
-        A board this editor was driving goes safe first.  A connection that
-        has already ended is not a failure to go safe: the pulse server's own
-        law drives AUTO-SAFE the moment a client disconnects.
+        A board this editor was driving is told to go safe first, and the
+        connection is closed whatever that told us -- refusing to close
+        would hold the window hostage to a board it has no channel to.
+
+        What it does not do is pass the failure off as an orderly hang-up.
+        The server's AUTO-SAFE runs in its handler's finally, which needs
+        that server still alive and still able to reach the board, and a
+        ConnectionError is raised exactly when that is in doubt.  So the
+        failure is ANSWERED rather than swallowed, and the caller says so
+        on the owner thread where there is somewhere to say it.
         """
 
+        unsafe: BaseException | None = None
         if holding_lease:
             safe = getattr(sequencer, "safe", None)
             if callable(safe):
                 try:
                     safe()
-                except ConnectionError:
-                    return
+                except ConnectionError as error:
+                    unsafe = error
         close = getattr(sequencer, "close", None)
         if callable(close):
             close()
+        return unsafe
 
     def _forget_connection(self) -> None:
         """Retire everything the departed board asserted about itself."""
@@ -3227,6 +3243,7 @@ class PulseEditorPresenter:
 
     def _adopt_board_answer(self, answer: object) -> None:
         finite_answer, state = answer
+        faulted = False
         if finite_answer is not None:
             kind, payload = finite_answer
             if kind == "failed":
@@ -3242,12 +3259,21 @@ class PulseEditorPresenter:
                     # releasing the lease here and saying nothing left the
                     # sequence playing behind an idle-looking window.
                     self._warn(f"finite pulse stopped: {fault}")
-                    self._safe_drive(release=True)
+                    faulted = True
                 else:
                     self._release_drive()
             elif state.answering and not state.firing:
                 self._release_drive()
         self._adopt_board_state(state)
+        if faulted:
+            # Through Stop, which is the one implementation of "tell the
+            # board to stop": it puts the SAFE on the device worker, where
+            # every other board conversation happens.  Sent from here it
+            # would be a blocking socket round trip on the OWNER, the one
+            # thread this module's whole status path exists to keep off the
+            # wire -- and it ran after the state was adopted, so the window
+            # would freeze showing the board still firing.
+            self.stop()
 
     def _adopt_board_state(self, state: BoardState) -> None:
         """Show what the board said, wherever and whenever it was asked."""

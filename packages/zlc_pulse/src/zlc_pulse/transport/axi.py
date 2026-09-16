@@ -68,10 +68,24 @@ def _word_value(value: int) -> int:
     return value
 
 
+#: How long Vivado may take to come up and open the hardware target.
+STARTUP_TIMEOUT_SECONDS = 180.0
+
+#: And how long any one AXI action may take once it is up.
+ACTION_TIMEOUT_SECONDS = 120.0
+
+#: Writes per Tcl block.  A block is one round trip, so this trades the
+#: number of trips against how much is in flight when one is cancelled.
+WRITE_BATCH = 200
+
+#: The longest burst the AXI master will do, which is the hardware's own
+#: limit rather than a choice.
+BURST_MAX = 256
+
+
 class VivadoAxiRegisterTransport:
     """Ordered 32-bit register/BRAM access through one persistent Vivado Tcl owner."""
 
-    transport_id = "vivado-axi"
     observer_interval = JTAG_AXI_OBSERVER_INTERVAL
 
     def __init__(
@@ -81,10 +95,6 @@ class VivadoAxiRegisterTransport:
         vivado: str | None = None,
         probes: str | None = None,
         hw_server_url: str | None = None,
-        startup_timeout: float = 180.0,
-        action_timeout: float = 120.0,
-        write_batch: int = 200,
-        burst_max: int = 256,
         tcl_executor: Callable[[Sequence[str], str, float | None], str] | None = None,
     ) -> None:
         self.state_dir = Path(state_dir)
@@ -97,22 +107,6 @@ class VivadoAxiRegisterTransport:
             or os.environ.get("ZLC_HW_SERVER_URL")
             or ""
         )
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value <= 0
-            for value in (startup_timeout, action_timeout)
-        ):
-            raise ValueError("AXI transport timeouts must be finite and positive")
-        self.startup_timeout = float(startup_timeout)
-        self.action_timeout = float(action_timeout)
-        if isinstance(write_batch, bool) or not isinstance(write_batch, int) or write_batch <= 0:
-            raise ValueError("write_batch must be a positive integer")
-        if isinstance(burst_max, bool) or not isinstance(burst_max, int) or not 1 <= burst_max <= 256:
-            raise ValueError("burst_max must be in the hardware range [1, 256]")
-        self.write_batch = write_batch
-        self.burst_max = burst_max
         self._external_executor = tcl_executor
         self._io_lock = threading.RLock()
         self._process: subprocess.Popen | None = None
@@ -166,7 +160,7 @@ class VivadoAxiRegisterTransport:
                 self._run_tcl(
                     self._init_tcl(),
                     action="transport_start",
-                    deadline=time.monotonic() + self.startup_timeout,
+                    deadline=time.monotonic() + STARTUP_TIMEOUT_SECONDS,
                 )
             except BaseException:
                 self._closed = True
@@ -195,7 +189,7 @@ class VivadoAxiRegisterTransport:
         for base, values in self._burst_runs(pending):
             lines.extend(self._write_burst_tcl(base, values))
             bursts += 1
-            if bursts >= self.write_batch:
+            if bursts >= WRITE_BATCH:
                 self._run_tcl(
                     lines,
                     action="axi_write",
@@ -272,7 +266,7 @@ class VivadoAxiRegisterTransport:
 
     def _effective_deadline(self, value: float | None) -> float:
         deadline = (
-            time.monotonic() + self.action_timeout
+            time.monotonic() + ACTION_TIMEOUT_SECONDS
             if value is None
             else float(value)
         )
@@ -334,7 +328,7 @@ class VivadoAxiRegisterTransport:
             cursor = index + 1
             while (
                 cursor < len(pending)
-                and len(values) < self.burst_max
+                and len(values) < BURST_MAX
                 and pending[cursor][0] == base + 4 * len(values)
                 and (base + 4 * len(values)) // AXI_BURST_BOUNDARY_BYTES
                 == base // AXI_BURST_BOUNDARY_BYTES
@@ -409,10 +403,6 @@ class VivadoAxiRegisterTransport:
                     )
                 except TimeoutError:
                     self._closed = True
-                    raise
-                except TransportAborted:
-                    # Cancelled, not broken.  An external executor owns its
-                    # own framing, so there is nothing here to drain.
                     raise
             return self._execute(
                 lines,
@@ -492,6 +482,12 @@ class VivadoAxiRegisterTransport:
             if reader.is_alive():
                 raise RuntimeError("Vivado AXI reader did not stop")
         self._queue = queue.Queue()
+        # The reply nobody read went with the process that was going to
+        # send it.  Left standing, the marker outlives a restart: start()
+        # brings up a new Vivado, and the next command waits out a block
+        # that this process never owed and never sends -- an error about an
+        # abandoned reply, pointing at a command from before the restart.
+        self._abandoned_marker = None
 
     @staticmethod
     def _wrap_tcl(lines: Sequence[str], marker: str) -> str:
