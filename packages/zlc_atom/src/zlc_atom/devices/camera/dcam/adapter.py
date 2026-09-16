@@ -546,11 +546,6 @@ class DcamCameraAdapter:
                 if after != before:
                     raise RuntimeError("qCMOS working point changed across arm")
                 self._working_point = after
-                count, newest = device.transfer_info()
-                if int(count) != 0 or int(newest) != -1:
-                    raise RuntimeError(
-                        "qCMOS transfer counter did not reset at the arm boundary"
-                    )
             except BaseException as primary:
                 self._working_point = None
                 self._requested_settings.clear()
@@ -592,6 +587,8 @@ class DcamCameraAdapter:
                 self._capture_running = True
                 self._ring_size = buffer_count
                 self._expected_frames = expected
+                # Frames may already arrive during the post-start readback.
+                # The first ordinary drain still starts at this arm's frame 0.
                 self._copied_count = 0
                 self._last_transfer_count = 0
                 self._last_transfer_newest = None

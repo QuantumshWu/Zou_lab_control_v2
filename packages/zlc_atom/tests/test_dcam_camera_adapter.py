@@ -297,7 +297,10 @@ def test_working_point_reuses_applied_readback_and_all_sdk_calls_share_owner(mon
     assert next(iter(owner_threads)) != threading.get_ident()
 
 
-def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata() -> None:
+@pytest.mark.parametrize("arrived_during_arm", (0, 1, 2, 3))
+def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata(
+    arrived_during_arm: int, monkeypatch,
+) -> None:
     driver = _FakeDcamDriver()
     adapter = DcamCameraAdapter(_config(), driver=driver)
     try:
@@ -307,12 +310,29 @@ def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata() 
             buffer_frame_count=3,
             timeout=1.0,
         )
+        if arrived_during_arm:
+            adapter.finish_record_capture()
+            start = driver.device.start_capture
+
+            def start_with_new_frames() -> None:
+                start()
+                driver.device.publish(
+                    (11, 22, 33)[:arrived_during_arm],
+                    newest=(arrived_during_arm + 1) % 3,
+                )
+
+            monkeypatch.setattr(driver.device, "start_capture", start_with_new_frames)
+            adapter.arm(3, source_group_sizes=(3,), buffer_frame_count=3, timeout=1.0)
         assert driver.device.ring_size == 3
+        records = (
+            adapter.read_frame_records(arrived_during_arm, timeout=0.0, exact=True)
+            if arrived_during_arm else []
+        )
         driver.device.publish((11, 22, 33), newest=1)
-        records = [
+        records.extend(
             adapter.read_frame_records(1, timeout=1.0, exact=True)[0]
-            for _index in range(3)
-        ]
+            for _index in range(3 - arrived_during_arm)
+        )
         driver.device.ring.clear()
         assert [int(record.image[0, 0]) for record in records] == [11, 22, 33]
         assert [record.source_ordinal for record in records] == [0, 1, 2]
