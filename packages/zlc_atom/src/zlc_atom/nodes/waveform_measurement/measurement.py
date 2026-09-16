@@ -19,7 +19,10 @@ records are separate events and only the newest of them can be the
 reading: at each due time that one is published and whatever arrived
 before it is let go.  A shot is ``(1) x () x (channel, time)``, the
 samples on a READOUT_EVENT axis whose coordinates are seconds from the
-trigger.
+record's OWN FIRST SAMPLE -- not from the trigger, which is a thing this
+bench does not know: the scope is asked for its sample interval and never
+for where in the record the trigger sits, so on an instrument holding the
+usual half-record of pre-trigger, t=0 is half a record BEFORE it.
 
 A FREE-RUNNING source -- an IMU, a DAQ card -- is slicing ONE continuous
 signal, so its consecutive records abut and none of them may be dropped:
