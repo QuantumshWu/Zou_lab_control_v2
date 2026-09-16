@@ -115,7 +115,11 @@ def _one_line(error: BaseException) -> str:
     the breaks are folded rather than the message cut.
     """
 
-    return " ".join(str(error).split())
+    if isinstance(error, BaseExceptionGroup):
+        message = f"{error.message}: " + "; ".join(_one_line(child) for child in error.exceptions)
+    else:
+        message = str(error)
+    return " ".join(message.split())
 
 
 def _run_inline(work, deliver, failed) -> None:
@@ -972,6 +976,7 @@ class DeviceManagerPresenter:
 
         def failed(error: BaseException) -> None:
             refresh_error = None
+            _LOG.error("device changes did not apply", exc_info=error)
             effective = getattr(session, "installation_config", None)
             if (
                 isinstance(effective, InstallationConfig)
@@ -989,9 +994,9 @@ class DeviceManagerPresenter:
             self.busy = False
             self._show()
             self._report(
-                f"device changes did not apply: {error}"
+                f"device changes did not apply: {_one_line(error)}"
                 + (
-                    f"; device views did not refresh: {refresh_error}"
+                    f"; device views did not refresh: {_one_line(refresh_error)}"
                     if refresh_error is not None
                     else ""
                 ),
@@ -1190,7 +1195,8 @@ class DeviceManagerPresenter:
             try:
                 prepared = self._prepare_shutdown(session)
             except Exception as error:
-                self._report(f"devices did not prepare to shut down: {error}", severity="error")
+                _LOG.error("devices did not prepare to shut down", exc_info=error)
+                self._report(f"devices did not prepare to shut down: {_one_line(error)}", severity="error")
                 return False
             if not prepared:
                 return False
@@ -1211,7 +1217,8 @@ class DeviceManagerPresenter:
         def failed(error: BaseException) -> None:
             self.busy = False
             self._show()
-            self._report(f"devices did not shut down: {error}", severity="error")
+            _LOG.error("devices did not shut down", exc_info=error)
+            self._report(f"devices did not shut down: {_one_line(error)}", severity="error")
 
         def finished(retired: object) -> None:
             nonlocal completed

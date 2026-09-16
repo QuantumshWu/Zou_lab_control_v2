@@ -55,6 +55,23 @@ class LmsLibrary(Protocol):
 class CtypesLmsLibrary:
     """The real DLL behind the Protocol.  Windows only, by the vendor."""
 
+    @staticmethod
+    def _check_status(operation: str, handle: int, status: int) -> None:
+        # Vendor API manual section 3.2 and LMSTest::CheckAPISet: only bit
+        # 31 denotes a command error; a nonzero success is not a refusal.
+        code = int(status) & 0xFFFFFFFF
+        if code & 0x80000000:
+            reason = {
+                0x80000000: "INVALID_DEVID",
+                0x80010000: "BAD_PARAMETER",
+                0x80020000: "BAD_HID_IO",
+                0x80030000: "DEVICE_NOT_READY",
+            }.get(code, "SDK_ERROR")
+            raise RuntimeError(
+                f"{operation} refused for device {handle}: {reason} "
+                f"(status {int(status)}, 0x{code:08X})"
+            )
+
     def __init__(self, dll_path: str) -> None:
         import ctypes
 
@@ -85,44 +102,31 @@ class CtypesLmsLibrary:
         self._dll.fnLMS_GetDevInfo(identifiers)
         for identifier in identifiers[:count]:
             if int(self._dll.fnLMS_GetSerialNumber(identifier)) == int(serial):
-                status = int(self._dll.fnLMS_InitDevice(identifier))
-                if status != 0:
-                    raise RuntimeError(
-                        f"Vaunix LMS {serial} refused to open (status {status})"
-                    )
+                self._check_status("fnLMS_InitDevice", int(identifier),
+                                   self._dll.fnLMS_InitDevice(identifier))
                 return int(identifier)
         raise LookupError(f"no Vaunix LMS with serial {serial} is attached")
 
     def close_device(self, handle: int) -> None:
-        # The SDK answers close with a status like every other call, and a
-        # non-zero one (BAD_HID_IO, say) means the handle is still open.
-        # Swallowing it let the installation believe the brick released
-        # and drop the only reference that could retry.
-        status = int(self._dll.fnLMS_CloseDevice(handle))
-        if status != 0:
-            raise RuntimeError(
-                f"fnLMS_CloseDevice refused to close device {handle} "
-                f"(status {status})"
-            )
+        self._check_status("fnLMS_CloseDevice", handle, self._dll.fnLMS_CloseDevice(handle))
 
     def set_frequency(self, handle: int, frequency_units: int) -> None:
-        status = int(self._dll.fnLMS_SetFrequency(handle, int(frequency_units)))
-        if status != 0:
-            raise RuntimeError(f"fnLMS_SetFrequency refused (status {status})")
+        self._check_status("fnLMS_SetFrequency", handle,
+                           self._dll.fnLMS_SetFrequency(handle, int(frequency_units)))
 
     def get_frequency(self, handle: int) -> int:
         return int(self._dll.fnLMS_GetFrequency(handle))
 
     def set_power(self, handle: int, power_units: int) -> None:
-        status = int(self._dll.fnLMS_SetPowerLevel(handle, int(power_units)))
-        if status != 0:
-            raise RuntimeError(f"fnLMS_SetPowerLevel refused (status {status})")
+        self._check_status("fnLMS_SetPowerLevel", handle,
+                           self._dll.fnLMS_SetPowerLevel(handle, int(power_units)))
 
     def get_power(self, handle: int) -> int:
         return int(self._dll.fnLMS_GetAbsPowerLevel(handle))
 
     def set_rf_on(self, handle: int, enabled: bool) -> None:
-        self._dll.fnLMS_SetRFOn(handle, bool(enabled))
+        self._check_status("fnLMS_SetRFOn", handle,
+                           self._dll.fnLMS_SetRFOn(handle, bool(enabled)))
 
     def get_rf_on(self, handle: int) -> bool:
         return bool(self._dll.fnLMS_GetRF_On(handle))

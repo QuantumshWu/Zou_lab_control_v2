@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- LMS关闭整改：厂商Windows SDK手册§3.2及LMSTest::CheckAPISet规定bit31为错误标志，旧Close把所有nonzero判失败（f5f2ab9b首次增加该检查）。现与Init/频率/功率/RF开关共用命令状态检查，真实错误带名称及hex；Installation成功才释放、失败仍持有。DeviceManager原_one_line展开异常组，单设备Close/reconcile/Shutdown均显示真实原因并记录完整traceback。LMS关闭成功非零/错误重试与virtual驱动两例、Manager两例通过。厂商DLL在TestMode下通过生产wrapper打开并关闭2个模拟设备，未接真实设备；现场具体返回码尚未知，不能据顶层'1 sub-exception'保证现场唯一根因。
+
 - Facet直接文件导出丢边框/刻度/cell标题根修：把统一chrome准备从screen-only compose移到RenderFrame公共present最终几何之后、compose分支之前；屏幕与文件消费同一份场景，Save不补Calibration特判、不补无用screen draw。原caller-owned classifier导出例先红（0边框/0标题）后绿（2cell共8边框/2标题），其PNG与同DPI普通screen-prepared导出逐像素一致；DPR1/2 Facet Image更新及复用后的导出共4项直接验证通过。截图/诊断产物在ignored research，未改导出参数或拟合数据。
 
 - 对前轮交互/Image整改的独立复核又关闭三处实证遗漏：Group消失后的隐藏锁回写、pointer锁定后以旧整帧状态误判解锁no-op，以及非均匀Image height坐标注释按ordinal跨度错误舍入。均在原Session/renderer owner修复，没有额外Workbench状态或补偿重试。原用例先红后绿；正式Qt完成Live锁→Frozen→Group移除/恢复→重新锁→Frozen解锁，等同步目标退役后两Host确实清锁，hover PNG/NPZ一致；窗口关闭。DCAM四种非法早帧仍在copy前拒绝，没有新增硬件结论。

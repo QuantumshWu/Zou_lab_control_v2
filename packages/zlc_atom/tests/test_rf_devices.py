@@ -802,14 +802,7 @@ def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> No
 
 
 def test_a_brick_the_sdk_refuses_to_close_stays_owned() -> None:
-    """A close status is an answer, and a non-zero one means "still open".
-
-    ``fnLMS_CloseDevice`` returns a status like every other SDK call.  It
-    was discarded, so the installation heard "closed", dropped the leaf and
-    unbound the brick -- while the SDK still held the handle and nothing
-    was left that could retry.  The status is raised now, and the leaf
-    stays owned so ``close`` can be tried again.
-    """
+    """SDK error-bit replies retain ownership; nonzero success releases it."""
 
     from zlc_atom.devices.rf.binding import bind_rf_source
     from zlc_atom.execution import DeviceBroker
@@ -865,6 +858,24 @@ def test_a_brick_the_sdk_refuses_to_close_stays_owned() -> None:
     )
     assert physical["close_attempts"] == 2
     broker.verify_capability(leaf.binding)
+
+    def successful_close(_identifier) -> int:
+        physical["close_attempts"] += 1
+        physical["open"] = False
+        return 1  # Nonzero is not the vendor's error flag (bit 31).
+
+    library._dll.fnLMS_CloseDevice = successful_close
+    installation.close()
+    assert not installation.devices and not physical["open"]
+    installation.close()
+    assert physical["close_attempts"] == 3
+
+    # RF-off and other setters use the same command-status contract.
+    library._dll.fnLMS_SetRFOn = lambda *_args: 0x80020000
+    with pytest.raises(RuntimeError, match="BAD_HID_IO"):
+        library.set_rf_on(7, False)
+    library._dll.fnLMS_SetRFOn = lambda *_args: 1
+    library.set_rf_on(7, False)
 
 
 def test_the_lab_brick_speaks_its_own_units_and_refuses_off_grid() -> None:

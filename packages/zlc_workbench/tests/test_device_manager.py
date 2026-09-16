@@ -507,7 +507,7 @@ def test_a_standalone_editor_without_a_session_factory_cannot_fake_init(tmp_path
     assert manager._active_session is None
 
 
-def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
+def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) -> None:
     """Init is the shared Experiment boundary, not a build-and-release test."""
 
     from types import SimpleNamespace
@@ -535,6 +535,13 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     initialized: list[object] = []
     shut_down: list[object] = []
     candidates: list[InstallationConfig] = []
+    shutdown_attempts = []
+
+    def shutdown(active):
+        shutdown_attempts.append(active)
+        if len(shutdown_attempts) == 1:
+            raise ExceptionGroup("installation close failed", [RuntimeError("device handle refused release")])
+        shut_down.append(active)
 
     def initialize(candidate: InstallationConfig) -> object:
         candidates.append(candidate)
@@ -547,7 +554,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
         initial_config=initial,
         initialize_session=initialize,
         on_initialized=initialized.append,
-        shutdown_session=shut_down.append,
+        shutdown_session=shutdown,
     )
 
     assert tuple(manager.devices) == initial.devices
@@ -566,6 +573,12 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     manager.cancel()
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
+    manager.toggle_lifecycle()
+    assert manager._active_session is session
+    assert shut_down == []
+    assert "device handle refused release" in view.status[-1][1]
+    assert any(record.exc_info and isinstance(record.exc_info[1], BaseExceptionGroup)
+               for record in caplog.records)
     manager.toggle_lifecycle()
     assert manager._active_session is None
     assert shut_down == [session]
@@ -712,8 +725,10 @@ def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
     assert shut_down == []
 
 
-def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path) -> None:
+def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path, caplog) -> None:
     from zlc_atom.install import discover_device_catalog
+    from zlc_atom.install.graph import Installation
+    from zlc_atom.install.descriptors import InstalledLeaf
 
     camera = next(
         item
@@ -730,14 +745,23 @@ def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path) ->
             ),
         )
     )
-    session = SimpleNamespace(
-        installation=SimpleNamespace(devices={"camera": object()}, failures={})
-    )
+    close_attempts = []
+    def close_leaf():
+        close_attempts.append(1)
+        if len(close_attempts) == 1:
+            raise ExceptionGroup("SDK close", [RuntimeError("fnLMS_CloseDevice refused device 7 error 0x80000001")])
+    installation = Installation({"camera": InstalledLeaf(
+        "camera", camera.type_id, object(), {}, closer=close_leaf,
+    )}, world=None)
+    session = SimpleNamespace(installation=installation)
     reconciled: list[object] = []
     shut_down: list[object] = []
 
     def prepare(_active, _candidate, _close_keys):
         def fail():
+            if _close_keys:
+                installation.close()
+                return session
             raise RuntimeError("camera refused reconfigure")
 
         return fail
@@ -766,6 +790,17 @@ def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path) ->
         "error",
         "device changes did not apply: camera refused reconfigure",
     )
+    assert manager.close_device("camera") is True
+    assert len(close_attempts) == 1 and "camera" in installation.devices
+    assert manager._active_session is session and not manager.busy
+    assert "fnLMS_CloseDevice refused device 7 error 0x80000001" in view.status[-1][1]
+    assert "sub-exception" not in view.status[-1][1]
+    assert any(record.exc_info and isinstance(record.exc_info[1], BaseExceptionGroup)
+               for record in caplog.records)
+    assert manager.close_device("camera") is True
+    assert len(close_attempts) == 2 and not installation.devices
+    assert manager.close_device("camera") is False
+    assert len(close_attempts) == 2
 
 
 def test_partial_failure_adopts_effective_config_and_refreshes_views(tmp_path) -> None:
