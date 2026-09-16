@@ -450,6 +450,33 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     assert bench.fired_repeats == [(2, 2)]
     assert bench.loaded_loop_counts == [1], "shots must not rewrite the Bracket"
 
+    # A template may offer more slots than this plan scans. Omitted slots
+    # keep their authored field values without extra axes or table columns.
+    from zlc_pulse import PulseFieldRef, PulseSlot, pulse_field_value
+    from zlc_pulse.binding import replace_pulse_field
+    sequence = _template_sequence("da_bias_x", "da_bias_y", "da_bias_z")
+    for slot, default in zip(sequence.slots[1:], (137, -87), strict=True):
+        sequence = replace_pulse_field(sequence, slot.field_ref, default, "value", field_name=slot.slot_id)
+    omitted_duration = PulseFieldRef("duration", period_id=sequence.periods[-1].period_id)
+    sequence = replace(sequence, slots=(
+        PulseSlot("duration", omitted_duration, "ms", slot_id="hold"),
+        *sequence.slots,
+    ))
+    authored = sequence
+    partial, subset_bench = _scripted_run(
+        values=(-256.0, 256.0), shots=2, repeats=2, sequence=sequence,
+    )
+    np.testing.assert_array_equal(partial, kept)
+    assert subset_bench._loaded_program.slot_count == 1
+    assert len(subset_bench.scan_tables[0][0]) == 1
+    actual = subset_bench.loaded_sources[0]
+    assert tuple(slot.slot_id for slot in actual.slots) == ("da_bias_x",)
+    for slot in sequence.slots:
+        if slot.slot_id != "da_bias_x":
+            unit = sequence.field_unit(slot.field_ref)
+            assert pulse_field_value(actual, slot.field_ref, unit) == pulse_field_value(sequence, slot.field_ref, unit)
+    assert sequence is authored and len(sequence.slots) == 4
+
     # A long duration is still a full-width period; only its variation rides
     # the signed slot multiplier.  Make the requested span wider than one
     # 25-bit tick operand so the application must choose scale 2, and retain
@@ -818,6 +845,7 @@ def _manual_run(
     shots: int = 1,
     repeats: int = 1,
     answer=None,
+    sequence=None,
 ):
     """Walk a plan whose outer axes only a hand can move.
 
@@ -851,6 +879,7 @@ def _manual_run(
             signal_plane=plane,
             source_signal=bench.signal_name,
             pulse_resource=_pulse_resource(TEMPLATE_NAME,
+                sequence if sequence is not None else
                 pulse_sequence("mot_field_template.json") if values is None else _template_sequence()),
             plan=plan.to_tree(),
             repeats=repeats,
@@ -1089,6 +1118,24 @@ def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
     assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
         [0.0, 2.0], [1.0, 3.0], [4.0, 6.0], [5.0, 7.0],
     ]
+    # Omitting every Pulse slot is still the same host-only scan, not a
+    # one-row hardware scan with duplicated constant columns.
+    slotted = _template_sequence("da_bias_x", "da_bias_y")
+    fixed, fixed_asked, fixed_bench = _manual_run(
+        manual=(("power", (1.0, 2.0)),), values=None, shots=2, repeats=2,
+        sequence=slotted,
+    )
+    np.testing.assert_array_equal(fixed.block.values, value.block.values)
+    assert fixed.block.schema.fingerprint == schema.fingerprint
+    assert [r.payload["value"] for r in fixed_asked] == [1.0, 2.0, 1.0, 2.0]
+    assert fixed_bench.scan_tables == [] and fixed_bench._loaded_program.slot_count == 0
+    assert len(slotted.slots) == 2
+    from zlc_pulse import resolve_scan_point
+    board = load_streamer_config()
+    expected = compile_sequence(
+        resolve_scan_point(resolve_api_parameters(slotted)), board["params"], board["clock_hz"],
+    )
+    assert fixed_bench._loaded_program.digest == expected.digest
 
 
 def _device_run(

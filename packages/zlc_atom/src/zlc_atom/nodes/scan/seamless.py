@@ -1,9 +1,9 @@
 """Host-advanced axes around an optional seamless hardware scan table.
 
-Manual and device axes advance between fires. Board axes fill the Pulse's
-declared slots and advance inside a fire; without them, each host point
-plays the fixed Pulse with no table. Run repeats supplies shots_per_point,
-without rewriting PulseBracket or adding artificial scan coordinates.
+Manual and device axes advance between fires. Planned board axes advance
+inside a fire; unplanned slots keep their Pulse field values. Without board
+axes, each host point plays the fixed Pulse with no table. Run repeats supplies
+shots_per_point without rewriting PulseBracket or adding artificial scan coordinates.
 
 Acquisition preparation happens once at Scan Start. Device writes use their
 actual readback; manual changes are controlled by the operator. No implicit
@@ -137,37 +137,27 @@ class SeamlessScanMeasurement:
         return (SCAN_OUTPUT,)
 
     def _streamed_sequence(self, board: object) -> tuple[PulseSequence, tuple]:
-        """The template's OWN slots, checked against the plan that fills them.
+        """Only planned slots vary; omitted fields compile as Pulse constants.
 
-        A seamless template carries its hardware scan slots -- the author
-        placed them in the pulse editor -- and the plan supplies the values
-        every slot plays.  The plan must cover every slot exactly: a slot
-        with no axis has no values to play, and an axis naming no slot was
-        already refused when the plan was bound. A host-only scan can instead
-        use a template with no slots, playing its fixed values at each point.
+        The authored template and plan remain untouched. Removing an unused
+        binding from this execution copy preserves the field's actual value
+        and uses the ordinary compiler, without redundant constant wire columns.
+        Unknown authored ports have already been refused by plan binding.
         """
 
-        slot_ids = tuple(slot.slot_id for slot in self.sequence.slots)
-        planned = tuple(
+        planned = {
             port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports
-        )
-        missing = tuple(
-            slot_id for slot_id in slot_ids if slot_id not in set(planned)
-        )
-        if missing:
-            raise ValueError(
-                "every hardware slot plays every point, so each needs a plan "
-                f"axis; {', '.join(repr(name) for name in missing)} have none"
-            )
+        }
+        streamed = resolve_api_parameters(replace(
+            self.sequence,
+            slots=tuple(slot for slot in self.sequence.slots if slot.slot_id in planned),
+        ))
         num_slots = int(board.geometry.num_slots)
-        if len(slot_ids) > num_slots:
+        if len(streamed.slots) > num_slots:
             raise ValueError(
                 f"the board advances at most {num_slots} slots per cycle; "
-                f"this template scans {len(slot_ids)} slots"
+                f"this plan scans {len(streamed.slots)} slots"
             )
-        # Any API parameters bake to their authored values; the compiler
-        # refuses unresolved ones.
-        streamed = resolve_api_parameters(self.sequence)
         columns = scan_columns_for(streamed)
         return streamed, columns
 

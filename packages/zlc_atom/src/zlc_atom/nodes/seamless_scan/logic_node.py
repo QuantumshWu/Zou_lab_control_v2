@@ -166,7 +166,8 @@ def _editor_factory(parent=None):
     from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
 
     # The board axes are the template's own hardware slots: the board plays
-    # exactly what the template scans.  Manual AND device axes are offered
+    # the slots selected by the plan; omitted slots keep their Pulse values.
+    # Manual AND device axes are offered
     # because this node can stop between fires -- for a hand on a
     # thumbscrew or a tune() call on an installed device alike.
     return scan_plan_editor_factory(
