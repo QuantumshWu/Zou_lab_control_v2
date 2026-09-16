@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Facet字号/标题碰撞收口：overview同格尺寸统一量化到整数像素，刻度继续由原locator定合法placement、同方向取共同字号；标题改在最终Image方框header内按宽高定价，不借Y刻度gutter。布局签名未变时0次重新规划，变化时复用原文字/placement缓存，放大或移除紧约束后可恢复字号。50×50×50 partial扫描的50cell同文案title/tick交集15→0；长字段名、省略标题、不同limits、focus返回、resize和稳定帧既有6项直接验证通过。窄bench首图（进程已加载）中位246.94→229.95ms，稳态26.22→24.91ms；进程首次1184→782ms受缓存状态影响，不宣称为稳定提速。没有新增Numba kernel或逐帧碰撞矩阵，截图/计时不入Git。
+
 - Processor持续跟随不再被一次输入计算失败永久清除。NodeHost复用唯一实际输入publication，Console只在源generation变化后重接失败输入，同代新shot不重试；新源已经sealed也执行一次。等待时保留原因，Logic行和Editor的Stop均可取消跟随。原Camera→Occupancy跟随用例扩展Frame Survival，真实virtual链1帧失败→3帧自动发布三对→再1帧等待且旧结果退休通过；原无源Start/Stop与armed-before-first-publication用例通过。无帧数特判、无新增重试owner。
 
 - LMS关闭整改：厂商Windows SDK手册§3.2及LMSTest::CheckAPISet规定bit31为错误标志，旧Close把所有nonzero判失败（f5f2ab9b首次增加该检查）。现与Init/频率/功率/RF开关共用命令状态检查，真实错误带名称及hex；Installation成功才释放、失败仍持有。DeviceManager原_one_line展开异常组，单设备Close/reconcile/Shutdown均显示真实原因并记录完整traceback。LMS关闭成功非零/错误重试与virtual驱动两例、Manager两例通过。厂商DLL在TestMode下通过生产wrapper打开并关闭2个模拟设备，未接真实设备；现场具体返回码尚未知，不能据顶层'1 sub-exception'保证现场唯一根因。

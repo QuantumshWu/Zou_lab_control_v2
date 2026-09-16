@@ -54,20 +54,24 @@ _FRAMES_SPEC = FacetGridPlot(
     ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy")),
 )
 
-def _scalar_scan_snapshot() -> tuple[FacetGridPlot, OwnedSnapshot]:
+def _scalar_scan_snapshot(size: int = 3, *, partial: bool = False) -> tuple[FacetGridPlot, OwnedSnapshot]:
     """3D scalar scan whose facet holds scan-heatmap (ImagePlot) cells."""
 
-    import itertools
+    from dataclasses import replace
 
-    a = [0.0, 1.0, 2.0]
-    rows = list(itertools.product(a, a, a))
+    rows = np.indices((size, size, size)).reshape(3, -1).T
+    coordinates = np.linspace(-500.0, 500.0, size) if partial else np.arange(size, dtype=float)
     table = mapped_domain_from_columns(
         {
-            "va": [r[0] for r in rows],
-            "vb": [r[1] for r in rows],
-            "vc": [r[2] for r in rows],
+            "va": rows[:, 0].astype(float),
+            "vb": coordinates[rows[:, 1]],
+            "vc": coordinates[rows[:, 2]],
         }
     )
+    if partial:
+        table = replace(table, axes=(
+            replace(table.axes[0], name="pgcwaiting.da_bias_x"), *table.axes[1:],
+        ))
     schema = make_dataset_schema(
         repeat_domain(size=2),
         table,
@@ -80,7 +84,11 @@ def _scalar_scan_snapshot() -> tuple[FacetGridPlot, OwnedSnapshot]:
             AxisRef.point("vc"), AxisRef.point("vb")
         ),
     )
-    return spec, make_snapshot(schema, values, revision=1)
+    valid = None
+    if partial:
+        valid = np.zeros(values.shape, dtype=bool)
+        valid[0, 0] = True
+    return spec, make_snapshot(schema, values, revision=1, validity=valid)
 
 def _visible_cells(session: PlotSession) -> list[tuple[int, object]]:
     renderer = session._renderer
@@ -193,7 +201,7 @@ def test_scan_heatmap_facet_cells_share_tick_marks_and_gate_labels() -> None:
     finally:
         session.close()
 
-def test_overview_cell_ticks_have_one_owner_across_frames() -> None:
+def test_overview_cell_ticks_have_one_owner_across_frames(monkeypatch) -> None:
     """A cell's tick configuration is installed ONCE, not once per authority.
 
     Routing facet cells through the standalone image render brought the image
@@ -224,6 +232,76 @@ def test_overview_cell_ticks_have_one_owner_across_frames() -> None:
         assert after == before
         # ...and the owner is still the grid: shared marks, gated labels.
         _assert_shared_marks_boundary_labels(session)
+    finally:
+        session.close()
+
+    # The reported 50-cell scan: only the first point is valid. Final Image
+    # squares are narrower than their grid slots, so titles cannot spend the
+    # slot's extra width over the Y-label gutter.
+    spec, snapshot = _scalar_scan_snapshot(50, partial=True)
+    session = PlotSession(snapshot, spec, size="4x4", device_pixel_ratio=3)
+    try:
+        renderer = session._renderer
+
+        def consistent():
+            cells = [axis for axis in renderer.axes["facet_cell"] if axis.get_visible()]
+            for name in ("xaxis", "yaxis"):
+                assert len({getattr(axis, name).get_major_locator().drawn_pt for axis in cells}) == 1
+            assert len({round(float(axis.bbox.width), 6) for axis in cells}) == 1
+            assert all(abs(axis.bbox.width - axis.bbox.height) < 1e-6 for axis in cells)
+            for axis in cells:
+                transform = session._axis_transform_for_axis(axis)
+                nx, ny = transform.display_to_normalized(0.0, 0.0)
+                point = transform.canonical_from_normalized(nx, ny)
+                assert abs(point.x) < 1e-8 and abs(point.y) < 1e-8
+            titles = renderer._artists["facet:chrome_titles"]
+            assert len({title.get_fontsize() for title in titles}) == 1
+            draw = renderer.figure.canvas.get_renderer()
+            boxes = [title.get_window_extent(draw) for title in titles]
+            labels = renderer._artists["facet:chrome_labels"].texts
+            assert not any(
+                box.overlaps(label.get_window_extent(draw))
+                for box in boxes for label in labels
+                if label.get_visible() and label.get_text()
+            )
+            assert not any(box.overlaps(other) for i, box in enumerate(boxes) for other in boxes[i + 1:])
+
+        consistent()
+        assert any(title.get_text().endswith("\N{HORIZONTAL ELLIPSIS}")
+                   for title in renderer._artists["facet:chrome_titles"])
+        # A lane can have different limits. A common font must remain common
+        # when its own cached placement is queried on the next draw.
+        cells = renderer.axes["facet_cell"]
+        cells[0].set_ylim(30.0, -5.0)
+        renderer.draw()
+        consistent()
+        renderer.draw()
+        consistent()
+        for axis in cells:
+            axis.set_ylim(30.0, -5.0)
+        renderer.draw()
+        consistent()
+        assert cells[0].yaxis.get_major_locator().drawn_pt > 3.0
+        session.focus_facet(0)
+        session.show_facet_overview()
+        consistent()
+        session.set_size("8x8")
+        consistent()
+        assert renderer.axes["facet_cell"][0].yaxis.get_major_locator().drawn_pt > 3.0
+        refreshed = []
+        original = renderer._refresh_facet_cell_chrome
+
+        def refresh(*args):
+            refreshed.append(True)
+            return original(*args)
+
+        monkeypatch.setattr(renderer, "_refresh_facet_cell_chrome", refresh)
+        session.update_data(make_snapshot(
+            snapshot.block.schema, snapshot.block.values, revision=2,
+            validity=snapshot.expanded_validity(),
+        ))
+        assert not refreshed, "unchanged live geometry must not remeasure collisions"
+        consistent()
     finally:
         session.close()
 

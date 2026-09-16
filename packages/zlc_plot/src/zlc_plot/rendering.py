@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import deque
 import copy
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 import gc
 import hashlib
@@ -81,6 +81,7 @@ from .state import DisplayState
 from .style import PlotStyleConfig, style_context
 from .ticks import (
     DeclaredLocator,
+    SmartOffsetLocator,
     TICKS_FLOOR,
     apply_declared_ticks,
     apply_named_ticks,
@@ -10514,6 +10515,12 @@ class MatplotlibRenderer:
         y0 = math.floor(bounds[1] * height)
         x1 = math.ceil((bounds[0] + bounds[2]) * width)
         y1 = math.ceil((bounds[1] + bounds[3]) * height)
+        if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
+            # A grid owns one cell size. Rounding each far edge separately
+            # gave identical slots alternating N/N+1 pixels, crossing the
+            # tick-size ladder and making the first cell's labels larger.
+            x1 = x0 + math.ceil(bounds[2] * width - 1e-9)
+            y1 = y0 + math.ceil(bounds[3] * height - 1e-9)
         if x1 - x0 < 2 or y1 - y0 < 2:
             self._quantized_box_cache[id(axis)] = (key, bounds, False)
             return bounds
@@ -10879,6 +10886,7 @@ class MatplotlibRenderer:
         labels: list[Any] = []
         shape: list[Any] = []
         shared_lanes: dict[tuple[object, ...], list[Any]] = {}
+        tick_sizes: tuple[list[float], list[float]] = ([], [])
         # A spine's path is in axes coordinates, so every cell's left edge
         # is the same two vertices, and one frozen copy serves the grid:
         # the patch holds the cell's own transform, the path only the
@@ -10939,6 +10947,14 @@ class MatplotlibRenderer:
                 lanes = []
                 for axis in (axes.xaxis, axes.yaxis):
                     horizontal = axis is axes.xaxis
+                    locator = axis.get_major_locator()
+                    measured = isinstance(locator, (SmartOffsetLocator, DeclaredLocator))
+                    if measured:
+                        # A previous grid may have drawn this lane smaller
+                        # for a neighbour. Re-adopt its own cached placement
+                        # before choosing this grid's common size; no new
+                        # ladder walk is needed for the unchanged question.
+                        locator._tick_cache_key = None
                     zorder = float(axis.get_zorder())
                     # One artist can carry every MARK of one axis that
                     # strokes the same way -- which major and minor ticks
@@ -10968,6 +10984,8 @@ class MatplotlibRenderer:
                         ]
                     else:
                         placed = _tick_marks_in_view(axis)
+                    if measured:
+                        tick_sizes[0 if horizontal else 1].append(locator.drawn_pt)
                     for location, gridline, tick1line, tick2line, tick_labels in placed:
                         if gridline.get_visible():
                             grid_lanes.setdefault(
@@ -11030,6 +11048,48 @@ class MatplotlibRenderer:
             if entry is not None:
                 titles_plan.append((axes, entry[0], float(entry[1])))
             shape.append((index, sides, lanes_seen, entry is not None))
+
+        # The locators already priced their labels. A common smaller size
+        # preserves every collision decision, including differing cell ranges;
+        # no second ladder walk is needed. This is inside the chrome signature
+        # boundary, so unchanged live data does not repeat the work.
+        for name, sizes in zip(("xaxis", "yaxis"), tick_sizes, strict=True):
+            if sizes:
+                size = min(sizes)
+                for _index, axes in visible:
+                    locator = getattr(axes, name).get_major_locator()
+                    if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
+                        locator._apply_drawn_size(size)
+
+        # Image boxes can be narrower than their original grid slots. Titles
+        # stay inside the actual header and never annex the Y-label gutter.
+        typography = self.plan.facet_typography
+        if typography is not None and titles_plan:
+            dots_per_point = float(self._figure.dpi) / 72.0
+            width = min(
+                float(axes.bbox.width) for axes, _text, _size in titles_plan
+            ) / dots_per_point
+            typography = replace(
+                typography,
+                cell_title_max_width_pt=min(width, typography.cell_title_max_width_pt),
+            )
+            rooms = [self.plan.axes[index].room for index, _axes in visible]
+            # X labels are boundary-only: a column that has a cell below
+            # never labels the preceding bottom edge. Its inter-row header
+            # therefore belongs to that next cell's title, not two owners.
+            height = min(room.top + room.bottom for room in rooms)
+            height *= float(self._figure.bbox.height) / dots_per_point
+            height -= self.style.render.compact_axes_title_pad_pt
+            fitted = [
+                fitted_facet_cell_title(text, typography, self.style.fonts, height_pt=height)
+                for _axes, text, _size in titles_plan
+            ]
+            common_size = min(size for _text, size in fitted)
+            titles_plan = [
+                (axes, text, common_size)
+                for (axes, _old, _size), (text, _fitted_size)
+                in zip(titles_plan, fitted, strict=True)
+            ]
         topology = tuple(shape)
         reuse = topology == self._facet_chrome_shape and all(
             key in self._artists for key in self._FACET_CHROME_KEYS
@@ -11409,15 +11469,6 @@ class MatplotlibRenderer:
         for index, axis in visible_axes:
             cell = cells[index]
             label = str(_facet_cell_title(cell, index))
-            if typography is not None:
-                # The plan knows each cell's exclusive title room; a title
-                # wider than it shrinks (then truncates) rather than
-                # overlapping its neighbour into one unreadable line.
-                title_text, title_pt = fitted_facet_cell_title(
-                    label, typography, self.style.fonts
-                )
-            else:
-                title_text, title_pt = label, self.style.fonts.tick_pt
             # A GRID cell's title is the grid's, not the cell's: it is
             # painted by the chrome group, above every cell's frame, exactly
             # where ``Axes.title`` would have put it.  The cell's own title stays
@@ -11427,7 +11478,10 @@ class MatplotlibRenderer:
             # alone measured 65 of the 165 ms a sixty-four cell grid spends
             # building its chrome.
             if not focused:
-                cell_titles[index] = (title_text, float(title_pt))
+                cell_titles[index] = (
+                    label,
+                    float(typography.cell_title_pt if typography else self.style.fonts.tick_pt),
+                )
             # The tick MARKS are the grid's; their label SIZE belongs to the
             # tick policy below, which may shrink it to keep two labels
             # apart and must be the last writer.

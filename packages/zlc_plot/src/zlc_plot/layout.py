@@ -385,9 +385,9 @@ class FacetTopology:
 class FacetTypographyPlan:
     """Cell chrome uses the reference compact/normal typography tier.
 
-    ``cell_title_max_width_pt`` is one cell's EXCLUSIVE title room: its own
-    width plus the column gap, because two neighbours each annexing half a
-    gap cannot collide.  ``cell_title_min_pt`` is the readable floor a title
+    ``cell_title_max_width_pt`` is one cell's title room before final raster
+    geometry is known. The renderer intersects it with the actual axes
+    width, keeping tick gutters separate. ``cell_title_min_pt`` is the readable floor a title
     may shrink to before it is truncated instead.
     """
 
@@ -667,6 +667,8 @@ def fitted_facet_cell_title(
     label: str,
     typography: FacetTypographyPlan,
     fonts: FontStyleConfig,
+    *,
+    height_pt: float | None = None,
 ) -> tuple[str, float]:
     """The exact text and size one cell title may occupy without overlap.
 
@@ -678,16 +680,22 @@ def fitted_facet_cell_title(
 
     label = str(label)
     budget = typography.cell_title_max_width_pt
-    width = _text_width_pt(label, fonts.sans_serif, typography.cell_title_pt)
-    if width <= budget:
+    width, height = _text_size_pt(label, fonts.sans_serif, typography.cell_title_pt)
+    factor = min(
+        1.0,
+        budget / width if width > 0.0 else 1.0,
+        height_pt / height if height_pt is not None and height > 0.0 else 1.0,
+    )
+    if factor == 1.0:
         return label, typography.cell_title_pt
-    fitted = typography.cell_title_pt * budget / width
+    fitted = typography.cell_title_pt * factor
     if fitted >= typography.cell_title_min_pt:
         return label, fitted
     floor = typography.cell_title_min_pt
     for keep in range(len(label) - 1, 0, -1):
         shortened = label[:keep].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
-        if _text_width_pt(shortened, fonts.sans_serif, floor) <= budget:
+        width, height = _text_size_pt(shortened, fonts.sans_serif, floor)
+        if width <= budget and (height_pt is None or height <= height_pt):
             return shortened, floor
     return "\N{HORIZONTAL ELLIPSIS}", floor
 
