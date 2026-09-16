@@ -10,6 +10,7 @@ import math
 from ._axis_scale import (
     LINEAR,
     LOG,
+    Scale,
     axis_space,
     axis_value,
     fraction_of as _fraction,
@@ -59,8 +60,10 @@ class AxisTransform:
     #: limits alone say where the ends are, never how the space between them
     #: is divided.  Defaulted so a caller that does not know cannot silently
     #: claim an axis is logarithmic.
-    x_scale: str = LINEAR
-    y_scale: str = LINEAR
+    x_scale: Scale = LINEAR
+    y_scale: Scale = LINEAR
+    canonical_x_scale: Scale | None = None
+    canonical_y_scale: Scale | None = None
 
     def display_to_normalized(self, x: float, y: float) -> tuple[float, float]:
         """Map display-space axes data into top-origin widget coordinates."""
@@ -80,13 +83,15 @@ class AxisTransform:
         ty = (float(ny) - top) / (bottom - top)
         x0, x1 = self.canonical_x_limits
         y0, y1 = self.canonical_y_limits
+        x_scale = self.x_scale if self.canonical_x_scale is None else self.canonical_x_scale
+        y_scale = self.y_scale if self.canonical_y_scale is None else self.canonical_y_scale
         if self.role == "distribution":
             # The rail is the value axis stood on its side: its vertical
             # extent is the X pair, so it is the X scale that divides it.
-            return CrosshairPoint(_interpolate(x1, x0, ty, self.x_scale), 0.0)
+            return CrosshairPoint(_interpolate(x1, x0, ty, x_scale), 0.0)
         return CrosshairPoint(
-            _interpolate(x0, x1, tx, self.x_scale),
-            _interpolate(y1, y0, ty, self.y_scale),
+            _interpolate(x0, x1, tx, x_scale),
+            _interpolate(y1, y0, ty, y_scale),
         )
 
     def display_from_normalized(self, nx: float, ny: float) -> CrosshairPoint:

@@ -9,6 +9,7 @@ single revision, so a full window never held still.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from zlc_data import PRIMARY_INDEX
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
@@ -156,7 +157,7 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     finally:
         session.close()
 
-def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> None:
+def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypatch) -> None:
     source = [-2, -2, 0, 0]
     indexed_schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -218,6 +219,23 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> Non
         sample.source_index is None and sample.group_keys == ((),)
         for sample in repeat
     )
+
+    # Record rows are already Rolling's X. Grouping by them used to allocate
+    # records squared buckets, only the diagonal of which could be valid.
+    # Reject before any sample gather, including the LAST reduction path.
+    def no_projection(_view):
+        raise AssertionError("invalid rolling axes reached numeric projection")
+
+    monkeypatch.setattr(DataView, "_all_positions", no_projection)
+    for view, record in (
+        (DataView(snapshot), AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)),
+        (DataView(_snapshot(0, repeats=3)), AxisRef.repeat("repeat")),
+    ):
+        for aggregation in (Reduction.MEAN, Reduction.LAST):
+            with pytest.raises(ValueError, match="fixed record axis cannot also be Group"):
+                view.rolling_history(group=record, aggregation=aggregation)
+    with pytest.raises(ValueError, match="fixed record axis"):
+        DataView(snapshot).rolling_history(x=AxisRef.cell_data("site"))
 
 def test_a_one_shot_history_skips_the_band_it_is_told_not_to_draw() -> None:
     """``uncertainty=False`` reaches the single-revision reduction.

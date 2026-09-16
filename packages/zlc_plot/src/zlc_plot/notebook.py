@@ -19,6 +19,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ._axis_transform import AxisTransform
+from zlc_data.units import DEFAULT_UNITS, Unit
 from .backends import BackendUnavailableError
 from .front import RasterFront, RasterIdentity, RasterOperation
 from .raster import RasterPlotHost
@@ -35,6 +36,13 @@ if TYPE_CHECKING:
 
 
 def _axis_to_dict(axis: AxisTransform) -> dict[str, object]:
+    def scale(value):
+        if isinstance(value, tuple) and len(value) == 3 and isinstance(value[1], Unit):
+            mapping, canonical, display = value
+            if any(DEFAULT_UNITS.resolve(unit.symbol) != unit for unit in (canonical, display)):
+                raise ValueError("notebook axis units must resolve exactly in the unit registry")
+            return {"scale": mapping, "canonical_unit": canonical.symbol, "display_unit": display.symbol}
+        return value
     return {
         "role": axis.role,
         "cell_index": axis.cell_index,
@@ -48,8 +56,10 @@ def _axis_to_dict(axis: AxisTransform) -> dict[str, object]:
         # a linear map and stays broken after Qt is fixed -- two
         # frontends failing the same way is exactly what one shared
         # AxisTransform exists to prevent.
-        "x_scale": axis.x_scale,
-        "y_scale": axis.y_scale,
+        "x_scale": scale(axis.x_scale),
+        "y_scale": scale(axis.y_scale),
+        "canonical_x_scale": scale(axis.canonical_x_scale),
+        "canonical_y_scale": scale(axis.canonical_y_scale),
     }
 
 
@@ -62,6 +72,15 @@ def _axis_from_dict(value: Mapping[str, object]) -> AxisTransform:
 
     cell_index = value["cell_index"]
     left, top, right, bottom = value["bounds"]
+    def scale(name):
+        item = value[name]
+        if isinstance(item, Mapping):
+            mapping = item["scale"]
+            if isinstance(mapping, list):
+                mapping = tuple(float(number) for number in mapping)
+            return (mapping, DEFAULT_UNITS.resolve(item["canonical_unit"]),
+                    DEFAULT_UNITS.resolve(item["display_unit"]))
+        return tuple(float(number) for number in item) if isinstance(item, list) else item
     return AxisTransform(
         role=str(value["role"]),
         cell_index=None if cell_index is None else int(cell_index),
@@ -70,8 +89,10 @@ def _axis_from_dict(value: Mapping[str, object]) -> AxisTransform:
         y_limits=pair("y_limits"),
         canonical_x_limits=pair("canonical_x_limits"),
         canonical_y_limits=pair("canonical_y_limits"),
-        x_scale=str(value["x_scale"]),
-        y_scale=str(value["y_scale"]),
+        x_scale=scale("x_scale"),
+        y_scale=scale("y_scale"),
+        canonical_x_scale=scale("canonical_x_scale"),
+        canonical_y_scale=scale("canonical_y_scale"),
     )
 
 

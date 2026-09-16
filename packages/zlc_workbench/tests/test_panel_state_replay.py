@@ -26,7 +26,7 @@ from zlc_data import (
     ValueSchema,
 )
 from zlc_plot import PlotKind
-from zlc_plot import AxisRef, RollingPlot
+from zlc_plot import AxisRef, HistogramPlot, RollingPlot
 from zlc_plot.semantics import FATE_PREFIX, describe_semantics, scope_fate
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import PanelState, project_panel_state
@@ -123,15 +123,15 @@ def test_fates_saved_under_one_representation_replay_under_the_other() -> None:
     coordinate_field = "coordinate:point:zlc_data.primary-index"
     fate_field = "fate:point:zlc_data.primary-index"
     saved = {coordinate_field: "shot-time", fate_field: scope_fate(0.0)}
-    projection = project_panel_state(stamped, RollingPlot(), _state(saved))
+    projection = project_panel_state(stamped, HistogramPlot(), _state(saved))
     assert projection.spec.scope == ((AxisRef.point("shot-time"), 0.0),)
     assert projection.semantic[coordinate_field] == "shot-time"
     assert projection.semantic[fate_field] == scope_fate(0.0)
     assert project_panel_state(
-        stamped, RollingPlot(), _state(projection.semantic)
+        stamped, HistogramPlot(), _state(projection.semantic)
     ).spec == projection.spec
     # A retired history removes both the axis fate and its coordinate choice.
-    projection = project_panel_state(event, RollingPlot(), _state(saved))
+    projection = project_panel_state(event, HistogramPlot(), _state(saved))
     assert coordinate_field not in projection.semantic
     assert fate_field not in projection.semantic
 

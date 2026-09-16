@@ -28,6 +28,7 @@ from zlc_data import (
 )
 from zlc_data.snapshot_projection import (
     PRIMARY_INDEX_AXIS_ID,
+    SHOT_TIME_AXIS_ID,
     IndexedHistoryLayout,
     indexed_history_layout,
     restrict_snapshot,
@@ -3353,12 +3354,41 @@ class DataView:
             return None
         return np.asarray(sigma, dtype=np.float64).reshape(-1)[positions]
 
-    def validate_rolling(self, group: AxisRef | None) -> None:
-        """Check a rolling projection without computing it (see validate_curve)."""
+    def validate_rolling(
+        self, group: AxisRef | None, *, x: AxisRef | None = None,
+    ) -> None:
+        """Validate the fixed record carrier before allocating history buckets.
 
+        ``x`` chooses only the carrier's coordinate, not another data axis.
+        Without indexed history each physical Repeat row is one record.
+        """
+
+        if x is not None:
+            if not isinstance(x, AxisRef):
+                raise TypeError("rolling coordinate must be an AxisRef or None")
+            contract = resolve_axis(self._schema, x)
+            if (
+                not self.has_primary_index
+                or x.domain.value != "point"
+                or contract.domain.coordinate_axis(contract.axis_id).axis_id
+                != PRIMARY_INDEX_AXIS_ID
+                or contract.axis_id not in (PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID)
+            ):
+                raise DataViewError(
+                    "Rolling has a fixed record axis; choose its source index "
+                    "or shot time coordinate"
+                )
         if group is not None:
             if not isinstance(group, AxisRef):
                 raise TypeError("rolling group must be an AxisRef or None")
+            contract = resolve_axis(self._schema, group)
+            record_group = (
+                group.domain.value == "point"
+                and contract.domain.coordinate_axis(contract.axis_id).axis_id
+                == PRIMARY_INDEX_AXIS_ID
+            ) if self.has_primary_index else group.domain.value == "repeat"
+            if record_group:
+                raise DataViewError("Rolling's fixed record axis cannot also be Group")
             self._resolve(group)
 
     def _single_revision_history(
@@ -3375,7 +3405,6 @@ class DataView:
         pass over every value, and only a MEAN has one.
         """
 
-        self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
         uncertainty = bool(uncertainty) and aggregation is Reduction.MEAN
         if group is None:
@@ -3472,6 +3501,7 @@ class DataView:
     def rolling_history(
         self,
         *,
+        x: AxisRef | None = None,
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
         uncertainty: bool = True,
@@ -3488,6 +3518,7 @@ class DataView:
         revision whether or not the band was switched on.
         """
 
+        self.validate_rolling(group, x=x)
         if aggregation is Reduction.LAST:
             from .semantics import axis_choices_for_schema
 
@@ -3498,7 +3529,7 @@ class DataView:
                            if ref.domain.value == "repeat")
             )
             return self._last_view(keep=retained + (() if group is None else (group,))).rolling_history(
-                group=group, aggregation=Reduction.MEAN, uncertainty=uncertainty,
+                x=x, group=group, aggregation=Reduction.MEAN, uncertainty=uncertainty,
             )
         if self.has_primary_index:
             return self._history_by_primary_index(
@@ -3511,7 +3542,6 @@ class DataView:
             return self._single_revision_history(
                 group=group, aggregation=aggregation, uncertainty=uncertainty
             )
-        self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
         tensor = self._repeat_history_tensor(
             group=group,
@@ -3701,7 +3731,6 @@ class DataView:
 
         layout = self._history_layout
         assert layout is not None
-        self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
         positions = self._all_positions()
         # The shot each sample belongs to is the layout's per-row code,

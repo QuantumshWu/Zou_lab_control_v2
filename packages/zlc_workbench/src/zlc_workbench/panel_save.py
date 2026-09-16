@@ -266,6 +266,11 @@ def save_panel_figure(
             facet_focus=description.facet_focus,
             fit=description.fit,
             selectors=description.selectors,
+            # A settled host freezes its actual pointer presentation in the
+            # same transaction as the PNG/recipe. Cached Edit metadata may
+            # predate the last hover and must not replace what is on screen.
+            interaction=None if host is not None else description.display_state.interaction,
+            presentation=None if host is not None else description.presentation,
             lineage=frozen.lineage,
             source=source_document,
             host=host,

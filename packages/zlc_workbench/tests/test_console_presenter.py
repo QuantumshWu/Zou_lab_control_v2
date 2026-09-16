@@ -6347,6 +6347,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
 def test_display_state_synchronizes_both_panel_surfaces(
     presenter,
     session,
+    tmp_path,
 ) -> None:
     """Appearance is ONE truth over two data moments: any display value
     committed on either surface -- a camera orbit, a colour-limit drag --
@@ -6460,6 +6461,54 @@ def test_display_state_synchronizes_both_panel_surfaces(
         ),
     )
     assert panel.state.display["color_max"] == 160.0
+
+    # Committed gestures use the same mirror currency as parameters. The
+    # identity is a group key, so two independently rendered surfaces agree.
+    from zlc_atom.data import snapshot_from_array
+    from zlc_data import AxisId, AxisSpec, COMPONENT, SCAN_POINT
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
+    declaration = DatasetOutputDeclaration("curve", "test.series")
+    producer = SimpleNamespace(instance_id="series-sync", dataset_output_declarations=(declaration,),
+                               signal_key=lambda name: f"series-sync/{name}")
+    curve = snapshot_from_array(np.array([[[1., 11.], [2., 12.], [3., 13.], [4., 14.]]]),
+        producer="series-sync", signal="curve", generation="series-sync", revision=1,
+        point_axes=(AxisSpec(AxisId("series.x"), "x", SCAN_POINT, 4, (0, 1, 2, 3)),),
+        cell_axes=(AxisSpec(AxisId("series.channel"), "channel", COMPONENT, 2, (0, 1)),))
+    session.signal_plane.begin_generation(producer)
+    session.signal_plane.commit_live(producer, {
+        "curve": LiveDatasetOutput(declaration, curve, MonitorCoverage(4, 4)),
+    })
+    grouped = presenter.add_panel("series-sync/curve", curve, kind="curve", semantic={
+        "fate:point:series.x": "x", "fate:cell_data:series.channel": "group",
+    })
+    _settle_panel_hosts(presenter, lambda: grouped.host is not None)
+    assert presenter.edit_panel(grouped.panel_id)
+    _settle_panel_hosts(presenter, lambda: grouped.editor_host is not None and grouped.editor_configuration is None)
+    lock = {"key": (("cell_data", "series.channel", "1"),), "facet_index": None}
+    grouped.editor_host.configure(interaction={"series_lock": lock}).result(timeout=10)
+    assert beat(lambda: _operation_value(grouped.host.describe_display()).display_state.interaction.get("series_lock") == lock
+                and grouped.editor_configuration is None)
+    assert grouped.state.interaction["series_lock"] == lock
+    assert grouped.frozen_data.target.interaction == grouped.state.interaction
+    assert not grouped.frozen_configuration_incompatible
+    assert _operation_value(grouped.host.describe_display()).presentation["series_readout"]["mode"] == "locked"
+    from zlc_workbench.panel_state import PanelState
+    assert PanelState.from_document(grouped.state.document()).interaction == grouped.state.interaction
+    grouped.host.configure(interaction={"series_lock": None}).result(timeout=10)
+    assert beat(lambda: _operation_value(grouped.editor_host.describe_display()).display_state.interaction.get("series_lock") is None
+                and grouped.editor_configuration is None)
+    readout = {**lock, "label": "channel=1", "mode": "hover"}
+    grouped.editor_host.configure(presentation={"series_readout": readout}).result(timeout=10)
+    assert not _operation_value(grouped.host.describe_display()).presentation["series_readout"]
+    assert not grouped.frozen_data.description.presentation["series_readout"]
+    saved = tmp_path / "visible-hover.png"
+    assert presenter.save_panel_figure(grouped.panel_id, str(saved))
+    _wait_for_panel_save(presenter, saved)
+    from zlc_data.figure_archive import read_archive
+    from zlc_plot import read_figure_plot
+    info, arrays, datasets = read_archive(saved.with_suffix(".npz"))
+    _snapshot, recipe = read_figure_plot(info, arrays, datasets, "data")
+    assert recipe["presentation"]["series_readout"] == readout
 
 
 def test_the_operator_viewport_survives_a_same_geometry_run(

@@ -172,6 +172,7 @@ Node new chunk
 - AxisSpec.coordinate_of声明同一domain内同一物理行的替代坐标；主轴/替代坐标共用row codes而不形成笛卡尔积或重复fate。Setting以一行fate和坐标选择呈现，Scope切坐标按同一位置转换，Figure保存选择。连续源的SAMPLE_TIME位于Point，Runtime按记录时刻加样本偏移物化真实采样时间轴；Plot、选择、Fit与存档使用同一Dataset坐标，不在renderer临时变换科学时间。触发源的record time保留独立波形首样本相对时间；scope未知触发偏移时不得声称零点是trigger。
 - 替代坐标只属于有显式行映射的Repeat/Point，不改变Cell-data的dense contract。Derive的scalar选择/归约移除整个物理坐标组，list选择同步全部坐标；Manual不把替代坐标展开成新维度，物理长度/域移动/删除同步整组，名称/单位/坐标值只编辑目标坐标。带替代坐标的整组移入Cell-data明确拒绝，不静默丢时间或拆成独立维度。
 - Curve（含Facet Curve）与Histogram的Window默认1，复用同一Runtime history lease；Rolling仍默认100。保留多少记录与如何投影是两件事。Plot、Fit、selector和Runtime派生读取相同window；不得因其它Panel请求更长窗口而扩大本Panel的统计。时间横轴使用本run相对首record的真实时间，Rolling不再把最新时刻暗改为零；source index坐标仍以最新为0。
+- Rolling的横轴固定为记录序列，Index/Time只是这条轴的坐标表示，Setting只给X coordinate选择，不给记录族Fate，也不让其它轴抢占X；独立轴仍可Group/Scope/Reduce。数值入口在展开任何样本前拒绝记录轴及其别名重复Group，不能形成record×record平方桶。普通图种的坐标切换只重映射已有Fate，不偷偷分配X；完整坐标/Fate表一次性合成，拒绝态仍可修改恢复。
 
 - Measurement必须在bounded cadence内live commit。
 - Task必须发布progress与声明preview，或显式声明无preview。
@@ -276,7 +277,7 @@ Node new chunk
   PanelState与最新publication启动新service generation并原子替换surface。旧generation的共享
   Front可继续读取，其lease identity不得与新generation碰撞。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
-- Image/Heatmap的主显示框始终是固定正方形，layout、首帧、zoom、pan、Single/Facet/Focus切换均不得改变它；每个离散data point同时是正方形screen cell。规则grid以x/y cell pitch的唯一比例把canonical坐标归一为lattice geometry：canonical scan step只控制tick、selector、overlay与fit的坐标映射，不控制cell长宽。非方阵数据在square frame内居中letterbox，数据extent本身不被改写；zoom按两轴相同whole-cell span在固定square box内修改viewport，不得重新layout。50×50 scan必须完整填满square frame，即使两个scan轴步长不同。
+- Image/Heatmap的主显示框始终是固定正方形，每个离散data point是等大的方形screen cell。格距由sample index定义，不要求科学坐标或显示单位换算后的数值等距。单调非等距扫描与非线性显示单位通过同一sample-index↔显示坐标映射摆放格子、刻度与overlay；canonical↔display继续使用现有Unit精确转换，pointer/selector/zoom/pan不得另作canonical分段近似。native和Matplotlib图像都在同一ordinal/affine空间贴RGBA，科学坐标/Fit输入不改写；原等距图保留原affine路径。非方阵在square frame内居中letterbox；zoom/pan只在该固定框内改变索引空间的范围，不重新layout。Single/Facet/Focus/Save共用此映射，不因三维scan或display unit另建图像路线。
 - 3D height场景的刻度字符串只规划一次，真实字体宽高与tick/pad像素纳入同一scene fit的对称inset，再应用operator camera zoom；不靠固定几何百分比猜文字空间，不改outer Axes，不取消clip。Raster、id_plane与chrome读取同一scale/centre，orbit不因label位置换边而呼吸；主动zoom造成viewport裁剪仍是原行为。
 - Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Single、Facet overview和Focus的每个cell必须经过同一个kind preparation/render owner；Focus只选择同一个accepted cell并换layout/viewport，不重新解释数据、fit或annotation。Facet overview及steady Curve/Image/Fit/SEM保留native raster快路，但native与Agg只允许消费同一份prepared cell state；native拒绝必须整帧回到已准备好的公共draw path或保留上一完整front，不得出现partial/blank cells，也不得靠一次pointer materialization才能恢复。
 - FacetGrid的facet role可为空；为空不是semantic vacancy，也不允许UI或renderer伪造Dataset轴，而是唯一一个完整cell，标题为`Facet 1`。同一cell kind的projection、fit、selector、Focus和Figure grammar仍走普通Facet路径；给真实轴Facet fate后才扩为多cell。
@@ -303,6 +304,7 @@ Node new chunk
 - Title/layout等非plot变化不得re-fit。
 - Histogram classifier先按distribution选择模型来源：调用方已提供Gaussian components就直接呈现该模型，显式空模型直接不画；仅未提供模型的分布自动求解。完整classifier初态必须先于Host首次计算传入，不能先fit再覆盖。拒绝overview/单series的line交互不得物化native artists。
 - 删除重复configure/clear/replay与多front handoff。
+- 显式series lock属于DisplayState.interaction，通过既有display通知、configure事务及Workbench同一namespace/revision/pending target规则同步Live与Frozen，不新增series专用订阅线路；状态只保存稳定group key及facet身份，不保存axes对象地址。PanelState/Layout/Figure保持同一interaction。指针hover不镜像到另一窗口，但Save在实际host内冻结当时可见的presentation/readout并写PNG及Figure recipe；重开复现该注释，真正鼠标move后再由本地命中更新，不能导出时主动清空已有文字。Rolling的数值readout和series文字依据实际文本高度排开。
 - Live/Edit之间的选区镜像也走同一个`configure`事务，以`selector_updates`只更新命名的kind，保留执行时其它选区；完整`selectors`替换后才应用同次patch，排队合并遵守同一顺序。事务返回同一front的完整`DisplayDescription`，不得把`SelectorState`交给configuration接受入口，也不得先安装像素再验证返回契约。Edit的交互与Refresh共用已有pending/accepted入口，Save在配置未接受时保存最后accepted frozen recipe，不复用正变化的host。
 - Qt owner必须在RasterPlotHost第一次render前把当前screen DPR以plain scalar交给Plot；不得先按默认DPR生成front，再在Widget挂载后为同一data/state重画一次。Form consumer在FormSpec结构和实际Widget值均已匹配时只接受新metadata，不得reconcile；keyed runtime choice domain真实变化仍强制刷新。
 - Fluent choice是`zlc_ui`唯一前端owner：collapsed控件、一个owned item model和operator信号在控件本身；flat/tree popup view只在operator第一次展开时建立，随后复用，Tree不得先造flat view再替换。popup QSS只有一个共享声明，数值/choice authority仍是typed model，Workbench、Plot和Logic不得感知popup、font metric或Qt私有view。popup几何是内容的纯函数：由可见行数、delegate的行高与`sizeHintForColumn`、view的frameWidth、collapsed控件宽度、锚点下方空间和active-screen宽度上限一次算出，并据此把纵/横scrollbar policy定为AlwaysOn/AlwaysOff再告知view；不得从scroll area读回`view.width - viewport.width`等lazy layout结果（那是上一次展开的残留，曾让同一picker在整洁与双滚动条之间交替），也不得手算字体/padding/native scrollbar metric。横向bar只在popup已达宽度上限而内容仍溢出时出现；Tree展开/折叠与open model变化重走同一owner。
@@ -381,7 +383,7 @@ Node new chunk
 - Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
-- qCMOS区分last-successful requested设置与actual working point；量化后的actual不覆盖requested，重复同请求不因此重写。成功setter及arm后的readback形成一份actual，普通working_point读取复用；失败清除请求成功事实，后续setter真正重试。arm后真实读回、transfer reset及copy-overrun检测保留。
+- qCMOS区分last-successful requested设置与actual working point；量化后的actual不覆盖requested，重复同请求不因此重写。成功setter及arm后的readback形成一份actual，普通working_point读取复用；失败清除请求成功事实，后续setter真正重试。arm后保留真实工作点读回与改变拒绝；不得要求读回之后transfer count仍为零——相机可能已接收本代首帧。本代copied/last count从0开始，首次读取按真实count/newest取回早到帧，负数、倒退、不一致、有限上限及copy-overrun检查不删除。
 - Pylon同样区分requested/actual；arm模式、restore及gain变化使工作点失效，不能复用旧mode/epoch。SDK frame在result仍有效时直接构造不可变CameraFrameRecord，再Release；不先复制一份随即丢弃的mutable整图。非连续输入直接打包C-order bytes，immutable ownership、frame ordinal及epoch事实不变。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
 - Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值；未显式选择Acquisition logic时不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。

@@ -315,7 +315,10 @@ def encode_plot_recipe(
     facet_focus: int | None = None, fit: Mapping[str, object] | None = None,
     selectors: object = (),
     overlay: object = None,
+    interaction: Mapping[str, object] | None = None,
+    presentation: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    from .state import normalize_interaction, normalize_presentation
     complete_parameters = dict(
         parameter_schema_for(spec, style=DEFAULTS.style).initial_values(parameters)
     )
@@ -327,11 +330,14 @@ def encode_plot_recipe(
         "fit": _plain({} if fit is None else fit),
         "selectors": _selectors_document(selectors),
         "overlay": overlay,
+        "interaction": _plain(normalize_interaction({"series_lock": None} if interaction is None else interaction)),
+        "presentation": _plain(normalize_presentation({"series_readout": None} if presentation is None else presentation)),
     }
 
 
 def decode_plot_recipe(value: object) -> dict[str, object]:
-    entry = _keys(value, {"spec", "parameters", "size", "viewport", "classifier_thresholds", "facet_focus", "fit", "selectors", "overlay"}, "plot recipe")
+    from .state import normalize_interaction, normalize_presentation
+    entry = _keys(value, {"spec", "parameters", "size", "viewport", "classifier_thresholds", "facet_focus", "fit", "selectors", "overlay", "interaction", "presentation"}, "plot recipe")
     if not isinstance(entry["parameters"], Mapping) or not isinstance(entry["fit"], Mapping):
         raise TypeError("plot recipe parameters and fit must be objects")
     if not isinstance(entry["size"], str) or not entry["size"]:
@@ -348,6 +354,8 @@ def decode_plot_recipe(value: object) -> dict[str, object]:
         "classifier_thresholds": tuple(thresholds), "facet_focus": focus,
         "fit": dict(entry["fit"]), "selectors": _selectors(entry["selectors"]),
         "overlay": entry["overlay"],
+        "interaction": normalize_interaction(entry["interaction"]),
+        "presentation": normalize_presentation(entry["presentation"]),
     }
 
 
@@ -416,7 +424,7 @@ def open_figure_host(
 
     expected = {
         "spec", "parameters", "size", "viewport", "classifier_thresholds",
-        "facet_focus", "fit", "selectors",
+        "facet_focus", "fit", "selectors", "interaction", "presentation",
     }
     entry = _keys(recipe, expected, "decoded plot recipe")
     host = build_figure_host(
@@ -426,7 +434,7 @@ def open_figure_host(
         parameters=entry["parameters"],
         initial_configuration={
             name: entry[name] for name in (
-                "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit",
+                "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit", "interaction", "presentation",
             )
         } | {"fit_live": False},
         device_pixel_ratio=device_pixel_ratio,
@@ -517,6 +525,8 @@ def _submit_figure_artifact(
     lineage: Mapping[str, object] | None = None,
     selectors: object = (),
     source: Mapping[str, object] | None = None,
+    interaction: Mapping[str, object] | None = None,
+    presentation: Mapping[str, object] | None = None,
 ) -> object:
     """Queue one exact archive/export transaction on an existing Host.
 
@@ -537,6 +547,9 @@ def _submit_figure_artifact(
     expected_fit = {} if fit is None else dict(fit)
     expected_thresholds = tuple(classifier_thresholds)
     expected_selectors = tuple(selectors)
+    from .state import normalize_interaction, normalize_presentation
+    expected_interaction = None if interaction is None else normalize_interaction(interaction)
+    expected_presentation = None if presentation is None else normalize_presentation(presentation)
     expected_overlay_revision = (
         int(plot_input.overlay.revision)
         if isinstance(plot_input, ImageFrame)
@@ -555,6 +568,8 @@ def _submit_figure_artifact(
             and description.facet_focus == facet_focus
             and dict(description.fit) == expected_fit
             and tuple(description.selectors) == expected_selectors
+            and (expected_interaction is None or description.display_state.interaction == expected_interaction)
+            and (expected_presentation is None or description.presentation == expected_presentation)
         )
         if not same_recipe:
             raise RuntimeError("settled save host differs from the frozen recipe")
@@ -576,6 +591,8 @@ def _submit_figure_artifact(
                 facet_focus=description.facet_focus,
                 fit=description.fit,
                 selectors=description.selectors,
+                interaction=description.display_state.interaction,
+                presentation=description.presentation,
             ),
             lambda: session.save(_image_path),
         )
@@ -591,6 +608,8 @@ def save_figure_artifact(
     selectors: object = (),
     source: Mapping[str, object] | None = None,
     host: object | None = None,
+    interaction: Mapping[str, object] | None = None,
+    presentation: Mapping[str, object] | None = None,
 ) -> tuple[Path, Path]:
     """Write an archive-first, exact figure/image pair.
 
@@ -615,6 +634,8 @@ def save_figure_artifact(
             lineage=lineage,
             selectors=selectors,
             source=source,
+            interaction=interaction,
+            presentation=presentation,
         )
         operation = pending.result() if hasattr(pending, "result") else pending
         return operation.value
@@ -639,6 +660,8 @@ def save_figure_artifact(
             "selectors": selectors,
             "fit": {} if fit is None else fit,
             "fit_live": False,
+            "interaction": {} if interaction is None else interaction,
+            "presentation": {} if presentation is None else presentation,
         },
     )
     try:

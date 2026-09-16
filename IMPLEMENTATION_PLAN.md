@@ -10,6 +10,11 @@
 
 ## 1. 当前实施范围
 
+- 本轮交互/坐标整改：Rolling固定记录横轴，只选Index/Time坐标，不给记录族Fate或让其它轴抢X；普通坐标切换不偷分配角色，完整表可从错误Group状态恢复，数值在分桶前拒绝record自分组，消除B²退化。显式series lock进入DisplayState.interaction，Live/Frozen、PanelState/Layout/Figure共用既有display通知与configure；Save在实际host内冻结可见hover/series readout，不依赖旧cached description，不清空导出注释。Rolling两行注释按真实字体高度分开。
+- Image格距按sample index而非显示坐标等距判断；单调非等距与非线性单位共用可逆映射，canonical转换仍由现有Unit精确负责。二维native保持affine贴图，普通等距路径不变；Facet overview/focus、PNG、height-bars的tick/pick和鼠标pan/zoom/ROI共用映射。四种真实三轴Scan schema（等距、非等距、dBm、下降）均可画、native成立、同DPI PNG一致；已核真实screen cell中心，不仅做自身逆变换检查。非单调坐标仍明确拒绝。
+- qCMOS确定软件竞态：删除start/readback后transfer count必须仍0的假证明；Restart期间已到1–3帧从ordinal0照常读取，未跳帧。真实工作点变化、负计数/倒退/newest不一致、finite上限和copy-overrun检查保留。既有8项直接验证通过；该判断在此前基线已存在，尚无现场完整count错误日志，不能声称覆盖全部实验机现象或归因于某一个提交。
+- 本轮正式TaskConsole Qt验收已通过坐标切换、Live锁定→Frozen同锁、Frozen清锁→Live解除、实际hover经PNG/NPZ保存；截图已查看、窗口关闭。另既有RenderProcess/Viewer与不同窗口交互直接验证通过。未操作实验机；脚本、截图与原始证据留ignored research，不入Git。
+
 - Waveform采集收口完成：删除Measurement Read interval、latest抽取和主机定时拼批；一条adapter原生record对应一次发布，receive容量与finite记录数分离，普通Stop发布已接收尾部后封存。time_basis区分设备/采样/主机时钟，记录时间由Runtime保留；N100采集期校验帧流水/CRC/设备时钟，Tek/DAQ arm与Stop反映真实硬件命令，DAQ按实际读回时钟投影。
 - Index/Time声明为同一物理轴的替代坐标，Setting单fate、Scope切换、Derive与Manual共同处理坐标组；连续记录的sample time在Runtime物化为真实普通Dataset坐标。Curve/Facet Curve增加现有Window默认1，Histogram/Curve的显示、selector/Fit与派生统计按同一窗口裁剪。Rolling使用实际run时间，删除renderer负时间原点假设及重复标签实现。当前Figure/selection grammar明确保存坐标选择/窗口，不兼容缺字段格式。
 - 本轮验证：400Hz虚拟源400条原始record顺序完整，四输出经真实NodeHost约1.008秒完成；普通Stop尾部、队列溢出/坏包/时钟、DAQ量化时钟、跨record选区、不同Panel Window和已画ROI随Window更新、Derive/Manual及Figure roundtrip的定向用例通过。正式TaskConsole真实Qt Start/Stop、Index↔Time、Window输入、保存与截图验收通过，窗口全部关闭。没有实际N100/Tek/DAQ硬件验收；探针/截图/性能证据不入Git，无新增Numba kernel。

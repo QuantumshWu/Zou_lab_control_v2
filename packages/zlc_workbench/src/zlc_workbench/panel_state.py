@@ -16,6 +16,7 @@ from zlc_plot import (
     normalize_classifier_threshold_targets,
 )
 from zlc_plot.specs import FACET_FIT_PARAMETER, GRID_CELL_KINDS, limit_pair_for
+from zlc_plot.state import normalize_interaction
 from zlc_plot.semantics import (
     FATE_PREFIX,
     COORDINATE_PREFIX,
@@ -421,6 +422,7 @@ def panel_state_from_description(
             if str(name) != "kind"
         },
         display=dict(description.display_state.values),
+        interaction=dict(description.display_state.interaction),
         fit=dict(description.fit),
     )
 
@@ -721,6 +723,7 @@ class PanelState:
     cell_kind: str = ""
     semantic: Mapping[str, Any] = field(default_factory=dict)
     display: Mapping[str, Any] = field(default_factory=dict)
+    interaction: Mapping[str, Any] = field(default_factory=dict)
     fit: Mapping[str, Any] = field(default_factory=dict)
     overlay_signal: str = ""
     published_outputs: Mapping[str, bool] = field(default_factory=dict)
@@ -762,6 +765,7 @@ class PanelState:
         object.__setattr__(self, "title", str(self.title))
         object.__setattr__(self, "semantic", _plain_state(self.semantic))
         object.__setattr__(self, "display", _plain_state(self.display))
+        object.__setattr__(self, "interaction", _plain_state(normalize_interaction(self.interaction)))
         object.__setattr__(self, "fit", _plain_state(self.fit))
         published_outputs = {
             str(name): enabled
@@ -824,6 +828,7 @@ class PanelState:
             "interval_ms": self.interval_ms,
             "semantic": _document_value(self.semantic),
             "display": _document_value(self.display),
+            "interaction": _document_value(self.interaction),
             "fit": _document_value(self.fit),
             "overlay_signal": self.overlay_signal,
             "published_outputs": dict(self.published_outputs),
@@ -848,6 +853,7 @@ class PanelState:
             "interval_ms",
             "semantic",
             "display",
+            "interaction",
             "fit",
             "overlay_signal",
             "published_outputs",
@@ -901,6 +907,7 @@ class PanelState:
             interval_ms=interval,
             semantic=mapping("semantic"),
             display=mapping("display"),
+            interaction=mapping("interaction"),
             fit=mapping("fit"),
             overlay_signal=text("overlay_signal"),
             published_outputs=published,

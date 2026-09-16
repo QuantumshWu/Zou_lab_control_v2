@@ -172,6 +172,7 @@ def _wire_display_state(state: object) -> tuple[object, ...]:
         dict(state.values),
         tuple(state.changed_names),
         int(state.effects),
+        _plain(state.interaction),
     )
 
 
@@ -321,6 +322,7 @@ def _wire_value(value: object) -> object:
                 ),
                 "fit_expression": value.fit_expression,
                 "fit_expression_error": value.fit_expression_error,
+                "presentation": _plain(value.presentation),
             },
         )
     if isinstance(value, DisplayState):
@@ -473,6 +475,7 @@ def _unwire_value(value: object) -> object:
             FrozenParameters(value[3]),
             frozenset(value[4]),
             RenderEffect(int(value[5])),
+            value[6],
         )
     document = value[2]
     if kind == "display-description":
@@ -531,6 +534,7 @@ def _unwire_value(value: object) -> object:
             ),
             fit_expression=str(document["fit_expression"]),
             fit_expression_error=str(document["fit_expression_error"]),
+            presentation=dict(document["presentation"]),
         )
     if kind == "fit-result":
         return _restore_complete_fit_result(document)
@@ -1697,6 +1701,8 @@ class RenderProcess:
         selectors: object = (),
         source: Mapping[str, object] | None = None,
         host: object | None = None,
+        interaction: Mapping[str, object] | None = None,
+        presentation: Mapping[str, object] | None = None,
     ) -> Future:
         try:
             self._ensure_running()
@@ -1733,6 +1739,8 @@ class RenderProcess:
             tuple(selectors),
             None if source is None else _plain(source),
             host_id,
+            None if interaction is None else _plain(interaction),
+            None if presentation is None else _plain(presentation),
             input_tokens=tuple(input_tokens),
             raw_result=True,
         )
@@ -3426,6 +3434,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
             selectors,
             source,
             host_id,
+            interaction,
+            presentation,
         ) = payload
         plot_input = _resolve_inputs(input_ref, inputs)
 
@@ -3441,6 +3451,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
             "lineage": lineage,
             "selectors": selectors,
             "source": source,
+            "interaction": interaction,
+            "presentation": presentation,
         }
         if host_id is None:
             from .figure_artifact import save_figure_artifact

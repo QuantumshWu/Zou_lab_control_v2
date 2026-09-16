@@ -201,12 +201,20 @@ def _panel_interaction_subject_matches(
 
 _PLOT_TARGET = attrgetter(
     "signal", "kind", "cell_kind", "size", "semantic", "display", "fit",
-    "overlay_signal", "selector", "classifier_thresholds", "focused_cell",
+    "overlay_signal", "selector", "classifier_thresholds", "focused_cell", "interaction",
 )
 
 
 def _same_panel_plot_target(left: PanelState, right: PanelState) -> bool:
     return _PLOT_TARGET(left) == _PLOT_TARGET(right)
+
+
+def _display_values(parameters: Mapping, interaction: Mapping) -> dict:
+    """One namespaced currency for parameter and committed-gesture echoes."""
+
+    return {(namespace, str(name)): value
+            for namespace, values in (("parameters", parameters), ("interaction", interaction))
+            for name, value in values.items()}
 
 
 #: The identity a Setting VOCABULARY derives from -- the same three inputs
@@ -249,7 +257,7 @@ class PanelBinding:
     #: values.  Monotonic ordering makes the mirror convergent.
     display_sync_revisions: dict = field(default_factory=dict)
     #: Latest Workbench-authored display target still travelling to each
-    #: surface (host_id -> name -> value).  Host display callbacks are ordered
+    #: surface (host_id -> (namespace, name) -> value). Host callbacks are ordered
     #: per surface, but they are asynchronous with the Workbench owner turn:
     #: an older configure can therefore report after a newer PanelState was
     #: authored.  Until the surface reaches the latest target, older values
@@ -350,6 +358,7 @@ class PanelBinding:
             "size",
             "semantic",
             "display",
+            "interaction",
             "fit",
             "overlay_signal",
         )
@@ -1732,6 +1741,7 @@ class ConsolePresenter:
         binding: PanelBinding,
         host: object,
         values: Mapping[str, object],
+        *, interaction: Mapping[str, object] | None = None,
     ) -> None:
         """Record the newest application-authored values sent to one host.
 
@@ -1745,15 +1755,11 @@ class ConsolePresenter:
         key = self._display_host_key(host)
         pending = binding.display_sync_targets.setdefault(key, {})
         accepted = self._panel_accepted_display(binding, host)
-        current = (
-            {}
-            if accepted is None
-            else getattr(accepted.display_state, "values", {})
-        )
-        for name, value in values.items():
-            selected = str(name)
-            if selected in pending or current.get(selected) != value:
-                pending[selected] = value
+        current = {} if accepted is None else _display_values(
+            accepted.display_state.values, accepted.display_state.interaction)
+        for name, value in _display_values(values, {} if interaction is None else interaction).items():
+            if name in pending or current.get(name) != value:
+                pending[name] = value
         if not pending:
             binding.display_sync_targets.pop(key, None)
 
@@ -1771,7 +1777,7 @@ class ConsolePresenter:
             seen = binding.display_sync_revisions.get(key)
             if seen is None or revision > seen:
                 binding.display_sync_revisions[key] = revision
-        values = getattr(state, "values", {})
+        values = _display_values(getattr(state, "values", {}), getattr(state, "interaction", {}))
         pending = binding.display_sync_targets.get(key)
         if pending is None:
             return
@@ -1981,7 +1987,9 @@ class ConsolePresenter:
             configuration.update(
                 facet_focus=panel_state.focused_cell,
                 viewport=selected_viewport,
+                interaction=dict(panel_state.interaction),
             )
+            self._stage_panel_display_target(binding, host, {}, interaction=panel_state.interaction)
             if classifier_thresholds is not _UNCHANGED:
                 configuration["classifier_thresholds"] = classifier_thresholds
             if selectors is not _UNCHANGED:
@@ -2202,6 +2210,8 @@ class ConsolePresenter:
                         return
                     target = replace(
                         current.target,
+                        display=binding.state.display,
+                        interaction=binding.state.interaction,
                         selector=binding.state.selector,
                         classifier_thresholds=binding.state.classifier_thresholds,
                         focused_cell=binding.state.focused_cell,
@@ -2270,6 +2280,7 @@ class ConsolePresenter:
                 state,
                 semantic=dict(current.semantic),
                 display=dict(current.display),
+                interaction=dict(current.interaction),
                 fit=dict(current.fit),
                 size=current.size,
                 selector=dict(current.selector),
@@ -2288,7 +2299,7 @@ class ConsolePresenter:
                 "initial_spec": recipe["spec"],
                 "initial_configuration": {
                     name: recipe[name] for name in (
-                        "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit",
+                        "viewport", "classifier_thresholds", "facet_focus", "selectors", "fit", "interaction", "presentation",
                     )
                 },
             }
@@ -2704,6 +2715,7 @@ class ConsolePresenter:
                 selector={},
                 classifier_thresholds=(),
                 focused_cell=None,
+                interaction={name: None for name in current.interaction},
             )
             binding.interaction_viewport = None
         projection_identity_changed = (
@@ -2711,6 +2723,8 @@ class ConsolePresenter:
             or str(changes.get("cell_kind", current.cell_kind))
             != current.cell_kind
         )
+        if projection_identity_changed:
+            merged["interaction"] = {name: None for name in current.interaction}
         for name in ("semantic", "display", "fit"):
             # Axis assignments and fit models belong to one exact
             # signal/cell vocabulary.  Carrying either into another and
@@ -5548,13 +5562,13 @@ class ConsolePresenter:
         reported_names = getattr(state, "changed_names", None)
         if reported_names is None:
             reported_names = tuple(values)
-        reported = {
+        reported = _display_values({
             str(name): values[name]
             for name in reported_names
             if name in values
-        }
-        echoed: set[str] = set()
-        stale: set[str] = set()
+        }, getattr(state, "interaction", {}))
+        echoed: set[tuple[str, str]] = set()
+        stale: set[tuple[str, str]] = set()
         for name, value in reported.items():
             if name not in expected:
                 continue
@@ -5569,18 +5583,25 @@ class ConsolePresenter:
                 stale.add(name)
         if not expected:
             binding.display_sync_targets.pop(source_key, None)
-        recorded = dict(binding.state.display)
+        recorded = _display_values(binding.state.display, binding.state.interaction)
         changed = {
-            str(name): value
+            name: value
             for name, value in reported.items()
-            if recorded.get(str(name)) != value
-            and str(name) not in echoed
-            and str(name) not in stale
+            if recorded.get(name) != value
+            and name not in echoed
+            and name not in stale
         }
         if not changed:
             return
-        merged = {**recorded, **changed}
-        self._remember_panel_view(binding, display=merged)
+        updates = {
+            namespace: {name: value for (kind, name), value in changed.items() if kind == namespace}
+            for namespace in ("parameters", "interaction")
+        }
+        merged = {
+            target: {**getattr(binding.state, target), **updates[namespace]}
+            for namespace, target in (("parameters", "display"), ("interaction", "interaction"))
+        }
+        self._remember_panel_view(binding, **merged)
         frozen = binding.frozen_data
         if frozen is not None:
             # The sync moves BOTH surfaces and the record together: the
@@ -5590,7 +5611,7 @@ class ConsolePresenter:
             # on the first synced value and gated the channel keeping the
             # surfaces equal.
             binding.frozen_data = replace(
-                frozen, target=replace(frozen.target, display=merged)
+                frozen, target=replace(frozen.target, **merged)
             )
         for host in (binding.host, binding.editor_host):
             if (
@@ -5606,7 +5627,9 @@ class ConsolePresenter:
                 self._display_host_key(host), {}
             )
             pending.update(changed)
-            host.set_parameters(changed)
+            self._track_panel_configuration(binding, host,
+                host.configure(**{name: values for name, values in updates.items() if values}))
+        self._track_panel_configuration(binding, source, source.describe_display())
 
     def _enqueue_panel_crosshair(
         self,

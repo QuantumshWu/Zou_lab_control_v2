@@ -32,10 +32,10 @@ from data_factory import (
     repeat_domain,
 )
 from zlc_data import REPEAT, SITE
-from zlc_plot import HistogramPlot, PlotSession
+from zlc_plot import AxisRef, HistogramPlot, ImagePlot, PlotSession, SelectorKind
 from zlc_plot._axis_scale import LINEAR, LOG, axis_space, axis_value, midpoint
 from zlc_plot._axis_transform import AxisTransform
-from zlc_plot.selectors import DragHandle, NumericRange, _drag_numeric_range
+from zlc_plot.selectors import DragHandle, NumericRange, SelectorState, _drag_numeric_range
 
 
 _BOX = (0.0, 0.0, 1.0, 1.0)
@@ -141,6 +141,67 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
     finally:
         session.close()
 
+    # Image coordinates define equally spaced cells, including descending
+    # nonuniform scans and nonlinear display units. Pointer -> canonical ->
+    # painted selector must return to the same pixel between sample centers.
+    from zlc_data.units import DEFAULT_UNITS
+    for coordinates, unit in (((135., 191., 247.), "dBm"), ((247., 160., 135.), "mVpp")):
+        schema = make_dataset_schema(
+            repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+            cell_axes=(axis("y", values=(0., 1., 2.), role=SITE),
+                       axis("power", values=coordinates, role=SITE, unit="mVpp")),
+            dtype=np.float64,
+        )
+        image = PlotSession(
+            make_snapshot(schema, np.arange(9.).reshape(1, 1, 3, 3), 0),
+            ImagePlot(AxisRef.cell_data("power"), AxisRef.cell_data("y")),
+            parameters={"x_display_unit": unit},
+        )
+        try:
+            image.rgba()
+            axes = image._renderer.primary_axes
+            transform = image._axis_transform_for_axis(axes)
+            display_values = DEFAULT_UNITS.convert(np.asarray(coordinates), "mVpp", unit)
+            displayed = float((display_values[0] + display_values[1]) / 2)
+            nx, ny = transform.display_to_normalized(displayed, 1.)
+            canonical = transform.canonical_from_normalized(nx, ny)
+            expected = float(DEFAULT_UNITS.convert(displayed, unit, "mVpp"))
+            assert canonical.x == pytest.approx(expected)
+            if unit == "dBm":
+                assert canonical.x == pytest.approx(math.sqrt(135. * 191.))
+            painted = image._painted_selector_state(SelectorState(SelectorKind.CROSSHAIR, canonical))
+            np.testing.assert_allclose(transform.display_to_normalized(painted.value.x, painted.value.y), (nx, ny))
+            from zlc_plot.notebook import _axis_from_dict, _axis_to_dict
+            import json
+            restored = _axis_from_dict(json.loads(json.dumps(_axis_to_dict(transform))))
+            assert restored == transform
+            assert restored.canonical_from_normalized(nx, ny) == canonical
+            import pickle
+            from zlc_plot.render_process import _encode_message
+            assert pickle.loads(_encode_message(transform)) == transform
+            image.set_area_selector(
+                NumericRange(min(coordinates), max(coordinates)), NumericRange(0., 2.), display=False,
+            )
+            selection = image.selectors
+            for step in (-1., 1.):
+                image._raster_pointer_event("scroll", nx, ny, step=step, axes_snapshot=transform)
+                image.rgba()
+                transform = image._axis_transform_for_axis(axes)
+                box = axes.get_window_extent()
+                assert box.width == pytest.approx(box.height)
+                lattice_span = abs(np.diff(axis_space(np.asarray(axes.get_xlim()), transform.x_scale))[0])
+                pitch = abs(np.diff(axis_space(display_values, transform.x_scale))[0])
+                assert lattice_span / pitch == pytest.approx(abs(np.diff(axes.get_ylim())[0]))
+                assert image.selectors == selection
+            left, top, right, bottom = transform.bounds
+            origin = (left + .4 * (right - left), top + .4 * (bottom - top))
+            target = (left + .6 * (right - left), top + .6 * (bottom - top))
+            for action, point in (("press", origin), ("move", target), ("release", target)):
+                image._raster_pointer_event(action, *point, button=2, axes_snapshot=transform)
+            assert image.selectors == selection
+        finally:
+            image.close()
+
 
 def test_concurrent_live_draws_and_exports_share_one_safe_mathtext_parser(
     tmp_path,
@@ -233,7 +294,7 @@ def test_every_axis_fact_the_renderer_can_set_is_captured() -> None:
     from zlc_plot import session as session_module
 
     source = inspect.getsource(session_module.PlotSession._axis_transform_for_axis)
-    for limits, scale in (("get_xlim", "get_xscale"), ("get_ylim", "get_yscale")):
+    for limits, scale in (("get_xlim", 'axis_scale(axis, "x")'), ("get_ylim", 'axis_scale(axis, "y")')):
         assert limits in source
         assert scale in source, (
             "the transform builder reads %s but never %s" % (limits, scale)
@@ -259,3 +320,13 @@ def test_axis_space_is_reversible_and_guards_a_stale_value() -> None:
     assert axis_space(0.0, LOG) == -math.inf
     assert axis_space(-5.0, LOG) == -math.inf
     assert axis_space(-5.0, LINEAR) == -5.0
+    for coordinates in ((1.0, 3.0, 10.0), (10.0, 3.0, 1.0)):
+        # The scale itself stays increasing. Descending axes are reversed
+        # by their limits, exactly as uniform axes, not a second time here.
+        np.testing.assert_array_equal(axis_space(np.asarray((1., 3., 10.)), coordinates), (0., 1., 2.))
+        positions = np.asarray((-.5, 0., .5, 1., 1.5, 2., 2.5))
+        values = axis_value(positions, coordinates)
+        np.testing.assert_allclose(axis_space(values, coordinates), positions)
+        for position, value in zip(positions, values):
+            assert axis_space(float(value), coordinates) == pytest.approx(position)
+            assert axis_value(float(position), coordinates) == pytest.approx(value)

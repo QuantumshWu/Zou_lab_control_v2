@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from dataclasses import replace
 
 from data_factory import make_dataset_schema, make_snapshot, mapped_domain_from_columns, repeat_domain
-from zlc_data import PRIMARY_INDEX, SHOT_TIME
+from zlc_data import AxisId, AxisSpec, COMPONENT, DomainSpec, PRIMARY_INDEX, SHOT_TIME
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
-from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, PlotKind, PlotSession, Reduction, RollingPlot
+from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotKind, PlotSession, Reduction, RollingPlot
 from zlc_plot.figure_artifact import decode_plot_recipe, encode_plot_recipe
 from zlc_plot.semantics import describe_semantics, fate_field_name, projection_scope, updated_spec, scope_fate, composed_spec
 
@@ -48,14 +49,15 @@ def test_the_shot_time_axis_is_an_x_fate_of_a_rolling_plot() -> None:
     coordinate_field = f"coordinate:point:{PRIMARY_INDEX_AXIS_ID}"
     fate_field = fate_field_name(index_ref)
     description = describe_semantics(schema, RollingPlot())
-    assert len(description.fate_rows) == 2  # repeat plus one shot axis
-    row = description.field(fate_field)
-    labels = dict(row.choices)
-    assert row.value == "reduce" and labels["reduce"] == "(shot axis)"
-    assert "x" in labels
+    assert len(description.fate_rows) == 1  # Repeat only; the record X is fixed.
+    assert not description.declares(fate_field)
+    assert description.field(coordinate_field).label == "X coordinate"
+    assert not description.axes_offering("x")
     along_time = updated_spec(schema, RollingPlot(), coordinate_field, time_ref.axis_id)
     assert along_time == RollingPlot(x=time_ref, coordinates=(time_ref,))
-    assert updated_spec(schema, along_time, fate_field, "reduce") == RollingPlot(coordinates=(time_ref,))
+    for fate in ("reduce", "group", "x", scope_fate(0.1)):
+        with pytest.raises(KeyError):
+            updated_spec(schema, along_time, fate_field, fate)
     # The shot index may be named as x as well: that is the default, spelled out.
     along_index = updated_spec(schema, along_time, coordinate_field, index_ref.axis_id)
     assert along_index == RollingPlot(x=index_ref)
@@ -80,15 +82,42 @@ def test_the_shot_time_axis_is_an_x_fate_of_a_rolling_plot() -> None:
     along = CurvePlot(time_ref, reduction=Reduction.LAST)
     assert index_ref not in dict(projection_scope(schema, along))
 
-    pinned = RollingPlot(scope=((index_ref, -1),))
+    pinned = HistogramPlot(scope=((index_ref, -1),))
     chosen = updated_spec(schema, pinned, coordinate_field, time_ref.axis_id)
     assert chosen.scope == ((time_ref, 0.1),)
     # A saved full table's Scope is already in its selected coordinate.
-    restored = composed_spec(schema, RollingPlot(), {
+    restored = composed_spec(schema, HistogramPlot(), {
         coordinate_field: time_ref.axis_id, fate_field: scope_fate(0.0),
     })
     assert restored.scope == ((time_ref, 0.0),)
     assert updated_spec(schema, restored, coordinate_field, index_ref.axis_id).scope == ((index_ref, -2),)
+
+    # Coordinate selection changes only the coordinate, never the family's
+    # fate. A complete replay must not build a conflicting intermediate x.
+    component = AxisSpec(AxisId("component"), "component", COMPONENT, 2)
+    component_ref = AxisRef.cell_data(component.axis_id.value)
+    matrix_schema = replace(schema, cell_domain=DomainSpec((2,), (component,)))
+    for original in (
+        CurvePlot(component_ref, group=index_ref),
+        CurvePlot(index_ref, group=component_ref),
+        ImagePlot(index_ref, component_ref),
+        HistogramPlot(reduced=(index_ref,)),
+        FacetGridPlot(index_ref, HistogramPlot()),
+    ):
+        before = describe_semantics(matrix_schema, original).field(fate_field).value
+        switched = updated_spec(matrix_schema, original, coordinate_field, time_ref.axis_id)
+        description = describe_semantics(matrix_schema, switched)
+        assert description.field(fate_field).value == before
+        assert composed_spec(matrix_schema, switched, description.values) == switched
+        assert updated_spec(matrix_schema, switched, coordinate_field, index_ref.axis_id) == original
+    grouped = RollingPlot(group=time_ref, coordinates=(time_ref,))
+    # An already-mounted invalid Group is repairable with the same complete
+    # table used by ordinary configure, without an intermediate x/group clash.
+    valid_table = describe_semantics(schema, along_time).values
+    assert composed_spec(schema, grouped, valid_table) == along_time
+    assert updated_spec(schema, grouped, coordinate_field, index_ref.axis_id) == along_index
+    with pytest.raises(ValueError, match="record|history|group|Group"):
+        PlotSession(snapshot, grouped, parameters={"window": 3})
 
     session = PlotSession(snapshot, along_time, parameters={"window": 3})
     try:

@@ -391,10 +391,9 @@ ROLE_FATES = ("x", "y", "group", "facet")
 def _optional_roles(spec: PlotSpec) -> frozenset[str]:
     """The roles this kind may leave empty: those its declaration defaults to None.
 
-    A curve's x is required because a curve has no default x; a rolling
-    plot's x defaults to the shot index and group to none, so both may be
-    vacated.  Read off the kind's own declaration, so a new optional role
-    is optional the day it is declared.
+    A curve's x is required because it has no default; group defaults to
+    none and may be vacated. Read the declaration rather than maintaining
+    another list of optional authorable roles.
     """
 
     semantic = semantic_spec(spec)
@@ -587,15 +586,11 @@ def projection_scope(
 
     scope = _scope_terms(spec)
     if getattr(semantic_spec(spec), "reduction", None) is Reduction.LAST:
-        indexed = indexed_history_layout(schema) if spec.kind is PlotKind.ROLLING else None
         axes = _fate_row_axes(schema, spec)
         for ref in axes:
             if _fate_of(spec, ref) != FATE_REDUCE:
                 continue
-            if spec.kind is PlotKind.ROLLING and (
-                _is_shot_axis(schema, ref) if indexed is not None
-                else ref.domain is AxisDomain.REPEAT
-            ):
+            if spec.kind is PlotKind.ROLLING and _is_rolling_record_axis(schema, ref):
                 continue
             scope[ref] = LATEST_COORDINATE
     return tuple(scope.items())
@@ -607,13 +602,10 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _is_shot_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
-    """Whether this fate row is a per-shot axis of a Runtime indexed history.
-
-    The shot index and the shot time are the same shots read two ways: a
-    rolling plot rolls along them and never reduces either away.
-    """
-
+def _is_rolling_record_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
+    """The fixed record carrier, not an authorable reduction/group axis."""
+    if indexed_history_layout(schema) is None:
+        return ref.domain is AxisDomain.REPEAT
     return resolve_axis(schema, ref).domain.coordinate_axis(AxisId(ref.axis_id)).role == PRIMARY_INDEX
 
 
@@ -760,9 +752,6 @@ def _coordinate_spec(schema: DatasetSchema, spec: PlotSpec, primary: AxisRef, se
 
     semantic = semantic_spec(spec)
     changes = {role: remap(getattr(semantic, role)) for role in ("x", "y", "group") if hasattr(semantic, role)}
-    if (spec.kind is PlotKind.ROLLING and semantic.x is None and _is_shot_axis(schema, selected)
-            and not any(coordinate_axis_ref(schema, ref) == primary for ref, _value in spec.scope)):
-        changes["x"] = selected
     if hasattr(semantic, "reduced"):
         changes["reduced"] = tuple(remap(ref) for ref in semantic.reduced)
     scope = []
@@ -839,6 +828,26 @@ def composed_spec(
                         schema, candidate, coordinate_axis_ref(schema, ref), ref
                     )
 
+    if schema is not None and candidate.kind is PlotKind.ROLLING:
+        # Fixed record geometry is applied as one replacement. A host that
+        # previously held Group on this carrier can still accept a correction.
+        record = next((
+            ref for ref in axis_choices_for_schema(schema)
+            if _is_rolling_record_axis(schema, ref)
+        ), None)
+        along = None
+        if record is not None and indexed_history_layout(schema) is not None:
+            along = next((
+                ref for ref in (candidate.x, *candidate.coordinates)
+                if ref is not None and _is_rolling_record_axis(schema, ref)
+            ), record)
+        group = candidate.group
+        if group is not None and _is_rolling_record_axis(schema, group):
+            group = None
+        scope = {ref: value for ref, value in scope.items()
+                 if not _is_rolling_record_axis(schema, ref)}
+        candidate = replace(candidate, x=along, group=group, scope=tuple(scope.items()))
+
     if schema is not None:
         for old in _fate_row_axes(schema, candidate):
             field_name = _coordinate_field_name(schema, old)
@@ -868,6 +877,7 @@ def composed_spec(
         fate_rows = {
             fate_field_name(coordinate_axis_ref(schema, axis)): axis
             for axis in _fate_row_axes(schema, row_spec)
+            if candidate.kind is not PlotKind.ROLLING or not _is_rolling_record_axis(schema, axis)
         }
     for name in tuple(rest):
         if not name.startswith(FATE_PREFIX):
@@ -1229,23 +1239,21 @@ def describe_semantics(
         primary = coordinate_axis_ref(schema, ref)
         name = fate_field_name(primary)
         family = resolve_axis(schema, ref).domain.coordinate_axes(AxisId(ref.axis_id))
+        fixed_record = spec.kind is PlotKind.ROLLING and _is_rolling_record_axis(schema, ref)
         if len(family) > 1:
             fields.append(SemanticField(
-                _coordinate_field_name(schema, ref), f"{_axis_label(schema, primary)} coordinate", ref.axis_id,
+                _coordinate_field_name(schema, ref),
+                "X coordinate" if fixed_record else f"{_axis_label(schema, primary)} coordinate", ref.axis_id,
                 tuple((axis.axis_id.value, axis.name) for axis in family), True,
             ))
+        if fixed_record:
+            continue
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
         if default_fate == FATE_POOL and _declares_reduced(spec):
             # Pooling is the default, not the only choice: an axis may be
             # collapsed under the reduction before the values are binned.
             offered.append((FATE_REDUCE, "reduced"))
-        if spec.kind is PlotKind.ROLLING and _is_shot_axis(schema, ref):
-            # Rolling does not reduce the Runtime's shot index or shot time
-            # away -- it ROLLS along them.  Their ordinary relative-coordinate
-            # pins genuinely narrow the window; only the default's label
-            # stops lying about the axis's fate.
-            offered[0] = (default_fate, "(shot axis)")
         for role in roles:
             # Fate rows are the plot kind's vocabulary, not a preview of
             # whether today's data and surface can render the result.  Every

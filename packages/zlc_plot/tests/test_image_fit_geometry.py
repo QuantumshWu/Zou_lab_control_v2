@@ -258,34 +258,53 @@ def _coordinate_image_snapshot(x: np.ndarray, y: np.ndarray) -> OwnedSnapshot:
     return make_snapshot(schema, np.array(values)[None, None], revision=0)
 
 
-def test_irregular_image_coordinates_are_refused_not_drawn_uniformly() -> None:
-    """An Image is a regular grid: one cell per pitch, drawn as one extent.
+@pytest.mark.parametrize("coordinates", [(0.0, 1.0, 10.0), (10.0, 1.0, 0.0)])
+def test_irregular_image_coordinates_share_the_pixel_and_selection_mapping(coordinates) -> None:
+    """Square samples retain their real coordinates, including between samples."""
 
-    Centres ``0, 1, 10`` have no such extent.  Painted uniformly anyway,
-    the pixel at x=1 showed the first sample while the crosshair at x=1
-    read the second: two consumers of one dataset answering with
-    different cells.  The geometry is refused where every image owner
-    asks for it, loudly, instead of drawn as something it is not.
-    """
+    from zlc_plot import NumericRange
 
     spec = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
-    with pytest.raises(ValueError, match="uniformly spaced"):
-        PlotSession(
-            _coordinate_image_snapshot(
-                np.array([0.0, 1.0, 10.0]), np.array([0.0, 1.0])
-            ),
-            spec,
-        )
-    # A producer's rounded coordinate table is still the regular grid it
-    # describes: a hundredth of a cell of drift is not irregularity.
+    x = np.asarray(coordinates)
     session = PlotSession(
-        _coordinate_image_snapshot(
-            np.round(np.linspace(0.0, 1.0, 7), 3), np.array([0.0, 1.0])
-        ),
-        spec,
+        _coordinate_image_snapshot(x, np.array([0.0, 1.0])), spec,
     )
     try:
-        assert session.rgba().size > 0
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        assert renderer._image_transform(axes).is_affine
+        assert renderer._raster_prepared_images(renderer.figure.canvas)[0]
+        assert axes.bbox.width == pytest.approx(axes.bbox.height)
+        pixels = axes.transData.transform(np.column_stack((x, np.zeros(3))))
+        assert np.all(np.diff(pixels[:, 0]) > 0.0), "cell order must survive a descending coordinate axis"
+        np.testing.assert_allclose(np.diff(pixels[:, 0]), np.repeat(np.diff(pixels[:, 0])[0], 2))
+        extent = renderer._artists["image:prepared"]["extents"][0]
+        raster_centers = np.column_stack((
+            extent[0] + (np.arange(3) + 0.5) * (extent[1] - extent[0]) / 3,
+            np.repeat(extent[3] + 0.25 * (extent[2] - extent[3]), 3),
+        ))
+        np.testing.assert_allclose(renderer._image_transform(axes).transform(raster_centers), pixels)
+        transform = session._axis_transform_for_axis(axes)
+        for coordinate in (0.0, 1.0, 5.5, 10.0):
+            nx, ny = transform.display_to_normalized(coordinate, 0.0)
+            assert transform.canonical_from_normalized(nx, ny).x == pytest.approx(coordinate)
+        selected = session.set_area_selector(NumericRange(0.5, 5.0), NumericRange(0.0, 1.0))
+        model = session._resolve_fit_model("anisotropic_gaussian_center")
+        before = session._projected.fit_selection(model)
+        np.testing.assert_array_equal(before.coordinates[0], x)
+        np.testing.assert_array_equal(before.regular_image.valid_mask, [[False, True, False]] * 2)
+        session.set_viewport(NumericRange(0.4, 5.6), NumericRange(-0.4, 1.4))
+        assert axes.bbox.width == pytest.approx(axes.bbox.height)
+        assert session.selector_state(selected.kind).value == selected.value
+        after = session._projected.fit_selection(model)
+        np.testing.assert_array_equal(after.coordinates[0], before.coordinates[0])
+        np.testing.assert_array_equal(after.regular_image.valid_mask, before.regular_image.valid_mask)
+        session.set_parameter("presentation", "height_bars")
+        assert renderer.primary_axes.get_xscale() == "linear"
+        for column, coordinate in enumerate(x):
+            assert renderer._height_bars_cell_of(float(coordinate), 0.0) == (0, column)
+        session.set_parameter("presentation", "heatmap")
+        assert renderer._raster_prepared_images(renderer.figure.canvas)[0]
     finally:
         session.close()
 

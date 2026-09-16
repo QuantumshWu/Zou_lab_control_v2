@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from numbers import Integral, Real
 from pathlib import Path
 from threading import Event, RLock, current_thread
@@ -33,6 +33,7 @@ from .data_contract import (
 from .errors import RevisionError
 
 from ._axis_transform import AxisTransform, canvas_physical_size
+from ._axis_scale import axis_space, axis_value
 from ._gesture_engine import (
     _OrbitGesture,
     _PickGesture,
@@ -96,6 +97,7 @@ from .rendering import (
     MatplotlibRenderer,
     RenderFrame,
     _image_cell_aspect,
+    _image_coordinate_scale,
 )
 from .selectors import (
     CrosshairPoint,
@@ -124,7 +126,7 @@ from .specs import (
     parameter_schema_for,
     semantic_spec,
 )
-from .state import DisplayState, DisplayStateStore
+from .state import DisplayState, DisplayStateStore, normalize_interaction, normalize_presentation
 from .semantics import (
     SemanticDescription,
     composed_spec,
@@ -210,6 +212,7 @@ class DisplayDescription:
     fit_models: tuple[FitModelSpec, ...]
     fit_expression: str
     fit_expression_error: str
+    presentation: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PlotKind):
@@ -264,6 +267,7 @@ class DisplayDescription:
             None if focus is None else int(focus),
         )
         object.__setattr__(self, "fit", MappingProxyType(dict(self.fit)))
+        object.__setattr__(self, "presentation", normalize_presentation(self.presentation))
         if self.selection_subject.plot_kind is not semantic_spec(self.spec).kind:
             raise ValueError(
                 "display description selection subject differs from its semantic spec"
@@ -443,7 +447,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("initial_configuration must be a mapping or None")
         initial = {} if initial_configuration is None else dict(initial_configuration)
         unknown_initial = set(initial) - {
-            "viewport", "selectors", "facet_focus", "classifier_thresholds", "fit", "fit_live",
+            "viewport", "selectors", "facet_focus", "classifier_thresholds", "fit", "fit_live", "interaction", "presentation",
         }
         if unknown_initial:
             raise TypeError(f"unknown initial configuration fields: {sorted(unknown_initial)}")
@@ -778,6 +782,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             display_x,
             display_y,
         )
+        x_scale = self._renderer.axis_scale(axis, "x")
+        y_scale = self._renderer.axis_scale(axis, "y")
+        canonical_scales = [None, None]
+        semantic = self._projected._semantic_spec()
+        if isinstance(semantic, ImagePlot) and role in {"image", "facet_cell"}:
+            for index, (ref, scale) in enumerate(((semantic.x, x_scale), (semantic.y, y_scale))):
+                quantity = self._projected._coordinate(ref)
+                canonical, display = quantity.canonical_unit, quantity.display_unit
+                if canonical != display and (
+                    isinstance(scale, tuple) or not (canonical.is_linear and display.is_linear)
+                ):
+                    canonical_scales[index] = (scale, canonical, display)
         return AxisTransform(
             role or "main",
             cell_index,
@@ -794,8 +810,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # The one fact the limits cannot carry.  Read here because this
             # is the only place an AxisTransform is ever built, and the axis
             # is in hand; downstream nobody has the axis to ask.
-            str(axis.get_xscale()),
-            str(axis.get_yscale()),
+            x_scale,
+            y_scale,
+            *canonical_scales,
         )
 
     def _axis_for_transform(self, transform: AxisTransform) -> Any | None:
@@ -1052,6 +1069,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 classifier_thresholds=self._classifier_threshold_targets_state(settled=True),
                 facet_focus=self._facet_focus_index, fit=self._fit_configuration(),
                 selectors=self._configured_selectors(),
+                interaction=self.display_state.interaction,
+                presentation=self._renderer.series_presentation(),
             )
 
     def describe_display(self) -> DisplayDescription:
@@ -1097,6 +1116,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 fit_models=fit_models,
                 fit_expression=fit_expression,
                 fit_expression_error=fit_expression_error,
+                presentation=self._renderer.series_presentation(),
             )
 
     def describe_semantics(self) -> SemanticDescription:
@@ -1285,6 +1305,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         effects: RenderEffect,
         *,
         compose: bool = True,
+        presentation: Mapping[str, object] | None = None,
     ) -> None:
         deferred = self._configuration_effects
         if deferred is not None:
@@ -1330,6 +1351,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             facet_index=self._focused_facet_index,
             facet_focus_index=self._facet_focus_index,
             view_limits=view_limits,
+            presentation=presentation,
         )
         if compose:
             renderer.present(frame)
@@ -1348,10 +1370,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _render_current(
         self,
         effects: RenderEffect,
+        *, presentation: Mapping[str, object] | None = None,
     ) -> None:
         with self._render_lock:
             assert self._renderer is not None
-            self._update_renderer(self._renderer, effects)
+            self._update_renderer(self._renderer, effects, presentation=presentation)
 
     def _present_solved_projection(
         self,
@@ -1580,6 +1603,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         plan: SurfacePlan,
         *,
         compose: bool = True,
+        presentation: Mapping[str, object] | None = None,
     ) -> None:
         with self._render_lock:
             self._cancel_gesture()
@@ -1590,7 +1614,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 facet_index=self._focused_facet_index,
                 facet_focus_index=self._facet_focus_index,
             )
-            self._update_renderer(renderer, RenderEffect.LAYOUT, compose=compose)
+            self._update_renderer(renderer, RenderEffect.LAYOUT, compose=compose, presentation=presentation)
             with self._lock:
                 self._assert_open()
 
@@ -1611,6 +1635,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
         viewport: RectangleRange | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
+        interaction: Mapping[str, object] | None = None,
+        presentation: Mapping[str, object] | None = None,
         fit: Mapping[str, object] | None | object = _UNSET,
         fit_live: bool = True,
     ) -> DisplayDescription:
@@ -1622,6 +1648,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 parameter_updates=parameter_updates, size=size, image_overlay=image_overlay,
                 classifier_thresholds=classifier_thresholds, selectors=selectors,
                 selector_updates=selector_updates, viewport=viewport, facet_focus=facet_focus,
+                interaction=interaction, presentation=presentation,
                 fit=fit, fit_live=fit_live,
             )
             return self.describe_display()
@@ -1640,6 +1667,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
         viewport: RectangleRange | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
+        interaction: Mapping[str, object] | None = None,
+        presentation: Mapping[str, object] | None = None,
         fit: Mapping[str, object] | None | object = _UNSET,
         fit_live: bool = True,
     ) -> None:
@@ -1696,6 +1725,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("fit must be a mapping, None, or omitted")
         if type(fit_live) is not bool:
             raise TypeError("fit_live must be bool")
+        interaction_target = None if interaction is None else normalize_interaction(interaction)
+        presentation_target = None if presentation is None else normalize_presentation(presentation)
         selected_data = data
         selected_overlay = _UNSET
         if data is not _UNSET:
@@ -1834,6 +1865,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         {} if fit is None else fit,
                         live=fit_live,
                     )
+                if interaction_target is not None:
+                    before_interaction = self.display_state
+                    state = self._display_store._commit_interaction(interaction_target)
+                    if state is not before_interaction:
+                        self._configuration_effects |= RenderEffect.OVERLAY
+                        changed = frozenset().union(*(item.changed_names for item in self._configuration_display_events))
+                        self._notify_display(replace(state, changed_names=changed))
+                if presentation_target is not None:
+                    self._configuration_effects |= RenderEffect.OVERLAY
                 effects = self._configuration_effects
                 display_events = tuple(self._configuration_display_events or ())
                 fit_events = tuple(self._configuration_fit_events or ())
@@ -1842,7 +1882,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._configuration_fit_events = None
                 if effects != RenderEffect.NONE:
                     render_started = True
-                    self._render_current(effects)
+                    self._render_current(effects, presentation=presentation_target)
                 fit_commit_actions = tuple(
                     self._configuration_fit_commit_actions or ()
                 )
@@ -1874,6 +1914,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             "selector_states": self._selector_controller.states(),
             "fit_warm_starts": dict(self._fit_warm_starts),
             "renderer_plan": self._renderer.plan,
+            "presentation": self._renderer.series_presentation(),
         })
         return snapshot
 
@@ -1903,7 +1944,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         assert self._renderer is not None
         self._renderer.spec = self._spec
         try:
-            self._apply_layout_plan(snapshot["renderer_plan"], compose=compose)
+            self._apply_layout_plan(snapshot["renderer_plan"], compose=compose, presentation=snapshot["presentation"])
         except Exception:
             self.redraw_surface()
 
@@ -2572,6 +2613,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             schema,
             self._filled_store_values(schema, initial_state.parameters),
             initial_revision=old_state.revision + 1,
+            initial_interaction=old_state.interaction,
         )
         focused = 0 if isinstance(spec, FacetGridPlot) else None
         projection = FitProjection(
@@ -4300,12 +4342,16 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         origins: list[float] = []
         counts: list[int] = []
         lows: list[float] = []
+        scales = []
         for axis_values, span in zip(axes_values, spans):
             values = np.asarray(
                 getattr(axis_values, "display", axis_values), dtype=float
             ).reshape(-1)
             if values.size < 2:
                 return selected
+            scale = _image_coordinate_scale(values)
+            values = axis_space(values, scale)
+            span_values = axis_space(np.asarray((span.low, span.high)), scale)
             pitch = abs(
                 (float(values[-1]) - float(values[0])) / (values.size - 1)
             )
@@ -4320,10 +4366,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # x down and y up for the same request.
             tolerance = pitch * 1e-9
             first = math.floor(
-                (min(span.low, span.high) - origin) / pitch + tolerance
+                (min(span_values) - origin) / pitch + tolerance
             )
             last = math.ceil(
-                (max(span.low, span.high) - origin) / pitch - tolerance
+                (max(span_values) - origin) / pitch - tolerance
             )
             if last <= first:
                 return selected
@@ -4331,6 +4377,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             origins.append(origin)
             lows.append(first)
             counts.append(last - first)
+            scales.append(scale)
 
         aspect = _image_cell_aspect(*axes_values)
         if aspect is None or not math.isclose(
@@ -4346,10 +4393,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             counts[index] = wanted
 
         snapped = [
-            NumericRange(
+            NumericRange(*sorted(axis_value(np.asarray((
                 origins[index] + lows[index] * pitches[index],
                 origins[index] + (lows[index] + counts[index]) * pitches[index],
-            )
+            )), scales[index])))
             for index in range(2)
         ]
         return RectangleRange(snapped[0], snapped[1])
@@ -4776,6 +4823,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._on_button_release(event)
             else:
                 self._on_motion(event)
+        before_state = self.display_state
+        state = self._display_store._commit_interaction(self._renderer.series_interaction())
+        if state is not before_state:
+            self._notify_display(state)
         return self._raster_pointer_state(
             # Native (baked) previews redraw the raster without a full
             # presentation pass; either signal means the pixels changed.

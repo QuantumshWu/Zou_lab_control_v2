@@ -11,7 +11,7 @@ from collections import deque
 import copy
 import ctypes
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 import gc
 import hashlib
 import pickle
@@ -35,6 +35,7 @@ from matplotlib.patches import Rectangle
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
 from ._image_raster import ImageFrontStore, PreparedImageFront, _all_true
+from ._axis_scale import LINEAR, axis_space, axis_value
 from ._fit_scene import FitOverlay, FitPolyline
 from . import _raster_kernels as kernels
 from .data_view import aligned_histogram_edges, histogram_counts
@@ -1003,39 +1004,34 @@ def _point_ring_radius(
     return float(fraction) * float(np.median(nearest))
 
 
-#: How far, as a fraction of the pitch, a coordinate may sit from the
-#: regular lattice through its neighbours and still be one of its cells.
-#: A hundredth of a cell is below anything a pixel can show at any zoom the
-#: product offers and above the rounding a producer's coordinate table
-#: carries; ``[0, 1, 10]`` is refused.
-_IMAGE_REGULAR_GRID_TOLERANCE = 1e-2
+def _image_coordinate_scale(values: np.ndarray) -> str | tuple[float, ...]:
+    """Image cells are equally spaced; their scientific coordinates need not be."""
+
+    values = np.asarray(values, dtype=float).reshape(-1)
+    if not values.size or not bool(np.all(np.isfinite(values))):
+        raise ValueError("image coordinates must be non-empty and finite")
+    if values.size < 2:
+        return LINEAR
+    steps = np.diff(values)
+    if not (bool(np.all(steps > 0.0)) or bool(np.all(steps < 0.0))):
+        raise ValueError("image coordinates must be strictly monotonic")
+    pitch = (values[-1] - values[0]) / (values.size - 1)
+    regular = values[0] + pitch * np.arange(values.size)
+    # Only roundoff is a linear lattice. Nonuniform scans and nonlinear
+    # display-unit conversions use the same sample-index mapping below.
+    tolerance = 16.0 * np.finfo(float).eps * max(float(np.max(np.abs(values))), abs(pitch))
+    return LINEAR if bool(np.all(np.abs(values - regular) <= tolerance)) else tuple(map(float, values))
 
 
 def _centers_extent(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
-    """The extent regular image centres cover: half a pitch past each end."""
+    """Image extent in its affine drawing coordinates, half a cell past each end."""
 
     def edge(values: np.ndarray) -> tuple[float, float]:
         values = np.asarray(values, dtype=float).reshape(-1)
-        if not values.size or not bool(np.all(np.isfinite(values))):
-            raise ValueError("image coordinates must be non-empty and finite")
+        values = np.asarray(axis_space(values, _image_coordinate_scale(values)))
         if values.size == 1:
             return (float(values[0] - 0.5), float(values[0] + 0.5))
         steps = np.diff(values)
-        if not (bool(np.all(steps > 0.0)) or bool(np.all(steps < 0.0))):
-            raise ValueError("image coordinates must be strictly monotonic")
-        # An Image is a REGULAR grid: one cell per pitch, drawn as one
-        # extent.  Irregular centres have no such extent -- painted
-        # uniformly, the pixel at a coordinate and the crosshair's nearest
-        # cell disagree about which sample is there -- so the geometry is
-        # refused here, at the one place every image owner asks for it,
-        # rather than drawn as something it is not.
-        pitch = (values[-1] - values[0]) / (values.size - 1)
-        drift = np.abs(values - (values[0] + pitch * np.arange(values.size)))
-        if bool(np.any(drift > _IMAGE_REGULAR_GRID_TOLERANCE * abs(pitch))):
-            raise ValueError(
-                "image coordinates must be uniformly spaced: an Image is a "
-                "regular grid drawn one cell per pitch"
-            )
         return (
             float(values[0] - steps[0] / 2.0),
             float(values[-1] + steps[-1] / 2.0),
@@ -1346,12 +1342,13 @@ def _image_cell_aspect(x: Any, y: Any) -> float | None:
         values = np.asarray(
             getattr(coordinates, "display", coordinates), dtype=float
         ).reshape(-1)
+        values = np.asarray(axis_space(values, _image_coordinate_scale(values)))
         if values.size == 0:
             return None
         if values.size == 1:
             pitch = 1.0
         else:
-            span = _image_axis_span(coordinates)
+            span = _image_axis_span(values)
             if span is None:
                 return None
             pitch = span / values.size
@@ -1977,6 +1974,7 @@ class RenderFrame:
     facet_index: int | None = None
     facet_focus_index: int | None = None
     view_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
+    presentation: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         overlays = tuple(self.classifier_overlays)
@@ -2604,6 +2602,7 @@ class MatplotlibRenderer:
         self._series_hit_cache: dict[int, tuple[tuple, tuple]] = {}
         self._series_indices: dict[int, dict[object, int]] = {}
         self._series_hover: tuple[int, object, str, float, float] | None = None
+        self._series_hover_frozen = False
         self._series_locked: tuple[int, object, str, float, float] | None = None
         self._series_press: tuple[float, float, object | None] | None = None
         self._series_annotations: dict[int, Any] = {}
@@ -2982,6 +2981,7 @@ class MatplotlibRenderer:
         self._series_bars.clear()
         self._series_hit_cache.clear()
         self._series_hover = self._series_locked = self._series_press = None
+        self._series_hover_frozen = False
         self._boundary_chrome_cache.clear()
         self._forget_chrome_commands()
         self._boundary_chrome_signature = None
@@ -3040,6 +3040,7 @@ class MatplotlibRenderer:
         self._composed_generation = -1
         previous_payload = self._last_payload
         previous_data_revision = self._data_revision
+        previous_state = self._last_state
         fresh_axes = self._last_state is None
         state_changed = fresh_axes or state.revision != self._last_state.revision
         payload_changed = (
@@ -3117,6 +3118,10 @@ class MatplotlibRenderer:
                     self._capture_home_limits(axes)
             elif style_only:
                 self._update_base_style(state)
+            if frame.presentation is not None or fresh_axes or (
+                state_changed and state.interaction != previous_state.interaction
+            ):
+                self.restore_series_interaction(state.interaction, frame.presentation)
             # Freshly built axes -- the first frame, or the ones a relayout
             # just rebuilt -- carry no text and no chrome yet, whatever the
             # frame's effects say: the accepted title and grid must reach them
@@ -3327,6 +3332,22 @@ class MatplotlibRenderer:
             axis.set_xlim(float(low), float(high))
             self._mark_axes_chrome_dirty(axis)
             self._refresh_enveloped_lines(axis)
+
+    def axis_scale(self, axis: Any, name: str) -> str | tuple[float, ...]:
+        """The accepted display-coordinate mapping of this painted axis."""
+
+        scales = self._artists.get(f"image:coordinate_scales:{id(axis)}")
+        actual = str(axis.get_xscale() if name == "x" else axis.get_yscale())
+        if scales is not None and actual == "function":
+            return scales[0 if name == "x" else 1]
+        return actual
+
+    def _image_transform(self, axes: Any) -> Any:
+        # Images already live on the uniform sample lattice. Only chrome and
+        # scientific artists need the nonlinear data-to-lattice transform.
+        if any(isinstance(self.axis_scale(axes, name), tuple) for name in ("x", "y")):
+            return axes.transLimits + axes.transAxes
+        return axes.transData
 
     def _set_ylim(self, axis: Any, low: float, high: float) -> None:
         previous_low, previous_high = axis.get_ylim()
@@ -4920,9 +4941,10 @@ class MatplotlibRenderer:
             if image is not None:
                 image_ids.add(id(image))
             extent = tuple(map(float, extents[row]))
+            transform = self._image_transform(axes)
             facts = (
                 axes.bbox.extents.tobytes(),
-                axes.transData.get_matrix().tobytes() if axes.transData.is_affine else None,
+                transform.get_matrix().tobytes() if transform.is_affine else None,
                 extent,
                 rows,
                 columns,
@@ -4933,12 +4955,12 @@ class MatplotlibRenderer:
             if remembered is not None and remembered[0] == facts:
                 geometry = remembered[1]
             else:
-                geometry = self._image_scene_geometry(axes, extent, rows, columns, height, upper)
+                geometry = self._image_scene_geometry(axes, extent, rows, columns, height, upper, transform)
                 self._image_scene_memo[key] = (facts, geometry)
             if geometry is None:
                 # A surface whose picture is out of view paints nothing;
                 # one on a transform the scene cannot serve refuses it.
-                if not axes.transData.is_affine:
+                if not transform.is_affine:
                     return False, frozenset()
                 continue
             blits[row], clips[row], affines[row] = geometry
@@ -4968,6 +4990,7 @@ class MatplotlibRenderer:
         columns: int,
         height: int,
         upper: bool,
+        transform: Any = None,
     ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], tuple[float, ...]] | None:
         """Where ``imshow`` puts one surface's picture, and how it maps.
 
@@ -4993,7 +5016,7 @@ class MatplotlibRenderer:
             TransformedBbox,
         )
 
-        transform = axes.transData
+        transform = axes.transData if transform is None else transform
         if not transform.is_affine:
             return None
         x1, x2, y1, y2 = extent
@@ -6136,8 +6159,8 @@ class MatplotlibRenderer:
         rect = _image_destination_rect(
             axes.bbox,
             tuple(float(v) for v in artist.get_extent()),
-            tuple(map(float, axes.get_xlim())),
-            tuple(map(float, axes.get_ylim())),
+            tuple(map(float, axis_space(np.asarray(axes.get_xlim()), self.axis_scale(axes, "x")))),
+            tuple(map(float, axis_space(np.asarray(axes.get_ylim()), self.axis_scale(axes, "y")))),
         )
         if rect is None:
             return False
@@ -7293,6 +7316,7 @@ class MatplotlibRenderer:
         for annotation in self._series_annotations.values():
             annotation.set_visible(False)
         if active is None or focus_line is None:
+            self._place_rolling_latest()
             return
         axis_id = active[0]
         annotation = self._series_annotations.get(axis_id)
@@ -7316,6 +7340,28 @@ class MatplotlibRenderer:
         )
         annotation.set_color(focus_line.get_color())
         annotation.set_visible(True)
+        self._place_rolling_latest()
+
+    def _place_rolling_latest(self) -> None:
+        """Stack the latest number below a visible series readout by its ink height."""
+
+        latest = self._artists.get(f"{self.primary_surface[0]}:latest")
+        if latest is None:
+            return
+        annotation = self._series_annotations.get(id(latest.axes))
+        if annotation is None or not annotation.get_visible():
+            latest.set_transform(latest.axes.transAxes)
+            latest.set_position((0.97, 0.95))
+            return
+        from matplotlib.transforms import offset_copy
+
+        renderer = _prepare_renderer(self._figure.canvas.get_renderer())
+        height = annotation.get_window_extent(renderer).height
+        _width, _height, descent = renderer.get_text_width_height_descent(
+            "lp", annotation.get_fontproperties(), False)
+        latest.set_position(annotation.get_position())
+        latest.set_transform(offset_copy(annotation.get_transform(), fig=self._figure,
+            x=0, y=-(height + descent) * 72.0 / self._figure.dpi, units="points"))
 
     def _accepts_series_focus(self, axes: Any | None) -> bool:
         """Whether choosing a series is a meaningful gesture on this axes.
@@ -7357,8 +7403,53 @@ class MatplotlibRenderer:
             )
         return len(self._series_lines.get(axis_id, ())) > 1
 
+    def series_interaction(self) -> dict[str, object]:
+        locked = self._series_locked
+        return {"series_lock": None if locked is None else {
+            "key": locked[1], "facet_index": self._facet_focus_index,
+        }}
+
+    def series_presentation(self) -> dict[str, object]:
+        active = self._series_locked or self._series_hover
+        return {"series_readout": None if active is None else {
+            "key": active[1], "facet_index": self._facet_focus_index,
+            "label": active[2], "mode": "locked" if self._series_locked is not None else "hover",
+        }}
+
+    def restore_series_interaction(self, interaction: Mapping[str, object], presentation: Mapping[str, object] | None = None) -> None:
+        """Resolve a portable group key against this renderer's own artists."""
+
+        target = interaction.get("series_lock")
+        readout = None if presentation is None else presentation.get("series_readout")
+        selected = target or readout
+        self._series_locked = self._series_hover = None
+        self._series_hover_frozen = False
+        if selected is not None and selected["facet_index"] == self._facet_focus_index:
+            self._materialize_prepared_curve()
+            for axis_id, entries in self._series_lines.items():
+                if not self._series_focus_allowed(axis_id):
+                    continue
+                for line, identity, label in entries:
+                    if identity == selected["key"]:
+                        x, y = np.asarray(line.get_xdata()), np.asarray(line.get_ydata())
+                        anchor = (float(x[0]), float(y[0])) if x.size and y.size else (0.0, 0.0)
+                        text = (readout["label"] if readout is not None
+                                and readout["key"] == identity else label)
+                        focus = (axis_id, identity, text, *anchor)
+                        if target is not None or readout["mode"] == "locked":
+                            self._series_locked = focus
+                        else:
+                            self._series_hover = focus
+                            self._series_hover_frozen = True
+                        break
+        self._apply_series_focus()
+
     def series_focus(self, action: str, axes: Any | None, px: float, py: float, *,
                      hit_radius: float, click_radius: float = 0.0, redraw: bool = True) -> bool:
+        if action == "leave" and self._series_hover_frozen:
+            return False
+        if action in {"move", "press", "clear"}:
+            self._series_hover_frozen = False
         before = self._series_locked or self._series_hover
         before_state = (
             "locked" if self._series_locked is not None else
@@ -7376,9 +7467,9 @@ class MatplotlibRenderer:
             self._series_press = (px, py, None if hit is None else hit[1])
             return False
         if action == "move":
-            if self._series_locked is not None or not self._accepts_series_focus(axes):
+            if self._series_locked is not None:
                 return False
-            hit = self._series_hit(axes, px, py, hit_radius)
+            hit = self._series_hit(axes, px, py, hit_radius) if self._accepts_series_focus(axes) else None
             if (None if before is None else before[1]) == (None if hit is None else hit[1]):
                 return False
             self._series_hover = hit
@@ -7887,6 +7978,13 @@ class MatplotlibRenderer:
             extent,
             coordinate_aspect=coordinate_aspect,
         )
+        x_scale, y_scale = self.axis_scale(axes, "x"), self.axis_scale(axes, "y")
+        home_extent = (
+            float(axis_value(home_extent[0], x_scale)),
+            float(axis_value(home_extent[1], x_scale)),
+            float(axis_value(home_extent[2], y_scale)),
+            float(axis_value(home_extent[3], y_scale)),
+        )
         self._home_limits[id(axes)] = (
             (float(home_extent[0]), float(home_extent[1])),
             (float(home_extent[2]), float(home_extent[3])),
@@ -7903,6 +8001,7 @@ class MatplotlibRenderer:
             x_limits, y_limits = requested
         self._set_xlim(axes, *x_limits)
         self._set_ylim(axes, *y_limits)
+        display_limits = (x_limits, y_limits)
         if axes.get_anchor() != policy.image_anchor:
             axes.set_anchor(policy.image_anchor)
         wanted_aspect = coordinate_aspect
@@ -7933,6 +8032,11 @@ class MatplotlibRenderer:
                 max(1, round(float(axes.bbox.height))),
             )
             self._artists[aspect_key] = (aspect_signature, display_pixel_shape)
+
+        # Front reduction/resampling consumes the same affine lattice as the
+        # native image. Axes limits remain scientific display coordinates.
+        x_limits = tuple(map(float, axis_space(np.asarray(x_limits), x_scale)))
+        y_limits = tuple(map(float, axis_space(np.asarray(y_limits), y_scale)))
         if materialize:
             store_key = f"{key}:front_store"
             store = self._artists.get(store_key)
@@ -8057,6 +8161,7 @@ class MatplotlibRenderer:
                 aspect="auto" if coordinate_aspect is None else coordinate_aspect,
                 extent=drawn_extent,
                 interpolation="nearest",
+                transform=self._image_transform(axes),
                 **scalar_options,
             )
             if rgba_front is not None:
@@ -8075,6 +8180,7 @@ class MatplotlibRenderer:
             # ``_install_image_front`` assigns rather than copies, so this
             # costs nothing to repeat.
             self._install_image_front(image, shown)
+            image.set_transform(self._image_transform(axes))
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != drawn_extent:
                 # ``set_extent`` rebuilds transforms and re-autoscales;
@@ -8102,8 +8208,8 @@ class MatplotlibRenderer:
         self._artists[mapping_key] = mapping_state
         # ``imshow``/``set_extent`` may autoscale a new artist.  Reassert the
         # transaction's final transform after mutating the front.
-        self._set_xlim(axes, *x_limits)
-        self._set_ylim(axes, *y_limits)
+        self._set_xlim(axes, *display_limits[0])
+        self._set_ylim(axes, *display_limits[1])
         return image, cmap
 
     def _view_filling_rgba_front(
@@ -8488,10 +8594,12 @@ class MatplotlibRenderer:
         ny, nx = heights.shape
         coordinate_ticks = []
         coordinate_offsets = []
-        for count, start, end in ((nx, left, right), (ny, top, bottom)):
+        scales = self._artists.get(f"image:coordinate_scales:{id(axes)}", (LINEAR, LINEAR))
+        for (count, start, end), scale in zip(((nx, left, right), (ny, top, bottom)), scales, strict=True):
             indices = sorted({int(round(v)) for v in np.linspace(0, count - 1, min(count, 6))})
             values = [
-                start + (index + 0.5) * (end - start) / count for index in indices
+                float(axis_value(start + (index + 0.5) * (end - start) / count, scale))
+                for index in indices
             ]
             # The SAME formatter a flat panel runs: it factors out what every
             # tick on this axis shares and states it once.  Formatted with
@@ -8610,6 +8718,7 @@ class MatplotlibRenderer:
             # anything, while still computing a destination rectangle per
             # frame and discarding it.
             self._install_image_front(image, frame)
+            image.set_transform(axes.transData)
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != scene_extent:
                 image.set_extent(scene_extent)
@@ -9064,7 +9173,8 @@ class MatplotlibRenderer:
         (left, right, bottom, top), source_nx, source_ny = data_frame
         x_value = left + (column + 0.5) * (right - left) / source_nx
         y_value = top + (row + 0.5) * (bottom - top) / source_ny
-        return x_value, y_value
+        x_scale, y_scale = self._artists.get(f"image:coordinate_scales:{id(axes)}", (LINEAR, LINEAR))
+        return float(axis_value(x_value, x_scale)), float(axis_value(y_value, y_scale))
 
     def _height_bars_cell_of(
         self, x_value: float, y_value: float
@@ -9075,6 +9185,8 @@ class MatplotlibRenderer:
         (left, right, bottom, top), source_nx, source_ny = data_frame
         if right == left or bottom == top:
             return None
+        x_scale, y_scale = self._artists.get(f"image:coordinate_scales:{id(self.primary_axes)}", (LINEAR, LINEAR))
+        x_value, y_value = axis_space(x_value, x_scale), axis_space(y_value, y_scale)
         column = int(np.floor((x_value - left) / (right - left) * source_nx))
         row = int(np.floor((y_value - top) / (bottom - top) * source_ny))
         if not (0 <= column < source_nx and 0 <= row < source_ny):
@@ -9642,6 +9754,24 @@ class MatplotlibRenderer:
         color_limits: tuple[float, float] | None = None,
         paint_labels: bool = True,
     ) -> None:
+        scales = tuple(_image_coordinate_scale(np.asarray(_display_array(value)))
+                       for value in (payload.x, payload.y))
+        scale_key = f"image:coordinate_scales:{id(axes)}"
+        previous_scales = self._artists.get(scale_key, (None, None))
+        height_bars = self._height_bars_active(key, state)
+        for name, scale, previous in zip(("x", "y"), scales, previous_scales, strict=True):
+            wanted = "function" if isinstance(scale, tuple) and not height_bars else LINEAR
+            actual = axes.get_xscale() if name == "x" else axes.get_yscale()
+            if scale != previous or actual != wanted:
+                setter = axes.set_xscale if name == "x" else axes.set_yscale
+                if wanted == "function":
+                    setter("function", functions=(
+                        partial(axis_space, scale=scale), partial(axis_value, scale=scale),
+                    ))
+                elif actual != LINEAR:
+                    setter(LINEAR)
+                self._mark_axes_chrome_dirty(axes)
+        self._artists[scale_key] = scales
         labels = getattr(self.semantic_spec, "labels", None)
         explicit_x = _state_label(
             state,
@@ -10177,6 +10307,7 @@ class MatplotlibRenderer:
             )
             self._artists[f"{key}:latest"] = latest_text
         latest_text.set_text("" if latest is None else f"{latest:.6g}")
+        self._place_rolling_latest()
 
         distribution_axes = self._axes.get("distribution", [])
         if distribution_axes:
@@ -10325,8 +10456,8 @@ class MatplotlibRenderer:
         aspect = axis.get_aspect()
         if not isinstance(aspect, (int, float)) or isinstance(aspect, bool):
             return None
-        x_limits = axis.get_xlim()
-        y_limits = axis.get_ylim()
+        x_limits = axis_space(np.asarray(axis.get_xlim()), self.axis_scale(axis, "x"))
+        y_limits = axis_space(np.asarray(axis.get_ylim()), self.axis_scale(axis, "y"))
         x_span = abs(float(x_limits[1]) - float(x_limits[0]))
         y_span = abs(float(y_limits[1]) - float(y_limits[0]))
         if not (x_span > 0.0 and y_span > 0.0):
@@ -11177,6 +11308,12 @@ class MatplotlibRenderer:
                     "lut": self._image_color_lut(cmap_name, cmap),
                     "state_revision": state.revision,
                     "view_limits": self._requested_view_limits,
+                    "coordinate_scales": tuple(
+                        tuple(_image_coordinate_scale(np.asarray(_display_array(coordinate)))
+                              for coordinate in (getattr(cell, "payload", cell).x,
+                                                 getattr(cell, "payload", cell).y))
+                        for cell in cells
+                    ),
                 }
             else:
                 self._artists.pop("image:prepared", None)
@@ -11215,6 +11352,7 @@ class MatplotlibRenderer:
                 native_image["state_revision"],
                 tuple(map(tuple, native_image["extents"])),
                 native_image["view_limits"],
+                native_image["coordinate_scales"],
             )
         )
         prepare_native_image = (
@@ -12000,8 +12138,8 @@ class MatplotlibRenderer:
                 label_target=self._selector_target_for_axis(axis),
                 x_limits=tuple(map(float, axis.get_xlim())),
                 y_limits=tuple(map(float, axis.get_ylim())),
-                x_scale=str(axis.get_xscale()),
-                y_scale=str(axis.get_yscale()),
+                x_scale=self.axis_scale(axis, "x"),
+                y_scale=self.axis_scale(axis, "y"),
                 selector_rgba=selector_rgba,
                 color_limit_rgba=(selector_rgba, selector_rgba),
                 threshold_rgba=threshold_rgba,
@@ -12957,10 +13095,7 @@ class MatplotlibRenderer:
         return self._rgba_buffer()
 
     def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, restore_display: bool = True, **kwargs: Any) -> None:
-        locked, hover = self._series_locked, self._series_hover
         try:
-            self._series_locked = self._series_hover = None
-            self._apply_series_focus()
             with style_context(self.style):
                 # ``savefig`` draws through matplotlib's own machinery, which
                 # knows nothing of the native prepared scene -- and that scene
@@ -12998,7 +13133,6 @@ class MatplotlibRenderer:
         finally:
             self._exporting = False
             self._withdraw_facet_chrome()
-            self._series_locked, self._series_hover = locked, hover
             self._apply_series_focus()
             if restore_display:
                 self.draw()

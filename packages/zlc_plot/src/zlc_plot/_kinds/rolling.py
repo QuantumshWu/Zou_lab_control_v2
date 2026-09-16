@@ -21,6 +21,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
         bool(state["uncertainty"]) and spec.reduction.statistic is Reduction.MEAN
     )
     history = view.rolling_history(
+        x=spec.x,
         group=spec.group,
         aggregation=spec.reduction,
         uncertainty=uncertainty,
@@ -68,10 +69,9 @@ HANDLER = KindHandler(
     "series",
     render,
     build_payload,
-    # ``x`` is the shot axis the window rolls along: left empty the shots
-    # are counted back from the newest; a stamped history's shot-time
-    # axis places them at the seconds they were taken.
-    ("kind", "x", "group", "reduction"),
+    # The record carrier is fixed. Its Index/Time representation is a
+    # coordinate choice, not an authored X fate.
+    ("kind", "group", "reduction"),
     admits,
     default_spec,
     label_roles,

@@ -1337,6 +1337,8 @@ class RasterPlotHost:
         selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
         viewport: RectangleRange | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
+        interaction: Mapping[str, object] | None = None,
+        presentation: Mapping[str, object] | None = None,
         fit: Mapping[str, object] | None | object = _UNSET,
         fit_live: bool | object = _UNSET,
     ) -> Future[RasterOperation["DisplayDescription"]]:
@@ -1386,6 +1388,10 @@ class RasterPlotHost:
             configuration["viewport"] = viewport
         if facet_focus is not _UNSET:
             configuration["facet_focus"] = facet_focus
+        if interaction is not None:
+            configuration["interaction"] = dict(interaction)
+        if presentation is not None:
+            configuration["presentation"] = dict(presentation)
         if fit is not _UNSET:
             configuration["fit"] = None if fit is None else dict(fit)
         if fit_live is not _UNSET:
@@ -1395,6 +1401,9 @@ class RasterPlotHost:
             queued = self._queued_configuration
             if queued is not None:
                 merged = dict(queued)
+                for name in ("interaction", "presentation"):
+                    if name in configuration:
+                        configuration[name] = {**merged.get(name, {}), **configuration[name]}
                 if "selectors" in configuration:
                     merged.pop("selector_updates", None)
                 elif "selector_updates" in configuration:

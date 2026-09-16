@@ -345,9 +345,9 @@ class HistogramPlot:
 @dataclass(frozen=True, slots=True)
 class RollingPlot:
     group: AxisRef | None = None
-    #: The axis the shots are placed along: None counts them back from the
-    #: newest (the shot index); the history's shot-time axis places each
-    #: shot at the time it was taken.
+    #: Coordinate of the fixed record carrier, not an editable X fate.
+    #: None uses the relative source index; the history's shot-time
+    #: coordinate places each record at its actual run-relative time.
     x: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)

@@ -1749,6 +1749,8 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
     )
     try:
         renderer = session._renderer
+        shared_states = []
+        session.subscribe_display(shared_states.append)
         axes = renderer.primary_axes
         width, height = canvas_physical_size(renderer.figure.canvas)
 
@@ -1780,6 +1782,35 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         assert not annotation.get_text().startswith("*")
         assert annotation.get_position() == (0.98, 0.98)
         assert annotation.get_bbox_patch() is None
+        assert not shared_states, "a local hover must not move another window's pointer"
+        from zlc_plot.figure_artifact import decode_plot_recipe
+        frozen_hover = decode_plot_recipe(session._figure_recipe())
+        assert frozen_hover["interaction"]["series_lock"] is None
+        assert frozen_hover["presentation"]["series_readout"]["mode"] == "hover"
+        peer = PlotSession(make_snapshot(schema, values, 0), session.spec,
+            initial_configuration={"interaction": frozen_hover["interaction"],
+                                   "presentation": frozen_hover["presentation"]})
+        try:
+            assert peer._renderer._series_hover[1] == renderer._series_hover[1]
+            assert peer._renderer._series_hover[2] == annotation.get_text()
+            peer._raster_pointer_event("leave", 0.0, 0.0)
+            assert peer._renderer._series_hover is not None
+            peer._raster_pointer_event("move", 0.0, 0.0)
+            assert peer._renderer._series_hover is None
+            # The saved hover is a presentation snapshot, not a shared lock.
+            assert peer.describe_display().display_state.interaction["series_lock"] is None
+        finally:
+            peer.close()
+        from zlc_plot import read_figure_plot, save_figure_artifact
+        from zlc_data.figure_archive import read_archive
+        image, archive = save_figure_artifact(tmp_path / "hover-readout",
+            plot_input=make_snapshot(schema, values, 0), spec=session.spec,
+            parameters=session.display_state.values, size=session.describe_display().size,
+            interaction=frozen_hover["interaction"], presentation=frozen_hover["presentation"])
+        assert image.is_file()
+        info, arrays, datasets = read_archive(archive)
+        _saved, saved_recipe = read_figure_plot(info, arrays, datasets, "data")
+        assert saved_recipe["presentation"] == frozen_hover["presentation"]
 
         generation = renderer.raster_generation
         assert not pointer("move", 4.0, 5.0).publish_front
@@ -1789,6 +1820,24 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         pointer("release", 2.0, 3.0, button=1)
         assert session.selectors == ()
         locked = renderer._series_locked[1]
+        state = session.describe_display().display_state
+        assert state.interaction["series_lock"]["key"] == locked
+        assert shared_states[-1].interaction == state.interaction
+        from zlc_plot.render_process import _wire_value, _unwire_value
+        import pickle
+        transported = _unwire_value(pickle.loads(pickle.dumps(_wire_value(session.describe_display()))))
+        assert transported.display_state.interaction == state.interaction
+        assert transported.presentation == session.describe_display().presentation
+        peer = PlotSession(make_snapshot(schema, values, 0), session.spec)
+        try:
+            peer.configure(interaction=state.interaction)
+            assert peer._renderer._series_locked[1] == locked
+            assert peer._renderer._series_locked[0] != renderer._series_locked[0]
+            generation = peer._renderer.raster_generation
+            peer.configure(interaction=state.interaction)
+            assert peer._renderer.raster_generation == generation
+        finally:
+            peer.close()
         assert sorted(line.get_alpha() for line in lines) == [0.18, 1.0]
         assert annotation.get_text().startswith("* ")
         pointer("move", 2.0, 13.0)
@@ -1819,7 +1868,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
             lambda *_args, **_kwargs: observed.append(tuple(line.get_alpha() for line in lines)),
         )
         session.save(tmp_path / "neutral.png")
-        assert observed == [(0.8, 0.8)]
+        assert observed == [(1.0, 0.18)]
         assert renderer._series_locked is not None
 
         session.update_data(make_snapshot(schema, values + 0.25, 1))
@@ -1936,7 +1985,7 @@ def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
     finally:
         session.close()
 
-def test_locked_rolling_wheel_steps_group_series_without_zoom() -> None:
+def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
     repeats = 8
     sites = 3
     schema = make_dataset_schema(
@@ -1976,6 +2025,11 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom() -> None:
         event("press", -4.0, 13.0, button=1)
         event("release", -4.0, 13.0, button=1)
         assert "site=1" in renderer._series_locked[2]
+        inspector = next(text for text in renderer._series_annotations.values() if text.get_visible())
+        latest = renderer._artists[f"{renderer.primary_surface[0]}:latest"]
+        measured = renderer.figure.canvas.get_renderer()
+        assert latest.get_text() and inspector.get_text()
+        assert latest.get_window_extent(measured).y1 <= inspector.get_window_extent(measured).y0
         original_limits = (
             tuple(axes.get_xlim()),
             tuple(axes.get_ylim()),
@@ -1988,6 +2042,14 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom() -> None:
             tuple(axes.get_xlim()),
             tuple(axes.get_ylim()),
         ) == original_limits
+        exports = []
+        connection = renderer.figure.canvas.mpl_connect("draw_event", lambda event: exports.append((
+            latest.get_window_extent(event.renderer), inspector.get_window_extent(event.renderer))))
+        try:
+            session.save(tmp_path / "rolling-readouts.png", dpi=200)
+        finally:
+            renderer.figure.canvas.mpl_disconnect(connection)
+        assert exports and all(latest_box.y1 <= series_box.y0 for latest_box, series_box in exports)
     finally:
         session.close()
 

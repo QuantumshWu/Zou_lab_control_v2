@@ -358,7 +358,7 @@ class _MeasuredLocator(ticker.Locator):
         if mapped.shape != values.shape or not np.isfinite(mapped).all():
             mapped = values
         low, high = float(mapped[0]), float(mapped[1])
-        if high <= low:
+        if high == low:
             return [0.0 for _tick in ticks]
         return [(float(value) - low) / (high - low) * extent for value in mapped[2:]]
 
@@ -611,6 +611,7 @@ class _MeasuredLocator(ticker.Locator):
             id(self.measure),
             tuple(rcParams.get("font.sans-serif", ())),
             extra,
+            self.axis.get_transform() if self.axis is not None and self.axis.get_scale() == "function" else None,
         )
 
     def _placement(
@@ -652,6 +653,7 @@ class _MeasuredLocator(ticker.Locator):
             id(getattr(axes, "figure", None)), getattr(axis, "axis_name", None),
             geometry, self.max_ticks, self.label_pt, id(self.measure),
             tuple(rcParams.get("font.sans-serif", ())),
+            axis.get_transform() if axis is not None and axis.get_scale() == "function" else None,
         )
 
     def __call__(self) -> list[float]:

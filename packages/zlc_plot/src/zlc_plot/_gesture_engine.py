@@ -17,6 +17,7 @@ from typing import Any, Callable, TypeAlias
 import numpy as np
 
 from ._axis_transform import AxisTransform
+from ._axis_scale import LINEAR, Scale, axis_space, axis_value
 from .selectors import (
     CrosshairPoint,
     DragHandle,
@@ -114,18 +115,22 @@ def pan_rectangle(
     y: NumericRange,
     *,
     image_like: bool,
+    x_scale: Scale = LINEAR,
+    y_scale: Scale = LINEAR,
 ) -> RectangleRange | None:
     """Return the translated viewport for one pointer position."""
 
-    dx = origin.x - point.x
-    dy = origin.y - point.y
+    dx = axis_space(origin.x, x_scale) - axis_space(point.x, x_scale)
+    dy = axis_space(origin.y, y_scale) - axis_space(point.y, y_scale)
     if np.isclose(dx, 0.0, rtol=0.0, atol=1.0e-15) and (
         not image_like or np.isclose(dy, 0.0, rtol=0.0, atol=1.0e-15)
     ):
         return None
     return RectangleRange(
-        x.shifted(dx),
-        y.shifted(dy) if image_like else y,
+        NumericRange(*(axis_value(axis_space(value, x_scale) + dx, x_scale)
+                       for value in (x.low, x.high))),
+        NumericRange(*(axis_value(axis_space(value, y_scale) + dy, y_scale)
+                       for value in (y.low, y.high))) if image_like else y,
     )
 
 

@@ -468,7 +468,7 @@ class GestureSessionMixin:
                 *sorted(map(float, self._viewport_y_to_axes(committed.y)))
             )
 
-        def centered(value: NumericRange, scale: str) -> NumericRange:
+        def centered(value: NumericRange, scale) -> NumericRange:
             low = axis_space(value.low, scale)
             high = axis_space(value.high, scale)
             middle = (low + high) / 2.0
@@ -478,10 +478,10 @@ class GestureSessionMixin:
                 axis_value(middle + half, scale),
             )
 
-        zoomed_x = centered(x_axes, str(axes.get_xscale()))
+        zoomed_x = centered(x_axes, self._renderer.axis_scale(axes, "x"))
         zoomed_y = y_axes
         if isinstance(self._projected._semantic_spec(), ImagePlot):
-            zoomed_y = centered(y_axes, str(axes.get_yscale()))
+            zoomed_y = centered(y_axes, self._renderer.axis_scale(axes, "y"))
         self.set_viewport(self._viewport_x_from_axes(zoomed_x), zoomed_y)
 
     def _zoom_to_selection_or_reset(self) -> None:
@@ -819,8 +819,8 @@ class GestureSessionMixin:
             # The gesture began on THIS transform, so it is that
             # transform's scales the drag has to slide under -- not
             # whatever the axes happen to carry when it lands.
-            x_scale=gesture.transform.x_scale,
-            y_scale=gesture.transform.y_scale,
+            x_scale=gesture.transform.canonical_x_scale or gesture.transform.x_scale,
+            y_scale=gesture.transform.canonical_y_scale or gesture.transform.y_scale,
         )
         if updated is not None and updated != current:
             assert self._renderer is not None
@@ -970,8 +970,8 @@ class GestureSessionMixin:
                 point.y,
                 x_bounds=self._selector_x_bounds(gesture.transform),
                 y_bounds=self._selector_y_bounds(gesture.transform),
-                x_scale=gesture.transform.x_scale,
-                y_scale=gesture.transform.y_scale,
+                x_scale=gesture.transform.canonical_x_scale or gesture.transform.x_scale,
+                y_scale=gesture.transform.canonical_y_scale or gesture.transform.y_scale,
             )
         except Exception:
             self._cancel_gesture()
@@ -1049,6 +1049,8 @@ class GestureSessionMixin:
             gesture.x,
             gesture.y,
             image_like=image_like,
+            x_scale=gesture.transform.x_scale,
+            y_scale=gesture.transform.y_scale,
         )
         if moved is None:
             return False
