@@ -1606,23 +1606,17 @@ def _process_qt_until(application, predicate, seconds: float = 2.0) -> None:
     assert predicate(), "timed out waiting for the Pulse Editor owner turn"
 
 
-def test_a_config_file_binding_failure_closes_the_new_connection(tmp_path, monkeypatch) -> None:
-    """The device reads Config files; Connect owns cleanup if binding fails."""
+def test_connect_does_not_load_an_unselected_workspace_config(tmp_path, monkeypatch) -> None:
+    """Connecting a device cannot select a Config file on the operator's behalf."""
 
-    from zlc_pulse import read_config_values, write_config_values
     from zlc_workbench.apps import pulse_editor as application_module
 
     dials: list[tuple[str, str]] = []
 
     class _Board:
         closed = False
-        refuse = False
-        loaded = None
-
         def load_config_file(self, path):
-            if self.refuse:
-                raise RuntimeError("board refused the entries")
-            self.loaded = (read_config_values(path), str(path))
+            raise AssertionError("Connect must not load a Config file")
 
         def close(self):
             self.closed = True
@@ -1640,28 +1634,14 @@ def test_a_config_file_binding_failure_closes_the_new_connection(tmp_path, monke
     presenter = application_module.build(
         _EditorView(),
         PulseEditorState(sequence=_ordinary_sequence()),
-        config_values=str(values),
+        pulses_directory=str(tmp_path / "pulses"),
         run_off_thread=_run_preview_immediately,
     )
     try:
-        with pytest.raises(ValueError):
-            presenter._dial("virtual", "")
-        assert dials == [("virtual", "")]
-        assert board.closed, "a device that could not bind its config was left open"
-
-        write_config_values(values, {"timing": (2.0, "ms")})
-        board.refuse = True
-        with pytest.raises(RuntimeError, match="refused the entries"):
-            presenter._dial("virtual", "")
-        assert dials == [("virtual", ""), ("virtual", "")]
-        assert board.closed, "a board that refused the entries was left open"
-
-        board.refuse = False
-        board.closed = False
         assert presenter._dial("virtual", "") is board
+        assert dials == [("virtual", "")]
         assert not board.closed
-        entries, source = board.loaded
-        assert entries["timing"][0] == 2.0 and source == str(values)
+        assert values.read_text(encoding="utf-8") == "{not json"
     finally:
         presenter.close()
 

@@ -63,6 +63,7 @@
 - Device UI名称统一投影accepted Role，内部key/端口/保存引用不变；卡片、通用及Pulse/SLM Control、Logic/Scan选择与设备日志使用相同label/value分离。重复Role保留为草稿，在Init/Save统一拒绝，Role-only reconcile不重建设备。Windows真实Qt点击与截图确认；Loaded卡片身份列避免Role被按钮挤掉，所有验收窗口关闭，截图仅保留ignored research。
 - Config性能根修：当前实际字段先比较，无变化不构造Pulse；Config/API/单字段修改复用同一批量writer，真变化只最终构造/校验一次，API解绑定也不再逐项重建。消除中间单位转换与相等值的重复时钟对齐，公共单位层复用immutable Unit/Prefix派生结果，换注册单位不复用旧转换。文件仍每Fire重读，路径只绑定时resolve；Remote Load回简短执行确认，不回传已接受的整份程序/原稿。直接数值/文件/Remote/单位用例通过；正式Pulse界面验证实际值与原稿分离，窗口已关闭。未访问真实硬件、未build；性能报告、bench与截图只存ignored research，不入Git。
 - Config tab独立编辑命名value/unit表，多个Pulse字段可以引用同一名称；Pulse Save只保存引用，Config Save只保存人编辑的命名值。未保存草稿不参与Fire；未分配/未提供名称使用Pulse默认值。执行仍沿设备既有Load/Fire读取已保存文件、统一换算及实际变更编译路径；运行中的Pulse不被草稿改写。旧Config root/name/source/编号/field说明不兼容。
+- 已删除Session初始化/重建设备及独立Pulse Editor连接时的隐式current.json加载、空文件seed和配套入口；Config只由显式Load/Save选择。旧文件不会阻断Device Init，也不会被修改或转换；保留现有设备时不清除已选Config。
 - 已删除Exponential按观测窗口跨度设定的A/B/tau自动硬边界，以及四种Histogram概率模型的平底beta及其分类扣除旁路；数学域、显式用户约束、普通Gaussian B和Poisson数值floor保留。
 - 协方差收尾统一为原生Householder R-only QR＋小矩阵SVD；不生成无用大Q/U，不放宽rank阈值，预测数组直接复用。独立高精度比较表明极端病态协方差会放大各稳定算法的舍入，旧SVD并非精确真值；生产只保留QR一个方案，DGESVD桥与原地转置候选只留ignored研究。15组加权/Poisson/fixed/order/masked收尾输出与原native基线一致，真实FitEngine普通数据参数/误差保持。默认32768源点案例的求解仍按既有4096上限，不能冒称全32768求解；报告区分完整输入链与隔离收尾。
 

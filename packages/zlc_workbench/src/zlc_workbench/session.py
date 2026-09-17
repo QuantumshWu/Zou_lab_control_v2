@@ -113,21 +113,6 @@ def _resolved_simulation(space: "Workspace", config: object) -> dict[str, object
     return simulation
 
 
-def seed_current_config_values(directory: Path) -> None:
-    """The empty set of config values, present so it can be edited.
-
-    An empty named table leaves Pulse defaults unchanged; no calibration
-    value is invented merely by opening a workspace.
-    """
-
-    from zlc_pulse import CURRENT_CONFIG_VALUES, write_config_values
-
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / CURRENT_CONFIG_VALUES
-    if not path.exists():
-        write_config_values(path, {})
-
-
 @dataclass(frozen=True)
 class Workspace:
     """Where an experiment's own files live: its pulses and its saved data.
@@ -175,13 +160,7 @@ class Workspace:
 
     @property
     def config_values(self) -> Path:
-        """Saved sets of the board's calibrated numbers.
-
-        A channel delay or a DAC bias belongs to the apparatus rather than to
-        whichever pulse happened to be open, so it is loaded onto the
-        SEQUENCER rather than into a pulse, and ``CURRENT_CONFIG_VALUES`` is
-        the one a session picks up by itself when it opens a board.
-        """
+        """Directory offered by Config Load/Save; no file is implicitly active."""
 
         from zlc_pulse import CONFIG_VALUES_DIRECTORY
 
@@ -199,7 +178,7 @@ class Workspace:
 
         self.pulses.mkdir(parents=True, exist_ok=True)
         self.data.mkdir(parents=True, exist_ok=True)
-        seed_current_config_values(self.config_values)
+        self.config_values.mkdir(parents=True, exist_ok=True)
         return self
 
     #: Where an experiment lives when nobody has said otherwise.  Overridable,
@@ -393,7 +372,6 @@ class ExperimentSession:
         self._device_setting_records: dict[
             tuple[str, int], dict[str, object]
         ] = {}
-        self._load_current_config_values()
 
     # ---------------------------------------------------------------- devices
 
@@ -839,28 +817,6 @@ class ExperimentSession:
             self.installation = successor
             self._installation_config = target_config
             self._installation_revision += 1
-            # Retained leaves keep the operator's loaded set. Only a newly
-            # built sequencer needs its initial workspace configuration.
-            if "sequencer" in plan.build_keys:
-                self._load_current_config_values()
-
-    def _load_current_config_values(self) -> None:
-        """Bind this workspace's default file; the device refreshes it on Fire."""
-
-        from zlc_pulse import CURRENT_CONFIG_VALUES
-
-        path = self.workspace.config_values / CURRENT_CONFIG_VALUES
-        if not path.is_file():
-            return
-        sequencer = getattr(self.installation, "device", None)
-        if sequencer is None:
-            return
-        try:
-            device = self.installation.device("sequencer")
-        except Exception:
-            return
-        device.load_config_file(path)
-
     def acquire_device_command(
         self, owner: object, label: str, key: str, device: object,
     ):

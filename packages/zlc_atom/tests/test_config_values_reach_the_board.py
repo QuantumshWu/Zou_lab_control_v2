@@ -123,44 +123,41 @@ def test_the_archive_keeps_config_source_in_its_whitelist() -> None:
     assert "invented" not in result
 
 
-def test_a_session_hands_its_board_the_workspace_set(tmp_path, monkeypatch) -> None:
-    """The session binds the file for everything that fires through the device.
-
-    A scan, a calibration and a bound Pulse Editor all reach the board through
-    this session's devices, whose Fire owns subsequent file refreshes.
-    """
+def test_session_init_does_not_read_an_unselected_config_file(tmp_path) -> None:
+    """An old file cannot block Init; only explicit Config Load reads a file."""
 
     from zlc_workbench.session import ExperimentSession, Workspace
 
     (tmp_path / "pulses").mkdir()
     space = Workspace(tmp_path).prepare()
-    write_config_values(
-        space.config_values / CURRENT_CONFIG_VALUES,
-        {"trigger_delay": (40.0, "ns")},
-    )
+    current = space.config_values / CURRENT_CONFIG_VALUES
+    old = '{"format":"zlc.pulse.config_values","name":"current","source":"hand","values":{}}'
+    current.write_text(old, encoding="utf-8")
 
     session = ExperimentSession.open(workspace=tmp_path, template="virtual")
     try:
+        assert session.sequencer.config_values() == {}
+        assert session.sequencer.config_source == ""
+        assert current.read_text(encoding="utf-8") == old
+        chosen = space.config_values / "chosen.json"
+        write_config_values(chosen, {"trigger_delay": (40.0, "ns")})
+        session.sequencer.load_config_file(chosen)
         assert session.sequencer.config_values() == {"trigger_delay": (40.0, "ns")}
-        assert session.sequencer.config_source.endswith(CURRENT_CONFIG_VALUES)
+        assert session.sequencer.config_source == str(chosen)
     finally:
         session.close()
 
 
 def test_a_workspace_with_no_set_is_silent(tmp_path) -> None:
-    """An empty seed is deliberate: a seeded delay is a wrong calibration.
-
-    The board initially holds no overrides; pulses retain their authored
-    Config field values until a matching override is explicitly loaded.
-    """
+    """Opening a workspace creates a directory, not an implicitly active file."""
 
     from zlc_workbench.session import ExperimentSession, Workspace
 
     (tmp_path / "pulses").mkdir()
     space = Workspace(tmp_path).prepare()
     seeded = space.config_values / CURRENT_CONFIG_VALUES
-    assert seeded.is_file()
-    assert read_config_values(seeded) == {}
+    assert space.config_values.is_dir()
+    assert not seeded.exists()
 
     session = ExperimentSession.open(workspace=tmp_path, template="virtual")
     try:

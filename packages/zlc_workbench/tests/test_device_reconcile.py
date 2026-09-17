@@ -94,13 +94,13 @@ def test_reconcile_reuses_unchanged_leaf_and_only_builds_added_device(tmp_path):
     assert original.config == {"timing": (17.0, "ns")}
     assert original.config_source == "operator.json"
 
-    # A genuinely new sequencer still takes the workspace's current set.
+    # A new sequencer has no selected Config; rebuilding cannot select a file.
     replacement = InstallationConfig((_device("sequencer", value=2), _device("other")))
     session.reconcile_devices(session.plan_device_reconcile(replacement))
     rebuilt = session.installation.device("sequencer")
     assert rebuilt is not original
-    assert rebuilt.config == {"timing": (5.0, "us")}
-    assert rebuilt.config_source == str(current)
+    assert not hasattr(rebuilt, "config")
+    assert not hasattr(rebuilt, "config_source")
     session.close()
     assert events == ["close:sequencer", "close:sequencer", "close:other"]
 
@@ -441,16 +441,10 @@ def test_reconcile_keeps_a_leaf_whose_canonical_setup_is_unchanged(tmp_path):
     assert events == ["close:base"]
 
 
-def test_a_session_that_fails_after_its_devices_opened_closes_them(tmp_path):
-    """Between "devices open" and "session delivered" there is no owner.
+def test_a_session_that_fails_after_its_devices_opened_closes_them(tmp_path, monkeypatch):
+    """A workspace failure after device creation must not orphan its handles."""
 
-    The board's config-value load runs in the session constructor, after
-    every device has opened.  When it refuses, the devices were left open
-    with nobody holding them: the Device Manager saw an error, no session,
-    and a close that "succeeded".  The failure now closes what was opened,
-    and a device that will not close is reported beside the original error
-    rather than instead of it.
-    """
+    from zlc_workbench.session import Workspace
 
     events: list[str] = []
 
@@ -458,10 +452,6 @@ def test_a_session_that_fails_after_its_devices_opened_closes_them(tmp_path):
         def __init__(self, *, close_fails: bool) -> None:
             self.close_fails = close_fails
             self.closed = False
-
-        def load_config_file(self, path) -> None:
-            events.append("load config")
-            raise RuntimeError("sequencer rejected config load")
 
         def close(self) -> None:
             events.append("close")
@@ -490,15 +480,23 @@ def test_a_session_that_fails_after_its_devices_opened_closes_them(tmp_path):
         (DeviceInstanceConfig("sequencer", "sequencer", "test.sequencer", {}),)
     )
     devices: list[_Sequencer] = []
-    with pytest.raises(RuntimeError, match="rejected config load"):
+    prepare = Workspace.prepare
+
+    def prepare_workspace(space):
+        if devices:
+            raise OSError("workspace unavailable")
+        return prepare(space)
+
+    monkeypatch.setattr(Workspace, "prepare", prepare_workspace)
+    with pytest.raises(OSError, match="workspace unavailable"):
         ExperimentSession.from_config(tmp_path, config, catalog=catalog(close_fails=False))
-    assert events == ["opened", "load config", "close"]
+    assert events == ["opened", "close"]
     assert devices[0].closed
 
     events.clear()
     devices.clear()
     with pytest.raises(BaseExceptionGroup, match="not everything it opened closed") as caught:
         ExperimentSession.from_config(tmp_path, config, catalog=catalog(close_fails=True))
-    assert events == ["opened", "load config", "close"]
-    assert caught.group_contains(RuntimeError, match="rejected config load")
+    assert events == ["opened", "close"]
+    assert caught.group_contains(OSError, match="workspace unavailable")
     assert caught.group_contains(RuntimeError, match="vendor handle is still open")

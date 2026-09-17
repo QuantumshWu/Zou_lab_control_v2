@@ -119,7 +119,6 @@ def build(
     *,
     path: str = "",
     pulses_directory: str = "",
-    config_values: str = "",
     sequencer: object | None = None,
     device_use: object | None = None,
     allow_dial: bool = True,
@@ -136,20 +135,6 @@ def build(
     from ..pulse_editor import PulseEditorPresenter
     from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
 
-    def dial_and_calibrate(mode: str, endpoint: str):
-        """Bind the selected file to the device, which refreshes it on Fire."""
-
-        streamer = dial(mode, endpoint)
-        path = Path(config_values) if config_values else None
-        if path is None or not path.is_file():
-            return streamer
-        try:
-            streamer.load_config_file(path)
-        except BaseException:
-            streamer.close()
-            raise
-        return streamer
-
     return PulseEditorPresenter(
         view,
         state,
@@ -157,7 +142,7 @@ def build(
         update_preview=resize_pulse_preview_host,
         sequencer=sequencer,
         device_use=device_use,
-        dial=dial_and_calibrate if allow_dial else None,
+        dial=dial if allow_dial else None,
         pulses_directory=pulses_directory,
         path=path,
         default_endpoint=default_endpoint() if sequencer is None else "",
@@ -274,7 +259,6 @@ def create_window(
     entry means the window under inspection is the window that ships.
     """
 
-    from zlc_pulse import CURRENT_CONFIG_VALUES
     from zlc_ui import open_pulse_editor
     from ..board import attach_qt_owner_turn, attach_qt_worker
 
@@ -296,7 +280,6 @@ def create_window(
             state,
             path=path,
             pulses_directory=str(space.pulses),
-            config_values=str(space.config_values / CURRENT_CONFIG_VALUES),
             run_off_thread=run_off_thread,
             run_device_work=run_device_work,
             run_safe_work=run_safe_work,

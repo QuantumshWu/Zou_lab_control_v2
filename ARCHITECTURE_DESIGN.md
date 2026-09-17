@@ -337,6 +337,7 @@ Node new chunk
 
 - 字段旁的绑定入口只选择Scan开关与Default/API/Config来源，不循环点击，不显示编号，不在此创建或命名Config key。数值始终可编辑（Hold无本地数值仍沿原语义）；小入口以紧凑S/A/C及组合状态展示。Config名称、创建、编辑及字段引用全部位于Scan右侧Config tab。CPU/Qt只投影当前绑定及有效覆盖状态，不保存历史输入作为第二份数据真相。
 - Config JSON只拥有`format`和命名`values`表，每个名称对应value/unit；无数字键语义、name/source/from-pulse/field来源信息，旧格式直接拒绝不兼容。多个Pulse字段可引用同一Config名称，字段到名称的引用保存在Pulse，不写入Config文件。未指定名称、未加载文件或名称无对应值使用原字段默认值并显示未覆盖；实际被消费的值遇到格式或单位错误则报告，不能假装应用成功。
+- Device Init、设备重建和Pulse Editor Connect不选择Config文件；Workspace只创建目录，不生成或自动读取current.json。Config tab的显式Load/Save负责选择已保存文件；复用现有设备保留其明确加载的选择，新设备默认没有选择。已有文件不因初始化而修改或转换，显式加载错误格式仍严格拒绝。
 
 - Remote编码/解码按immutable dataclass类型复用字段metadata，JSON grammar与对象验证不变。Load可明确复用同连接已接受AppliedState中的未变authored_source，不反复传输/解码原稿；新实际source/program照常验证。原稿变化就完整传入，服务器无旧记录时拒绝复用，绝不把filled source当原稿。客户端在发送前清原有应用缓存，失败不缓存假成功；重连继续按原有applied查询恢复事实，不增加源缓存或后台同步。
 - Config tab用独立草稿编辑命名值表并显示dirty，只有显式Save/Save as写入文件后才参与下一次Fire；不自动保存，不把未保存值送设备。Load绑定已保存文件，Refresh重读编辑文件（已经Unload的文件不被Refresh偷偷重新激活），Save使用草稿而不是Pulse默认值；Pulse Save只保存Pulse内容与引用。File读写沿唯一codec及原durable API，既有device load/fire在开始新执行前重读已绑定文件；运行中的Pulse不因编辑草稿或保存而改变。Config文件与Pulse引用的dirty互不混用；外部刷新不能静默覆盖未保存草稿。
