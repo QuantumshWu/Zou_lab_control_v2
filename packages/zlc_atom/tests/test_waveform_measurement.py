@@ -224,9 +224,7 @@ def test_one_measurement_publishes_what_its_source_carries() -> None:
         assert preview.plot_kind == "curve"
         (requirement,) = LOGIC_NODE.device_requirements
         assert requirement.fields_frozen_by(imu) == ()
-        with pytest.raises(ValueError, match="at least"):
-            WaveformMeasurementRequest("imu", repeat=0, buffer_seconds=0.0)
-        assert {field.name for field in LOGIC_NODE.authoring_schema.fields} == {"repeat", "buffer_seconds"}
+        assert {field.name for field in LOGIC_NODE.authoring_schema.fields} == {"repeat"}
         for samples, continuous, columns in (
             (1, False, (0, 1, 2)),
             (4, True, (0, 1, 2)),
@@ -262,7 +260,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
     source = _imu_like_source(500.0)
     node = WaveformMeasurementNode(
         sampler=source,
-        request=WaveformMeasurementRequest("imu", repeat=0, buffer_seconds=0.5),
+        request=WaveformMeasurementRequest("imu", repeat=0),
         signal_plane=plane,
         producer="imu-live",
     )
@@ -283,7 +281,8 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         assert schema.value_schema.value_unit == "uT"
         assert np.asarray(value.snapshot.block.values)[0, 0, 1] == pytest.approx(-5.0)
         assert value.run_record["named_devices"] == {"sampler": "imu"}
-        assert value.run_record["parameters"]["buffer_seconds"] == 0.5
+        assert value.run_record["parameters"] == {"repeat": 0}
+        assert value.run_record["acquisition"]["buffer_record_count"] == 1000
         assert value.run_record["device_snapshots"]["sampler"]["record_samples"] == 1
         temperature = plane.freeze().value(host.signal_key("temperature"))
         assert temperature is not None
@@ -334,12 +333,14 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         plane.close()
 
 
-def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity() -> None:
+def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity(monkeypatch) -> None:
+    from zlc_atom.nodes.waveform_measurement import measurement
     for capacity in (0.02, 0.5):
+        monkeypatch.setattr(measurement, "_RECEIVE_BUFFER_SECONDS", capacity)
         plane = SignalDataPlane()
         source = _imu_like_source(400.0)
         node = WaveformMeasurementNode(sampler=source,
-            request=WaveformMeasurementRequest("imu", repeat=12, buffer_seconds=capacity),
+            request=WaveformMeasurementRequest("imu", repeat=12),
             signal_plane=plane, producer="imu-finite")
         wake = Event()
         host = _host(node, plane, wake)
@@ -372,7 +373,7 @@ def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity(
         plane = SignalDataPlane()
         source = _imu_like_source(400)
         node = WaveformMeasurementNode(sampler=source,
-            request=WaveformMeasurementRequest("imu", repeat=repeat, buffer_seconds=0.5),
+            request=WaveformMeasurementRequest("imu", repeat=repeat),
             signal_plane=plane, producer="imu-stop")
         capture = node.prepare(should_stop=lambda: True) if repeat else node.monitor()
         try:
@@ -400,7 +401,7 @@ def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity(
     plane = SignalDataPlane()
     source = _imu_like_source(400)
     node = WaveformMeasurementNode(sampler=source,
-        request=WaveformMeasurementRequest("imu", repeat=12, buffer_seconds=0.5),
+        request=WaveformMeasurementRequest("imu", repeat=12),
         signal_plane=plane, producer="imu-failed")
     capture = node.prepare()
     failure = ValueError("publication failed")

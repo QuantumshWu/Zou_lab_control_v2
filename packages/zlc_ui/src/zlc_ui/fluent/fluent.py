@@ -4738,6 +4738,7 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
             return
         self._numeric_error(None)
         super().setValue(visible)
+        self.lineEdit().setText(super().textFromValue(visible))
         if visible != value:
             self._queue_normalization()
 
@@ -4755,11 +4756,19 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         try:
             visible = self._visible_integer(self.value(), low, high)
         except ValueError as error:
+            with signals_blocked(self):
+                super().setRange(low, high)
             self._numeric_error(error)
+            self.lineEdit().clear()
             return
         self._numeric_error(None)
         super().setRange(low, high)
         self.setValue(visible)
+
+    def textFromValue(self, value: int) -> str:  # noqa: N802
+        if self.property("numericError") and not self.lineEdit().text():
+            return ""
+        return super().textFromValue(value)
 
     def validate(self, text: str, position: int):
         state, text, position = super().validate(text, position)
@@ -5102,7 +5111,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         return number
 
     def setRange(self, minimum: float, maximum: float, *, value: object | None = None,
-                 unit: str | None = None) -> bool:  # noqa: N802
+                 unit: str | None = None, reject_unrepresentable: bool = False) -> bool:  # noqa: N802
         """The owner's range -- applied when it changes, see FluentSpinBox.
 
         The value it holds is moved inside the new range BEFORE Qt is told:
@@ -5132,12 +5141,24 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         if wanted_unit != self._unit:
             self._unit = self._shown_unit = wanted_unit
         self._display_text = ""
+        requested = self._value if value is None else _finite_decimal(value)
+        clipped = self._bounded(self._quantized(requested))
         try:
-            requested = self._value if value is None else _finite_decimal(value)
-            number = self._visible_value(self._bounded(self._quantized(requested)))
+            number = self._visible_value(clipped)
         except (UnitError, ValueError, ArithmeticError) as error:
-            self._low, self._high, self._unit, self._shown_unit, self._display_text = previous
             self.setProperty("numericError", str(error))
+            if reject_unrepresentable:
+                self._low, self._high, self._unit, self._shown_unit, self._display_text = previous
+            else:
+                # Device bounds are facts, not an optional display request.
+                # Keep those facts and mark the input unavailable until it
+                # fits, rather than continue authoring against an old range.
+                self._value = clipped
+                self._display_text = ""
+                with signals_blocked(self):
+                    super().setRange(low, high)
+                    super().setValue(float(clipped))
+                    self.lineEdit().clear()
             self._queue_normalization()
             return False
         self._value = number
@@ -5371,6 +5392,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # process.  A unit this registry has never heard of is a defect to fix
         # where it was declared, not a reason for the window to die drawing a
         # number it could otherwise have shown.
+        if self.property("numericError") and not self._display_text:
+            return ""
         try:
             number = self._value if float(self._value) == float(value) else _finite_decimal(value)
         except ValueError:
@@ -5424,7 +5447,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         is not finished yet, which "-" and "." and "" are.
         """
 
-        if text == self._display_text:
+        if text == self._display_text and not self.property("numericError"):
             return QtGui.QValidator.Acceptable, text, position
         stripped = str(text).strip()
         if self.decimals() == 0 and "." in stripped:
@@ -5517,8 +5540,8 @@ def _visible_decimal(
     """The most precise bounded decimal whose complete text fits the editor.
 
     The returned number, not an unrounded input, is what the control owns.
-    Only fractional places are rounded. Reaching a bound means that exact
-    bound, never a nearby interior value or a scientific-notation fallback.
+    Only fractional places are rounded. The same decimal grid is restricted
+    to the real bounds; it never crosses them or uses scientific notation.
     """
     from decimal import ROUND_HALF_UP
 
@@ -5540,17 +5563,18 @@ def _visible_decimal(
             quantum = Decimal(1).scaleb(-decimals)
             rounded = number.quantize(quantum, rounding=ROUND_HALF_UP)
             if low is not None and rounded < low:
-                rounded = low
+                rounded = low.quantize(quantum, rounding=ROUND_CEILING)
             if high is not None and rounded > high:
-                rounded = high
+                rounded = high.quantize(quantum, rounding=ROUND_FLOOR)
+            if ((low is not None and rounded < low)
+                    or (high is not None and rounded > high)):
+                continue
             rounded = rounded.normalize() + Decimal(0)
             fixed = format(rounded, "f")
             width = metrics.horizontalAdvance(fixed) + 2
             if width <= available_width:
                 return rounded, fixed, width
-            if rounded == low or rounded == high:
-                break
-    raise ValueError("The numeric field is too narrow for a value within its limits; no value was changed.")
+    raise ValueError("The numeric field is too narrow to display a value within its limits; choose another unit.")
 
 
 def _finite_decimal(value: object) -> Decimal:

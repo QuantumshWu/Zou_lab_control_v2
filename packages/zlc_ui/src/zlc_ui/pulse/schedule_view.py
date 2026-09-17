@@ -23,7 +23,7 @@ from zlc_ui.fluent import (
 )
 
 from ._layout import (
-    add_labeled_widget, bus_mode_combo_width, channel_label_width,
+    add_labeled_widget, channel_label_width,
     card_gutter, channel_name_edit_width, channel_row_height, hide_button_width,
     panel_top_height, px, period_card_width, period_control_width, row_height,
     row_region_vmetrics, time_unit_width,
@@ -237,10 +237,9 @@ class PeriodCard(FluentGroupBox):
                 row_layout.setSpacing(px(4, minimum=3))
                 combo = FluentComboBox()
                 self._set_analog_mode(combo, mode)
-                combo.setFixedWidth(
-                    bus_mode_combo_width(
-                        tuple(choice.label for choice in self._analog_mode_choices)
-                    )
+                combo.setSizePolicy(
+                    QtWidgets.QSizePolicy.Fixed,
+                    QtWidgets.QSizePolicy.Fixed,
                 )
                 # The port's own code range, enforced where it is typed.  It
                 # was carried all the way here on the row and then read by

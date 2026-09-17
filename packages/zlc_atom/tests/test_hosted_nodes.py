@@ -297,11 +297,13 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
             "roi_xywh": None,
             "repeat": 1,
             "frames_per_cycle": windows,
-            "receive_buffer_mib": 128,
             "photoelectrons": True,
         }
         assert record["named_devices"] == {"camera": "camera"}
         actual = record["device_snapshots"]["camera"]
+        assert record["acquisition"]["buffer_frame_count"] == 128 * 1024 * 1024 // (
+            2 * int(np.prod(actual["frame_shape_yx"])) * np.dtype(actual["dtype"]).itemsize
+        )
         assert actual["exposure_seconds"] == 0.02
         assert tuple(actual["frame_shape_yx"]) == tuple(frames.shape[-2:])
         assert actual["dtype"] == np.dtype("<u2").str

@@ -46,7 +46,6 @@ def _build(
         request=WaveformMeasurementRequest(
             sampler_key=sampler_key,
             repeat=int(authored["repeat"]),
-            buffer_seconds=float(authored["buffer_seconds"]),
         ),
         signal_plane=signal_plane,
         producer="waveform_measurement",

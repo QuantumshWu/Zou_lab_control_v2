@@ -67,6 +67,7 @@ CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT
 #: its deadline -- but it waits in slices of this, which is the difference
 #: between a Stop that lands now and one that lands ten seconds from now.
 _CANCEL_RESPONSE_SECONDS = 0.05
+_RECEIVE_BUFFER_MIB = 128
 
 
 def _frame_point_axis(producer: str, frames: int) -> AxisSpec:
@@ -346,7 +347,6 @@ class CameraMeasurementRequest:
     #: none falls back to raw counts rather than inventing a conversion; the
     #: effective choice rides in the run record.
     photoelectrons: bool = True
-    receive_buffer_mib: int = 128
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
@@ -361,8 +361,6 @@ class CameraMeasurementRequest:
             raise ValueError("repeat must be non-negative")
         if frames_per_cycle <= 0:
             raise ValueError("frames_per_cycle must be positive")
-        if int(self.receive_buffer_mib) < 1:
-            raise ValueError("receive_buffer_mib must be positive")
         roi = self.roi_xywh
         if roi is not None:
             try:
@@ -380,7 +378,6 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
-        object.__setattr__(self, "receive_buffer_mib", int(self.receive_buffer_mib))
 
 
 
@@ -823,10 +820,10 @@ class CameraMeasurementNode:
         # SDK ring and accepted FIFO each hold at most N raw frames. Scientific
         # history and one-frame copy scratch are not receive-buffer storage.
         frame_bytes = int(np.prod(point.frame_shape_yx)) * point.dtype.itemsize
-        count = self.request.receive_buffer_mib * 1024 * 1024 // (2 * frame_bytes)
+        count = _RECEIVE_BUFFER_MIB * 1024 * 1024 // (2 * frame_bytes)
         if count < self.frames_per_cycle:
             raise ValueError(
-                f"Receive buffer {self.request.receive_buffer_mib} MiB cannot hold "
+                f"Internal receive buffer {_RECEIVE_BUFFER_MIB} MiB cannot hold "
                 f"one {self.frames_per_cycle}-frame cycle at {frame_bytes} bytes/frame"
             )
         return count
@@ -855,13 +852,15 @@ class CameraMeasurementNode:
         timeout = float(self.camera.timeout)
         total = self.request.repeat * self.request.frames_per_cycle
         groups = (self.request.frames_per_cycle,) * self.request.repeat
+        buffer_frames = self._buffer_frame_count(self._actual_working_point)
         self.camera.arm(
             total,
             source_group_sizes=groups,
-            buffer_frame_count=self._buffer_frame_count(self._actual_working_point),
+            buffer_frame_count=buffer_frames,
             timeout=timeout,
         )
         self._freeze_working_point(self.camera.working_point())
+        self._run_record["acquisition"] = {"buffer_frame_count": buffer_frames}
         return FiniteCapture(
             self,
             repeat=self.request.repeat,
@@ -933,7 +932,6 @@ class CameraMeasurementNode:
                 ),
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
-                "receive_buffer_mib": self.request.receive_buffer_mib,
                 PHOTOELECTRONS: photoelectrons,
             },
             "named_devices": {"camera": self.request.camera_key},
@@ -1160,6 +1158,7 @@ class CameraMeasurementNode:
                 timeout=timeout,
             )
             self._freeze_working_point(self.camera.working_point())
+            self._run_record["acquisition"] = {"buffer_frame_count": buffer_frames}
             if owns_generation:
                 self._run_record = self.signal_plane.set_run_record(self, self.run_record)
             return MonitorCapture(

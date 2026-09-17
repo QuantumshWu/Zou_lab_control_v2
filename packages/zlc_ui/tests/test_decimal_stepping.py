@@ -235,7 +235,7 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
         assert box.validate("1e-", 3)[0] == QtGui.QValidator.Intermediate
         box.setValueUnit("1")
         previous = box.value(), box.width(), box.minimum(), box.maximum()
-        box.setRange(1.23456789012345, 1.23456789012346)
+        box.setRange(1.23456789012345, 1.23456789012346, reject_unrepresentable=True)
         app.processEvents()
         assert (box.value(), box.width(), box.minimum(), box.maximum()) == previous
         assert "too narrow" in box.property("numericError")
@@ -253,10 +253,23 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
         assert (box.value(), box.text(), box.valueUnit()) == (0.001, "0.001", "ms")
         assert box.setRange(1, 2000, value=3000, unit="µs")
         assert (box.value(), box.text(), box.valueUnit()) == (2000, "2000", "µs")
+        assert box.setRange(0, 1.23456789012345, value=2, unit="s")
+        assert 1.23 <= box.value() <= box.maximum()
+        assert float(box.text()) == box.value() and "e" not in box.text()
         accepted = box.value(), box.minimum(), box.maximum(), box.valueUnit(), box.width()
-        assert not box.setRange(1e-15, 2, value=0, unit="s")
+        assert not box.setRange(1.23456789012345, 1.23456789012346, value=0,
+                                unit="ms", reject_unrepresentable=True)
         assert (box.value(), box.minimum(), box.maximum(), box.valueUnit(), box.width()) == accepted
         assert "too narrow" in box.property("numericError")
+        # An authoritative device range cannot be refused by a formatter.
+        assert not box.setRange(1.23456789012345, 1.23456789012346, value=0, unit="ms")
+        assert box.minimum() == 1.23456789012345 and box.maximum() == 1.23456789012346
+        assert box.valueUnit() == "ms" and box.value() == box.minimum()
+        assert box.text() == "" and not box.hasAcceptableInput()
+        app.processEvents()
+        assert box.text() == "" and box.property("numericError")
+        assert box.setRange(0, 2, value=1, unit="ms")
+        assert box.text() == "1" and not box.property("numericError")
         from zlc_ui.fluent import FluentLineEdit
         plain = FluentLineEdit()
         plain.set_numeric_validator("float", bottom=0, top=10)
@@ -273,6 +286,24 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
             assert float(plain.text()) == 0.005
         finally:
             plain.close()
+        from zlc_ui.fluent import FluentSpinBox
+        integer = FluentSpinBox()
+        integer.setFixedWidth(80)
+        integer.setValue(12)
+        integer.show()
+        try:
+            app.processEvents()
+            integer.setRange(1_000_000_000, 2_000_000_000)
+            assert integer.minimum() == integer.value() == 1_000_000_000
+            assert integer.maximum() == 2_000_000_000
+            assert integer.text() == "" and integer.property("numericError")
+            app.processEvents()
+            assert integer.text() == ""
+            integer.setRange(0, 100)
+            assert integer.value() == 100 and integer.text() == "100"
+            assert not integer.property("numericError")
+        finally:
+            integer.close()
     finally:
         box.close()
         app.processEvents()

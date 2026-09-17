@@ -349,7 +349,7 @@ Node new chunk
 ## 6. UI与Lifecycle
 
 - TaskConsole与FigureViewer工具栏的Save image均保存当前整个GUI窗口，复用ConsolePresenter的截图动作、workspace当天目录与公共窗口capture；不依赖已打开的archive或某个active Panel，不在archive旁另存单Plot PNG。Edit的Save figure仍是数据和科学Figure归档，与GUI截图分开。
-- 可编辑数值输入同时遵守四舍五入、真实上下限及实际文本宽度：显示数就是控件与提交草稿的数，不保留用于扩宽后恢复的隐藏尾数。固定小数写法按可见宽度舍入，不自动改用科学计数法兜底；越界先限制到真实边界，边界本身无法显示时明确报错、保留原值，不将边界替成近邻内点、不扩宽。Decimal步进、步长对齐和单位换算继续共用原实现；仅数值/单位/字体/宽度真正变化时量化。同单位族的前缀换算沿公共单位owner做十进制精确缩放，不往返二进制浮点制造长尾。单位、对应范围及数值在同一控件接受入口一起更新，不能先把新单位的bounds套在旧单位数值上。被动布局/投影规范化只同步原草稿通道，不能冒充用户Apply写设备；只读科学数据及设备当前读数不因此被改写。Scan保存点列必须采用最终接受的限幅/舍入结果；浮点尾差不能把等距Range误标为custom，真正非线性变换产生的点列仍保留，Range与Values输入互不填充。
+- 可编辑数值输入按“真实设备范围→限幅→可见精度舍入”的优先级处理：普通越界不是错误；舍入越界时取该精度小数网格内最靠近边界的合法数，不能仅因原边界尾数写不下就拒绝。显示数就是控件与提交草稿的数，不保留隐藏尾数，不自动改科学计数法、不扩宽；只有整个合法范围确实无可显示数才报错。用户主动单位显示切换在成功前不提交候选ports/单位/值，拒绝时保持原整份显示；设备真实范围更新不能被显示失败回滚，必须保留新范围并明确标记当前输入不可用，不能把过时范围或未显示数值作为可Apply草稿。Decimal步进、步长对齐和单位换算继续共用原实现；同单位族前缀换算在公共单位owner做精确十进制缩放。单位、对应范围及数值在同一控件入口一起更新，不把新单位bounds先套在旧单位数值上。被动规范化只回到草稿通道，不冒充用户Apply；只读科学数据/设备读数不因此改写。Scan保存点列采用最终接受的限幅/舍入结果；浮点尾差不能将等距Range误标custom，真实非线性点列仍保留，Range与Values互不填充。
 - Config与Manual Data等表格复用公共Fluent表格高度策略：不超过2000行时按实际行高纵向展开，只由外层Tab纵向滚动；超过2000行才保留有界的内部纵向滚动。横向溢出仍可滚动，虚拟model不因展开而复制数据或逐格构造控件。InfoTree的末行文字与动作按钮在单元格内保留上下间距；不得靠在外框与滚动条之间加padding掩盖行内容裁切。
 - 滚动条轨道与滑块共用Fluent边框的圆角几何：位于边框内侧时扣除实际边框厚度，无框容器使用原圆角，避免贴边时两条圆弧圆心不一致留下空隙。公共样式统一处理，不按页面设置独立半径。
 - Pulse绑定popup使用共同标签/内容列：Scan后的布尔check、Source后的Default/API/Config互斥三态胶囊开关，以及Config时只读的实际Config name。三态每段按自身文字加少量边距自然定宽，不横向拉伸。弹窗复用公共anchor toggle及点击重放处理：同一slot再点即关闭，不先关闭又重开。名称配置仍只在Config tab，不能把popup变成第二个Config编辑器或用操作指引冒充名称。
@@ -380,6 +380,7 @@ Node new chunk
 - `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；Pylon无法证明live tune前后的buffer边界，因此本次arm内tune之后的每个readback都保守标为old/new mixed，只有重新arm才回到单一epoch——一次read碰巧取走部分旧队列不是其余帧已是新设置的证据。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Pulse Editor每个channel保留同一组编辑/单位/全开/全关列；DAC不支持全开时保留按钮但disabled，不隐藏列。全关仍可用。
+- Pulse DAC模式Combo的宽度由公共FluentComboBox按实际字体、文字边距与箭头给出，不在Pulse复制估宽公式；模式与数值框之间保留行布局的显式逻辑像素间距，不能用过大的固定Combo宽度挤掉间距或数值输入空间。
 - Pulse Period字段的无变化判断只读取该卡片当前accepted PeriodVM（名字、duration/unit、DAC mode/value），不保存上次发送intent的数值。Load/Sync/Clear及拒绝后的回显共用原投影；未被owner接受的输入不能被视作已提交，控件复用不得吞掉再次输入。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile只在schema改变时重建dependency graph；同schema成功adopt只更新值。隐藏Setting延后构造/度量到实际打开，Manual Data单格修改只通知实际变化的格子。Pulse显示切换保留原timeline/滚动与bracket对象，不拆装未变控件。
@@ -408,7 +409,7 @@ Node new chunk
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
 - qCMOS区分last-successful requested设置与actual working point；量化后的actual不覆盖requested，重复同请求不因此重写。成功setter及arm后的readback形成一份actual，普通working_point读取复用；失败清除请求成功事实，后续setter真正重试。arm后保留真实工作点读回与改变拒绝；不得要求读回之后transfer count仍为零——相机可能已接收本代首帧。本代copied/last count从0开始，首次读取按真实count/newest取回早到帧，负数、倒退、不一致、有限上限及copy-overrun检查不删除。
-- Camera adapter独立持续搬运原生frame，read只消费有界FIFO，发布/投影不决定何时从SDK取帧；真实与Virtual都禁止静默丢旧和重新编号。Camera Measurement的Receive buffer按MiB配置（默认128），按实际ROI/dtype分配SDK与应用FIFO的像素容量，有限目标数与周期帧数不是缓冲容量；两处各分一半预算，另有单帧复制scratch及小型record开销。完整周期放不进预算明确拒绝，溢出/可观测序号缺口立即报错并带容量/计数/时间信息。正常Stop先停止并完成接收，再发布已接收的完整周期；失败不继续发布，残缺周期不补造，Restart才重置该次采集。
+- Camera adapter独立持续搬运原生frame，read只消费有界FIFO，发布/投影不决定何时从SDK取帧；真实与Virtual都禁止静默丢旧和重新编号。接收容量是内部实现策略，不属于Measurement authoring/Request或用户run参数：Camera沿既有128MiB内部预算，按实际ROI/dtype分配SDK和应用FIFO（各半），另有单帧复制scratch及小型record开销；Waveform沿既有2秒内部容量预算按原生record时长计算。有限目标数、周期帧数与用户科学history/window不等同于接收容量，不增加高级表单。实际容量可记录为只读采集事实。完整周期放不进内部容量明确拒绝，溢出/可观测序号缺口仍报错并带容量/计数/时间信息。正常Stop先停接收，再发布已接收的完整周期；失败不继续发布，残缺周期不补造，Restart才重置该次采集。
 - Camera/Waveform真实与Virtual adapter共用中立设备基础层的同一个RecordQueue（由原Waveform队列迁移，不保留两套实现）；容量、FIFO顺序、ordinal检查、失败优先与Stop后待消费尾部由它保证。插件仅产生已独占的原生record并执行自己的SDK start/read/stop；线程归属、触发方式及不可观测硬件gap不能由通用queue猜测，不把具体SDK依赖反向放入Runtime。
 - Stop保留已接收尾部与最终Close释放资源是不同边界：硬件/生产线程确已关闭后，共同queue释放未消费记录及失败引用；SDK拒绝Close时仍保留句柄和数据供重试。持续广播设备的本次capture完整性错误只结束该次采集，接收线程继续idle排流，普通Restart重置本次ordinal/clock；真实通信I/O故障仍结束接收并明确要求重开设备，不自动吞错或继续失败capture。
 - Pylon同样区分requested/actual；arm模式、restore及gain变化使工作点失效，不能复用旧mode/epoch。SDK frame在result仍有效时直接构造不可变CameraFrameRecord，再Release；不先复制一份随即丢弃的mutable整图。非连续输入直接打包C-order bytes，immutable ownership、frame ordinal及epoch事实不变。

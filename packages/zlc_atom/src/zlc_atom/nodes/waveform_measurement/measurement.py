@@ -39,10 +39,10 @@ from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
 #: How often a capture comes back to see whether it has been asked to stop;
 #: the read length is the cancel latency, and it belongs to the loop.
 _CANCEL_RESPONSE_SECONDS = 0.05
+_RECEIVE_BUFFER_SECONDS = 2.0
 
 WAVEFORM_MEASUREMENT_SCHEMA = AuthoringSchema((
     AuthoringField("repeat", "int", "Records (0 = continuous)", 0, minimum=0),
-    AuthoringField("buffer_seconds", "float", "Receive buffer", 2.0, minimum=0.01, unit="s"),
 ))
 
 
@@ -173,11 +173,10 @@ def _working_point_snapshot(
 
 @dataclass(frozen=True)
 class WaveformMeasurementRequest:
-    """Native record count and receive capacity, not a polling clock."""
+    """Native record count, independent of internal receive capacity."""
 
     sampler_key: str
     repeat: int
-    buffer_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         key = str(self.sampler_key).strip()
@@ -185,12 +184,8 @@ class WaveformMeasurementRequest:
             raise ValueError("sampler_key must be non-empty")
         if isinstance(self.repeat, bool) or int(self.repeat) != self.repeat or self.repeat < 0:
             raise ValueError("repeat must be a non-negative integer")
-        seconds = float(self.buffer_seconds)
-        if not np.isfinite(seconds) or seconds < 0.01:
-            raise ValueError("buffer_seconds must be finite and at least 0.01 s")
         object.__setattr__(self, "sampler_key", key)
         object.__setattr__(self, "repeat", int(self.repeat))
-        object.__setattr__(self, "buffer_seconds", seconds)
 
 
 class FiniteCapture:
@@ -447,7 +442,6 @@ class WaveformMeasurementNode:
             "node": self.instance_id,
             "parameters": {
                 "repeat": self.repeat,
-                "buffer_seconds": self.request.buffer_seconds,
             },
             "named_devices": {"sampler": self.sampler_key},
             "device_snapshots": {"sampler": _working_point_snapshot(self.sampler, point)},
@@ -534,8 +528,9 @@ class WaveformMeasurementNode:
 
     def _arm(self) -> None:
         # Capacity absorbs stalls; it never sets sample/record/plot cadence.
-        capacity = max(2, ceil(self.request.buffer_seconds / _record_seconds(self)))
+        capacity = max(2, ceil(_RECEIVE_BUFFER_SECONDS / _record_seconds(self)))
         self.sampler.arm(self.repeat or None, buffer_record_count=capacity)
+        self._run_record["acquisition"] = {"buffer_record_count": capacity}
         # Hardware may quantize the requested rate at arm (notably DAQ).
         # Freeze its accepted clock before publishing even the first record.
         self._working_point = self.sampler.working_point()

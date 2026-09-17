@@ -200,9 +200,11 @@ class _AxisRow(QtWidgets.QWidget):
             "value_text": self.values_edit.text(),
         }
 
-    def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False) -> bool:
+    def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False,
+                     ports=None, reject_unrepresentable: bool = False) -> bool:
         if not preserve_edit or not being_edited(self.range_inputs):
-            if not self._show_values(ScanAxis(entry["port"], tuple(entry["values"]), entry["unit"])):
+            if not self._show_values(ScanAxis(entry["port"], tuple(entry["values"]), entry["unit"]),
+                                     ports=ports, reject_unrepresentable=reject_unrepresentable):
                 return False
         if not preserve_edit or not being_edited(self.values_edit):
             self.values_edit.setText(entry["value_text"])
@@ -210,10 +212,16 @@ class _AxisRow(QtWidgets.QWidget):
         self._refresh_mode()
         return True
 
-    def _show_converted(self, entry: Mapping, unit: str, values) -> bool:
+    def _show_converted(self, entry: Mapping, unit: str, values, *, ports=None) -> bool:
         count = len(entry["values"])
-        return self._show_inputs({**entry, "unit": unit, "values": list(values[:count]),
-                                  "value_text": ", ".join(repr(float(value)) for value in values[count:])})
+        if not self._show_inputs({**entry, "unit": unit, "values": list(values[:count])},
+                                 ports=ports, reject_unrepresentable=True):
+            return False
+        low, high = self.start_spin.minimum(), self.start_spin.maximum()
+        self.values_edit.setText(
+            ", ".join(repr(min(high, max(low, float(value)))) for value in values[count:])
+        )
+        return True
 
     def _fill_ports(self, current: str | None) -> None:
         """Offer every port, each under the thing that owns it."""
@@ -260,9 +268,10 @@ class _AxisRow(QtWidgets.QWidget):
             self._ports = label_device_scan_ports(self._ports, labels)
             self._fill_ports(str(self.port_combo.currentData() or ""))
 
-    def _apply_port_limits(self, unit: str = "", values=None) -> bool:
+    def _apply_port_limits(self, unit: str = "", values=None, *, ports=None,
+                           reject_unrepresentable: bool = False) -> bool:
         port = None if self.manual else next(
-            (p for p in self._ports if p.port == self.port_combo.currentData()),
+            (p for p in (self._ports if ports is None else ports) if p.port == self.port_combo.currentData()),
             None,
         )
         unit = unit or ("" if port is None else port.unit)
@@ -271,19 +280,24 @@ class _AxisRow(QtWidgets.QWidget):
             limits = tuple(float(DEFAULT_UNITS.convert_decimal(value, port.unit, unit)) for value in limits)
         spins = (self.start_spin, self.stop_spin)
         previous = tuple((spin.minimum(), spin.maximum(), spin.decimalValue(), spin.valueUnit()) for spin in spins)
+        error = None
         for index, spin in enumerate(spins):
             if not spin.setRange(min(limits), max(limits), unit=unit,
-                                 value=None if values is None else values[index]):
+                                 value=None if values is None else values[index],
+                                 reject_unrepresentable=reject_unrepresentable):
                 error = spin.property("numericError")
-                for restored, (low, high, value, old_unit) in zip(spins[:index], previous[:index]):
-                    restored.setRange(low, high, value=value, unit=old_unit)
-                self.custom_label.setText(str(error))
-                return False
+                if reject_unrepresentable:
+                    for restored, (low, high, value, old_unit) in zip(spins[:index], previous[:index]):
+                        restored.setRange(low, high, value=value, unit=old_unit)
+                    self.custom_label.setText(str(error))
+                    return False
         if self.manual:
             self.unit_label.setText("" if unit in ("", "1") else unit)
         else:
             self._mount_unit_picker(unit)
-        return True
+        if error:
+            self.custom_label.setText(str(error))
+        return not error
 
     def _mount_unit_picker(self, unit: str) -> None:
         """Offer this port's other spellings, or just name the one it has.
@@ -318,12 +332,13 @@ class _AxisRow(QtWidgets.QWidget):
         layout.addWidget(picker)
         self.unit_picker = picker
 
-    def _show_values(self, axis: ScanAxis) -> bool:
+    def _show_values(self, axis: ScanAxis, *, ports=None, reject_unrepresentable: bool = False) -> bool:
         """Put this axis's values on the row: its ends, its count, or the
         fact that they are a list nobody's ends describe."""
 
         with signals_blocked(self.start_spin, self.stop_spin, self.points_spin):
-            if not self._apply_port_limits(axis.unit, (axis.values[0], axis.values[-1])):
+            if not self._apply_port_limits(axis.unit, (axis.values[0], axis.values[-1]),
+                                          ports=ports, reject_unrepresentable=reject_unrepresentable):
                 return False
             self.points_spin.setValue(len(axis.values))
         low, high = self.start_spin.minimum(), self.start_spin.maximum()
@@ -697,9 +712,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 return
             values, port = result
             (port,) = label_device_scan_ports((port,), owner._device_labels)
-            owner._ports = tuple(port if item.port == port.port else item for item in owner._ports)
-            current._ports = owner._ports
-            if current._show_converted(entry, unit, values):
+            ports = tuple(port if item.port == port.port else item for item in owner._ports)
+            if current._show_converted(entry, unit, values, ports=ports):
+                owner._ports = ports
+                current._ports = ports
                 owner._emit_plan()
 
         try:
@@ -1025,11 +1041,22 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._emit_plan()
 
     def _current_plan(self) -> ScanPlan:
+        for row in self._rows:
+            if row.input_stack.currentIndex() == 0:
+                for spin in (row.start_spin, row.stop_spin, row.points_spin):
+                    if error := spin.property("numericError"):
+                        raise ValueError(str(error))
         return ScanPlan.from_tree({"axes": [row.input_entry() for row in self._rows]})
 
     def _emit_plan(self) -> None:
         if self._loading:
             return
+        for row in self._rows:
+            if row.input_stack.currentIndex() == 0:
+                for spin in (row.start_spin, row.stop_spin, row.points_spin):
+                    if error := spin.property("numericError"):
+                        self.summary.setText(str(error))
+                        return
         self._align_columns()
         ordered = sorted(self._rows, key=lambda row: host_advanced_port(
             MANUAL_PARAM_FAMILY if row.manual else str(row.port_combo.currentData())

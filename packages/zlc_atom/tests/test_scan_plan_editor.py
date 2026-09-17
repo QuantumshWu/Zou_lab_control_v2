@@ -565,7 +565,7 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         root = row.port_combo._model.item(0)
         assert root.text() == "Cooling RF" and root.child(0).text() == "ch1_power"
         assert row.port_combo.currentData() == "device:rf:ch1_power"
-        row.values_edit.setText("-17, -13, -17")
+        row.values_edit.setText("-35, -13, 15")
         row.values_edit.editingFinished.emit()
         old_values = row.axis().values
         row.unit_picker.unit_picked.emit("mVpp")
@@ -575,7 +575,7 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         assert row.axis().values[-1] == pytest.approx(894.4271909999159), "used the global 50-ohm conversion"
         assert row.start_spin.valueUnit() == "mVpp"
         converted_values = parse_scan_values(row.values_edit.text())
-        assert converted_values == tuple(units.convert((-17., -13., -17.), "dBm", "mVpp"))
+        assert converted_values == tuple(units.convert((-30., -13., 10.), "dBm", "mVpp"))
         assert len(converted_values) == 3 and len(row.input_entry()["values"]) == 5
         row.start_spin.setValue(135.0)
         row.stop_spin.setValue(247.0)

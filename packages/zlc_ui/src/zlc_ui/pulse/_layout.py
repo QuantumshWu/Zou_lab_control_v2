@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PyQt5 import QtCore, QtWidgets
 
-from zlc_ui.fluent import FluentLabel, measure_text_width, scaled_px
+from zlc_ui.fluent import FluentLabel, scaled_px
 
 
 ROW_HEIGHT = 30
@@ -64,12 +64,6 @@ def period_control_width(card_width: int) -> int:
     return max(px(76, minimum=68), card_width - 2 * px(7) - px(4))
 
 
-def bus_mode_combo_width(labels: tuple[str, ...]) -> int:
-    if not labels:
-        raise ValueError("a bus-mode combo needs presenter-supplied labels")
-    return measure_text_width(labels, padding=34)
-
-
 def set_fixed_height(widget: QtWidgets.QWidget, height: int | None = None) -> QtWidgets.QWidget:
     widget.setFixedHeight(row_height() if height is None else height)
     return widget
@@ -114,7 +108,7 @@ def channel_row_height() -> int:
 
 
 __all__ = [
-    "add_labeled_widget", "bus_mode_combo_width", "card_gutter",
+    "add_labeled_widget", "card_gutter",
     "channel_label_width", "channel_name_edit_width", "channel_row_height",
     "form_control_cell", "hide_button_width", "panel_top_height",
     "period_card_width", "period_control_width", "px", "row_height",
