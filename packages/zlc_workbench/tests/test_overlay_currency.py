@@ -187,6 +187,7 @@ def test_finite_overlay_uses_the_exact_canonical_prefix_and_last_scope() -> None
     try:
         plane.begin_generation(image_node)
         plane.begin_generation(status_node)
+        plane.set_run_record(status_node, {IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry})
         for index, origin in enumerate((0, 49)):
             event_repeat = repeat_domain(size=1)
             record = {"device_settings": {"camera": {"device_session_id": "camera-session",
@@ -204,7 +205,7 @@ def test_finite_overlay_uses_the_exact_canonical_prefix_and_last_scope() -> None
             plane.commit_live(status_node, {"status": LiveDatasetOutput(status_output,
                 make_snapshot(replace(status_schema, repeat_domain=event_repeat), values,
                               revision=index + 1, validity=valid),
-                DatasetCoverage((index + 1) * 3, 150), {IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry},
+                DatasetCoverage((index + 1) * 3, 150),
                 canonical_schema=status_schema, cell_origin=(origin, 0), event_record=record)},
                 worker_source=("camera/frames", image_publication))
             status_publication = plane.latest_publication("status/status")

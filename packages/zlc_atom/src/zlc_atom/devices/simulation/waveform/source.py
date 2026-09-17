@@ -9,12 +9,12 @@ from typing import Callable
 
 import numpy as np
 
+from zlc_atom.devices import RecordQueue
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
-    WaveformRecordQueue,
     WaveformWorkingPoint,
 )
 
@@ -71,7 +71,7 @@ class VirtualWaveformSource:
         self._columns = 1 + max(
             column for output in config.outputs for column in output.columns
         )
-        self._records = WaveformRecordQueue(
+        self._records = RecordQueue(
             "the virtual waveform source", join_timeout_seconds=self.timeout
         )
 
@@ -138,7 +138,9 @@ class VirtualWaveformSource:
                         "virtual sample source returned the wrong shape: "
                         f"{values.shape} for {(samples, self._columns)}"
                     )
-                self._records.push(values, record_index * record_seconds, time.time_ns())
+                self._records.push(WaveformRecord(
+                    values, record_index, record_index * record_seconds, time.time_ns(),
+                ))
                 record_index += 1
                 due = started + record_index * record_seconds
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
@@ -150,7 +152,8 @@ class VirtualWaveformSource:
         return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
-        return self._records.finish()
+        produced = self._records.finish()
+        return WaveformCaptureTerminalRecord(produced, True, not self._records.pending_count, True)
 
     def capture_state(self) -> bool:
         return self._records.armed

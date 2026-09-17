@@ -325,7 +325,7 @@ def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata(
             adapter.arm(3, source_group_sizes=(3,), buffer_frame_count=3, timeout=1.0)
         assert driver.device.ring_size == 3
         records = (
-            adapter.read_frame_records(arrived_during_arm, timeout=0.0, exact=True)
+            adapter.read_frame_records(arrived_during_arm, timeout=1.0, exact=True)
             if arrived_during_arm else []
         )
         driver.device.publish((11, 22, 33), newest=1)
@@ -348,18 +348,17 @@ def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata(
         adapter.close()
 
 
-def test_finite_arm_requires_the_complete_physical_buffer_cardinality() -> None:
+def test_finite_target_and_receive_capacity_are_independent() -> None:
     driver = _FakeDcamDriver()
     adapter = DcamCameraAdapter(_config(), driver=driver)
     try:
-        with pytest.raises(ValueError, match="must equal the complete frame count"):
-            adapter.arm(
-                3,
-                source_group_sizes=(3,),
-                buffer_frame_count=2,
-                timeout=1.0,
-            )
-        assert driver.device.ring_size == 0
+        adapter.arm(6, source_group_sizes=(2, 2, 2), buffer_frame_count=2, timeout=1.0)
+        assert driver.device.ring_size == 2
+        for count in (2, 4, 6):
+            driver.device.publish(tuple(range(count)), newest=1)
+            records = adapter.read_frame_records(2, timeout=1.0, exact=True)
+            assert [record.source_ordinal for record in records] == [count - 2, count - 1]
+        assert adapter.finish_record_capture().produced_count == 6
     finally:
         adapter.close()
 
@@ -380,7 +379,8 @@ def test_every_copy_rechecks_ring_overwrite(exact: bool) -> None:
         with pytest.raises(RuntimeError, match="overwrite a frame during copy"):
             adapter.read_frame_records(1, timeout=1.0, exact=exact)
     finally:
-        adapter.finish_record_capture()
+        with pytest.raises(RuntimeError, match="overwrite a frame during copy"):
+            adapter.finish_record_capture()
         adapter.close()
 
 
@@ -404,8 +404,10 @@ def test_a_frame_that_has_arrived_is_never_lost_to_the_read_window() -> None:
             timeout=1.0,
         )
         driver.device.publish((77,), newest=0)
-        # A window that has already closed: the frame is in the ring, so it
-        # comes back rather than raising.
+        # Independent intake owns copying; once accepted, even a zero-time
+        # consumer read receives the queued frame without another SDK call.
+        with adapter._records._condition:
+            assert adapter._records._condition.wait_for(lambda: adapter._records.pending_count, timeout=1.0)
         records = adapter.read_frame_records(1, timeout=0.0, exact=False)
         assert [int(record.image[0, 0]) for record in records] == [77]
     finally:
@@ -428,11 +430,12 @@ def test_transfer_count_rollback_fails_loudly() -> None:
         driver.device.count = 1
         driver.device.newest = 0
         with pytest.raises(RuntimeError, match="moved backwards"):
-            adapter.read_frame_records(1, timeout=0.0, exact=False)
+            adapter.read_frame_records(1, timeout=1.0, exact=False)
     finally:
         driver.device.count = 2
         driver.device.newest = 1
-        adapter.finish_record_capture()
+        with pytest.raises(RuntimeError, match="moved backwards"):
+            adapter.finish_record_capture()
         adapter.close()
 
 
@@ -448,10 +451,11 @@ def test_transfer_query_failure_never_falls_back_to_latest_frame() -> None:
         )
         driver.device.transfer_error = RuntimeError("injected transfer failure")
         with pytest.raises(RuntimeError, match="injected transfer failure"):
-            adapter.read_frame_records(1, timeout=0.0, exact=False)
+            adapter.read_frame_records(1, timeout=1.0, exact=False)
     finally:
         driver.device.transfer_error = None
-        adapter.finish_record_capture()
+        with pytest.raises(RuntimeError, match="injected transfer failure"):
+            adapter.finish_record_capture()
         adapter.close()
 
 
@@ -483,8 +487,7 @@ def test_concurrent_finish_unblocks_read_and_freezes_one_terminal_record() -> No
     reader.join(1.0)
     try:
         assert not reader.is_alive()
-        assert len(outcome) == 1
-        assert isinstance(outcome[0], DcamCaptureInterrupted)
+        assert outcome == []
         assert adapter.finish_record_capture() is terminal
         assert terminal.produced_count == 0
     finally:
@@ -640,7 +643,7 @@ def test_released_ring_with_invalid_final_state_never_fabricates_terminal() -> N
         driver.device.transfer_error = None
         with pytest.raises(RuntimeError, match="not authoritative") as second:
             adapter.finish_record_capture()
-        assert second.value is first.value
+        assert second.value.__cause__ is first.value.__cause__
         assert tuple(driver.calls) == calls_after_failure
 
         adapter.arm(

@@ -28,7 +28,7 @@ from types import MappingProxyType
 from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol, runtime_checkable
 import uuid
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, ref as weakref_ref
 
 import numpy as np
 from zlc_data import (
@@ -64,6 +64,8 @@ from .dataset import (
 )
 from .streams import (
     AcquisitionStream,
+    DEFAULT_FOLLOW_MAX_PENDING,
+    DEFAULT_FOLLOW_MAX_BYTES,
     EventRef,
     FollowTap,
     SourceFailed,
@@ -185,6 +187,8 @@ class LatestProcessorControl(SignalProducer, Protocol):
     def accept_processor_failure(self, error: Exception) -> None: ...
 
     def accept_processor_cancelled(self) -> None: ...
+
+    def accept_processor_ended(self, error: Exception | None) -> None: ...
 
     def request_processor_owner_wake(self) -> None: ...
 
@@ -412,10 +416,11 @@ class SignalPublication:
 
     A publication is the causal unit.  Its signal mapping is one atomic sibling
     bundle and ``direct_parent_refs`` names only the exact events consumed to
-    produce it.  The plane privately retains the corresponding immutable parent
-    payloads while a child is live; that process-local retention is deliberately
-    not part of the public lineage contract.  ``run_record`` is only the
-    shallow, application-authored record frozen for this run; it is not Dataset
+    produce it. Current and explicitly held views retain their required parent
+    payloads; finite replay ancestry retains only exact metadata and signal
+    names. A metadata-only parent has no value, never a substituted latest one.
+    ``run_record`` is only the
+    immutable declaration accepted for this run; it is not Dataset
     schema, a second revision authority, or security provenance.
     """
 
@@ -425,6 +430,9 @@ class SignalPublication:
     direct_parent_refs: tuple[EventRef, ...] = ()
     run_record: Mapping[str, object] = field(default_factory=dict)
     event_record: Mapping[str, object] = field(default_factory=dict)
+    signal_names: tuple[str, ...] = field(init=False)
+    _lineage: "SignalPublication | None" = field(init=False, default=None, repr=False, compare=False)
+    _payload_ref: object = field(init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._validate_fields()
@@ -447,6 +455,17 @@ class SignalPublication:
         ):
             object.__setattr__(result, key, value)
         result._validate_fields()
+        return result
+
+    @classmethod
+    def _metadata(cls, publication: "SignalPublication") -> "SignalPublication":
+        """Plane-owned ancestry without retaining the ancestor's array payload."""
+        result = object.__new__(cls)
+        for name in ("event_ref", "_issuer", "direct_parent_refs", "run_record", "event_record", "signal_names"):
+            object.__setattr__(result, name, getattr(publication, name))
+        object.__setattr__(result, "signals", MappingProxyType({}))
+        object.__setattr__(result, "_payload_ref", weakref_ref(publication))
+        object.__setattr__(result, "_lineage", None)
         return result
 
     def _validate_fields(self) -> None:
@@ -488,6 +507,9 @@ class SignalPublication:
                 "signal publication event_record differs from its sibling values"
             )
         object.__setattr__(self, "signals", MappingProxyType(signals))
+        object.__setattr__(self, "signal_names", tuple(signals))
+        object.__setattr__(self, "_lineage", None)
+        object.__setattr__(self, "_payload_ref", None)
         object.__setattr__(self, "direct_parent_refs", parents)
 
     def value(self, name: str) -> SignalValue | None:
@@ -569,30 +591,6 @@ def _require_published_declaration(
         )
 
 
-def _shared_run_record(
-    outputs: Mapping[
-        str,
-        LiveDatasetOutput | SignalValue,
-    ],
-) -> Mapping[str, object]:
-    """Copy the one run record shared by an atomic sibling output bundle."""
-
-    shared: dict[str, object] | None = None
-    for output in outputs.values():
-        if not isinstance(
-            output,
-            (LiveDatasetOutput, SignalValue),
-        ):
-            raise TypeError("run_record carrier has an unknown output type")
-        record = {} if output.run_record is None else output.run_record
-        if shared is None:
-            shared = record
-            continue
-        if not _run_records_equal(record, shared):
-            raise ValueError("sibling outputs must share one run_record")
-    return {} if shared is None else shared
-
-
 def _shared_event_record(
     outputs: Mapping[str, LiveDatasetOutput | SignalValue],
 ) -> Mapping[str, object]:
@@ -612,7 +610,7 @@ def _shared_event_record(
 def _merge_event_records(
     records: Iterable[Mapping[str, object]],
 ) -> Mapping[str, object]:
-    """Union compact device epoch ranges used by one materialized value."""
+    """Merge Plane-owned records, sharing their already frozen metadata leaves."""
 
     merged: dict[str, object] = {}
     devices: dict[str, dict[str, object]] = {}
@@ -678,15 +676,17 @@ def _merge_event_records(
                     ranges[-1][1] = max(ranges[-1][1], stop)
                 else:
                     ranges.append([start, stop])
-            compact[device_key] = {
+            compact[device_key] = MappingProxyType({
                 "device_session_id": raw["device_session_id"],
-                "epoch_ranges": ranges,
+                "epoch_ranges": tuple(tuple(bounds) for bounds in ranges),
                 "mixed": len(ranges) > 1 or bool(ranges and ranges[0][0] != ranges[0][1]),
-            }
-        merged["device_settings"] = compact
+            })
+        merged["device_settings"] = MappingProxyType(compact)
     if record_timing:
-        merged["record_timing"] = record_timing
-    return merged
+        merged["record_timing"] = MappingProxyType({
+            source: MappingProxyType(entries) for source, entries in record_timing.items()
+        })
+    return MappingProxyType(merged)
 
 
 def _require_signal_producer(node: object) -> SignalProducer:
@@ -1264,7 +1264,7 @@ def _indexed_materialization_input(
         start,
         primary_index,
         basis,
-        _freeze_run_record(merged_record),
+        merged_record,
         _row_times(row_times) if stamped else None,
         stable_since=history.replaced_at,
     )
@@ -1300,6 +1300,7 @@ class _GenerationState:
     published_schemas: Mapping[str, DatasetSchema] | None = None
     next_sequence: int = 1
     terminal: bool = False
+    terminal_error: SourceFailed | None = None
     retired: bool = False
     publication_stream: AcquisitionStream[SignalPublication] | None = None
     exact_outputs: frozenset[str] | None = None
@@ -1341,6 +1342,8 @@ class _ProcessorEntry:
     last_publication: SignalPublication | None = None
     cancel_requested: bool = False
     paused: bool = False
+    source_finished: bool = False
+    source_error: Exception | None = None
 
 
 class _LatestOnlyProcessorLane:
@@ -1471,6 +1474,11 @@ class _LatestOnlyProcessorLane:
                     or entry.cancel_requested
                 ):
                     continue
+                previous = entry.last_publication
+                if (previous is not None
+                    and previous.event_ref.generation == publication.event_ref.generation
+                    and previous.event_ref.sequence >= publication.event_ref.sequence):
+                    continue
                 entry.last_publication = publication
                 entry.pending_publication = publication
                 failure = self._start_processor_locked(entry)
@@ -1521,6 +1529,34 @@ class _LatestOnlyProcessorLane:
                 if cancelled:
                     self._cancelled_processor(entry)
                 continue
+            with self._lock:
+                ended = (
+                    self._processors.get(_node_instance_id(entry.node)) is entry
+                    and entry.source_finished and not entry.paused
+                    and entry.work_future is None
+                    and entry.pending_publication is None
+                )
+                if ended:
+                    self._processors.pop(_node_instance_id(entry.node))
+            if ended:
+                entry.node.accept_processor_ended(entry.source_error)
+
+    def source_ended(self, publication: SignalPublication, error: Exception | None) -> None:
+        """Deliver the last data once, then finish after existing work drains."""
+        self.route({name: publication for name in publication.signals})
+        with self._lock:
+            entries = tuple(
+                entry for entry in self._processors.values()
+                if entry.source_name in publication.signals
+                and entry.last_publication is publication
+                and not entry.source_finished
+            )
+            for entry in entries:
+                entry.source_finished = True
+                entry.source_error = error
+        for entry in entries:
+            if entry.work_future is None:
+                self._wake_processor(entry.node)
 
     def cancel_processor(self, node: object) -> bool:
         with self._lock:
@@ -1657,16 +1693,6 @@ class SignalDataPlane:
         self._publication_parents: WeakKeyDictionary[
             SignalPublication,
             tuple[SignalPublication, ...],
-        ] = WeakKeyDictionary()
-        #: Which of its parent's signals each derived publication CONSUMED.
-        #: This is a fact of the commit that produced it, recorded when it
-        #: happened: the live state table cannot answer it later -- a
-        #: worker-fed producer's selection exists only inside its one
-        #: commit_live call, and a stream that re-arms or retires takes
-        #: source_name with it while the publication lives on in lineage.
-        self._publication_selections: WeakKeyDictionary[
-            SignalPublication,
-            tuple[str, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
         self._signal_descriptions: tuple[SignalDescription, ...] | None = None
@@ -2049,6 +2075,11 @@ class SignalDataPlane:
                 next_sequence=state.next_sequence,
             )
             state.publication_stream = stream
+            if state.terminal:
+                if state.terminal_error is None:
+                    stream.finish()
+                else:
+                    stream.fail(state.terminal_error)
         return stream
 
     @staticmethod
@@ -2134,6 +2165,38 @@ class SignalDataPlane:
                 bare_names=bare_names,
                 node=node,
             ).generation
+
+    def run_record(self, node: object) -> Mapping[str, object] | None:
+        """The accepted declaration, independently of successful data commits."""
+        owner_id = _node_instance_id(node)
+        with self._lock:
+            state = self._states.get(owner_id)
+            if state is None or state.node is not node or state.retired:
+                raise SourceGenerationEnded("run record belongs to a retired generation")
+            return state.committed_run_record
+
+    def set_run_record(self, node: object, record: Mapping[str, object]) -> Mapping[str, object]:
+        """Declare immutable run facts once, after preparation and before data.
+
+        Freezing is outside the commit lock. Later events carry only their
+        event-varying facts; neither mutable input nor a new mapping can
+        replace this run's accepted declaration.
+        """
+        owner_id = _node_instance_id(node)
+        with self._lock:
+            state = self._states.get(owner_id)
+            if state is None or state.node is not node or state.retired or state.terminal:
+                raise SourceGenerationEnded("run record requires an active generation")
+            if state.committed_run_record is not None or state.publication is not None:
+                raise RuntimeError("run record has already been declared")
+        frozen = _freeze_run_record(record)
+        with self._lock:
+            if self._states.get(owner_id) is not state or state.retired or state.terminal:
+                raise SourceGenerationEnded("generation ended while declaring its run record")
+            if state.committed_run_record is not None or state.publication is not None:
+                raise RuntimeError("run record has already been declared")
+            state.committed_run_record = frozen
+        return frozen
 
     @staticmethod
     def _materialization_input_locked(
@@ -2280,7 +2343,6 @@ class SignalDataPlane:
                         output.declaration,
                         output.snapshot,
                         DatasetCoverage(total, total),
-                        output.run_record,
                         schema,
                         (0, 0),
                         output.event_record,
@@ -2404,12 +2466,9 @@ class SignalDataPlane:
                 and state.exact_outputs != exact_qualified
             ):
                 raise ValueError("live extent kinds changed inside one generation")
-            authored_record = _shared_run_record(outputs)
             run_record = state.committed_run_record
             if run_record is None:
-                run_record = _freeze_run_record(authored_record)
-            elif not _run_records_equal(run_record, authored_record):
-                raise ValueError("run_record changed inside one generation")
+                run_record = _freeze_run_record({})
             event_record = _freeze_run_record(_shared_event_record(outputs))
 
             canonical_schemas = dict(state.canonical_schemas)
@@ -2520,10 +2579,7 @@ class SignalDataPlane:
                     present = None
                     if schema.repeat_domain.size > 1 and not output.coverage.complete:
                         point = schema.point_domain
-                        point_rows = np.ones(point.size, dtype=bool)
-                        for axis in point.axes:
-                            codes = point.codes(axis.axis_id)
-                            point_rows &= codes == codes[target[1].stop - 1]
+                        point_rows = point.coordinate_rows(target[1].stop - 1)
                         present = np.any(mask[:, point_rows], axis=1)
                         present[target[0]] = True
                     repeat_counts = repeat_coordinate_counts(
@@ -2555,17 +2611,11 @@ class SignalDataPlane:
                 event_record=event_record,
                 parents=parents,
             )
-            if parent is not None:
-                self._publication_selections[publication] = selected_sources
             replay_parents = (
                 ()
-                if parent is None
+                if parent is None or not exact_qualified
                 else (
-                    self._slim_publication_locked(
-                        parent,
-                        selected_sources,
-                        {},
-                    ),
+                    self._lineage_publication_locked(parent),
                 )
             )
             for qualified, mask, target in occupied_updates:
@@ -2693,9 +2743,9 @@ class SignalDataPlane:
                     value.event_record for _sequence, value, _origin, _parents
                     in committed[floor:sequence]
                 )
-                materialized_record = _freeze_run_record(_merge_event_records(
+                materialized_record = _merge_event_records(
                     records if basis is None else (basis.record, *records)
-                ))
+                )
         snapshot = (
             _materialize_indexed_dataset(indexed_input)
             if indexed_input is not None
@@ -2746,7 +2796,9 @@ class SignalDataPlane:
 
         return self.current_dataset_view(signal_name, publication)[0]
 
-    def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
+    def seal_committed(
+        self, node: object, *, cut_short: bool = False, error: BaseException | None = None,
+    ) -> bool:
         """End production while retaining its chunks and exact publications.
 
         Sealing does not consume the data.  A complete canonical buffer is
@@ -2777,11 +2829,16 @@ class SignalDataPlane:
             # Terminal state prevents all further commits under this lock;
             # neither a second sealing state nor a full buffer is needed.
             state.terminal = True
+            state.terminal_error = None if error is None else SourceFailed(f"{type(error).__name__}: {error}")
             self._signal_descriptions = None
             self._membership_changed = True
             producer = state.publication_stream
         if producer is not None:
-            producer.finish()
+            if state.terminal_error is None:
+                producer.finish()
+            else:
+                producer.fail(state.terminal_error)
+        self._lane.source_ended(state.publication, state.terminal_error)
         return True
 
     def seal_processor(self, node: object) -> bool:
@@ -2990,6 +3047,8 @@ class SignalDataPlane:
         *,
         replay: bool,
         selected_signals: tuple[str, ...] | None = None,
+        max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
+        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
     ) -> FollowTap[SignalPublication]:
         stream = self._ensure_publication_stream_locked(state)
         selected = (signal_name,) if selected_signals is None else selected_signals
@@ -3001,85 +3060,107 @@ class SignalDataPlane:
             raise ValueError(
                 "followed publication inputs must be unique siblings of its source"
             )
-        retained: list[tuple[int, SignalPublication]] = []
-        if replay:
-            committed = state.commit_chunks.get(signal_name, ())
-            if committed:
-                by_signal = {
-                    name: {
-                        sequence: (value, origin, parents)
-                        for sequence, value, origin, parents in state.commit_chunks.get(
-                            name, ()
-                        )
-                    }
-                    for name in selected
-                }
-                for sequence, value, _origin, parents in committed:
-                    if (
-                        state.publication is not None
-                        and state.publication.event_ref.sequence == sequence
-                    ):
-                        publication = state.publication
-                        if any(
-                            publication.value(name) is None for name in selected
-                        ):
-                            raise RuntimeError(
-                                "current publication lost a selected sibling input"
-                            )
-                    else:
-                        signals: dict[str, SignalValue] = {}
-                        selected_parents = parents
-                        for name in selected:
-                            entry = by_signal[name].get(sequence)
-                            if entry is None:
-                                raise RuntimeError(
-                                    "exact sibling outputs did not commit together"
-                                )
-                            sibling, _sibling_origin, sibling_parents = entry
-                            if sibling_parents != selected_parents:
-                                raise RuntimeError(
-                                    "exact sibling outputs have different parents"
-                                )
-                            signals[name] = sibling
-                        publication = SignalPublication._from_owned_records(
-                            EventRef(
-                                StreamId(state.owner_id),
-                                state.generation,
-                                sequence,
-                            ),
-                            signals,
-                            self._publication_issuer,
-                            direct_parent_refs=tuple(
-                                parent.event_ref for parent in parents
-                            ),
-                            run_record=value.run_record,
-                            event_record=value.event_record,
-                        )
-                        self._publication_parents[publication] = parents
-                        if parents:
-                            # Replay parents are already slim: their retained
-                            # signal bundle is exactly the recorded selection.
-                            self._publication_selections[publication] = tuple(
-                                parents[0].signals
-                            )
-                    retained.append((sequence, publication))
-            elif state.publication is not None:
-                if any(
-                    state.publication.value(name) is None for name in selected
-                ):
-                    raise RuntimeError(
-                        "current publication lost a selected sibling input"
+        committed = state.commit_chunks.get(signal_name, ()) if replay else ()
+        stop = len(committed)
+        current = (self._selected_publication_locked(state.publication, selected)
+                   if replay and not stop and state.publication is not None else None)
+        chunks = tuple(state.commit_chunks.get(name, ()) for name in selected)
+        owner_id, generation = state.owner_id, state.generation
+        start = (committed[0][0] if stop else
+                 current.event_ref.sequence if current is not None else state.next_sequence)
+
+        def retained(index):
+            nonlocal current
+            # Append-only chunk lists and one stop cursor replace N wrappers
+            # and per-sibling full-run indexes constructed under this lock.
+            if stop:
+                with self._lock:
+                    sequence, value, _origin, parents = committed[index]
+                    signals = {}
+                    for name, entries in zip(selected, chunks, strict=True):
+                        if index >= len(entries):
+                            raise RuntimeError("exact sibling outputs did not commit together")
+                        sibling_sequence, sibling, _placement, sibling_parents = entries[index]
+                        if sibling_sequence != sequence or sibling_parents != parents:
+                            raise RuntimeError("exact sibling outputs did not commit together")
+                        signals[name] = sibling
+                    publication = SignalPublication._from_owned_records(
+                        EventRef(StreamId(owner_id), generation, sequence),
+                        signals, self._publication_issuer,
+                        direct_parent_refs=tuple(parent.event_ref for parent in parents),
+                        run_record=value.run_record, event_record=value.event_record,
                     )
-                retained.append(
-                    (state.publication.event_ref.sequence, state.publication)
-                )
-        return stream.follow(retained)
+                    self._publication_parents[publication] = parents
+                    size = self._publication_payload_bytes_locked(publication)
+                    if size > max_bytes:
+                        raise SourceFailed(f"exact replay event {sequence} has {size} payload bytes, limit {max_bytes}")
+                return sequence, publication
+            if current is not None:
+                with self._lock:
+                    publication, current = current, None
+                    size = self._publication_payload_bytes_locked(publication)
+                    if size > max_bytes:
+                        raise SourceFailed(f"exact replay event {publication.event_ref.sequence} has {size} payload bytes, limit {max_bytes}")
+                return publication.event_ref.sequence, publication
+
+        return stream.follow(
+            map(retained, range(stop if stop else int(current is not None))), replay_start_sequence=start,
+            max_pending=max_pending, max_bytes=max_bytes,
+            project=lambda publication: self._selected_publication_locked(publication, selected),
+            payload_size=self._publication_payload_bytes_locked,
+        )
+
+    def _selected_publication_locked(self, publication: SignalPublication, names: tuple[str, ...]) -> SignalPublication:
+        if any(publication.value(name) is None for name in names):
+            raise RuntimeError("publication lost a selected sibling input")
+        # A pending exact input also carries the already-connected same-shot
+        # siblings whose picture cannot advance before this consumer answers.
+        required = set(names) | self._front_signals
+        names = tuple(name for name in publication.signals if name in required)
+        if tuple(publication.signals) == names:
+            return publication
+        values = {name: publication.value(name) for name in names}
+        selected = SignalPublication._from_owned_records(
+            publication.event_ref, values, self._publication_issuer,
+            direct_parent_refs=publication.direct_parent_refs,
+            run_record=publication.run_record, event_record=publication.event_record,
+        )
+        self._publication_parents[selected] = self._publication_parents[publication]
+        return selected
+
+    def _publication_payload_bytes_locked(self, publication: SignalPublication) -> int:
+        """Pinned arrays, deduplicated within one event; across events conservative."""
+        pending = [publication]
+        seen, buffers = set(), set()
+        total = 0
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            pending.extend(self._publication_parents[current])
+            for value in current.signals.values():
+                block = value.snapshot.block
+                for array in (block.values, block.sigma, getattr(block.validity, "mask", None)):
+                    if array is None:
+                        continue
+                    owner = array
+                    while isinstance(owner, np.ndarray) and owner.base is not None:
+                        owner = owner.base
+                    if isinstance(owner, memoryview):
+                        owner = owner.obj
+                    if id(owner) not in buffers:
+                        buffers.add(id(owner))
+                        total += int(owner.nbytes if isinstance(owner, np.ndarray) else len(owner))
+        return total
 
     def follow_publications(
         self,
         signal_name: str,
         *,
         replay: bool = True,
+        max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
+        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
     ) -> tuple[SignalPublication | None, FollowTap[SignalPublication]]:
         """Return the current event and an ordered replay/future payload tap.
 
@@ -3110,6 +3191,8 @@ class SignalDataPlane:
                 state,
                 name,
                 replay=replay,
+                max_pending=max_pending,
+                max_bytes=max_bytes,
             )
 
     def follower_edges(self) -> frozenset[tuple[str, str]]:
@@ -3235,6 +3318,15 @@ class SignalDataPlane:
                 initial_publication,
                 paused=paused,
             )
+            # Source sealing can fall between installation and lane attach.
+            # Read the same generation after attach, then notify outside the
+            # Plane lock just as the normal seal path does.
+            with self._lock:
+                terminal = source_state.terminal and not source_state.retired
+                final = source_state.publication
+                error = source_state.terminal_error
+            if terminal and final is not None:
+                self._lane.source_ended(final, error)
         except BaseException:
             with self._lock:
                 if self._states.get(owner_id) is state:
@@ -3264,13 +3356,16 @@ class SignalDataPlane:
             if (
                 source_state is None
                 or source_state.retired
-                or source_state.terminal
                 or source_state.generation != state.source_generation
                 or source_state.publication is None
             ):
                 raise RuntimeError("latest-only Processor source is no longer live")
             publication = source_state.publication
+            terminal = source_state.terminal
+            error = source_state.terminal_error
         self._lane.catch_up_processor(node, publication)
+        if terminal:
+            self._lane.source_ended(publication, error)
 
     def reserve_frozen_processor(
         self,
@@ -3319,6 +3414,8 @@ class SignalDataPlane:
         source_name: str,
         source_publication: SignalPublication | None,
         source_signals: tuple[str, ...] | None = None,
+        max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
+        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
     ) -> FollowTap[SignalPublication]:
         """Bind one Processor to the current exact publication and its future events.
 
@@ -3383,6 +3480,8 @@ class SignalDataPlane:
                 source_name,
                 replay=True,
                 selected_signals=selected_signals,
+                max_pending=max_pending,
+                max_bytes=max_bytes,
             )
             try:
                 self._install_state_locked(
@@ -3415,50 +3514,19 @@ class SignalDataPlane:
         if publication._issuer is not self._publication_issuer:
             raise ValueError("signal publication was not issued by this data plane")
 
-    def _slim_publication_locked(
-        self,
-        publication: SignalPublication,
-        selected_signals: tuple[str, ...] | None,
-        memo: dict[SignalPublication, SignalPublication],
-    ) -> SignalPublication:
-        """Retain one causal route without retaining unconsumed siblings."""
-
-        existing = memo.get(publication)
-        if existing is not None:
-            return existing
-        if not selected_signals:
-            raise RuntimeError("derived publication has no selected source signals")
-        values = {
-            name: publication.value(name)
-            for name in selected_signals
-        }
-        if any(value is None for value in values.values()):
-            raise RuntimeError("causal parent lost a selected source signal")
-        parents = self._resolved_direct_parents_locked(publication)
-        # What this publication consumed of ITS parent was recorded by the
-        # commit that produced it.  Asking the live state table instead was
-        # the crash: the table answers for the stream's CURRENT generation
-        # (None once it re-arms or retires, and None for a live worker-fed
-        # producer whose selection was never in the table at all), so a
-        # perfectly healthy retained lineage read as "no selected source".
-        parent_signal = self._publication_selections.get(publication)
-        slim_parents = tuple(
-            self._slim_publication_locked(parent, parent_signal, memo)
-            for parent in parents
-        )
-        slim = SignalPublication._from_owned_records(
-            publication.event_ref,
-            values,
-            self._publication_issuer,
-            direct_parent_refs=tuple(parent.event_ref for parent in slim_parents),
-            run_record=publication.run_record,
-            event_record=publication.event_record,
-        )
-        memo[publication] = slim
-        self._publication_parents[slim] = slim_parents
-        if parent_signal is not None:
-            self._publication_selections[slim] = parent_signal
-        return slim
+    def _lineage_publication_locked(self, publication: SignalPublication) -> SignalPublication:
+        """One immutable metadata node per event, shared by finite replay routes."""
+        if publication._payload_ref is not None:
+            return publication
+        cached = publication._lineage
+        if cached is not None:
+            return cached
+        parents = tuple(self._lineage_publication_locked(parent)
+                        for parent in self._publication_parents[publication])
+        metadata = SignalPublication._metadata(publication)
+        self._publication_parents[metadata] = parents
+        object.__setattr__(publication, "_lineage", metadata)
+        return metadata
 
     def _resolved_direct_parents_locked(
         self,
@@ -3478,7 +3546,32 @@ class SignalDataPlane:
             != publication.direct_parent_refs
         ):
             raise RuntimeError("signal publication parent refs are inconsistent")
-        return parents
+        resolved = []
+        for parent in parents:
+            if parent._payload_ref is None:
+                resolved.append(parent)
+                continue
+            payload = parent._payload_ref()
+            if payload is None:
+                state = self._states.get(parent.event_ref.stream_id.value)
+                if state is not None and not state.retired and state.generation == parent.event_ref.generation:
+                    sequence = parent.event_ref.sequence
+                    values = {}
+                    for name in parent.signal_names:
+                        chunks = state.commit_chunks.get(name, ())
+                        if 0 < sequence <= len(chunks):
+                            values[name] = chunks[sequence - 1][1]
+                    if values:
+                        payload = SignalPublication._from_owned_records(
+                            parent.event_ref, values, self._publication_issuer,
+                            direct_parent_refs=parent.direct_parent_refs,
+                            run_record=parent.run_record, event_record=parent.event_record,
+                        )
+                        self._publication_parents[payload] = self._publication_parents[parent]
+                        object.__setattr__(payload, "_lineage", parent)
+                        object.__setattr__(parent, "_payload_ref", weakref_ref(payload))
+            resolved.append(parent if payload is None else payload)
+        return tuple(resolved)
 
     def _require_route_parent_locked(
         self,

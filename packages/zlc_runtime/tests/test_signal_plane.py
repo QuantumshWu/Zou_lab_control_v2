@@ -70,7 +70,6 @@ def _finite(
     total: int,
     origin: int,
     written: int,
-    run_record: dict[str, object] | None = None,
     event_record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
     event = _event(declaration.name, value)
@@ -98,7 +97,6 @@ def _finite(
         declaration,
         event,
         DatasetCoverage(written, total),
-        run_record,
         canonical,
         (origin, 0),
         event_record,
@@ -108,7 +106,6 @@ def _finite(
 def _latest(
     declaration: DatasetOutputDeclaration,
     value: float,
-    run_record: dict[str, object] | None = None,
     *,
     event_record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
@@ -116,7 +113,6 @@ def _latest(
         declaration,
         _event(declaration.name, value),
         MonitorCoverage(1, 1),
-        run_record,
         event_record=event_record,
     )
 
@@ -192,6 +188,7 @@ def _paused_lane(instance_id: str, declaration: DatasetOutputDeclaration):
         accept_processor_result=lambda *_arguments: None,
         accept_processor_failure=refuse,
         accept_processor_cancelled=lambda: None,
+        accept_processor_ended=lambda _error: None,
         request_processor_owner_wake=lambda: None,
     )
 
@@ -244,6 +241,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         @staticmethod
         def accept_processor_cancelled() -> None:
             return None
+
+        accept_processor_ended = staticmethod(lambda _error: None)
 
         @staticmethod
         def request_processor_owner_wake() -> None:
@@ -457,6 +456,7 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
         accept_processor_result = staticmethod(lambda *_args: None)
         accept_processor_failure = staticmethod(lambda error: (_ for _ in ()).throw(error))
         accept_processor_cancelled = staticmethod(lambda: None)
+        accept_processor_ended = staticmethod(lambda _error: None)
         request_processor_owner_wake = staticmethod(lambda: None)
 
     derived = Derived()
@@ -682,6 +682,9 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
     plane = SignalDataPlane()
     try:
         generation = plane.begin_generation(node)
+        plane.set_run_record(node, record)
+        with pytest.raises(RuntimeError, match="already been declared"):
+            plane.set_run_record(node, record)
         value = plane.commit_live(
             node,
             {
@@ -691,7 +694,6 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
                     total=1,
                     origin=0,
                     written=1,
-                    run_record=record,
                 )
             },
         )["camera/frame"]
@@ -719,6 +721,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
 
     def event(epoch: int) -> dict[str, object]:
         return {
+            "record_timing": {"camera": {str(epoch): {"record_time_seconds": float(epoch)}}},
             "device_settings": {
                 "camera": {
                     "device_session_id": "camera-session",
@@ -730,6 +733,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
 
     try:
         plane.begin_generation(node)
+        plane.set_run_record(node, {"run": "same"})
         first = plane.commit_live(
             node,
             {
@@ -739,7 +743,6 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
                     total=2,
                     origin=0,
                     written=1,
-                    run_record={"run": "same"},
                     event_record=event(0),
                 )
             },
@@ -754,7 +757,6 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
                     total=2,
                     origin=1,
                     written=2,
-                    run_record={"run": "same"},
                     event_record=event(2),
                 )
             },
@@ -775,6 +777,10 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
         assert prefix_camera["epoch_ranges"] == ((0, 0), (2, 2))
         assert prefix_camera["mixed"] is True
         assert first.run_record is second.run_record
+        for value, key in ((first, "0"), (second, "2")):
+            assert prefix_record["record_timing"]["camera"][key] is value.event_record["record_timing"]["camera"][key]
+        with pytest.raises(TypeError):
+            prefix_record["record_timing"]["camera"]["0"]["record_time_seconds"] = 99
         assert first.canonical_schema is second.canonical_schema
         assert first.run_record == {"run": "same"}
     finally:
@@ -922,7 +928,8 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         plane.close()
 
 
-def test_repeat_counts_follow_written_cells_not_survival_eligibility() -> None:
+@pytest.mark.parametrize("point_codes", ((0, 1), (0, 1, 0)))
+def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes) -> None:
     declaration = DatasetOutputDeclaration("survival", "test.survival")
     node = _node("repeat-title", declaration)
     plane = SignalDataPlane()
@@ -932,7 +939,7 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility() -> None:
     site = AxisSpec(AxisId("site"), "site", SPATIAL_X, 2, (0, 1))
     canonical = DatasetSchema(
         DomainSpec((6,), (repeat, run), ((0, 0, 1, 1, 2, 2), (0, 1, 0, 1, 0, 1))),
-        DomainSpec((2,), (point,), ((0, 1),)), DomainSpec((2,), (site,)),
+        DomainSpec((len(point_codes),), (point,), (point_codes,)), DomainSpec((2,), (site,)),
         ValueSchema(ValidityContract.components(site.axis_id), np.dtype(bool)),
     )
     scalar_event = _event("survival", 0.0).block.schema
@@ -942,6 +949,8 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility() -> None:
     # do not erase the acquired trial. The two Repeat axes share a name.
     steps = ((0, 0, (1, 1)), (0, 1, (1, 1)), (1, 0, (1, 2)),
              (2, 0, (2, 1)), (3, 1, (1, 1)), (4, 0, (3, 1)), (5, 0, (2, 2)))
+    if len(point_codes) == 3:
+        steps += ((5, 2, (2, 2)),)
     saved = []
     try:
         plane.begin_generation(node)
@@ -952,7 +961,7 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility() -> None:
                               DatasetComponentValidity((site.axis_id,), eligible), event_schema)
             snapshot = OwnedSnapshot(block.ref(StreamGenerationId("source")), block)
             value = plane.commit_live(node, {"survival": LiveDatasetOutput(
-                declaration, snapshot, DatasetCoverage(written, 12),
+                declaration, snapshot, DatasetCoverage(written, 6 * len(point_codes)),
                 canonical_schema=canonical, cell_origin=(row, column),
             )})[node.signal_key("survival")]
             assert value.repeat_counts == expected
@@ -1361,6 +1370,7 @@ def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> 
 
 
 def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -> None:
+    from zlc_runtime.streams import SourceFailed
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     history_declaration = DatasetOutputDeclaration("history", "test.history")
     phase_declaration = DatasetOutputDeclaration("phase", "test.phase")
@@ -1377,22 +1387,19 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
     plane = SignalDataPlane()
     first_tap = None
     downstream_tap = None
+    live_tap = overflow_tap = None
     try:
         plane.begin_generation(source)
         plane.commit_live(
             source,
             {
-                "frame": _finite(
-                    source_declaration,
-                    value=1.0,
-                    total=2,
-                    origin=0,
-                    written=1,
-                )
+                "frame": _large_latest(source_declaration, 1.0)
             },
         )
         first_root = plane.latest_publication("causal-source/frame")
         assert first_root is not None
+        first_pixels = weakref.ref(first_root.value("causal-source/frame").snapshot.block.values)
+        first_event = first_root.event_ref
         first_tap = plane.reserve_follow_processor(
             first_processor,
             source_name="causal-source/frame",
@@ -1416,17 +1423,17 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         assert first_derived is not None
         phase = first_derived.value("causal-first/phase")
         assert phase is not None
+        _, live_tap = plane.follow_publications(
+            "causal-first/history", replay=False, max_bytes=2 * 1024 * 1024,
+        )
+        _, overflow_tap = plane.follow_publications(
+            "causal-first/history", replay=False, max_bytes=1024,
+        )
 
         plane.commit_live(
             source,
             {
-                "frame": _finite(
-                    source_declaration,
-                    value=2.0,
-                    total=2,
-                    origin=1,
-                    written=2,
-                )
+                "frame": _large_latest(source_declaration, 2.0)
             },
         )
         second_root = plane.latest_publication("causal-source/frame")
@@ -1447,7 +1454,16 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         )
         latest_derived = plane.latest_publication("causal-first/history")
         assert latest_derived is not None
-        del phase, first_derived
+        needed = live_tap.next(0.0)
+        assert tuple(needed.signals) == ("causal-first/history",)
+        # The large unused sibling is not queued; the needed scalar's actual
+        # strong camera parent still counts towards its bounded input budget.
+        with pytest.raises(SourceFailed, match="payload bytes"):
+            overflow_tap.next(0.0)
+        assert not overflow_tap._queue and overflow_tap._queued_bytes == 0
+        del phase, first_derived, _
+        first_tap.close()
+        first_tap = None
 
         downstream_tap = plane.reserve_follow_processor(
             downstream,
@@ -1461,7 +1477,34 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         assert plane.publication_roots(replayed) == frozenset(
             {first_root.event_ref}
         )
+        # An actually held Frozen/accepted parent still resolves its pixels.
+        assert plane.direct_parent_publications(replayed)[0] is first_root
+        del first_root
+        gc.collect()
+        assert first_pixels() is None, "finite scalar replay must not retain the old camera array"
+        parent = plane.direct_parent_publications(replayed)[0]
+        assert parent.event_ref == first_event
+        assert parent.signal_names == ("causal-source/frame",)
+        assert not parent.signals
+        assert plane.publication_roots(replayed) == frozenset({first_event})
+        visible = _node("visible", history_declaration, phase_declaration)
+        plane.begin_generation(visible)
+        plane.set_front_signals({"visible/history", "visible/phase"})
+        _baseline, visible_tap = plane.follow_publications("visible/history", replay=False)
+        try:
+            plane.commit_live(visible, {
+                "history": _latest(history_declaration, 3.0),
+                "phase": _large_latest(phase_declaration, 300.0),
+            })
+            pending = visible_tap.next(0.0)
+            assert set(pending.signals) == {"visible/history", "visible/phase"}
+        finally:
+            visible_tap.close()
     finally:
+        if live_tap is not None:
+            live_tap.close()
+        if overflow_tap is not None:
+            overflow_tap.close()
         if downstream_tap is not None:
             downstream_tap.close()
         if first_tap is not None:
@@ -1469,7 +1512,8 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         plane.close()
 
 
-def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
+@pytest.mark.parametrize("source_error", (None, RuntimeError("source failed after committed data")))
+def test_latest_processors_run_parallel_per_node_serial_and_coalesce(source_error) -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     source = _node("latest-source", source_declaration)
     release_initial = threading.Event()
@@ -1485,6 +1529,7 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
             self.calls: list[int] = []
             self.accepted: list[int] = []
             self.failures: list[Exception] = []
+            self.ended: list[Exception | None] = []
             self.active = 0
             self.max_active = 0
 
@@ -1530,6 +1575,9 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
         def accept_processor_cancelled(self) -> None:
             return None
 
+        def accept_processor_ended(self, error: Exception | None) -> None:
+            self.ended.append(error)
+
         def request_processor_owner_wake(self) -> None:
             self.wake.set()
 
@@ -1571,6 +1619,7 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
         )
         plane.freeze()
 
+        plane.seal_committed(source, cut_short=True, error=source_error)
         release_initial.set()
         assert first.wake.wait(2.0)
         assert second.wake.wait(2.0)
@@ -1589,6 +1638,10 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
             assert processor.accepted == [1, 3]
             assert processor.max_active == 1
             assert not processor.failures
+            assert len(processor.ended) == 1
+            assert (processor.ended[0] is None) == (source_error is None)
+            if source_error is not None:
+                assert str(source_error) in str(processor.ended[0])
     finally:
         release_initial.set()
         plane.close()
@@ -1780,6 +1833,7 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         accept_processor_result = staticmethod(lambda *_args: None)
         accept_processor_failure = staticmethod(lambda error: (_ for _ in ()).throw(error))
         accept_processor_cancelled = staticmethod(lambda: None)
+        accept_processor_ended = staticmethod(lambda _error: None)
         request_processor_owner_wake = staticmethod(lambda: None)
 
     derived = Derived()

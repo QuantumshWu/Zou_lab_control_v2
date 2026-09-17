@@ -161,7 +161,10 @@ Node new chunk
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - Selection revision属于用户的数值范围选择，不属于source generation。相同revision、相同数值几何和同source generation是幂等提交；旧revision或同revision改真实范围仍拒绝。兼容选区遇到新的accepted source generation时在原Bridge重新激活派生，不伪造一次用户编辑。仅视觉用的drawn不触发数值重算，Panel文档不另存revision，交回Bridge始终用原binding.selection_revision。
 - 一次commit的siblings共享revision、run record和causal parent。
-- Run record在generation内只冻结一次，event record每次atomic commit只冻结一次，内部siblings/publication复用同一不可变记录；外部构造仍独立冻结和校验。finite物化仅合并新增chunks与已有prefix，indexed窗口滚动时记录只覆盖仍保留的事件。仅更换DataBlock身份不重扫已验证且未改变的数值内容。
+- Run record属于generation声明，不属于每event数据：实际准备完成后只注册/冻结一次，后续commit引用Runtime拥有的不可变记录，不携整张计划反复比较。event record才携本事件变化的时间/设备事实，每次atomic commit只冻结一次；内部siblings/publication复用同一记录。finite物化共享已经冻结的旧记录，只合并新增条目，indexed只保留窗口范围。仅更换DataBlock身份不重扫未改变的数值内容。
+- 接收队列、未消费exact事件、用户科学history、Frozen快照和溯源元数据各有明确寿命；溯源的event identity/run record/parent关系不授予无限保留祖先像素的权力。当前科学求值、same-shot front和Frozen仍持所需真实payload；有限结果只永久保留自身数据及祖先元数据，回放按原chunks顺序按需读取，不在公共锁内构造全历史临时队列。普通Monitor不构造无消费者的finite replay副本。
+- Exact订阅的live待处理队列同时按事件数与payload字节明确限额，默认1024事件、128MiB，可在订阅时显式调整；这是未消费缓冲而非history上限。满额或单事件超额只使该订阅明确失败，不丢旧/取latest、不阻塞其它消费者。原生不可暂停数据源不能承诺无限积压仍无损；有界故障必须携容量和积压信息。
+- 运行后续失败与此前已commit数据有效性分开：保留已验证的partial prefix，同时向订阅者传播失败终态，不伪装完整或正常EOS。Stop继续保留数据；显式Remove/Clear释放被移除owner的Runtime保留，仍由实际Frozen/Save持有的不可变值不受影响。
 - Exact scientific Processor逐publication有序处理；pure display derivation可latest。交付策略由input contract声明，不从coverage猜；同一交付publication的event/run/window输入范围是另一项显式选择，exact并不强制只读event chunk。
 - 不同Processor可并发，同一Processor保持有序。
 - Processor的Start是持续跟随意图，只有操作者Stop才取消；源暂时不满足计算条件（如Frame Survival少于两帧）保留原因并等待，不伪造结果。失败的同一源generation不反复执行；新generation有publication后复用原Start重新接入，包含已经sealed的新数据。实际尝试的输入publication由NodeHost唯一持有，Workbench不另存重试世代或判断插件帧数。
@@ -246,6 +249,8 @@ Node new chunk
 - Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
+- 长期绘图服务不能用全局gc.freeze或提高回收阈值来永久保留正在使用的Figure。随viewport/time变化的共享刻度placement缓存有明确工作集上限；Host关闭释放其输入与结构依赖，已退休的共享像素segment在最后读者释放后解除映射，不积累空闲旧名字。进程可复用编译代码与有界缓存，但科学窗口固定时资源保留不得随运行时长无界增长。
+- IPC静态Dataset结构沿现有input token及引用生命周期只传一次，后续revision只传结构引用和变化的数值/validity；进程重建重新安装，不传Python私有memo。Scope的坐标定位只持该AxisSpec，不通过绑定方法带入整张Domain坐标表；单次Freeze/Save共享同run的plain记录转换，磁盘JSON仍按当前公开grammar编码。
 - Configure在最终绘制前被拒绝时只恢复旧字段及renderer准备态，保留原已接受front，不重新compose/发布；最终绘制已开始后失败则必须完整恢复像素，后续主动redraw同样只能呈现旧状态。
 - `PanelState`是可编辑、可在拒绝后继续修复的authored target；只有Plot成功接受后返回的
   完整`DisplayDescription`才是当前Live/Frozen/Viewer pixels的accepted truth，其`spec`也是
@@ -389,6 +394,8 @@ Node new chunk
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
 - qCMOS区分last-successful requested设置与actual working point；量化后的actual不覆盖requested，重复同请求不因此重写。成功setter及arm后的readback形成一份actual，普通working_point读取复用；失败清除请求成功事实，后续setter真正重试。arm后保留真实工作点读回与改变拒绝；不得要求读回之后transfer count仍为零——相机可能已接收本代首帧。本代copied/last count从0开始，首次读取按真实count/newest取回早到帧，负数、倒退、不一致、有限上限及copy-overrun检查不删除。
+- Camera adapter独立持续搬运原生frame，read只消费有界FIFO，发布/投影不决定何时从SDK取帧；真实与Virtual都禁止静默丢旧和重新编号。Camera Measurement的Receive buffer按MiB配置（默认128），按实际ROI/dtype分配SDK与应用FIFO的像素容量，有限目标数与周期帧数不是缓冲容量；两处各分一半预算，另有单帧复制scratch及小型record开销。完整周期放不进预算明确拒绝，溢出/可观测序号缺口立即报错并带容量/计数/时间信息。正常Stop先停止并完成接收，再发布已接收的完整周期；失败不继续发布，残缺周期不补造，Restart才重置该次采集。
+- Camera/Waveform真实与Virtual adapter共用中立设备基础层的同一个RecordQueue（由原Waveform队列迁移，不保留两套实现）；容量、FIFO顺序、ordinal检查、失败优先与Stop后待消费尾部由它保证。插件仅产生已独占的原生record并执行自己的SDK start/read/stop；线程归属、触发方式及不可观测硬件gap不能由通用queue猜测，不把具体SDK依赖反向放入Runtime。
 - Pylon同样区分requested/actual；arm模式、restore及gain变化使工作点失效，不能复用旧mode/epoch。SDK frame在result仍有效时直接构造不可变CameraFrameRecord，再Release；不先复制一份随即丢弃的mutable整图。非连续输入直接打包C-order bytes，immutable ownership、frame ordinal及epoch事实不变。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
 - Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值；未显式选择Acquisition logic时不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。

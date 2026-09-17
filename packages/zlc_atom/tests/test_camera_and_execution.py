@@ -38,24 +38,53 @@ def test_camera_binding_rejects_an_object_outside_the_camera_contract() -> None:
         bind_camera(object(), "bad", object(), "bad", "camera.bad")  # type: ignore[arg-type]
 
 
-def test_virtual_camera_preserves_trigger_to_frame_causality_and_drops_monitor_history() -> None:
+def test_virtual_camera_preserves_frames_and_reports_bounded_intake_failure() -> None:
     world = SimulationWorld()
     camera = VirtualCamera(
         frame_source=lambda exposure: world.render_frame(
             exposure_seconds=exposure,
         )
     )
-    camera.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=1.0)
+    camera.arm(None, source_group_sizes=None, buffer_frame_count=3, timeout=1.0)
     camera.trigger(3)
     deadline = time.monotonic() + 1.0
     while camera.produced_count < 3 and time.monotonic() < deadline:
         time.sleep(0.001)
-    records = camera.read_frame_records(1, timeout=0.1, exact=True)
-    assert len(records) == 1
-    assert records[0].source_ordinal == 2
-    assert camera.capture_state() is True
     terminal = camera.finish_record_capture()
-    assert terminal.source_stopped and terminal.joined is True
+    records = camera.read_frame_records(3, timeout=0.0, exact=True)
+    assert [record.source_ordinal for record in records] == [0, 1, 2]
+    assert terminal.produced_count == 3
+    camera.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=1.0)
+    with pytest.raises(RuntimeError, match="buffer overflow"):
+        camera.trigger(3)
+    assert camera.capture_state() is True
+    with pytest.raises(RuntimeError, match="failed while producing"):
+        camera.read_frame_records(1, timeout=0.0, exact=False)
+    with pytest.raises(RuntimeError, match="failed while producing"):
+        camera.finish_record_capture()
+    camera.close()
+
+    calls = 0
+    def fail_second(_):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("injected frame failure")
+        return np.zeros((1, 1), dtype=np.uint16)
+    camera = VirtualCamera(VirtualCameraConfig(frame_shape_yx=(1, 1)), frame_source=fail_second)
+    camera.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=1.0)
+    camera.trigger(2)
+    with camera._condition:
+        assert camera._condition.wait_for(lambda: camera._records.failure is not None, timeout=1.0)
+    # Even a full-enough queue must not conceal a failed capture.
+    with pytest.raises(RuntimeError, match="failed while producing"):
+        camera.read_frame_records(1, timeout=0.0, exact=True)
+    with pytest.raises(RuntimeError, match="failed while producing"):
+        camera.finish_record_capture()
+    camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
+    camera.trigger()
+    assert camera.read_frame_records(1, timeout=1.0, exact=True)[0].source_ordinal == 0
+    camera.close()
 
 
 def test_a_close_that_could_not_join_the_producer_waits_for_it_again() -> None:
@@ -284,6 +313,18 @@ def test_virtual_camera_clips_into_its_declared_dtype() -> None:
         first.image.__array_interface__["data"][0]
         != second.image.__array_interface__["data"][0]
     )
+
+    # External frames retain only this arm's native ROI in the trigger queue,
+    # not a mutable reference to the producer's larger sensor image.
+    camera.set_roi((0, 0, 1, 1))
+    camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
+    with camera._condition:
+        camera.trigger(frame=source)
+        source.fill(0)
+        assert camera._trigger_queue[0][1].nbytes == 1
+    frozen, = camera.read_frame_records(1, timeout=1.0, exact=True)
+    assert frozen.image.shape == (1, 1) and frozen.image[0, 0] == 255
+    camera.close()
 
     with pytest.raises(ValueError, match="unsigned integer"):
         VirtualCamera(

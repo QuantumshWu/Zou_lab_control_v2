@@ -1101,9 +1101,10 @@ class _SiteReviewPublisher:
         self._active = True
         return generation
 
-    def publish(self, output: object) -> None:
+    def publish(self, output: object, run_record: Mapping[str, object]) -> None:
         if not self._active:
             raise RuntimeError("site review publisher is not active")
+        self.signal_plane.set_run_record(self, run_record)
         self.signal_plane.commit_live(
             self, {SITE_REVIEW_DECLARATION.name: output}
         )
@@ -1370,6 +1371,8 @@ class CalibrationTask:
                 photoelectrons=photoelectrons,
             )
             self._partial_run_record = dict(run_record)
+            if context is not None:
+                context.set_run_record(run_record)
             for _ in range(self.request.repeats):
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")
@@ -1421,7 +1424,6 @@ class CalibrationTask:
                         binning_yx=actual.binning_yx,
                         generation=context.generation,
                         revision=len(cycles),
-                        run_record=run_record,
                         value_unit=value_unit,
                     )
                     context.commit_live(
@@ -1519,6 +1521,7 @@ class CalibrationTask:
             readout_mode=camera.get("readout_mode"),
         )
         if context is not None:
+            context.set_run_record(run_record)
             value_unit = (
                 None
                 if bool(saved_request.get(PHOTOELECTRONS, False))
@@ -1536,7 +1539,6 @@ class CalibrationTask:
                     binning_yx=contract.binning_yx,
                     generation=context.generation,
                     revision=index + 1,
-                    run_record=run_record,
                     value_unit=value_unit,
                 )
                 context.commit_live(
@@ -1657,7 +1659,7 @@ class CalibrationTask:
             )
             generation = publisher.begin()
             try:
-                output = site_review_output(
+                review_record, output = site_review_output(
                     reference_average,
                     candidate,
                     origin_yx=origin_yx,
@@ -1667,7 +1669,7 @@ class CalibrationTask:
                     run_record=run_record,
                     value_unit=None if value_unit is None else str(value_unit),
                 )
-                publisher.publish(output)
+                publisher.publish(output, review_record)
                 context.report_progress(
                     f"Waiting for review of {candidate.n_sites} detected sites"
                 )

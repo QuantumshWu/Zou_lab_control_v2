@@ -905,6 +905,9 @@ class _BridgeProcessor:
     def accept_processor_cancelled(self) -> None:
         self._bridge._accept_processor_cancelled(self)
 
+    def accept_processor_ended(self, error: Exception | None) -> None:
+        self._bridge._accept_processor_ended(self, error)
+
     def request_processor_owner_wake(self) -> None:
         self._bridge._processor_wake()
 
@@ -1871,6 +1874,19 @@ class SelectionBridge:
 
     def _accept_processor_cancelled(self, processor: _BridgeProcessor) -> None:
         return None
+
+    def _accept_processor_ended(self, processor: _BridgeProcessor, error: Exception | None) -> None:
+        with self._lock:
+            active = (self._selection_processor if processor._role == "selection"
+                      else self._fit_processor)
+        if active is not processor:
+            return
+        # End this route, not the bridge: an operator may still edit the
+        # selector/fit over the retained stopped or failed source Dataset.
+        self._plane.seal_committed(processor, cut_short=True, error=error)
+        if error is not None:
+            self._record_error(error)
+        self._processor_wake()
 
     def _commit_processor(
         self,

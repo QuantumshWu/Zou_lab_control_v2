@@ -47,6 +47,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from zlc_atom.devices import RecordQueue
 from zlc_atom.authoring import (
     AuthoringChoice,
     AuthoringField,
@@ -58,7 +59,6 @@ from zlc_atom.devices.waveform.contract import (
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
-    WaveformRecordQueue,
     WaveformWorkingPoint,
 )
 
@@ -529,7 +529,7 @@ class WheeltecN100WaveformSource:
         #: below was measured off the stream because it would not.
         #: The last console command and its verbatim reply, for the record.
         self._last_exchange: tuple[str, str] = ("", "")
-        self._records = WaveformRecordQueue(
+        self._records = RecordQueue(
             "the N100", join_timeout_seconds=config.timeout_seconds
         )
         self._reader = threading.Thread(
@@ -654,9 +654,11 @@ class WheeltecN100WaveformSource:
         self._last_packet_at = time.monotonic()
         self._stamp(stamp)
         self._watch_magnetic(values[0:3])
-        self._records.push(
-            np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS), stamp, received
-        )
+        if self._records.accepting:
+            self._records.push(WaveformRecord(
+                np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS),
+                self._records.produced_count, stamp, received,
+            ))
 
     def _stamp(self, stamp: float) -> None:
         """The packet interval off the module's own clock, measured on the reader.
@@ -1159,7 +1161,8 @@ class WheeltecN100WaveformSource:
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
         with self._capture_lock:
-            return self._records.finish()
+            produced = self._records.finish()
+            return WaveformCaptureTerminalRecord(produced, True, not self._records.pending_count, True)
 
     def capture_state(self) -> bool:
         return self._records.armed

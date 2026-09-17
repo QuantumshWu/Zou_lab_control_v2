@@ -24,6 +24,7 @@ from __future__ import annotations
 import sys
 import threading
 import types
+import time
 
 import numpy as np
 import pytest
@@ -102,6 +103,10 @@ class _Result:
         self.Array = array
         self._succeeded = succeeded
         self.released = False
+        self.block_id = 0
+
+    def GetBlockID(self):
+        return self.block_id
 
     def GrabSucceeded(self):
         return self._succeeded
@@ -146,6 +151,19 @@ class _FakeCamera:
         self._fail_start_once = fail_start_once
         self._ignore_stop_once = ignore_stop_once
         self._fail_open = fail_open
+        self.AcquisitionStop = types.SimpleNamespace(Execute=lambda: None)
+        self.NumReadyBuffers = types.SimpleNamespace(GetValue=lambda: len(self._frames))
+        self._remaining = None
+        self.block_ids = None
+        self.device_class = "BaslerUsb"
+        self.extended_id = False
+        self._next_id = 0
+
+    def GetDeviceInfo(self):
+        return types.SimpleNamespace(GetDeviceClass=lambda:self.device_class)
+
+    def GetNodeMap(self):
+        return types.SimpleNamespace(GetNode=lambda name:_Node(int(self.extended_id)))
 
     def Open(self):
         self.opened = True
@@ -164,10 +182,14 @@ class _FakeCamera:
             self._fail_start_once = False
             raise RuntimeError("injected start failure")
         self._grabbing = True
+        self._remaining = None
+        self._next_id = 0
         self.grab_calls.append(f"StartGrabbing({strategy})")
 
     def StartGrabbingMax(self, count, _strategy):
         self._grabbing = True
+        self._remaining = count
+        self._next_id = 0
         self.grab_calls.append(f"StartGrabbingMax({count})")
 
     def StopGrabbing(self):
@@ -182,8 +204,16 @@ class _FakeCamera:
 
     def RetrieveResult(self, _timeout_ms, _handling):
         if not self._frames:
+            time.sleep(_timeout_ms / 1000)
             return None
-        return _Result(self._frames.pop(0), succeeded=self._succeed)
+        result = _Result(self._frames.pop(0), succeeded=self._succeed)
+        result.block_id = self._next_id if self.block_ids is None else self.block_ids.pop(0)
+        self._next_id += 1
+        if self._remaining is not None:
+            self._remaining -= 1
+            if self._remaining == 0:
+                self._grabbing = False
+        return result
 
 
 @pytest.fixture
@@ -387,13 +417,13 @@ def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(
     assert camera.TriggerMode.GetValue() == "On"
     assert camera.TriggerSource.GetValue() == "Line1"
 
-    adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
+    adapter.arm(None, source_group_sizes=None, buffer_frame_count=4, timeout=0.5)
     assert camera.TriggerMode.GetValue() == "Off"
     armed_point = adapter.working_point()
     assert armed_point.acquisition_mode is CameraAcquisitionMode.FREE_RUNNING
     assert armed_point.required_external_trigger_interval_seconds is None
     assert armed_point.external_trigger_integration_start_offset_seconds is None
-    assert armed_point.readout_mode == "pylon:Mono8;free-running;grab=LatestImageOnly"
+    assert armed_point.readout_mode == "pylon:Mono8;free-running;grab=OneByOne"
     adapter.read_frame_records(1, timeout=0.5, exact=False)
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
@@ -406,9 +436,9 @@ def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(
     (
         (
             1,
-            "StartGrabbing(latest)",
+            "StartGrabbing(one)",
             CameraAcquisitionMode.FREE_RUNNING,
-            "pylon:Mono8;free-running;grab=LatestImageOnly",
+            "pylon:Mono8;free-running;grab=OneByOne",
         ),
         (
             3,
@@ -446,7 +476,7 @@ def test_camera_measurement_monitor_arms_the_pylon_mode_for_a_whole_cycle(
         monitor = node.monitor()
 
         assert camera.grab_calls[-1] == grab_call
-        assert camera.MaxNumBuffer.GetValue() == 4 * frames_per_cycle
+        assert camera.MaxNumBuffer.GetValue() == camera.MaxNumBuffer.GetMax()
         actual = node.actual_working_point
         assert actual is not None
         assert actual.acquisition_mode is mode
@@ -513,6 +543,32 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     adapter.finish_record_capture()
     assert not camera.IsGrabbing()
 
+    # SDK numbering is not the host's ordinal: preserve valid IDs and reject
+    # visible gaps, using the documented USB/GigE wrap distinction.
+    for transport, extended, ids, failure in (
+        ("BaslerUsb", False, [0, 2], "sequence gap"),
+        ("BaslerUsb", False, [0, (1 << 64) - 1], "invalid hardware BlockID"),
+        ("BaslerGigE", False, [65535, 1], None),
+        ("BaslerGigE", True, [65535, 65536], None),
+        ("BaslerGigE", False, [0, 0], None),
+    ):
+        hardware = _FakeCamera(frames=[np.zeros((4, 4), np.uint8) for _ in ids])
+        hardware.device_class, hardware.extended_id = transport, extended
+        hardware.block_ids = ids.copy()
+        checked = PylonCameraAdapter(_config(), camera=hardware)
+        checked.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.5)
+        if failure:
+            with pytest.raises(RuntimeError, match=failure):
+                checked.read_frame_records(2, timeout=0.5, exact=True)
+            with pytest.raises(RuntimeError, match=failure):
+                checked.finish_record_capture()
+        else:
+            records = checked.read_frame_records(2, timeout=0.5, exact=True)
+            expected = [None, None] if ids == [0, 0] else ids
+            assert [record.frame_stamp for record in records] == expected
+            checked.finish_record_capture()
+        checked.close()
+
 
 def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
     """A free-run preview returns short; every triggered mode fails loud."""
@@ -525,7 +581,7 @@ def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
     loud = PylonCameraAdapter(_config(), camera=_FakeCamera(frames=[]))
     loud.open()
     loud.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.05)
-    with pytest.raises(RuntimeError, match="lost trigger"):
+    with pytest.raises(TimeoutError, match="requested exact records"):
         loud.read_frame_records(2, timeout=0.05, exact=True)
 
     continuous = PylonCameraAdapter(
@@ -543,7 +599,8 @@ def test_fault_loudness_follows_the_arm_mode(fake_pypylon) -> None:
         continuous.read_frame_records(2, timeout=0.05, exact=False)
     quiet.finish_record_capture()
     loud.finish_record_capture()
-    continuous.finish_record_capture()
+    with pytest.raises(RuntimeError, match="failed frame"):
+        continuous.finish_record_capture()
 
 
 def test_mono8_is_verified_from_sdk_readback(fake_pypylon) -> None:
@@ -795,9 +852,11 @@ def test_a_live_gain_change_marks_every_later_read_of_the_arm_as_a_transition(
     adapter = PylonCameraAdapter(_config(), camera=camera)
     adapter.open()
     session_id = adapter.settings_provenance()["device_session_id"]
-    adapter.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.5)
-    # Both frames were ready under epoch 0 before the tune.
-    adapter.tune("gain", 8.0)
+    # Both frames await SDK retrieval under epoch 0. Hold the existing SDK
+    # command lock so the tune deterministically precedes their acceptance.
+    with adapter._command_lock:
+        adapter.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.5)
+        adapter.tune("gain", 8.0)
     first = adapter.read_frame_records(1, timeout=0.5, exact=True)[0]
     second = adapter.read_frame_records(1, timeout=0.5, exact=True)[0]
     assert (int(first.image[0, 0]), int(second.image[0, 0])) == (10, 20)

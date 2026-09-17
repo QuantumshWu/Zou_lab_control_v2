@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 import threading
 import time
-from typing import Generic, Iterable, TypeVar
+from typing import Callable, Generic, Iterable, TypeVar
 
 from zlc_data import StreamGenerationId
 from zlc_data import canonical_text, nonnegative_integer
@@ -14,6 +14,8 @@ from zlc_data import canonical_text, nonnegative_integer
 
 PayloadT = TypeVar("PayloadT")
 _FOLLOW_TOKEN = object()
+DEFAULT_FOLLOW_MAX_PENDING = 1024
+DEFAULT_FOLLOW_MAX_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,30 +90,94 @@ class FollowTap(Generic[PayloadT]):
         *,
         stream: "AcquisitionStream[PayloadT]",
         start_sequence: int,
-        replay: tuple[tuple[int, PayloadT], ...] = (),
+        live_sequence: int,
+        replay: Iterable[tuple[int, PayloadT]] = (),
+        max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
+        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        project: Callable[[PayloadT], PayloadT] | None = None,
+        payload_size: Callable[[PayloadT], int] | None = None,
     ) -> None:
         if authority is not _FOLLOW_TOKEN:
             raise PermissionError("FollowTap can only be minted by AcquisitionStream")
         self._stream = stream
         self._condition = threading.Condition()
-        self._queue: deque[tuple[int, PayloadT]] = deque(replay)
+        if type(max_pending) is not int or max_pending < 1 or type(max_bytes) is not int or max_bytes < 1:
+            raise ValueError("exact follow limits must be positive integers")
+        self._queue: deque[tuple[int, PayloadT, int]] = deque()
+        self._replay = iter(replay)
+        self._max_pending, self._max_bytes = max_pending, max_bytes
+        self._queued_bytes = 0
+        self._project, self._payload_size = project, payload_size
         self._next_sequence = start_sequence
+        self._live_sequence = live_sequence
         self._closed = False
         self._source_finished = False
         self._terminal_error: StreamError | None = None
 
-    def _offer(self, sequence: int, payload: PayloadT) -> None:
+    def _offer(self, sequence: int, payload: PayloadT) -> bool:
         with self._condition:
             if self._closed or self._source_finished:
-                return
-            expected = self._next_sequence + len(self._queue)
+                return False
+            expected = self._live_sequence
             if sequence != expected:
                 raise StreamGap(expected, sequence)
-            self._queue.append((sequence, payload))
+            self._live_sequence += 1
+            failure = None
+            try:
+                payload = payload if self._project is None else self._project(payload)
+                size = 0 if self._payload_size is None else self._payload_size(payload)
+                if len(self._queue) >= self._max_pending or self._queued_bytes + size > self._max_bytes:
+                    failure = SourceFailed(
+                        f"exact follower overflow at sequence {sequence}: "
+                        f"{len(self._queue) + 1}/{self._max_pending} pending events, "
+                        f"{self._queued_bytes + size}/{self._max_bytes} payload bytes"
+                    )
+            except Exception as error:
+                failure = SourceFailed(str(error))
+            if failure is not None:
+                self._terminal_error = failure
+                self._source_finished = True
+                self._queue.clear()
+                self._queued_bytes = 0
+                self._replay = None
+                self._condition.notify_all()
+                return False
+            self._queue.append((sequence, payload, size))
+            self._queued_bytes += size
             self._condition.notify()
+            return True
 
     def next(self, timeout: float | None = None) -> PayloadT:
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        # Replay reads the owner's immutable chunks lazily. Never hold the
+        # tap condition while that reader acquires its owner's lock.
+        while True:
+            with self._condition:
+                replay = self._replay
+            if replay is None:
+                break
+            failure = None
+            try:
+                sequence, payload = next(replay)
+            except StopIteration:
+                with self._condition:
+                    self._replay = None
+                break
+            except Exception as error:
+                failure = str(error)
+                self.close()
+                replay = None
+            if failure is not None:
+                # Do not keep the reader traceback: it may own the rejected
+                # oversized event. The existing close releases all backlog.
+                raise SourceFailed(failure)
+            with self._condition:
+                if self._closed or self._replay is None:
+                    break
+                if sequence != self._next_sequence:
+                    raise StreamGap(self._next_sequence, sequence)
+                self._next_sequence += 1
+                return payload
         with self._condition:
             while not self._queue:
                 if self._closed:
@@ -127,7 +193,8 @@ class FollowTap(Generic[PayloadT]):
                 if remaining <= 0:
                     raise TimeoutError("timed out waiting for followed event")
                 self._condition.wait(remaining)
-            sequence, payload = self._queue.popleft()
+            sequence, payload, size = self._queue.popleft()
+            self._queued_bytes -= size
             if sequence != self._next_sequence:
                 raise StreamGap(self._next_sequence, sequence)
             self._next_sequence += 1
@@ -144,6 +211,8 @@ class FollowTap(Generic[PayloadT]):
         with self._condition:
             self._closed = True
             self._queue.clear()
+            self._queued_bytes = 0
+            self._replay = None
             self._condition.notify_all()
 
 
@@ -174,28 +243,29 @@ class AcquisitionStream(Generic[PayloadT]):
     def follow(
         self,
         replay: Iterable[tuple[int, PayloadT]] = (),
+        *,
+        replay_start_sequence: int | None = None,
+        max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
+        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        project: Callable[[PayloadT], PayloadT] | None = None,
+        payload_size: Callable[[PayloadT], int] | None = None,
     ) -> FollowTap[PayloadT]:
-        retained = tuple(replay)
         with self._lock:
             if self._closed:
                 if self._terminal_error is not None:
                     raise self._terminal_error
                 raise StreamEndedEarly("cannot follow a closed stream")
-            start = self._next_sequence
-            if retained:
-                start = retained[0][0]
-                expected = start
-                for sequence, _payload in retained:
-                    if sequence != expected:
-                        raise StreamGap(expected, sequence)
-                    expected += 1
-                if expected != self._next_sequence:
-                    raise StreamGap(self._next_sequence, expected)
+            start = self._next_sequence if replay_start_sequence is None else replay_start_sequence
             tap = FollowTap(
                 _FOLLOW_TOKEN,
                 stream=self,
                 start_sequence=start,
-                replay=retained,
+                live_sequence=self._next_sequence,
+                replay=replay,
+                max_pending=max_pending,
+                max_bytes=max_bytes,
+                project=project,
+                payload_size=payload_size,
             )
             self._followers.add(tap)
             return tap
@@ -216,7 +286,8 @@ class AcquisitionStream(Generic[PayloadT]):
                 raise StreamGap(self._next_sequence, sequence)
             self._next_sequence += 1
             for follower in tuple(self._followers):
-                follower._offer(sequence, payload)
+                if not follower._offer(sequence, payload):
+                    self._followers.discard(follower)
             return payload
 
     def finish(self) -> None:

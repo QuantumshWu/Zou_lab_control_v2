@@ -286,7 +286,6 @@ class SeamlessScanMeasurement:
         scan_repeat_base: int,
         progress_base: int,
         progress_total: int,
-        run_record: dict,
         on_point: object,
     ) -> None:
         """Play a segment of the one prepared acquisition and resident program."""
@@ -346,7 +345,6 @@ class SeamlessScanMeasurement:
                         {
                             name: replace(
                                 output,
-                                run_record=run_record,
                                 event_record=value.event_record,
                             )
                             for name, output in companions.items()
@@ -448,12 +446,12 @@ class SeamlessScanMeasurement:
             wire=wire,
         )
         self._last_run_record = dict(run_record)
+        context.set_run_record(run_record)
         writer = ScanDatasetWriter(
             effective_rows,
             axes,
             scan_repeats=self.repeats,
             run_repeats=shots,
-            run_record=run_record,
             axis_names=axis_names,
         )
         inner_count = len(effective_inner)
@@ -465,7 +463,6 @@ class SeamlessScanMeasurement:
             rows=effective_rows,
             inner_count=inner_count,
             shots=shots,
-            run_record=run_record,
             on_point=on_point,
             progress_total=self.repeats * len(effective_rows),
         )

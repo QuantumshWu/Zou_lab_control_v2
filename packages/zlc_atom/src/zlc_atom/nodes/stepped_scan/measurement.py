@@ -246,12 +246,12 @@ class SteppedScanMeasurement:
             "gating": self.gating,
             "free_run_delay_seconds": self.free_run_delay_seconds,
         }
+        context.set_run_record(run_record)
         writer = ScanDatasetWriter(
             rows,
             [(port_label(axis.port), axis.unit or port.unit) for axis, port in zip(self.plan.axes, self.ports)],
             scan_repeats=self.repeats,
             run_repeats=shots,
-            run_record=run_record,
             axis_names=tuple(port.label for port in self.ports),
         )
         knobs = ScanDeviceKnobs(self._tunables)

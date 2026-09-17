@@ -76,10 +76,8 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert isinstance(monitor, MonitorCapture)
         camera = installation.device("camera")
 
-        # Continuous capture keeps four whole cycles.  Let that 12-frame raw
-        # buffer advance once before the consumer reads: it now contains
-        # ordinals 1..12.  The leading 1/2 cannot be combined with 3, and the
-        # retained capacity must still leave 3/4/5 available as the next shot.
+        # Intake does not wait for the publisher. All 13 accepted frames stay
+        # ordered; Stop below must publish the three remaining full cycles.
         camera.trigger(13, frame=np.zeros((96, 128), dtype=np.uint16))
         deadline = time.monotonic() + 5.0
         while camera.produced_count < 13 and time.monotonic() < deadline:
@@ -87,18 +85,10 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         for _ in range(3):
             monitor.poll()
         assert monitor.latest_record is not None
-        assert monitor.latest_record.source_ordinal == 3
+        assert monitor.latest_record.source_ordinal == 2
         signal_key = measurement.signal_key("frames")
         plane.freeze()
-        assert plane.latest_publication(signal_key) is None
-
-        # Physical ordinals 4/5 complete the already retained 3/4/5 shot.
-        publication = None
-        deadline = time.monotonic() + 1.0
-        while publication is None and time.monotonic() < deadline:
-            monitor.poll()
-            plane.freeze()
-            publication = plane.latest_publication(signal_key)
+        publication = plane.latest_publication(signal_key)
         assert publication is not None
         assert set(publication.signals) == {signal_key}
         value = publication.value(signal_key)
@@ -114,6 +104,8 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert signal_key in front.signals
         terminal = monitor.close()
         assert terminal.source_stopped and terminal.joined
+        assert terminal.produced_count == 13 and terminal.no_more_frames
+        assert plane.latest_publication(signal_key).event_ref.sequence == 4
         assert measurement.camera.capture_state() is False
         # The close ends the run; the sealed monitor publication is
         # retained for the panels (and derivations) that still show it.
@@ -446,7 +438,7 @@ def test_a_direct_stop_half_way_through_a_cycle_keeps_the_complete_cycles_it_too
                 camera_key="camera",
                 exposure_seconds=0.02,
                 roi_xywh=None,
-                repeat=2,
+                repeat=4,
                 frames_per_cycle=2,
             ),
             signal_plane=plane,
@@ -454,8 +446,15 @@ def test_a_direct_stop_half_way_through_a_cycle_keeps_the_complete_cycles_it_too
         stop = Event()
         capture = measurement.prepare(should_stop=stop.is_set)
         result_box: list[object] = []
+        publishing = Event()
+        release = Event()
+        def slow_commit(cycle, index):
+            measurement._commit_direct_cycle(cycle, index)
+            if index == 0:
+                publishing.set()
+                assert release.wait(5.0)
         worker = Thread(
-            target=lambda: result_box.append(capture.collect()),
+            target=lambda: result_box.append(capture.collect(commit_cycle=slow_commit)),
             daemon=True,
         )
         worker.start()
@@ -469,18 +468,21 @@ def test_a_direct_stop_half_way_through_a_cycle_keeps_the_complete_cycles_it_too
                 break
             time.sleep(0.005)
         assert plane.latest_publication(signal_key) is not None
-        camera.trigger(1, frame=frame)
-        while camera.produced_count < 3 and time.monotonic() < deadline:
+        assert publishing.wait(1.0)
+        camera.trigger(5, frame=frame)
+        while camera.produced_count < 7 and time.monotonic() < deadline:
             time.sleep(0.001)
-        assert camera.produced_count == 3
+        assert camera.produced_count == 7
         stop.set()
+        release.set()
         worker.join(timeout=5.0)
         assert not worker.is_alive()
         assert result_box, "the stopped capture raised instead of keeping its prefix"
         result = result_box[0]
         assert result is not None
-        assert result.cycle_count == 1  # type: ignore[union-attr]
-        assert result.terminal.produced_count == 3  # type: ignore[union-attr]
+        assert result.cycle_count == 3  # type: ignore[union-attr]
+        assert result.terminal.produced_count == 7  # type: ignore[union-attr]
+        assert [record.source_ordinal for record in result.frames] == list(range(6))
         assert capture.stopped
         plane.freeze()
         assert plane.latest_publication(signal_key) is not None, (

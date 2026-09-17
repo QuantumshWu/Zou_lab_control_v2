@@ -196,6 +196,9 @@ class _Context:
     def cancel_requested(self) -> bool:
         return self.cancelled
 
+    def set_run_record(self, record):
+        self.run_record = record
+
     def commit_live(self, outputs, *, source_publication=None) -> None:
         del outputs, source_publication
         self.commits += 1
@@ -485,6 +488,14 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     from zlc_pulse import PulseFieldRef, PulseSlot, scan_columns_for
 
     canonical = []
+    declared_records = []
+    original_record = SignalDataPlane.set_run_record
+
+    def record_declaration(plane, node, record):
+        declared_records.append(record)
+        return original_record(plane, node, record)
+
+    monkeypatch.setattr(SignalDataPlane, "set_run_record", record_declaration)
     original_write = ScanDatasetWriter.write
 
     def record_canonical(
@@ -557,7 +568,7 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     assert next(axis.name for axis in schema.point_domain.axes
                 if axis.axis_id.value == "scan.da_bias_x") == "MOT.duration"
     assert _point_axis_values(schema, "da_bias_x") == pytest.approx(played)
-    run_record = canonical[0].run_record
+    run_record = declared_records[-1]
     assert run_record["slot_tick_scales"] == [2]
     assert run_record["named_devices"] == {"sequencer": "sequencer"}
     sequencer = run_record["device_snapshots"]["sequencer"]["description"]

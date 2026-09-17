@@ -1428,6 +1428,39 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     camera_snapshots = dict(diamond_devices)["camera"]["snapshots"]
     assert [item["scope"] for item in camera_snapshots] == ["run", "event"]
 
+    # Different events of one run retain their event identity, but the same
+    # static run table is projected once, including through the IPC/archive
+    # preparation. Metadata-only Runtime parents keep their signal names.
+    from zlc_plot.render_process import _plain as wire_plain
+    from zlc_plot.figure_artifact import _plain as figure_plain
+    from zlc_data.figure_archive import _jsonable
+    from zlc_runtime import SignalPublication, SignalValue
+    from zlc_runtime.streams import EventRef, StreamId
+    from zlc_data import StreamGenerationId
+
+    record = {"node": "scan", "table": [[float(index)] for index in range(500)]}
+    publications = []
+    for sequence in range(1, 4):
+        event_record = {"shot": sequence}
+        value = SignalValue("scan/value", _snapshot, None, record, event_record=event_record)
+        publication = SignalPublication(
+            EventRef(StreamId("scan"), StreamGenerationId("g"), sequence),
+            {"scan/value": value}, object(),
+            run_record=record, event_record=event_record,
+        )
+        publications.append(SignalPublication._metadata(publication))
+    lineage, _source = capture_run_chain(
+        SimpleNamespace(direct_parent_publications=lambda publication:
+                        tuple(publications[max(0, publication.event_ref.sequence - 2):publication.event_ref.sequence - 1])),
+        publications[-1],
+    )
+    assert [node["event"]["sequence"] for node in lineage["nodes"]] == [1, 2, 3]
+    assert all(node["signals"] == ["scan/value"] for node in lineage["nodes"])
+    for prepared in (lineage, wire_plain(lineage), figure_plain(lineage), _jsonable(lineage)):
+        records = [node["record"] for node in prepared["nodes"]]
+        assert records[0] is records[1] is records[2]
+        assert records[0] == record and records[0] is not record
+
 def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     """Every projected tab is a reading; this is the document itself, one
     row per section, nested as the file nests it -- not flattened into

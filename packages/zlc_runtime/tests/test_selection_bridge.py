@@ -235,7 +235,6 @@ def _seal_source(
                 output.declaration,
                 output.snapshot,
                 DatasetCoverage(cells, cells),
-                output.run_record,
                 schema,
                 (0, 0),
             )
@@ -885,11 +884,11 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
     observed: list[OwnedSnapshot] = []
     original_current_dataset_view = plane.current_dataset_view
 
-    def delayed_current_dataset_view(name, publication=None):
+    def delayed_current_dataset_view(name, publication=None, **options):
         if publication is not None and publication.event_ref.sequence == 2:
             entered.set()
             assert release.wait(2.0)
-        view = original_current_dataset_view(name, publication)
+        view = original_current_dataset_view(name, publication, **options)
         if publication is not None and publication.event_ref.sequence == 2:
             observed.append(view[0])
         return view
@@ -3069,7 +3068,8 @@ def test_the_stacked_reduction_gives_the_per_cell_numbers(monkeypatch) -> None:
             assert np.array_equal(answers["mean"][0], values.mean(axis=(-2, -1), dtype=np.float64))
 
 
-def test_a_selection_on_a_stopped_run_still_derives() -> None:
+@pytest.mark.parametrize("source_error", (None, RuntimeError("camera read failed")))
+def test_a_selection_on_a_stopped_run_still_derives(source_error) -> None:
     """Stop ends production, never the data.
 
     The picture is still on the panel after the operator presses Stop,
@@ -3093,7 +3093,18 @@ def test_a_selection_on_a_stopped_run_still_derives() -> None:
     try:
         publication = initial.publication("camera/frame")
         assert publication is not None
-        assert plane.seal_committed(source, cut_short=True)
+        selection = SelectionState(
+            "image", "area",
+            (SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+             SelectionRange("y", 20.0, 30.0, domain="cell_data")),
+            revision=0,
+        )
+        bridge.commit_selection(selection, source_publication=publication)
+        assert plane.is_generation_live("@logic/box/roi_frame")
+        assert plane.seal_committed(source, cut_short=True, error=source_error)
+        plane.freeze()
+        assert not plane.is_generation_live("@logic/box/roi_frame")
+        assert plane.retains("@logic/box/roi_frame")
         assert not plane.is_generation_live("camera/frame")
         assert plane.retains("camera/frame", publication)
 
@@ -3110,7 +3121,10 @@ def test_a_selection_on_a_stopped_run_still_derives() -> None:
             source_publication=publication,
         )
         assert plane.freeze().value("@logic/box/roi_frame") is not None
-        assert bridge.last_error is None
+        if source_error is None:
+            assert bridge.last_error is None
+        else:
+            assert str(source_error) in str(bridge.last_error)
         assert bridge.last_condition == ""
     finally:
         bridge.close()

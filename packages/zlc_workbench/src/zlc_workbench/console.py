@@ -5164,6 +5164,7 @@ class ConsolePresenter:
         for node_id, binding in tuple(self.logic.items()):
             if binding.host is not None:
                 binding.host.shutdown()
+                self.session.signal_plane.retire(binding.host)
             close_editor = getattr(self.view, "close_logic_editor", None)
             if callable(close_editor):
                 close_editor(node_id)
@@ -7524,6 +7525,7 @@ class ConsolePresenter:
                 return False
             try:
                 binding.host.shutdown()
+                self.session.signal_plane.retire(binding.host)
             except Exception as error:
                 self._report(
                     f"{binding.node_id}: {_error_text(error)}", severity="error"

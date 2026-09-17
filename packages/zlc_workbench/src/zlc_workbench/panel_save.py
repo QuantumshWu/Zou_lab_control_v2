@@ -104,6 +104,7 @@ def capture_run_chain(
         raise TypeError("signal plane cannot resolve exact parent publications")
     identities: dict[int, str | None] = {}
     nodes: dict[str, dict[str, object]] = {}
+    run_records: dict[tuple[str, str], dict[str, object]] = {}
     exact_records = {} if event_records is None else dict(event_records)
     inherited_settings: list[object] = []
     inherited_source: dict[str, object] | None = None
@@ -178,14 +179,20 @@ def capture_run_chain(
             serial += 1
             node_id = f"event-{serial}"
         identities[identity] = node_id
-        record = dict(getattr(current, "run_record", {}))
-        record.pop(_IMPORTED_LINEAGE_KEY, None)
+        event = _event_document(current)
+        run_key = (event["stream"], event["generation"])
+        record = run_records.get(run_key)
+        if record is None:
+            record = dict(getattr(current, "run_record", {}))
+            record.pop(_IMPORTED_LINEAGE_KEY, None)
+            record = _plain(record)
+            run_records[run_key] = record
         nodes[node_id] = {
             "id": node_id,
-            "event": _event_document(current),
+            "event": event,
             "parents": parent_ids,
-            "signals": [str(name) for name in getattr(current, "signals", {})],
-            "record": _plain(record),
+            "signals": list(current.signal_names),
+            "record": record,
             "event_record": _plain(
                 exact_records.get(
                     current,

@@ -234,6 +234,15 @@ usable and close in reverse order.
 
 ## Execution layers
 
+Camera and waveform adapters share `zlc_atom.devices.RecordQueue`. Adapters
+own SDK start/read/stop and construct immutable native records; the common
+queue owns FIFO ordering, capacity, ordinal checks and failure-first reads.
+Acquisition proceeds independently of scientific publication. Finite target
+counts, receive capacity and consumer history are separate requirements:
+overflow fails loudly, and ordinary Stop retains accepted complete records for
+the measurement to drain. Camera reception uses an explicit MiB budget based
+on its actual frame geometry, not a fixed number of cycles.
+
 The runtime has one direction of responsibility:
 
 | Layer | Owns | Does not own |

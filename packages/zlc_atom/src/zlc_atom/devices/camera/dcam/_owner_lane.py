@@ -20,9 +20,8 @@ LANE_STOP_SECONDS = 30.0
 class CameraSdkOwnerLane:
     """Serialize SDK calls on one stable non-daemon thread.
 
-    Camera adapters keep their own acquisition semantics.  This class owns only
-    thread affinity and synchronous command handoff; it is not a scheduler,
-    buffer, registry, or lifecycle state machine.
+    Commands take priority over the adapter's bounded receive step.  The adapter
+    owns that step and its capture state; this lane owns only SDK thread affinity.
     """
 
     _STOP = object()
@@ -35,13 +34,21 @@ class CameraSdkOwnerLane:
         self._lifecycle_lock = threading.Lock()
         self._closed = False
         self._owner_ident: int | None = None
+        self.receive: Callable[[], None] | None = None
         self._thread = threading.Thread(target=self._run, name=name, daemon=False)
         self._thread.start()
 
     def _run(self) -> None:
         self._owner_ident = threading.get_ident()
         while True:
-            item = self._commands.get()
+            if self.receive is None:
+                item = self._commands.get()
+            else:
+                try:
+                    item = self._commands.get_nowait()
+                except queue.Empty:
+                    self.receive()
+                    continue
             if item is self._STOP:
                 return
             function, future = item

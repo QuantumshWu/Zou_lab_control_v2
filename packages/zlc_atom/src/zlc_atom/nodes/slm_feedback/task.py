@@ -2282,7 +2282,8 @@ class SlmFeedbackTask:
             revision=publication_revision,
             validity=np.isfinite(target_share)[None],
         )
-        record = self._run_record()
+        if publication_revision == 1:
+            context.set_run_record(self._run_record())
         if not isinstance(device_event_record, Mapping):
             raise TypeError("candidate device_event_record must be a mapping")
         event_record = dict(device_event_record)
@@ -2291,7 +2292,6 @@ class SlmFeedbackTask:
                 CANDIDATE_PHASE_OUTPUT,
                 phase_event,
                 MonitorCoverage(1, 1),
-                record,
                 event_record=event_record,
             ),
             UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
@@ -2301,7 +2301,6 @@ class SlmFeedbackTask:
                     self._candidate_capacity,
                     self._candidate_capacity,
                 ),
-                record,
                 event_record=event_record,
             ),
             OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
@@ -2311,7 +2310,6 @@ class SlmFeedbackTask:
                     self._candidate_capacity,
                     self._candidate_capacity,
                 ),
-                record,
                 event_record=event_record,
             ),
             SITE_SIGNAL_HISTORY_OUTPUT.name: LiveDatasetOutput(
@@ -2321,7 +2319,6 @@ class SlmFeedbackTask:
                     self._candidate_capacity,
                     self._candidate_capacity,
                 ),
-                record,
                 event_record=event_record,
             ),
             TARGET_SHARE_HISTORY_OUTPUT.name: LiveDatasetOutput(
@@ -2331,7 +2328,6 @@ class SlmFeedbackTask:
                     self._candidate_capacity,
                     self._candidate_capacity,
                 ),
-                record,
                 event_record=event_record,
             ),
         }

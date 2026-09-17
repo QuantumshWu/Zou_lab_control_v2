@@ -632,7 +632,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             for name, _ in task_camera_events
             if name in {"set_exposure_seconds", "arm"}
         ) == "set_exposure_seconds"
-        assert ("arm", (90, (3,) * 30, 90)) in task_camera_events
+        total, groups, capacity = next(value for name, value in task_camera_events if name == "arm")
+        assert (total, groups) == (90, (3,) * 30)
+        assert capacity > total, "receive capacity follows the byte budget, not the finite target"
         reads = [value for name, value in task_camera_events if name == "read"]
         assert len(reads) >= 30
         assert all(value == (3, False) for value in reads)

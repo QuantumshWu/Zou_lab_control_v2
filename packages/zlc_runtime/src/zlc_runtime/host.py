@@ -22,17 +22,20 @@ from .plane import (
     SignalValue,
     RetainedPublicationExpired,
 )
-from .streams import FollowTap, SourceFailed, SourceGenerationEnded, StreamEndedEarly
+from .streams import (
+    DEFAULT_FOLLOW_MAX_BYTES, DEFAULT_FOLLOW_MAX_PENDING,
+    FollowTap, SourceGenerationEnded, StreamEndedEarly,
+)
 
 #: What the SOURCE's lifecycle looks like from a node hosted on it, and never
-#: this node's failure.  A source that ended or itself failed leaves its
+#: this node's failure. A source that was replaced leaves its
 #: follower with nothing more to read; ``GenerationSchemaAdvanced`` says an
 #: output changed shape and so needs a NEW generation -- landing any of them
 #: as failed cleared ``following`` for good, so the restart that would have
 #: granted that generation never came, and a pulse restart that changed the
 #: frame shape killed its occupancy overlay permanently.  CANCELLED is the
 #: phase a standing re-follow restarts from.
-_SOURCE_LIFECYCLE = (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced)
+_SOURCE_LIFECYCLE = (SourceGenerationEnded, GenerationSchemaAdvanced)
 from .task_run import TaskArtifact, TaskRun
 
 
@@ -206,6 +209,11 @@ class NodeExecutionContext:
             source_publication=source_publication,
         )
 
+    def set_run_record(self, record: Mapping[str, object]) -> Mapping[str, object]:
+        """Declare this generation's prepared facts before its first event."""
+
+        return self._host._data_plane.set_run_record(self._host, record)
+
     def current_dataset(
         self,
         output_name: str,
@@ -296,6 +304,8 @@ class NodeHost:
         input_name: str | None = None,
         input_siblings: Iterable[str] = (),
         input_delivery: str | None = None,
+        follow_max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
+        follow_max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
         required_artifacts: Mapping[str, str] | None = None,
         task_name: str | None = None,
         signal_namer: Callable[[str, str], str] | None = None,
@@ -406,6 +416,8 @@ class NodeHost:
         self._input_siblings = sibling_inputs
         self._resolved_input_signals: Mapping[str, str] | None = None
         self._input_delivery = delivery
+        self._follow_max_pending = follow_max_pending
+        self._follow_max_bytes = follow_max_bytes
         self._input_view = getattr(node, "dataset_input_view", None)
         self._input_window = getattr(node, "dataset_input_window", 50)
         if self._input_view is not None and self._input_view not in {"event", "run", "window"}:
@@ -861,18 +873,9 @@ class NodeHost:
     def _end_run(self, phase: str, error: BaseException | None) -> None:
         """How a run that did not succeed leaves the bench.
 
-        Cancelled and failed differ in one thing, and it is the thing that
-        matters to whoever was watching: stopping a measurement ENDS it, it
-        does not unmeasure it, so what the run published is kept -- partial,
-        and said to be partial by its own coverage.  A failure stands behind
-        nothing, so its generation is withdrawn.
-
-        Both endings were written out separately, and the copy that runs when
-        the worker was interrupted MID-STEP -- the common case, since Stop
-        raises out of whatever the node was doing -- named the run "cancelled"
-        and then disposed of it as a failure.  A stopped scan therefore
-        vanished from the bench, taking the panel watching it, its Edit
-        snapshot and its Save with it.
+        Committed chunks remain true after production stops or later fails.
+        Keep that prefix without turning a failed acquisition into normal
+        end-of-stream: followers receive the failure separately from data.
 
         What the Task's exit writer could not save is part of how the run
         ended, whichever way it ended.  On a failure it is a note on the
@@ -899,15 +902,15 @@ class NodeHost:
         terminal_error_text = (
             None if error is None else f"{type(error).__name__}: {error}"
         )
-        if phase == "cancelled" and self._live_commit_count:
+        if self._live_commit_count:
             try:
-                self._seal_committed_plane_state(cut_short=True)
+                self._seal_committed_plane_state(cut_short=True, error=error)
                 kept = self._plane_state
             except BaseException as seal_error:
                 kept = False
                 terminal_phase = "failed"
                 terminal_exception = RuntimeError(
-                    "stopped partial Dataset could not be sealed: "
+                    "partial Dataset could not be sealed: "
                     f"{type(seal_error).__name__}: {seal_error}"
                 )
                 terminal_error_text = str(terminal_exception)
@@ -1032,7 +1035,9 @@ class NodeHost:
     ) -> Mapping[str, SignalValue]:
         """Commit a derived bundle through the plane."""
 
-        return self._data_plane.commit_processor(self, outputs, **placement)
+        result = self._data_plane.commit_processor(self, outputs, **placement)
+        self._live_commit_count += 1
+        return result
 
     def _validate_worker_terminal_contract(self, result: object) -> None:
         declared = {value.name for value in self._dataset_outputs}
@@ -1156,12 +1161,15 @@ class NodeHost:
         for lease in leases:
             lease.close()
 
-    def _seal_committed_plane_state(self, *, cut_short: bool = False) -> None:
+    def _seal_committed_plane_state(
+        self, *, cut_short: bool = False, error: BaseException | None = None,
+    ) -> None:
         if not self._plane_state:
             return
         retained = self._data_plane.seal_committed(
             self,
             cut_short=cut_short,
+            error=error,
         )
         self._plane_state = retained
 
@@ -1457,6 +1465,8 @@ class NodeHost:
                 source_name=self._source_signal,
                 source_publication=publication,
                 source_signals=tuple(self._processor_signal_names().values()),
+                max_pending=self._follow_max_pending,
+                max_bytes=self._follow_max_bytes,
             )
         except BaseException as error:
             # The plane raises SourceGenerationEnded here BY DESIGN when
@@ -1577,20 +1587,13 @@ class NodeHost:
             isinstance(error, (_StartSuppressed, *_SOURCE_LIFECYCLE))
             or self.cancel_requested
         ):
-            # A source that ended, moved on, or itself failed under a
-            # standing follower is the SOURCE's lifecycle, not this node's
-            # failure -- its own card carries its own error.  The host ends
+            # A source that ended or moved on under a standing follower is
+            # the source's lifecycle, not corrupt data. The host ends
             # CANCELLED, which is the state an automatic re-follow
             # restarts from.
             self._finish_follow_processor_cancelled()
             return
-        self._retire_plane_state()
-        self._result = _UNRESOLVED
-        self._active = False
-        self._mark_terminal()
-        self._phase = "failed"
-        self._error = f"{type(error).__name__}: {error}"
-        self._progress = None
+        self._end_run("failed", error)
 
     def validate_processor_source(self, source: SignalValue | None) -> None:
         """Validate identity only; the descriptor owns exact/latest delivery."""
@@ -1631,6 +1634,10 @@ class NodeHost:
             outputs = evaluate(selected_inputs[self._input_name])
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("processor evaluate() must return a non-empty mapping")
+        if self._data_plane.run_record(self) is None:
+            describe = getattr(self._node, "describe_run", None)
+            if callable(describe):
+                self._data_plane.set_run_record(self, describe(selected_inputs))
         return dict(outputs)
 
     def accept_processor_result(
@@ -1658,13 +1665,7 @@ class NodeHost:
             # here as SourceGenerationEnded.
             self.accept_processor_cancelled()
             return
-        self._data_plane.withdraw_processor(self)
-        self._plane_state = False
-        self._active = False
-        self._mark_terminal()
-        self._phase = "failed"
-        self._error = f"{type(error).__name__}: {error}"
-        self._progress = None
+        self._end_run("failed", error)
 
     def accept_processor_cancelled(self) -> None:
         if not self._active:
@@ -1674,6 +1675,24 @@ class NodeHost:
         self._active = False
         self._mark_terminal()
         self._phase = "cancelled"
+        self._error = None
+        self._progress = None
+
+    def accept_processor_ended(self, error: Exception | None) -> None:
+        if not self._active:
+            return
+        if error is not None:
+            self.accept_processor_failure(error)
+            return
+        self._release_input_history()
+        try:
+            self._data_plane.seal_processor(self)
+        except Exception as failure:
+            self.accept_processor_failure(failure)
+            return
+        self._active = False
+        self._mark_terminal()
+        self._phase = "done"
         self._error = None
         self._progress = None
 

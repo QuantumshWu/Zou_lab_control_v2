@@ -186,6 +186,9 @@ class _Context:
     def cancel_requested(self) -> bool:
         return self.cancelled
 
+    def set_run_record(self, record):
+        self.run_record = record
+
     def commit_live(self, outputs, *, source_publication=None) -> None:
         del outputs, source_publication
         self.commits += 1

@@ -12,7 +12,7 @@ consumer sees the same publication's canonical full geometry through
 `current_dataset()`, with unwritten cells invalid. Ordinary Monitor outputs,
 including Processor outputs, have no finite canonical extent and retain only
 their latest event. `index_by_source` declares only that a display-derived
-output is capable of history. Runtime exposes a byte-bounded ordinary Dataset
+output is capable of history. Runtime exposes a window-bounded ordinary Dataset
 over a neutral `primary-index` only while a consumer holds a window lease;
 retention begins at the current event, uses the largest active window, and is
 dropped with the last lease. Missing computations inside that interval are
@@ -25,6 +25,20 @@ a run generation nor a content revision. Display materialization is
 presentation-paced, cached, and performed off the UI owner;
 `freeze()` only reads committed state and never calls plugin science or a
 plugin materializer.
+
+Run metadata is declared once, after preparation, through
+`NodeExecutionContext.set_run_record(record)` (or `SignalDataPlane.set_run_record`
+for a direct producer). `LiveDatasetOutput` carries only its event data and
+event-varying metadata. A Processor can provide `describe_run(inputs)`; the Host
+calls it once after the first successful evaluation. Runtime owns the frozen
+declaration and rejects replacement; later commits do not re-compare a plan.
+
+Exact delivery has separate, explicit pending-event and payload-byte limits;
+these do not truncate scientific history. Overflow fails that consumer rather
+than dropping data or blocking the producer. Finite replay reads existing
+chunks lazily. Historical ancestry retains event identities and records, not
+all ancestor arrays; active computations, coherent fronts and frozen snapshots
+still own the exact payloads they need.
 
 Presentation cadence is a Surface deadline, not a Dataset-index filter. A busy
 same-shot group does not enqueue another full frame; `BoardScheduler` records
@@ -40,6 +54,11 @@ does not publish a second replacement dataset. Scientific processors declare
 exact delivery and consume every ordered event chunk once. Display derivations
 declare latest delivery, coalesce while busy, and run concurrently with other
 processors while remaining serial within one processor.
+
+A later acquisition failure preserves the verified partial prefix and signals
+failure to existing followers; it does not report normal end-of-stream. Stop
+retains data. Explicit node removal or board replacement retires that owner's
+retention, without invalidating independently owned frozen snapshots.
 
 Publication roots preserve lineage through exact replay and derived/follower
 routes. Accepted-fit outputs are presentation-paced followers of the exact

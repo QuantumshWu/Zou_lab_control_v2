@@ -166,6 +166,9 @@ class _Context:
     def report_progress(self, *args, **kwargs) -> None:
         self.progress.append((args, kwargs))
 
+    def set_run_record(self, record):
+        self.run_record = record
+
     def commit_live(self, outputs, *, source_publication=None):
         # The NodeContext surface, whole.  Green only because this node has
         # never passed source_publication; the plane double next door failed

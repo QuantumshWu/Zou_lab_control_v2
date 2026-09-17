@@ -23,7 +23,7 @@ everything later hangs from: a box drawn on the plot's x axis is a range of
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from zlc_data import (
     AxisId,
     AxisSpec,
@@ -260,7 +260,6 @@ class ScanDatasetWriter:
         *,
         scan_repeats: int = 1,
         run_repeats: int = 1,
-        run_record: Mapping[str, object] | None = None,
         axis_names: Sequence[str] | None = None,
     ) -> None:
         self._rows = tuple(tuple(float(value) for value in row) for row in rows)
@@ -274,7 +273,6 @@ class ScanDatasetWriter:
             raise ValueError("scan_repeats must be at least 1")
         if self._run_repeats < 1:
             raise ValueError("run_repeats must be at least 1")
-        self._run_record = dict(run_record or {})
         self._source_schema: DatasetSchema | None = None
         self._schema: DatasetSchema | None = None
         self._filled: set[tuple[int, int, int]] = set()
@@ -326,7 +324,6 @@ class ScanDatasetWriter:
                 self._written * points,
                 self.total * points,
             ),
-            self._run_record,
             self._schema,
             (scan_repeat * self._run_repeats + run_repeat, row * points),
             value.event_record,

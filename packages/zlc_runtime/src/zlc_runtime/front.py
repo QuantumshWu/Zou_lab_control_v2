@@ -52,7 +52,7 @@ def _collect_ancestry(
         if current.event_ref in parents:
             continue
         parents[current.event_ref] = tuple(resolve_parents(current))
-        for name in current.signals:
+        for name in current.signal_names:
             previous = by_name.get(name)
             if previous is not None and previous.event_ref != current.event_ref:
                 collisions.setdefault(name, [previous]).append(current)
@@ -236,12 +236,13 @@ def build_front(
                     ancestry[name] = candidate
                 if not coherent:
                     break
-        if coherent and any(name not in ancestry for name in requested_component):
+        if coherent and any(name not in ancestry or ancestry[name].value(name) is None
+                            for name in requested_component):
             coherent = False
 
         if coherent:
             for name, publication in ancestry.items():
-                if name in component and name in active_names:
+                if name in component and name in active_names and publication.value(name) is not None:
                     selected[name] = publication
         else:
             # Pending first/restarted outputs cannot be dropped from a group.

@@ -31,7 +31,7 @@ from uuid import uuid4
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField
-from zlc_atom.devices import visa
+from zlc_atom.devices import RecordQueue, visa
 from zlc_atom.devices.visa import (
     PROBE_TIMEOUT_SECONDS,
     VisaResources,
@@ -42,7 +42,6 @@ from zlc_atom.devices.waveform.contract import (
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
-    WaveformRecordQueue,
     WaveformWorkingPoint,
 )
 
@@ -204,7 +203,7 @@ class TekScopeWaveformSource:
         self._link_lock = threading.Lock()
         self._device_session_id = uuid4().hex
         self._settings_epoch = 0
-        self._records = WaveformRecordQueue(
+        self._records = RecordQueue(
             "the scope", join_timeout_seconds=config.timeout_seconds + 1.0
         )
 
@@ -416,9 +415,10 @@ class TekScopeWaveformSource:
                         )
                 # The host's high-resolution clock: two records read within
                 # one coarse tick must still be two distinct times.
-                self._records.push(
-                    np.stack(columns, axis=1), time.perf_counter(), time.time_ns()
-                )
+                self._records.push(WaveformRecord(
+                    np.stack(columns, axis=1), self._records.produced_count,
+                    time.perf_counter(), time.time_ns(),
+                ))
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
         finally:
@@ -435,7 +435,8 @@ class TekScopeWaveformSource:
         return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
-        return self._records.finish()
+        produced = self._records.finish()
+        return WaveformCaptureTerminalRecord(produced, True, not self._records.pending_count, True)
 
     def capture_state(self) -> bool:
         return self._records.armed
