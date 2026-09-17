@@ -238,7 +238,7 @@ class PulseEditorHandle(QtCore.QObject):
     def set_config_page(self, record: ConfigPageRecord) -> None:
         self._view.config_view.set_page(record)
         button = self._view.schedule_view.channel_panel.config_status_button
-        button.setText(f"Config: {Path(record.active_path).name}" if record.active_path else "Config: none")
+        button.setText(Path(record.active_path).name if record.active_path else "none")
         button.setToolTip(record.active_path or "No active Config file; Pulse defaults are used.")
 
     # ---------------------------------------------------------- the schedule

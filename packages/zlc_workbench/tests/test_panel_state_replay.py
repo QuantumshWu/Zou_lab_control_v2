@@ -162,18 +162,19 @@ def test_a_crosshair_is_owned_and_judged_at_the_panel_state_door() -> None:
             replace(first, crosshair=bad)
 
 
-def test_non_fate_unknown_names_stay_hard_errors() -> None:
+def test_saved_fields_use_current_vocabulary_but_runtime_edits_stay_strict() -> None:
+    import pytest
+    from zlc_plot.semantics import composed_spec
+
     event = _event_schema()
     spec = task_console_fitting_spec(event, PlotKind.ROLLING.value, "")
     assert spec is not None
-    try:
-        project_panel_state(
-            event, spec, _state({"no_such_field": "reduce"})
-        )
-    except KeyError as error:
-        assert "no_such_field" in str(error)
-    else:  # pragma: no cover
-        raise AssertionError("unknown non-fate names must still raise")
+    projected = project_panel_state(event, spec, _state({"no_such_field": "reduce"}))
+    assert "no_such_field" not in projected.semantic
+    with pytest.raises(KeyError, match="no_such_field"):
+        composed_spec(event, spec, {"no_such_field": "reduce"})
+    with pytest.raises(ValueError):
+        project_panel_state(event, spec, _state({"reduction": "not-a-reduction"}))
 
 
 def test_shot_index_presents_as_shots_not_as_a_point_geometry() -> None:

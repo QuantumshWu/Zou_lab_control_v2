@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from numbers import Real
 from types import MappingProxyType
@@ -592,11 +592,9 @@ def project_panel_state(
     """What this panel MEANS on ``spec``: the composed spec and the two bags
     that spec will accept.
 
-    A panel's record is the complete assignment of its current vocabulary.
-    Signal and cell-kind transitions clear their old semantic assignment at
-    the Console owner.  Within that current vocabulary, unknown names and
-    illegal values are errors rather than compatibility state to be silently
-    ignored.
+    A saved UI record is projected onto today's vocabulary. Removed fields
+    do not apply; current fields still reject illegal values. The strict
+    runtime edit APIs are not involved in restoring obsolete UI fields.
 
     THE projection, for every consumer.  It used to exist only at the mount,
     and only for the appearance bag: the semantic bag was handed over whole,
@@ -630,17 +628,7 @@ def project_panel_state(
     for name, saved in saved_values.items():
         key = str(name)
         if not description.declares(key):
-            if key.startswith((FATE_PREFIX, COORDINATE_PREFIX)):
-                # A fate names an AXIS.  The same signal legally changes
-                # its schema representation -- the Runtime's indexed
-                # history adds a source-index axis to the Point domain, and
-                # its arrival or departure adds and removes that fate row. A saved fate
-                # for an axis the current representation does not offer
-                # is not a typo (the editor authors these names); it is a
-                # statement about an axis that is not here to have a
-                # fate.  Non-fate names remain hard errors.
-                continue
-            raise KeyError(key)
+            continue
         value = restore_semantic_choice(description, key, saved)
         field = description.field(key)
         if key.startswith(FATE_PREFIX) and is_scope_fate(value):
@@ -840,34 +828,19 @@ class PanelState:
 
     @classmethod
     def from_document(cls, document: object) -> "PanelState":
-        """Decode the one strict PanelState grammar used by every reader."""
+        """Restore current UI fields; missing fields use their current defaults."""
 
         if not isinstance(document, Mapping):
             raise TypeError("panel state must be an object")
-        expected = {
-            "signal",
-            "title",
-            "kind",
-            "cell_kind",
-            "size",
-            "interval_ms",
-            "semantic",
-            "display",
-            "interaction",
-            "fit",
-            "overlay_signal",
-            "published_outputs",
-            "selector",
-            "crosshair",
-            "classifier_thresholds",
-            "focused_cell",
-        }
-        if set(document) != expected:
-            raise ValueError(
-                "panel state fields differ; "
-                f"missing={sorted(expected - set(document))}, "
-                f"extra={sorted(set(document) - expected)}"
-            )
+        from zlc_plot.config import DEFAULTS
+        from zlc_plot.specs import parameter_schema_for_kind
+        from zlc_plot.state import DisplayState
+
+        if not isinstance(document.get("kind"), str):
+            raise TypeError("panel state requires a text kind")
+        defaults = cls("", document["kind"], DEFAULTS.layout.default_preset,
+                       DEFAULTS.live.default_refresh_interval_ms, "").document()
+        document = {name: document.get(name, value) for name, value in defaults.items()}
 
         def text(name: str) -> str:
             value = document[name]
@@ -898,17 +871,48 @@ class PanelState:
         thresholds = document["classifier_thresholds"]
         if not isinstance(thresholds, (tuple, list)):
             raise TypeError("panel state classifier_thresholds must be a sequence")
+        kind, cell_kind = text("kind"), text("cell_kind")
+        display = mapping("display")
+        if kind != PlotKind.FACET_GRID.value or cell_kind:
+            vocabulary = parameter_schema_for_kind(kind, style=DEFAULTS.style,
+                                                   facet_cell_kind=cell_kind or None)
+            display = dict(vocabulary.initial_values(vocabulary.declared_subset(display)))
+        else:
+            # The first dataset chooses the cell; retain only fields declared
+            # by an available cell, then use its exact defaults at projection.
+            vocabulary = {name: parameter for cell in GRID_CELL_KINDS
+                          for name, parameter in parameter_schema_for_kind(
+                              kind, style=DEFAULTS.style, facet_cell_kind=cell).items()}
+            display = {name: vocabulary[name].prepare(value) for name, value in display.items()
+                       if name in vocabulary}
+        interaction = next(item for item in fields(DisplayState) if item.name == "interaction").default_factory()
+        interaction = {name: mapping("interaction").get(name, value) for name, value in interaction.items()}
+        fit = mapping("fit")
+        if fit:
+            from zlc_plot.fit import FIT_TARGET_FIELDS, FitOptions, default_fit_registry
+
+            fit = {name: value for name, value in fit.items() if name in FIT_TARGET_FIELDS}
+            if fit.get("model"):
+                model = default_fit_registry().get(fit["model"])
+                for name in ("fixed", "initial", "bounds"):
+                    if isinstance(fit.get(name), Mapping):
+                        fit[name] = {key: value for key, value in fit[name].items()
+                                     if key in model.parameter_names}
+            if isinstance(fit.get("options"), Mapping):
+                option_names = {item.name for item in fields(FitOptions)}
+                fit["options"] = {name: value for name, value in fit["options"].items() if name in option_names}
+                FitOptions(**fit["options"])
         return cls(
             signal=text("signal"),
             title=text("title"),
-            kind=text("kind"),
-            cell_kind=text("cell_kind"),
+            kind=kind,
+            cell_kind=cell_kind,
             size=text("size"),
             interval_ms=interval,
             semantic=mapping("semantic"),
-            display=mapping("display"),
-            interaction=mapping("interaction"),
-            fit=mapping("fit"),
+            display=display,
+            interaction=interaction,
+            fit=fit,
             overlay_signal=text("overlay_signal"),
             published_outputs=published,
             selector=mapping("selector"),

@@ -476,9 +476,10 @@ class ChannelPanel(FluentGroupBox):
         add_labeled_widget(top_layout, "Clock:", self.clock_label)
         add_labeled_widget(top_layout, "Scan:", self.scan_summary_label)
         add_labeled_widget(top_layout, "Repeat:", self.run_repeats_spin)
-        self.config_status_button = FluentButton("Config: none", color=GREY)
+        self.config_status_button = FluentButton("none", color=GREY)
+        self.config_status_button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.config_status_button.clicked.connect(self.config_requested)
-        top_layout.addWidget(self.config_status_button)
+        add_labeled_widget(top_layout, "Config:", self.config_status_button)
         top_layout.addStretch(1)
         self._layout.addWidget(top)
         self._rows: dict[

@@ -46,6 +46,12 @@ if TYPE_CHECKING:
 
 ArrayTuple = tuple[np.ndarray, ...]
 
+# Authored fit target fields, shared by strict execution and UI-state restore.
+FIT_TARGET_FIELDS = frozenset({
+    "model", "expression", "selector_kind", "fixed", "initial", "bounds",
+    "options", "fit_all_facets", "min_bic_gain",
+})
+
 # Models whose x origin is the start of the window they are fitted over.
 _DOMAIN_ANCHORED = "domain_anchored"
 Evaluator = Callable[..., np.ndarray]
@@ -5194,6 +5200,7 @@ def default_fit_registry() -> FitModelRegistry:
 
 
 __all__ = [
+    "FIT_TARGET_FIELDS",
     "FitCancelled",
     "FitComponentSpec",
     "FitDeadlineExceeded",

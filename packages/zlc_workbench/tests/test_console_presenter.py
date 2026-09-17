@@ -4106,6 +4106,46 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
         "panel 'orphan' read @logic/panel-5/roi_frame, a panel this board does "
         "not carry; the connection was dropped",
     )
+    # Saved UI fields intersect today's declarations; new fields use defaults.
+    saved = tree["panels"][0]
+    saved.pop("size")
+    saved["retired_panel_option"] = 123
+    saved["display"] = {"show_grid": True, "retired_display_option": 123}
+    saved["interaction"] = {"retired_gesture": True}
+    row = tree["logic"][0]
+    row["values"] = {"retired_logic_option": 123}
+    row["device_keys"] = {"retired_device_input": 123}
+    row["artifact_inputs"]["retired_artifact_input"] = 123
+    del row["auto_preview"]
+    _document, restored = _loaded_board(tree, ("panel-3", "panel-4", "panel-5"))
+    from zlc_plot.config import DEFAULTS
+    assert restored.panels[0].size == DEFAULTS.layout.default_preset
+    assert restored.panels[0].display["show_grid"] is True
+    assert "retired_display_option" not in restored.panels[0].display
+    assert dict(restored.panels[0].interaction) == {"series_lock": None}
+    restored_logic = restored.logic[0]
+    assert dict(restored_logic.draft.values) == restored_logic.descriptor.authoring_schema.draft_values()
+    assert restored_logic.draft.device_keys == {}
+    assert restored_logic.draft.artifact_inputs == {"calibration_path": "chosen.json"}
+    assert restored_logic.auto_preview is True
+    saved["display"]["show_grid"] = "invalid boolean"
+    with pytest.raises(LayoutError):
+        LayoutDocument.from_tree(tree)
+    saved["display"]["show_grid"] = True
+    saved["fit"] = {"model": "gaussian_offset", "retired_fit_option": True,
+                    "initial": {"sigma": 1.0, "retired_parameter": 9.0},
+                    "options": {"max_nfev": 12, "retired_solver_option": True}}
+    fitted = LayoutDocument.from_tree(tree).panels[0]
+    assert dict(fitted.fit) == {"model": "gaussian_offset", "initial": {"sigma": 1.0},
+                                "options": {"max_nfev": 12}}
+    saved["fit"]["model"] = "not-a-fit-model"
+    with pytest.raises(LayoutError, match="unknown fit model"):
+        LayoutDocument.from_tree(tree)
+    saved["fit"] = {}
+    tree["logic"].append({"node_id": "derived", "api_name": "derive", "values": {
+        "expressions": [{"name": "result", "code": "a.counts +", "retired_column": 123}]}})
+    _document, unfinished = _loaded_board(tree, ("panel-3", "panel-4", "panel-5"))
+    assert unfinished.logic[-1].draft.values["expressions"] == ({"name": "result", "code": "a.counts +"},)
     with pytest.raises(LayoutError, match="one fresh panel_id per saved panel"):
         _loaded_board(tree, ("panel-3", "panel-4"))
 
@@ -4135,8 +4175,8 @@ def test_a_board_requires_each_saved_panel_identity() -> None:
         LayoutDocument((), ())
 
 
-def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
-    """Current fates survive without a live source; old spellings fail."""
+def test_saved_fates_wait_for_current_schema_without_guessing_old_axes() -> None:
+    """Without data, keep names verbatim; projection later drops absent fields."""
 
     tree = {
         "format": "zlc.console-board",
@@ -4168,11 +4208,9 @@ def test_saved_fates_are_read_in_todays_vocabulary_or_refused_by_name() -> None:
         "fate:point_row", "fate:point_coordinate:cm.x", "fate:point:",
     ):
         tree["panels"][0]["semantic"] = {unknown: "x"}
-        with pytest.raises(LayoutError, match=repr(unknown)):
-            LayoutDocument.from_tree(tree)
+        assert dict(LayoutDocument.from_tree(tree).panels[0].semantic) == {unknown: "x"}
     tree["panels"][0]["semantic"] = {"fate:point_dimension:cm.x": "x", "fate:point:cm.x": "y"}
-    with pytest.raises(LayoutError, match="unknown fate key 'fate:point_dimension:cm.x'"):
-        LayoutDocument.from_tree(tree)
+    assert dict(LayoutDocument.from_tree(tree).panels[0].semantic) == tree["panels"][0]["semantic"]
 
 
 def test_panel_edit_projects_the_direct_producer_link_and_ages(

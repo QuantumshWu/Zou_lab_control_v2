@@ -23,8 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from zlc_durable import write_readable_json
-from zlc_plot.kinds import AxisDomain
-from zlc_plot.semantics import FATE_PREFIX
 
 from .logic import (
     LogicBinding,
@@ -45,9 +43,6 @@ LAYOUT_FORMAT = "zlc.console-board"
 #: monotonic serial; this module reads the same spelling back to tell a
 #: reference to a panel from a reference to a logic row.
 PANEL_ID_PREFIX = "panel-"
-
-_FATE_DOMAINS = frozenset(domain.value for domain in AxisDomain)
-
 
 class LayoutError(ValueError):
     """A file cannot describe one current TaskConsole board."""
@@ -90,13 +85,8 @@ class LogicLayoutEntry:
         object.__setattr__(
             self,
             "device_keys",
-            {str(name): str(key) for name, key in self.device_keys.items()},
+            dict(self.device_keys),
         )
-        if any(
-            not isinstance(name, str) or not isinstance(path, str)
-            for name, path in self.artifact_inputs.items()
-        ):
-            raise LayoutError("artifact input names and paths must be strings")
         object.__setattr__(self, "artifact_inputs", dict(self.artifact_inputs))
         object.__setattr__(self, "auto_preview", bool(self.auto_preview))
 
@@ -134,8 +124,7 @@ class LayoutDocument:
     #: The identity each panel had on the board, in the order of ``panels``.
     #: Required, not defaulted: a writer that does not know its panels'
     #: identities would write ones that look right and are not, and the
-    #: file would mis-wire on load; only the reader may make identities up
-    #: (:meth:`from_tree`, for a file written before they were kept).
+    #: file would mis-wire on load. The reader never invents identities.
     panel_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -162,15 +151,14 @@ class LayoutDocument:
         document = _mapping(tree, "layout")
         if document.get("format") != LAYOUT_FORMAT:
             raise LayoutError("that file is not a saved board")
-        _exact_fields(document, {"format", "panels", "logic"}, "layout")
         entries = tuple(
             _panel_from_tree(entry, index)
-            for index, entry in enumerate(_sequence(document["panels"], "panels"))
+            for index, entry in enumerate(_sequence(document.get("panels", ()), "panels"))
         )
         named = tuple(panel_id for panel_id, _state in entries)
         logic = tuple(
             _logic_from_tree(entry, index)
-            for index, entry in enumerate(_sequence(document["logic"], "logic"))
+            for index, entry in enumerate(_sequence(document.get("logic", ()), "logic"))
         )
         return cls(tuple(state for _panel_id, state in entries), logic, named)
 
@@ -242,20 +230,12 @@ def resolve_layout(
         if descriptor is None:
             raise LayoutError(f"no logic node named {entry.api_name!r}")
         try:
-            fields = descriptor.authoring_schema.fields
-            missing_values = {
-                field.name for field in fields
-                if field.required and field.name not in entry.values
-            }
-            if missing_values:
-                raise LayoutError(
-                    f"{entry.node_id}: missing authoring fields "
-                    f"{sorted(missing_values)!r}"
-                )
-            # A saved row is an editable raw draft.  Semantic projection is
-            # deliberately deferred to the same finalizer that gates Start.
-            values = {field.name: field.default for field in fields if not field.required}
-            values.update(entry.values)
+            schema = descriptor.authoring_schema
+            # A Layout restores editable fields, not a runnable task. Field
+            # types/bounds still apply; cross-field completion belongs to Start.
+            values = replace(schema, validator=None).draft_values(
+                _current_authoring_values(schema.fields, entry.values)
+            )
             options = device_key_options(descriptor, installation=installation)
         except Exception as error:
             raise LayoutError(f"{entry.node_id}: {error}") from error
@@ -263,22 +243,12 @@ def resolve_layout(
             requirement.argument_name
             for requirement in descriptor.device_requirements
         )
-        unknown_devices = set(entry.device_keys) - set(required)
-        if unknown_devices:
-            raise LayoutError(
-                f"{entry.node_id}: unknown device bindings "
-                f"{sorted(unknown_devices)!r}"
-            )
-        missing_devices = set(required) - set(entry.device_keys)
-        if missing_devices:
-            raise LayoutError(
-                f"{entry.node_id}: missing device bindings "
-                f"{sorted(missing_devices)!r}"
-            )
         selected: dict[str, str] = {}
         for name in required:
             available = options[name]
-            key = str(entry.device_keys[name])
+            key = entry.device_keys.get(name, available[0] if available else "")
+            if not isinstance(key, str):
+                raise LayoutError(f"{entry.node_id}: device input {name!r} must be text")
             if key in installed_keys and key not in available:
                 raise LayoutError(
                     f"{entry.node_id}: {key!r} is incompatible with device input "
@@ -286,23 +256,9 @@ def resolve_layout(
                 )
             selected[name] = key
         artifact_specs = artifact_input_specs(descriptor)
-        artifact_names = tuple(spec.name for spec in artifact_specs)
-        unknown_artifacts = set(entry.artifact_inputs) - set(artifact_names)
-        if unknown_artifacts:
-            raise LayoutError(
-                f"{entry.node_id}: unknown artifact inputs "
-                f"{sorted(unknown_artifacts)!r}"
-            )
-        missing_artifacts = {
-            spec.name
-            for spec in artifact_specs
-            if spec.required and spec.name not in entry.artifact_inputs
-        }
-        if missing_artifacts:
-            raise LayoutError(
-                f"{entry.node_id}: missing artifact inputs "
-                f"{sorted(missing_artifacts)!r}"
-            )
+        artifacts = {spec.name: entry.artifact_inputs.get(spec.name, "") for spec in artifact_specs}
+        if any(not isinstance(path, str) for path in artifacts.values()):
+            raise LayoutError(f"{entry.node_id}: artifact input paths must be strings")
         bindings.append(
             LogicBinding(
                 entry.node_id,
@@ -311,7 +267,7 @@ def resolve_layout(
                     values,
                     entry.source_signal,
                     selected,
-                    dict(entry.artifact_inputs),
+                    artifacts,
                 ),
                 auto_preview=entry.auto_preview,
             )
@@ -451,48 +407,39 @@ def _sequence(value: object, where: str) -> Sequence[object]:
     return value
 
 
-def _exact_fields(value: Mapping[str, Any], expected: set[str], where: str) -> None:
-    missing = expected - set(value)
-    unknown = set(value) - expected
-    if missing:
-        raise LayoutError(f"{where} is missing {sorted(missing)!r}")
-    if unknown:
-        raise LayoutError(f"{where} has unknown fields {sorted(unknown)!r}")
+def _current_authoring_values(fields, saved: Mapping[str, Any]) -> dict[str, Any]:
+    """Read only today's declared leaves, including columns of authored rows."""
+    values = {}
+    for field in fields:
+        if field.name not in saved:
+            continue
+        value = saved[field.name]
+        if str(field.value_type) == "rows" and isinstance(value, (list, tuple)):
+            value = [_current_authoring_values(field.columns, row) if isinstance(row, Mapping)
+                     else row for row in value]
+        values[field.name] = value
+    return values
 
 
 def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
     where = f"logic entry {index + 1}"
     entry = _mapping(value, where)
-    _exact_fields(
-        entry,
-        {
-            "node_id",
-            "api_name",
-            "values",
-            "source_signal",
-            "device_keys",
-            "artifact_inputs",
-            "auto_preview",
-        },
-        where,
-    )
-    values = _mapping(entry["values"], f"{where} values")
-    device_keys = _mapping(entry["device_keys"], f"{where} device_keys")
+    for name in ("node_id", "api_name"):
+        if name not in entry:
+            raise LayoutError(f"{where} requires {name}")
+    values = _mapping(entry.get("values", {}), f"{where} values")
+    device_keys = _mapping(entry.get("device_keys", {}), f"{where} device_keys")
     artifact_inputs = _mapping(
-        entry["artifact_inputs"], f"{where} artifact_inputs"
+        entry.get("artifact_inputs", {}), f"{where} artifact_inputs"
     )
-    if any(not isinstance(key, str) for key in device_keys.values()):
-        raise LayoutError(f"{where} device values must be strings")
-    if any(not isinstance(path, str) for path in artifact_inputs.values()):
-        raise LayoutError(f"{where} artifact input paths must be strings")
     return LogicLayoutEntry(
         _string(entry["node_id"], f"{where} node_id"),
         _string(entry["api_name"], f"{where} api_name"),
         dict(values),
-        _string(entry["source_signal"], f"{where} source_signal"),
+        _string(entry.get("source_signal", ""), f"{where} source_signal"),
         dict(device_keys),
         dict(artifact_inputs),
-        _boolean(entry["auto_preview"], f"{where} auto_preview"),
+        _boolean(entry.get("auto_preview", True), f"{where} auto_preview"),
     )
 
 
@@ -508,11 +455,6 @@ def _panel_from_tree(value: object, index: int) -> tuple[str, PanelState]:
         state = PanelState.from_document(entry)
     except Exception as error:
         raise LayoutError(f"{where}: {error}") from error
-    for key in state.semantic:
-        if key.startswith(FATE_PREFIX):
-            domain, _separator, axis_id = key[len(FATE_PREFIX):].partition(":")
-            if domain not in _FATE_DOMAINS or not axis_id.strip():
-                raise LayoutError(f"{where}: unknown fate key {key!r}")
     return panel_id, state
 
 

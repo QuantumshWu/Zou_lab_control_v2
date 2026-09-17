@@ -1170,6 +1170,14 @@ class FluentButton(QtWidgets.QPushButton):
     def is_dirty(self) -> bool:
         return self._dirty
 
+    def paintEvent(self, event) -> None:
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        contents = self.style().subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, self)
+        option.text = self.fontMetrics().elidedText(option.text, QtCore.Qt.ElideRight, contents.width())
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawControl(QtWidgets.QStyle.CE_PushButton, option)
+
 
 def _apply_fluent_context_menu(widget, event) -> None:
     """Pop ``widget``'s right-click menu with the Fluent rounded-card chrome instead of the platform's

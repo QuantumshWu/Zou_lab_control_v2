@@ -25,6 +25,7 @@ from ._session_state import (
     FitEvent,
 )
 from .fit import (
+    FIT_TARGET_FIELDS,
     FacetFitBatchResult,
     FitCancelled,
     FitDeadlineExceeded,
@@ -433,6 +434,9 @@ class FitSessionMixin:
 
         if not isinstance(target, Mapping):
             raise TypeError("fit target must be a mapping")
+        unknown = set(target) - FIT_TARGET_FIELDS
+        if unknown:
+            raise TypeError(f"unknown fit target fields: {', '.join(sorted(map(str, unknown)))}")
         if type(live) is not bool:
             raise TypeError("fit live must be bool")
         values = dict(target)
@@ -461,10 +465,6 @@ class FitSessionMixin:
         fit_all_facets = values.pop("fit_all_facets", False)
         evidence_marker = object()
         min_bic_gain = values.pop("min_bic_gain", evidence_marker)
-        if values:
-            raise TypeError(
-                f"unknown fit target fields: {', '.join(sorted(map(str, values)))}"
-            )
         if min_bic_gain is not evidence_marker:
             # The threshold rides on the fit target beside the model that
             # asks the question; it is one option among the solver's.

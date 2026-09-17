@@ -42,7 +42,8 @@ class _BindingButton(QtWidgets.QAbstractButton):
             y = (self.height() - len(badges) * diameter) / 2 + index * diameter
             rect = QtCore.QRectF((self.width() - diameter) / 2, y, diameter, diameter)
             painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(color).darker(120 if self.underMouse() else 100))
+            painter.setBrush(QtGui.QColor(color if self.isEnabled() else PLACEHOLDER).darker(
+                120 if self.isEnabled() and self.underMouse() else 100))
             painter.drawEllipse(rect.adjusted(0.5, 0.5, -0.5, -0.5))
             painter.setPen(QtGui.QColor(SURFACE))
             painter.drawText(rect, QtCore.Qt.AlignCenter, text)
@@ -147,7 +148,12 @@ class FluentScanLineEdit(FluentLineEdit):
         self.binding_button.setToolTip(f"{self._tooltip}\n{summary}\n{source_text}".strip())
         self.binding_button.update()
         self.setReadOnly(not editable)
-        if source == "config":
+        self.setEnabled(editable)
+        if not editable:
+            if self._popup is not None:
+                self._popup.hide()
+            style = self._base_style
+        elif source == "config":
             style = _bound_style(CONFIG_GREEN_DARK, CONFIG_GREEN,
                                  background=CONFIG_GREEN_TINT if effective_text else SURFACE)
         elif source == "api":

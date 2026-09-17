@@ -10,6 +10,9 @@
 
 ## 1. 当前实施范围
 
+- Layout恢复统一按当前定义读取交集、补默认、忽略不存在的字段；Logic与rows列、设备/资源输入、Panel/Display/Interaction/Fit沿现有声明，不保留废弃buffer字段的特判，也不猜旧轴。当前字段的类型/数值、必需身份、未知model及运行时Plot API仍严格，未完成业务草稿可Load后在Start校验。直接恢复用例通过；正式Console点击Load读取用户原layout，两个Measurement与两个Panel恢复、旧buffer字段不再进入草稿，原文件未改、窗口关闭。
+- Hold沿FieldVM.editable整块禁用并灰显数值与Slot，已开popup关闭；模式Combo继续可用，切回Edge/Ramp恢复编辑。Config使用用户选定C色#D1E8E1。Edit页Config文件按钮复用Clock/Scan/Repeat两列，显示basename、tooltip保留全路径，受限FluentButton仅绘制时省略长文本。正式Pulse按钮操作与截图通过，无错误或遗留窗口。
+
 - Waveform静态链调查后删除已确认冗余：N100 CRC16改用等价标准库函数，删除旧表/逐字节Python循环；所有Waveform连续列/触发transpose复用既有不可变视图，不再advanced-index后再次复制。NodeHost worker commit删除Plane通知之后的重复wake，与processor一致；Runtime indexed history校验只在原子预检/lease入口执行一次。原CRC/顺序/所有权、Host通知/终态及history窗口直接用例通过；未访问实验设备、未以本机CPU测量替代现场10%现象，未改变采样、输出、history或显示deadline。
 - Rolling时间范围复用公共curve summary的坐标极值，latest在valid mask内用NumPy找最后有效位置，不再构建整列临时数组；无新增kernel或cache。真实时间窗口移动仍使刻度背景失效，数据层保持native、每revision一次compose；本轮不以复用旧背景破坏真实坐标，也未新增独立Rolling绘制路线。侧边histogram继续按当前窗口计算。
 
@@ -28,7 +31,7 @@
 
 - 同源复核收尾：RecordQueue区分Stop保留尾部与设备Close释放尾部/失败引用，所有Camera/Waveform adapter在实际关闭成功后使用同一清理入口，SDK拒绝关闭仍保留可重试状态。N100坏帧/序号/时间错误只终止当前capture，原接收线程继续idle drain以支持普通Restart；实际串口I/O故障仍终止接收并明确拒绝重新arm。原直接用例验证释放弱引用、拒绝关闭重试和坏包后恢复，未接实验硬件。
 - Runtime数值物化仍只有一条路径，数组消费者不再构建后丢弃event record；完整记录按需准备，同一atomic bundle的有限prefix及相同indexed窗口共享已准备记录，补记录不重建数组。记录合并、时间坐标填充移出公共锁，旧请求不能覆盖新缓存，Frozen记录不变。64条有限记录逐次取数组的时间条目遍历2080→0；四个同源完整视图8320→2080，合并均不持公共锁。新的平坦不可变完整记录仍需O(N)索引构建，不声称全部完整读取为O(增量)，不引入链式记录容器或第二套缓存owner。并发新旧请求、不同窗口及原sigma/validity物化直接验证通过。
-- 持续采集与发布复用中立RecordQueue，SDK取数仍由具体adapter执行。Camera/Waveform的公开receive-buffer参数已从schema、Request、工厂和用户run参数删除，不隐藏到高级表单；内部保留Camera128MiB及Waveform2秒容量策略，有限目标数不决定缓冲。成功arm请求的应用接收容量记录在只读acquisition事实中，不冒称SDK ring实际相同。真实/Virtual禁止drop-oldest，序号、溢出、正常Stop尾部与history语义不变；原有限/持续采集、容量和Stop用例及正式表单截图通过，未操作实验硬件。旧用户Layout中的废弃字段仍按严格schema拒绝，没有兼容分支，也未自动修改用户文件。
+- 持续采集与发布复用中立RecordQueue，SDK取数仍由具体adapter执行。Camera/Waveform的公开receive-buffer参数已从schema、Request、工厂和用户run参数删除，不隐藏到高级表单；内部保留Camera128MiB及Waveform2秒容量策略，有限目标数不决定缓冲。成功arm请求的应用接收容量记录在只读acquisition事实中，不冒称SDK ring实际相同。真实/Virtual禁止drop-oldest，序号、溢出、正常Stop尾部与history语义不变；原有限/持续采集、容量和Stop用例及正式表单截图通过，未操作实验硬件。旧Layout中的废弃字段由通用当前字段交集恢复忽略，不添加专属兼容或自动改写原文件。
 - Run metadata改为generation一次声明，删除LiveDatasetOutput的逐event run_record及重复整表比较；所有生产者、Processor describe_run、Viewer与Task companion已接同一入口。有限结果只持自身数据与祖先元数据，未消费exact输入和已连接same-shot/Frozen所需payload仍按真实所有权保留；exact live队列明确限额，finite replay按需读取，Monitor弃置replay树已删除。Latest/Exact终态均收尾，后续失败保留已验证partial prefix并传播失败；显式Remove/Clear退休被移除owner，不破坏独立Frozen值。
 - 绘图传输沿原input token一次安装静态结构并按真实依赖释放；Scope说明只持其AxisSpec。单次Freeze/Save复用同run记录转换。长期Rolling的tick缓存限定工作集，删除后台全局gc.freeze及回收阈值改写；共享segment退休沿既有进程消息通知，在最后读者释放后解除映射。接收/Runtime/Plot有界性、关闭与重开分别验证，长期时钟坐标与window2000短压测不冒充20小时真机运行。全部benchmark、诊断和截图只留ignored research，不入Git。
 - 同源资源收口补齐：共享映射最后读者晚于service关闭时，退休线程在最终映射关闭后正常退出；relayout同时清旧Axes量化几何缓存。32个退休segment不再留空闲映射，旧front跨pool/service关闭仍可读；12次尺寸切换缓存只含当前Axes。Overlay的Last/Scope在公共语义入口先限制Repeat/Point域，再解析坐标，避免拿image像素轴去解析site状态域；不增加overlay私有Last算法。
@@ -97,7 +100,7 @@
 
 - 完成核对补齐非默认Dataset Edit data漏点：Viewer整条described传递链及隐藏C预绘删除。原双Dataset案例编辑第二个other时0Host、Preview1个A，123保存typed读回/lineage、无效输入后继续编辑恢复均通过；production净减41行。
 
-- Layout仅接受当前完整grammar：每panel必须有真实`panel_id`，fate只接受`fate:<domain>:<axis>`（`repeat/point/cell_data`）。删除旧fate前缀转换、裸repeat展开及缺失identity的顺序补全；旧格式明确拒绝，不新增兼容层、迁移工具或修改用户workspace文件。加载时铸造新panel identity并统一重映射派生signal/overlay/Logic source引用仍保留，这是当前运行时接线机制而非兼容代码。
+- Layout每panel仍须真实`panel_id`，加载时铸造新identity并统一重映射派生signal/overlay/Logic source引用；不按顺序猜身份，也不翻译旧fate前缀或展开裸repeat。不存在于当前词汇的参数键直接忽略，缺省用当前默认，不增加版本兼容层/迁移工具或自动改写用户文件。
 
 - Viewer去掉临时C Host，直接一个A首accept，旧板在新图成功前保留；菜单纯投影，延迟mount回Host生命周期入口，修掉交叉验证暴露的递归。保存/选区/viewport/typed overlay及Manual保存重开原case通过；短实屏确认7.25、三域title、1A/0临时C，窗口/children关闭。后续又验证真实Area手势后新generation：同Host offset随数据+7、ROI/Fit exact parent更新，selection revision不虚增，drawn-only不重算；未削弱same-shot或旧revision拒绝。探针的控件API/路径/等待fit错误均在ignored记录，不当产品证据。
 

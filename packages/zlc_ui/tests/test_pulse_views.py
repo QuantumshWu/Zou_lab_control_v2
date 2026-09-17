@@ -890,6 +890,16 @@ edit.set_field_state(editable=True, source="config", config_key="bias", effectiv
 assert CONFIG_GREEN_TINT in edit.styleSheet() and CONFIG_GREEN_DARK in edit.styleSheet()
 edit.binding_button.click()
 assert edit.config_name.text() == "bias" and edit.config_name.isVisible()
+edit.set_field_state(editable=False, source="config", config_key="bias", effective_text="120 value")
+assert not edit.isEnabled() and not edit.binding_button.isEnabled()
+assert edit.isReadOnly() and not edit._popup.isVisible()
+assert CONFIG_GREEN_TINT not in edit.styleSheet()
+edit.binding_button.click()
+assert not edit._popup.isVisible(), "a held value cannot open binding authoring"
+edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value")
+assert edit.isEnabled() and edit.binding_button.isEnabled() and not edit.isReadOnly()
+edit.binding_button.click()
+assert edit._popup.isVisible() and edit.config_name.text() == "bias"
 edit._popup.hide()
 
 edit.set_field_state(editable=True, scan=True, source="config")
@@ -1020,7 +1030,21 @@ QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]
 assert not hasattr(view.schedule_view, "save_values_button")
 assert view.scan_view.scan_load_array_button.text() == "Load Array"
-QtTest.QTest.mouseClick(view.schedule_view.channel_panel.config_status_button, QtCore.Qt.LeftButton)
+view.tabs.setCurrentWidget(view.schedule_view)
+app.processEvents()
+channel = view.schedule_view.channel_panel
+button = channel.config_status_button
+assert button.text() == 'saved.json' and button.toolTip() == 'saved.json'
+column = (channel.clock_label.mapTo(channel, QtCore.QPoint()).x(), channel.clock_label.width())
+assert (button.mapTo(channel, QtCore.QPoint()).x(), button.width()) == column
+current_page = replace(record, entries=config._entries())
+handle.set_config_page(replace(current_page, active_path='C:/config/' + 'calibration_' * 30 + '.json'))
+app.processEvents()
+assert (button.mapTo(channel, QtCore.QPoint()).x(), button.width()) == column
+assert button.toolTip().startswith('C:/config/')
+assert button.text() == 'calibration_' * 30 + '.json'
+handle.set_config_page(current_page)
+QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
 assert view.current_page == "Config"
 kept_items = tuple(config.values_model.item(1, column) for column in range(3))
 assert all(item is not None for item in kept_items)
