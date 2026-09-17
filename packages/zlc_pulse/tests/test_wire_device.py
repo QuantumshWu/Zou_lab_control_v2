@@ -595,12 +595,15 @@ def test_repeated_fire_reuses_resident_program_after_done_and_safe() -> None:
         streamer.load(program, rows=((1,), (2,), (1,)))
         clocks = tuple(transport.read_word(CtrlWords.CLK_ENABLE + i)
                        for i in range(geom.clk_enable_words))
-        streamer.fire(run_repeats=1)
+        first = streamer.fire(run_repeats=1)
         assert streamer.wait_done(1.0) is not None
         uploaded = len(transport.write_batches)
-        streamer.fire(run_repeats=1)
+        repeated = streamer.fire(run_repeats=1)
+        assert repeated is first
         assert streamer.wait_done(1.0) is not None
-        streamer.fire(run_repeats=0)
+        infinite = streamer.fire(run_repeats=0)
+        assert infinite.rows is first.rows
+        assert infinite.program is first.program
         safe = streamer.safe()
         assert safe.stable and safe.status == 0 and safe.command_id > 0
         before = len(transport.write_batches)

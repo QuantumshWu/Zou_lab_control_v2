@@ -250,17 +250,17 @@ def create_window(
         abandon_render_processes()
         window.close()
         raise
-    window.set_close_guard(window.presenter.close)
+    window.set_close_guard(window.presenter._guarded(window.presenter.close))
     panel_presenter = window.presenter._panel_presenter
     panel_presenter.board.wake.set_notify(
-        attach_qt_owner_turn(window.presenter.commit_surfaces)
+        attach_qt_owner_turn(window.presenter._guarded(window.presenter.commit_surfaces))
     )
     window.presenter.timer = attach_qt(
-        window.presenter.beat,
+        window.presenter._guarded(window.presenter.beat),
         interval_ms=panel_presenter.board.base_interval_ms,
     )
     if path is not None:
-        window.presenter.open(str(path))
+        window.presenter._guarded(window.presenter.open)(str(path))
     return window
 
 

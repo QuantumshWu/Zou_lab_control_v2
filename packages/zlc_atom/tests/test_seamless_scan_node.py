@@ -55,8 +55,6 @@ from zlc_atom.nodes.scan import (
     SeamlessScanMeasurement,
     check_cancelled,
     hardware_scan_ports_for,
-    scan_ports_for,
-    slots_from_plan,
     split_outer_axes,
 )
 from zlc_atom.nodes.seamless_scan import SEAMLESS_SCAN_SCHEMA
@@ -97,10 +95,11 @@ class _FakeSequencer(ConfigValueHolder):
         self.program = program
         self._applied = AppliedState(program, kwargs.get("source"), tuple(kwargs.get("rows", ())), 1, 1, 0.0)
 
-    def fire(self, **kwargs) -> None:
+    def fire(self, **kwargs):
         self.fires += 1
         from dataclasses import replace
         self._applied = replace(self._applied, run_repeats=kwargs["run_repeats"], scan_repeats=kwargs.get("scan_repeats", 1))
+        return self._applied
 
     def applied(self):
         return self._applied
@@ -247,13 +246,10 @@ def _template_sequence(*scanned: str):
 
     raw = pulse_sequence("mot_field_template.json")
     names = {"dac:load:" + name for name in scanned} or {"dac:load:da_bias_x"}
-    ports = tuple(
-        port
-        for port in scan_ports_for(raw)
-        if port.port[len(PULSE_PARAM_FAMILY):] in names
-    )
-    assert len(ports) == len(names), (names, [p.port for p in ports])
-    return slots_from_plan(raw, ports)
+    assert names <= {binding.field_id for binding in raw.bindings}
+    return replace(raw, bindings=tuple(
+        replace(binding, scan=binding.field_id in names) for binding in raw.bindings
+    ))
 
 
 def _pulse_resource(name: str, sequence):
@@ -645,7 +641,7 @@ def test_a_partial_bracket_and_multiple_run_repeats_are_independent() -> None:
 def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
     """End to end on the virtual bench, against the world's own ground truth.
 
-    The temperature template probes the traps twice around a variable release
+    The release-recapture pulse probes the traps twice around a variable release
     (``t_off``) and the site camera is triggered by that same fired program,
     so its cycles arrive in played order -- the source family this node is
     for.  The second probe's brightness over the first IS the survival
@@ -677,7 +673,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         monitor = camera_node.monitor()
         frames_signal = camera_node.signal_key("frames")
 
-        sequence = pulse_sequence("temperature_template.json")
+        sequence = pulse_sequence("release_recapture.json")
         board = sequencer.describe()
         seeded = resolve_api_parameters(sequence)
         sequencer.load(
@@ -692,7 +688,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
                 break
             time.sleep(0.02)
         assert plane.freeze().value(frames_signal) is not None, (
-            "the temperature template never produced a two-frame cycle"
+            "the release-recapture pulse never produced a two-frame cycle"
         )
 
         # Microseconds, in the template's own unit: where a recapture curve
@@ -705,16 +701,12 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
             signal_plane=plane,
             source_signal=frames_signal,
             pulse_resource=_pulse_resource(
-                "temperature_template.json",
+                "release_recapture.json",
                 # The node's contract: the template CARRIES its scan slot.
-                slots_from_plan(
-                    sequence,
-                    tuple(
-                        port
-                        for port in scan_ports_for(sequence)
-                        if port.port == PULSE_PARAM_FAMILY + "duration:release"
-                    ),
-                ),
+                replace(sequence, bindings=tuple(
+                    replace(binding, scan=binding.field_id == "duration:release")
+                    for binding in sequence.bindings
+                )),
             ),
             plan=plan.to_tree(),
             shots_per_point=shots,

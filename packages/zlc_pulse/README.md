@@ -45,7 +45,9 @@ across Pulses; multiple fields can reference the same name.
 Config files contain only `format: zlc.pulse.config_values` and `values`:
 each name maps to a numeric `value` and `unit`. Unassigned or missing entries
 leave field defaults unchanged; supplied entries use the shared unit checks.
-Old numbered/source/export formats are not accepted or migrated.
+Runtime readers reject old numbered/source/export formats. The explicit offline
+`bin/migrate_pulses.bat` tool converts known old Pulse/Config files with original
+byte backups; it is not an automatic load-time compatibility path.
 
 The Config tab edits that independent values file. Only explicit Save/Save as
 writes it; unsaved rows never reach execution. Pulse Save stores the Pulse and
@@ -58,6 +60,11 @@ editing or saving. Local/Virtual/Remote share the same resolution owner.
 `compile_pulse` remains pure. API resolution, Config resolution and selecting
 an explicit Scan row use the common field writer. A field selected as an explicit
 Hold/Step scan point cannot be overwritten again by Config at Fire.
+
+`fire()` returns the already confirmed `AppliedState`: consumers do not need a
+second `snapshot()`/`applied()` query. Unchanged execution counts and scan rows
+are reused. A changed Config still goes through normal LOAD validation before
+FIRE; the remote client and server must run the same protocol implementation.
 
 The package has no measurement, GUI, or run-planning layer. `applied()` is only
 the device's saved passive echo of the last program, source, rows, and repeat

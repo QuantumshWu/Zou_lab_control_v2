@@ -27,7 +27,7 @@ BIAS = ScanPort("pulse:param:da_bias_x", "da_bias_x", "V", -1.0, 1.0, -0.5, 0.5)
 def _editor(manual_axes: bool = True):
     ensure_qt_app()
     editor = scan_plan_editor_factory(
-        device_ports=False, hardware_slots=True, manual_axes=manual_axes
+        device_ports=False, manual_axes=manual_axes
     )
     # The projection is what a node hands its editor; only the ports and the
     # authored plan matter here, so the rest of it stays out of the way.
@@ -147,26 +147,19 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         editor.deleteLater()
 
 
-def test_host_only_scan_plans_need_no_dummy_board_axis_in_either_editor() -> None:
-    """Both forms describe a device-only plan using its real coordinates."""
-
+def test_host_only_scan_plans_need_no_dummy_board_axis() -> None:
     ensure_qt_app()
     device = ScanPort("device:rf:frequency", "rf.frequency", "Hz", 1e5, 5e6)
-    stepped = scan_plan_editor_factory(device_ports=True, hardware_slots=False)
-    seamless = scan_plan_editor_factory(
-        device_ports=True, hardware_slots=True, manual_axes=True
-    )
+    editor = scan_plan_editor_factory(device_ports=True, manual_axes=True)
     try:
         plan = json.dumps(ScanPlan((ScanAxis(device.port, (1e6, 2e6)),)).to_tree())
-        for editor in (stepped, seamless):
-            editor._ports = (device,)
-            editor._reconcile_rows(plan)
-            editor._refresh_summary()
-            assert "2 device settings are applied" in editor.summary.text()
-            assert len(editor._current_plan().axes) == 1
+        editor._ports = (device,)
+        editor._reconcile_rows(plan)
+        editor._refresh_summary()
+        assert "2 device settings are applied" in editor.summary.text()
+        assert len(editor._current_plan().axes) == 1
     finally:
-        stepped.deleteLater()
-        seamless.deleteLater()
+        editor.deleteLater()
 
 
 def test_a_node_that_cannot_stop_for_a_hand_never_offers_the_button() -> None:
@@ -422,7 +415,7 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     app = ensure_qt_app(["scan-editor-values"])
     sequence = _bound_sequence()
     sequence = replace(sequence, periods=(replace(sequence.periods[0], name="MOT"), *sequence.periods[1:]))
-    editor = scan_plan_editor_factory(device_ports=False, hardware_slots=False)
+    editor = scan_plan_editor_factory(device_ports=False)
     editor.show()
     editor.update_projection(_projection(sequence))
     app.processEvents()
@@ -680,7 +673,7 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     from PyQt5 import QtCore
 
     app = ensure_qt_app(["scan-editor-rescope"])
-    editor = scan_plan_editor_factory(device_ports=False, hardware_slots=False)
+    editor = scan_plan_editor_factory(device_ports=False)
     editor.show()
     drafts: list[dict] = []
     editor.draft_changed.connect(drafts.append)

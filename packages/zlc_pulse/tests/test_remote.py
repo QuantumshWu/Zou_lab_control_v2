@@ -260,7 +260,7 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
             server.dispatch(
                 "load",
                 {"program": program, "source": source, "authored_source": source,
-                 "reuse_authored_source": False, "rows": []},
+                 "reuse_authored_source": False, "rows": [], "reuse_rows": False},
                 client="A",
                 connection=a_server,
             )
@@ -369,17 +369,18 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             ):
                 path.write_text(json.dumps(pulse_codec.config_values_to_tree(values)), encoding="utf-8")
                 calls.clear()
-                client.fire(run_repeats=2, scan_repeats=3)
+                state = client.fire(run_repeats=2, scan_repeats=3)
                 assert calls == (["load", "fire"] if reload else ["fire"])
                 if reload:
                     assert load_requests[-1]["reuse_authored_source"] is True
                     assert load_requests[-1]["authored_source"] is None
+                    assert load_requests[-1]["reuse_rows"] is True
+                    assert load_requests[-1]["rows"] is None
                 assert streamer.applied().authored_source is resident_author
                 report = client.wait_done(1.0)
                 assert report is not None
                 assert report.status == 4 and report.command_id > 0
                 assert report.cursor == 2
-                state = client.applied()
                 assert state.authored_source == source
                 assert state.source.period_by_id["p1"].duration == duration
                 assert state.program.slot_tick_scales == (2,)
@@ -392,14 +393,14 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             client.open()
             path.write_text(json.dumps(pulse_codec.config_values_to_tree({"p1_time": (160, "ns")})), encoding="utf-8")
             calls.clear()
-            client.fire(run_repeats=2, scan_repeats=3)
+            state = client.fire(run_repeats=2, scan_repeats=3)
             assert calls == ["applied", "describe", "load", "fire"]
             assert client.wait_done(1.0) is not None
-            state = client.applied()
             assert state.authored_source == source
             assert state.source.period_by_id["p1"].duration == 160
             calls.clear()
-            client.fire(run_repeats=2, scan_repeats=3)
+            again = client.fire(run_repeats=2, scan_repeats=3)
+            assert again is state
             assert calls == ["fire"]
             assert client.wait_done(1.0) is not None
             path.write_text("{", encoding="utf-8")

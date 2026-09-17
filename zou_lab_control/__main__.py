@@ -241,13 +241,10 @@ def evidence(argv: list[str] | None = None) -> int:
                     repo / "packages/zlc_workbench/tests/test_guard_b_task_console_interaction.py",
                     repo / "packages/zlc_workbench/tests/test_guard_c_save_semantics.py",
                     repo / "packages/zlc_atom/tests/test_real_runtime_integration.py",
-                    repo / "packages/zlc_atom/tests/test_temperature_chain.py",
                     str(repo / "packages/zlc_atom/tests/test_slm_feedback_task.py")
                     + "::test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate",
                     str(repo / "packages/zlc_atom/tests/test_seamless_scan_node.py")
                     + "::test_the_board_advanced_scan_recovers_the_planted_trap_loss",
-                    str(repo / "packages/zlc_atom/tests/test_stepped_scan_node.py")
-                    + "::test_scanning_the_bias_dacs_finds_the_planted_mot_optimum",
                 ),
             ),
         )

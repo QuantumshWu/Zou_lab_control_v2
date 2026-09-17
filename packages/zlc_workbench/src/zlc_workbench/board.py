@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Any
+from weakref import ref
 
 from zlc_runtime import (
     BoardScheduler,
@@ -288,25 +289,56 @@ class LiveBoard:
         return True
 
 
-def _guarded_slot(turn: Callable[[], None], what: str) -> Callable[[], None]:
+def _guarded_slot(
+    turn: Callable[..., Any],
+    what: str,
+    *,
+    on_error: Callable[[Exception], None] | None = None,
+) -> Callable[..., Any]:
     """Wrap a callable that is about to become a Qt slot.
 
     ONE OWNER for the boundary.  PyQt calls qFatal() on anything that leaves
     a slot, and the process dies where it stands -- taking a running
-    experiment, every mounted panel and the traceback with it.  There are
-    two hops into the GUI thread in this project, the timer and the
-    completion wake, and the guard was written on one of them.
+    experiment, every mounted panel and the traceback with it. The timer,
+    completion wake and user signals all cross this same boundary.
 
     Logged, not swallowed: the next tick still runs, and the instrument
     outlives the defect.  Callers that drive these directly (tests, headless
     benches) are untouched and still raise.
     """
 
-    def guarded() -> None:
+    # Qt weakly owns bound methods. A wrapper must not keep their presenter
+    # (and its workers) alive after the window has gone away.
+    owner = getattr(turn, "__self__", None)
+    method_name = getattr(turn, "__name__", "")
+    owner_ref = ref(owner) if owner is not None else None
+    callback = None if owner_ref is not None else turn
+    error_owner = getattr(on_error, "__self__", None)
+    error_name = getattr(on_error, "__name__", "")
+    error_ref = ref(error_owner) if error_owner is not None else None
+    error_callback = None if error_ref is not None else on_error
+
+    def guarded(*args, **kwargs):
         try:
-            turn()
-        except Exception:  # noqa: BLE001 -- the boundary IS total
+            target = callback
+            if owner_ref is not None:
+                owner = owner_ref()
+                if owner is None:
+                    return None
+                target = getattr(owner, method_name)
+            return target(*args, **kwargs)
+        except Exception as error:  # noqa: BLE001 -- the boundary IS total
             _LOG.exception("Qt-driven %s failed", what)
+            try:
+                report = error_callback
+                if error_ref is not None:
+                    owner = error_ref()
+                    report = getattr(owner, error_name) if owner is not None else None
+                if report is not None:
+                    report(error)
+            except Exception:
+                _LOG.exception("Qt-driven %s error reporting failed", what)
+            return None
 
     return guarded
 

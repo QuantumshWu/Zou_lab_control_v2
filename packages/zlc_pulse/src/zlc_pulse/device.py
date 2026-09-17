@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from copy import copy
 from collections.abc import Sequence
 import math
 from numbers import Integral
@@ -175,6 +176,19 @@ class AppliedState:
         object.__setattr__(self, "run_repeats", run_repeats)
         object.__setattr__(self, "scan_repeats", scan_repeats)
         object.__setattr__(self, "loaded_at", loaded_at)
+
+    def with_repeats(self, run_repeats: int, scan_repeats: int) -> AppliedState:
+        """Update execution counts without revisiting the validated program/table."""
+        run_repeats = _repeat_count(run_repeats, "run_repeats")
+        scan_repeats = _repeat_count(scan_repeats, "scan_repeats")
+        if not self.rows and scan_repeats != 1:
+            raise ValueError("scan_repeats must be 1 when no scan table is loaded")
+        if (self.run_repeats, self.scan_repeats) == (run_repeats, scan_repeats):
+            return self
+        updated = copy(self)
+        object.__setattr__(updated, "run_repeats", run_repeats)
+        object.__setattr__(updated, "scan_repeats", scan_repeats)
+        return updated
 
 
 @dataclass(frozen=True)
@@ -558,7 +572,7 @@ class PulseStreamer(ConfigValueHolder):
             )
             self._applied_digest = prog.digest
 
-    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
         with self._lock:
             self._refresh_config_file()
             applied = self._applied
@@ -571,9 +585,9 @@ class PulseStreamer(ConfigValueHolder):
                         program, source=source, authored_source=applied.authored_source,
                         rows=applied.rows,
                     )
-            self._fire_program(run_repeats=run_repeats, scan_repeats=scan_repeats)
+            return self._fire_program(run_repeats=run_repeats, scan_repeats=scan_repeats)
 
-    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
         run_repeats = _repeat_count(run_repeats, "run_repeats")
         scan_repeats = _repeat_count(scan_repeats, "scan_repeats")
         with self._lock:
@@ -602,25 +616,20 @@ class PulseStreamer(ConfigValueHolder):
             # tick after starting at tick 1.  Refuse an impossible seamless run
             # before touching the mailbox instead of letting RTL underflow or
             # consume the previous point's cache.
-            table = self._scan_rows or ((),)
-            if run_repeats == 0:
-                seam_rows = table[:1]
-            elif run_repeats > 1 or scan_repeats != 1:
-                seam_rows = table
-            else:
-                seam_rows = table[:-1]
             if self._validated_execution != (run_repeats, scan_repeats):
+                table = self._scan_rows or ((),)
+                if run_repeats == 0:
+                    seam_rows = table[:1]
+                elif run_repeats > 1 or scan_repeats != 1:
+                    seam_rows = table
+                else:
+                    seam_rows = table[:-1]
                 for row in seam_rows:
                     self._validate_slot_row(self._program, row, require_outer_seam=True)
             self._validated_execution = (run_repeats, scan_repeats)
             self._run_repeats = run_repeats
             self._scan_repeats = scan_repeats
             assert self._applied is not None
-            self._applied = replace(
-                self._applied,
-                run_repeats=run_repeats,
-                scan_repeats=scan_repeats,
-            )
             # A resident program survives DONE/SAFE. Only streamed banks which
             # were overwritten during the last run need their first rows back.
             arming = self._scan_bank_arming()
@@ -646,11 +655,13 @@ class PulseStreamer(ConfigValueHolder):
             self._fire_acknowledged = time.monotonic()
             if not status & STATUS_RUNNING or status & STATUS_ERROR:
                 raise RuntimeError(f"FIRE was not accepted (STATUS=0x{status:08X})")
+            self._applied = self._applied.with_repeats(run_repeats, scan_repeats)
             self._fire_command_id = self._command_id
             self._firing = True
             self._terminal_status = STATUS_RUNNING
             self._worker = threading.Thread(target=self._observe, name="zlc-pulse-observer", daemon=True)
             self._worker.start()
+            return self._applied
 
     def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
         with self._lock:

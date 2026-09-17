@@ -2528,14 +2528,11 @@ class SlmFeedbackTask:
                 current=0,
                 total=requested,
             )
-            self.sequencer.fire(run_repeats=requested, scan_repeats=1)
-            execution_state = self.sequencer.snapshot()
-            if not isinstance(execution_state, Mapping):
-                raise TypeError("sequencer snapshot must be a mapping")
+            execution = self.sequencer.fire(run_repeats=requested, scan_repeats=1)
+            if self._program_digest is None:
+                self._program_digest = str(execution.program.digest)
             self._actual_device_snapshots["sequencer"] = (
-                sequencer_archive_snapshot(
-                    state=execution_state, applied=self.sequencer.applied(),
-                )
+                sequencer_archive_snapshot(applied=execution)
             )
 
             def commit_camera_cycle(cycle: object, index: int) -> None:
@@ -3655,7 +3652,6 @@ class SlmFeedbackTask:
                 api_values={},
             )
             arm_sequencer(self.sequencer, pulse)
-            self._program_digest = str(self.sequencer.applied().program.digest)
             _check_cancelled(context)
             current_target = self.target
             # The Target on the SLM is the control Target with this
@@ -3670,70 +3666,6 @@ class SlmFeedbackTask:
             solver_metadata: Mapping[str, object] | None = None
             previous_weights = np.full(self._site_count, np.nan, dtype=float)
             previous_observed = np.full(self._site_count, np.nan, dtype=float)
-            prior_measurement = self._prior_pattern_metadata.get("measurement")
-            prior_probe_factors = self._prior_pattern_metadata.get("probe_factors")
-            # A prior run's double history is this plant's only if the board
-            # plays the same program, and the compiled program's own digest
-            # is what says so.  The Pulse file's path said nothing: the same
-            # file is edited in place, and a renamed period would have made
-            # an identical program look foreign.
-            comparable_history = bool(
-                self._prior_pattern_metadata.get("feedback_controller")
-                == self.observable.controller
-                and self._prior_pattern_metadata.get("feedback_mode") == self.feedback_mode
-                and self._prior_pattern_metadata.get("program_digest") == self._program_digest
-                and type(self._prior_pattern_metadata.get("exposure_seconds"))
-                in (int, float)
-                and float(self._prior_pattern_metadata["exposure_seconds"])
-                == self.exposure_seconds
-                and isinstance(prior_probe_factors, (tuple, list))
-                and tuple(float(value) for value in prior_probe_factors)
-                == self.probe_factors
-                and float(self._prior_pattern_metadata.get("feedback_gain", -1.0))
-                == self.feedback_gain
-                and float(
-                    self._prior_pattern_metadata.get("maximum_weight_change", -1.0)
-                )
-                == self.maximum_weight_change
-                and isinstance(prior_measurement, Mapping)
-            )
-            if comparable_history:
-                prior = prior_measurement
-                assert isinstance(prior, Mapping)
-                def restored(name: str, dtype: object) -> np.ndarray | None:
-                    try:
-                        return np.asarray(prior[name], dtype=dtype).reshape(
-                            self._site_count
-                        )
-                    except (KeyError, TypeError, ValueError):
-                        return None
-
-                restored_control = restored(
-                    "previous_double_control_weight", float
-                )
-                if restored_control is not None:
-                    previous_weights[:] = restored_control
-                restored_observed = restored(
-                    f"previous_double_{self.observable.history_keys[0]}", float
-                )
-                if restored_observed is not None:
-                    previous_observed[:] = restored_observed
-
-                prior_weights = restored("control_weight", float)
-                prior_observed = restored(self.observable.history_keys[0], float)
-                prior_fit_valid = restored("fit_valid", bool)
-                if (
-                    prior_weights is not None
-                    and prior_observed is not None
-                    and prior_fit_valid is not None
-                ):
-                    usable = (
-                        prior_fit_valid
-                        & np.isfinite(prior_weights)
-                        & np.isfinite(prior_observed)
-                    )
-                    previous_weights[usable] = prior_weights[usable]
-                    previous_observed[usable] = prior_observed[usable]
 
             candidate_number = 0
             candidate_kind = "baseline"
@@ -3842,6 +3774,73 @@ class SlmFeedbackTask:
                     missing_sites,
                     mean_frame,
                 ) = self._measure(context, iteration)
+                if iteration == 0:
+                    # Fire may refresh Config after LOAD. Restore prior
+                    # evidence only once its actual first execution is known.
+                    prior_measurement = self._prior_pattern_metadata.get("measurement")
+                    prior_probe_factors = self._prior_pattern_metadata.get("probe_factors")
+                    # A prior run's double history is this plant's only if the board
+                    # plays the same program, and the compiled program's own digest
+                    # is what says so.  The Pulse file's path said nothing: the same
+                    # file is edited in place, and a renamed period would have made
+                    # an identical program look foreign.
+                    comparable_history = bool(
+                        self._prior_pattern_metadata.get("feedback_controller")
+                        == self.observable.controller
+                        and self._prior_pattern_metadata.get("feedback_mode") == self.feedback_mode
+                        and self._prior_pattern_metadata.get("program_digest") == self._program_digest
+                        and type(self._prior_pattern_metadata.get("exposure_seconds"))
+                        in (int, float)
+                        and float(self._prior_pattern_metadata["exposure_seconds"])
+                        == self.exposure_seconds
+                        and isinstance(prior_probe_factors, (tuple, list))
+                        and tuple(float(value) for value in prior_probe_factors)
+                        == self.probe_factors
+                        and float(self._prior_pattern_metadata.get("feedback_gain", -1.0))
+                        == self.feedback_gain
+                        and float(
+                            self._prior_pattern_metadata.get("maximum_weight_change", -1.0)
+                        )
+                        == self.maximum_weight_change
+                        and isinstance(prior_measurement, Mapping)
+                    )
+                    if comparable_history:
+                        prior = prior_measurement
+                        assert isinstance(prior, Mapping)
+                        def restored(name: str, dtype: object) -> np.ndarray | None:
+                            try:
+                                return np.asarray(prior[name], dtype=dtype).reshape(
+                                    self._site_count
+                                )
+                            except (KeyError, TypeError, ValueError):
+                                return None
+
+                        restored_control = restored(
+                            "previous_double_control_weight", float
+                        )
+                        if restored_control is not None:
+                            previous_weights[:] = restored_control
+                        restored_observed = restored(
+                            f"previous_double_{self.observable.history_keys[0]}", float
+                        )
+                        if restored_observed is not None:
+                            previous_observed[:] = restored_observed
+
+                        prior_weights = restored("control_weight", float)
+                        prior_observed = restored(self.observable.history_keys[0], float)
+                        prior_fit_valid = restored("fit_valid", bool)
+                        if (
+                            prior_weights is not None
+                            and prior_observed is not None
+                            and prior_fit_valid is not None
+                        ):
+                            usable = (
+                                prior_fit_valid
+                                & np.isfinite(prior_weights)
+                                & np.isfinite(prior_observed)
+                            )
+                            previous_weights[usable] = prior_weights[usable]
+                            previous_observed[usable] = prior_observed[usable]
                 if initial_mean_frame is None:
                     initial_mean_frame = np.array(mean_frame, copy=True)
                 fitted = _fit_contrasts(samples)

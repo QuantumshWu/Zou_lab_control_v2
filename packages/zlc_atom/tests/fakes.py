@@ -114,15 +114,13 @@ class ScriptedScanBench:
 
     * every frame is a constant image whose value is that publication's
       index, so a kept shot can be named in an assertion;
-    * one ``fire`` produces exactly ``publications_per_fire`` of them.  The
-      stepped test may pace those publications by the finite Run-repeat count;
-      the seamless test publishes its whole hardware table at once.
+    * one ``fire`` produces exactly ``publications_per_fire`` of them,
+      matching the selected hardware-table segment.
 
     Everything else is the production path: the real virtual board compiles,
     loads, writes its scan table and fires; the real camera adapter, the real
     ``camera_measurement`` monitor and the real signal plane carry the frames.
-    The board's stops and fires are timestamped, because "the pulse was
-    stopped for the authored settle time" is a fact about this surface.
+    The board's stops and fires are timestamped to check execution boundaries.
     """
 
     def __init__(
@@ -247,10 +245,10 @@ class ScriptedScanBench:
             self.scan_tables.append(np.asarray(normalized))
         self._sequencer.load(prog, source=source, rows=normalized)
 
-    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1):
         self.events.append(("fire", time.monotonic()))
         self.fired_repeats.append((int(run_repeats), int(scan_repeats)))
-        self._sequencer.fire(
+        execution = self._sequencer.fire(
             run_repeats=run_repeats,
             scan_repeats=scan_repeats,
         )
@@ -258,7 +256,7 @@ class ScriptedScanBench:
             for _ in range(self.publications_per_fire):
                 self.publish(self._next_value)
                 self._next_value += 1
-            return
+            return execution
         program = self._loaded_program
         if run_repeats == 0 or scan_repeats == 0:
             raise AssertionError("scripted scan tests require a finite fire")
@@ -288,6 +286,7 @@ class ScriptedScanBench:
 
         self._publisher = threading.Thread(target=publish_cycles, daemon=True)
         self._publisher.start()
+        return execution
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
         report = self._sequencer.wait_done(timeout)

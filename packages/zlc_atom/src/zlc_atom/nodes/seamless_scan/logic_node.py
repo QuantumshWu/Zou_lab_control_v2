@@ -2,14 +2,11 @@
 
 One load, one fire, every point back to back.  What the operator authors is
 the template, the plan, how many whole sweeps and how many in-place shots per
-point, and how long the pulse stays stopped before the table starts.  There
-is nothing to say about how a fresh value is taken: the fired cycle drives
+point. There is nothing to say about how a fresh value is taken: the fired cycle drives
 the source, so its publications ARE the played rows, in order.
 
-The loop this node offers is ``scan.SeamlessScanMeasurement``: it moved into
-the library the day a second consumer appeared (the temperature Task), and
-what stays here is what only this node knows -- its form, and that the frames
-it takes are published as the scan itself.
+The loop this node offers is ``scan.SeamlessScanMeasurement``; this module
+declares its form and published output.
 """
 
 from __future__ import annotations
@@ -171,7 +168,7 @@ def _editor_factory(parent=None):
     # because this node can stop between fires -- for a hand on a
     # thumbscrew or a tune() call on an installed device alike.
     return scan_plan_editor_factory(
-        parent, device_ports=True, hardware_slots=True, manual_axes=True
+        parent, device_ports=True, manual_axes=True
     )
 
 

@@ -124,12 +124,12 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
             write(entries)
             before = counts.copy()
             previous_source = device.applied().source
-            device.fire(run_repeats=repeats)
+            state = device.fire(run_repeats=repeats)
             assert device.wait_done(1.0) is not None
             assert counts == {"compile": before["compile"] + recompiles,
                               "load": before["load"] + recompiles,
                               "fire": before["fire"] + 1}
-            state = device.applied()
+            assert state is device.applied()
             if not recompiles:
                 assert state.source is previous_source
             assert state.authored_source is source

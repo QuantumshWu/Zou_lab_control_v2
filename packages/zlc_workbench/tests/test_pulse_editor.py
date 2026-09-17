@@ -868,6 +868,7 @@ def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
 
 
 def test_the_preview_is_built_from_the_periods_that_will_be_played(presenter, sequence) -> None:
+    assert presenter._effective_sequence(sequence) is sequence
     data = presenter.view.preview_view.content.data
     assert data is not None, presenter.view.preview_view.placeholder
 
@@ -4265,6 +4266,10 @@ def test_editor_config_draft_is_independent_and_only_saved_values_execute(
     presenter.view.save_answer = str(saved)
     parameter = _bind_one_config_parameter(presenter, sequence)
     period = parameter.field_ref.period_id
+    default = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
+    presenter.edit_config_entries((("shared_time", str(default), parameter.unit),))
+    assert presenter.save_config_values()
+    assert presenter._effective_sequence(presenter.sequence) is presenter.sequence
     # A scan-capable field still consumes Config when no Scan table is active.
     presenter.set_binding("duration", period, None, True, "config")
     value = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)

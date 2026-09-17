@@ -161,7 +161,7 @@ class _RecordingSequencer:
     def config_source(self) -> str:
         return self.sequencer.config_source
 
-    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1):
         """Fire, and nothing else.
 
         This used to wait for the shot as well, which is what the code under
@@ -173,7 +173,7 @@ class _RecordingSequencer:
         self.events.append(("fire", (run_repeats, scan_repeats)))
         if self.fail_on_fire:
             raise RuntimeError("recording sequencer fire failure")
-        self.sequencer.fire(  # type: ignore[attr-defined]
+        return self.sequencer.fire(  # type: ignore[attr-defined]
             run_repeats=run_repeats,
             scan_repeats=scan_repeats,
         )
@@ -252,12 +252,8 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     another node SAVED -- occupancy reads a calibration artifact through the
     codec calibration published it under, and imports none of its analysis.
 
-    A TASK is the one thing on this bench that owns a whole experiment: the
-    temperature Task holds the camera and the sequencer, drives the camera's
-    own acquisition, judges every cycle with the occupancy processor, and adds
-    only the pairing that is its own.  Those edges are the alternative to
-    three copies of somebody else's science, so they are allowed BY KIND and
-    still listed one by one -- a new one has to be argued for.
+    Tasks may compose existing scientific capabilities. Those edges remain
+    explicit so a task reuses each owner rather than copying its science.
     """
 
     nodes_root = ROOT / "src" / "zlc_atom" / "nodes"
@@ -289,9 +285,6 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         ("occupancy", "calibration"),
         ("slm_feedback", "calibration"),
         ("slm_feedback", "camera_measurement"),
-        ("temperature", "calibration"),
-        ("temperature", "camera_measurement"),
-        ("temperature", "occupancy"),
     }
     kinds = {
         path.parent.name: _descriptor_kind(path)
@@ -309,8 +302,6 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     assert {edge for edge in edges if edge[1] not in node_owners} == {
         ("seamless_scan", "scan"),
         ("slm_feedback", "scan"),
-        ("stepped_scan", "scan"),
-        ("temperature", "scan"),
     }
 
 

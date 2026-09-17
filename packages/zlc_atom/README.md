@@ -318,22 +318,7 @@ The separate processor
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still
 seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
 (`0-1`, `0-2`, `1-2` for three frames), each pair's value is the later verdict
-and its validity is that pair's own denominator. The concrete Temperature Task
-keeps its own pairing: it reuses the occupied values and their expanded
-validity for its authored before/trap-off/after cycles, and only a valid,
-initially occupied pair is a survival trial. It publishes two datasets, the
-stepped scan's own output and the binary per-site `survival`: each landed
-cycle is one row on a `temperature.t_off` scan Point axis (the release time
-it was measured at), the sites are Cell-data, and the scan and run repeats
-form the repeat domain, so the default plots treat it as any other scan
-dataset. Its
-declared preview and artifact both pool that same dataset and its validity
-into survival rate against trap-off time; there is no second rate history. It
-does not fit a temperature or lifetime and does not derive a 1/e crossing. Its
-run retains one final JSON, summary and a typed survival-rate Figure NPZ with
-PNG preview.
-
-The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
+and its validity is that pair's own denominator. The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera
 sites at its own composition boundary; the full roster, including predicted
@@ -466,9 +451,9 @@ The loop defaults to 100 shots and 12 updates. No max/min ratio threshold
 ends a run early; the simultaneous interval is recorded as uncertainty but
 never triggers an extra acquisition.
 
-The supported product path discovers nine logic descriptors: `calibration`,
+The supported product path discovers eight logic descriptors: `calibration`,
 `camera_measurement`, `derive`, `frame_survival`, `occupancy`,
-`seamless_scan`, `slm_feedback`, `stepped_scan`, and `temperature`. They are
+`seamless_scan`, `slm_feedback`, and `waveform_measurement`. They are
 hosted through the real runtime plane: virtual Calibration writes a plain
 workspace JSON, Camera Measurement publishes finite or `Repeat = 0` infinite
 frames, Occupancy consumes the frames key plus JSON path, and the processors

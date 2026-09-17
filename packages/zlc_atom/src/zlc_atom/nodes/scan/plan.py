@@ -8,17 +8,13 @@ vocabulary for "which knob" is a PORT, projected from whatever owns the knob;
 nothing here invents one, so a plan can never name a parameter its pulse does
 not declare.
 
-The port family says WHO can advance the knob, and that is what decides which
-node runs the plan:
+The port family decides whether the board or host advances each axis:
 
 * ``pulse:param:<field_id>`` -- a stable Pulse field reference. Seamless uses
-  fields marked Scan, stepped uses fields with API source. The board advances
-  it from its own scan table (``seamless_scan``),
-  and the host can resolve and reload the template per point
-  (``stepped_scan``).
+  fields marked Scan. The board advances the table.
 * ``device:<key>:<field>`` -- a runtime knob on an installed device.  Only the
   host can move it, with a ``tune(field, value)`` call before the point fires,
-  in either scan node.
+  between board-table segments.
 """
 
 from __future__ import annotations
@@ -37,7 +33,6 @@ from zlc_data.units import DEFAULT_UNITS, format_quantity
 from zlc_pulse import (
     apply_api_values,
     PulseSequence,
-    api_parameter_columns_for,
     scan_columns_for,
     normalize_binding_values,
 )
@@ -219,19 +214,6 @@ def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
     return tuple(ports)
 
 
-def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
-    """Every API-parameter port this pulse offers -- the STEPPED vocabulary.
-
-    A stepped scan re-resolves the template per point through its API
-    surface, so what it can vary is what the pulse exports as an API
-    parameter.  The hard limits come from the same projection the pulse
-    editor's scan page uses, so a plan cannot promise a value the board
-    would refuse.
-    """
-
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
-    return _ports_from_columns(api_parameter_columns_for(sequence))
 
 
 def hardware_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
@@ -471,50 +453,7 @@ def _template_sequence(path: str | Path) -> PulseSequence:
     return sequence
 
 
-def slots_from_plan(
-    sequence: PulseSequence,
-    ports: Sequence[ScanPort],
-) -> PulseSequence:
-    """Enable hardware scanning for the API fields selected by this plan.
 
-    Scan capability and value source are independent: enabling a column does
-    not delete its API declaration or the defaults of other fields.
-    """
-
-    scanned = {port.port[len(PULSE_PARAM_FAMILY):] for port in ports}
-    declared = {binding.field_id for binding in sequence.api_bindings}
-    if scanned - declared:
-        raise ValueError(f"pulse offers no API fields {tuple(sorted(scanned - declared))}")
-    return replace(
-        sequence,
-        bindings=tuple(
-            replace(binding, scan=binding.field_id in scanned)
-            for binding in sequence.bindings
-        ),
-    )
-
-
-def load_stepped_template(path: str | Path) -> PulseSequence:
-    """Require API fields; an independent Scan flag does not change this API."""
-
-    sequence = _template_sequence(path)
-    if not sequence.api_bindings:
-        raise ValueError(
-            "a stepped scan template declares API parameters; this pulse "
-            "declares none, so it offers nothing to scan"
-        )
-    return sequence
-
-
-#: The stepped/API-driven template, selected from the workspace's ``pulses``.
-STEPPED_PULSE_RESOURCE = WorkspaceResourceSpec(
-    "pulse_template",
-    SCAN_PULSE_CONTRACT,
-    "pulses",
-    (".json",),
-    load_stepped_template,
-    argument_name="pulse_resource",
-)
 
 #: A seamless plan may carry only host axes and play an ordinary fixed Pulse;
 #: any declared board slots still bind to the plan in the scan owner.
@@ -726,17 +665,13 @@ __all__ = [
     "PULSE_PARAM_FAMILY",
     "SCAN_PULSE_CONTRACT",
     "SEAMLESS_PULSE_RESOURCE",
-    "STEPPED_PULSE_RESOURCE",
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
     "bind_plan",
     "hardware_scan_ports_for",
-    "load_stepped_template",
-    "slots_from_plan",
     "plan_from_authored",
     "plan_input_rows",
     "parse_scan_values",
-    "scan_ports_for",
     "scan_ports_for_devices",
 ]

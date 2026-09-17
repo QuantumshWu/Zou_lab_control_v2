@@ -1,14 +1,9 @@
-"""What both scan nodes stand on: the plan, and the ports a bench offers it.
-
-Nothing here knows which node runs the plan.  A plan is a document, a port is
-a projection of a knob somebody already owns, and binding is where the two
-meet -- before any device is touched, and identically for the board-advanced
-and the host-advanced engine.
-"""
+"""The scan plan and the physical ports a bench offers it."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -24,9 +19,8 @@ from zlc_atom.nodes.scan import (
     ScanAxis,
     ScanPlan,
     bind_plan,
-    load_stepped_template,
     scan_dataset_schema,
-    scan_ports_for,
+    hardware_scan_ports_for,
     scan_ports_for_devices,
 )
 from zlc_atom.nodes.scan.plan import plan_from_authored, plan_input_rows, scan_axis_ids
@@ -41,7 +35,8 @@ BIAS_PORTS = tuple(
 
 
 def _template_sequence():
-    return pulse_sequence("mot_field_template.json")
+    sequence = pulse_sequence("mot_field_template.json")
+    return replace(sequence, bindings=tuple(replace(b, scan=True) for b in sequence.bindings))
 
 
 def test_the_mot_template_offers_the_three_bias_ports() -> None:
@@ -52,7 +47,7 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
 
     sequence = _template_sequence()
     sequence = replace(sequence, periods=(replace(sequence.periods[0], name="MOT"), *sequence.periods[1:]))
-    ports = scan_ports_for(sequence)
+    ports = hardware_scan_ports_for(sequence)
     assert tuple(port.port for port in ports) == BIAS_PORTS
     assert tuple(port.label for port in ports) == tuple(
         field_label(sequence, parameter.field_ref) for parameter in sequence.api_bindings
@@ -69,7 +64,6 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
 def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     tmp_path,
 ) -> None:
-    from zlc_atom.nodes.scan import slots_from_plan
     from zlc_pulse.codec import sequence_to_tree
 
     tree = json.loads(pulse_document("mot_field_template.json").decode("utf-8"))
@@ -83,12 +77,11 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     path = tmp_path / "scan.json"
     path.write_text(json.dumps(tree), encoding="utf-8")
 
-    assert load_stepped_template(path).name == tree["name"]
     resource = SEAMLESS_NODE.workspace_resources[0]
     ordinary = resource.resolve(path).value
     assert ordinary.name == tree["name"] and ordinary.scan_bindings == ()
     assert ordinary.api_bindings, "host-only scans keep the fixed Pulse's authored values"
-    slotted = slots_from_plan(ordinary, scan_ports_for(ordinary)[:1])
+    slotted = replace(ordinary, bindings=(replace(ordinary.bindings[0], scan=True), *ordinary.bindings[1:]))
     slotted_tree = sequence_to_tree(slotted)
     path.write_text(json.dumps(slotted_tree), encoding="utf-8")
     resolved = resource.resolve(path).value
@@ -122,7 +115,7 @@ def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
     from zlc_atom.nodes.scan.plan import ScanPort
     from zlc_data.units import DEFAULT_UNITS
 
-    ports = scan_ports_for(_template_sequence())
+    ports = hardware_scan_ports_for(_template_sequence())
 
     with pytest.raises(ValueError, match="offers no scan port named"):
         bind_plan(ScanPlan((ScanAxis("pulse:param:nonsense", (1.0,)),)), ports)

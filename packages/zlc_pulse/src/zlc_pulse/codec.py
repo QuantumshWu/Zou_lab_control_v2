@@ -400,6 +400,17 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     return sequence
 
 
+def _config_value_entry(key: object, number: object, unit: object) -> tuple[float, str]:
+    config_parameter_key(key)
+    if isinstance(number, bool) or not isinstance(number, Real):
+        raise TypeError(f"Config value {key!r} must be a number")
+    if not math.isfinite(float(number)):
+        raise ValueError(f"Config value {key!r} must be finite")
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError(f"Config value {key!r} must carry a unit")
+    return float(number), unit
+
+
 def config_values_to_tree(
     values: Mapping[str, tuple[int | float, str]],
 ) -> dict[str, Any]:
@@ -409,14 +420,8 @@ def config_values_to_tree(
         raise TypeError("Config values must be a mapping")
     entries = {}
     for key, (number, unit) in values.items():
-        config_parameter_key(key)
-        if isinstance(number, bool) or not isinstance(number, Real):
-            raise TypeError(f"Config value {key!r} must be a number")
-        if not math.isfinite(float(number)):
-            raise ValueError(f"Config value {key!r} must be finite")
-        if not isinstance(unit, str) or not unit.strip():
-            raise ValueError(f"Config value {key!r} must carry a unit")
-        entries[key] = {"value": _plain_number(float(number)), "unit": unit}
+        number, unit = _config_value_entry(key, number, unit)
+        entries[key] = {"value": _plain_number(number), "unit": unit}
     return {"format": CONFIG_VALUES_FORMAT, "values": entries}
 
 
@@ -432,11 +437,9 @@ def config_values_from_tree(
         raise TypeError("Config values must be an object")
     entries = {}
     for key, item in tree["values"].items():
-        config_parameter_key(key)
         entry = _object(item, ("value", "unit"), f"Config value {key!r}")
-        entries[key] = (entry["value"], entry["unit"])
-    validated = config_values_to_tree(entries)
-    return {key: (float(item["value"]), item["unit"]) for key, item in validated["values"].items()}
+        entries[key] = _config_value_entry(key, entry["value"], entry["unit"])
+    return entries
 
 
 def read_config_values(path: str | Path) -> dict[str, tuple[float, str]]:

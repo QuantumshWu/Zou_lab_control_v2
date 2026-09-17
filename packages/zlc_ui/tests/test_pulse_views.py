@@ -946,11 +946,14 @@ handle.set_config_page(replace(record, entries=edits[-1]))
 assert config.values_model.index(0, 1).data() == "not yet a number"
 assert config.bindings_model.index(0, 3).data() == "100"
 assert config.bindings_model.index(1, 3).data() == "100"
+original_items = tuple(config.values_model.item(0, column) for column in range(3))
+original_combos = dict(config._binding_combos)
 QtTest.QTest.mouseClick(config.add_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert not qt_errors, qt_errors
 assert config.values_table.verticalHeader().count() == config.values_model.rowCount()
 assert config.values_table.visualRect(config.values_model.index(1, 0)).height() > 0
+assert tuple(config.values_model.item(0, column) for column in range(3)) == original_items
 editor = app.focusWidget()
 assert isinstance(editor, QtWidgets.QLineEdit)
 QtTest.QTest.keyClicks(editor, "offset")
@@ -970,6 +973,18 @@ assert not hasattr(view.schedule_view, "save_values_button")
 assert view.scan_view.scan_load_array_button.text() == "Load Array"
 QtTest.QTest.mouseClick(view.schedule_view.channel_panel.config_status_button, QtCore.Qt.LeftButton)
 assert view.current_page == "Config"
+kept_items = tuple(config.values_model.item(1, column) for column in range(3))
+entries = config._entries()
+handle.set_config_page(replace(record, entries=entries[1:]))
+assert tuple(config.values_model.item(0, column) for column in range(3)) == kept_items
+extra = ("dac:new:x", "Added.bias_x", "bias", "0", "100", "Applied")
+handle.set_config_page(replace(record, bindings=(extra, *record.bindings)))
+assert config._binding_combos['dac:p1:x'] is original_combos['dac:p1:x']
+assert config._binding_combos['dac:p2:x'] is original_combos['dac:p2:x']
+assert config.bindings_table.indexWidget(config.bindings_model.index(1, 1)) is original_combos['dac:p1:x']
+handle.set_config_page(replace(record, bindings=(record.bindings[1],)))
+assert config._binding_combos['dac:p2:x'] is original_combos['dac:p2:x']
+assert config.bindings_table.indexWidget(config.bindings_model.index(0, 1)) is original_combos['dac:p2:x']
 assert not qt_errors, qt_errors
 view.finish_close()
 ''')

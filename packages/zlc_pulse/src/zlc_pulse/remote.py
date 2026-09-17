@@ -12,7 +12,7 @@ from .endpoint import (
 )
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 import argparse
 import json
@@ -1082,7 +1082,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     "applied",
                 }
                 expected = (
-                    {"program", "source", "authored_source", "reuse_authored_source", "rows"}
+                    {"program", "source", "authored_source", "reuse_authored_source", "rows", "reuse_rows"}
                     if method == "load"
                     else {"run_repeats", "scan_repeats"}
                     if method == "fire"
@@ -1135,18 +1135,25 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     program = params["program"]
                     source = params["source"]
                     rows = params["rows"]
-                    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, list):
-                        raise TypeError("load rows must be a JSON array")
                     authored_source = params["authored_source"]
                     reuse_authored = params["reuse_authored_source"]
+                    reuse_rows = params["reuse_rows"]
                     if not isinstance(reuse_authored, bool):
                         raise TypeError("reuse_authored_source must be a boolean")
+                    if not isinstance(reuse_rows, bool):
+                        raise TypeError("reuse_rows must be a boolean")
+                    previous = self.streamer.applied() if reuse_authored or reuse_rows else None
+                    if (reuse_authored or reuse_rows) and previous is None:
+                        raise RuntimeError("there is no loaded application to reuse")
+                    if reuse_rows:
+                        if rows is not None:
+                            raise ValueError("reused scan rows must not also be supplied")
+                        rows = previous.rows
+                    elif not isinstance(rows, list):
+                        raise TypeError("load rows must be a JSON array")
                     if reuse_authored:
                         if authored_source is not None:
                             raise ValueError("a reused authored source must not also be supplied")
-                        previous = self.streamer.applied()
-                        if previous is None:
-                            raise RuntimeError("there is no loaded authored source to reuse")
                         authored_source = previous.authored_source
                     self.streamer._load_program(
                         program, source=source,
@@ -1177,11 +1184,10 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         scan_repeats, int
                     ):
                         raise TypeError("fire scan_repeats must be an integer")
-                    self.streamer._fire_program(
+                    applied = self.streamer._fire_program(
                         run_repeats=run_repeats,
                         scan_repeats=scan_repeats,
                     )
-                    applied = self.streamer.applied()
                     program = applied.program if applied is not None else None
                     fire_fields = _log_fields(
                         run_repeats="INFINITE" if run_repeats == 0 else run_repeats,
@@ -1518,8 +1524,10 @@ class RemotePulseStreamer(ConfigValueHolder):
             authored_source is not None and previous is not None
             and authored_source == previous.authored_source
         )
+        reuse_rows = previous is not None and rows is previous.rows
         self._loaded_application = None
-        rows = tuple(tuple(row) for row in rows)
+        if not reuse_rows:
+            rows = tuple(tuple(row) for row in rows)
         receipt = self._call_locked(
             "load",
             {
@@ -1527,7 +1535,8 @@ class RemotePulseStreamer(ConfigValueHolder):
                 "source": source,
                 "authored_source": None if reuse_authored else authored_source,
                 "reuse_authored_source": reuse_authored,
-                "rows": rows,
+                "rows": None if reuse_rows else rows,
+                "reuse_rows": reuse_rows,
             },
         )
         if not isinstance(receipt, dict):
@@ -1540,7 +1549,7 @@ class RemotePulseStreamer(ConfigValueHolder):
         )
         self._fire_command_id = None
 
-    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
         with self._io_lock:
             self._refresh_config_file()
             if self._loaded_application is None:
@@ -1564,10 +1573,9 @@ class RemotePulseStreamer(ConfigValueHolder):
                     or type(receipt["command_id"]) is not int or receipt["command_id"] <= 0):
                 raise ConnectionError("Pulse server did not return the FIRE command identity")
             self._fire_command_id = receipt["command_id"]
-            if self._loaded_application is not None:
-                self._loaded_application = replace(
-                    self._loaded_application, run_repeats=run_repeats, scan_repeats=scan_repeats
-                )
+            assert self._loaded_application is not None
+            self._loaded_application = self._loaded_application.with_repeats(run_repeats, scan_repeats)
+            return self._loaded_application
 
     def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
         """Await this FIRE's completion without occupying the command lane."""

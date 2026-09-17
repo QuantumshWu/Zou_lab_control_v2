@@ -136,7 +136,7 @@ def test_runtime_selected_field_protection_does_not_change_exclusive_admission()
     ).commit()
     scan = coordinator.prepare_logic(
         object(),
-        "stepped scan",
+        "seamless scan",
         (
             _claim(
                 "camera",
@@ -152,10 +152,10 @@ def test_runtime_selected_field_protection_does_not_change_exclusive_admission()
     _revision, owners, policy = coordinator.field_policy(
         "camera", ("exposure", "gain")
     )
-    assert owners == ("camera measurement", "stepped scan")
+    assert owners == ("camera measurement", "seamless scan")
     assert policy == {
         "exposure": ("camera measurement",),
-        "gain": ("stepped scan",),
+        "gain": ("seamless scan",),
     }
     scan.release()
     measurement.release()

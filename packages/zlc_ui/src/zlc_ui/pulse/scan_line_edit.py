@@ -134,8 +134,6 @@ class FluentScanLineEdit(FluentLineEdit):
         self.source_info.setText(info)
         self.source_info.setToolTip(source_text)
         self.source_info.setVisible(bool(info))
-        if self._popup.isVisible():
-            self._place_popup()
 
     def _commit_binding(self, *_args) -> None:
         self.binding_committed.emit(self.scan_toggle.isChecked(), str(self.source_combo.currentData()))
@@ -165,6 +163,8 @@ class FluentScanLineEdit(FluentLineEdit):
         self.setStyleSheet(style)
         self._reserve_right()
         self._project_popup()
+        if self._popup is not None and self._popup.isVisible():
+            self._place_popup()
 
 
 __all__ = ["FluentScanLineEdit"]

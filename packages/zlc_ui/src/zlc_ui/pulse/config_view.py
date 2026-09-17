@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from difflib import SequenceMatcher
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
@@ -26,7 +27,6 @@ class PulseConfigView(QtWidgets.QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._record = ConfigPageRecord()
         self._projecting_entries = False
         self._binding_combos: dict[str, FluentComboBox] = {}
         outer = QtWidgets.QVBoxLayout(self)
@@ -117,7 +117,6 @@ class PulseConfigView(QtWidgets.QWidget):
             self.entries_edited.emit(tuple(entry for row, entry in enumerate(self._entries()) if row not in rows))
 
     def set_page(self, record: ConfigPageRecord) -> None:
-        self._record = record
         self.path_text.setText(record.file_path)
         self.path_text.setToolTip(record.file_path)
         status = f"Active file: {Path(record.active_path).name}" if record.active_path else "No active file; Pulse defaults are used."
@@ -133,28 +132,49 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_table.setEnabled(not record.busy)
         self.add_button.setEnabled(not record.busy)
         self.remove_button.setEnabled(not record.busy)
-        if self._entries() != record.entries:
+        previous = self._entries()
+        if previous != record.entries:
             self._projecting_entries = True
             try:
-                self.values_model.setRowCount(len(record.entries))
-                for row, entry in enumerate(record.entries):
-                    for column, value in enumerate(entry):
-                        self.values_model.setItem(row, column, QtGui.QStandardItem(str(value)))
+                for tag, start, stop, new_start, new_stop in reversed(
+                    SequenceMatcher(a=previous, b=record.entries, autojunk=False).get_opcodes()
+                ):
+                    if tag == "equal":
+                        continue
+                    kept = min(stop - start, new_stop - new_start)
+                    if stop - start > kept:
+                        self.values_model.removeRows(start + kept, stop - start - kept)
+                    for offset, entry in enumerate(record.entries[new_start:new_stop]):
+                        row = start + offset
+                        if offset >= kept:
+                            self.values_model.insertRow(row, [QtGui.QStandardItem(value) for value in entry])
+                        else:
+                            for column, value in enumerate(entry):
+                                self.values_model.item(row, column).setText(value)
             finally:
                 self._projecting_entries = False
         fields = tuple(row[0] for row in record.bindings)
-        if fields != tuple(self._binding_combos):
-            self.bindings_model.setRowCount(0)
-            self._binding_combos.clear()
-            self.bindings_model.setRowCount(len(fields))
-            for row, field_id in enumerate(fields):
-                combo = FluentComboBox()
-                combo.currentIndexChanged.connect(
-                    lambda _index, field=field_id, widget=combo: self.binding_committed.emit(field, str(widget.currentData() or ""))
-                )
-                self._binding_combos[field_id] = combo
-                self.bindings_table.setIndexWidget(self.bindings_model.index(row, 1), combo)
-                self.bindings_table.setRowHeight(row, combo.sizeHint().height() + px(4))
+        previous_fields = tuple(self._binding_combos)
+        if fields != previous_fields:
+            for tag, start, stop, new_start, new_stop in reversed(
+                SequenceMatcher(a=previous_fields, b=fields, autojunk=False).get_opcodes()
+            ):
+                if tag == "equal":
+                    continue
+                self.bindings_model.removeRows(start, stop - start)
+                for offset, field_id in enumerate(fields[new_start:new_stop]):
+                    row = start + offset
+                    self.bindings_model.insertRow(row)
+                    combo = FluentComboBox()
+                    combo.currentIndexChanged.connect(
+                        lambda _index, field=field_id, widget=combo: self.binding_committed.emit(field, str(widget.currentData() or ""))
+                    )
+                    self.bindings_table.setIndexWidget(self.bindings_model.index(row, 1), combo)
+                    self.bindings_table.setRowHeight(row, combo.sizeHint().height() + px(4))
+            self._binding_combos = {
+                field_id: self.bindings_table.indexWidget(self.bindings_model.index(row, 1))
+                for row, field_id in enumerate(fields)
+            }
             self.bindings_table.ensurePolished()
             self.bindings_table.setMinimumHeight(
                 self.bindings_table.horizontalHeader().sizeHint().height()

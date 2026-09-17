@@ -37,6 +37,7 @@ from zlc_plot import figure_plot_recipe, read_figure_plot
 from zlc_data.figure_archive import read_archive
 
 from .logic import split_signal_key
+from .board import _guarded_slot
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -2243,7 +2244,7 @@ class FigureViewerPresenter:
         return self._panel_presenter.panels
 
     def _connect(self) -> None:
-        self.view.path_committed.connect(self.open)
+        self.view.path_committed.connect(self._guarded(self.open))
         for signal_name, handler in (
             ("new_data_requested", self.new_data),
             ("edit_data_requested", self.edit_data),
@@ -2258,15 +2259,23 @@ class FigureViewerPresenter:
         ):
             signal = getattr(self.view, signal_name, None)
             if signal is not None:
-                signal.connect(handler)
+                signal.connect(self._guarded(handler))
         # ConsolePresenter remains the sole panel mutation owner.  Viewer only
         # remembers which card the operator touched so its one global Save
         # image action targets that card.
-        self.view.add_panel_requested.connect(self._remember_added_panel)
-        self.view.panel_state_changed.connect(self._remember_panel)
-        self.view.panel_edit_requested.connect(self._remember_panel)
-        self.view.panel_remove_requested.connect(self._remember_removed_panel)
-        self.view.save_image_requested.connect(self.save_image)
+        self.view.add_panel_requested.connect(self._guarded(self._remember_added_panel))
+        self.view.panel_state_changed.connect(self._guarded(self._remember_panel))
+        self.view.panel_edit_requested.connect(self._guarded(self._remember_panel))
+        self.view.panel_remove_requested.connect(self._guarded(self._remember_removed_panel))
+        self.view.save_image_requested.connect(self._guarded(self.save_image))
+
+    def _guarded(self, handler):
+        return _guarded_slot(
+            handler, handler.__name__, on_error=self._slot_error
+        )
+
+    def _slot_error(self, error: Exception) -> None:
+        self.view.set_status(str(error) or type(error).__name__, error=True)
 
     # ------------------------------------------------------------ pulse tabs
 
@@ -3266,14 +3275,22 @@ class FigureViewerPresenter:
                     self._finish_operation()
 
         def failed(error: BaseException) -> None:
-            report_failure(error)
-            self._finish_operation()
+            try:
+                report_failure(error)
+            finally:
+                self._finish_operation()
 
         try:
-            self._run_off_thread(work, delivered, failed)
+            self._run_off_thread(
+                work,
+                _guarded_slot(delivered, busy_status, on_error=self._slot_error),
+                _guarded_slot(failed, failure_prefix, on_error=self._slot_error),
+            )
         except BaseException as error:
-            report_failure(error)
-            self._finish_operation()
+            try:
+                report_failure(error)
+            finally:
+                self._finish_operation()
 
     def _finish_operation(self) -> None:
         self._busy = False

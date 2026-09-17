@@ -203,7 +203,7 @@ class ConsoleBench:
         import json
         import shutil
         from pulse_fixtures import write_ordinary_pulse
-        from zlc_atom.nodes.scan import scan_ports_for, slots_from_plan
+        from dataclasses import replace
         from zlc_pulse.codec import read_pulse_document, sequence_to_tree
         from zlc_workbench.apps.task_console import create_experiment_flow
 
@@ -232,9 +232,9 @@ class ConsoleBench:
         (self._tmp / "pulses/single_frame_feedback.json").write_text(
             json.dumps(sequence_to_tree(feedback), indent=2), encoding="utf-8",
         )
-        imaging_scan = slots_from_plan(imaging, tuple(
-            port for port in scan_ports_for(imaging)
-            if port.port == "pulse:param:duration:short"
+        imaging_scan = replace(imaging, bindings=tuple(
+            replace(binding, scan=binding.field_id == "duration:short")
+            for binding in imaging.bindings
         ))
         (self._tmp / "pulses/imaging_scan.json").write_text(
             json.dumps(sequence_to_tree(imaging_scan), indent=2), encoding="utf-8",

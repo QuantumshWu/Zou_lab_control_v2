@@ -1640,6 +1640,52 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
             window.presenter.description,
             _active_record(window.presenter)["host"],
         ) == accepted
+
+        # All user-action slots have the same error boundary as TaskConsole,
+        # including failures before an asynchronous operation is submitted.
+        from dataclasses import replace
+        import sys
+        from zlc_pulse import sequence_to_tree
+        from zlc_workbench.viewer import PlayedPulse
+
+        uncaught = []
+        monkeypatch.setattr(sys, "excepthook", lambda *error: uncaught.append(error))
+        statuses = []
+        original_status = window.set_status
+
+        def record_status(text, *, error=False):
+            statuses.append((str(text), bool(error)))
+            original_status(text, error=error)
+
+        monkeypatch.setattr(window, "set_status", record_status)
+        old = sequence_to_tree(ordinary_imaging_sequence())
+        old.pop("bindings")
+        old.update(slots=[], api_parameters=[], config_parameters=[])
+        window.presenter.description = replace(
+            accepted[1],
+            pulses=(PlayedPulse("old", "sequencer", "camera", 1, "old pulse", old),),
+        )
+        window.info_action_requested.emit("pulse:old")
+        assert statuses[-1][1] and "unknown pulse field" in statuses[-1][0]
+        assert not window.presenter._pulse_tabs
+
+        def refused(*_args):
+            raise ValueError("action refused visibly")
+
+        for signal, method, arguments in (
+            (window.save_image_requested, "save_image", ()),
+            (window.new_data_requested, "new_data", ()),
+            (window.data_editor_intent, "data_editor_intent", ("bad", {})),
+        ):
+            with monkeypatch.context() as patch:
+                patch.setattr(window.presenter, method, refused)
+                signal.emit(*arguments)
+            assert statuses[-1] == ("action refused visibly", True)
+        assert window.is_visible() and not uncaught
+        assert _active_record(window.presenter)["host"] is accepted[2]
+        window.path_committed.emit(str(path))
+        _wait_until(lambda: not window.presenter._busy)
+        assert window.presenter.path == path
     finally:
         timer.stop()
         window.close()

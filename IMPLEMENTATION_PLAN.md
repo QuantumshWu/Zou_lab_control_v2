@@ -10,6 +10,10 @@
 
 ## 1. 当前实施范围
 
+- Stepped Scan和Temperature Task及专属实现、入口、测试已删除；只有它们使用的CameraCycleSource、API转Scan分支、settle工具一起删除。Seamless Scan的公共数据放置验证保留在scan测试，release–recapture拟合模型和模拟物理温度不变。
+- Pulse Fire返回既有执行状态，Calibration/Feedback不再追加两次远程查询，Seamless也不追加applied查询；重复次数更新不复制扫描表。Config读取直接复用条目校验，Preview无变化保留Pulse对象；Config UI按行更新并保留未变控件。Feedback只在首次真实Fire后匹配历史，运行中改Config的处理策略按用户裁决不变。
+- FigureViewer与TaskConsole共享Qt动作异常边界，错误进入状态栏及日志；初始文件打开和异步完成同样受保护。显式migrate_pulses.bat离线迁移旧Pulse/Config并备份原始文件，正式reader不增加兼容分支；旧Config数字统一命名config_N，随后仍须显式Load。
+
 - 同源复核收尾：RecordQueue区分Stop保留尾部与设备Close释放尾部/失败引用，所有Camera/Waveform adapter在实际关闭成功后使用同一清理入口，SDK拒绝关闭仍保留可重试状态。N100坏帧/序号/时间错误只终止当前capture，原接收线程继续idle drain以支持普通Restart；实际串口I/O故障仍终止接收并明确拒绝重新arm。原直接用例验证释放弱引用、拒绝关闭重试和坏包后恢复，未接实验硬件。
 - Runtime数值物化仍只有一条路径，数组消费者不再构建后丢弃event record；完整记录按需准备，同一atomic bundle的有限prefix及相同indexed窗口共享已准备记录，补记录不重建数组。记录合并、时间坐标填充移出公共锁，旧请求不能覆盖新缓存，Frozen记录不变。64条有限记录逐次取数组的时间条目遍历2080→0；四个同源完整视图8320→2080，合并均不持公共锁。新的平坦不可变完整记录仍需O(N)索引构建，不声称全部完整读取为O(增量)，不引入链式记录容器或第二套缓存owner。并发新旧请求、不同窗口及原sigma/validity物化直接验证通过。
 - 持续采集与发布边界已收口：Camera/Waveform复用从原Waveform迁移的中立RecordQueue，SDK取数仍由具体adapter的原owner执行；相机接收容量按实际帧大小和显式MiB预算，有限目标数不再决定缓冲。真实/Virtual禁止drop-oldest，序号及错误优先由共同队列核验，正常Stop发布已接收完整周期，错误不伪装正常结束。设备模拟与真实NodeHost慢发布/Stop/Restart验证已执行，未操作实验硬件。
@@ -57,9 +61,9 @@
 - 数值名称贯通现有ValueSchema、生产节点、Scan/ROI/history、Plot与Figure codec；FrameSurvival的survival经过Scan不再变value/scan。Derive用户输出、Fit参数、ROI统计由各自owner命名；普通数值轴使用同一quantity label，显式标签优先。Facet外层轴标签归一到cell，解决其被忽略及换轴旧标签复活；无renderer分支。Data/Atom/Plot/Runtime/Viewer直接验证及真实FigureViewer截图通过，窗口关闭，截图不入Git。
 - Pulse/Scan/API字段由公共field_label显示Period Name和实际字段，如MOT.duration；稳定field identity不随显示改名。重名按模型拒绝，作者默认值、单位和selector回写不变。
 - Remote Load消除未变原稿的重复传输/解码，复用原有AppliedState；仅新实际执行稿重建，原稿变化仍完整发送。类型级序列化字段metadata复用不改变wire对象grammar；文件刷新、原稿恢复、scan/reconnect及takeover直接用例通过。未增加源记录或新通信方法，客户端/server需同步Python版本，不涉及RTL。
-- Pulse只有一份PulseBinding：稳定字段引用、独立Scan开关及Default/API/Config三选一来源；Scan可与API/Config共存。删除编号、别名、循环切换及旧格式迁移入口；类型popup不编辑Config名称。
-- Calibration的三帧角色显式选择物理API字段；Temperature不再依赖硬编码API别名。公共Scan列/默认值/量化均使用binding.unit，µs输入不会误按Period的ms解释。Calibration/Scan/Feedback保存实际AppliedState；初始Scan记录在第一次Fire之后、首次发布之前完成，之后不修改。
-- 本轮验证：Pulse Editor既有119项通过，Pulse UI与timeline标记28项通过；Calibration、Temperature、两种Scan及Feedback的相关直接链通过。正式Qt截图确认Config表、类型popup、Scan Load Array和Calibration三个选择框；已保存120、未保存300仍执行120，两个绑定的作者默认值10/20不变。没有真实硬件/FPGA build；截图与探针仅在ignored research，所有验收窗口关闭。
+- Pulse只有一份PulseBinding：稳定字段引用、独立Scan开关及Default/API/Config三选一来源；Scan可与API/Config共存。删除运行时编号、别名与循环切换；类型popup不编辑Config名称。
+- Calibration的三帧角色显式选择物理API字段；公共Scan列/默认值/量化均使用binding.unit，µs输入不会误按Period的ms解释。Calibration/Scan/Feedback保存实际AppliedState；初始Scan记录在第一次Fire之后、首次发布之前完成，之后不修改。
+- 本轮验证：Pulse Editor既有119项通过，Pulse UI与timeline标记28项通过；Calibration、Seamless Scan及Feedback的相关直接链通过。正式Qt截图确认Config表、类型popup、Scan Load Array和Calibration三个选择框；已保存120、未保存300仍执行120，两个绑定的作者默认值10/20不变。没有真实硬件/FPGA build；截图与探针仅在ignored research，所有验收窗口关闭。
 - Device UI名称统一投影accepted Role，内部key/端口/保存引用不变；卡片、通用及Pulse/SLM Control、Logic/Scan选择与设备日志使用相同label/value分离。重复Role保留为草稿，在Init/Save统一拒绝，Role-only reconcile不重建设备。Windows真实Qt点击与截图确认；Loaded卡片身份列避免Role被按钮挤掉，所有验收窗口关闭，截图仅保留ignored research。
 - Config性能根修：当前实际字段先比较，无变化不构造Pulse；Config/API/单字段修改复用同一批量writer，真变化只最终构造/校验一次，API解绑定也不再逐项重建。消除中间单位转换与相等值的重复时钟对齐，公共单位层复用immutable Unit/Prefix派生结果，换注册单位不复用旧转换。文件仍每Fire重读，路径只绑定时resolve；Remote Load回简短执行确认，不回传已接受的整份程序/原稿。直接数值/文件/Remote/单位用例通过；正式Pulse界面验证实际值与原稿分离，窗口已关闭。未访问真实硬件、未build；性能报告、bench与截图只存ignored research，不入Git。
 - Config tab独立编辑命名value/unit表，多个Pulse字段可以引用同一名称；Pulse Save只保存引用，Config Save只保存人编辑的命名值。未保存草稿不参与Fire；未分配/未提供名称使用Pulse默认值。执行仍沿设备既有Load/Fire读取已保存文件、统一换算及实际变更编译路径；运行中的Pulse不被草稿改写。旧Config root/name/source/编号/field说明不兼容。
@@ -101,7 +105,6 @@
 
 - DCAM整改：同ROI setter由22次SDK属性调用降为0；相同exposure请求不再因硬件量化重写，arm保留一次真实工作点读回，Monitor复用该结果。失败后只读可恢复actual但不伪造请求成功，下一setter重试；原量化、读回失败及arm变更拒绝用例通过。源码满幅/裁剪arm链约20/24次SDK属性调用，不是通信往返或实测时延；未操作实验机。
 
-- Stepped重复操作已清：device-only只编译/LOAD一次，API两点只编译两次（首个实际点直接用于run记录）；settle改到写设备之后。原case从等待时看到旧值[0.25,1]变为[1,2]，Stop、恢复及第二点拒绝路径通过；未删Stepped authored settle或Temperature等待。
 
 - History删除64MiB/100000的隐藏截短、错误nbytes预算和重复capacity状态，唯一保留量为max(active window)。3个原window/多lease/gap用例通过；两次带gap的真实publication A/B证明请求100001时旧路径只给100000并丢首valid，新路径完整100001（两端valid、中间gap invalid）。未执行100000 shots；大窗口内存成本由实际数据决定。
 
@@ -166,7 +169,7 @@
 
 - 2026-09-09 Scan Editor单位异步回调修复两处：换port可撤掉unit picker，pending期间改为禁用/恢复同一行稳定的unit host；用户已改草稿而丢弃晚结果时，按当前mode刷新状态，清除过期的Converting提示。只在原owner改3行，保留新草稿与原单位转换流程。
 
-- 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless/Stepped输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
+- 2026-09-08 按最终用户裁决，扫描彻底采用author unit：Plan直接存135…247与mVpp，Seamless输出同一单位，仅设备/编译边界换算；display_unit旧路径及8ULP/相等检查均删除。5个单位/Plan直接实例通过；真实Runtime的Seamless十点例在设备回读偏离设定时完成，Dataset coordinates逐位等于135→247的十点且unit为mVpp，run record一致；设备异常与restore传播仍保留。曾添加的独立readback event字段不符合现有merge grammar，已撤掉，不扩格式，设备原有tune回读路径保留。未做真实硬件验收。
 
 - Seamless的Acquisition logic沿原Start/Restart与ready入口，后续所有points/repeats复用同一generation。之前包含10ms settle的GUI结果不作为当前无settle通信流程验收；当前测试删除被取消的等待断言，保留shot placement/Stop/恢复与一次准备。Temperature原有50ms等待留在自身Task，不借Seamless参数实现。
 
@@ -187,7 +190,7 @@
 - Hosted Task只在NodeHost worker真正Start时分配run directory，并在任何不可逆工作前
   原子建立一次不可变的`start.json`；进度、artifact registration与Stop只在进程内，不写盘；
   terminal result与failure在结束时一次性建立`run.json`。两份记录都只创建、从不替换。
-- Runtime不自动dump live/intermediate Dataset。Calibration、Temperature和SLM Feedback
+- Runtime不自动dump live/intermediate Dataset。Calibration和SLM Feedback
   由各自domain owner保存精选artifact，并通过ExecutionContext注册已完成文件。
 - Figure NPZ是primary typed artifact，PNG只是preview。Figure保存exact Plot recipe、overlay、
   viewport、selectors、facet focus和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
@@ -366,8 +369,8 @@
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
 - Generic Control的X复用现有Fluent隐藏机制，保留同一device session的窗口、Desired和单位；隐藏时停止Live debounce、撤回未执行字段写入并跳过周期UI投影，重开只读刷新current，卸载/重建或session结束真正销毁窗口。现有正式flow的单个Qt生命周期用例红/绿通过，验证ms单位与草稿保留、隐藏无周期投影、重开读回及session shutdown释放；未做硬件测试。
 - RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。仪器自身limits在Init读出并以`TunableField.device_limits`只读投影；Scan port范围、Control与外部`tune`的有效范围都是policy与device limits逐侧取更紧者，缺失policy edge时该侧就是仪器limit；全空Init不归一化或改写硬件当前值。
-- Pylon以运行时`gain`（dB）公开SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure`（s）。固定单位Config/SDK参数名保留。epoch由设备owner报告，Control不比较不同单位或用浮点相等推断增量；Seamless/Stepped保留用户设定坐标，实际回读不替换扫描轴。
-- Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
+- Pylon以运行时`gain`（dB）公开SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure`（s）。固定单位Config/SDK参数名保留。epoch由设备owner报告，Control不比较不同单位或用浮点相等推断增量；Seamless保留用户设定坐标，实际回读不替换扫描轴。
+- Logic静态requirements与Seamless Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
 - Device Manager的Remote公布是Session DeviceUse里该device的command claim：本地Logic/command占用时按名拒绝且不公布，已公布期间本地Logic、command、字段写入与rebuild按名拒绝直到撤回；公布的是accepted apparatus而非draft，远端proxy每次Refresh经fields RPC取当前完整字段投影、不缓存bounds。SLM Editor的device状态问句在其串行command executor上问、Qt线程只显示答案，command的交付带回它留下的状态；Qt从不等remote proxy的apply锁。
 - CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后的buffer边界，tune之后直到本次arm结束的每个read都明确携带old+new（一次read取走部分旧队列不证明其余帧是新设置），重新arm才回到单一epoch；Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
@@ -422,7 +425,7 @@
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；Panel Edit现与TaskConsole完整共用Frozen snapshot/Refresh、Interaction、Direct producer和Save figure。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
 - FigureViewer Info页是树：InfoPane每页一棵两列`InfoTree`（名字 | 值），record逐层展开、分支行内联标量摘要、长数值列表按个数与范围显示、值由wrap-anywhere delegate在列内换行不cutoff；页顶filter同时匹配名字与值并展开到命中处；Ctrl+C与右键菜单复制整个值或名字路径；Raw页是文档四个section的嵌套树；Flow node携带`row=(tab, label)`，点击card切页并选中该行。`FluentReadoutMultiline`不再用于InfoPane。
-- FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration/Temperature normal与partial report、SLM candidate/report、Seamless/Stepped/Temperature live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance；Stepped tunable以完整scan values及逐点readback等值contract记录，不复制event history。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
+- FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration normal与partial report、SLM candidate/report、Seamless live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
 - 公共Panel Setting现复用master的page-local `FluentOverlayFrame` owner，并以固定identity（`Setting · panel-N`）作为可拖header，不读取可编辑title/signal/structure；右上角紧凑`×`只隐藏Setting。TaskConsole与FigureViewer因复用PanelCard同时获得该行为，Panel删除仍是card header的受保护命令。
 - Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
 - Exact Scan terminal/Frozen根修当前证据：真实`20×(10×10×10)×(3×35)`canonical Dataset从partial Live publication开始，原子提交`field.x→Facet, field.y→Y, field.z→X, pair/site→Reduced`后，Live、运行中Frozen及terminal seal后重新创建的Frozen host均保持同一schema fingerprint、物理shape `(20,1000,3,35)`、resolved roles和`[-0.5,9.5]×[-0.5,9.5]` limits。根因三处均删除：multi-fate逐行修复导致回退默认35×3、host accept后以1×1×3×35 event schema覆盖canonical surface、以及histogram threshold/shape-only viewport无条件重放到image。当前实现使用atomic fate assignment、canonical accept metadata、resolved capability interaction和schema/spec view identity；Plot semantic/feasibility/facet/threshold聚焦`52 passed`，Workbench canonical/Frozen/retarget/save交叉聚焦`10 passed`。

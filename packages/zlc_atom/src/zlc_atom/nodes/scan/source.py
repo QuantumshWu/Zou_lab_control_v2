@@ -1,31 +1,7 @@
-"""Where a scan point's value comes from.
-
-Both engines do the same three things at every point -- take a value, write it
-into the plan's slot, move on -- and differ only in where that value comes
-from.  Two answers exist on this bench.
-
-A SCAN NODE WATCHES SOMEBODY ELSE'S SIGNAL.  The operator says which one, and
-the value of a point is whatever that signal publishes next: camera frames, a
-processor's counts, anything live.  That is the whole point of the scan nodes
--- they scan a knob against a quantity the bench is already producing.
-
-A TASK THAT OWNS ITS CAMERA TAKES THE FRAMES ITSELF.  Release-recapture is not
-"scan t_off against whatever happens to be running": the two probe windows of
-one cycle ARE the measurement, so the Task holds the camera, arms it for the
-whole table, and reads the cycles the fired program triggers.  That source is
-a camera capture wearing this protocol, so it lives with the camera
-(``camera_measurement.measurement.CameraCycleSource``) -- no scan node uses
-it, and the scan package is what the scan NODES stand on.
-
-Both are sources: open before the board is loaded, validate the actual played
-program before LOAD, arm just before the fire, return one value plus its exact
-causal publication per played point, and close at the end.  A Task-owned camera
-has no upstream publication and returns ``None`` for that half.
-"""
+"""Ordered publication input and completion waits for Seamless Scan."""
 
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
 from threading import Event, RLock
 
@@ -38,7 +14,7 @@ from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
 def check_cancelled(context: object) -> None:
     """Leave now if the operator has pressed Stop.
 
-    One sentence for both engines and for the wait below: a scan that ends
+    Shared by scan and task completion waits: a scan that ends
     because it was stopped says so the same way wherever it noticed.
     """
 
@@ -46,23 +22,6 @@ def check_cancelled(context: object) -> None:
         raise RuntimeError("the scan was cancelled")
 
 
-def settle(context: object, seconds: float) -> None:
-    """Give the bench its authored settle time, and stay stoppable meanwhile.
-
-    The settle is the longest thing either engine does between SAFE and the
-    next fire, and one that sleeps it whole cannot see a Stop that arrives
-    during it: the next point was tuned, loaded and fired before the flag
-    was read.  Slept in slices with the flag read between them, Stop ends
-    the settle within a slice and nothing new reaches the bench.
-    """
-
-    deadline = time.monotonic() + float(seconds)
-    while True:
-        check_cancelled(context)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            return
-        time.sleep(min(remaining, 0.1))
 
 
 def wait_for_report(sequencer: object, context: object) -> object:
@@ -73,11 +32,6 @@ def wait_for_report(sequencer: object, context: object) -> object:
     them: pressing Stop leaves this within one slice, the caller's ``finally``
     drives the outputs safe, and nothing waits for the rest of the table to
     play out -- ending a scan is not the same act as letting it finish.
-
-    Both engines wait here.  Passing ``None`` to ``wait_done`` is what made a
-    stopped seamless scan run to the end of its table (measured: Stop at
-    4.018 s, terminal at 8.469 s, the whole difference asleep inside the
-    streamer), while its sibling had this loop written out beside it.
 
     The report comes back whole, fault and all: what a fault MEANS for the
     data is the caller's question (a scan point is lost; a Task that counted
@@ -268,7 +222,6 @@ class PublishedSignalSource:
 __all__ = [
     "PublishedSignalSource",
     "check_cancelled",
-    "settle",
     "wait_for_board",
     "wait_for_report",
     "watched_signal_source",

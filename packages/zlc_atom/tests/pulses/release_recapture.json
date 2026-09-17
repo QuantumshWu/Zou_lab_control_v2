@@ -1,6 +1,6 @@
 {
   "format": "zlc.pulse",
-  "name": "temperature_template",
+  "name": "release_recapture",
   "time_step_ns": 20.0,
   "target": {
     "raw_lanes": [

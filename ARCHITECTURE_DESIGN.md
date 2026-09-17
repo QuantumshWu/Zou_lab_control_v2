@@ -196,7 +196,7 @@ Node new chunk
 - Task只保存由domain owner挑选的重要、可复算或不可替代artifact；Runtime不得自动dump live Dataset、全部shot或所有中间状态。
 - Artifact必须先完整原子写入run directory，再按semantic contract注册；`run.json`只列已存在、已注册的文件。声明的final artifact未注册时Task不得成功。
 - Run根保存`run.json`与summary；domain final进入`final/`，重要图进入`figures/`，精选candidate/site数据进入`data/`。
-- Figure始终成对保存：同stem `zlc.figure` NPZ为primary data artifact，PNG为无science contract的preview。Calibration、Temperature和SLM Feedback遵守同一TaskRun规则。
+- Figure始终成对保存：同stem `zlc.figure` NPZ为primary data artifact，PNG为无science contract的preview。Calibration和SLM Feedback遵守同一TaskRun规则。
 - Stop保留已完成的精选artifact和明确partial状态；failure保留错误、last progress、已注册artifact与rollback outcome。进程异常终止只留下`start.json`而没有`run.json`——这就是「没有结束的run」，不得清理或伪装成功。
 
 ### 4.5 Task运行中冻结
@@ -275,7 +275,7 @@ Node new chunk
   打开的FigureViewer各持一个显式owner lease，任一窗口先关闭都不得终止另一窗口仍在使用的服务，
   最后一个owner才关闭进程。独立FigureViewer则拥有自己的一对A/C。
 - Domain Task仍在B决定并写非Figure科学NPZ/JSON、选择artifact路径并向TaskRun登记完成文件；
-  TaskArtifactContext不拥有Plot。Calibration、Temperature与SLM Feedback的Figure archive/render/export
+  TaskArtifactContext不拥有Plot。Calibration与SLM Feedback的Figure archive/render/export
   由composition显式注入同一个C服务执行，Task worker只等待该Future，不得在B隐式构造本地Plot host。
 - B向一个render service提交同一`DatasetRevisionRef`只建立一份transport value，由该service内
   全部Panel共享；不得按Panel重复发送或让Runtime感知Plot transport。A/C向B发布的RGBA使用
@@ -338,11 +338,14 @@ Node new chunk
 - 字段旁的绑定入口只选择Scan开关与Default/API/Config来源，不循环点击，不显示编号，不在此创建或命名Config key。数值始终可编辑（Hold无本地数值仍沿原语义）；小入口以紧凑S/A/C及组合状态展示。Config名称、创建、编辑及字段引用全部位于Scan右侧Config tab。CPU/Qt只投影当前绑定及有效覆盖状态，不保存历史输入作为第二份数据真相。
 - Config JSON只拥有`format`和命名`values`表，每个名称对应value/unit；无数字键语义、name/source/from-pulse/field来源信息，旧格式直接拒绝不兼容。多个Pulse字段可引用同一Config名称，字段到名称的引用保存在Pulse，不写入Config文件。未指定名称、未加载文件或名称无对应值使用原字段默认值并显示未覆盖；实际被消费的值遇到格式或单位错误则报告，不能假装应用成功。
 - Device Init、设备重建和Pulse Editor Connect不选择Config文件；Workspace只创建目录，不生成或自动读取current.json。Config tab的显式Load/Save负责选择已保存文件；复用现有设备保留其明确加载的选择，新设备默认没有选择。已有文件不因初始化而修改或转换，显式加载错误格式仍严格拒绝。
+- 旧Pulse/Config只通过操作者显式运行的离线迁移工具转换：先验证完整候选、备份原始字节，再原子替换；旧数字Config N在文件与Pulse引用中共同变为config_N。正式reader不兼容旧grammar，工具不改Figure或自动应用配置。
 
 - Remote编码/解码按immutable dataclass类型复用字段metadata，JSON grammar与对象验证不变。Load可明确复用同连接已接受AppliedState中的未变authored_source，不反复传输/解码原稿；新实际source/program照常验证。原稿变化就完整传入，服务器无旧记录时拒绝复用，绝不把filled source当原稿。客户端在发送前清原有应用缓存，失败不缓存假成功；重连继续按原有applied查询恢复事实，不增加源缓存或后台同步。
 - Config tab用独立草稿编辑命名值表并显示dirty，只有显式Save/Save as写入文件后才参与下一次Fire；不自动保存，不把未保存值送设备。Load绑定已保存文件，Refresh重读编辑文件（已经Unload的文件不被Refresh偷偷重新激活），Save使用草稿而不是Pulse默认值；Pulse Save只保存Pulse内容与引用。File读写沿唯一codec及原durable API，既有device load/fire在开始新执行前重读已绑定文件；运行中的Pulse不因编辑草稿或保存而改变。Config文件与Pulse引用的dirty互不混用；外部刷新不能静默覆盖未保存草稿。
 
 ## 6. UI与Lifecycle
+
+- TaskConsole与FigureViewer共用既有Qt回调异常边界：用户动作、初始打开、owner-turn和异步完成中的普通Python异常进入界面状态和日志，不退出GUI；直接程序化调用仍正常抛错。报告错误本身失败也不得逃出Qt。界面状态、回调与后台worker寿命仍由原owner管理。
 
 - `zlc_ui`不拥有domain parser、device state或plot lifecycle。
 - Frozen Edit的配置兼容性与数据年龄分开：新generation（包括revision重置）或旧source已退休时明确显示橙色旧代/不再current提示，尚无新首帧也不能漏提示；不重建表单、不替换旧Frozen图和数据。Save仍精确保存该Frozen，只有Refresh接受新front后才换快照；配置不兼容仍按原stale gate处理。Console与FigureViewer共用PanelEditorView的轻量状态更新。
@@ -356,7 +359,7 @@ Node new chunk
 - Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
 - Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
 - Device Manager关闭失败必须展开ExceptionGroup里的实际原因并保留完整日志，不能只显示sub-exception数量。Vaunix LMS命令返回按厂商LVSTATUS最高位判错，不能把任意非零成功值当失败；Init/Close/frequency/power/RF开关共用同一校验。真实SDK错误仍保留installation的失败持有与显式重试语义，不自动重发或假称已关闭。
-- Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败不能覆盖原始hardware/science failure：failure时附注在原始错误上（进入记录的traceback），Stop时成为observation的error与stopped记录的error而状态仍是stopped/cancelled——Stop不因保存失败变成failure，保存失败也不得被当作从未发生。Calibration、Temperature与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
+- Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败不能覆盖原始hardware/science failure：failure时附注在原始错误上（进入记录的traceback），Stop时成为observation的error与stopped记录的error而状态仍是stopped/cancelled——Stop不因保存失败变成failure，保存失败也不得被当作从未发生。Calibration与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
 - Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。Generic Control的X在既有close guard放行后只隐藏，同一device session复用窗口与Desired/单位；隐藏时停止Live debounce、撤销尚未执行的字段写入并跳过周期UI投影，重开按保留单位读取current；device unload/rebuild或session shutdown才真正关闭并释放窗口与Qt连接。
 - Device Control的表头与全部Fluent form rows共用一份列宽预算：只有Desired列伸缩，其余列按全表内容对齐；Desired内的单位选择器同宽，输入框右边缘一致。布尔开关保留自己的绘制/命中宽度，无Live能力的行保留空列。不得让各行按不同的两个stretch列独立分配宽度，也不单独给RF手写另一套表单。
 - Scan Plan在原轴行owner内共享全表列宽：手动轴的提示与名字属于同一identity单元，普通/手动轴均保留单位位置；起终点等宽，单位选择器、点数、状态与删除列对齐，只有identity随窗口伸缩。单位控件只在自己的单元内替换，长状态使用现有ElidedLabel，不推动其它列；不得通过重建行或改写ScanPlan实现排版。
@@ -407,7 +410,6 @@ Node new chunk
 - Seamless Plan只需列出实际扫描的轴。未列出的Pulse Scan字段只在本次执行副本解除Scan标记，保留API/Config基础来源，按本次API、已保存Config或作者默认值固定并复用普通编译器生成常量；不改作者Pulse、Plan草稿、默认值，不发送重复常量列。仅计划中的字段占硬件scan列，manual/device-only计划也可使用带Scan能力的模板。输出Dataset只增加Plan显式轴，已有显式单点轴保留；固定字段由实际执行Pulse/run record保存，不伪造扫描维度或增加点数。未知显式port仍由同一bind_plan拒绝。
 - Seamless允许仅manual/device轴且Pulse无scan slot。资源选择直接复用严格Pulse reader，不得额外要求slot存在；真实slot语法和Plan绑定仍严格校验。普通无slot Pulse只load一次（wire rows为空），每个Host点用Run repeats完成shots_per_point；整轮repeats由原Host循环推进，不重排采样顺序、不伪装成无表hardware scan_repeats。数据只包含真实扫描轴，不补虚构slot/轴；顶层ScanPlan至少有一条真实轴。
 - Camera settings provenance属于frame event而不是generation identity：`run_record`在一代内保持不变，frame冻结的小型`event_record`可变化；finite/scan前缀与有界indexed history按实际保留chunks合并epoch ranges，monitor只携带当前event。
-- Temperature保留约20ms authored exposure；Pulse timing与camera exposure是各自owner的独立输入。
 - Virtual sequencer按compiled wall cadence逐cycle并支持Stop；每个到达virtual camera的frame event都被采集，不根据Pulse时间或camera exposure私自skip、制造ordinal gap。
 
 ### 7.3 Remote
@@ -430,6 +432,7 @@ Node new chunk
 - 正式板配置直接包含`pgc_1D`：P19、raw lane 18；共63 lanes、19个TTL、4组10-bit DAC与4个clock。原DAC的物理引脚不变（`da_dipole[0]`仍为V9），只有raw lane编号随新增TTL后移。Manifest、XDC、RTL top、生成geometry及仓库Pulse模板一起提交；部署不再运行本地add-channel脚本。Pulse状态按port key保持，不按新旧raw数组相同下标猜对应通道。
 
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。
+- Fire成功返回现有已确认AppliedState；调用方不为相同事实追加snapshot/applied查询。更新重复次数只校验计数并共享已验证program/rows，计数不变复用原对象。Remote以现有LOAD/FIRE确认及已接纳装载状态交付相同事实，只有真正变更才重新装载；同连接未变scan rows沿既有装载引用复用，不新增状态缓存。
 - Count必须是合法hardware range内整数，不clamp/wrap。
 - Hardware SAFE把TTL拉低、把DAC data置safe码，并让DAC latch strobe继续走足够长以把该safe码真正锁进外部转换器，之后才gate住strobe；只gate而不锁存等于把safe码摆上引脚却永远送不进DAC，模拟输出会保持run的最后一个edge/ramp值。LOAD/FIRE前pins保持safe。
 - Public DONE等待delay FIFOs和final DAC latch完成并进入安全态。
@@ -495,11 +498,9 @@ Node new chunk
 - Calibration threshold method保留operator选择并默认`gaussian`：每个site/readout model只用全部finite short-shot signal做无标签双Gaussian mixture fit，按均值识别低/高分量并保留fit得到的population weights；threshold是两条实际加权分量曲线`w_dark N_dark(t)=w_bright N_bright(t)`在两均值之间、令拟合population总误判最小的解析交点。reference真实标签不得进入Gaussian参数、权重或threshold；只允许用于Empirical threshold及最终actual fidelity。Gaussian参数、population或相关解析根无效时该site使用全部有效labelled samples上令实际总正确率最大的empirical threshold；operator显式选择`empirical`时所有site都走该路径。Histogram竖线始终是最终写入Calibration并由`detect()`使用的threshold；Gaussian曲线必须复用Calibration保存的同一组参数与权重，不得由Plot二次拟合，fallback site不得伪造理论曲线。报告分别保存最终threshold在全部有效真实数据上的overall actual fidelity（另存dark/bright conditional值），以及Gaussian threshold按其fit population weights积分得到的theoretical fidelity；fit失败site没有theoretical值。
 - Calibration只使用稳定`format="zlc.calibration.readout"`，无数字版本；reader只接受当前完整grammar，alternate root或缺失统计均loud拒绝。
 - Calibration run保存final JSON、summary JSON/text及精选报告图；每张报告图都有可由FigureViewer重开的typed Figure NPZ，PNG仅为preview。默认不保存全部raw frames；operator显式请求时才保存采样数据。
-- Temperature使用同一TaskRun lifecycle，保存final JSON、summary和生存率typed Figure/PNG，不建立第二套run管理。
 - Scan正常完成、Stop或失败都restore pre-run device数值与单位：第一次移动该knob前从device读取原始数值/当前单位对及同单位bounds，确认可恢复后才写；不从dBm反算原Vpp读数。restore复用同一单位化写入，其拒绝在成功的run中就是run的失败、在失败的run中附注在原错误上，并继续恢复其他knob，不得被SAFE成功掩盖。
-- Seamless/Stepped写值及restore不比较设定值与回读值是否相等，也不设浮点容差。设备的实际tune返回值仍保留，仅核numeric/finite契约；设备自身拒绝与异常照常传播。扫描轴是用户设定坐标，不用设备量化后的回读替换它。
-- Stepped从首个实际点生成程序与run记录，只在真实API值改变时重编/LOAD，device-only点复用同一程序。每点先写设备再执行Stepped自己声明的settle；Start及错误/Stop保证SAFE，正常段尾已确认DONE时不再重复SAFE。这里不改变Temperature的等待政策。
-- ScanAxis的`unit`就是其`values`的单位，Plan、Layout、Seamless/Stepped Dataset及run record保持该单位：135→247mVpp/10点直接存135…247与mVpp。设备轴的数值与单位原样传到设备层，bind和编辑器范围也取设备在所选单位下的投影；不在Scan先转dBm。Pulse编译仍在原边界换算，量化后的坐标转回同一author unit。切单位逐点转换已有列以保持物理扫描，显式编辑范围/点数才在选中单位内等分。
+- Seamless写值及restore不比较设定值与回读值是否相等，也不设浮点容差。设备的实际tune返回值仍保留，仅核numeric/finite契约；设备自身拒绝与异常照常传播。扫描轴是用户设定坐标，不用设备量化后的回读替换它。
+- ScanAxis的`unit`就是其`values`的单位，Plan、Layout、Seamless Dataset及run record保持该单位：135→247mVpp/10点直接存135…247与mVpp。设备轴的数值与单位原样传到设备层，bind和编辑器范围也取设备在所选单位下的投影；不在Scan先转dBm。Pulse编译仍在原边界换算，量化后的坐标转回同一author unit。切单位逐点转换已有列以保持物理扫描，显式编辑范围/点数才在选中单位内等分。
 - Scan每轴可切换Range/Values，两套输入独立保存：authoring entry的`values`始终属于Range（包括已有非等距精确列表），`mode`默认`range`，独立`value_text`默认空字符串。Values只接收按顺序的逗号数值，不显示Points控件、不从Range自动填充；切换只隐藏原控件，不销毁或互相回填。Selector只更新Range及其原点数，即使当前隐藏在Values模式，也不得改Values文本。两套输入共用一个`unit`，切单位时分别换算各自已有数值，空Values仍为空。Layout保存raw plan以保留两套输入；Start仅将当前mode编译为原有不可变`ScanAxis(port, values, unit)`，空或非法的当前Values按行/port拒绝，不改变已冻结运行。执行Plan的`to_tree`仍只写实际port/values/unit，不增加第二套执行计划。
 - 单位化设备边界由既有`tune_in_unit`、`read_tunable_in_unit`、`convert_tunable_value`共同承担，字段ID和author unit不变。RF的字段/单位投影只读有界会话latest facts；显式`refresh_tunable_fields`才更新设备真实读数，不保存epoch历史。常规设频率/幅度只发设置与实际值查询，返回量化后的真实结果，不作相等检查。频率改变不再额外读取幅度并自动回退；受影响幅度current/range失效，不能显示旧值为当前事实。epoch复用已知before与actual，不增加写前读。仅显示换单位不写设备；真正Apply才必要时切native UNIT并发送数值。未知负载/波形只在真实转换需要时查询，不能每个值重读或永久缓存已失效范围。Control Open/Refresh复用明确刷新入口，Apply及单位投影不整机查询；非RF adapter继续原接口，不多调用一次values。多channel共享功率policy仍不能冒充唯一电压换算。
 - SimulationWorld保持一个类和一个state owner，不拆层。

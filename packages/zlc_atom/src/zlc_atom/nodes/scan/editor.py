@@ -64,7 +64,6 @@ from .plan import (
     port_leaf,
     plan_input_rows,
     parse_scan_values,
-    scan_ports_for,
     DEVICE_PARAM_FAMILY,
     scan_ports_for_devices,
     label_device_scan_ports,
@@ -461,12 +460,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         parent=None,
         *,
         device_ports: bool = True,
-        hardware_slots: bool = False,
         manual_axes: bool = False,
     ) -> None:
         super().__init__(parent)
         self._device_ports = bool(device_ports)
-        self._hardware_slots = bool(hardware_slots)
         # Only a node that can STOP between plays can offer one, so the
         # editor shows the button exactly where the node would honour it.
         self._manual_axes = bool(manual_axes)
@@ -559,11 +556,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         except (TypeError, ValueError):
             axes = ()  # The existing row editor reports an unfinished plan.
         template_ports = (
-            (
-                hardware_scan_ports_for(sequence)
-                if self._hardware_slots
-                else scan_ports_for(sequence)
-            )
+            hardware_scan_ports_for(sequence)
             if sequence is not None
             else ()
         )
@@ -1079,12 +1072,10 @@ def scan_plan_editor_factory(
     parent=None,
     *,
     device_ports: bool = True,
-    hardware_slots: bool = False,
     manual_axes: bool = False,
 ) -> ScanPlanEditor:
     return ScanPlanEditor(
         parent,
         device_ports=device_ports,
-        hardware_slots=hardware_slots,
         manual_axes=manual_axes,
     )

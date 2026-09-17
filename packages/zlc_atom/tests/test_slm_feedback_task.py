@@ -483,6 +483,7 @@ def _task(
 
             sequencer.load = load_program
             sequencer.applied = lambda: held[0]
+            sequencer.fire = lambda **_kwargs: held[0]
     if science_context is None:
         if target is None:
             raise ValueError("test must supply a Target or Science Context")
@@ -520,6 +521,8 @@ def _measured(task: SlmFeedbackTask, result):
 
     """
 
+    if task._program_digest is None:
+        task._program_digest = str(task.sequencer.fire(run_repeats=task.shots).program.digest)
     task._actual_device_snapshots = {
         "camera": {"exposure_seconds": 0.020},
         "sequencer": {"state": {"loaded": True}},
@@ -2221,11 +2224,12 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         def applied(self):
             return self._applied
 
-        def fire(self, *, run_repeats, scan_repeats=1) -> None:
+        def fire(self, *, run_repeats, scan_repeats=1):
             assert scan_repeats == 1
             self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
             self.fires.append(run_repeats)
             camera.trigger(int(run_repeats))
+            return self._applied
 
         def wait_done(self, timeout=None):
             del timeout
@@ -2310,7 +2314,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             "exposure_seconds"
         ] == pytest.approx(0.020)
         sequencer_record = device_record["device_snapshots"]["sequencer"]
-        assert set(sequencer_record) == {"state", "program", "pulse"}
+        assert set(sequencer_record) == {"program", "pulse"}
         assert sequencer_record["program"]["digest"] == sequencer.applied().program.digest
         assert device_record["device_snapshots"]["slm"][
             "command_revision"
@@ -2420,6 +2424,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             assert scan_repeats == 1
             self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
             self.camera.trigger(int(run_repeats))
+            return self._applied
 
         def wait_done(self, timeout=None):
             return DoneReport(status=STATUS_DONE, cursor=0, underflow=False, elapsed_seconds=0.0)
@@ -2530,13 +2535,14 @@ def test_measure_refuses_faults_without_repeating_the_authored_batch(
         def applied(self):
             return self._applied
 
-        def fire(self, *, run_repeats, scan_repeats=1) -> None:
+        def fire(self, *, run_repeats, scan_repeats=1):
             assert scan_repeats == 1
             self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
             self.fires.append(run_repeats)
             played = int(run_repeats) if self.trigger_limit is None else self.trigger_limit
             self.trigger_limit = None
             camera.trigger(played)
+            return self._applied
 
         def wait_done(self, timeout=None):
             del timeout
@@ -2894,7 +2900,8 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
             sequencer=SimpleNamespace(
                 describe=lambda: object(), safe=lambda: None,
                 load=lambda *_args, **_kwargs: None,
-                applied=lambda: SimpleNamespace(program=SimpleNamespace(digest=actual_digest)),
+                applied=lambda: SimpleNamespace(program=SimpleNamespace(digest=_PROGRAM_DIGEST)),
+                fire=lambda **_kwargs: SimpleNamespace(program=SimpleNamespace(digest=actual_digest)),
             ),
             plane=plane,
             calibration=_calibration_at(

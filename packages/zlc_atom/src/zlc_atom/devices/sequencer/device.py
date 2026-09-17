@@ -192,8 +192,8 @@ class SequencerDevice:
     ) -> None:
         self.streamer.load(prog, source=source, rows=rows)
 
-    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
-        self.streamer.fire(
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
+        return self.streamer.fire(
             run_repeats=run_repeats,
             scan_repeats=scan_repeats,
         )

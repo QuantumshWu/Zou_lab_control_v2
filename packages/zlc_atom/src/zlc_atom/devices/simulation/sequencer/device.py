@@ -61,17 +61,14 @@ class VirtualPulseStreamer(PulseStreamer):
             target=pulse_target_from_xdc(config_path=config["source"]),
         )
 
-    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
+    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
         worker = self._world_thread
         if worker is not None and worker.is_alive():
             raise RuntimeError("the previous virtual pulse is still playing")
-        super()._fire_program(
+        applied = super()._fire_program(
             run_repeats=run_repeats,
             scan_repeats=scan_repeats,
         )
-        applied = self.applied()
-        if applied is None:  # PulseStreamer.fire() requires a loaded program.
-            raise RuntimeError("virtual sequencer fired without an applied program")
         with self._lock:
             self._world_error = None
         worker = threading.Thread(
@@ -87,6 +84,7 @@ class VirtualPulseStreamer(PulseStreamer):
             self._world_thread = None
             super().safe()
             raise
+        return applied
 
     def wait_done(self, timeout: float | None = None, *, command_id: int | None = None) -> DoneReport | None:
         started = time.monotonic()

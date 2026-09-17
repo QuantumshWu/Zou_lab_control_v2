@@ -8,10 +8,9 @@ own tiny transformation, consuming the general occupancy classification.
 
 WHY IT IS NOT INSIDE OCCUPANCY.  ``occupancy`` judges one frame at a time
 and knows nothing about what the frame beside it means; a survival special
-case there would be an experiment hiding inside a general classifier (the
-boundary the temperature task documents).  Temperature keeps its own
-pairing: its two probe windows are that task's semantics.  THIS processor
-is the frame-general pairing for any multi-frame cycle.
+case there would hide experiment-specific pairing inside a general
+classifier. This processor owns frame-general pairing for any multi-frame
+cycle.
 
 WHAT IT PUBLISHES.  One dataset, ``survival``, holding EVERY forward frame
 pair at once as ONE labelled point axis: a three-frame cycle carries pair

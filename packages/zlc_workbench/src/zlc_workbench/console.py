@@ -16,8 +16,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, TimeoutError as _AnswerTimeout
 from dataclasses import dataclass, field, replace
-from functools import wraps
-from weakref import ref
 import logging
 from operator import attrgetter
 from pathlib import Path
@@ -51,7 +49,7 @@ from zlc_runtime import (
 )
 from zlc_ui import FormFieldProps, FormSpec
 
-from .board import LiveBoard
+from .board import LiveBoard, _guarded_slot
 from .console_layout import (
     LAYOUT_FORMAT as CONSOLE_LAYOUT_FORMAT,
     LayoutDocument,
@@ -623,47 +621,12 @@ class ConsolePresenter:
     # ------------------------------------------------------------------ wiring
 
     def _guarded(self, handler):
-        """Wrap one view-signal handler so a defect cannot kill the bench.
+        return _guarded_slot(
+            handler, handler.__name__, on_error=self._slot_error
+        )
 
-        A presenter method connected to a Qt signal IS a slot, and an
-        exception leaving a slot is not reported anywhere: PyQt calls
-        qFatal(), the process dies where it stands, and the operator loses
-        a running experiment, every mounted panel and any chance of a
-        traceback.  That is how one mistyped status severity -- three
-        frames below a panel edit -- took the whole console down.
-
-        The guard is exactly here, at the boundary where a method becomes a
-        slot, and nowhere else: called directly (as the tests call them)
-        these methods still raise, so a defect is still loud where loudness
-        costs nothing.  Crossing into Qt, it becomes an error line and a
-        traceback on stderr, and the instrument keeps running.
-        """
-
-        name = handler.__name__
-        # A WEAK reference, deliberately.  Qt keeps a strong reference to a
-        # plain callable and only a weak one to a bound method, so wrapping
-        # the bound method in a closure would have the view hold the
-        # presenter -- and every host, worker and thread it owns -- alive
-        # for as long as the window exists.  Holding the presenter weakly
-        # keeps the lifetime exactly as it was before this guard existed.
-        reference = ref(self)
-
-        @wraps(handler)
-        def guarded(*args, **kwargs):
-            presenter = reference()
-            if presenter is None:
-                return None
-            try:
-                return getattr(presenter, name)(*args, **kwargs)
-            except Exception as error:  # noqa: BLE001 -- the boundary IS total
-                _LOG.exception("console handler %s failed", name)
-                presenter._report(
-                    f"internal error in {name}: {_error_text(error)}",
-                    severity="error",
-                )
-                return None
-
-        return guarded
+    def _slot_error(self, error: Exception) -> None:
+        self._report(f"internal error: {_error_text(error)}", severity="error")
 
     def _connect(self) -> None:
         """Every outbound signal the view offers gets an answer here.

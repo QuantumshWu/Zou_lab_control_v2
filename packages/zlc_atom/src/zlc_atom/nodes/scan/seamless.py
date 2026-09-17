@@ -202,7 +202,7 @@ class SeamlessScanMeasurement:
 
         The console converts these into runtime device claims, so a
         control-panel tune of the same field is blocked while the scan
-        owns it -- the same protection the stepped executor carried.
+        owns it.
         """
 
         from zlc_atom.nodes._framework.descriptor import ResolvedDeviceClaim
@@ -308,7 +308,7 @@ class SeamlessScanMeasurement:
                 self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
             check_cancelled(context)
-            self.sequencer.fire(
+            execution = self.sequencer.fire(
                 run_repeats=shots,
                 scan_repeats=sweeps,
             )
@@ -318,7 +318,7 @@ class SeamlessScanMeasurement:
                 # LOAD/Fire, not by the pure compiler used to plan this run.
                 initial = run_record["device_snapshots"]["sequencer"]
                 initial.update(sequencer_archive_snapshot(
-                    applied=self.sequencer.applied(),
+                    applied=execution,
                     config=self.sequencer.config_values(),
                 ))
                 context.set_run_record(run_record)

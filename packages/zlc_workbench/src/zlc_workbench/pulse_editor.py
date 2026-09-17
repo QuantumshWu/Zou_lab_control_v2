@@ -1449,7 +1449,7 @@ class PulseEditorPresenter:
         base = sequence if self._scan_armed() else resolve_scan_point(sequence)
         effective = apply_config_values(sequence, self._active_config_values(), current=base)[0]
         # Capability marks remain visible when this preview uses defaults.
-        return replace(effective, bindings=sequence.bindings)
+        return effective if effective.bindings == sequence.bindings else replace(effective, bindings=sequence.bindings)
 
     def start_new_pulse(self) -> bool:
         """Begin a pulse on the board this bench actually has.

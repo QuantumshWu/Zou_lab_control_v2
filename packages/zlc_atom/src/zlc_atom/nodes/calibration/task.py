@@ -1315,18 +1315,14 @@ class CalibrationTask:
             # the flag on the way out left that board firing with nobody
             # coming back to SAFE it.
             firing = True
-            self.sequencer.fire(
+            execution = self.sequencer.fire(
                 run_repeats=self.request.repeats,
                 scan_repeats=1,
             )
             # Archive the execution state, not LOAD's neutral counters.  FIRE
             # is the authority that applies this run's M/S values.
-            sequencer_state = self.sequencer.snapshot()
-            if not isinstance(sequencer_state, Mapping):
-                raise TypeError("sequencer snapshot must be a mapping")
             sequencer_snapshot = sequencer_archive_snapshot(
-                state=sequencer_state,
-                applied=self.sequencer.applied(),
+                applied=execution,
             )
             run_record = self._run_record(
                 actual,

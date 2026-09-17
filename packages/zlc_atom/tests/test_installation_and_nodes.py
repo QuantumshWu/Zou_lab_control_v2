@@ -234,8 +234,6 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "occupancy",
         "seamless_scan",
         "slm_feedback",
-        "stepped_scan",
-        "temperature",
         "waveform_measurement",
     )
     assert all(

@@ -38,7 +38,6 @@ from zlc_atom.devices.slm.solver import (
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
-from zlc_atom.nodes.camera_measurement.measurement import CameraCycleSource
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_runtime import SignalDataPlane
 from zlc_pulse import (
@@ -1374,48 +1373,6 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
         installation.close()
 
 
-def test_camera_cycle_source_does_not_interpret_pulse_windows_or_exposure() -> None:
-    world = _world(seed=5)
-    camera = VirtualCamera(frame_source=world.render_frame)
-    streamer = VirtualPulseStreamer(world=world)
-    streamer.open()
-    try:
-        sequence = resolve_api_parameters(
-            IMAGING_PULSE_RESOURCE.value,
-            {
-                "duration:long_before": 0.02,
-                "duration:short": 0.005,
-                "duration:long_after": 0.02,
-            },
-        )
-        board = streamer.describe()
-        program = compile_sequence(sequence, board.geometry, board.clock_hz)
-        context = SimpleNamespace(
-            generation=object(), cancel_requested=lambda: False
-        )
-        prepared: list[dict[str, object]] = []
-
-        def node(*, frames_per_cycle: int, exposure: float = 0.02):
-            camera.set_exposure_seconds(exposure)
-            return SimpleNamespace(
-                request=SimpleNamespace(
-                    repeat=2,
-                    frames_per_cycle=frames_per_cycle,
-                    camera_key="camera",
-                ),
-                actual_working_point=camera.working_point(),
-                _configure_capture=camera.working_point,
-                _arm_configured=lambda **kwargs: prepared.append(kwargs)
-                or SimpleNamespace(close=lambda: None),
-            )
-
-        source = CameraCycleSource(node(frames_per_cycle=2, exposure=0.1))
-        source.open(context, cycles=2)
-        source.validate(program, np.empty((2, 0), dtype=np.int64))
-        source.arm()
-        assert len(prepared) == 1
-    finally:
-        streamer.close()
 
 
 def test_virtual_camera_counts_collected_frames_not_pulse_edges() -> None:
