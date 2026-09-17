@@ -28,7 +28,6 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     )
     projection._payload = projection._rolling_payload(
         history,
-        window=int(state["window"]),
         trailing=(
             int(state["trailing"]) if spec.reduction.statistic is Reduction.MEAN else 1
         ),

@@ -84,7 +84,14 @@ def test_a_static_rolling_panel_reuses_its_chrome_background(monkeypatch) -> Non
 
     session = _session()
     try:
+        session.set_parameters({"title": "Live counts"})
         session.rgba()
+        renderer = session._renderer
+        measured = renderer.figure.canvas.get_renderer()
+        value = renderer._artists["rolling:latest"].get_window_extent(measured)
+        title = renderer.primary_axes.title.get_window_extent(measured)
+        assert renderer.primary_axes.bbox.y1 < value.y0 < value.y1 < title.y0
+        assert title.y1 < renderer.figure.bbox.y1
         clock = [1]
         _feed(session, 4, start=clock)
         draws = []

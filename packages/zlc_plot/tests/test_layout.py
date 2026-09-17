@@ -48,6 +48,13 @@ def test_rolling_surface_requires_explicit_distribution_policy() -> None:
             layout=DEFAULTS.layout,
             style=DEFAULTS.style,
         )
+    for dpr in (1.0, 3.0):
+        image = resolve_surface("2x2", "image", device_pixel_ratio=dpr,
+                                layout=DEFAULTS.layout, style=DEFAULTS.style)
+        rolling = resolve_surface("2x2", "rolling", rolling_side_distribution=True,
+                                  device_pixel_ratio=dpr, layout=DEFAULTS.layout, style=DEFAULTS.style)
+        assert rolling.logical_size == image.logical_size == (490, 357)
+        assert rolling.raster_size == image.raster_size
 
 
 def test_a_pulse_gets_the_smallest_preset_that_draws_it_legibly() -> None:

@@ -3,7 +3,7 @@
 Each live revision appends one shot.  ``trailing`` says how many shots
 one drawn point averages -- 1 is the shot itself, N is the mean of the
 last N, with the standard error of those same N as the band.  The
-display window still never changes the numbers.
+window bounds all samples available to that statistic.
 """
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def test_the_default_span_of_one_is_each_shot_itself() -> None:
     finally:
         session.close()
 
-def test_window_frames_the_view_without_changing_the_numbers() -> None:
+def test_window_bounds_the_samples_used_by_the_trailing_mean_and_sem() -> None:
     sites = 4
     rng = np.random.default_rng(5)
     shots = (rng.random((20, sites)) < 0.5).astype(np.float64)
@@ -142,7 +142,11 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
         finally:
             session.close()
 
-    assert last_value(5) == last_value(None)
+    for window, span in ((5, 5), (None, 6)):
+        pooled = shots[-span:].reshape(-1)
+        np.testing.assert_allclose(last_value(window), (
+            pooled.mean(), np.std(pooled, ddof=1) / np.sqrt(pooled.size),
+        ), rtol=1e-12)
 
 def test_the_trailing_band_renders(tmp_path) -> None:
     sites = 6
@@ -392,41 +396,86 @@ def test_labelled_axis_ticks_by_name() -> None:
     finally:
         session.close()
 
-def test_the_history_a_trailing_mean_needs_reaches_behind_the_window() -> None:
-    """A window of W points, each the mean of T shots, reads W + T - 1 shots.
-
-    The window says how many points are shown; trailing says how many
-    shots each averages, counted back from itself.  Asking Runtime for
-    ``max(W, T)`` fed the earliest visible point a truncated history: at
-    W=10, T=5 over the shots 0..19 it showed 10.0 (the shot alone) where
-    the mean of shots 6..10 is 8.0.  The last point was right either way,
-    which is why checking the latest value never saw it.
-    """
+def test_trailing_only_uses_this_panels_window_even_when_more_is_retained() -> None:
+    """W is the only retention request; T never reaches behind this window."""
 
     from zlc_plot.specs import history_window_requirement
 
     mean = RollingPlot(reduction=Reduction.MEAN)
-    assert history_window_requirement(mean, {"window": 10, "trailing": 5}) == 14
+    assert history_window_requirement(mean, {"window": 10, "trailing": 5}) == 10
     assert history_window_requirement(mean, {"window": 10, "trailing": 1}) == 10
-    assert history_window_requirement(mean, {"window": 3, "trailing": 30}) == 32
+    assert history_window_requirement(mean, {"window": 3, "trailing": 30}) == 3
     # A non-MEAN reduction has no trailing span: the handler forces it to
     # one, and the lease must not hold shots for a statistic not drawn.
     total = RollingPlot(reduction=Reduction.SUM)
     assert history_window_requirement(total, {"window": 10, "trailing": 5}) == 10
 
     shots = np.arange(20.0).reshape(20, 1)
-    retained = history_window_requirement(mean, {"window": 10, "trailing": 5})
+    from dataclasses import replace
+    from zlc_data import REPEAT, AxisId, AxisSpec, DomainSpec, owned_snapshot_from_arrays
+
+    source = _shots(shots)
+    repeat = DomainSpec((20,), (
+        AxisSpec(AxisId("sweep"), "sweep", REPEAT, 4),
+        AxisSpec(AxisId("shot"), "shot", REPEAT, 5),
+    ), (tuple(np.repeat(np.arange(4), 5)), tuple(np.tile(np.arange(5), 4))))
+    source = owned_snapshot_from_arrays(replace(source.block.schema, repeat_domain=repeat), source.block.values, 0)
     session = PlotSession(
-        _shots(shots[-retained:]),
+        source,
         mean,
         parameters={"trailing": 5, "window": 10, "uncertainty": False},
     )
     try:
         y = np.asarray(session._projection._payload.series[0].y.canonical)
+        assert session._projection._view._schema.repeat_domain.size == 10
+        visible_repeat = session._projection._view._schema.repeat_domain
+        assert tuple(visible_repeat.axes[0].coordinate_at(index) for index in range(2)) == (2, 3)
+        assert tuple(visible_repeat.axes[1].coordinate_at(index) for index in range(5)) == tuple(range(5))
+        np.testing.assert_allclose(y, _trailing_mean(shots[-10:], 5), rtol=1e-12)
+        assert y[0] == 10.0
+        view = session._projection._view
+        session.set_parameter("trailing", 50)
+        assert session._projection._view is view
+        np.testing.assert_allclose(session._projection._payload.series[0].y.canonical,
+                                   _trailing_mean(shots[-10:], 50), rtol=1e-12)
+        session.set_parameter("window", 3)
+        assert session._projection._view._schema.repeat_domain.size == 3
+        np.testing.assert_allclose(session._projection._payload.series[0].y.canonical, (17., 17.5, 18.))
     finally:
         session.close()
-    np.testing.assert_allclose(y, _trailing_mean(shots, 5)[-10:], rtol=1e-12)
-    assert y[0] == 8.0
+    from types import SimpleNamespace
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage, SignalDataPlane
+    from zlc_data.snapshot_projection import indexed_history_layout
+
+    declaration = DatasetOutputDeclaration("value", "rolling.test", index_by_source=True)
+    node = SimpleNamespace(instance_id="rolling", dataset_output_declarations=(declaration,),
+                           signal_key=lambda name: f"rolling/{name}")
+    plane = SignalDataPlane()
+    plane.begin_generation(node)
+    own = plane.acquire_indexed_history("rolling/value", history_window_requirement(mean, {"window": 10, "trailing": 5}))
+    other = plane.acquire_indexed_history("rolling/value", 20)
+    try:
+        for index in range(20):
+            plane.commit_live(node, {"value": LiveDatasetOutput(
+                declaration, _shots(shots[index:index + 1], revision=index), MonitorCoverage(1, 1),
+                shot_time_seconds=float(index),
+            )})
+        for retained in (20, 10):
+            snapshot = plane.current_dataset("rolling/value")
+            assert indexed_history_layout(snapshot.block.schema).shot_count == retained
+            session = PlotSession(snapshot, mean, parameters={"window": 10, "trailing": 5})
+            try:
+                assert indexed_history_layout(session._projection._view._schema).shot_count == 10
+                np.testing.assert_allclose(session._projection._payload.series[0].y.canonical, y)
+                own.resize(history_window_requirement(mean, {"window": 10, "trailing": 50}))
+                assert own.window == 10
+            finally:
+                session.close()
+            other.close()
+    finally:
+        other.close()
+        own.close()
+        plane.close()
 
 def test_a_window_with_no_valid_shot_has_an_empty_distribution() -> None:
     """The rolling rail counts the samples in the window and nothing else.

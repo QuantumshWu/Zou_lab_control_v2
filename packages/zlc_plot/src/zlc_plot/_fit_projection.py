@@ -105,10 +105,9 @@ def _window_totals(totals: np.ndarray, span: int) -> np.ndarray:
 def _trailing_trace(
     history: RollingHistory,
     column: int,
-    start: int,
     span: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Mean and standard error over the last ``span`` shots, then sliced.
+    """Mean and standard error over ``span`` shots inside the panel's window.
 
     Ungrouped, each shot contributes everything it pooled (its stored
     moments), so shots pooling different sample counts weigh in correctly.
@@ -168,7 +167,7 @@ def _trailing_trace(
     sem[running_n < 2.0] = np.nan
     valid = (running_n > 0.0) & np.isfinite(mean)
     mean = np.where(valid, mean, np.nan)
-    return mean[start:], sem[start:], valid[start:]
+    return mean, sem, valid
 
 def _broadcast_all_true(mask: np.ndarray) -> bool:
     """True for a stride-0 broadcast plane that is constant True."""
@@ -686,12 +685,14 @@ class FitProjection:
 
         assert isinstance(self._data, OwnedSnapshot)
         scope = projection_scope(self._data.block.schema, self._spec)
+        rolling = isinstance(self._semantic_spec(), RollingPlot)
         layout = (
             indexed_history_layout(self._data.block.schema)
-            if isinstance(self._semantic_spec(), (CurvePlot, HistogramPlot)) else None
+            if isinstance(self._semantic_spec(), (CurvePlot, HistogramPlot, RollingPlot)) else None
         )
-        window = int(self.display_state.values["window"]) if layout is not None else None
-        narrowed = layout is not None and window < layout.shot_count
+        window = int(self.display_state.values["window"]) if layout is not None or rolling else None
+        count = layout.shot_count if layout is not None else self._data.block.schema.repeat_domain.size
+        narrowed = window is not None and window < count
         if not scope and not narrowed:
             return self._data
         source = self._data
@@ -731,7 +732,9 @@ class FitProjection:
         scoped = source
         if narrowed:
             scoped = restrict_snapshot(
-                source, Selection.index_range(PRIMARY_INDEX_AXIS_ID, layout.shot_count - window, layout.shot_count),
+                source,
+                None if layout is None else Selection.index_range(PRIMARY_INDEX_AXIS_ID, count - window, count),
+                repeat_rows=range(count - window, count) if layout is None else None,
                 reference_for=lambda derived: DatasetRevisionRef(
                     BlockId(f"{source.ref.block_id.value}|window:{window}"),
                     source.ref.stream_generation, derived.fingerprint, source.ref.revision,
@@ -795,7 +798,6 @@ class FitProjection:
         self,
         history: RollingHistory,
         *,
-        window: int,
         trailing: int = 1,
         uncertainty: bool = False,
     ) -> CurveData:
@@ -804,29 +806,24 @@ class FitProjection:
         ``trailing`` is how many shots each drawn point averages: 1 is the
         shot itself, N is the mean of the last N.  ``uncertainty`` draws the
         band -- the standard error of those same N shots when averaging,
-        each shot's own pooled standard error when not.  The window selects
-        the displayed tail and never changes the numbers; data older than
-        Runtime's active bounded retention is never reconstructed by Plot,
-        so a trailing mean averages what is actually retained.
+        each shot's own pooled standard error when not. The common scoped
+        DataView already holds only this panel's window, so neither reduction
+        nor trailing statistics can consume another panel's retained records.
         """
 
-        if window <= 0:
-            raise ValueError("rolling window must be positive")
         total = len(history)
         if not total:
             raise ValueError("rolling history cannot be empty")
-        visible_size = min(window, total)
-        start = total - visible_size
         keys = history.group_keys
         # Each drawn series is a column slice of the history planes -- no
         # per-shot objects, no per-shot key lookup.
-        values_plane = np.asarray(history.values, dtype=float)[start:]
-        valid_plane = np.asarray(history.valid, dtype=bool)[start:]
+        values_plane = np.asarray(history.values, dtype=float)
+        valid_plane = np.asarray(history.valid, dtype=bool)
         masked_plane = np.where(valid_plane, values_plane, np.nan)
         sem_plane = None
         if history.sem is not None:
             sem_plane = np.where(
-                valid_plane, np.asarray(history.sem, dtype=float)[start:], np.nan
+                valid_plane, np.asarray(history.sem, dtype=float), np.nan
             )
         # Runtime supplies both coordinates: relative source index and actual
         # run-relative time. A window selects records without rebasing either.
@@ -834,14 +831,14 @@ class FitProjection:
         if along is None or along == AxisRef.point(PRIMARY_INDEX_AXIS_ID.value):
             if history.source_indices is not None:
                 source_coordinates = np.asarray(
-                    history.source_indices[start:], dtype=float
+                    history.source_indices, dtype=float
                 )
             else:
-                source_coordinates = np.arange(start, total, dtype=float) - (total - 1)
+                source_coordinates = np.arange(total, dtype=float) - (total - 1)
             x_unit = resolve_unit("1", DEFAULT_UNITS)
             x_label = "Shots from latest"
         elif along == AxisRef.point(SHOT_TIME_AXIS_ID.value) and history.source_times is not None:
-            source_coordinates = np.asarray(history.source_times[start:], dtype=float)
+            source_coordinates = np.asarray(history.source_times, dtype=float)
             x_unit = self._view.coordinate(along).canonical_unit
             x_label = self._view.coordinate(along).label
         else:
@@ -867,7 +864,7 @@ class FitProjection:
             sem = None
             if trailing > 1:
                 canonical_values, running_sem, valid = _trailing_trace(
-                    history, column, start, trailing
+                    history, column, trailing
                 )
                 if uncertainty:
                     sem = running_sem

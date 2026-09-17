@@ -96,7 +96,8 @@ _UNCERTAINTY_EFFECTS = (
 )
 
 _ROLLING_WINDOW_EFFECTS = (
-    RenderEffect.PAYLOAD_PROJECTION
+    RenderEffect.VIEW_PROJECTION
+    | RenderEffect.PAYLOAD_PROJECTION
     | RenderEffect.BASE_GEOMETRY
     | RenderEffect.AXIS_TRANSFORM
     | RenderEffect.CHROME
@@ -1047,16 +1048,6 @@ def history_window_requirement(
         return None
     if isinstance(semantic, (HistogramPlot, CurvePlot)) and window == 1:
         return None
-    if isinstance(semantic, RollingPlot) and semantic.reduction.statistic is Reduction.MEAN:
-        # The window is how many points are shown; trailing is how many
-        # shots EACH of them averages, counted back from itself.  The
-        # earliest visible point therefore reaches ``trailing - 1`` shots
-        # behind the window, and retention must cover it or that point
-        # averages whatever history happens to remain.  Only a MEAN has a
-        # trailing span: the rolling handler forces it to one otherwise.
-        trailing = display.get("trailing")
-        if type(trailing) is int and trailing > 1:
-            return window + trailing - 1
     return window
 
 
@@ -1113,7 +1104,7 @@ def _build_parameter_schema(
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())
     if semantic_kind is PlotKind.CURVE:
-        entries.append(_window_parameter(1, effects=_ROLLING_WINDOW_EFFECTS | RenderEffect.VIEW_PROJECTION))
+        entries.append(_window_parameter(1))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         # A display choice, not a data declaration: the operator flips the
         # band on a live panel and the projection computes the MEAN's
@@ -1143,7 +1134,7 @@ def _build_parameter_schema(
         # larger window pools that many of the most recent shots into the same
         # picture, which is how a per-site histogram gets enough counts to
         # separate two peaks.
-        entries.append(_window_parameter(1, effects=_ROLLING_WINDOW_EFFECTS | RenderEffect.VIEW_PROJECTION))
+        entries.append(_window_parameter(1))
     if semantic_kind is PlotKind.IMAGE:
         # A FacetGrid whose cell is an image carries the FULL image surface:
         # the focused cell is the standalone Image kind, so its parameters

@@ -10292,7 +10292,7 @@ class MatplotlibRenderer:
                 "",
                 transform=offset_copy(
                     history.transAxes, fig=self._figure,
-                    y=self.style.render.axes_title_pad_pt, units="points",
+                    y=self.style.render.compact_axes_title_pad_pt, units="points",
                 ),
                 color=self.style.palette.readout,
                 ha="right",
@@ -11863,7 +11863,7 @@ class MatplotlibRenderer:
             owner = self.primary_axes
             pad = self.style.render.axes_title_pad_pt
             if isinstance(self.spec, RollingPlot):
-                pad = 2.0 * pad + 1.2 * self.style.fonts.annotation_pt
+                pad += self.style.fonts.annotation_pt + self.style.render.compact_axes_title_pad_pt
             owner.set_title(
                 title,
                 fontsize=self.style.fonts.figure_title_pt,

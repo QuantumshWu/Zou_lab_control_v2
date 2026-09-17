@@ -376,7 +376,7 @@ def axis_catalog(
 
 def selection_indices(
     schema: DatasetSchema,
-    selection: Selection,
+    selection: Selection | None,
 ) -> tuple[
     range | tuple[int, ...],
     range | tuple[int, ...],
@@ -394,7 +394,7 @@ def selection_indices(
     catalog = {
         axis_id: (axis, kind) for _label, axis_id, axis, kind in axis_catalog(schema)
     }
-    terms = {term.axis_id: term for term in selection.terms}
+    terms = {} if selection is None else {term.axis_id: term for term in selection.terms}
     for axis_id in terms:
         if axis_id not in catalog:
             raise ValueError(f"selection axis {axis_id} is absent from source schema")
@@ -627,9 +627,10 @@ def value_selection(
 
 def restrict_snapshot(
     snapshot: OwnedSnapshot,
-    selection: Selection,
+    selection: Selection | None = None,
     *,
     reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
+    repeat_rows: range | None = None,
 ) -> OwnedSnapshot:
     """One selection applied to one snapshot: the same axes, over less of them.
 
@@ -639,12 +640,26 @@ def restrict_snapshot(
     here.  Two cutters is how a box drawn on a scoped panel came to cut from
     the whole signal instead: they agreed about the intent and disagreed about
     the domain it applied to.
+
+    ``repeat_rows`` restricts the physical Repeat carrier, not one logical
+    axis in it. Its existing coordinates and axis_codes remain authoritative.
     """
 
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("restrict_snapshot requires an OwnedSnapshot")
     schema = snapshot.block.schema
     repeat_indices, point_indices, data_indices = selection_indices(schema, selection)
+    if repeat_rows is not None:
+        if (not isinstance(repeat_rows, range) or repeat_rows.step != 1
+                or not 0 <= repeat_rows.start < repeat_rows.stop <= schema.repeat_domain.size):
+            raise ValueError("repeat_rows must be a nonempty contiguous range within the Repeat carrier")
+        if isinstance(repeat_indices, range):
+            repeat_indices = range(max(repeat_indices.start, repeat_rows.start),
+                                   min(repeat_indices.stop, repeat_rows.stop))
+        else:
+            repeat_indices = tuple(index for index in repeat_indices if index in repeat_rows)
+        if not repeat_indices:
+            raise EmptySelection("selected Repeat rows do not intersect repeat_rows")
     derived = restricted_schema(schema, repeat_indices, point_indices, data_indices)
     values = restricted_values(
         snapshot.block.values, schema, repeat_indices, point_indices, data_indices
