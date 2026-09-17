@@ -714,10 +714,22 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
         plane.close()
 
 
-def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> None:
+def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeypatch) -> None:
+    import zlc_runtime.plane as plane_module
+
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("epoch-camera", declaration)
+    sibling = DatasetOutputDeclaration("counts", "test.counts")
+    node = _node("epoch-camera", declaration, sibling)
     plane = SignalDataPlane()
+    merge_calls = []
+    real_merge = plane_module._merge_event_records
+
+    def counted(records):
+        records = tuple(records)
+        merge_calls.append(len(records))
+        return real_merge(records)
+
+    monkeypatch.setattr(plane_module, "_merge_event_records", counted)
 
     def event(epoch: int) -> dict[str, object]:
         return {
@@ -744,10 +756,14 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
                     origin=0,
                     written=1,
                     event_record=event(0),
-                )
+                ),
+                "counts": _finite(sibling, value=3.0, total=2, origin=0, written=1, event_record=event(0)),
             },
         )["epoch-camera/frame"]
-        plane.current_dataset_view("epoch-camera/frame")
+        first_publication = plane.latest_publication("epoch-camera/frame")
+        _, first_record = plane.current_dataset_view("epoch-camera/frame")
+        assert plane.current_dataset_view("epoch-camera/counts")[1] is first_record
+        assert merge_calls == [1]
         second = plane.commit_live(
             node,
             {
@@ -758,7 +774,8 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
                     origin=1,
                     written=2,
                     event_record=event(2),
-                )
+                ),
+                "counts": _finite(sibling, value=4.0, total=2, origin=1, written=2, event_record=event(2)),
             },
         )["epoch-camera/frame"]
         assert first.event_record["device_settings"]["camera"][
@@ -769,11 +786,16 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
         assert camera["mixed"] is False
         publication = plane.latest_publication("epoch-camera/frame")
         assert publication is not None
+        prepared = plane.current_dataset("epoch-camera/frame")
+        assert merge_calls == [1]
         _snapshot, prefix_record = plane.current_dataset_view(
             "epoch-camera/frame",
             publication,
         )
         prefix_camera = prefix_record["device_settings"]["camera"]
+        assert _snapshot is prepared
+        assert plane.current_dataset_view("epoch-camera/counts")[1] is prefix_record
+        assert merge_calls == [1, 2]
         assert prefix_camera["epoch_ranges"] == ((0, 0), (2, 2))
         assert prefix_camera["mixed"] is True
         assert first.run_record is second.run_record
@@ -783,6 +805,11 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
             prefix_record["record_timing"]["camera"]["0"]["record_time_seconds"] = 99
         assert first.canonical_schema is second.canonical_schema
         assert first.run_record == {"run": "same"}
+        assert tuple(first_record["record_timing"]["camera"]) == ("0",)
+        old_snapshot, old_record = plane.current_dataset_view("epoch-camera/frame", first_publication)
+        assert tuple(old_record["record_timing"]["camera"]) == ("0",)
+        assert old_snapshot.expanded_validity()[:, 0, 0].tolist() == [True, False]
+        assert plane.current_dataset_view("epoch-camera/frame")[1] is prefix_record
     finally:
         plane.close()
 
@@ -1031,11 +1058,17 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
                     )
                 },
             )
-            # What a live panel does every beat: ask for the run so far.
+            # A values-only consumer asks for the run without provenance.
             view = plane.current_dataset("grid-cost/scan")
             assert view.block.values[0, point, 0] == float(point)
         assert placed == [1, 1, 1, 1], placed
-        assert merged == [1, 2, 2, 2], "one owned prefix plus the new shot, never a historical rescan"
+        assert merged == [], "snapshot-only reads must not build discarded event records"
+        snapshot, record = plane.current_dataset_view("grid-cost/scan")
+        assert snapshot is view, "requesting provenance must not rebuild prepared pixels"
+        assert merged == [4]
+        assert record == {}
+        assert plane.current_dataset_view("grid-cost/scan")[1] is record
+        assert merged == [4], "the same exact record is prepared once"
         np.testing.assert_allclose(
             plane.current_dataset("grid-cost/scan").block.values[0, :, 0],
             (0.0, 1.0, 2.0, 3.0),
@@ -1266,7 +1299,8 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         plane.close()
 
 
-def test_full_materialization_does_not_hold_plane_lock(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["owned_snapshot_from_arrays", "_merge_event_records"])
+def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation) -> None:
     import zlc_runtime.plane as plane_module
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
@@ -1275,7 +1309,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch) -> None:
     release = threading.Event()
     reader_done = threading.Event()
     errors: list[BaseException] = []
-    real = plane_module.owned_snapshot_from_arrays
+    real = getattr(plane_module, operation)
 
     def gated(*args, **kwargs):
         entered.set()
@@ -1298,11 +1332,11 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch) -> None:
                 )
             },
         )
-        monkeypatch.setattr(plane_module, "owned_snapshot_from_arrays", gated)
+        monkeypatch.setattr(plane_module, operation, gated)
 
         def materialize() -> None:
             try:
-                plane.current_dataset(node.signal_key("frame"))
+                plane.current_dataset_view(node.signal_key("frame"))
             except BaseException as error:
                 errors.append(error)
 

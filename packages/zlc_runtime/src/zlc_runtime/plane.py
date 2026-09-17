@@ -25,7 +25,7 @@ from dataclasses import dataclass, field, replace
 import math
 import threading
 from types import MappingProxyType
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Protocol, runtime_checkable
 import uuid
 from weakref import WeakKeyDictionary, ref as weakref_ref
@@ -795,13 +795,16 @@ def _indexed_schema(
 def _materialize_indexed_dataset(
     materialization: _IndexedMaterialization,
 ) -> OwnedSnapshot:
+    if materialization.snapshot is not None:
+        return materialization.snapshot
     event_schema = materialization.event_schema
     start = materialization.start
     latest_index = materialization.latest
     schema = materialization.schema
     if schema is None:
         schema = _indexed_schema(
-            event_schema, tuple(range(start - latest_index, 1)), materialization.times
+            event_schema, tuple(range(start - latest_index, 1)),
+            None if materialization.times is None else _row_times(materialization.times),
         )
     point_count = event_schema.point_domain.size
     trailing = (slice(None),) * len(event_schema.cell_domain.axes)
@@ -971,7 +974,9 @@ class _MaterializedFinite:
 
     sequence: int
     snapshot: OwnedSnapshot
-    record: Mapping[str, object]
+    record: Mapping[str, object] | None
+    # Values-only reads can advance the snapshot without preparing its record.
+    record_sequence: int = 0
 
 
 @dataclass(slots=True)
@@ -980,7 +985,7 @@ class _MaterializedIndexed:
 
     sequence: int
     snapshot: OwnedSnapshot
-    record: Mapping[str, object]
+    record: Mapping[str, object] | None
     start: int
     latest: int
 
@@ -1034,16 +1039,17 @@ class _IndexedMaterialization:
     start: int
     latest: int
     basis: _MaterializedIndexed | None
-    record: Mapping[str, object]
+    records: tuple[Mapping[str, object], ...]
     #: When each retained shot was taken, for a history whose shots are
     #: stamped; None for one that counts its shots only.  A window with
     #: times is built afresh each time -- its schema is its coordinates.
-    times: tuple[float, ...] | None
+    times: tuple[float | None, ...] | None
     #: The history's ``replaced_at`` at this materialization: the last
     #: sequence at which a retained shot was overwritten.  Stamped on the
     #: block so a consumer carrying work from an earlier revision knows
     #: whether the shots the two share are still the same shots.
     stable_since: int = -1
+    snapshot: OwnedSnapshot | None = None
 
 
 def _validate_indexed_event(
@@ -1125,7 +1131,7 @@ def _update_indexed_history(
     return history, changed
 
 
-def _row_times(times: list[float | None]) -> tuple[float, ...]:
+def _row_times(times: Sequence[float | None]) -> tuple[float, ...]:
     """A distinct, ordered time for every row of a stamped window.
 
     A held row has its own.  A hole between two held rows -- a shot the
@@ -1159,7 +1165,8 @@ def _indexed_materialization_input(
     value: SignalValue,
     window: int | None = None,
     first_index: int | None = None,
-) -> tuple[OwnedSnapshot, Mapping[str, object]] | _IndexedMaterialization:
+    include_record: bool = True,
+) -> tuple[OwnedSnapshot, Mapping[str, object] | None] | _IndexedMaterialization:
     primary_index = value.primary_index
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
@@ -1176,6 +1183,7 @@ def _indexed_materialization_input(
     if start > primary_index:
         raise RetainedPublicationExpired("publication precedes the sibling history window")
     cached = history.materialized
+    snapshot = None
     if (
         cached is not None
         and cached.sequence == sequence
@@ -1186,7 +1194,9 @@ def _indexed_materialization_input(
         # The exact hit must match the WINDOW, not just the sequence: a
         # lease change moves ``start`` for the very same publication, and
         # the kept basis honestly describes the window it was built for.
-        return cached.snapshot, cached.record
+        if not include_record or cached.record is not None:
+            return cached.snapshot, cached.record
+        snapshot = cached.snapshot
     basis = None
     if (
         cached is not None
@@ -1218,30 +1228,33 @@ def _indexed_materialization_input(
             record = held[2] if current else value.event_record
             shot_time = held[3] if current else value.shot_time
             selected_events.append((index, value.snapshot))
-            appended_records.append(record)
-            window_records.append(record)
+            if include_record:
+                appended_records.append(record)
+                window_records.append(record)
         elif held is None or held[0] > sequence:
             row_times.append(None)
             continue
         else:
             record = held[2]
             shot_time = held[3]
-            window_records.append(record)
+            if include_record:
+                window_records.append(record)
             if index >= append_from:
                 selected_events.append((index, held[1]))
-                appended_records.append(record)
+                if include_record:
+                    appended_records.append(record)
         row_times.append(shot_time)
-    if basis is not None and start == basis.start:
+    if include_record and basis is not None and basis.record is not None and start == basis.start:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
-        merged_record = _merge_event_records((basis.record, *appended_records))
+        records = (basis.record, *appended_records)
     else:
         # The window ROLLED (or there is no basis): rows left it, and a
         # union of epoch ranges cannot subtract what they contributed.
         # The record is the union of the rows actually retained, however
         # the values themselves were assembled -- otherwise how often a
         # panel was read decided which device epochs its picture claimed.
-        merged_record = _merge_event_records(window_records)
+        records = tuple(window_records)
     schema = None
     if (
         not stamped
@@ -1264,9 +1277,10 @@ def _indexed_materialization_input(
         start,
         primary_index,
         basis,
-        merged_record,
-        _row_times(row_times) if stamped else None,
+        records,
+        tuple(row_times) if stamped else None,
         stable_since=history.replaced_at,
+        snapshot=snapshot,
     )
 
 
@@ -2671,6 +2685,20 @@ class SignalDataPlane:
         history_signals: tuple[str, ...] = (),
     ) -> tuple[OwnedSnapshot, Mapping[str, object]]:
         """Materialize one Dataset and the exact event record it contains."""
+        snapshot, record = self._materialize_current(
+            signal_name, publication, include_record=True,
+            indexed_history=indexed_history, history_window=history_window,
+            history_signals=history_signals,
+        )
+        assert record is not None
+        return snapshot, record
+
+    def _materialize_current(
+        self, signal_name: str, publication: SignalPublication | None, *,
+        include_record: bool, indexed_history: bool = True,
+        history_window: int | None = None, history_signals: tuple[str, ...] = (),
+    ) -> tuple[OwnedSnapshot, Mapping[str, object] | None]:
+        """One numerical path; records are prepared only for their consumers."""
         name = canonical_text(signal_name, "signal name")
         if history_window is not None:
             history_window = self._indexed_history_window(history_window)
@@ -2678,6 +2706,10 @@ class SignalDataPlane:
                 raise ValueError("history_window requires indexed history")
         indexed_input = None
         finite_input = None
+        snapshot = None
+        record_chunks = ()
+        record_sequence = 0
+        merge_record = False
         materialized_record: Mapping[str, object] | None = None
         with self._lock:
             state = self._state_for_signal_locked(name)
@@ -2718,11 +2750,24 @@ class SignalDataPlane:
                     value=value,
                     window=history_window,
                     first_index=sibling_floor,
+                    include_record=include_record,
                 )
                 if not isinstance(indexed_result, _IndexedMaterialization):
                     return indexed_result
                 indexed_input = indexed_result
-                materialized_record = indexed_result.record
+                if include_record:
+                    # Atomic siblings share event records, but their retained
+                    # windows may differ. Reuse only the exact same range.
+                    materialized_record = next((
+                        item.materialized.record
+                        for item in state.indexed_history.values()
+                        if item.materialized is not None
+                        and item.materialized.sequence == sequence
+                        and item.materialized.start == indexed_input.start
+                        and item.materialized.latest == indexed_input.latest
+                        and item.materialized.record is not None
+                        and item.replaced_at <= sequence
+                    ), None)
             elif state.exact_outputs is None or name not in state.exact_outputs:
                 return value.snapshot, value.event_record
             else:
@@ -2731,26 +2776,38 @@ class SignalDataPlane:
                     raise ValueError("publication is not a canonical commit of this run")
                 cached = state.materialized.get(name)
                 if cached is not None and cached.sequence == sequence:
-                    return cached.snapshot, cached.record
-                finite_input = self._materialization_input_locked(
-                    state,
-                    name,
-                    sequence,
-                )
-                basis = finite_input[-1]
-                floor = 0 if basis is None else basis.sequence
-                records = (
-                    value.event_record for _sequence, value, _origin, _parents
-                    in committed[floor:sequence]
-                )
+                    snapshot = cached.snapshot
+                    if not include_record:
+                        return snapshot, None
+                else:
+                    finite_input = self._materialization_input_locked(state, name, sequence)
+                # Snapshot and provenance consumers can advance independently.
+                # Keep their latest prepared answers in this existing cache.
+                seed = max((
+                    item for item in state.materialized.values()
+                    if item.record is not None and item.record_sequence <= sequence
+                ), key=lambda item: item.record_sequence, default=None)
+                if seed is not None:
+                    materialized_record, record_sequence = seed.record, seed.record_sequence
+                if include_record and record_sequence != sequence:
+                    # Only capture immutable chunk references under the lock.
+                    record_chunks = tuple(committed[record_sequence:sequence])
+                    merge_record = True
+        if snapshot is None:
+            snapshot = (
+                _materialize_indexed_dataset(indexed_input)
+                if indexed_input is not None
+                else self._materialize_dataset(name, sequence, *finite_input)
+            )
+        if include_record:
+            if indexed_input is not None and materialized_record is None:
+                materialized_record = _merge_event_records(indexed_input.records)
+            elif merge_record:
+                records = tuple(value.event_record for _sequence, value, _origin, _parents in record_chunks)
                 materialized_record = _merge_event_records(
-                    records if basis is None else (basis.record, *records)
+                    records if materialized_record is None else (materialized_record, *records)
                 )
-        snapshot = (
-            _materialize_indexed_dataset(indexed_input)
-            if indexed_input is not None
-            else self._materialize_dataset(name, sequence, *finite_input)
-        )
+                record_sequence = sequence
         with self._lock:
             if self._states.get(state.owner_id) is state and not state.retired:
                 if indexed_input is not None:
@@ -2765,7 +2822,13 @@ class SignalDataPlane:
                         # basis honestly describes sequence; replaced_at
                         # fences its reuse.
                         if current is None or current.sequence <= sequence:
-                            assert materialized_record is not None
+                            if (
+                                current is not None and current.sequence == sequence
+                                and current.start == indexed_input.start
+                                and current.latest == indexed_input.latest
+                                and current.record is not None
+                            ):
+                                materialized_record = current.record
                             history.materialized = _MaterializedIndexed(
                                 sequence,
                                 snapshot,
@@ -2779,12 +2842,14 @@ class SignalDataPlane:
                     # prefixes.  A later materialization must not be displaced by
                     # an older request that happened to finish afterwards.
                     if cached is None or cached.sequence <= sequence:
+                        if cached is not None and cached.record_sequence > record_sequence:
+                            materialized_record, record_sequence = cached.record, cached.record_sequence
                         state.materialized[name] = _MaterializedFinite(
                             sequence,
                             snapshot,
                             materialized_record,
+                            record_sequence,
                         )
-        assert materialized_record is not None
         return snapshot, materialized_record
 
     def current_dataset(
@@ -2794,7 +2859,7 @@ class SignalDataPlane:
     ) -> OwnedSnapshot:
         """Materialize one exact finite prefix or active indexed Dataset."""
 
-        return self.current_dataset_view(signal_name, publication)[0]
+        return self._materialize_current(signal_name, publication, include_record=False)[0]
 
     def seal_committed(
         self, node: object, *, cut_short: bool = False, error: BaseException | None = None,

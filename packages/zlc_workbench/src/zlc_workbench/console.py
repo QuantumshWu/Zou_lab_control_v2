@@ -6777,11 +6777,7 @@ class ConsolePresenter:
         value = front.value(signal)
         if publication is None or value is None:
             raise RuntimeError("operator point review has no published image")
-        snapshot, _event_record = self._presentation_snapshot(
-            signal,
-            value,
-            publication,
-        )
+        snapshot = self.session.signal_plane.current_dataset(signal, publication)
         geometry = publication.run_record.get(
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
         )

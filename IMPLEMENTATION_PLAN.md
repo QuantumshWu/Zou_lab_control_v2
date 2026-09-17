@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 同源复核收尾：RecordQueue区分Stop保留尾部与设备Close释放尾部/失败引用，所有Camera/Waveform adapter在实际关闭成功后使用同一清理入口，SDK拒绝关闭仍保留可重试状态。N100坏帧/序号/时间错误只终止当前capture，原接收线程继续idle drain以支持普通Restart；实际串口I/O故障仍终止接收并明确拒绝重新arm。原直接用例验证释放弱引用、拒绝关闭重试和坏包后恢复，未接实验硬件。
+- Runtime数值物化仍只有一条路径，数组消费者不再构建后丢弃event record；完整记录按需准备，同一atomic bundle的有限prefix及相同indexed窗口共享已准备记录，补记录不重建数组。记录合并、时间坐标填充移出公共锁，旧请求不能覆盖新缓存，Frozen记录不变。64条有限记录逐次取数组的时间条目遍历2080→0；四个同源完整视图8320→2080，合并均不持公共锁。新的平坦不可变完整记录仍需O(N)索引构建，不声称全部完整读取为O(增量)，不引入链式记录容器或第二套缓存owner。并发新旧请求、不同窗口及原sigma/validity物化直接验证通过。
 - 持续采集与发布边界已收口：Camera/Waveform复用从原Waveform迁移的中立RecordQueue，SDK取数仍由具体adapter的原owner执行；相机接收容量按实际帧大小和显式MiB预算，有限目标数不再决定缓冲。真实/Virtual禁止drop-oldest，序号及错误优先由共同队列核验，正常Stop发布已接收完整周期，错误不伪装正常结束。设备模拟与真实NodeHost慢发布/Stop/Restart验证已执行，未操作实验硬件。
 - Run metadata改为generation一次声明，删除LiveDatasetOutput的逐event run_record及重复整表比较；所有生产者、Processor describe_run、Viewer与Task companion已接同一入口。有限结果只持自身数据与祖先元数据，未消费exact输入和已连接same-shot/Frozen所需payload仍按真实所有权保留；exact live队列明确限额，finite replay按需读取，Monitor弃置replay树已删除。Latest/Exact终态均收尾，后续失败保留已验证partial prefix并传播失败；显式Remove/Clear退休被移除owner，不破坏独立Frozen值。
 - 绘图传输沿原input token一次安装静态结构并按真实依赖释放；Scope说明只持其AxisSpec。单次Freeze/Save复用同run记录转换。长期Rolling的tick缓存限定工作集，删除后台全局gc.freeze及回收阈值改写；共享segment退休沿既有进程消息通知，在最后读者释放后解除映射。接收/Runtime/Plot有界性、关闭与重开分别验证，长期时钟坐标与window2000短压测不冒充20小时真机运行。全部benchmark、诊断和截图只留ignored research，不入Git。

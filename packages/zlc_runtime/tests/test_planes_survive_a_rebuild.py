@@ -90,7 +90,7 @@ def test_indexed_history_keeps_each_shots_stated_error() -> None:
             0,
             2,
             None,
-            {},
+            (),
             None,
         )
     )
@@ -119,7 +119,7 @@ def test_an_index_nobody_published_has_an_unknown_error_not_a_zero_one() -> None
             0,
             2,
             None,
-            {},
+            (),
             None,
         )
     )
@@ -147,7 +147,7 @@ def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
             0,
             2,
             None,
-            {},
+            (),
             None,
         )
     )
@@ -199,7 +199,7 @@ def test_an_indexed_materialization_is_stamped_with_its_window() -> None:
             5,
             7,
             None,
-            {},
+            (),
             None,
             stable_since=4,
         )
@@ -247,7 +247,7 @@ def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
         run_schema,
         GENERATION,
         chunks[2:],
-        _MaterializedFinite(2, prefix, {}),
+        _MaterializedFinite(2, prefix, {}, 2),
     )
     np.testing.assert_array_equal(
         np.asarray(extended.block.values), np.asarray(whole.block.values)
@@ -286,6 +286,6 @@ def test_a_run_that_states_no_error_gains_none_from_a_basis() -> None:
         run_schema,
         GENERATION,
         (second,),
-        _MaterializedFinite(1, prefix, {}),
+        _MaterializedFinite(1, prefix, {}, 1),
     )
     assert extended.block.sigma is None
