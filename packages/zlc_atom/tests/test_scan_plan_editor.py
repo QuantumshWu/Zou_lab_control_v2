@@ -366,7 +366,7 @@ def _bound_sequence():
 
     from zlc_pulse import (
         AnalogStep,
-        PulseApiParameter,
+        PulseBinding,
         PulseFieldRef,
         PulsePeriod,
         PulsePortSpec,
@@ -390,9 +390,9 @@ def _bound_sequence():
             PulsePeriod("p0", 200, "ns", (1, 0, 0, 0), (AnalogStep("dac", "edge", 1),)),
             PulsePeriod("p1", 20, "ns", (0, 1, 0, 0)),
         ),
-        api_parameters=(
-            PulseApiParameter("hold", PulseFieldRef("duration", "p0"), "ns"),
-            PulseApiParameter("level", PulseFieldRef("dac", "p0", "dac"), "value"),
+        bindings=(
+            PulseBinding(PulseFieldRef("duration", "p0"), "ns", source="api"),
+            PulseBinding(PulseFieldRef("dac", "p0", "dac"), "value", source="api"),
         ),
     )
 
@@ -427,18 +427,18 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     editor.update_projection(_projection(sequence))
     app.processEvents()
     form = editor.values_form
-    assert form.keys == ("hold", "level")
-    assert next(field.label for field in form.spec.fields if field.key == "hold") == "MOT.duration"
-    hold = form.widget_for("hold")
-    level = form.widget_for("level")
-    assert form.read_value("level") == 1 and type(form.read_value("level")) is int, "a DAC level is whole codes"
+    assert form.keys == ("duration:p0", "dac:p0:dac")
+    assert next(field.label for field in form.spec.fields if field.key == "duration:p0") == "MOT.duration"
+    hold = form.widget_for("duration:p0")
+    level = form.widget_for("dac:p0:dac")
+    assert form.read_value("dac:p0:dac") == 1 and type(form.read_value("dac:p0:dac")) is int, "a DAC level is whole codes"
     assert hold.value() == 200.0 and hold.valueUnit() == "ns"
-    assert form.unit_picker_for("hold") is not None, "a duration has a ladder"
-    assert form.unit_picker_for("level") is None, "a code has none"
+    assert form.unit_picker_for("duration:p0") is not None, "a duration has a ladder"
+    assert form.unit_picker_for("dac:p0:dac") is None, "a code has none"
     assert hold.maximum() > 200.0 and hold.minimum() > 0.0, "the board's limit, not a guess"
 
     # Read the duration in microseconds, then turn the wheel on it.
-    form._shown_unit_picked("hold", "µs")
+    form._shown_unit_picked("duration:p0", "µs")
     assert hold.text() == "0.2"
     hold.setFocus(QtCore.Qt.MouseFocusReason)
     app.processEvents()
@@ -447,15 +447,15 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     hold.stepBy(1)
     assert drafts, "a notch is a draft, now, not after a timer"
     text = drafts[-1]["values"]["api_values"]
-    assert text.startswith("hold = ") and "level" not in text, text
+    assert text.startswith("duration:p0 = ") and "dac:p0:dac" not in text, text
     # The host projects the draft straight back, and then again with no
     # draft at all -- a beat -- and the row is the same widget both times,
     # read in the unit the operator chose.
     for _ in range(2):
         editor.update_projection(_projection(sequence, api_values=text))
         app.processEvents()
-        assert form.widget_for("hold") is hold
-        assert form.unit_picker_for("hold") is not None
+        assert form.widget_for("duration:p0") is hold
+        assert form.unit_picker_for("duration:p0") is not None
         assert hold.shownUnit() == "µs", hold.shownUnit()
     assert "1 of 2 set for this run" in editor.values_note.text()
     editor.close()
@@ -655,14 +655,14 @@ def _plain_sequence():
 
     from dataclasses import replace
 
-    return replace(_bound_sequence(), api_parameters=())
+    return replace(_bound_sequence(), bindings=())
 
 
 def _level_only_sequence():
     from dataclasses import replace
 
     bound = _bound_sequence()
-    return replace(bound, api_parameters=bound.api_parameters[1:])
+    return replace(bound, bindings=bound.api_bindings[1:])
 
 
 def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None:
@@ -687,12 +687,12 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     bound = _bound_sequence()
 
     # Written against the pulse that declares it: nothing to re-scope.
-    editor.update_projection(_projection(bound, api_values="hold = 250"))
+    editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))
     assert drafts == []
-    assert editor._values_text == "hold = 250"
+    assert editor._values_text == "duration:p0 = 250"
 
     # A pulse with no API parameters: the line is dropped, once.
-    editor.update_projection(_projection(_plain_sequence(), api_values="hold = 250"))
+    editor.update_projection(_projection(_plain_sequence(), api_values="duration:p0 = 250"))
     assert drafts == [{"values": {"api_values": ""}}]
     assert editor._values_text == ""
     editor.update_projection(_projection(_plain_sequence(), api_values=""))
@@ -701,32 +701,32 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     # A pulse declaring other names keeps only what it declares.
     drafts.clear()
     editor.update_projection(
-        _projection(_level_only_sequence(), api_values="hold = 250\nlevel = 1")
+        _projection(_level_only_sequence(), api_values="duration:p0 = 250\ndac:p0:dac = 1")
     )
     assert drafts == [{"values": {"api_values": ""}}], drafts
     drafts.clear()
     editor.update_projection(
-        _projection(_level_only_sequence(), api_values="hold = 250\nlevel = -1")
+        _projection(_level_only_sequence(), api_values="duration:p0 = 250\ndac:p0:dac = -1")
     )
-    assert drafts == [{"values": {"api_values": "level = -1"}}], drafts
+    assert drafts == [{"values": {"api_values": "dac:p0:dac = -1"}}], drafts
 
     # No pulse at all decides nothing: the text waits for one.
     drafts.clear()
     editor.update_projection({
         "workspace_resources": {},
-        "form_values": {"plan": "", "api_values": "hold = 250"},
+        "form_values": {"plan": "", "api_values": "duration:p0 = 250"},
     })
     assert drafts == []
-    assert editor._values_text == "hold = 250"
+    assert editor._values_text == "duration:p0 = 250"
 
     # A box mid-word is the operator's: the text is not re-read over it.
-    editor.update_projection(_projection(bound, api_values="hold = 250"))
-    hold = editor.values_form.widget_for("hold")
+    editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))
+    hold = editor.values_form.widget_for("duration:p0")
     hold.setFocus(QtCore.Qt.MouseFocusReason)
     app.processEvents()
     hold.lineEdit().setText("2")
     drafts.clear()
-    editor.update_projection(_projection(bound, api_values="hold = 250"))
+    editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))
     assert drafts == []
     editor.close()
     editor.deleteLater()
@@ -738,7 +738,7 @@ def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_refused_by_name()
 
     from zlc_atom.nodes.scan.plan import apply_api_overrides
 
-    with pytest.raises(ValueError, match="declares no API parameter"):
-        apply_api_overrides(_plain_sequence(), {"hold": 240.0})
-    applied = apply_api_overrides(_bound_sequence(), {"hold": 240.0})
+    with pytest.raises(ValueError, match="unknown or ambiguous api field"):
+        apply_api_overrides(_plain_sequence(), {"duration:p0": 240.0})
+    applied = apply_api_overrides(_bound_sequence(), {"duration:p0": 240.0})
     assert applied.periods[0].duration == 240

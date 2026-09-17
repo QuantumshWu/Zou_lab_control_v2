@@ -450,20 +450,19 @@
       "analog_steps": []
     }
   ],
-  "slots": [],
-  "api_parameters": [
+  "bindings": [
     {
-      "parameter_id": "t_off",
-      "number": 1,
-      "unit": "ms",
       "field_ref": {
         "kind": "duration",
         "period_id": "release",
         "port": null
-      }
+      },
+      "unit": "ms",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     }
   ],
-  "config_parameters": [],
   "delays": [],
   "bracket": null,
   "run_repeats": 0

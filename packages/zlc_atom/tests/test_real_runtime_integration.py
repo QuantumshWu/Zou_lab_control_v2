@@ -39,9 +39,9 @@ def _calibration_request() -> CalibrationRequest:
         repeats=30,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
-        reference_before_slot=1,
-        readout_slot=2,
-        reference_after_slot=3,
+        reference_before_field="duration:long_before",
+        readout_field="duration:short",
+        reference_after_field="duration:long_after",
         default_model_kind=ReadoutModelKind.BOX,
         threshold_method="gaussian",
         box_half_width=1,
@@ -75,9 +75,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             path=IMAGING_PULSE_RESOURCE.path,
             sequencer=sequencer,
             api_values={
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
         arm_sequencer(sequencer, pulse)

@@ -22,11 +22,12 @@ host is asked for its widget here, where widgets are allowed.
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 from PyQt5 import QtCore
 
 from .editor_view import PulseEditorView
-from .models import ConnectionVM
+from .models import ConfigPageRecord, ConnectionVM
 
 
 class PulseEditorHandle(QtCore.QObject):
@@ -42,9 +43,14 @@ class PulseEditorHandle(QtCore.QObject):
     clear_all_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
-    values_save_requested = QtCore.pyqtSignal()
-    values_load_requested = QtCore.pyqtSignal()
-    binding_renamed = QtCore.pyqtSignal(str, str)
+    config_new_requested = QtCore.pyqtSignal()
+    config_load_requested = QtCore.pyqtSignal()
+    config_refresh_requested = QtCore.pyqtSignal()
+    config_save_requested = QtCore.pyqtSignal()
+    config_save_as_requested = QtCore.pyqtSignal()
+    config_unload_requested = QtCore.pyqtSignal()
+    config_entries_edited = QtCore.pyqtSignal(object)
+    config_binding_committed = QtCore.pyqtSignal(str, str)
 
     # -- the schedule ----------------------------------------------------
     port_label_committed = QtCore.pyqtSignal(str, str)
@@ -56,7 +62,7 @@ class PulseEditorHandle(QtCore.QObject):
     #: paying while it is being looked at.
     page_changed = QtCore.pyqtSignal(str)
     delay_committed = QtCore.pyqtSignal(str, object, str)
-    binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
+    binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
     insert_period_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
     remove_period_requested = QtCore.pyqtSignal(str)
@@ -101,6 +107,7 @@ class PulseEditorHandle(QtCore.QObject):
         self._view = view
         schedule = view.schedule_view
         scan = view.scan_view
+        config = view.config_view
         preview = view.preview_view
         target = view.target_view
 
@@ -110,15 +117,13 @@ class PulseEditorHandle(QtCore.QObject):
         for name in (
             "document_name_committed", "port_label_committed",
             "period_name_committed", "duration_committed", "digital_committed",
-            "analog_committed", "delay_committed", "binding_cycle_requested",
+            "analog_committed", "delay_committed", "binding_committed",
             "insert_period_requested", "reorder_items_requested",
             "remove_period_requested", "bracket_committed",
             "run_repeats_committed",
             "visible_ports_committed", "fill_port_requested", "clear_port_requested",
             "feedback_requested", "connection_requested", "stop_requested",
             "sync_requested", "save_requested", "load_requested",
-            "values_save_requested", "values_load_requested",
-            "scan_array_load_requested",
         ):
             getattr(schedule, name).connect(getattr(self, name))
         schedule.run_requested.connect(self.fire_requested)
@@ -130,8 +135,11 @@ class PulseEditorHandle(QtCore.QObject):
         scan.source_edited.connect(self.scan_source_edited)
         scan.run_requested.connect(self.scan_run_requested)
         scan.save_array_requested.connect(self.scan_array_save_requested)
+        scan.load_array_requested.connect(self.scan_array_load_requested)
         scan.progress_refresh_requested.connect(self.scan_progress_refresh_requested)
-        scan.binding_renamed.connect(self.binding_renamed)
+        for name in ("new_requested", "load_requested", "refresh_requested", "save_requested",
+                     "save_as_requested", "unload_requested", "entries_edited", "binding_committed"):
+            getattr(config, name).connect(getattr(self, f"config_{name}"))
         preview.include_off_toggled.connect(self.preview_include_off_toggled)
         preview.size_committed.connect(self.preview_size_committed)
         preview.selectors_toggled.connect(self.preview_selectors_toggled)
@@ -224,6 +232,15 @@ class PulseEditorHandle(QtCore.QObject):
     def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
         return self._view.ask_save_path(caption, suggested, filter)
 
+    def confirm_config_discard(self) -> bool:
+        return self._view.confirm("Unsaved Config", "Discard unsaved Config edits?", "Discard", "Cancel")
+
+    def set_config_page(self, record: ConfigPageRecord) -> None:
+        self._view.config_view.set_page(record)
+        button = self._view.schedule_view.channel_panel.config_status_button
+        button.setText(f"Config: {Path(record.active_path).name}" if record.active_path else "Config: none")
+        button.setToolTip(record.active_path or "No active Config file; Pulse defaults are used.")
+
     # ---------------------------------------------------------- the schedule
 
     def set_schedule(self, schedule: Any) -> None:
@@ -272,7 +289,7 @@ class PulseEditorHandle(QtCore.QObject):
         self._view.schedule_view.set_connection(connection)
 
     def set_scan_busy(self, busy: bool) -> None:
-        self._view.schedule_view.set_scan_busy(busy)
+        self._view.scan_view.set_workspace_busy(busy)
 
     # -------------------------------------------------------------- the scan
 

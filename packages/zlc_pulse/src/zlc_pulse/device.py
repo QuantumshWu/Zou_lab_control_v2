@@ -228,7 +228,7 @@ class ConfigValueHolder:
 
     def load_config_values(
         self,
-        entries: "Mapping[int | str, tuple[float, str]]",
+        entries: "Mapping[str, tuple[float, str]]",
         *,
         source: str = "",
     ) -> None:
@@ -246,7 +246,7 @@ class ConfigValueHolder:
         for name, entry in entries.items():
             name = config_parameter_key(name)
             if name in held:
-                raise ValueError(f"duplicate config value number {name!r}")
+                raise ValueError(f"duplicate Config name {name!r}")
             try:
                 value, unit = entry
             except (TypeError, ValueError):
@@ -276,7 +276,7 @@ class ConfigValueHolder:
 
         path = Path(path).expanduser().resolve()
         with self._config_lock:
-            _name, _source, entries = read_config_values(path)
+            entries = read_config_values(path)
             self._config_values = entries
             self._config_source = str(path)
             self._config_file = path
@@ -286,7 +286,7 @@ class ConfigValueHolder:
 
         with self._config_lock:
             if self._config_file is not None:
-                _name, _source, entries = read_config_values(self._config_file)
+                entries = read_config_values(self._config_file)
                 self._config_values = entries
 
     def config_values(self) -> dict[str, tuple[float, str]]:

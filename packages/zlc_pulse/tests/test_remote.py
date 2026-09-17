@@ -44,7 +44,7 @@ _BOARD_TARGET = pulse_target_from_xdc()
 
 
 def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequence:
-    from zlc_pulse import PulseConfigParameter, PulseSlot
+    from zlc_pulse import PulseBinding
     from zlc_pulse.model import PulseFieldRef
 
     target = PulseTarget(
@@ -54,9 +54,9 @@ def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequen
             PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0),
         ),
     )
-    slots = (PulseSlot("duration", PulseFieldRef("duration", "p0"), "ns", "p0_time"),) if slotted else ()
-    config_parameters = (
-        (PulseConfigParameter("p1_time", PulseFieldRef("duration", "p1"), "ns"),)
+    slots = (PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', scan=True),) if slotted else ()
+    configured_bindings = (
+        (PulseBinding(PulseFieldRef('duration', 'p1'), 'ns', source='config', config_key='p1_time'),)
         if configured
         else ()
     )
@@ -67,8 +67,7 @@ def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequen
             PulsePeriod("p0", 40, "ns", (1, 0, 0), (AnalogStep("dac", "edge", 0),)),
             PulsePeriod("p1", 40, "ns", (0, 0, 0)),
         ),
-        slots=slots,
-        config_parameters=config_parameters,
+        bindings=slots + configured_bindings,
     )
 
 
@@ -332,7 +331,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     # The client owns Config; a distinct set on the server must not reapply.
-    streamer.load_config_values({"1": (300, "ns")})
+    streamer.load_config_values({"p1_time": (300, "ns")})
     with _server(streamer) as server:
         dispatch = server.dispatch
         def old_open(method, params, **kwargs):
@@ -349,7 +348,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             path = tmp_path / "current.json"
             assert client._socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
             assert server._owner_connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
-            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (100, "ns")})), encoding="utf-8")
+            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"p1_time": (100, "ns")})), encoding="utf-8")
             client.load_config_file(path)
             client.load(program, source=source, rows=((1,),))
             resident_author = streamer.applied().authored_source
@@ -363,10 +362,10 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
                 return call(method, params)
             monkeypatch.setattr(client, "_call_locked", counted)
             for values, duration, reload in (
-                ({"1": (100, "ns")}, 100, False),
-                ({"1": (200, "ns")}, 200, True),
+                ({"p1_time": (100, "ns")}, 100, False),
+                ({"p1_time": (200, "ns")}, 200, True),
                 ({}, 40, True),
-                ({"9": (99, "value")}, 40, False),
+                ({"unrelated": (99, "value")}, 40, False),
             ):
                 path.write_text(json.dumps(pulse_codec.config_values_to_tree(values)), encoding="utf-8")
                 calls.clear()
@@ -391,7 +390,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             # Only this first unknown-state Fire reads applied/description.
             client.disconnect()
             client.open()
-            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (160, "ns")})), encoding="utf-8")
+            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"p1_time": (160, "ns")})), encoding="utf-8")
             calls.clear()
             client.fire(run_repeats=2, scan_repeats=3)
             assert calls == ["applied", "describe", "load", "fire"]
@@ -415,7 +414,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             assert state.source.period_by_id["p1"].duration == 160
             # A genuinely changed author document must replace the resident
             # original even when its executable instructions stay the same.
-            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"1": (160, "ns")})), encoding="utf-8")
+            path.write_text(json.dumps(pulse_codec.config_values_to_tree({"p1_time": (160, "ns")})), encoding="utf-8")
             renamed = replace(source, name="another authored pulse")
             client.load(program, source=renamed, rows=((1,),))
             assert load_requests[-1]["reuse_authored_source"] is False
@@ -1230,7 +1229,7 @@ def test_a_pulse_that_declares_a_config_parameter_survives_the_wire() -> None:
             state = client.applied()
             assert state is not None
             assert state.source == source
-            assert state.source.config_parameters == source.config_parameters
+            assert state.source.config_bindings == source.config_bindings
             rebuilt = compile_sequence(state.source, geom, 50e6)
             assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
         finally:

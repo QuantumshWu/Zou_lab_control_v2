@@ -201,12 +201,12 @@ def scan_columns_for(
 
     geometry = StreamerParams() if params is None else params
     scales = (
-        (1,) * len(sequence.slots)
+        (1,) * len(sequence.scan_bindings)
         if slot_tick_scales is None
         else tuple(slot_tick_scales)
     )
     if (
-        len(scales) != len(sequence.slots)
+        len(scales) != len(sequence.scan_bindings)
         or any(type(value) is not int or value < 1 for value in scales)
     ):
         raise ValueError("slot_tick_scales must contain one positive integer per slot")
@@ -219,21 +219,21 @@ def scan_columns_for(
         )
     if any(
         slot.kind != FIELD_DURATION and scale != 1
-        for slot, scale in zip(sequence.slots, scales, strict=True)
+        for slot, scale in zip(sequence.scan_bindings, scales, strict=True)
     ):
         raise ValueError("DAC slot tick scale must remain 1")
     return tuple(
         _column_for_field(
             sequence,
-            slot.slot_id,
+            slot.field_id,
             slot.field_ref,
-            sequence.field_unit(slot.field_ref),
+            slot.unit,
             geometry=geometry,
             api_parameter=False,
             tick_scale=scale,
             maximum_tick_scale=maximum_tick_scale,
         )
-        for slot, scale in zip(sequence.slots, scales, strict=True)
+        for slot, scale in zip(sequence.scan_bindings, scales, strict=True)
     )
 
 
@@ -246,13 +246,13 @@ def api_parameter_columns_for(
     return tuple(
         _column_for_field(
             sequence,
-            parameter.parameter_id,
+            parameter.field_id,
             parameter.field_ref,
             parameter.unit,
             geometry=geometry,
             api_parameter=True,
         )
-        for parameter in sequence.api_parameters
+        for parameter in sequence.api_bindings
     )
 
 
@@ -270,9 +270,10 @@ def resolve_scan_point(
     never re-applied while the digital edges kept playing.  Resolve the point
     into the document and run a plain pulse, in this package's own terms.
 
-    ``values`` are in each field's authored unit, the same numbers a scan table
-    row holds -- a signed DAC code, or a duration/delay in the unit shown by
-    the field's editor.  With ``None``, the currently authored values are
+    ``values`` are in each binding's declared unit, the same numbers a scan
+    table row holds -- a signed DAC code, or a duration in its column unit.
+    The period itself may store that duration in another unit. With ``None``,
+    the currently authored values are
     resolved; that is how an editor runs a scan-bound pulse before a table has
     been authored.
 
@@ -290,35 +291,40 @@ def resolve_scan_point(
             pulse_field_value(
                 sequence,
                 slot.field_ref,
-                sequence.field_unit(slot.field_ref),
+                slot.unit,
             )
-            for slot in sequence.slots
+            for slot in sequence.scan_bindings
         )
         if values is None
         else tuple(values)
     )
-    if len(row) != len(sequence.slots):
+    if len(row) != len(sequence.scan_bindings):
         raise ValueError(
-            f"a scan point has one value per slot: {len(sequence.slots)} "
+            f"a scan point has one value per slot: {len(sequence.scan_bindings)} "
             f"slot(s), {len(row)} value(s)"
         )
     if not row:
         return sequence
 
     result = sequence
-    for slot, value in zip(sequence.slots, row):
+    for slot, value in zip(sequence.scan_bindings, row):
         result = replace_pulse_field(
             result,
             slot.field_ref,
             value,
-            result.field_unit(slot.field_ref),
-            field_name=slot.slot_id,
+            slot.unit,
+            field_name=slot.field_id,
         )
 
-    # The slots go with the values: what they described is now written down,
-    # and a sequence that still declared them would compile a scan of a pulse
-    # that no longer has anything to sweep.
-    return replace(result, slots=())
+    # Explicit rows outrank every other source, including when Hold turns a
+    # scan point into an ordinary pulse. With no row, only disable scanning
+    # so the field keeps its normal API/Config default resolution.
+    return replace(result, bindings=tuple(
+        (replace(binding, scan=False, source="default", config_key="")
+         if values is not None else replace(binding, scan=False))
+        if binding.scan else binding
+        for binding in result.bindings
+    ))
 
 
 def scan_rows_to_wire(
@@ -386,7 +392,7 @@ def prepare_scan_application(
 ]:
     """Quantize one authored table with the finest scales that make it fit.
 
-    Absolute durations stay in the user's field units.  For each duration
+    Absolute durations stay in the binding's declared units. For each duration
     slot, the compiler keeps the template's nominal value in its 32-bit base;
     this function chooses the smallest whole-tick delta quantum whose 25-bit
     signed operand covers the requested table.  DAC slots always use scale 1.
@@ -405,11 +411,11 @@ def prepare_scan_application(
     positive_operand = negative_operand - 1
     maximum_tick_scale = maximum_duration_tick_scale(geometry)
     scales: list[int] = []
-    for index, slot in enumerate(sequence.slots):
+    for index, slot in enumerate(sequence.scan_bindings):
         if slot.kind != FIELD_DURATION:
             scales.append(1)
             continue
-        unit = sequence.field_unit(slot.field_ref)
+        unit = slot.unit
         ticks_per_unit = _ticks_per(sequence, unit)
         nominal_ticks = int(round(
             float(pulse_field_value(sequence, slot.field_ref, unit))
@@ -430,7 +436,7 @@ def prepare_scan_application(
         tick_scale = max(1, positive_scale, negative_scale)
         if tick_scale > maximum_tick_scale:
             raise ValueError(
-                f"{slot.slot_id}: this scan needs tick scale {tick_scale}, but "
+                f"{slot.field_id}: this scan needs tick scale {tick_scale}, but "
                 f"the coefficient field supports at most {maximum_tick_scale}; "
                 "narrow the duration range"
             )
@@ -446,11 +452,11 @@ def prepare_scan_application(
     signed_lo = -negative_operand
     signed_hi = positive_operand
     for index, (slot, tick_scale) in enumerate(
-        zip(sequence.slots, selected_scales, strict=True)
+        zip(sequence.scan_bindings, selected_scales, strict=True)
     ):
         if slot.kind != FIELD_DURATION:
             continue
-        unit = sequence.field_unit(slot.field_ref)
+        unit = slot.unit
         ticks_per_unit = _ticks_per(sequence, unit)
         nominal_ticks = int(round(
             float(pulse_field_value(sequence, slot.field_ref, unit))
@@ -593,7 +599,7 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
         if spec.is_dac:
             return f"{spec.name}: {spec.unit}, {legal}"
         return (
-            f"{spec.name}: duration in {spec.unit}, the unit its period is in "
+            f"{spec.name}: duration in the binding's {spec.unit} "
             f"({legal})"
         )
 

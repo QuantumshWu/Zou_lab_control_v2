@@ -32,7 +32,7 @@ from zlc_pulse import (
     load_streamer_config,
     resolve_api_parameters,
 )
-from zlc_pulse.device import BoardDescription, ConfigValueHolder
+from zlc_pulse.device import AppliedState, BoardDescription, ConfigValueHolder
 from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
 from zlc_atom.authoring import AuthoringField, TunableField
@@ -79,8 +79,6 @@ class _FakeSequencer(ConfigValueHolder):
         self.board = BoardDescription(
             sequence.target, settings["params"], settings["clock_hz"]
         )
-        from zlc_pulse import authored_config_entries
-        self.load_config_values(authored_config_entries(sequence))
         self.fires = 0
         self.loads = 0
         self.safe_calls = 0
@@ -94,12 +92,18 @@ class _FakeSequencer(ConfigValueHolder):
         if self.on_safe is not None:
             self.on_safe()
 
-    def load(self, program, **_kwargs) -> None:
+    def load(self, program, **kwargs) -> None:
         self.loads += 1
         self.program = program
+        self._applied = AppliedState(program, kwargs.get("source"), tuple(kwargs.get("rows", ())), 1, 1, 0.0)
 
-    def fire(self, **_kwargs) -> None:
+    def fire(self, **kwargs) -> None:
         self.fires += 1
+        from dataclasses import replace
+        self._applied = replace(self._applied, run_repeats=kwargs["run_repeats"], scan_repeats=kwargs.get("scan_repeats", 1))
+
+    def applied(self):
+        return self._applied
 
     def wait_done(self, _timeout):
         return SimpleNamespace(fault=None)
@@ -208,7 +212,7 @@ class _Context:
 
 
 TEMPLATE_NAME = "mot_field_template.json"
-BIAS_X_PORT = PULSE_PARAM_FAMILY + "da_bias_x"
+BIAS_X_PORT = PULSE_PARAM_FAMILY + "dac:load:da_bias_x"
 
 
 def _point_axis_values(schema, name: str) -> tuple[object, ...]:
@@ -239,7 +243,7 @@ def _template_sequence(*scanned: str):
     """
 
     raw = pulse_sequence("mot_field_template.json")
-    names = set(scanned) or {"da_bias_x"}
+    names = {"dac:load:" + name for name in scanned} or {"dac:load:da_bias_x"}
     ports = tuple(
         port
         for port in scan_ports_for(raw)
@@ -260,6 +264,7 @@ def _scripted_run(
     repeats: int,
     sequence: object | None = None,
     seed: bool = True,
+    scan_port: str = BIAS_X_PORT,
 ) -> tuple[np.ndarray, ScriptedScanBench]:
     """Play the table over a source whose every publication is named.
 
@@ -282,7 +287,7 @@ def _scripted_run(
         )
         if seed:
             bench.publish(SCRIPTED_SEED_VALUE)
-        plan = ScanPlan((ScanAxis(BIAS_X_PORT, values),))
+        plan = ScanPlan((ScanAxis(scan_port, values),))
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,
             signal_plane=plane,
@@ -337,7 +342,7 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
     )
     assert bench.fired_repeats == [(2, 1)] * 6
     assert bench.loads == 1 and bench.scan_tables == []
-    assert all(not sequence.slots for sequence in bench.loaded_sources)
+    assert all(not sequence.scan_bindings for sequence in bench.loaded_sources)
     assert bench._loaded_rows == () and bench._loaded_program.slot_count == 0
     assert bench.published[1:] == list(range(12))
     schema = value.block.schema
@@ -452,15 +457,15 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
 
     # A template may offer more slots than this plan scans. Omitted slots
     # keep their authored field values without extra axes or table columns.
-    from zlc_pulse import PulseFieldRef, PulseSlot, pulse_field_value
+    from zlc_pulse import PulseFieldRef, PulseBinding, pulse_field_value
     from zlc_pulse.binding import replace_pulse_field
     sequence = _template_sequence("da_bias_x", "da_bias_y", "da_bias_z")
-    for slot, default in zip(sequence.slots[1:], (137, -87), strict=True):
-        sequence = replace_pulse_field(sequence, slot.field_ref, default, "value", field_name=slot.slot_id)
+    for slot, default in zip(sequence.scan_bindings[1:], (137, -87), strict=True):
+        sequence = replace_pulse_field(sequence, slot.field_ref, default, "value", field_name=slot.field_id)
     omitted_duration = PulseFieldRef("duration", period_id=sequence.periods[-1].period_id)
-    sequence = replace(sequence, slots=(
-        PulseSlot("duration", omitted_duration, "ms", slot_id="hold"),
-        *sequence.slots,
+    sequence = replace(sequence, bindings=(
+        PulseBinding(omitted_duration, "ms", scan=True),
+        *sequence.bindings,
     ))
     authored = sequence
     partial, subset_bench = _scripted_run(
@@ -470,19 +475,19 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     assert subset_bench._loaded_program.slot_count == 1
     assert len(subset_bench.scan_tables[0][0]) == 1
     actual = subset_bench.loaded_sources[0]
-    assert tuple(slot.slot_id for slot in actual.slots) == ("da_bias_x",)
-    for slot in sequence.slots:
-        if slot.slot_id != "da_bias_x":
+    assert tuple(slot.field_id for slot in actual.scan_bindings) == ("dac:load:da_bias_x",)
+    for slot in sequence.scan_bindings:
+        if slot.field_id != "dac:load:da_bias_x":
             unit = sequence.field_unit(slot.field_ref)
             assert pulse_field_value(actual, slot.field_ref, unit) == pulse_field_value(sequence, slot.field_ref, unit)
-    assert sequence is authored and len(sequence.slots) == 4
+    assert sequence is authored and len(sequence.scan_bindings) == 4
 
     # A long duration is still a full-width period; only its variation rides
     # the signed slot multiplier.  Make the requested span wider than one
     # 25-bit tick operand so the application must choose scale 2, and retain
     # the canonical schema that the real writer hands Runtime.
     from zlc_atom.nodes.scan.dataset import ScanDatasetWriter
-    from zlc_pulse import PulseFieldRef, PulseSlot, scan_columns_for
+    from zlc_pulse import PulseFieldRef, PulseBinding, scan_columns_for
 
     canonical = []
     original_write = ScanDatasetWriter.write
@@ -511,12 +516,11 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
             else period
             for period in sequence.periods
         ),
-        slots=(
-            PulseSlot(
-                "duration",
+        bindings=(
+            PulseBinding(
                 PulseFieldRef("duration", period_id=period_id),
                 "ms",
-                slot_id="da_bias_x",
+                scan=True,
             ),
         ),
     )
@@ -526,6 +530,7 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
         shots=1,
         repeats=1,
         sequence=sequence,
+        scan_port=PULSE_PARAM_FAMILY + f"duration:{period_id}",
     )
 
     program = long_bench._loaded_program
@@ -555,8 +560,8 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
 
     schema = canonical[0].canonical_schema
     assert next(axis.name for axis in schema.point_domain.axes
-                if axis.axis_id.value == "scan.da_bias_x") == "MOT.duration"
-    assert _point_axis_values(schema, "da_bias_x") == pytest.approx(played)
+                if axis.axis_id.value == f"scan.duration:{period_id}") == "MOT.duration"
+    assert _point_axis_values(schema, f"duration:{period_id}") == pytest.approx(played)
     run_record = canonical[0].run_record
     assert run_record["slot_tick_scales"] == [2]
     assert run_record["named_devices"] == {"sequencer": "sequencer"}
@@ -683,7 +688,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         # for micro-kelvin atoms in a micron trap actually falls.
         t_offs = (0.004, 0.010, 0.016, 0.024)
         shots = 6
-        plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "t_off", t_offs),))
+        plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "duration:release", t_offs),))
         scan_node = descriptors["seamless_scan"].instantiate(
             sequencer=sequencer,
             signal_plane=plane,
@@ -696,7 +701,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
                     tuple(
                         port
                         for port in scan_ports_for(sequence)
-                        if port.port == PULSE_PARAM_FAMILY + "t_off"
+                        if port.port == PULSE_PARAM_FAMILY + "duration:release"
                     ),
                 ),
             ),
@@ -960,7 +965,7 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     assert _point_axis_values(schema, "power") == pytest.approx(
         (1.5, 1.5, 2.5, 2.5, 4.0, 4.0)
     )
-    assert _point_axis_values(schema, "da_bias_x") == pytest.approx(
+    assert _point_axis_values(schema, "dac:load:da_bias_x") == pytest.approx(
         (-256.0, 256.0) * 3
     )
     assert power.unit is None, "a manual axis carries a name, not a unit"
@@ -1106,7 +1111,7 @@ def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
     )
     assert bench.fired_repeats == [(2, 1)] * 4
     assert bench.loads == 1 and bench.scan_tables == []
-    assert all(not sequence.slots for sequence in bench.loaded_sources)
+    assert all(not sequence.scan_bindings for sequence in bench.loaded_sources)
     assert bench._loaded_rows == () and bench._loaded_program.slot_count == 0
     assert bench.published[1:] == list(range(8))
     assert [request.payload["value"] for request in asked] == [1.0, 2.0, 1.0, 2.0]
@@ -1129,7 +1134,7 @@ def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
     assert fixed.block.schema.fingerprint == schema.fingerprint
     assert [r.payload["value"] for r in fixed_asked] == [1.0, 2.0, 1.0, 2.0]
     assert fixed_bench.scan_tables == [] and fixed_bench._loaded_program.slot_count == 0
-    assert len(slotted.slots) == 2
+    assert len(slotted.scan_bindings) == 2
     from zlc_pulse import resolve_scan_point
     board = load_streamer_config()
     expected = compile_sequence(

@@ -1,181 +1,170 @@
-"""A numeric field with an injected Scan/API binding state."""
+"""Editable default value with independently projected Scan and source bindings."""
 
 from __future__ import annotations
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    API_VIOLET, API_VIOLET_DARK, BG, CONFIG_GREEN, CONFIG_GREEN_DARK,
-    EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK,
-    ORANGE_TINT, PADDING_V, PLACEHOLDER, RADIUS, SURFACE, FluentLineEdit,
-    fluent_font_size, scaled_px,
+    API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK,
+    EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
+    RADIUS, SURFACE, FluentCheckBox, FluentComboBox, FluentLabel,
+    FluentLineEdit, FluentPopup, fluent_font_size, scaled_px, signals_blocked,
+    show_fluent_popup_for_anchor,
 )
 
 
-class _FluentScanDot(QtWidgets.QAbstractButton):
-    def __init__(self, parent=None, *, tooltip: str) -> None:
+class _BindingButton(QtWidgets.QAbstractButton):
+    """A fixed-width pair of badges, never a cycling or numbered control."""
+
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setCheckable(True)
+        self.scan = False
+        self.source = "default"
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        self._number: int | None = None
-        self._kind: str | None = None
-        diameter = scaled_px(15, minimum=12)
-        self.setFixedSize(diameter, diameter)
-        self.setToolTip(tooltip)
-
-    def set_number(self, number: int | None) -> None:
-        self._number = None if number is None else int(number)
-        self.update()
-
-    def set_binding(self, kind: str | None) -> None:
-        """Which of the three ways this field is supplied, or none.
-
-        One setter rather than a flag per kind: the three are alternatives,
-        and a pair of booleans can say a thing the model cannot mean.
-        """
-
-        self._kind = None if kind is None else str(kind)
-        self.update()
-
-    def nextCheckState(self) -> None:  # model owns state
-        pass
+        self.setFixedSize(scaled_px(18, minimum=16), scaled_px(28, minimum=24))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        center = QtCore.QPointF(self.width() / 2.0, self.height() / 2.0)
-        radius = min(self.width(), self.height()) / 2.0 - max(1.0, scaled_px(1))
-        if self._kind is not None:
-            painter.setBrush(QtGui.QColor(_BINDING_FILL[self._kind]))
+        badges = []
+        if self.scan:
+            badges.append(("S", ORANGE))
+        if self.source != "default":
+            badges.append((self.source[0].upper(), API_VIOLET if self.source == "api" else CONFIG_GREEN))
+        if not badges:
+            badges.append(("", PLACEHOLDER))
+        diameter = min(self.width() - 2, self.height() / len(badges) - 1)
+        font = QtGui.QFont(FONT, max(6, fluent_font_size() - 5))
+        font.setBold(True)
+        painter.setFont(font)
+        for index, (text, color) in enumerate(badges):
+            y = (self.height() - len(badges) * diameter) / 2 + index * diameter
+            rect = QtCore.QRectF((self.width() - diameter) / 2, y, diameter, diameter)
             painter.setPen(QtCore.Qt.NoPen)
-            painter.drawEllipse(center, radius, radius)
-            if self._number is not None:
-                painter.setPen(QtGui.QColor(SURFACE))
-                font = QtGui.QFont(FONT, max(6, fluent_font_size() - 5))
-                font.setBold(True)
-                painter.setFont(font)
-                painter.drawText(self.rect(), QtCore.Qt.AlignCenter, str(self._number))
-        else:
-            painter.setBrush(QtCore.Qt.NoBrush)
-            painter.setPen(QtGui.QPen(QtGui.QColor(PLACEHOLDER), max(1, scaled_px(1))))
-            painter.drawEllipse(center, radius, radius)
-            painter.setBrush(QtGui.QColor(PLACEHOLDER))
-            painter.setPen(QtCore.Qt.NoPen)
-            painter.drawEllipse(center, radius * 0.42, radius * 0.42)
-        painter.end()
+            painter.setBrush(QtGui.QColor(color).darker(120 if self.underMouse() else 100))
+            painter.drawEllipse(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.setPen(QtGui.QColor(SURFACE))
+            painter.drawText(rect, QtCore.Qt.AlignCenter, text)
 
 
-#: What each binding paints as.  The board's own orange for a scan column,
-#: the violet a caller writes in for an API parameter, and slate for a config
-#: number, which is nobody's to supply because it is already the pulse's.
-_BINDING_FILL = {
-    "scan": ORANGE,
-    "api": API_VIOLET,
-    "config": CONFIG_GREEN,
-}
-
-
-def _bound_field_style(*, text: str, border: str, fill: str | None) -> str:
-    background = f"background: {fill}; " if fill else ""
+def _bound_style(color: str, border: str, *, applied: bool = False) -> str:
+    background = f"background: {QtGui.QColor(border).lighter(175).name()}; " if applied else ""
     return (
-        f"QLineEdit {{ {background}color: {text}; border: 1px solid {border}; "
-        f"border-radius: {scaled_px(RADIUS)}px; padding: {scaled_px(PADDING_V)}px "
-        f"{scaled_px(EDIT_PADDING_H)}px; font: {fluent_font_size()}pt \"{FONT}\"; }}"
-    )
-
-
-def _muted_line_style() -> str:
-    return (
-        f"QLineEdit {{ background: {BG}; color: {PLACEHOLDER}; border: 1px solid {PLACEHOLDER}; "
-        f"border-radius: {scaled_px(RADIUS)}px; padding: {scaled_px(PADDING_V)}px "
-        f"{scaled_px(EDIT_PADDING_H)}px; font: {fluent_font_size()}pt \"{FONT}\"; }}"
+        f'QLineEdit {{ {background}color: {color}; border: 1px solid {border}; '
+        f'border-radius: {scaled_px(RADIUS)}px; padding: {scaled_px(PADDING_V)}px '
+        f'{scaled_px(EDIT_PADDING_H)}px; font: {fluent_font_size()}pt "{FONT}"; }}'
     )
 
 
 class FluentScanLineEdit(FluentLineEdit):
-    """Numeric field whose dot displays unbound, Scan, or API state."""
+    """One default value; the popup emits binding intent, never a value override."""
 
-    scan_clicked = QtCore.pyqtSignal()
+    binding_committed = QtCore.pyqtSignal(bool, str)
 
-    def __init__(self, text: str = "", parent=None, *, tooltip: str = "Click the dot to cycle this field binding") -> None:
+    def __init__(self, text: str = "", parent=None, *, tooltip: str = "Edit Scan and value source") -> None:
         super().__init__(text, parent)
         self._base_style = self.styleSheet()
-        self._dot = _FluentScanDot(self, tooltip=tooltip)
-        self._dot.clicked.connect(self.scan_clicked)
-        self._field_state: tuple[bool, str | None, int | None] | None = None
+        self.binding_button = _BindingButton(self)
+        self.binding_button.clicked.connect(self._show_binding)
+        self._tooltip = tooltip
+        self._field_state = None
+        self._popup = None
         self._reserve_right()
 
-    @property
-    def dot(self) -> _FluentScanDot:
-        return self._dot
-
-    @property
-    def binding_kind(self) -> str | None:
-        """Current injected binding kind, or ``None`` for a literal field."""
-
-        return None if self._field_state is None else self._field_state[1]
-
-    @property
-    def binding_number(self) -> int | None:
-        """Current injected binding number, or ``None`` when unbound."""
-
-        return None if self._field_state is None else self._field_state[2]
-
-    def _dot_size(self) -> int:
-        return scaled_px(15, minimum=12)
-
     def _reserve_right(self) -> None:
-        self.setTextMargins(0, 0, self._dot_size() + scaled_px(3), 0)
+        self.setTextMargins(0, 0, self.binding_button.width() + scaled_px(3), 0)
 
-    def _place_dot(self) -> None:
-        diameter = self._dot_size()
-        self._dot.setGeometry(
-            int(self.width() - diameter - scaled_px(4)),
-            int((self.height() - diameter) // 2), diameter, diameter,
-        )
+    def _place_button(self) -> None:
+        button = self.binding_button
+        button.move(self.width() - button.width() - scaled_px(4), (self.height() - button.height()) // 2)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._place_dot()
+        self._place_button()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._place_dot()
+        self._place_button()
 
-    def set_field_state(self, *, editable: bool, binding: str | None = None, number: int | None = None) -> None:
-        normalized = None if binding is None else str(binding).strip().lower()
-        if normalized is not None and normalized not in _BINDING_FILL:
-            raise ValueError(
-                f"binding must be one of {sorted(_BINDING_FILL)}, or None"
-            )
-        if normalized is None and number is not None:
-            raise ValueError("an unbound field cannot have a binding number")
-        state = (bool(editable), normalized, number)
+    def _show_binding(self) -> None:
+        if self._popup is None:
+            self._popup = FluentPopup(self)
+            layout = QtWidgets.QVBoxLayout(self._popup)
+            margin = scaled_px(10)
+            layout.setContentsMargins(margin, margin, margin, margin)
+            layout.setSpacing(scaled_px(6))
+            self.scan_toggle = FluentCheckBox("Scan")
+            layout.addWidget(self.scan_toggle)
+            source_row = QtWidgets.QHBoxLayout()
+            source_row.addWidget(FluentLabel("Source"))
+            self.source_combo = FluentComboBox()
+            for label, value in (("Default", "default"), ("API", "api"), ("Config", "config")):
+                self.source_combo.addItem(label, value)
+            source_row.addWidget(self.source_combo, 1)
+            layout.addLayout(source_row)
+            self.source_info = FluentLabel("")
+            self.source_info.setWordWrap(True)
+            layout.addWidget(self.source_info)
+            self.scan_toggle.toggled.connect(self._commit_binding)
+            self.source_combo.currentIndexChanged.connect(self._commit_binding)
+        self._project_popup()
+        self._place_popup()
+
+    def _place_popup(self) -> None:
+        self._popup.ensurePolished()
+        self._popup.layout().activate()
+        show_fluent_popup_for_anchor(
+            self._popup, self.binding_button, self._popup,
+            minimum_width=210, minimum_height=1,
+            maximum_height=self._popup.sizeHint().height(),
+        )
+
+    def _project_popup(self) -> None:
+        if self._popup is None or self._field_state is None:
+            return
+        _editable, scan, source, can_scan, effective, source_text = self._field_state
+        with signals_blocked(self.scan_toggle, self.source_combo):
+            self.scan_toggle.setChecked(scan)
+            self.scan_toggle.setEnabled(can_scan)
+            self.source_combo.setCurrentIndex(self.source_combo.findData(source))
+        info = "Names: Config tab" if source == "config" else ""
+        if effective:
+            info = f"Effective: {effective}\n{info}".strip()
+        self.source_info.setText(info)
+        self.source_info.setToolTip(source_text)
+        self.source_info.setVisible(bool(info))
+        if self._popup.isVisible():
+            self._place_popup()
+
+    def _commit_binding(self, *_args) -> None:
+        self.binding_committed.emit(self.scan_toggle.isChecked(), str(self.source_combo.currentData()))
+
+    def set_field_state(self, *, editable: bool, scan: bool = False, source: str = "default",
+                        can_scan: bool = True, effective_text: str = "", source_text: str = "") -> None:
+        if source not in ("default", "api", "config"):
+            raise ValueError("source must be default, api or config")
+        state = (bool(editable), bool(scan), source, bool(can_scan), effective_text, source_text)
         if state == self._field_state:
             return
         self._field_state = state
-        is_scan = normalized == "scan"
-        self._dot.set_binding(normalized)
-        # A scan column is the one binding whose number this field cannot
-        # hold: the board writes it per point.  An API or config field still
-        # shows -- and edits -- the number it carries.
-        self._dot.setChecked(is_scan)
-        self._dot.set_number(number if normalized is not None else None)
-        self.setReadOnly(is_scan or not state[0])
-        if is_scan:
-            style = _bound_field_style(text=ORANGE_DARK, border=ORANGE, fill=ORANGE_TINT)
-        elif normalized == "api":
-            style = _bound_field_style(text=API_VIOLET_DARK, border=API_VIOLET, fill=None)
-        elif normalized == "config":
-            style = _bound_field_style(
-                text=CONFIG_GREEN_DARK, border=CONFIG_GREEN, fill=None
-            )
+        self.binding_button.scan = bool(scan)
+        self.binding_button.source = source
+        summary = " + ".join((["Scan"] if scan else []) + ([source.upper()] if source != "default" else [])) or "Default"
+        self.binding_button.setToolTip(f"{self._tooltip}\n{summary}\n{source_text}".strip())
+        self.binding_button.update()
+        self.setReadOnly(not editable)
+        if source == "config":
+            style = _bound_style(CONFIG_GREEN_DARK, CONFIG_GREEN, applied=bool(effective_text))
+        elif source == "api":
+            style = _bound_style(API_VIOLET_DARK, API_VIOLET, applied=bool(effective_text))
+        elif scan:
+            style = _bound_style(ORANGE_DARK, ORANGE)
         else:
-            style = self._base_style if state[0] else _muted_line_style()
+            style = self._base_style
         self.setStyleSheet(style)
         self._reserve_right()
-        self.update()
+        self._project_popup()
 
 
 __all__ = ["FluentScanLineEdit"]

@@ -6,9 +6,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from fractions import Fraction
 import math
-from numbers import Integral
 
 from .model import (
+    BINDING_API,
+    BINDING_CONFIG,
+    BINDING_DEFAULT,
+    config_parameter_key,
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
@@ -142,8 +145,12 @@ def _replace_pulse_fields(
         changes["delays"] = tuple(
             delay_changes.pop(delay.port, delay) for delay in sequence.delays
         ) + tuple(delay_changes.values())
-    if remove_api_parameters and sequence.api_parameters:
-        changes["api_parameters"] = ()
+    if remove_api_parameters and sequence.api_bindings:
+        changes["bindings"] = tuple(
+            replace(binding, source=BINDING_DEFAULT)
+            if binding.source == BINDING_API else binding
+            for binding in sequence.bindings
+        )
     return replace(sequence, **changes) if changes else sequence
 
 
@@ -174,41 +181,9 @@ def prune_orphaned_bindings(
             step.port == reference.port for step in period.analog_steps
         )
 
-    slots = tuple(slot for slot in sequence.slots if held(slot.field_ref))
-    parameters = tuple(
-        parameter
-        for parameter in sequence.api_parameters
-        if held(parameter.field_ref)
-    )
-    configured = tuple(
-        parameter
-        for parameter in sequence.config_parameters
-        if held(parameter.field_ref)
-    )
-    dropped = tuple(
-        [slot.slot_id for slot in sequence.slots if not held(slot.field_ref)]
-        + [
-            parameter.parameter_id
-            for parameter in sequence.api_parameters
-            if not held(parameter.field_ref)
-        ]
-        + [
-            parameter.parameter_id
-            for parameter in sequence.config_parameters
-            if not held(parameter.field_ref)
-        ]
-    )
-    if not dropped:
-        return sequence, ()
-    return (
-        replace(
-            sequence,
-            slots=slots,
-            api_parameters=parameters,
-            config_parameters=configured,
-        ),
-        dropped,
-    )
+    retained = tuple(binding for binding in sequence.bindings if held(binding.field_ref))
+    dropped = tuple(binding.field_id for binding in sequence.bindings if not held(binding.field_ref))
+    return (replace(sequence, bindings=retained), dropped) if dropped else (sequence, ())
 
 
 def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
@@ -248,7 +223,7 @@ def authored_api_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
     entries: dict[str, tuple[float, str]] = {}
-    for parameter in sequence.api_parameters:
+    for parameter in sequence.api_bindings:
         try:
             value = pulse_field_value(
                 sequence, parameter.field_ref, parameter.unit
@@ -258,9 +233,9 @@ def authored_api_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]
             # on port 'da_dipole'" is true and unactionable on its own; the
             # operator needs the name they can see on the Scan page.
             raise ValueError(
-                f"API parameter {parameter.parameter_id!r} has no field: {error}"
+                f"API parameter {parameter.field_id!r} has no field: {error}"
             ) from None
-        entries[parameter.parameter_id] = (float(value), parameter.unit)
+        entries[parameter.field_id] = (float(value), parameter.unit)
     return entries
 
 
@@ -278,28 +253,37 @@ def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
     }
 
 
-def config_parameter_key(value: object) -> str:
-    """The displayed, one-based Config number, in canonical JSON key form."""
+def normalize_binding_values(
+    sequence: PulseSequence,
+    entries: Mapping[str, object],
+    *,
+    source: str = BINDING_API,
+) -> dict[str, object]:
+    """Resolve stable field IDs or exact displayed paths once at a public boundary."""
 
-    if isinstance(value, Integral) and not isinstance(value, bool) and value > 0:
-        return str(int(value))
-    if isinstance(value, str) and value.isascii() and value.isdecimal():
-        number = int(value)
-        if number > 0 and str(number) == value:
-            return value
-    raise ValueError(f"Config parameter key must be a positive number (1, 2, ...), not {value!r}")
-
-
-def authored_config_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]]:
-    """Read each stable Config number in the unit declared by its binding."""
-
-    return {
-        str(parameter.number): (
-            float(pulse_field_value(sequence, parameter.field_ref, parameter.unit)),
-            parameter.unit,
-        )
-        for parameter in _sequence_of(sequence).config_parameters
-    }
+    _sequence_of(sequence)
+    if not isinstance(entries, Mapping):
+        raise TypeError("binding values must be a mapping")
+    declared = sequence.scan_bindings if source == "scan" else tuple(
+        binding for binding in sequence.bindings if binding.source == source
+    )
+    ids = {binding.field_id for binding in declared}
+    labels: dict[str, list[str]] = {}
+    for binding in declared:
+        labels.setdefault(field_label(sequence, binding.field_ref), []).append(binding.field_id)
+    resolved: dict[str, object] = {}
+    for name, value in entries.items():
+        if name in ids:
+            key = name
+        else:
+            matches = labels.get(name, ())
+            if len(matches) != 1:
+                raise ValueError(f"unknown or ambiguous {source} field {name!r}")
+            key = matches[0]
+        if key in resolved:
+            raise ValueError(f"duplicate {source} field {key!r}")
+        resolved[key] = value
+    return resolved
 
 
 def apply_config_values(
@@ -308,36 +292,42 @@ def apply_config_values(
     *,
     current: PulseSequence | None = None,
 ) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
-    """Apply Config values by stable displayed numbers, not tuple positions/IDs.
+    """Apply saved names to all matching non-scanned fields, restoring defaults.
 
-    ``sequence`` provides authored defaults. ``current``, when supplied, is
-    that same pulse's existing Config projection: compare and update its
-    actual fields, restoring omitted values from the authored pulse. It is
-    not an independently edited pulse or a different topology.
-
-    Returns the sequence, the numbers applied, and the numbers the set named that this
-    pulse does not declare -- one calibrated set serves every pulse a board
-    plays, most of which declare only part of it. A binding absent from the
-    set retains its authored field value; an empty intersection is a no-op.
+    A shared Config key may feed several physical fields. A scan column owns
+    its field for this execution; clearing that column restores normal source
+    resolution, not another copy of a default value.
     """
 
+    _sequence_of(sequence)
     if not isinstance(entries, Mapping):
         raise TypeError("config values must be a mapping")
-    normalized = {}
-    for number, entry in entries.items():
-        key = config_parameter_key(number)
-        if key in normalized:
-            raise ValueError(f"duplicate Config parameter number {key}")
-        normalized[key] = entry
-    return _apply_named_values(
-        sequence if current is None else _sequence_of(current),
-        normalized,
-        {
-            str(parameter.number): parameter
-            for parameter in _sequence_of(sequence).config_parameters
-        },
-        "config value",
-        defaults=sequence if current is not None and current is not sequence else None,
+    for key in entries:
+        config_parameter_key(key)
+    destination = sequence if current is None else _sequence_of(current)
+    declared = tuple(binding for binding in destination.config_bindings if not binding.scan)
+    fields = []
+    applied = []
+    names = {binding.config_key for binding in declared if binding.config_key}
+    for binding in declared:
+        key = binding.config_key
+        if key and key in entries:
+            number, unit = entries[key]
+            _check_value_unit(binding.unit, unit, f"Config value {key!r}")
+            fields.append((binding.field_ref, number, unit, key))
+            if key not in applied:
+                applied.append(key)
+        elif destination is not sequence:
+            fields.append((
+                binding.field_ref,
+                pulse_field_value(sequence, binding.field_ref, binding.unit),
+                binding.unit,
+                binding.field_id,
+            ))
+    return (
+        _replace_pulse_fields(destination, fields),
+        tuple(applied),
+        tuple(key for key in entries if key not in names),
     )
 
 
@@ -347,121 +337,41 @@ def _sequence_of(sequence: PulseSequence) -> PulseSequence:
     return sequence
 
 
-def _apply_named_values(
-    sequence: PulseSequence,
-    entries: Mapping[str, tuple[int | float, str]],
-    declared: Mapping[str, object],
-    label: str,
-    *,
-    defaults: PulseSequence | None = None,
-) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
-    """Write one set of named numbers into the fields their names point at."""
-
-    if not isinstance(entries, Mapping):
-        raise TypeError(f"{label}s must be a mapping")
-    fields = []
-    applied: list[str] = []
-    unknown: list[str] = []
-    for parameter_id, entry in entries.items():
-        parameter = declared.get(str(parameter_id))
-        if parameter is None:
-            unknown.append(str(parameter_id))
-            continue
-        number, unit = entry
-        if parameter.unit == "value" or unit == "value":
-            if parameter.unit != unit:
-                raise ValueError(
-                    f"{label} {parameter_id!r} is in {unit!r} where the pulse "
-                    f"declares {parameter.unit!r}"
-                )
-        # The field writer converts directly into the physical field's unit.
-        # Passing through the declaration's unit would repeat that conversion
-        # and round through an unnecessary intermediate float.
-        fields.append((parameter.field_ref, number, unit, str(parameter_id)))
-        applied.append(str(parameter_id))
-    if defaults is not None:
-        for parameter_id, parameter in declared.items():
-            if parameter_id not in entries:
-                fields.append((
-                    parameter.field_ref,
-                    pulse_field_value(defaults, parameter.field_ref, parameter.unit),
-                    parameter.unit,
-                    parameter_id,
-                ))
-    return _replace_pulse_fields(sequence, fields), tuple(applied), tuple(unknown)
+def _check_value_unit(declared: str, supplied: str, label: str) -> None:
+    if (declared == "value") != (supplied == "value"):
+        raise ValueError(f"{label} is in {supplied!r} where the pulse declares {declared!r}")
 
 
 def apply_api_values(
     sequence: PulseSequence,
     entries: Mapping[str, tuple[int | float, str]],
 ) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
-    """Overwrite the authored value of every API parameter the set names.
+    """Apply explicit API field values; omitted inputs retain their defaults."""
 
-    Returns the sequence, the ids applied and the ids the set named that this
-    pulse does not declare.  The intersection is applied rather than the whole
-    set demanded: one saved set of bias values is meant to be carried across
-    several pulses, most of which declare only some of it, so an id this pulse
-    has never heard of is reported and skipped.  An id this pulse declares and
-    the set omits keeps the number the operator already authored.
-
-    The declarations themselves survive: this changes what the API slots hold,
-    not whether they exist.  Baking them away is :func:`resolve_api_parameters`.
-    """
-
-    return _apply_named_values(
-        sequence,
-        entries,
-        {
-            parameter.parameter_id: parameter
-            for parameter in _sequence_of(sequence).api_parameters
-        },
-        "API value",
-    )
+    normalized = normalize_binding_values(sequence, entries)
+    fields = []
+    for binding in sequence.api_bindings:
+        if binding.field_id in normalized:
+            number, unit = normalized[binding.field_id]
+            _check_value_unit(binding.unit, unit, f"API value {binding.field_id!r}")
+            fields.append((binding.field_ref, number, unit, binding.field_id))
+    return _replace_pulse_fields(sequence, fields), tuple(normalized), ()
 
 
 def resolve_api_parameters(
     sequence: PulseSequence,
     values: Mapping[str, int | float] | None = None,
 ) -> PulseSequence:
-    """Bake every API parameter into its field and remove the declarations.
+    """Bake supplied API inputs/defaults and clear only the API source flag."""
 
-    With no explicit mapping, the currently authored field values are used.
-    That is the Pulse Editor's ``On Pulse`` meaning: run exactly what is shown.
-    An explicit mapping must name every declared parameter, so misspellings and
-    partially configured runs do not silently execute nominal values.  A caller
-    that owns only some of them starts from :func:`authored_api_values` and
-    overrides its own, which says the same thing at the call site.
-    """
-
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
-    expected = tuple(parameter.parameter_id for parameter in sequence.api_parameters)
-    if values is None:
-        resolved_values = authored_api_values(sequence)
-    else:
-        if not isinstance(values, Mapping):
-            raise TypeError("API parameter values must be a mapping")
-        resolved_values = dict(values)
-        missing = tuple(
-            parameter_id
-            for parameter_id in expected
-            if parameter_id not in resolved_values
-        )
-        extra = tuple(
-            parameter_id
-            for parameter_id in resolved_values
-            if parameter_id not in expected
-        )
-        if missing or extra:
-            raise ValueError(
-                "API parameter values must exactly match the pulse declaration; "
-                f"missing={missing}, extra={extra}"
-            )
-
+    _sequence_of(sequence)
+    resolved_values = authored_api_values(sequence)
+    if values is not None:
+        resolved_values.update(normalize_binding_values(sequence, values))
     return _replace_pulse_fields(
         sequence,
-        ((parameter.field_ref, resolved_values[parameter.parameter_id], parameter.unit,
-          parameter.parameter_id) for parameter in sequence.api_parameters),
+        ((binding.field_ref, resolved_values[binding.field_id], binding.unit,
+          binding.field_id) for binding in sequence.api_bindings),
         remove_api_parameters=True,
     )
 
@@ -505,9 +415,10 @@ __all__ = [
     "apply_config_values",
     "authored_api_entries",
     "authored_api_values",
-    "authored_config_entries",
     "convert_time",
     "field_label",
+    "normalize_binding_values",
+    "config_parameter_key",
     "prune_orphaned_bindings",
     "pulse_field_value",
     "replace_pulse_field",

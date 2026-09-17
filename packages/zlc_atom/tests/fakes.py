@@ -301,6 +301,9 @@ class ScriptedScanBench:
         # it is still firing; the answer is the real board's.
         return self._sequencer.snapshot()
 
+    def applied(self):
+        return self._sequencer.applied()
+
     def safe(self) -> SafeReadback:
         self.events.append(("safe", time.monotonic()))
         return self._sequencer.safe()

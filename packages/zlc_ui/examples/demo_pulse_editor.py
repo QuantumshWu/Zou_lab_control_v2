@@ -42,16 +42,15 @@ from zlc_ui import (
 def _field(
     text: str,
     *,
-    binding: str = "",
-    number: int = 0,
+    scan: bool = False,
+    source: str = "default",
     editable: bool = True,
     validator_kind: str | None = None,
     validator_lo: float = -100,
     validator_hi: float = 100,
 ) -> FieldVM:
     kind = validator_kind or ("int" if text.lstrip("-").isdigit() else "float")
-    return FieldVM(text, editable=editable, binding_kind=binding, binding_number=number,
-                   binding_tooltip=f"fake {binding} parameter" if binding else "",
+    return FieldVM(text, editable=editable, scan=scan, source=source,
                    validator_kind=kind,
                    validator_lo=validator_lo, validator_hi=validator_hi,
                    resolution=1 if kind == "int" else 0,
@@ -95,21 +94,21 @@ def fake_schedule() -> ScheduleVM:
     ports = (*digital_ports, *dac_ports)
     periods = (
         PeriodVM(
-            "p1", "", _field("s0", binding="scan", number=1), "ns", ("ns", "us"),
+            "p1", "", _field("1000", scan=True), "ns", ("ns", "us"),
             digital=tuple((port.key, port.key == "ch00") for port in ports[:4]),
             analog=(
                 (
                     "da_bias_y",
                     "ramp",
                     _field(
-                        "s1", binding="scan", number=2,
+                        "0", scan=True,
                         validator_kind="int", validator_lo=-512, validator_hi=511,
                     ),
                 ),
             ),
         ),
         PeriodVM(
-            "p2", "", _field("1000", binding="api", number=1), "ns", ("ns", "us"),
+            "p2", "", _field("1000", source="api"), "ns", ("ns", "us"),
             digital=tuple((port.key, False) for port in ports[:4]),
             analog=(
                 (
@@ -145,7 +144,7 @@ def fake_schedule() -> ScheduleVM:
         delay_rows=(
             DelayRowVM("ch00", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
             DelayRowVM("ch01", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
-            DelayRowVM("ch02", _field("0", binding="api", number=2), "ns", (("ns", 1.0), ("us", 1000.0))),
+            DelayRowVM("ch02", _field("0", source="api"), "ns", (("ns", 1.0), ("us", 1000.0))),
             DelayRowVM("ch03", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
             DelayRowVM(
                 "da_bias_y",
@@ -247,7 +246,7 @@ def populate(editor) -> None:
         (schedule.duration_committed, "duration_committed"),
         (schedule.digital_committed, "digital_committed"),
         (schedule.analog_committed, "analog_committed"),
-        (schedule.binding_cycle_requested, "binding_cycle_requested"),
+        (schedule.binding_committed, "binding_committed"),
         (schedule.reorder_items_requested, "reorder_items_requested"),
         (schedule.bracket_committed, "bracket_committed"),
         (schedule.run_repeats_committed, "run_repeats_committed"),

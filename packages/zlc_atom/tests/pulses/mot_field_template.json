@@ -430,40 +430,41 @@
       "analog_steps": []
     }
   ],
-  "slots": [],
-  "api_parameters": [
+  "bindings": [
     {
-      "parameter_id": "da_bias_x",
-      "number": 1,
-      "unit": "value",
       "field_ref": {
         "kind": "dac",
         "period_id": "load",
         "port": "da_bias_x"
-      }
+      },
+      "unit": "value",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     },
     {
-      "parameter_id": "da_bias_y",
-      "number": 2,
-      "unit": "value",
       "field_ref": {
         "kind": "dac",
         "period_id": "load",
         "port": "da_bias_y"
-      }
+      },
+      "unit": "value",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     },
     {
-      "parameter_id": "da_bias_z",
-      "number": 3,
-      "unit": "value",
       "field_ref": {
         "kind": "dac",
         "period_id": "load",
         "port": "da_bias_z"
-      }
+      },
+      "unit": "value",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     }
   ],
-  "config_parameters": [],
   "delays": [],
   "bracket": null,
   "run_repeats": 0

@@ -140,7 +140,7 @@ class SeamlessScanMeasurement:
         """Only planned slots vary; omitted fields compile as Pulse constants.
 
         The authored template and plan remain untouched. Removing an unused
-        binding from this execution copy preserves the field's actual value
+        scan flag from this execution copy preserves the field's actual value
         and uses the ordinary compiler, without redundant constant wire columns.
         Unknown authored ports have already been refused by plan binding.
         """
@@ -150,13 +150,16 @@ class SeamlessScanMeasurement:
         }
         streamed = resolve_api_parameters(replace(
             self.sequence,
-            slots=tuple(slot for slot in self.sequence.slots if slot.slot_id in planned),
+            bindings=tuple(
+                replace(binding, scan=binding.field_id in planned)
+                for binding in self.sequence.bindings
+            ),
         ))
         num_slots = int(board.geometry.num_slots)
-        if len(streamed.slots) > num_slots:
+        if len(streamed.scan_bindings) > num_slots:
             raise ValueError(
                 f"the board advances at most {num_slots} slots per cycle; "
-                f"this plan scans {len(streamed.slots)} slots"
+                f"this plan scans {len(streamed.scan_bindings)} slots"
             )
         columns = scan_columns_for(streamed)
         return streamed, columns
@@ -309,6 +312,15 @@ class SeamlessScanMeasurement:
                 run_repeats=shots,
                 scan_repeats=sweeps,
             )
+            if first:
+                # Complete the initial device snapshot before the first
+                # publication freezes the run record. Config is applied by
+                # LOAD/Fire, not by the pure compiler used to plan this run.
+                initial = run_record["device_snapshots"]["sequencer"]
+                initial.update(sequencer_archive_snapshot(
+                    applied=self.sequencer.applied(),
+                    config=self.sequencer.config_values(),
+                ))
             context.report_progress(
                 f"Scanning point {progress_base + 1}/{progress_total}; shots",
                 current=progress_base * shots,
@@ -405,11 +417,8 @@ class SeamlessScanMeasurement:
             # One fixed Pulse per host point. No columns go on the wire: an
             # unslotted program uses ordinary Run repeats, not a dummy table.
             effective_inner, slot_tick_scales, wire = inner_rows, (), ()
-        # Filled by the board, then compiled, ONCE: a config parameter is the
-        # apparatus's calibrated number and it is baked in here.  The filled
-        # sequence is what every fire loads as ``source=`` and what the run
-        # record carries as the pulse that played -- one object, so the
-        # record cannot say one thing and the board another.
+        # Prepare once from the authored fields; the device applies saved
+        # Config values at LOAD/Fire and supplies the initial execution record.
         streamed, program = self.sequencer.compile_pulse(
             streamed,
             board.geometry,
@@ -443,9 +452,6 @@ class SeamlessScanMeasurement:
             effective_rows=effective_rows,
             slot_tick_scales=slot_tick_scales,
             board=board,
-            program=program,
-            source=streamed,
-            wire=wire,
         )
         self._last_run_record = dict(run_record)
         writer = ScanDatasetWriter(
@@ -549,13 +555,8 @@ class SeamlessScanMeasurement:
         effective_rows: Sequence[Sequence[float]],
         slot_tick_scales: Sequence[int],
         board: object,
-        program: object,
-        source: PulseSequence,
-        wire: Sequence[Sequence[int]],
     ) -> dict[str, object]:
-        """What this run WAS: the plan that drove it, the file it played and,
-        on the board's own snapshot, the program and the filled pulse that
-        played."""
+        """The plan and initial device facts, completed after the first Fire."""
 
         requested_rows = self.plan.rows()
         played_rows = tuple(tuple(float(value) for value in row) for row in effective_rows)
@@ -598,12 +599,6 @@ class SeamlessScanMeasurement:
             "device_snapshots": {
                 "sequencer": sequencer_archive_snapshot(
                     description=board,
-                    config=self.sequencer.config_values(),
-                    program=program,
-                    source=source,
-                    rows=wire,
-                    run_repeats=self.shots_per_point,
-                    scan_repeats=1 if self.outer_axes else self.repeats,
                 ),
                 **{
                     f"tunable:{key}": {

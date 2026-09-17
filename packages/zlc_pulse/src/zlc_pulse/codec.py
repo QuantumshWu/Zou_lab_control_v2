@@ -7,7 +7,7 @@ file" -- was true and answered a different question.  A pulse is saved as JSON
 beside the module, with that fact owned by the package that owns the model
 rather than re-derived by whoever happens to be writing a file.
 
-Pulse and numbered Config files share their grammar and file I/O here;
+Pulse and named Config files share their grammar and file I/O here;
 devices and editors do not maintain alternative readers or writers.
 """
 
@@ -29,21 +29,19 @@ from .model import (
     AnalogStep,
     MAXIMUM_REPEAT_COUNT,
     OutputDelay,
-    PulseApiParameter,
-    PulseConfigParameter,
+    PulseBinding,
     PulseBracket,
     PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
-    PulseSlot,
     PulseTarget,
 )
 
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse"
-#: Config keys are the one-based numbers displayed by Pulse Editor.
+#: Config keys are cross-pulse names authored in the Config tab.
 CONFIG_VALUES_FORMAT = "zlc.pulse.config_values"
 CONFIG_VALUES_DIRECTORY = "config_values"
 CURRENT_CONFIG_VALUES = "current.json"
@@ -217,26 +215,19 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
             }
             for period in sequence.periods
         ],
-        "slots": [
+        "bindings": [
             {
-                "kind": slot.kind,
-                "unit": slot.unit,
-                "slot_id": slot.slot_id,
-                "number": slot.number,
                 "field_ref": {
-                    "kind": slot.field_ref.kind,
-                    "period_id": slot.field_ref.period_id,
-                    "port": slot.field_ref.port,
+                    "kind": binding.field_ref.kind,
+                    "period_id": binding.field_ref.period_id,
+                    "port": binding.field_ref.port,
                 },
+                "unit": binding.unit,
+                "scan": binding.scan,
+                "source": binding.source,
+                "config_key": binding.config_key,
             }
-            for slot in sequence.slots
-        ],
-        "api_parameters": [
-            _named_binding_tree(parameter) for parameter in sequence.api_parameters
-        ],
-        "config_parameters": [
-            _named_binding_tree(parameter)
-            for parameter in sequence.config_parameters
+            for binding in sequence.bindings
         ],
         "delays": [
             {"port": delay.port, "value": delay.value, "unit": delay.unit}
@@ -255,49 +246,6 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
     }
 
 
-def _named_binding_tree(binding: Any) -> dict[str, Any]:
-    """One named field binding -- API or config -- as a tree."""
-
-    return {
-        "parameter_id": binding.parameter_id,
-        "number": binding.number,
-        "unit": binding.unit,
-        "field_ref": {
-            "kind": binding.field_ref.kind,
-            "period_id": binding.field_ref.period_id,
-            "port": binding.field_ref.port,
-        },
-    }
-
-
-def _named_bindings(items: Any, factory: Any, label: str) -> tuple[Any, ...]:
-    """Rebuild one list of named field bindings through the model's own types."""
-
-    rebuilt = []
-    for item in _array(items, f"pulse {label}s"):
-        binding = _object(
-            item, ("parameter_id", "unit", "field_ref"), f"pulse {label}", optional=("number",)
-        )
-        field = _object(
-            binding["field_ref"],
-            ("kind", "period_id", "port"),
-            "pulse field reference",
-        )
-        rebuilt.append(
-            factory(
-                parameter_id=binding["parameter_id"],
-                field_ref=PulseFieldRef(
-                    kind=field["kind"],
-                    period_id=field["period_id"],
-                    port=field["port"],
-                ),
-                unit=binding["unit"],
-                number=binding.get("number"),
-            )
-        )
-    return tuple(rebuilt)
-
-
 def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     """Rebuild a sequence from :func:`sequence_to_tree`'s output.
 
@@ -313,9 +261,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             "time_step_ns",
             "target",
             "periods",
-            "slots",
-            "api_parameters",
-            "config_parameters",
+            "bindings",
             "delays",
             "bracket",
             "run_repeats",
@@ -406,44 +352,21 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             for item in _array(tree["periods"], "pulse periods")
         )
     )
-    slots = tuple(
-        PulseSlot(
-            kind=slot["kind"],
-            field_ref=PulseFieldRef(
-                kind=field["kind"],
-                period_id=field["period_id"],
-                port=field["port"],
-            ),
-            unit=slot["unit"],
-            slot_id=slot["slot_id"],
-            number=slot.get("number"),
+    bindings = []
+    for item in _array(tree["bindings"], "pulse bindings"):
+        binding = _object(
+            item, ("field_ref", "unit", "scan", "source", "config_key"), "pulse binding"
         )
-        for slot, field in (
-            (
-                slot,
-                _object(
-                    slot["field_ref"],
-                    ("kind", "period_id", "port"),
-                    "pulse field reference",
-                ),
-            )
-            for slot in (
-                _object(
-                    item,
-                    ("kind", "unit", "slot_id", "field_ref"),
-                    "pulse slot",
-                    optional=("number",),
-                )
-                for item in _array(tree["slots"], "pulse slots")
-            )
+        field = _object(
+            binding["field_ref"], ("kind", "period_id", "port"), "pulse field reference"
         )
-    )
-    api_parameters = _named_bindings(
-        tree["api_parameters"], PulseApiParameter, "API parameter"
-    )
-    config_parameters = _named_bindings(
-        tree["config_parameters"], PulseConfigParameter, "config parameter"
-    )
+        bindings.append(PulseBinding(
+            field_ref=PulseFieldRef(**field),
+            unit=binding["unit"],
+            scan=binding["scan"],
+            source=binding["source"],
+            config_key=binding["config_key"],
+        ))
     delays = tuple(
         OutputDelay(delay["port"], delay["value"], delay["unit"])
         for delay in (
@@ -468,9 +391,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         target=target,
         time_step_ns=tree["time_step_ns"],
         periods=periods,
-        slots=slots,
-        api_parameters=api_parameters,
-        config_parameters=config_parameters,
+        bindings=tuple(bindings),
         delays=delays,
         bracket=bracket,
         run_repeats=tree["run_repeats"],
@@ -479,98 +400,47 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     return sequence
 
 
-def _named_values_tree(
-    values: Mapping[str, tuple[int | float, str]], label: str
-) -> dict[str, Any]:
-    """The numbered Config values body."""
-
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{label}s must be a mapping")
-    entries: dict[str, Any] = {}
-    for parameter_id, entry in values.items():
-        parameter_id = config_parameter_key(parameter_id)
-        if parameter_id in entries:
-            raise ValueError(f"duplicate Config parameter number {parameter_id}")
-        number, unit = entry
-        if not isinstance(number, Real) or isinstance(number, bool):
-            raise TypeError(f"{label} {parameter_id!r} must be a number")
-        if not isinstance(unit, str) or not unit:
-            raise ValueError(f"{label} {parameter_id!r} must carry a unit")
-        entries[parameter_id] = {"value": _plain_number(float(number)), "unit": unit}
-    return {"values": entries}
-
-
-def _named_values_from_tree(
-    tree: Mapping[str, Any], declared_format: str, label: str
-) -> tuple[str, str, dict[str, tuple[float, str]]]:
-    """One saved value set, read under a closed grammar."""
-
-    tree = _object(tree, ("format", "name", "source", "values"), f"{label}s")
-    if tree["format"] != declared_format:
-        raise ValueError(f"{label}s must declare format {declared_format!r}")
-    for field in ("name", "source"):
-        if not isinstance(tree[field], str):
-            raise TypeError(f"{label}s {field} must be text")
-    body = tree["values"]
-    if not isinstance(body, Mapping):
-        raise TypeError(f"{label}s body must be an object")
-    entries: dict[str, tuple[float, str]] = {}
-    for parameter_id, entry in body.items():
-        parameter_id = config_parameter_key(parameter_id)
-        entry = _object(entry, ("value", "unit"), f"{label} {parameter_id!r}", optional=("field",))
-        if "field" in entry and not isinstance(entry["field"], str):
-            raise TypeError(f"{label} {parameter_id!r} field must be text")
-        number = entry["value"]
-        if not isinstance(number, Real) or isinstance(number, bool):
-            raise TypeError(f"{label} {parameter_id!r} must be a number")
-        if not math.isfinite(float(number)):
-            raise ValueError(f"{label} {parameter_id!r} must be finite")
-        unit = entry["unit"]
-        if not isinstance(unit, str) or not unit.strip():
-            raise ValueError(f"{label} {parameter_id!r} must carry a unit")
-        entries[parameter_id] = (float(number), unit)
-    return tree["name"], tree["source"], entries
-
-
 def config_values_to_tree(
     values: Mapping[str, tuple[int | float, str]],
-    *,
-    name: str = "",
-    source: str = "hand",
-    fields: Mapping[int | str, str] | None = None,
 ) -> dict[str, Any]:
-    """One named set of CONFIG parameter values, as a tree a file can hold.
+    """Serialize the manually authored named Config value table."""
 
-    Pulse Editor exports its declared Config fields here; a sequencer can
-    load this set as optional overrides. Field descriptions are only for people.
-    """
-
-    body = _named_values_tree(values, "config value")
-    if fields is not None:
-        if not isinstance(fields, Mapping):
-            raise TypeError("config fields must be a mapping")
-        for number, text in fields.items():
-            if not isinstance(text, str):
-                raise TypeError("config field description must be text")
-            body["values"][config_parameter_key(number)]["field"] = text
-    return {
-        **body,
-        "format": CONFIG_VALUES_FORMAT,
-        "name": str(name),
-        "source": str(source),
-    }
+    if not isinstance(values, Mapping):
+        raise TypeError("Config values must be a mapping")
+    entries = {}
+    for key, (number, unit) in values.items():
+        config_parameter_key(key)
+        if isinstance(number, bool) or not isinstance(number, Real):
+            raise TypeError(f"Config value {key!r} must be a number")
+        if not math.isfinite(float(number)):
+            raise ValueError(f"Config value {key!r} must be finite")
+        if not isinstance(unit, str) or not unit.strip():
+            raise ValueError(f"Config value {key!r} must carry a unit")
+        entries[key] = {"value": _plain_number(float(number)), "unit": unit}
+    return {"format": CONFIG_VALUES_FORMAT, "values": entries}
 
 
 def config_values_from_tree(
     tree: Mapping[str, Any],
-) -> tuple[str, str, dict[str, tuple[float, str]]]:
-    """``(name, source, {parameter_id: (value, unit)})`` from a saved config set."""
+) -> dict[str, tuple[float, str]]:
+    """Read the sole named Config grammar; legacy metadata is not accepted."""
 
-    return _named_values_from_tree(tree, CONFIG_VALUES_FORMAT, "config value")
+    tree = _object(tree, ("format", "values"), "Config values")
+    if tree["format"] != CONFIG_VALUES_FORMAT:
+        raise ValueError(f"Config values must declare format {CONFIG_VALUES_FORMAT!r}")
+    if not isinstance(tree["values"], Mapping):
+        raise TypeError("Config values must be an object")
+    entries = {}
+    for key, item in tree["values"].items():
+        config_parameter_key(key)
+        entry = _object(item, ("value", "unit"), f"Config value {key!r}")
+        entries[key] = (entry["value"], entry["unit"])
+    validated = config_values_to_tree(entries)
+    return {key: (float(item["value"]), item["unit"]) for key, item in validated["values"].items()}
 
 
-def read_config_values(path: str | Path) -> tuple[str, str, dict[str, tuple[float, str]]]:
-    """Read the selected Config file through its sole numbered grammar."""
+def read_config_values(path: str | Path) -> dict[str, tuple[float, str]]:
+    """Read a saved Config value table through the same grammar as Save."""
 
     source = Path(path).expanduser()
     if source.suffix.lower() != ".json":
@@ -581,19 +451,13 @@ def read_config_values(path: str | Path) -> tuple[str, str, dict[str, tuple[floa
 def write_config_values(
     path: str | Path,
     entries: Mapping[str, tuple[float, str]],
-    *,
-    name: str = "",
-    source: str = "hand",
-    fields: Mapping[int | str, str] | None = None,
 ) -> None:
-    """Write Config numbers and values atomically through the same grammar."""
+    """Save the Config tab's explicit value table atomically."""
 
+    body = config_values_to_tree(entries)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(
-        target,
-        readable_json_bytes(config_values_to_tree(entries, name=name, source=source, fields=fields)),
-    )
+    atomic_write_bytes(target, readable_json_bytes(body))
 
 
 def _plain_number(value: float) -> int | float:

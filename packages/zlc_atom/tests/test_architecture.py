@@ -4,6 +4,7 @@ import ast
 import pathlib
 import importlib
 import json
+from dataclasses import replace
 from pathlib import Path
 import time
 
@@ -11,6 +12,9 @@ import pytest
 from zlc_durable import readable_json_bytes
 from zlc_pulse import (
     PULSE_TREE_FORMAT,
+    PulseBinding,
+    PulseFieldRef,
+    convert_time,
     PulseTarget,
     resolve_api_parameters,
     sequence_from_tree,
@@ -186,6 +190,9 @@ class _RecordingSequencer:
         self.events.append(("snapshot", None))
         return self.sequencer.snapshot()  # type: ignore[attr-defined]
 
+    def applied(self):
+        return self.sequencer.applied()
+
     @property
     def camera_trigger_channel(self) -> str:
         return self.sequencer.camera_trigger_channel  # type: ignore[attr-defined]
@@ -203,9 +210,9 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         repeats=repeats,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
-        reference_before_slot=1,
-        readout_slot=2,
-        reference_after_slot=3,
+        reference_before_field="duration:long_before",
+        readout_field="duration:short",
+        reference_after_field="duration:long_after",
         default_model_kind=ReadoutModelKind.BOX,
         threshold_method="gaussian",
         box_half_width=1,
@@ -426,9 +433,7 @@ def test_pulse_resolver_uses_the_project_json_document(
         "time_step_ns",
         "target",
         "periods",
-        "slots",
-        "api_parameters",
-        "config_parameters",
+        "bindings",
         "delays",
         "bracket",
         "run_repeats",
@@ -443,20 +448,20 @@ def test_pulse_resolver_uses_the_project_json_document(
     }.intersection(tree)
     sequence = sequence_from_tree(tree)
     assert sequence_to_tree(sequence) == tree
-    assert sequence.slots == ()
-    assert tuple(parameter.parameter_id for parameter in sequence.api_parameters) == (
-        "reference_probe_duration_before",
-        "readout_probe_duration",
-        "reference_probe_duration_after",
+    assert sequence.scan_bindings == ()
+    assert tuple(parameter.field_id for parameter in sequence.api_bindings) == (
+        "duration:long_before",
+        "duration:short",
+        "duration:long_after",
     )
     api_values = {
-        "reference_probe_duration_before": 0.031,
-        "readout_probe_duration": 0.006,
-        "reference_probe_duration_after": 0.031,
+        "duration:long_before": 0.031,
+        "duration:short": 0.006,
+        "duration:long_after": 0.031,
     }
     explicit = resolve_api_parameters(sequence, api_values)
-    assert explicit.api_parameters == ()
-    assert explicit.slots == ()
+    assert explicit.api_bindings == ()
+    assert explicit.scan_bindings == ()
     resource_spec = CALIBRATION_LOGIC_NODE.workspace_resources[0]
     resource = resource_spec.resolve(asset)
     assert sequence_to_tree(resource.value) == tree
@@ -535,9 +540,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             path=IMAGING_PULSE_RESOURCE.path,
             sequencer=sequencer,
             api_values={
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
         capture = camera_node.prepare()
@@ -555,17 +560,34 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             if name in {"set_exposure_seconds", "arm"}
         ) == "set_exposure_seconds"
 
+        sequencer.load_config_values({"loading_time": (21.0, "ms")})
         calibration_node = descriptors["calibration"].instantiate(
             camera=camera,
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
             pulse_template=IMAGING_PULSE_RESOURCE.path.name,
-            pulse_resource=IMAGING_PULSE_RESOURCE,
+            pulse_resource=replace(IMAGING_PULSE_RESOURCE, value=replace(
+                IMAGING_PULSE_RESOURCE.value,
+                bindings=(
+                    *(replace(binding, unit="us", scan=True)
+                      for binding in reversed(IMAGING_PULSE_RESOURCE.value.bindings)),
+                    PulseBinding(PulseFieldRef("duration", "load"), "s",
+                                 source="config", config_key="loading_time"),
+                ),
+            )),
+            reference_before_field="duration:long_before",
+            readout_field="duration:short",
+            reference_after_field="duration:long_after",
             signal_plane=plane,
             repeats=30,
         )
         assert calibration_node.camera is camera
+        assert calibration_node._driven_values() == {
+            "duration:long_before": 20000.0,
+            "duration:short": 5000.0,
+            "duration:long_after": 20000.0,
+        }
         loads_before_task = len([event for event, _ in sequencer.events if event == "load"])
         fires_before_task = len([event for event, _ in sequencer.events if event == "fire"])
         waits_before_task = len(
@@ -593,6 +615,13 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert observation.progress is None
         task_result = calibration_node.result
         assert task_result is not None
+        execution = task_result.run_record["actual_devices"]["sequencer"]
+        assert execution["program"]["digest"] == sequencer.applied().program.digest
+        assert execution["program"]["digest"] == execution["state"]["applied_digest"]
+        actual_load = next(period for period in execution["pulse"]["periods"]
+                           if period["period_id"] == "load")
+        assert convert_time(actual_load["duration"], actual_load["unit"], "s") == 0.021
+        assert calibration_node.pulse_sequence.period_by_id["load"] == IMAGING_PULSE_RESOURCE.value.period_by_id["load"]
         task_camera_events = camera.events[camera_events_before_task:]
         # One publication is one whole three-window cycle: the long, readout
         # and long frames are three POINTS of the acquisition, and the preview
@@ -708,9 +737,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "repeats",
             "reference_exposure_seconds",
             "readout_exposure_seconds",
-            "reference_before_slot",
-            "readout_slot",
-            "reference_after_slot",
+            "reference_before_field",
+            "readout_field",
+            "reference_after_field",
             "default_model_kind",
             "threshold_method",
             "box_half_width",
@@ -739,7 +768,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         )
         with pytest.raises(ValueError, match=f"Enter {template.label}"):
             descriptors["calibration"].authoring_schema.project_values({})
-        named = {"pulse_template": IMAGING_PULSE_RESOURCE.path.name}
+        named = {"pulse_template": IMAGING_PULSE_RESOURCE.path.name,
+                 "reference_before_field": "duration:long_before",
+                 "readout_field": "duration:short",
+                 "reference_after_field": "duration:long_after"}
         defaults = descriptors["calibration"].authoring_schema.project_values(named)
         assert defaults["repeats"] == 200
         assert defaults["threshold_method"] == "gaussian"

@@ -35,7 +35,7 @@ from test_scan_repeat_domain import _source_schema
 
 
 BIAS_PORTS = tuple(
-    PULSE_PARAM_FAMILY + name
+    PULSE_PARAM_FAMILY + "dac:load:" + name
     for name in ("da_bias_x", "da_bias_y", "da_bias_z")
 )
 
@@ -55,7 +55,7 @@ def test_the_mot_template_offers_the_three_bias_ports() -> None:
     ports = scan_ports_for(sequence)
     assert tuple(port.port for port in ports) == BIAS_PORTS
     assert tuple(port.label for port in ports) == tuple(
-        field_label(sequence, parameter.field_ref) for parameter in sequence.api_parameters
+        field_label(sequence, parameter.field_ref) for parameter in sequence.api_bindings
     )
     assert all(port.label.startswith("MOT.") for port in ports)
     for port in ports:
@@ -86,15 +86,15 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     assert load_stepped_template(path).name == tree["name"]
     resource = SEAMLESS_NODE.workspace_resources[0]
     ordinary = resource.resolve(path).value
-    assert ordinary.name == tree["name"] and ordinary.slots == ()
-    assert ordinary.api_parameters, "host-only scans keep the fixed Pulse's authored values"
+    assert ordinary.name == tree["name"] and ordinary.scan_bindings == ()
+    assert ordinary.api_bindings, "host-only scans keep the fixed Pulse's authored values"
     slotted = slots_from_plan(ordinary, scan_ports_for(ordinary)[:1])
     slotted_tree = sequence_to_tree(slotted)
     path.write_text(json.dumps(slotted_tree), encoding="utf-8")
     resolved = resource.resolve(path).value
-    assert resolved.slots == slotted.slots
-    assert resolved.api_parameters == slotted.api_parameters
-    slotted_tree["slots"][0]["field_ref"]["period_id"] = "missing_period"
+    assert resolved.scan_bindings == slotted.scan_bindings
+    assert resolved.api_bindings == slotted.api_bindings
+    slotted_tree["bindings"][0]["field_ref"]["period_id"] = "missing_period"
     path.write_text(json.dumps(slotted_tree), encoding="utf-8")
     with pytest.raises(ValueError, match="missing_period"):
         resource.resolve(path)

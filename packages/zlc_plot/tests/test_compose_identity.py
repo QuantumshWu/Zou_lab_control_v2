@@ -1445,9 +1445,9 @@ def test_a_confined_pan_of_a_pulse_timeline_moves_its_badges_with_it(ratio) -> N
             PulseBlock("trap", 1.0e-3, 9.0e-3, label="hold"),
         ),
         scan_regions=(
-            PulseScanRegion(1.0e-3, 2.0e-3, 1, kind="api"),
-            PulseScanRegion(5.0e-3, 6.0e-3, 2, kind="api"),
-            PulseScanRegion(7.0e-3, 8.0e-3, 3),
+            PulseScanRegion(1.0e-3, 2.0e-3, "A", kind="api"),
+            PulseScanRegion(5.0e-3, 6.0e-3, "A", kind="api"),
+            PulseScanRegion(7.0e-3, 8.0e-3, "S+A"),
         ),
         time_unit="s",
         total_duration=10.0e-3,

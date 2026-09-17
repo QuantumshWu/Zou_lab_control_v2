@@ -27,6 +27,7 @@ from zlc_ui.fluent import (
 
 from .preview_view import PulsePreviewView
 from .scan_view import PulseScanView
+from .config_view import PulseConfigView
 from .schedule_view import PulseScheduleView
 from .target_view import PulseTargetView
 
@@ -78,15 +79,18 @@ class PulseEditorView(QtWidgets.QWidget):
         self.schedule_view = PulseScheduleView()
         self.preview_view = PulsePreviewView()
         self.scan_view = PulseScanView()
+        self.config_view = PulseConfigView()
         self.target_view = PulseTargetView()
         self.tabs.add_permanent_tab(self.schedule_view, "Edit")
         self.tabs.add_permanent_tab(self.preview_view, "Preview")
         self.tabs.add_permanent_tab(self.scan_view, "Scan")
+        self.tabs.add_permanent_tab(self.config_view, "Config")
         self.tabs.add_permanent_tab(self.target_view, "Target")
         outer.addWidget(self.tabs, 1)
         self.tabs.currentChanged.connect(
             lambda index: self.page_changed.emit(self.tabs.tabText(index))
         )
+        self.schedule_view.config_requested.connect(lambda: self.tabs.setCurrentWidget(self.config_view))
         # What just happened is SAID, in the one modal this project owns for
         # every refusal and confirmation.  A strip along the bottom was
         # invented here instead,

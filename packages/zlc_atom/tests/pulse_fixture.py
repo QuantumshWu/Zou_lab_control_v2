@@ -55,9 +55,9 @@ def build_calibration_pulse(
         path=IMAGING_PULSE_RESOURCE.path,
         sequencer=sequencer,
         api_values={
-            "reference_probe_duration_before": reference_exposure_seconds,
-            "readout_probe_duration": readout_exposure_seconds,
-            "reference_probe_duration_after": reference_exposure_seconds,
+            "duration:long_before": reference_exposure_seconds,
+            "duration:short": readout_exposure_seconds,
+            "duration:long_after": reference_exposure_seconds,
         },
     )
     return resolved.program

@@ -20,7 +20,7 @@
 
 - 对前轮交互/Image整改的独立复核又关闭三处实证遗漏：Group消失后的隐藏锁回写、pointer锁定后以旧整帧状态误判解锁no-op，以及非均匀Image height坐标注释按ordinal跨度错误舍入。均在原Session/renderer owner修复，没有额外Workbench状态或补偿重试。原用例先红后绿；正式Qt完成Live锁→Frozen→Group移除/恢复→重新锁→Frozen解锁，等同步目标退役后两Host确实清锁，hover PNG/NPZ一致；窗口关闭。DCAM四种非法早帧仍在copy前拒绝，没有新增硬件结论。
 
-- Seamless允许Plan省略模板里的Scan Slot：只有实际计划的slot留在执行副本里参与硬件扫描，其余字段保留当前Pulse默认值并由既有编译器作为常量；作者模板、Plan和原绑定编号不变。不增加隐式UI行或Dataset扫描轴；固定字段保存于实际Pulse/run record。部分slot扫描（含非零DAC默认值与默认duration）及manual-only省略全部slot的既有两条NodeHost用例红→绿，点数/重复顺序不变；后者编译digest与普通默认Pulse完全相同，无额外wire table。没有硬件/RTL改动。
+- Seamless Plan只激活显式扫描字段；未扫描字段保留API/Config基础来源，再按本次API、已保存Config或作者默认值解析成常量。只改执行副本Scan标记，作者模板和Plan不变，不添加隐式轴或重复常量列。
 
 - 本轮交互/坐标整改：Rolling固定记录横轴，只选Index/Time坐标，不给记录族Fate或让其它轴抢X；普通坐标切换不偷分配角色，完整表可从错误Group状态恢复，数值在分桶前拒绝record自分组，消除B²退化。显式series lock进入DisplayState.interaction，Live/Frozen、PanelState/Layout/Figure共用既有display通知与configure；Save在实际host内冻结可见hover/series readout，不依赖旧cached description，不清空导出注释。Rolling两行注释按真实字体高度分开。
 - Image格距按sample index而非显示坐标等距判断；单调非等距与非线性单位共用可逆映射，canonical转换仍由现有Unit精确负责。二维native保持affine贴图，普通等距路径不变；Facet overview/focus、PNG、height-bars的tick/pick和鼠标pan/zoom/ROI共用映射。四种真实三轴Scan schema（等距、非等距、dBm、下降）均可画、native成立、同DPI PNG一致；已核真实screen cell中心，不仅做自身逆变换检查。非单调坐标仍明确拒绝。
@@ -46,14 +46,16 @@
 - UART接收改为实际read决定到达，队列为0仍提交短时read(1)；本机分包直接案例通过，但实验机仍收到64/65且crc_prefix_ok=false，因此该接收调整未解决现场故障，不能认定仅CRC尾字节迟到。失败诊断保存解析前有限前缀、请求及重试恢复后的真实回复hex；正常成功不格式化hex，不累计通信历史。真实RTL逐bit仿真13/14/15 words共585字节一致不代表实际USB/串口已验收。Remote旧socket现场已于takeover当时退出且NO_ACTION，不是活动LAN连接超时。Device日志按窗口宽度软换行，长无空格诊断可折行，复制仍保留原文。未build/program，探针及仿真产物不入Git。
 - 现场原始帧已确认不止一种缺失：seq32在CRC之前的末十个连续00中少一个，CRC ee1d完整；seq79的运行状态02对应CRC 4ec6，结合静态寄存器不变支持缺低CRC字节4e，重试状态04对应另一CRC fd52。不能把后者误解为fd52被截成c6。运行期timeout setter会重新下发整个Win32 DCB的冗余已移除，改用现有SetCommTimeouts；两项直接用例通过，保留deadline/取消、原读写及失败状态不提前更新。此修改是否消除真机丢字节尚待确认，不把离线CRC分析冒充物理链路定位。
 - UART已删除写后Win32 flush轮询，并按pending SEQ收取回复，旧/重复帧及坏CRC不再吞当前有效ACK；真实缺包/NAK/命令去重不变。直接PySerialLink模拟串口证明软件自发重发已消除，未操作实验板。Done计时分清command、终态观察和report retrieval，日志仅有真实重发时附最后原因；不能以日志口径修正代替真机延迟验收。
-- 设备Role已沿既有bench facts进入两个Scan factory及ScanPort.label，UI和新扫描Axis.name不再各自拼内部ID；port/AxisId和数值不变，纯Role重投不读设备。Config空路径统一解除绑定和清覆盖，下一次Fire恢复原稿；空JSON仍是绑定文件。Save Config的可选field说明使用Period/Channel显示名，只用于阅读，不进入编号匹配。
+- 设备Role沿既有bench facts进入Scan factory和ScanPort.label，UI和扫描Axis.name复用同一显示名；port/AxisId不变。Config的名称独立于Pulse字段，文件不保存字段来源或Pulse值副本。
 - 数值名称贯通现有ValueSchema、生产节点、Scan/ROI/history、Plot与Figure codec；FrameSurvival的survival经过Scan不再变value/scan。Derive用户输出、Fit参数、ROI统计由各自owner命名；普通数值轴使用同一quantity label，显式标签优先。Facet外层轴标签归一到cell，解决其被忽略及换轴旧标签复活；无renderer分支。Data/Atom/Plot/Runtime/Viewer直接验证及真实FigureViewer截图通过，窗口关闭，截图不入Git。
-- Pulse/Scan字段显示使用可编辑Period Name，如MOT.duration；有效显示名重名在Pulse模型拒绝，空Name保留ID。Scan的Axis.name与稳定AxisId分离，保存port/绑定编号/量化值及selector回写不变；重名编辑回显原值，新period ID避开已有显示名。既有Pulse及Scan直接用例通过，无硬件或RTL操作。
+- Pulse/Scan/API字段由公共field_label显示Period Name和实际字段，如MOT.duration；稳定field identity不随显示改名。重名按模型拒绝，作者默认值、单位和selector回写不变。
 - Remote Load消除未变原稿的重复传输/解码，复用原有AppliedState；仅新实际执行稿重建，原稿变化仍完整发送。类型级序列化字段metadata复用不改变wire对象grammar；文件刷新、原稿恢复、scan/reconnect及takeover直接用例通过。未增加源记录或新通信方法，客户端/server需同步Python版本，不涉及RTL。
-- Scan/API/Config编号保存到各binding本身，三种类别各自分配最小空正整数；删除、取消、重排和改ID不重编号。Config文件按稳定number匹配，硬件Scan列仍保持原紧凑tuple顺序。模型/文件保存重开及Editor三种cycle的直接用例通过；未新增编号管理器或迁移器。
+- Pulse只有一份PulseBinding：稳定字段引用、独立Scan开关及Default/API/Config三选一来源；Scan可与API/Config共存。删除编号、别名、循环切换及旧格式迁移入口；类型popup不编辑Config名称。
+- Calibration的三帧角色显式选择物理API字段；Temperature不再依赖硬编码API别名。公共Scan列/默认值/量化均使用binding.unit，µs输入不会误按Period的ms解释。Calibration/Scan/Feedback保存实际AppliedState；初始Scan记录在第一次Fire之后、首次发布之前完成，之后不修改。
+- 本轮验证：Pulse Editor既有119项通过，Pulse UI与timeline标记28项通过；Calibration、Temperature、两种Scan及Feedback的相关直接链通过。正式Qt截图确认Config表、类型popup、Scan Load Array和Calibration三个选择框；已保存120、未保存300仍执行120，两个绑定的作者默认值10/20不变。没有真实硬件/FPGA build；截图与探针仅在ignored research，所有验收窗口关闭。
 - Device UI名称统一投影accepted Role，内部key/端口/保存引用不变；卡片、通用及Pulse/SLM Control、Logic/Scan选择与设备日志使用相同label/value分离。重复Role保留为草稿，在Init/Save统一拒绝，Role-only reconcile不重建设备。Windows真实Qt点击与截图确认；Loaded卡片身份列避免Role被按钮挤掉，所有验收窗口关闭，截图仅保留ignored research。
 - Config性能根修：当前实际字段先比较，无变化不构造Pulse；Config/API/单字段修改复用同一批量writer，真变化只最终构造/校验一次，API解绑定也不再逐项重建。消除中间单位转换与相等值的重复时钟对齐，公共单位层复用immutable Unit/Prefix派生结果，换注册单位不复用旧转换。文件仍每Fire重读，路径只绑定时resolve；Remote Load回简短执行确认，不回传已接受的整份程序/原稿。直接数值/文件/Remote/单位用例通过；正式Pulse界面验证实际值与原稿分离，窗口已关闭。未访问真实硬件、未build；性能报告、bench与截图只存ignored research，不入Git。
-- Config按各绑定保存的稳定正整数编号保存及跨Pulse匹配，不再使用本地字段ID。Load绑定文件，device.fire统一自动重读、按原稿重算，实际变化才重编译/重LOAD；文件错误拒绝本次Fire。Local/Virtual/Remote共用该owner并保留scan rows/scales/repeats；Remote不增加常态查询。Save仍离线导出作者值，Editor只投影cached有效预览，不写回作者默认值。文件I/O已归Pulse codec，删除旧Atom模块；复用sequencer不重置其文件绑定。
+- Config tab独立编辑命名value/unit表，多个Pulse字段可以引用同一名称；Pulse Save只保存引用，Config Save只保存人编辑的命名值。未保存草稿不参与Fire；未分配/未提供名称使用Pulse默认值。执行仍沿设备既有Load/Fire读取已保存文件、统一换算及实际变更编译路径；运行中的Pulse不被草稿改写。旧Config root/name/source/编号/field说明不兼容。
 - 已删除Exponential按观测窗口跨度设定的A/B/tau自动硬边界，以及四种Histogram概率模型的平底beta及其分类扣除旁路；数学域、显式用户约束、普通Gaussian B和Poisson数值floor保留。
 - 协方差收尾统一为原生Householder R-only QR＋小矩阵SVD；不生成无用大Q/U，不放宽rank阈值，预测数组直接复用。独立高精度比较表明极端病态协方差会放大各稳定算法的舍入，旧SVD并非精确真值；生产只保留QR一个方案，DGESVD桥与原地转置候选只留ignored研究。15组加权/Poisson/fixed/order/masked收尾输出与原native基线一致，真实FitEngine普通数据参数/误差保持。默认32768源点案例的求解仍按既有4096上限，不能冒称全32768求解；报告区分完整输入链与隔离收尾。
 

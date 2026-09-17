@@ -89,7 +89,7 @@ def test_temperature_template_spaces_twenty_millisecond_exposures() -> None:
         board = installation.device("sequencer").describe()
         authored = pulse_sequence("temperature_template.json")
         for release_ms in T_OFF_MS:
-            sequence = resolve_api_parameters(authored, {"t_off": release_ms})
+            sequence = resolve_api_parameters(authored, {"duration:release": release_ms})
             program = compile_sequence(sequence, board.geometry, board.clock_hz)
             windows = trigger_windows_by_channel(program, ("emCCD",))["emCCD"]
             starts = tuple(
@@ -129,6 +129,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             sequencer_key="sequencer",
             pulse_template=IMAGING_PULSE_RESOURCE.path.name,
             pulse_resource=IMAGING_PULSE_RESOURCE,
+            reference_before_field="duration:long_before",
+            readout_field="duration:short",
+            reference_after_field="duration:long_after",
             signal_plane=plane,
             repeats=30,
         )
@@ -151,7 +154,7 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         #        and no exposure was typed anywhere -- the Task takes the one
         #        the calibration's thresholds were measured at.
         sequence = pulse_sequence("temperature_template.json")
-        plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "t_off", T_OFF_MS),))
+        plan = ScanPlan((ScanAxis(PULSE_PARAM_FAMILY + "duration:release", T_OFF_MS),))
         task = descriptors["temperature"].instantiate(
             sequencer=sequencer,
             sequencer_key="sequencer",

@@ -132,11 +132,11 @@ The package is organized as follows:
   `PointReviewView`使用完整Fluent control family围绕caller提供的普通QWidget：
   `FluentDialogWindow`负责modal Fluent chrome/lifecycle，view负责搜索、site
   checkbox、scroll、status和actions；它不理解plot、SiteMap或Calibration。
-- `zlc_ui.pulse` — pure pulse schedule, scan, target, preview, and editor-shell
+- `zlc_ui.pulse` — pure pulse schedule, scan, Config, target, preview, and editor-shell
   views driven by frozen plain view models; controller and plot ownership stay
-  outside this package. Its Scan/API dot controls emit click intent only;
-  presenters ask the public `zlc_pulse.cycle_binding_kind()` domain API for the
-  next legal state and project the resulting `FieldVM` back into the view.
+  outside this package. Binding popups select independent Scan capability and
+  Default/API/Config source; Config names and saved-file editing have their own
+  page. Views emit intents and receive accepted projections, never perform I/O.
 - `zlc_ui.figure_viewer` — pure file/path/info shell and presenter-owned
   QWidget mount point; archive IO and plot rendering stay outside.
 - `zlc_ui.acceptance` — the test-only real-screen UI acceptance helper

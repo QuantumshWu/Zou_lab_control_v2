@@ -10,7 +10,7 @@ import zlc_pulse.device as device_module
 from zlc_pulse.codec import config_values_to_tree
 
 from zlc_pulse import (
-    PulseConfigParameter,
+    PulseBinding,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
@@ -53,9 +53,7 @@ def _configured() -> PulseSequence:
             PulsePeriod("p0", 40, "ns", (1, 0, 0)),
             PulsePeriod("p1", 40, "ns", (0, 0, 0)),
         ),
-        config_parameters=(
-            PulseConfigParameter("probe_time", PulseFieldRef("duration", "p1"), "ns"),
-        ),
+        bindings=(PulseBinding(PulseFieldRef('duration', 'p1'), 'ns', source='config', config_key='probe_time'),),
     )
 
 
@@ -71,11 +69,11 @@ def test_compilation_is_pure_and_load_applies_the_held_set(streamer):
     device, geom = streamer
     sequence = _configured()
 
-    device.load_config_values({1: (100, "ns")}, source="today.json")
+    device.load_config_values({"probe_time": (100, "ns")}, source="today.json")
     source, program = device.compile_pulse(sequence, geom, 50e6)
     assert source is sequence
     assert program == compile_sequence(sequence, geom, 50e6)
-    assert device.config_values() == {"1": (100.0, "ns")}
+    assert device.config_values() == {"probe_time": (100.0, "ns")}
     assert device.config_source == "today.json"
     device.open()
     try:
@@ -85,7 +83,7 @@ def test_compilation_is_pure_and_load_applies_the_held_set(streamer):
         assert applied.source.period_by_id["p1"].duration == 100
         assert applied.program != program
         assert applied.program == compile_sequence(applied.source, geom, 50e6)
-        assert applied.source.config_parameters == sequence.config_parameters
+        assert applied.source.config_bindings == sequence.config_bindings
     finally:
         device.close()
 
@@ -95,11 +93,11 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
     path = tmp_path / "current.json"
     def write(values):
         path.write_text(json.dumps(config_values_to_tree(values)), encoding="utf-8")
-    write({"1": (80, "ns")})
+    write({"probe_time": (80, "ns")})
     device.load_config_file(path)
-    write({"1": (100, "ns")})
+    write({"probe_time": (100, "ns")})
     source, program = device.compile_pulse(_configured(), geom, 50e6)
-    assert device.config_values() == {"1": (80.0, "ns")}
+    assert device.config_values() == {"probe_time": (80.0, "ns")}
     counts = {"compile": 0, "load": 0, "fire": 0}
     for key, owner, name in (
         ("compile", device_module, "compile_sequence"),
@@ -118,10 +116,10 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
         assert counts == {"compile": 1, "load": 1, "fire": 0}
         assert device.applied().source.period_by_id["p1"].duration == 100
         for entries, duration, repeats, recompiles in (
-            ({"1": (100, "ns")}, 100, 1, 0),
-            ({"1": (0.2, "us")}, 200, 3, 1),
+            ({"probe_time": (100, "ns")}, 100, 1, 0),
+            ({"probe_time": (0.2, "us")}, 200, 3, 1),
             ({}, 40, 2, 1),
-            ({"9": (700, "value")}, 40, 1, 0),
+            ({"unrelated": (700, "value")}, 40, 1, 0),
         ):
             write(entries)
             before = counts.copy()
@@ -140,26 +138,26 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
             assert state.run_repeats == repeats
             assert device.config_source == str(path), "an empty JSON set still follows its file"
         before = counts.copy()
-        write({"1": (100, "Hz")})
+        write({"probe_time": (100, "Hz")})
         with pytest.raises(ValueError, match="time unit"):
             device.fire(run_repeats=1)
         assert counts == before
         for malformed in (
             "{",
             '{"format":"zlc.pulse.config_values","name":"","source":"hand",'
-            '"values":{"1":{"value":1e999,"unit":"ns"}}}',
+            '"values":{"probe_time":{"value":1e999,"unit":"ns"}}}',
         ):
             path.write_text(malformed, encoding="utf-8")
             with pytest.raises(ValueError):
                 device.fire(run_repeats=1)
             assert counts == before
         # Explicit in-memory data unbinds the file; its label is not a path.
-        device.load_config_values({"1": (120, "ns")}, source=str(path))
+        device.load_config_values({"probe_time": (120, "ns")}, source=str(path))
         device.fire(run_repeats=1)
         assert device.wait_done(1.0) is not None
         assert device.applied().source.period_by_id["p1"].duration == 120
         for cleared_path in (None, ""):
-            write({"1": (80, "ns")})
+            write({"probe_time": (80, "ns")})
             device.load_config_file(path)
             device.fire(run_repeats=1)
             assert device.wait_done(1.0) is not None
@@ -177,27 +175,25 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
 def test_unmatched_config_ids_keep_authored_values(streamer):
     device, geom = streamer
     sequence = _configured()
-    sequence = replace(sequence, config_parameters=sequence.config_parameters + (
-        PulseConfigParameter("prep_time", PulseFieldRef("duration", "p0"), "ns"),
-    ))
+    sequence = replace(sequence, bindings=sequence.config_bindings + (PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', source='config', config_key='prep_time'),))
     source, program = device.compile_pulse(sequence, geom, 50e6)
     device.open()
     try:
-        for entries in ({}, {"9": (1, "value")}):
+        for entries in ({}, {"unrelated": (1, "value")}):
             device.load_config_values(entries)
             device.load(program, source=source)
             assert device.applied().source is sequence
             assert device.applied().program == program
-        device.load_config_values({"1": (0.1, "us"), "9": (1, "value")})
+        device.load_config_values({"probe_time": (0.1, "us"), "unrelated": (1, "value")})
         device.load(program, source=source)
         applied = device.applied()
         assert applied.source.period_by_id["p0"].duration == 40
         assert applied.source.period_by_id["p1"].duration == 100
-        assert applied.source.config_parameters == sequence.config_parameters
+        assert applied.source.config_bindings == sequence.config_bindings
         assert sequence.period_by_id["p1"].duration == 40
         assert applied.program == compile_sequence(applied.source, geom, 50e6)
         for bad_unit in ("value", "Hz"):
-            device.load_config_values({"1": (100, bad_unit)})
+            device.load_config_values({"probe_time": (100, bad_unit)})
             with pytest.raises(ValueError, match="declares|time unit"):
                 device.load(program, source=source)
             assert device.applied() is applied
@@ -225,12 +221,12 @@ def test_the_set_survives_a_close_and_reopen(streamer):
     """A calibration is a fact about the apparatus, not about a connection."""
 
     device, _geom = streamer
-    device.load_config_values({"1": (100, "ns")}, source="today.json")
+    device.load_config_values({"probe_time": (100, "ns")}, source="today.json")
     device.open()
     device.close()
     device.open()
     try:
-        assert device.config_values() == {"1": (100.0, "ns")}
+        assert device.config_values() == {"probe_time": (100.0, "ns")}
         assert device.snapshot()["config_source"] == "today.json"
     finally:
         device.close()
@@ -251,8 +247,8 @@ def test_the_remote_client_holds_its_own_set_and_compiles_without_io() -> None:
     filled, program = client.compile_pulse(sequence, geom, 50e6)
     assert filled is sequence
     assert program.ticks == compile_sequence(sequence, geom, 50e6).ticks
-    client.load_config_values({"1": (100, "ns")}, source="today.json")
-    assert client.config_values() == {"1": (100.0, "ns")}
+    client.load_config_values({"probe_time": (100, "ns")}, source="today.json")
+    assert client.config_values() == {"probe_time": (100.0, "ns")}
     assert client.config_source == "today.json"
 
     filled, program = client.compile_pulse(sequence, geom, 50e6)
@@ -265,12 +261,12 @@ def test_a_set_that_is_not_a_set_is_refused_at_the_door(streamer) -> None:
 
     device, _geom = streamer
     for bad, message in (
-        ({"1": 100}, "must be"),
-        ({"1": (float("nan"), "ns")}, "finite"),
-        ({"1": (100, "")}, "unit"),
-        ({"": (100, "ns")}, "positive"),
-        ({"probe_time": (100, "ns")}, "positive"),
-        ({1: (100, "ns"), "1": (200, "ns")}, "duplicate"),
+        ({"probe_time": 100}, "must be"),
+        ({"probe_time": (float("nan"), "ns")}, "finite"),
+        ({"probe_time": (100, "")}, "unit"),
+        ({"": (100, "ns")}, "non-empty"),
+        ({"not a name": (100, "ns")}, "identifier"),
+        ({1: (100, "ns")}, "non-empty"),
     ):
         with pytest.raises((TypeError, ValueError), match=message):
             device.load_config_values(bad)

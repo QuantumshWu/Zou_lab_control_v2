@@ -44,15 +44,6 @@ def _nonnegative_time(value: object, name: str) -> float:
     return result
 
 
-def _scan_number(
-    value: int | None,
-    name: str,
-    *,
-    optional: bool,
-) -> int | None:
-    return integer(value, name, minimum=1, optional=optional)
-
-
 class PointStatus(str, Enum):
     UNKNOWN = "unknown"
     EMPTY = "empty"
@@ -510,16 +501,11 @@ def _slot_kind(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class PulseScanRegion:
-    """One highlighted scan interval with a positive integer badge.
-
-    ``kind`` says who writes the slot -- a table that sweeps it, or a host
-    that sets it a row at a time.  It is the same slot and the same badge; the
-    drawing colours it so a glance answers which.
-    """
+    """One highlighted field interval with a short binding label."""
 
     start: float
     stop: float
-    number: int
+    label: str
     kind: str = "scan"
 
     def __post_init__(self) -> None:
@@ -529,11 +515,7 @@ class PulseScanRegion:
             raise ValueError("scan-region stop must be greater than start")
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "stop", stop)
-        object.__setattr__(
-            self,
-            "number",
-            _scan_number(self.number, "scan-region number", optional=False),
-        )
+        object.__setattr__(self, "label", _text(self.label, "binding label"))
         object.__setattr__(self, "kind", _slot_kind(self.kind))
 
 
@@ -617,7 +599,7 @@ class PulseDacScanSegment:
     start: float
     stop: float
     value: float
-    number: int | None = None
+    label: str = ""
     kind: str = "scan"
 
     def __post_init__(self) -> None:
@@ -629,11 +611,8 @@ class PulseDacScanSegment:
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "stop", stop)
         object.__setattr__(self, "value", _finite(self.value, "DAC scan value"))
-        object.__setattr__(
-            self,
-            "number",
-            _scan_number(self.number, "DAC scan number", optional=True),
-        )
+        if not isinstance(self.label, str):
+            raise TypeError("binding label must be text")
         object.__setattr__(self, "kind", _slot_kind(self.kind))
 
 
@@ -695,19 +674,6 @@ class PulseTimelineData:
         unknown_traces = {item.trace_name for item in scan_dac_segments} - set(names)
         if unknown_traces:
             raise ValueError(f"DAC scan segments reference unknown traces: {sorted(unknown_traces)}")
-        # A badge is drawn in its kind's colour beside its digit, so what has
-        # to be unique is the PAIR.  Requiring the digit alone to be unique
-        # made one kind's numbering depend on how many of the other kind the
-        # pulse happened to declare -- the third API parameter of a pulse with
-        # two scan slots called itself 5, which is a position in no list.
-        marks = [(item.kind, item.number) for item in regions]
-        marks.extend(
-            (item.kind, item.number)
-            for item in scan_dac_segments
-            if item.number is not None
-        )
-        if len(marks) != len(set(marks)):
-            raise ValueError("a scan kind and number name one mark on the timeline")
         total_duration = self.total_duration
         if total_duration is not None:
             total_duration = _finite(total_duration, "total_duration")

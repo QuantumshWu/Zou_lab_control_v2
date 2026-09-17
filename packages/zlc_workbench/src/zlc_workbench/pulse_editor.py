@@ -25,6 +25,7 @@ the last good state.
 from __future__ import annotations
 
 import logging
+import math
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -39,10 +40,10 @@ from zlc_pulse import (
     analog_levels,
     ANALOG_MODE_CHOICES,
     AnalogStep,
-    cycle_binding_kind,
     MINIMUM_BRACKET_COUNT,
     OutputDelay,
     PulseBracket,
+    PulseBinding,
     PulsePeriod,
     PulseSequence,
     PulseTarget,
@@ -52,7 +53,7 @@ from zlc_pulse import (
     nanoseconds_per,
     align_to_grid,
     apply_config_values,
-    authored_config_entries,
+    config_parameter_key,
     field_label,
     prune_orphaned_bindings,
     resolve_api_parameters,
@@ -60,6 +61,8 @@ from zlc_pulse import (
     CONFIG_VALUES_DIRECTORY,
     CURRENT_CONFIG_VALUES,
     write_config_values,
+    read_config_values,
+    pulse_field_value,
 )
 from zlc_data.units import format_quantity
 from zlc_durable import unique_path
@@ -72,6 +75,7 @@ from zlc_ui import (
     VALIDATOR_INT,
     DelayRowVM,
     BindingRecord,
+    ConfigPageRecord,
     ScanPageRecord,
     TargetWidthRule,
     FieldVM,
@@ -400,7 +404,9 @@ def project_period(
     period: PulsePeriod,
     *,
     visible_ports: Sequence[str] | None = None,
-    bindings: Mapping[tuple, tuple[str, int]] | None = None,
+    bindings: Mapping[tuple, PulseBinding] | None = None,
+    config_values: Mapping[str, tuple[float, str]] | None = None,
+    scan_active: bool = False,
 ) -> PeriodVM:
     """One period as its card.
 
@@ -417,7 +423,7 @@ def project_period(
     offered = programmable_ports(target)
     if bindings is None:
         bindings = bindings_of(sequence)
-    duration_binding, duration_number = _binding_for(
+    duration_binding = _binding_for(
         bindings, "duration", period.period_id
     )
     return PeriodVM(
@@ -430,8 +436,7 @@ def project_period(
             # goes exponential above them, which silently rewrote an authored
             # duration the first time anyone touched its period.
             text=format_quantity(float(period.duration), "1"),
-            binding_kind=duration_binding or "",
-            binding_number=duration_number or 0,
+            **_binding_field_state(duration_binding, config_values, scan_active),
             validator_kind=VALIDATOR_FLOAT,
             # One tick, and the shortest legal period, EXPRESSED IN THE UNIT
             # THIS BOX IS IN.  The grid the hardware plays on is 20 ns; the
@@ -455,7 +460,7 @@ def project_period(
             (
                 port.key,
                 _analog_mode(period, port),
-                _analog_field(sequence, period, port, bindings),
+                _analog_field(sequence, period, port, bindings, config_values, scan_active),
             )
             for port in offered
             if port.kind == "dac" and (shown is None or port.key in shown)
@@ -474,6 +479,8 @@ def project_schedule(
     visible_ports: Sequence[str] | None = None,
     pins: Mapping[str, str] | None = None,
     scan_points: int = 0,
+    config_values: Mapping[str, tuple[float, str]] | None = None,
+    scan_active: bool = False,
 ) -> ScheduleVM:
     """The schedule page: one pulse, or the bare board it would run on.
 
@@ -500,7 +507,8 @@ def project_schedule(
     bindings = bindings_of(sequence)
     periods = tuple(
         project_period(
-            sequence, period, visible_ports=visible_ports, bindings=bindings
+            sequence, period, visible_ports=visible_ports, bindings=bindings,
+            config_values=config_values, scan_active=scan_active,
         )
         for period in (() if sequence is None else sequence.periods)
     )
@@ -510,7 +518,7 @@ def project_schedule(
         for period in (() if sequence is None else sequence.periods)
     )
     bracket = None if sequence is None else sequence.bracket
-    slots = () if sequence is None else sequence.slots
+    slots = () if sequence is None else sequence.scan_bindings
     return ScheduleVM(
         document_generation=int(generation),
         revision=int(revision),
@@ -549,7 +557,7 @@ def project_schedule(
         # means, and it cannot be edited: a delay belongs to the pulse that
         # carries it, and there is not one yet to write into.
         delay_rows=tuple(
-            _delay_row(sequence, port.key, bindings)
+            _delay_row(sequence, port.key, bindings, config_values)
             for port in programmable_ports(target)
             if port.kind in ("digital", "dac")
         ),
@@ -572,47 +580,53 @@ def project_schedule(
     )
 
 
-def bindings_of(sequence: PulseSequence | None) -> dict[tuple, tuple[str, int]]:
-    """Every bound field, as (kind, number) keyed by what it refers to.
-
-    A dot is how a field becomes a scan column, and the widget that draws it
-    has always been able to show which: FluentScanLineEdit takes a binding and
-    a number and paints an orange s0 or a violet API mark.  Nothing ever told
-    it.  The projection built every field as a bare value, so a duration bound
-    to slot 0 looked exactly like one that was not bound at all -- the bind
-    took, and the screen never said so.
-
-    Scan, API and Config each keep their own stable authored numbers. Removing
-    one binding never renumbers another; a new binding takes the smallest
-    unused number. Config files use this number, API references use named IDs,
-    and hardware scan columns still follow ``sequence.slots`` order.
-    """
+def bindings_of(sequence: PulseSequence | None) -> dict[tuple, PulseBinding]:
+    """Project the one binding per physical field; no second identity list."""
 
     if sequence is None:
         return {}
-    found: dict[tuple, tuple[str, int]] = {}
-    for kind, bindings in (
-        ("scan", sequence.slots),
-        ("api", sequence.api_parameters),
-        ("config", sequence.config_parameters),
-    ):
-        for binding in bindings:
-            reference = binding.field_ref
-            found[(reference.kind, reference.period_id, reference.port)] = (
-                kind,
-                binding.number,
-            )
-    return found
+    return {
+        (b.field_ref.kind, b.field_ref.period_id, b.field_ref.port): b
+        for b in sequence.bindings
+    }
 
 
 def _binding_for(
-    bindings: Mapping[tuple, tuple[str, int]],
+    bindings: Mapping[tuple, PulseBinding],
     kind: str,
     period_id: str | None = None,
     port: str | None = None,
-) -> tuple[str | None, int | None]:
-    found = bindings.get((kind, period_id, port))
-    return found if found is not None else (None, None)
+) -> PulseBinding | None:
+    return bindings.get((kind, period_id, port))
+
+
+def _binding_field_state(
+    binding: PulseBinding | None,
+    config_values: Mapping[str, tuple[float, str]] | None,
+    scan_active: bool = False,
+) -> dict[str, object]:
+    """Display the source of the next execution, distinct from its default."""
+    if binding is None:
+        return {}
+    effective = ""
+    if binding.scan and scan_active:
+        status = "The Scan table supplies this field; the default remains editable."
+    elif binding.source == "config":
+        value = (config_values or {}).get(binding.config_key) if binding.config_key else None
+        if value is None:
+            status = (
+                f"Config '{binding.config_key}' is not supplied; using the Pulse default."
+                if binding.config_key else "Config name is unassigned; using the Pulse default."
+            )
+        else:
+            effective = f"{format_quantity(value[0], '1')} {value[1]}"
+            status = f"Saved Config '{binding.config_key}' supplies {effective}. The input is the Pulse default."
+    elif binding.source == "api":
+        status = "An API caller may override this field; otherwise its Pulse default is used."
+    else:
+        status = "Using the Pulse default."
+    return dict(scan=binding.scan, source=binding.source,
+                effective_text=effective, source_text=status)
 
 
 def _analog_mode(period: PulsePeriod, port: Any) -> str:
@@ -652,7 +666,9 @@ def _analog_field(
     sequence: PulseSequence,
     period: PulsePeriod,
     port: Any,
-    bindings: Mapping[tuple, tuple[str, int]],
+    bindings: Mapping[tuple, PulseBinding],
+    config_values: Mapping[str, tuple[float, str]] | None = None,
+    scan_active: bool = False,
 ) -> FieldVM:
     """One DAC's box on one card.
 
@@ -666,13 +682,11 @@ def _analog_field(
     step = next((item for item in period.analog_steps if item.port == port.key), None)
     low, high = port.signed_range or (0, 0)
     value = _held_value(sequence, period, port) if step is None else int(step.value)
-    binding, number = _binding_for(bindings, "dac", period.period_id, port.key)
+    binding = _binding_for(bindings, "dac", period.period_id, port.key)
     return FieldVM(
         text=str(value),
-        binding_kind=binding or "",
-        binding_number=number or 0,
-        # A bound field's value comes from the scan table, not from typing.
-        editable=step is not None and binding is None,
+        **_binding_field_state(binding, config_values, scan_active),
+        editable=step is not None,
         validator_kind=VALIDATOR_INT,
         validator_lo=float(low),
         validator_hi=float(high),
@@ -709,7 +723,8 @@ def _delay_of(sequence: PulseSequence, port_key: str) -> tuple[float, str]:
 def _delay_row(
     sequence: PulseSequence | None,
     port_key: str,
-    bindings: Mapping[tuple, tuple[str, int]],
+    bindings: Mapping[tuple, PulseBinding],
+    config_values: Mapping[str, tuple[float, str]] | None = None,
 ) -> DelayRowVM:
     """One output's delay row, wherever it is pushed from.
 
@@ -719,13 +734,13 @@ def _delay_row(
     """
 
     value, unit = (0.0, "ns") if sequence is None else _delay_of(sequence, port_key)
-    binding, number = _binding_for(bindings, "delay", None, port_key)
+    binding = _binding_for(bindings, "delay", None, port_key)
     return DelayRowVM(
         port_key=port_key,
         value=FieldVM(
             text="0" if sequence is None else format_quantity(float(value), "1"),
-            binding_kind=binding or "",
-            binding_number=number or 0,
+            can_scan=False,
+            **_binding_field_state(binding, config_values),
             editable=sequence is not None,
             allow_any=False,
         ),
@@ -869,27 +884,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     if total > 0:
         markers.append(PulseLoopMarker(0.0, total, run_label))
 
-    # WHICH fields the device writes per point, drawn where they happen.
-    #
-    # zlc_plot has been able to draw these all along -- a numbered badge over
-    # the period whose duration is swept, a coloured segment on the DAC trace
-    # whose level is -- and nothing ever built one, so a bound pulse and an
-    # unbound one previewed identically.  Binding is the single most
-    # consequential edit on this page and it was the one the picture did not
-    # show.
-    #
-    # A delay slot is deliberately not drawn: it shifts a channel's edges
-    # rather than occupying an interval, and a badge over the whole timeline
-    # would say something that is not true of any part of it.
-    #
-    # A CONFIG parameter is not drawn either, and for a reason the drawing
-    # already states: ``SLOT_KINDS`` is ("scan", "api") because a badge says
-    # "somebody writes this field while the pulse runs" -- a table per point,
-    # a host per run.  Nobody writes a config field while the pulse runs: it
-    # is the board's own calibrated number, written onto the sequencer once
-    # and already inside every edge and level drawn here.  Handing one over
-    # anyway raised out of the primitive, so binding a single duration as
-    # config replaced the whole timeline with "cannot draw this pulse".
+    # A single marker describes each field's independent Scan/base source.
     regions: list[Any] = []
     segments: list[Any] = []
     stops = {
@@ -898,16 +893,21 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         for position, period in enumerate(sequence.periods)
     }
     positions = {period.period_id: index for index, period in enumerate(sequence.periods)}
-    for (kind, period_id, port_key), (slot_kind, number) in bindings_of(sequence).items():
-        if slot_kind == "config":
+    for (kind, period_id, port_key), binding in bindings_of(sequence).items():
+        if not binding.scan and binding.source != "api":
             continue
+        slot_kind = "scan" if binding.scan else "api"
+        label = "+".join(part for part in (
+            "S" if binding.scan else "",
+            "A" if binding.source == "api" else "C" if binding.source == "config" else "",
+        ) if part)
         if period_id is None or period_id not in positions:
             continue
         start, stop = starts[positions[period_id]], stops[period_id]
         if stop <= start:
             continue
         if kind == "duration":
-            regions.append(PulseScanRegion(start, stop, number, slot_kind))
+            regions.append(PulseScanRegion(start, stop, label, slot_kind))
         elif kind == "dac" and any(trace.name == port_key for trace in traces):
             held = next(
                 (
@@ -918,7 +918,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
                 0.0,
             )
             segments.append(
-                PulseDacScanSegment(port_key, start, stop, held, number, slot_kind)
+                PulseDacScanSegment(port_key, start, stop, held, label, slot_kind)
             )
 
     return PulseTimelineData(
@@ -1060,6 +1060,13 @@ class PulseEditorPresenter:
         if sequencer is not None and dial is not None:
             raise ValueError("an injected sequencer cannot also have a dial authority")
         self.sequencer = sequencer
+        self._config_loaded_path = "" if sequencer is None else str(sequencer.config_source)
+        self._config_loaded_values = {} if sequencer is None else sequencer.config_values()
+        self._config_path = self._config_loaded_path
+        self._config_rows = self._config_saved_rows = tuple(
+            (key, format_quantity(value, "1"), unit)
+            for key, (value, unit) in self._config_loaded_values.items()
+        )
         self.device_use = device_use if device_use is not None else DeviceUseCoordinator()
         self._device_owner = object()
         self._drive_lease: DeviceLease | None = None
@@ -1193,7 +1200,7 @@ class PulseEditorPresenter:
         # that one -- so the toolbar's Clear All did nothing at all.
         view.clear_all_requested.connect(self._guarded(self.clear_all))
         view.page_changed.connect(self._guarded(self.show_page))
-        view.binding_cycle_requested.connect(self._guarded(self.cycle_binding))
+        view.binding_committed.connect(self._guarded(self.set_binding))
         view.scan_array_load_requested.connect(self._guarded(self.load_scan_array))
         view.scan_source_edited.connect(self._guarded(self.edit_scan_source))
         view.feedback_requested.connect(self._guarded(self._warn))
@@ -1213,9 +1220,14 @@ class PulseEditorPresenter:
         view.stop_requested.connect(self._guarded(self.stop))
         view.sync_requested.connect(self._guarded(self._sync_from_view))
         view.save_requested.connect(self._guarded(self.save_pulse))
-        view.values_load_requested.connect(self._guarded(self.load_config_values))
-        view.values_save_requested.connect(self._guarded(self.save_config_values))
-        view.binding_renamed.connect(self._guarded(self.rename_binding))
+        view.config_new_requested.connect(self._guarded(self.new_config))
+        view.config_load_requested.connect(self._guarded(self.load_config_values))
+        view.config_refresh_requested.connect(self._guarded(self.refresh_config_values))
+        view.config_save_requested.connect(self._guarded(self.save_config_values))
+        view.config_save_as_requested.connect(self._guarded(lambda: self.save_config_values(save_as=True)))
+        view.config_unload_requested.connect(self._guarded(self.unload_config))
+        view.config_entries_edited.connect(self._guarded(self.edit_config_entries))
+        view.config_binding_committed.connect(self._guarded(self.set_config_binding))
         view.load_requested.connect(self._guarded(self.ask_for_pulse))
         view.preview_include_off_toggled.connect(self._guarded(self._on_include_off))
         view.preview_size_committed.connect(self._guarded(self.set_preview_size))
@@ -1270,159 +1282,174 @@ class PulseEditorPresenter:
         return base.parent / CONFIG_VALUES_DIRECTORY
 
     def _binding_records(self) -> tuple[BindingRecord, ...]:
-        """Every bound field, its id beside where it sits on the pulse."""
-
+        """Read-only physical fields, never separately authored aliases."""
         if self.sequence is None:
             return ()
         return tuple(
-            BindingRecord(
-                binding.slot_id if kind == "scan" else binding.parameter_id,
-                field_label(self.sequence, binding.field_ref),
-                kind,
-            )
-            for kind, group in (
-                ("scan", self.sequence.slots),
-                ("api", self.sequence.api_parameters),
-            )
-            for binding in group
+            BindingRecord(b.field_id, field_label(self.sequence, b.field_ref), b.scan, b.source)
+            for b in self.sequence.bindings if b.scan or b.source == "api"
         )
 
-    def rename_binding(self, old_id: str, new_id: str) -> bool:
-        """Give one bound field the name everything else will call it by.
+    def _config_dirty(self) -> bool:
+        return self._config_rows != self._config_saved_rows
 
-        A binding's id is minted from the period it happens to sit in, which
-        is fine until a saved set of values, or a plan, has to name the same
-        slot in another pulse.  The FIELD does not move -- only the name --
-        so nothing inside the document has to be repointed.  Outside it, an
-        authored plan naming the old id is refused by name when it next
-        binds, which is the loud failure that makes this safe to offer.
-        """
+    def _discard_config_edits(self) -> bool:
+        return not self._config_dirty() or self.view.confirm_config_discard()
 
+    def new_config(self) -> None:
+        if not self._discard_config_edits():
+            return
+        self._config_path = ""
+        self._config_rows = self._config_saved_rows = ()
+        self._refresh_config_page()
+
+    def edit_config_entries(self, rows: object) -> None:
+        self._config_rows = tuple(tuple(str(v) for v in row) for row in rows)
+        self._refresh_config_page()
+
+    def _active_config_values(self) -> Mapping[str, tuple[float, str]]:
+        return (
+            self.sequencer.config_values()
+            if self.sequencer is not None else self._config_loaded_values
+        )
+
+    def _active_config_path(self) -> str:
+        return (
+            str(self.sequencer.config_source)
+            if self.sequencer is not None else self._config_loaded_path
+        )
+
+    def _refresh_config_page(self) -> None:
+        active = self._active_config_values()
+        scan_active = self._scan_armed()
+        bindings = []
+        if self.sequence is not None:
+            for b in self.sequence.config_bindings:
+                default = pulse_field_value(self.sequence, b.field_ref, b.unit)
+                effective = active.get(b.config_key) if b.config_key else None
+                bindings.append((
+                    b.field_id, field_label(self.sequence, b.field_ref), b.config_key,
+                    f"{format_quantity(default, '1')} {b.unit}",
+                    "" if effective is None else f"{format_quantity(effective[0], '1')} {effective[1]}",
+                    "Scan table" if b.scan and scan_active else
+                    "Using default" if effective is None else "Config override",
+                ))
+        self.view.set_config_page(ConfigPageRecord(
+            file_path=self._config_path, dirty=self._config_dirty(),
+            entries=self._config_rows, bindings=tuple(bindings),
+            active_path=self._active_config_path(),
+            busy=self._device_busy or self._stop_busy,
+        ))
+
+    def set_config_binding(self, field_id: str, key: str) -> None:
         if self.sequence is None:
-            self._warn("no pulse is open")
-            return False
-        was, wanted = str(old_id), str(new_id).strip()
-        if not wanted or wanted == was:
-            return False
-        known = {slot.slot_id for slot in self.sequence.slots} | {
-            parameter.parameter_id for parameter in self.sequence.api_parameters
-        }
-        if was not in known:
-            self._warn(f"this pulse has no bound field named {was!r}")
-            return False
-        try:
-            # The model validates an id the moment it is constructed, which is
-            # before _rebuilt would see it, so a name that is not an identifier
-            # is caught here rather than escaping a Qt slot.
-            slots = tuple(
-                replace(slot, slot_id=wanted) if slot.slot_id == was else slot
-                for slot in self.sequence.slots
-            )
-            parameters = tuple(
-                replace(parameter, parameter_id=wanted)
-                if parameter.parameter_id == was
-                else parameter
-                for parameter in self.sequence.api_parameters
-            )
-        except Exception as error:
-            self._warn(str(error))
-            self.refresh()
-            return False
-        candidate = self._rebuilt(slots=slots, api_parameters=parameters)
-        if candidate is None:
-            # Refused -- a duplicate id, or not an identifier.  _rebuilt has
-            # already said why; put the boxes back to what the pulse holds so
-            # the rejected text is not left standing on screen.
-            self.refresh()
-            return False
-        self._apply(candidate)
-        return True
+            return
+        key = str(key).strip()
+        if key:
+            key = config_parameter_key(key)
+        current = next((b for b in self.sequence.config_bindings if b.field_id == field_id), None)
+        if current is None:
+            raise ValueError("the field is not a Config parameter")
+        candidate = self._rebuilt(bindings=tuple(
+            replace(b, config_key=key) if b is current else b
+            for b in self.sequence.bindings
+        ))
+        if candidate is not None:
+            self._apply(candidate)
 
-    def load_config_values(self) -> bool:
-        """Bind or clear Config without changing the authored pulse."""
-
+    def _config_file_operation(
+        self, path: str, *, entries: Mapping[str, tuple[float, str]] | None = None,
+        load_draft: bool = True, activate: bool = True,
+    ) -> bool:
+        """Use the ordinary worker for one Config read/save/bind operation."""
+        if not self._device_available():
+            return False
         sequencer = self.sequencer
-        if sequencer is None:
-            self._warn("connect to a sequencer before loading its config values")
-            return False
-        directory = self._config_values_directory()
-        chosen = self.view.ask_open_path(
-            "Load config values",
-            str(directory / CURRENT_CONFIG_VALUES) if directory else "",
-            "ZLC config values (*.json);;All files (*)",
-        )
-        def work(_operation: int) -> int:
-            sequencer.load_config_file(chosen)
-            return len(sequencer.config_values())
+        def work(_operation: int):
+            if entries is not None:
+                write_config_values(path, entries)
+            if sequencer is not None and activate:
+                sequencer.load_config_file(path or None)
+                values = sequencer.config_values()
+            else:
+                values = read_config_values(path) if path else {}
+            return values
 
-        def delivered(count: object, error: BaseException | None) -> None:
+        def delivered(values: object, error: BaseException | None) -> None:
             if error is not None:
-                action = f"load {Path(chosen).name}" if chosen else "clear config"
-                self._warn(f"cannot {action}: {error}")
+                self._warn(f"cannot update Config: {error}")
+                self._refresh_config_page()
                 return
+            if activate:
+                self._config_loaded_path = path
+                self._config_loaded_values = dict(values)
+            if load_draft:
+                self._config_path = path
+                self._config_rows = self._config_saved_rows = tuple(
+                    (key, format_quantity(value, "1"), unit)
+                    for key, (value, unit) in values.items()
+                )
             self._digest_revision = -1
             self.refresh()
-            self._done(f"the board is holding {count} config value(s)" if chosen else "Config cleared")
 
         if self._run_device_work is not None:
-            if not self._device_available():
-                return False
-            return self._run_device_command(
-                work, delivered, summary="Loading config..." if chosen else "Clearing config...",
-            )
+            return self._run_device_command(work, delivered, summary="Updating Config...")
         try:
-            count = work(0)
+            values = work(0)
         except Exception as error:
             delivered(None, error)
             return False
-        delivered(count, None)
+        delivered(values, None)
         return True
 
-    def save_config_values(self) -> bool:
-        """Export the current editor's Config fields, without applying them."""
-
-        sequence = self.sequence
-        if sequence is None:
-            self._warn("no pulse is open")
-            return False
-        try:
-            entries = authored_config_entries(sequence)
-        except (TypeError, ValueError) as error:
-            self._warn(f"cannot save config values: {error}")
+    def load_config_values(self) -> bool:
+        if not self._discard_config_edits():
             return False
         directory = self._config_values_directory()
-        chosen = self.view.ask_save_path(
-            "Save config values",
-            str(directory / CURRENT_CONFIG_VALUES) if directory else "",
-            "ZLC config values (*.json);;All files (*)",
+        chosen = self.view.ask_open_path(
+            "Load Config", self._config_path or str(directory or ""), "Config (*.json)",
         )
         if not chosen:
             return False
-        target = Path(chosen).with_suffix(".json")
-        try:
-            write_config_values(
-                target,
-                entries,
-                name=target.stem,
-                source=self.path or f"pulse editor: {sequence.name}",
-                fields={
-                    parameter.number: field_label(sequence, parameter.field_ref)
-                    + (" (DAC)" if parameter.field_ref.kind == "dac" else "")
-                    for parameter in sequence.config_parameters
-                },
-            )
-        except Exception as error:
-            self._warn(f"cannot save {target.name}: {error}")
+        return self._config_file_operation(str(Path(chosen).resolve()))
+
+    def refresh_config_values(self) -> bool:
+        if not self._config_path or not self._discard_config_edits():
             return False
-        self._done(f"saved {len(entries)} value(s) to {target.name}")
-        return True
+        return self._config_file_operation(
+            self._config_path, activate=self._config_path == self._active_config_path(),
+        )
+
+    def unload_config(self) -> bool:
+        return self._config_file_operation("", load_draft=False)
+
+    def save_config_values(self, *, save_as: bool = False) -> bool:
+        entries = {}
+        for name, text, unit in self._config_rows:
+            key = config_parameter_key(name.strip())
+            if key in entries:
+                raise ValueError(f"duplicate Config name: {key}")
+            value = float(text)
+            if not math.isfinite(value):
+                raise ValueError(f"Config {key} must have a finite value")
+            entries[key] = (value, unit.strip())
+        target = self._config_path
+        if save_as or not target:
+            directory = self._config_values_directory()
+            target = self.view.ask_save_path(
+                "Save Config", target or str((directory or Path.cwd()) / CURRENT_CONFIG_VALUES),
+                "Config (*.json)",
+            )
+            if not target:
+                return False
+        return self._config_file_operation(str(Path(target).with_suffix(".json").resolve()), entries=entries)
 
     def _effective_sequence(self, sequence: PulseSequence) -> PulseSequence:
-        """Project cached Config overrides without changing the author's draft."""
-
-        if self.sequencer is None or not sequence.config_parameters:
-            return sequence
-        return apply_config_values(sequence, self.sequencer.config_values())[0]
+        """Preview uses saved active values, never the Config editor draft."""
+        base = sequence if self._scan_armed() else resolve_scan_point(sequence)
+        effective = apply_config_values(sequence, self._active_config_values(), current=base)[0]
+        # Capability marks remain visible when this preview uses defaults.
+        return replace(effective, bindings=sequence.bindings)
 
     def start_new_pulse(self) -> bool:
         """Begin a pulse on the board this bench actually has.
@@ -2191,52 +2218,25 @@ class PulseEditorPresenter:
             for period in current.periods
         )
         delays = tuple(delay for delay in current.delays if delay.port in ports)
-        slots = tuple(
-            slot
-            for slot in current.slots
-            if slot.field_ref.port is None or slot.field_ref.port in ports
-        )
-        api_parameters = tuple(
-            parameter
-            for parameter in current.api_parameters
-            if parameter.field_ref.port is None or parameter.field_ref.port in ports
-        )
-        config_parameters = tuple(
-            parameter
-            for parameter in current.config_parameters
-            if parameter.field_ref.port is None or parameter.field_ref.port in ports
+        bindings = tuple(
+            binding for binding in current.bindings
+            if binding.field_ref.port is None or binding.field_ref.port in ports
         )
         dropped_bindings = sorted(
-            [
-                slot.slot_id
-                for slot in current.slots
-                if slot not in slots
-            ]
-            + [
-                parameter.parameter_id
-                for parameter in current.api_parameters
-                if parameter not in api_parameters
-            ]
-            + [
-                parameter.parameter_id
-                for parameter in current.config_parameters
-                if parameter not in config_parameters
-            ]
+            field_label(current, b.field_ref) for b in current.bindings if b not in bindings
         )
         candidate = PulseSequence(
             name=current.name,
             target=board.target,
             time_step_ns=float(board.time_step_ns),
             periods=periods,
-            slots=slots,
-            api_parameters=api_parameters,
-            config_parameters=config_parameters,
+            bindings=bindings,
             delays=delays,
             bracket=current.bracket,
             run_repeats=current.run_repeats,
         )
         state_changes: dict[str, Any] = {"sequence": candidate}
-        if len(candidate.slots) != len(current.slots):
+        if len(candidate.scan_bindings) != len(current.scan_bindings):
             state_changes.update(
                 scan_rows=(),
                 scan_source_dirty=bool(self._state.scan_source),
@@ -2293,12 +2293,6 @@ class PulseEditorPresenter:
 
         mode, endpoint = self.connection
         self._connection_status = str(status)
-        sequencer = self.sequencer
-        # Asked of the object, not of the board: the set is held host-side, so
-        # this costs a dict copy and never a round trip.
-        config_source = "" if sequencer is None else str(
-            getattr(sequencer, "config_source", "")
-        )
         self.view.set_connection(
             ConnectionVM(
                 choices=self._connection_choices,
@@ -2306,7 +2300,6 @@ class PulseEditorPresenter:
                 endpoint=endpoint,
                 status=self._connection_status,
                 locked=self._connection_locked,
-                config_source=config_source,
             )
         )
         self._render_run_state()
@@ -2503,7 +2496,7 @@ class PulseEditorPresenter:
         if not wire_rows:
             self._applied_scan = None
             return
-        if not source.slots:
+        if not source.scan_bindings:
             self._applied_scan = None
             return
         from zlc_pulse import scan_columns_for, scan_rows_from_wire
@@ -2557,7 +2550,7 @@ class PulseEditorPresenter:
         if self.sequence is None:
             raise RuntimeError("no pulse is open")
         source = resolve_api_parameters(self.sequence)
-        if source.slots and not self._scan_armed():
+        if source.scan_bindings and not self._scan_armed():
             source = resolve_scan_point(source)
         return source
 
@@ -2675,6 +2668,7 @@ class PulseEditorPresenter:
         done = Event()
         self._device_done = done
         self._device_busy = True
+        self._refresh_config_page()
         self.view.set_summary(summary)
         self._render_run_state()
 
@@ -2689,6 +2683,7 @@ class PulseEditorPresenter:
             self._device_busy = False
             if operation == self._device_operation:
                 delivered(result, error)
+            self._refresh_config_page()
             self._run_status_followups()
             self._wake_close_guard()
 
@@ -3505,130 +3500,44 @@ class PulseEditorPresenter:
 
     # ------------------------------------------------------------- the scan
 
-    def cycle_binding(self, field_kind: str, period_id: object, port_key: object) -> None:
-        """Bind or unbind one field, cycling off -> scan -> api -> off.
-
-        A dot is how a field becomes a scan column: bound, it stops being a
-        constant in the pulse and becomes a value the device writes per point.
-        The view emits only which field was clicked.  zlc_pulse owns the legal
-        binding transition for that field; this presenter applies the returned
-        domain value to the immutable sequence.
-        """
-
-        from zlc_pulse import (
-            PulseApiParameter,
-            PulseConfigParameter,
-            PulseSlot,
-        )
-
+    def set_binding(
+        self, field_kind: str, period_id: object, port_key: object,
+        scan: bool, source: str,
+    ) -> None:
+        """Change independent Scan capability and the one base value source."""
         if self.sequence is None:
             return
         reference = self._field_reference(str(field_kind), period_id, port_key)
         if reference is None:
             return
-        current_scan = next(
-            (
-                slot
-                for slot in self.sequence.slots
-                if slot.field_ref == reference
-            ),
-            None,
+        current = next((b for b in self.sequence.bindings if b.field_ref == reference), None)
+        binding = PulseBinding(
+            reference, current.unit if current is not None else self.sequence.field_unit(reference),
+            scan=scan, source=source,
+            config_key=current.config_key if current is not None and source == "config" else "",
         )
-        current_api = next(
-            (
-                parameter
-                for parameter in self.sequence.api_parameters
-                if parameter.field_ref == reference
-            ),
-            None,
+        bindings = tuple(
+            binding if b.field_ref == reference else b
+            for b in self.sequence.bindings
+            if b.field_ref != reference or scan or source != "default"
         )
-        current_config = next(
-            (
-                parameter
-                for parameter in self.sequence.config_parameters
-                if parameter.field_ref == reference
-            ),
-            None,
-        )
-        held = current_scan or current_api or current_config
-        binding = (
-            "scan"
-            if current_scan is not None
-            else "api"
-            if current_api is not None
-            else "config"
-            if current_config is not None
-            else None
-        )
-        wanted = cycle_binding_kind(binding, field_kind=reference.kind)
-        slots = tuple(
-            slot for slot in self.sequence.slots if slot.field_ref != reference
-        )
-        api_parameters = tuple(
-            parameter
-            for parameter in self.sequence.api_parameters
-            if parameter.field_ref != reference
-        )
-        config_parameters = tuple(
-            parameter
-            for parameter in self.sequence.config_parameters
-            if parameter.field_ref != reference
-        )
-        # A field keeps the name and unit it was given as it moves round the
-        # cycle: the same physical thing under a new owner, not a new one.
-        carried_id = (
-            (held.slot_id if current_scan is not None else held.parameter_id)
-            if held is not None
-            else self._binding_id(reference)
-        )
-        carried_unit = (
-            held.unit if held is not None else self.sequence.field_unit(reference)
-        )
-        if wanted == "scan":
-            slots = slots + (
-                PulseSlot(reference.kind, reference, carried_unit, slot_id=carried_id),
-            )
-        elif wanted == "api":
-            api_parameters = api_parameters + (
-                PulseApiParameter(carried_id, reference, carried_unit),
-            )
-        elif wanted == "config":
-            config_parameters = config_parameters + (
-                PulseConfigParameter(carried_id, reference, carried_unit),
-            )
-        changes: dict[str, Any] = {
-            "slots": slots,
-            "api_parameters": api_parameters,
-            "config_parameters": config_parameters,
-        }
-        if wanted is not None:
+        if current is None and (scan or source != "default"):
+            bindings += (binding,)
+        changes: dict[str, Any] = {"bindings": bindings}
+        if scan or source != "default":
             owning = self._periods_owning(reference)
             if owning is not None:
                 changes["periods"] = owning
         candidate = self._rebuilt(**changes)
         if candidate is None:
             return
-        self._accept_state(
-            replace(
-                self._state,
-                sequence=candidate,
-                scan_rows=(),
-                scan_source_dirty=bool(self._state.scan_source),
-            )
-        )
+        state_changes: dict[str, Any] = {"sequence": candidate}
+        if tuple(b.field_id for b in candidate.scan_bindings) != tuple(
+            b.field_id for b in self.sequence.scan_bindings
+        ):
+            state_changes.update(scan_rows=(), scan_source_dirty=bool(self._state.scan_source))
+        self._edit_state(**state_changes)
         self.refresh()
-
-    @staticmethod
-    def _binding_id(reference: object) -> str:
-        """A stable field-derived id used only for newly authored bindings."""
-
-        parts = [str(reference.kind)]
-        parts += [
-            str(part)
-            for part in (reference.period_id, reference.port)
-            if part is not None
-        ]
-        return "_".join(parts)
 
     def _has_scan_slots(self) -> bool:
         """Whether anything is bound, and say what to do when nothing is.
@@ -3639,7 +3548,7 @@ class PulseEditorPresenter:
         names the symptom instead.
         """
 
-        if self.sequence is not None and self.sequence.slots:
+        if self.sequence is not None and self.sequence.scan_bindings:
             return True
         self._warn(
             "bind at least one field to a scan slot first "
@@ -3722,10 +3631,9 @@ class PulseEditorPresenter:
             ScanPageRecord(
                 slots_text=(
                     (
-                        "No bound fields: click a dot on a duration or DAC value to "
-                        "make it a scan column."
-                        if not columns and not self.sequence.api_parameters
-                        else "Bound fields, and the name everything else calls them by:"
+                        "No bound fields: open a field's binding control and enable Scan or API."
+                        if not columns and not self.sequence.api_bindings
+                        else "Physical fields available to Scan and API callers:"
                     )
                     + (
                         " Run repeats is 0, so On Pulse stays at the first scan "
@@ -4129,7 +4037,7 @@ class PulseEditorPresenter:
         """
 
         return bool(self._state.scan_rows) and bool(
-            self.sequence is not None and self.sequence.slots
+            self.sequence is not None and self.sequence.scan_bindings
         )
 
     def _scan_progress_from_view(self) -> None:
@@ -4186,6 +4094,7 @@ class PulseEditorPresenter:
         self.view.set_schedule(vm)
 
     def refresh(self) -> None:
+        self._refresh_config_page()
         target = self._current_target()
         if self.sequence is None:
             # No pulse.  If a board is attached its ports, pins and clock are
@@ -4221,6 +4130,8 @@ class PulseEditorPresenter:
                 visible_ports=self._state.visible_ports,
                 pins=self.pins,
                 scan_points=len(self._state.scan_rows),
+                config_values=self._active_config_values(),
+                scan_active=self._scan_armed(),
             )
         )
         self.view.set_title(f"PulseGUI - {self.sequence.name}")
@@ -4530,6 +4441,8 @@ class PulseEditorPresenter:
             self.view.set_period(project_period(
                 self.sequence, self.sequence.period_by_id[str(period_id)],
                 visible_ports=self._state.visible_ports,
+                config_values=self._active_config_values(),
+                scan_active=self._scan_armed(),
             ))
             return
         self._apply_value(
@@ -4613,11 +4526,14 @@ class PulseEditorPresenter:
                         period,
                         visible_ports=self._state.visible_ports,
                         bindings=bindings,
+                        config_values=self._active_config_values(),
+                        scan_active=self._scan_armed(),
                     )
                 )
         if port_key is not None:
-            schedule.set_delay_row(_delay_row(candidate, port_key, bindings))
+            schedule.set_delay_row(_delay_row(candidate, port_key, bindings, self._active_config_values()))
         self._refresh_summary()
+        self._refresh_config_page()
         self._render_run_state()
         self.refresh_preview()
 
@@ -4714,6 +4630,8 @@ class PulseEditorPresenter:
         """Stop accepting work and report when every owned delivery is idle."""
 
         if not self._preview_close_requested:
+            if not self._discard_config_edits():
+                return False
             self._device_operation += 1
         self._preview_close_requested = True
         self._preview_pending = None
@@ -4916,7 +4834,7 @@ def _carried_onto(sequence: PulseSequence, target: PulseTarget) -> dict[str, Any
         for key, port in target.by_key.items()
         if key in old.by_key and old.by_key[key].kind == port.kind
     }
-    bindings = (*sequence.slots, *sequence.api_parameters, *sequence.config_parameters)
+    bindings = sequence.bindings
     blocked: list[str] = []
     for port in old.ports:
         if port.key in kept or port.kind == "clock":
@@ -4941,7 +4859,7 @@ def _carried_onto(sequence: PulseSequence, target: PulseTarget) -> dict[str, Any
         if any(delay.port == port.key for delay in sequence.delays):
             uses.append("delayed")
         bound = [
-            getattr(binding, "slot_id", None) or getattr(binding, "parameter_id")
+            field_label(sequence, binding.field_ref)
             for binding in bindings
             if binding.field_ref.port == port.key
         ]

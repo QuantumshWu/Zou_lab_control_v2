@@ -30,38 +30,34 @@ metadata. Even a bracket spanning the whole Pulse does not become or alter
 `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 
-A pulse field's value comes from one of three places, and which one is the
-whole meaning of its binding. A SCAN slot is filled by the board, one value per
-point, out of the hardware's four. An API parameter is a hole a caller fills
-once per run; `compile_sequence` refuses one that is still open. A CONFIG
-parameter is neither: its default IS the field's own number. Config files use
-the displayed Config numbers `1`, `2`, ... in declaration/click order, never
-local period/slot/parameter IDs. Scan and API bindings do not affect that order.
-Unmatched numbers keep the pulse's defaults; matched values and units are validated.
-`compile_pulse` is pure authoring compilation. Device `load`/`fire` share the
-override rule, retain the authored source separately from the actual source,
-and record the program actually loaded. Load also reads the bound file before
-preparing its upload, avoiding an obsolete upload immediately before Fire.
-Deleting an override restores its
-authored default, not a value left behind by an earlier override.
+Each physical field has one default value and at most one `PulseBinding`.
+The binding stores independent Scan capability and a Default/API/Config source.
+Scan may coexist with API or Config; API and Config are mutually exclusive.
+The editor always permits editing the default. A Plan activates only its explicit
+Scan fields; omitted Scan capabilities become constants using their selected base
+source. An explicit scan point overrides the base source for that execution.
 
-Pulse Editor's **Save config** exports the current document's Config fields
-through `authored_config_entries`, including their declared units and an empty
-set when none are declared. It works offline and neither runs a pulse nor
-modifies the sequencer. **Load config** binds the file with `load_config_file`.
-Every device `fire()` rereads that file before execution; unchanged effective
-values require neither recompilation nor a new hardware load. Changed values
-are recompiled/reloaded before firing, preserving scan rows, tick scales and
-the requested repeats. Invalid or missing bound files refuse that Fire, not
-silently execute old values. There is no background watcher or preview file I/O.
-`load_config_values(entries)` remains the explicit in-memory API and detaches
-any file binding; its `source` label is not guessed to be a path. Config files
-with old field-name keys must be re-saved as numbered files, not guessed across
-pulses. Local/Virtual/Remote devices share this behavior; a Remote client owns
-its own file binding, not a server-wide path.
-A field a run needs to vary is an API parameter, which is the
-whole difference between the two, so a field carries at most one binding and
-all three share one id namespace.
+Scan and API are addressed by stable physical field identity internally and by
+readable paths such as `MOT.duration` in authoring. They have no user-assigned
+numbers or aliases. A Config binding instead references a named entry shared
+across Pulses; multiple fields can reference the same name.
+
+Config files contain only `format: zlc.pulse.config_values` and `values`:
+each name maps to a numeric `value` and `unit`. Unassigned or missing entries
+leave field defaults unchanged; supplied entries use the shared unit checks.
+Old numbered/source/export formats are not accepted or migrated.
+
+The Config tab edits that independent values file. Only explicit Save/Save as
+writes it; unsaved rows never reach execution. Pulse Save stores the Pulse and
+its field references, not a copy of the Config values. Device `load`/`fire`
+reread the selected saved file and update the executable only when effective
+values change. The authored source remains separate from the applied source;
+an override never becomes the next default. Running output is not modified by
+editing or saving. Local/Virtual/Remote share the same resolution owner.
+
+`compile_pulse` remains pure. API resolution, Config resolution and selecting
+an explicit Scan row use the common field writer. A field selected as an explicit
+Hold/Step scan point cannot be overwritten again by Config at Fire.
 
 The package has no measurement, GUI, or run-planning layer. `applied()` is only
 the device's saved passive echo of the last program, source, rows, and repeat

@@ -77,12 +77,7 @@ FluentScanLineEdit = _pulse.FluentScanLineEdit
 
 
 class _InteractiveBindingField(QtWidgets.QWidget):
-    """One real Scan/API dot control with an injected display state.
-
-    ``FluentScanLineEdit`` deliberately emits click intent and accepts injected
-    state.  The gallery records that intent but never invents the pulse-domain
-    transition a presenter would apply.
-    """
+    """The production binding popup with injected Scan/source state."""
 
     binding_changed = QtCore.pyqtSignal(object, object)
 
@@ -90,17 +85,17 @@ class _InteractiveBindingField(QtWidgets.QWidget):
         self,
         *,
         text: str,
-        binding: str | None,
-        number: int,
+        scan: bool,
+        source: str,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._number = int(number)
-        self._binding: str | None = None
+        self.scan = bool(scan)
+        self.source = source
 
         self.field = FluentScanLineEdit(
             str(text),
-            tooltip="Click the dot to emit a binding-cycle intent",
+            tooltip="Select Scan and value source",
         )
         self.field.setFixedHeight(scaled_px(32, minimum=26))
         self.state_label = muted_note_label("")
@@ -110,39 +105,9 @@ class _InteractiveBindingField(QtWidgets.QWidget):
         layout.setSpacing(window_pad(0.25))
         layout.addWidget(self.field)
         layout.addWidget(self.state_label)
-        self.field.scan_clicked.connect(self._request_cycle)
-        self.set_binding(binding, text=str(text))
-
-    @property
-    def binding(self) -> str | None:
-        return self._binding
-
-    def _state_text(self) -> str:
-        if self._binding == "scan":
-            current = f"SCAN slot {self._number}"
-        elif self._binding == "api":
-            current = f"API slot {self._number}"
-        else:
-            current = "OFF"
-        return f"state: {current} · click dot → presenter intent"
-
-    def set_binding(self, binding: str | None, *, text: str) -> None:
-        if binding not in (None, "scan", "api"):
-            raise ValueError(f"unsupported projected binding state {binding!r}")
-        self._binding = binding
-        self.field.setText(text)
-        self.field.set_field_state(
-            editable=True,
-            binding=binding,
-            number=self._number if binding else None,
-        )
-        self.state_label.setText(self._state_text())
-
-    def _request_cycle(self) -> None:
-        self.binding_changed.emit(
-            self._binding,
-            self._number if self._binding else None,
-        )
+        self.field.binding_committed.connect(self.binding_changed)
+        self.field.set_field_state(editable=True, scan=scan, source=source)
+        self.state_label.setText(f"Scan: {'on' if scan else 'off'} · Source: {source}")
 
 
 class _GalleryBody(QtWidgets.QWidget):
@@ -304,35 +269,35 @@ class _GalleryBody(QtWidgets.QWidget):
         return card
 
     def _build_pulse_binding_section(self) -> QtWidgets.QWidget:
-        card, inner = self._section("组合：FluentScanLineEdit — Scan slot / API slot")
+        card, inner = self._section("FluentScanLineEdit — Scan / API / Config")
         note = muted_note_label(
-            "这些是 PulseEditor 实际使用的动态字段。点击右侧圆点只发 intent；binding 的合法迁移由 Pulse domain 决定，再由 presenter 投回字段。"
+            "Production Pulse fields: select Scan and a value source. All fields keep an editable default."
         )
         note.setWordWrap(True)
         inner.addWidget(note)
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(window_pad())
         examples = (
-            ("duration_cycle", "Duration intent", "0", None, 1),
-            ("scan_duration", "Scan slot 1 · duration", "s0", "scan", 1),
-            ("api_duration", "API slot 1 · duration", "1000", "api", 1),
-            ("dac_cycle", "DAC slot 2 · da_bias_y", "s1", "scan", 2),
-            ("delay_cycle", "Delay intent · off", "0", None, 2),
+            ("duration", "Duration", "0", False, "default"),
+            ("scan_duration", "Scan · duration", "1000", True, "default"),
+            ("api_duration", "Scan + API · duration", "1000", True, "api"),
+            ("dac", "Scan + Config · da_bias_y", "0", True, "config"),
+            ("delay", "Delay", "0", False, "default"),
         )
         echo = muted_note_label("last binding click: —")
         echo.setWordWrap(True)
         inner.addWidget(echo)
-        for key, name, text, binding, number in examples:
+        for key, name, text, scan, source in examples:
             demo = _InteractiveBindingField(
                 text=text,
-                binding=binding,
-                number=number,
+                scan=scan,
+                source=source,
             )
             demo.field.setObjectName(f"GalleryBinding_{key}")
             demo.field.setFixedWidth(scaled_px(150, minimum=120))
             demo.binding_changed.connect(
-                lambda next_kind, slot_number, key=key: self._echo_binding(
-                    echo, key, next_kind, slot_number
+                lambda next_scan, next_source, key=key: self._echo_binding(
+                    echo, key, next_scan, next_source
                 )
             )
             self.binding_examples[key] = demo
@@ -341,10 +306,8 @@ class _GalleryBody(QtWidgets.QWidget):
         return card
 
     @staticmethod
-    def _echo_binding(label: FluentLabel, key: str, binding: object, number: object) -> None:
-        state = "OFF" if binding is None else str(binding).upper()
-        suffix = "" if number is None else f" slot {number}"
-        label.setText(f"last binding click: {key} → {state}{suffix}")
+    def _echo_binding(label: FluentLabel, key: str, scan: bool, source: str) -> None:
+        label.setText(f"last binding intent: {key} → Scan={scan}, source={source}")
         print(label.text(), flush=True)
 
     def _build_board_section(self) -> QtWidgets.QWidget:

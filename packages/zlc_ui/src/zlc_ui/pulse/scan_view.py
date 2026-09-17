@@ -9,7 +9,7 @@ from zlc_ui.fluent import (
     FluentFrame, FluentGroupBox, FluentLabel, fluent_count_box,
     signals_blocked,
 )
-from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
+from zlc_ui.form import being_edited
 
 from ._layout import px, row_height
 from .models import BindingRecord, ScanPageRecord  # noqa: F401
@@ -24,9 +24,8 @@ class PulseScanView(QtWidgets.QWidget):
     source_edited = QtCore.pyqtSignal(str)
     run_requested = QtCore.pyqtSignal()
     save_array_requested = QtCore.pyqtSignal()
+    load_array_requested = QtCore.pyqtSignal()
     progress_refresh_requested = QtCore.pyqtSignal()
-    #: ``(old id, new id)`` -- the NAME a plan and a saved value set use.
-    binding_renamed = QtCore.pyqtSignal(str, str)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -43,18 +42,9 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_slots_label = FluentLabel("")
         self.scan_slots_label.setWordWrap(True)
         info_layout.addWidget(self.scan_slots_label)
-        # The ids themselves, editable.  A binding gets its name minted from
-        # the period it sits in -- ``dac_load_da_bias_x`` -- which is fine
-        # until a saved set of values has to name the same slot in another
-        # pulse.  The field does not move; only what everything else calls it.
-        # On the shared form, keyed by POSITION: the page is projected on
-        # every record, and a grid rebuilt from scratch each time took the
-        # edit away from under the operator's cursor.  A row's key is its
-        # place in the pulse, which a rename does not change.
-        self.bindings_form = FluentParameterForm(FormSpec(()))
-        self.bindings_form.committed.connect(self._binding_committed)
-        info_layout.addWidget(self.bindings_form)
-        self._binding_ids: tuple[str, ...] = ()
+        self.bindings_label = FluentLabel("")
+        self.bindings_label.setWordWrap(True)
+        info_layout.addWidget(self.bindings_label)
 
         run_row = QtWidgets.QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
@@ -87,7 +77,7 @@ class PulseScanView(QtWidgets.QWidget):
         body.setSpacing(px(8, minimum=5))
         editor_box = FluentGroupBox("Generate the scan table (Python)")
         editor_layout = QtWidgets.QVBoxLayout(editor_box)
-        editor_layout.setContentsMargins(px(8), px(28, minimum=24), px(8), px(8))
+        editor_layout.setContentsMargins(px(8), px(8), px(8), px(8))
         editor_layout.setSpacing(px(6, minimum=4))
         self.scan_code = FluentCodeEdit()
 
@@ -110,12 +100,15 @@ class PulseScanView(QtWidgets.QWidget):
         code_buttons.setSpacing(px(6, minimum=4))
         self.scan_run_button = FluentButton("Run", color=GREEN)
         self.scan_save_array_button = FluentButton("Save Array", color=YELLOW)
+        self.scan_load_array_button = FluentButton("Load Array", color=ACCENT)
+        self.scan_load_array_button.clicked.connect(self.load_array_requested)
         self.scan_run_button.setFixedHeight(row_height())
         self.scan_save_array_button.setFixedHeight(row_height())
         self.scan_run_button.clicked.connect(lambda: self.run_requested.emit())
         self.scan_save_array_button.clicked.connect(self.save_array_requested)
         self.scan_code.textChanged.connect(self._on_code_changed)
-        for button in (self.scan_run_button, self.scan_save_array_button):
+        for button in (self.scan_run_button, self.scan_load_array_button, self.scan_save_array_button):
+            button.setFixedHeight(row_height())
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             code_buttons.addWidget(button, 1)
         editor_layout.addLayout(code_buttons)
@@ -123,7 +116,7 @@ class PulseScanView(QtWidgets.QWidget):
 
         preview_box = FluentGroupBox("Scan table")
         preview_layout = QtWidgets.QVBoxLayout(preview_box)
-        preview_layout.setContentsMargins(px(8), px(28, minimum=24), px(8), px(8))
+        preview_layout.setContentsMargins(px(8), px(8), px(8), px(8))
         self.scan_table_view = FluentCodeEdit(read_only=True)
         preview_layout.addWidget(self.scan_table_view, 1)
         preview_layout.addWidget(QtWidgets.QWidget(), 0)
@@ -171,7 +164,6 @@ class PulseScanView(QtWidgets.QWidget):
         value = int(self.scan_repeats_spin.value())
         if value == self._committed_repeats:
             return
-        self._committed_repeats = value
         self.repeats_committed.emit(value)
 
     def set_page(self, record: ScanPageRecord) -> None:
@@ -196,37 +188,14 @@ class PulseScanView(QtWidgets.QWidget):
 
     def set_bindings(self, bindings) -> None:
         records = tuple(bindings)
-        self._binding_ids = tuple(str(record.binding_id) for record in records)
-        fields = tuple(
-            FormFieldProps(
-                key=f"binding_{index}",
-                kind="text",
-                label=f"{record.label} \u00b7 {record.kind}",
-                default=str(record.binding_id),
-                required=True,
-                description="The name a scan plan, a saved value set and a run record use",
+        self.bindings_label.setText("\n".join(
+            f"{record.label} · " + " + ".join(
+                (["Scan"] if record.scan else [])
+                + ([record.source.upper()] if record.source != "default" else [])
             )
-            for index, record in enumerate(records)
-        )
-        spec = FormSpec(fields)
-        values = {field.key: field.default for field in fields}
-        if not self.bindings_form.adopt_projection(spec, values):
-            self.bindings_form.reconcile(spec, values)
-        self.bindings_form.setVisible(bool(records))
-
-    def _binding_committed(self, key: str) -> None:
-        """The operator finished a name: say what it was and what it is now."""
-
-        index = int(str(key).rpartition("_")[2])
-        if index >= len(self._binding_ids):
-            return
-        try:
-            wanted = str(self.bindings_form.read_value(key)).strip()
-        except ValueError:
-            return
-        was = self._binding_ids[index]
-        if wanted and wanted != was:
-            self.binding_renamed.emit(was, wanted)
+            for record in records
+        ))
+        self.bindings_label.setVisible(bool(records))
 
     def set_progress_text(self, text: str) -> None:
         self.scan_progress_label.setText(str(text))
@@ -243,7 +212,7 @@ class PulseScanView(QtWidgets.QWidget):
         enabled = not bool(busy)
         for button in (self.scan_load_program_button, self.scan_column_template_button,
                        self.scan_grid_template_button, self.scan_run_button,
-                       self.scan_save_array_button):
+                       self.scan_save_array_button, self.scan_load_array_button):
             button.setEnabled(enabled)
 
 

@@ -47,7 +47,7 @@ from zlc_pulse import (
     PulseFieldRef,
     PulsePeriod,
     PulseSequence,
-    PulseSlot,
+    PulseBinding,
     compile_sequence,
     load_streamer_config,
     resolve_api_parameters,
@@ -1194,9 +1194,9 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         sequence = resolve_api_parameters(
             IMAGING_PULSE_RESOURCE.value,
             {
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
         board = streamer.describe()
@@ -1243,11 +1243,11 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
         # creating a second virtual scheduler oracle.
         slotted = replace(
             _world_pulse(duration=0.03, cooling=True, trap=True),
-            slots=(
-                PulseSlot(
-                    "dac",
+            bindings=(
+                PulseBinding(
                     PulseFieldRef("dac", "state", "da_bias_x"),
                     "value",
+                    scan=True,
                 ),
             ),
         )
@@ -1338,9 +1338,9 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
             path=IMAGING_PULSE_RESOURCE.path,
             sequencer=sequencer,
             api_values={
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
         assert pulse.program.slot_count == 0
@@ -1383,9 +1383,9 @@ def test_camera_cycle_source_does_not_interpret_pulse_windows_or_exposure() -> N
         sequence = resolve_api_parameters(
             IMAGING_PULSE_RESOURCE.value,
             {
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
         board = streamer.describe()
@@ -1476,9 +1476,9 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
             path=IMAGING_PULSE_RESOURCE.path,
             sequencer=sequencer,
             api_values={
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
         capture = measurement.prepare()
@@ -1584,9 +1584,9 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
             path=IMAGING_PULSE_RESOURCE.path,
             sequencer=sequencer,
             api_values={
-                "reference_probe_duration_before": 0.02,
-                "readout_probe_duration": 0.005,
-                "reference_probe_duration_after": 0.02,
+                "duration:long_before": 0.02,
+                "duration:short": 0.005,
+                "duration:long_after": 0.02,
             },
         )
 

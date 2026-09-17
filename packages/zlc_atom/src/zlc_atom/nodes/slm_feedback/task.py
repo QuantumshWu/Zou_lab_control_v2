@@ -2533,13 +2533,14 @@ class SlmFeedbackTask:
                 total=requested,
             )
             self.sequencer.fire(run_repeats=requested, scan_repeats=1)
-            if "sequencer" not in self._actual_device_snapshots:
-                execution_state = self.sequencer.snapshot()
-                if not isinstance(execution_state, Mapping):
-                    raise TypeError("sequencer snapshot must be a mapping")
-                self._actual_device_snapshots["sequencer"] = (
-                    sequencer_archive_snapshot(state=execution_state)
+            execution_state = self.sequencer.snapshot()
+            if not isinstance(execution_state, Mapping):
+                raise TypeError("sequencer snapshot must be a mapping")
+            self._actual_device_snapshots["sequencer"] = (
+                sequencer_archive_snapshot(
+                    state=execution_state, applied=self.sequencer.applied(),
                 )
+            )
 
             def commit_camera_cycle(cycle: object, index: int) -> None:
                 output = _finite_cycle_output(node, cycle, index)
@@ -3657,7 +3658,7 @@ class SlmFeedbackTask:
                 api_values={},
             )
             arm_sequencer(self.sequencer, pulse)
-            self._program_digest = str(pulse.program.digest)
+            self._program_digest = str(self.sequencer.applied().program.digest)
             _check_cancelled(context)
             current_target = self.target
             # The Target on the SLM is the control Target with this

@@ -39,6 +39,8 @@ failed -- through the same verified ``tune`` that moved it.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -99,7 +101,10 @@ class SteppedScanMeasurement:
         self.sequencer = sequencer
         self.sequencer_key = str(sequencer_key)
         self.source = source
-        self.sequence = sequence
+        self.sequence = replace(
+            sequence,
+            bindings=tuple(replace(binding, scan=False) for binding in sequence.bindings),
+        )
         #: The file the operator chose; the pulse is named by it wherever a
         #: record names the pulse, never by the name the document carries.
         self.pulse_path = Path(pulse_path)
@@ -179,10 +184,10 @@ class SteppedScanMeasurement:
         """
 
         values: dict[str, float] = {
-            parameter.parameter_id: float(
+            parameter.field_id: float(
                 pulse_field_value(self.sequence, parameter.field_ref, parameter.unit)
             )
-            for parameter in self.sequence.api_parameters
+            for parameter in self.sequence.api_bindings
         }
         values.update(scanned)
         return values
@@ -230,10 +235,6 @@ class SteppedScanMeasurement:
             "device_snapshots": {
                 "sequencer": sequencer_archive_snapshot(
                     description=board,
-                    config=self.sequencer.config_values(),
-                    # The first actual point's filled source; the plan records
-                    # every later API coordinate applied to this same template.
-                    source=source,
                 ),
                 **tunable_snapshots,
             },
@@ -301,6 +302,7 @@ class SteppedScanMeasurement:
                         index,
                         sweep,
                         total_shots,
+                        run_record,
                     )
             check_cancelled(context)
         except BaseException as error:
@@ -319,6 +321,7 @@ class SteppedScanMeasurement:
         index: int,
         sweep: int,
         total_shots: int,
+        run_record: dict,
     ) -> None:
         """Fire one point and retain every outer pulse iteration."""
 
@@ -326,6 +329,19 @@ class SteppedScanMeasurement:
         check_cancelled(context)
         self.sequencer.fire(run_repeats=shots, scan_repeats=1)
         fired_at = time.monotonic()
+        first = index == 0 and sweep == 0
+        if first or self.gating == "sw_gated":
+            applied = self.sequencer.applied()
+            # Software gating must use the actual configured duration, too.
+            program = applied.program
+            if first:
+                # Only the initial execution belongs to this immutable run
+                # record; the plan describes subsequent point coordinates.
+                run_record["device_snapshots"]["sequencer"].update(
+                    sequencer_archive_snapshot(
+                        applied=applied, config=self.sequencer.config_values(),
+                    )
+                )
         if self.gating == "sw_gated":
             single_repeat_seconds = float(program.duration_seconds)
             for shot in range(shots):

@@ -21,11 +21,10 @@ from zlc_pulse import CURRENT_CONFIG_VALUES, read_config_values, write_config_va
 def test_a_saved_set_round_trips_through_the_shared_grammar(tmp_path) -> None:
     path = tmp_path / CURRENT_CONFIG_VALUES
     write_config_values(
-        path, {"1": (40.0, "ns")}, name="today", source="calibration"
+        path, {"trigger_delay": (40.0, "ns")}
     )
-    name, source, entries = read_config_values(path)
-    assert (name, source) == ("today", "calibration")
-    assert entries == {"1": (40.0, "ns")}
+    entries = read_config_values(path)
+    assert entries == {"trigger_delay": (40.0, "ns")}
 
 
 def test_the_archive_records_the_set_that_was_in_force() -> None:
@@ -47,14 +46,14 @@ def test_the_archive_records_the_set_that_was_in_force() -> None:
         assert before["config"] == {}
 
         sequencer.load_config_values(
-            {"1": (40.0, "ns")}, source="/bench/config_values/current.json"
+            {"trigger_delay": (40.0, "ns")}, source="/bench/config_values/current.json"
         )
         after = sequencer_archive_snapshot(
             description=board,
             config=sequencer.config_values(),
             state=sequencer.snapshot(),
         )
-        assert after["config"] == {"1": [40.0, "ns"]}
+        assert after["config"] == {"trigger_delay": [40.0, "ns"]}
         # And where it came from, so the file can be found again.
         assert after["state"]["config_source"] == "/bench/config_values/current.json"
     finally:
@@ -137,13 +136,12 @@ def test_a_session_hands_its_board_the_workspace_set(tmp_path, monkeypatch) -> N
     space = Workspace(tmp_path).prepare()
     write_config_values(
         space.config_values / CURRENT_CONFIG_VALUES,
-        {"1": (40.0, "ns")},
-        name="current",
+        {"trigger_delay": (40.0, "ns")},
     )
 
     session = ExperimentSession.open(workspace=tmp_path, template="virtual")
     try:
-        assert session.sequencer.config_values() == {"1": (40.0, "ns")}
+        assert session.sequencer.config_values() == {"trigger_delay": (40.0, "ns")}
         assert session.sequencer.config_source.endswith(CURRENT_CONFIG_VALUES)
     finally:
         session.close()
@@ -162,7 +160,7 @@ def test_a_workspace_with_no_set_is_silent(tmp_path) -> None:
     space = Workspace(tmp_path).prepare()
     seeded = space.config_values / CURRENT_CONFIG_VALUES
     assert seeded.is_file()
-    assert read_config_values(seeded)[2] == {}
+    assert read_config_values(seeded) == {}
 
     session = ExperimentSession.open(workspace=tmp_path, template="virtual")
     try:

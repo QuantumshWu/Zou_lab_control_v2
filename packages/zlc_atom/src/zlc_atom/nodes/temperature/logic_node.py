@@ -39,7 +39,6 @@ from zlc_atom.nodes.calibration import (
     readout_model_kind_from_choice,
 )
 from zlc_atom.nodes.scan import (
-    PULSE_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     STEPPED_PULSE_RESOURCE,
@@ -51,19 +50,12 @@ from zlc_atom.nodes.scan import (
 from .task import (
     SURVIVAL_OUTPUT,
     TEMPERATURE_ARTIFACT_CONTRACT,
-    T_OFF_PARAMETER,
     TemperatureTask,
 )
 
 
-#: Where a recapture curve lives for micro-kelvin atoms in a micron-sized
-#: trap: a few to a few tens of microseconds, in the template's own unit.
-#: The form opens on this so the first Start measures something, and the
-#: editor's own from/to/points is how it is changed.
-DEFAULT_RELEASE_PLAN = (
-    '{"axes": [{"port": "pulse:param:t_off", "values": '
-    "[0.004, 0.009, 0.014, 0.019, 0.025, 0.03, 0.035, 0.04]}]}"
-)
+#: Select the actual release field of the chosen Pulse before authoring its range.
+DEFAULT_RELEASE_PLAN = '{"axes": []}'
 
 
 TEMPERATURE_SCHEMA = AuthoringSchema(
@@ -85,7 +77,7 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             DEFAULT_RELEASE_PLAN,
             required=True,
         ),
-        # The pulse's other API slots, set once for this run.  The release
+        # The pulse's other API fields, set once for this run.  The release
         # itself is swept by the plan and never appears here.
         AuthoringField(
             "api_values",
@@ -177,13 +169,11 @@ def _build(
 def _editor_factory(parent=None):
     from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
 
-    # One axis, and it is the release: this Task pairs the two probe windows
-    # of a cycle, which is a statement about t_off and nothing else.  No
-    # device ports either -- the board advances this plan from its own table.
+    # The operator selects one time-valued API field from this Pulse; no
+    # template-specific alias determines which period releases the atoms.
     return scan_plan_editor_factory(
         parent,
         device_ports=False,
-        only_port=PULSE_PARAM_FAMILY + T_OFF_PARAMETER,
     )
 
 

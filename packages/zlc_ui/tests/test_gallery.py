@@ -94,28 +94,31 @@ assert body.findChild(QtWidgets.QWidget, 'GalleryHeading3') is not None
 visible_names = {label.text() for label in body.findChildren(QtWidgets.QLabel) if label.text()}
 assert 'FluentStatusStrip' in visible_names
 assert 'ConsoleBoardView' in visible_names
-assert 'FluentScanLineEdit · Duration intent' in visible_names
-assert 'FluentScanLineEdit · Scan slot 1 · duration' in visible_names
-assert 'FluentScanLineEdit · API slot 1 · duration' in visible_names
-assert 'FluentScanLineEdit · DAC slot 2 · da_bias_y' in visible_names
-assert 'FluentScanLineEdit · Delay intent · off' in visible_names
+assert 'FluentScanLineEdit · Duration' in visible_names
+assert 'FluentScanLineEdit · Scan · duration' in visible_names
+assert 'FluentScanLineEdit · Scan + API · duration' in visible_names
+assert 'FluentScanLineEdit · Scan + Config · da_bias_y' in visible_names
+assert 'FluentScanLineEdit · Delay' in visible_names
 
-duration = body.binding_examples['duration_cycle']
-assert duration.binding is None
-QtTest.QTest.mouseClick(duration.field.dot, QtCore.Qt.LeftButton)
+duration = body.binding_examples['duration']
+assert duration.source == 'default' and not duration.scan
+QtTest.QTest.mouseClick(duration.field.binding_button, QtCore.Qt.LeftButton)
 app.processEvents()
-assert duration.binding is None and duration.field.text() == '0'
+assert duration.source == 'default' and duration.field.text() == '0'
+duration.field._popup.hide()
 
-dac = body.binding_examples['dac_cycle']
-assert dac.binding == 'scan' and dac.field.text() == 's1'
-QtTest.QTest.mouseClick(dac.field.dot, QtCore.Qt.LeftButton)
+dac = body.binding_examples['dac']
+assert dac.scan and dac.source == 'config' and dac.field.text() == '0'
+QtTest.QTest.mouseClick(dac.field.binding_button, QtCore.Qt.LeftButton)
 app.processEvents()
-assert dac.binding == 'scan' and dac.field.text() == 's1'
+assert dac.scan and dac.field.text() == '0'
+dac.field._popup.hide()
 
-delay = body.binding_examples['delay_cycle']
-QtTest.QTest.mouseClick(delay.field.dot, QtCore.Qt.LeftButton)
+delay = body.binding_examples['delay']
+QtTest.QTest.mouseClick(delay.field.binding_button, QtCore.Qt.LeftButton)
 app.processEvents()
-assert delay.binding is None
+assert delay.source == 'default'
+delay.field._popup.hide()
 tab_sets = [
     {tab.tabText(index) for index in range(tab.count())}
     for tab in body.findChildren(FluentTabWidget)

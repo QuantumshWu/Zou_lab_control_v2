@@ -102,15 +102,6 @@ def _positive_float(value: object, name: str) -> float:
     return result
 
 
-def _slot_number(value: object, name: str) -> int:
-    """One 1-based API slot number, as an operator counts them."""
-
-    result = int(value)
-    if result <= 0:
-        raise ValueError(f"{name} must be a positive slot number")
-    return result
-
-
 def _non_empty_key(value: object, name: str) -> str:
     result = str(value).strip()
     if not result:
@@ -128,14 +119,10 @@ class CalibrationRequest:
     repeats: int
     reference_exposure_seconds: float
     readout_exposure_seconds: float
-    #: Which of the pulse's API slots this protocol drives, by number, and the
-    #: port the board gates its camera from.  By NUMBER because a slot's name
-    #: belongs to whoever wrote the pulse: a node that matched names could only
-    #: ever run the one template it shipped with, however many slots an
-    #: operator's own imaging pulse offered.
-    reference_before_slot: int
-    readout_slot: int
-    reference_after_slot: int
+    #: Stable field references selected explicitly in the task's form.
+    reference_before_field: str
+    readout_field: str
+    reference_after_field: str
     default_model_kind: ReadoutModelKind
     threshold_method: str
     box_half_width: int
@@ -176,18 +163,18 @@ class CalibrationRequest:
             # compiled program by being the SHORT one, so a run whose three
             # windows are the same length has no readout frame to find.
             raise ValueError("readout exposure must be shorter than the reference exposure")
-        slots = tuple(
-            _slot_number(value, name)
+        fields = tuple(
+            _non_empty_key(value, name)
             for value, name in (
-                (self.reference_before_slot, "reference_before_slot"),
-                (self.readout_slot, "readout_slot"),
-                (self.reference_after_slot, "reference_after_slot"),
+                (self.reference_before_field, "reference_before_field"),
+                (self.readout_field, "readout_field"),
+                (self.reference_after_field, "reference_after_field"),
             )
         )
-        if len(set(slots)) != len(slots):
+        if len(set(fields)) != len(fields):
             raise ValueError(
                 "the three calibration exposures must be driven by three "
-                "different pulse API slots"
+                "different pulse API fields"
             )
         if not isinstance(self.default_model_kind, ReadoutModelKind):
             raise TypeError("default_model_kind must be ReadoutModelKind")
@@ -223,9 +210,9 @@ class CalibrationRequest:
         object.__setattr__(self, "repeats", repeats)
         object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
         object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
-        object.__setattr__(self, "reference_before_slot", slots[0])
-        object.__setattr__(self, "readout_slot", slots[1])
-        object.__setattr__(self, "reference_after_slot", slots[2])
+        object.__setattr__(self, "reference_before_field", fields[0])
+        object.__setattr__(self, "readout_field", fields[1])
+        object.__setattr__(self, "reference_after_field", fields[2])
         object.__setattr__(self, "threshold_method", threshold_method)
         object.__setattr__(self, "box_half_width", box_half_width)
         object.__setattr__(self, "psf_half_width", psf_half_width)
@@ -248,9 +235,9 @@ class CalibrationRequest:
             "repeats": self.repeats,
             "reference_exposure_seconds": self.reference_exposure_seconds,
             "readout_exposure_seconds": self.readout_exposure_seconds,
-            "reference_before_slot": self.reference_before_slot,
-            "readout_slot": self.readout_slot,
-            "reference_after_slot": self.reference_after_slot,
+            "reference_before_field": self.reference_before_field,
+            "readout_field": self.readout_field,
+            "reference_after_field": self.reference_after_field,
             "default_model_kind": self.default_model_kind.value,
             "threshold_method": self.threshold_method,
             "box_half_width": self.box_half_width,
@@ -1183,17 +1170,17 @@ class CalibrationTask:
         )
 
     def _driven_values(self) -> dict[str, float]:
-        """The three exposures, each said in the unit its slot declares.
+        """The three exposures, each said in the unit its field declares.
 
         A parameter is written in ITS OWN unit.  This task holds SI seconds --
-        the camera speaks nothing else -- so a slot declared in microseconds
+        the camera speaks nothing else -- so a field declared in microseconds
         used to receive a number a million times too small, silently, and the
         shipped template only escaped it by declaring seconds itself.
         """
 
         values: dict[str, float] = {}
         for parameter, seconds in zip(
-            self._driven_slots(),
+            self._driven_fields(),
             (
                 self.request.reference_exposure_seconds,
                 self.request.readout_exposure_seconds,
@@ -1203,63 +1190,42 @@ class CalibrationTask:
         ):
             if parameter.unit == "value":
                 raise ValueError(
-                    f"API slot {parameter.parameter_id!r} sets a DAC code, not "
+                    f"API field {parameter.field_id!r} sets a DAC code, not "
                     "a duration; calibration drives the three probe lengths"
                 )
-            values[parameter.parameter_id] = convert_time(
+            values[parameter.field_id] = convert_time(
                 seconds, "s", parameter.unit
             )
         return values
 
-    def _driven_slots(self) -> tuple[object, object, object]:
-        """The three API slots this run drives, as the pulse declares them.
-
-        Addressed by number, in the acquisition's own order: slot k is the
-        k-th parameter the pulse declares, whatever its author called it and
-        whichever unit they wrote it in.
-        """
-
-        declared = tuple(self.pulse_sequence.api_parameters)
+    def _driven_fields(self) -> tuple[object, object, object]:
+        """Resolve the operator's three stable API field references."""
+        declared = {binding.field_id: binding for binding in self.pulse_sequence.api_bindings}
         wanted = (
-            self.request.reference_before_slot,
-            self.request.readout_slot,
-            self.request.reference_after_slot,
+            self.request.reference_before_field,
+            self.request.readout_field,
+            self.request.reference_after_field,
         )
-        if max(wanted) > len(declared):
-            raise ValueError(
-                f"pulse {self.pulse_sequence.name!r} offers {len(declared)} "
-                f"API slot(s) and this calibration drives slot {max(wanted)}"
-            )
-        return tuple(declared[slot - 1] for slot in wanted)
+        missing = tuple(key for key in wanted if key not in declared)
+        if missing:
+            raise ValueError(f"pulse {self.pulse_sequence.name!r} offers no API fields {missing}")
+        return tuple(declared[key] for key in wanted)
 
     def _pulse_facts(self, pulse: ResolvedPulse) -> dict[str, object]:
-        """What this run will be remembered by: the pulse it played, and where.
-
-        It does NOT re-read the compiled program to decide what the frames
-        mean.  The three exposures went into three API slots the operator
-        chose by number, and the acquisition reads them back in that same
-        order; a task that re-derived the meaning from window counts and
-        exposure lengths made itself depend on the shape of a document it does
-        not own, and broke the moment the pulse was somebody else's.
-        """
+        """Record the selected API fields and the values used for this run."""
 
         return {
             "name": pulse.name,
             "path": None if pulse.path is None else str(pulse.path),
-            "api_slots": [
-                self.request.reference_before_slot,
-                self.request.readout_slot,
-                self.request.reference_after_slot,
-            ],
-            "api_parameters": [
-                parameter.parameter_id for parameter in self._driven_slots()
+            "api_fields": [
+                parameter.field_id for parameter in self._driven_fields()
             ],
             # What was actually written to the board, in the units it was
             # written in: an archive that only records seconds cannot say
             # whether the run agreed with the pulse.
             "api_values": self._driven_values(),
             "api_units": [
-                parameter.unit for parameter in self._driven_slots()
+                parameter.unit for parameter in self._driven_fields()
             ],
             "frame_exposures": [
                 self.request.reference_exposure_seconds,
@@ -1359,9 +1325,7 @@ class CalibrationTask:
                 raise TypeError("sequencer snapshot must be a mapping")
             sequencer_snapshot = sequencer_archive_snapshot(
                 state=sequencer_state,
-                program=pulse.program,
-                source=pulse.sequence,
-                run_repeats=count,
+                applied=self.sequencer.applied(),
             )
             run_record = self._run_record(
                 actual,

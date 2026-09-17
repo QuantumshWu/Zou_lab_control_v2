@@ -92,7 +92,7 @@ class _ScheduleView:
         "visible_ports_committed",
         "fill_port_requested",
         "clear_port_requested",
-        "binding_cycle_requested",
+        "binding_committed",
         "scan_array_load_requested",
         "feedback_requested",
         "run_requested",
@@ -353,14 +353,16 @@ class _EditorView:
         "clear_all_requested", "close_requested", "page_changed",
         "document_name_committed", "port_label_committed",
         "period_name_committed", "duration_committed", "digital_committed",
-        "analog_committed", "delay_committed", "binding_cycle_requested",
+        "analog_committed", "delay_committed", "binding_committed",
         "insert_period_requested", "reorder_items_requested",
         "remove_period_requested", "bracket_committed",
         "run_repeats_committed",
         "visible_ports_committed", "fill_port_requested", "clear_port_requested",
         "feedback_requested", "connection_requested", "device_label_changed", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
-        "values_save_requested", "values_load_requested", "binding_renamed",
+        "config_new_requested", "config_load_requested", "config_refresh_requested",
+        "config_save_requested", "config_save_as_requested", "config_unload_requested",
+        "config_entries_edited", "config_binding_committed",
         "scan_array_load_requested", "scan_source_edited",
         "scan_repeats_committed", "scan_hold_requested", "scan_step_requested",
         "scan_program_load_requested", "scan_template_requested",
@@ -482,6 +484,12 @@ class _EditorView:
 
     def set_scan_progress_text(self, text: str) -> None:
         self.scan_view.set_progress_text(text)
+
+    def set_config_page(self, record) -> None:
+        self.config_page = record
+
+    def confirm_config_discard(self) -> bool:
+        return getattr(self, "discard_config_answer", True)
 
     # -- the preview -----------------------------------------------------
 
@@ -850,7 +858,7 @@ def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
     assert len(blank.periods) == 1
     assert all(value == 0 for value in blank.periods[0].states)
     assert blank.periods[0].analog_steps == ()
-    assert blank.slots == blank.api_parameters == blank.delays == ()
+    assert blank.scan_bindings == blank.api_bindings == blank.delays == ()
     assert blank.bracket is None
     assert presenter._state.scan_source == ""
     assert presenter._state.scan_rows == ()
@@ -908,7 +916,7 @@ def test_a_timeline_can_be_drawn_for_a_pulse_with_nothing_high(sequence) -> None
             )
             for period in sequence.periods
         ),
-        slots=(),
+        bindings=(),
         bracket=None,
     )
     data = timeline_of(quiet)
@@ -1067,26 +1075,15 @@ def test_on_pulse_runs_until_stop(sequence) -> None:
     waiting would hang the window on its own success.
     """
 
-    from zlc_pulse import PulseApiParameter, PulseFieldRef, PulseSlot
+    from zlc_pulse import PulseBinding, PulseFieldRef
 
     api_period = sequence.periods[1]
     scan_period = sequence.periods[3]
     sequence = replace(
         sequence,
-        slots=(
-            PulseSlot(
-                "duration",
-                PulseFieldRef("duration", scan_period.period_id),
-                scan_period.unit,
-                "scan_probe_duration",
-            ),
-        ),
-        api_parameters=(
-            PulseApiParameter(
-                "api_probe_duration",
-                PulseFieldRef("duration", api_period.period_id),
-                api_period.unit,
-            ),
+        bindings=(
+            PulseBinding(PulseFieldRef("duration", scan_period.period_id), scan_period.unit, scan=True),
+            PulseBinding(PulseFieldRef("duration", api_period.period_id), api_period.unit, source="api"),
         ),
     )
     view = _EditorView()
@@ -1096,8 +1093,8 @@ def test_on_pulse_runs_until_stop(sequence) -> None:
     try:
         view.fire_requested.emit()
         assert board.events == ["load", "fire forever"]
-        assert board._applied.source.slots == ()
-        assert board._applied.source.api_parameters == ()
+        assert board._applied.source.scan_bindings == ()
+        assert board._applied.source.api_bindings == ()
         assert board._applied.source.period_by_id[api_period.period_id].duration == (
             api_period.duration
         )
@@ -1285,7 +1282,7 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
         presenter.insert_period(None)
         expected = len(presenter.sequence.periods)
         period_id = presenter.sequence.periods[0].period_id
-        presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+        presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
         presenter.view.scan_source_edited.emit(
             "import numpy as np\nscan_table = np.linspace(0.001, 0.004, 4).reshape(-1, 1)\n"
         )
@@ -1510,7 +1507,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
     )
     with pytest.raises(RuntimeError, match="experiment session owns"):
         presenter.connect_to("given", "")
-    presenter.cycle_binding("duration", sequence.periods[0].period_id, None)
+    presenter.set_binding('duration', sequence.periods[0].period_id, None, True, 'default')
     assert presenter.compile()[1].scan_coeff_frac_bits == 3
     assert presenter.fire() is True
     presenter.close()
@@ -1625,7 +1622,7 @@ def test_a_config_file_binding_failure_closes_the_new_connection(tmp_path, monke
         def load_config_file(self, path):
             if self.refuse:
                 raise RuntimeError("board refused the entries")
-            self.loaded = (read_config_values(path)[2], str(path))
+            self.loaded = (read_config_values(path), str(path))
 
         def close(self):
             self.closed = True
@@ -1652,7 +1649,7 @@ def test_a_config_file_binding_failure_closes_the_new_connection(tmp_path, monke
         assert dials == [("virtual", "")]
         assert board.closed, "a device that could not bind its config was left open"
 
-        write_config_values(values, {"1": (2.0, "ms")})
+        write_config_values(values, {"timing": (2.0, "ms")})
         board.refuse = True
         with pytest.raises(RuntimeError, match="refused the entries"):
             presenter._dial("virtual", "")
@@ -1664,7 +1661,7 @@ def test_a_config_file_binding_failure_closes_the_new_connection(tmp_path, monke
         assert presenter._dial("virtual", "") is board
         assert not board.closed
         entries, source = board.loaded
-        assert entries["1"][0] == 2.0 and source == str(values)
+        assert entries["timing"][0] == 2.0 and source == str(values)
     finally:
         presenter.close()
 
@@ -2625,38 +2622,39 @@ def test_a_dot_binds_a_field_into_a_scan_column(presenter, sequence) -> None:
     schedule = presenter.view.schedule_view
     period_id = sequence.periods[3].period_id
 
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
 
-    assert [slot.field_ref.period_id for slot in presenter.sequence.slots] == [period_id]
+    assert [slot.field_ref.period_id for slot in presenter.sequence.scan_bindings] == [period_id]
     assert presenter.view.scan_view.page is not None
     assert "Bound" in presenter.view.scan_view.page.slots_text
 
 
-def test_the_dot_cycles_off_scan_api_off(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
+def test_scan_and_source_are_independent_and_preserve_scan_columns(presenter, sequence) -> None:
     period_id = sequence.periods[3].period_id
-
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
-    assert len(presenter.sequence.slots) == 1
-    assert presenter.sequence.api_parameters == ()
-
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
-    assert presenter.sequence.slots == ()
-    assert len(presenter.sequence.api_parameters) == 1
-    assert presenter.sequence.api_parameters[0].field_ref.period_id == period_id
-
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
-    assert presenter.sequence.slots == ()
-    assert presenter.sequence.api_parameters == ()
-
+    other_id = sequence.periods[2].period_id
+    presenter.view.binding_committed.emit("duration", period_id, None, True, "default")
+    presenter.view.binding_committed.emit("duration", other_id, None, True, "default")
+    fields = tuple(b.field_id for b in presenter.sequence.scan_bindings)
+    presenter._edit_state(scan_rows=((1.0, 2.0),))
+    for source in ("api", "config", "default"):
+        presenter.view.binding_committed.emit("duration", period_id, None, True, source)
+        assert tuple(b.field_id for b in presenter.sequence.scan_bindings) == fields
+        assert presenter.state.scan_rows == ((1.0, 2.0),)
+        current = next(b for b in presenter.sequence.bindings if b.field_id == fields[0])
+        assert current.source == source and current.scan
+    presenter.view.binding_committed.emit("duration", period_id, None, False, "api")
+    assert len(presenter.sequence.scan_bindings) == 1
+    assert presenter.sequence.api_bindings[0].field_id == fields[0]
+    presenter.view.binding_committed.emit("duration", period_id, None, False, "default")
+    assert not presenter.sequence.api_bindings
 
 def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> None:
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     period_id = sequence.periods[3].period_id
     dac = _dac_port(sequence)
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
-    presenter.view.binding_cycle_requested.emit("analog", period_id, dac.key)
+    presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
+    presenter.view.binding_committed.emit('analog', period_id, dac.key, True, 'default')
 
     presenter.view.scan_template_requested.emit("column_stack")
 
@@ -2669,7 +2667,7 @@ def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> No
 def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequence) -> None:
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
-    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
 
     _run_scan(
         presenter.view,
@@ -2690,7 +2688,7 @@ def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
 
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
-    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
 
     _run_scan(
         presenter.view,
@@ -2704,7 +2702,7 @@ def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
 def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, sequence) -> None:
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
-    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
     _run_scan(
         presenter.view,
         "import numpy as np\nscan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
@@ -2726,7 +2724,7 @@ def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, s
     board.events.clear()
     schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
-    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
     _run_scan(
         presenter.view,
         "import numpy as np\nscan_table = (np.arange(5) + 1).reshape(-1, 1) * 0.001\n"
@@ -2761,7 +2759,7 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     board.events.clear()
     period_id = sequence.periods[3].period_id
     presenter.view.duration_committed.emit(period_id, 1.0, "s")
-    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
     # The authored duration is long and its span needs a two-tick slot scale.
     # The board receives signed deltas around the one-second base, while Sync
     # must report the exact values those deltas play rather than the
@@ -2793,19 +2791,12 @@ def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> Non
     # One host-only API parameter plus one scan field with no table still
     # prepares a fully static source.  If status compiled the authoring
     # document directly, unresolved API would make its digest empty forever.
-    view.binding_cycle_requested.emit(
-        "duration", sequence.periods[1].period_id, None
-    )
-    view.binding_cycle_requested.emit(
-        "duration", sequence.periods[1].period_id, None
-    )
-    view.binding_cycle_requested.emit(
-        "duration", sequence.periods[3].period_id, None
-    )
+    view.binding_committed.emit("duration", sequence.periods[1].period_id, None, False, "api")
+    view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
     presenter.fire()
     assert view.status_token == "running-synced"
-    assert board._applied.source.api_parameters == ()
-    assert board._applied.source.slots == ()
+    assert board._applied.source.api_bindings == ()
+    assert board._applied.source.scan_bindings == ()
 
     # Arming a real table changes only scan state, not PulseSequence revision:
     # it must still invalidate the prepared-program digest immediately.
@@ -2817,8 +2808,8 @@ def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> Non
     assert view.status_token == "running-stale"
     presenter.fire()
     assert view.status_token == "running-synced"
-    assert len(board._applied.source.slots) == 1
-    assert board._applied.source.api_parameters == ()
+    assert len(board._applied.source.scan_bindings) == 1
+    assert board._applied.source.api_bindings == ()
 
     # Editing while it runs means the board is playing something older.
     view.duration_committed.emit(sequence.periods[0].period_id, "7", "us")
@@ -2905,9 +2896,7 @@ def test_stepping_is_offered_only_once_there_is_a_table(presenter, sequence) -> 
     presenter.connect_to("virtual", "")
     assert presenter.view.capabilities[2] is False
 
-    presenter.view.binding_cycle_requested.emit(
-        "duration", sequence.periods[3].period_id, None
-    )
+    presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
     _run_scan(
         presenter.view,
         "import numpy as np\nscan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
@@ -2942,9 +2931,7 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
 
     from zlc_pulse.scan import scan_columns_for, validate_scan_table
 
-    presenter.view.binding_cycle_requested.emit(
-        "duration", presenter.sequence.periods[3].period_id, None
-    )
+    presenter.view.binding_committed.emit('duration', presenter.sequence.periods[3].period_id, None, True, 'default')
     columns = scan_columns_for(presenter.sequence)
     assert columns, "no slot was bound"
 
@@ -3229,107 +3216,48 @@ def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> 
         presenter.close()
 
 
-@pytest.mark.parametrize("steps,kind", ((1, "scan"), (2, "api"), (3, "config")))
-def test_binding_numbers_survive_unselection_and_reuse_the_first_gap(sequence, steps, kind) -> None:
+def test_field_identity_survives_binding_changes_and_renaming(sequence) -> None:
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence)
-    periods = tuple(period.period_id for period in sequence.periods[:4])
-
-    def numbers():
-        return {
-            card.period_id: card.duration.binding_number
-            for card in view.schedule_view.schedule.periods
-            if card.duration.binding_kind == kind
-        }
-
     try:
-        for period in periods:
-            for _ in range(steps):
-                presenter.cycle_binding("duration", period, None)
-        assert numbers() == dict(zip(periods, (1, 2, 3, 4)))
-        for _ in range(4 - steps):
-            presenter.cycle_binding("duration", periods[1], None)
-        assert numbers() == dict(zip((periods[0], periods[2], periods[3]), (1, 3, 4)))
-        for _ in range(steps):
-            presenter.cycle_binding("duration", periods[1], None)
-        assert numbers() == dict(zip(periods, (1, 2, 3, 4)))
+        period = sequence.periods[0].period_id
+        presenter.set_binding("duration", period, None, True, "api")
+        original = presenter.sequence.bindings[0].field_id
+        presenter.set_period_name(period, "renamed_period")
+        presenter.set_binding("duration", period, None, True, "config")
+        presenter.set_config_binding(original, "shared_time")
+        assert presenter.sequence.bindings[0].field_id == original
+        assert presenter.sequence.bindings[0].config_key == "shared_time"
+        presenter.set_binding("duration", period, None, False, "default")
+        assert presenter.sequence.bindings == ()
+        presenter.set_binding("duration", period, None, True, "default")
+        assert presenter.sequence.bindings[0].field_id == original
     finally:
         presenter.close()
 
-
-def test_every_bindable_field_shows_the_slot_it_is_bound_to(sequence) -> None:
-    """The dot has always been able to say which column a field became.
-
-    FluentScanLineEdit takes a binding and a number and paints an orange s1 or
-    a violet API mark, and nothing ever told it: the projection built every
-    field as a bare value, so a duration bound to a slot looked exactly like
-    one that was not bound at all.  The bind took; the screen never said so.
-    """
-
+def test_every_bindable_field_shows_scan_and_value_source(sequence) -> None:
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence)
     try:
-        period = presenter.sequence.periods[0].period_id
-        dac = next(
-            port.key
-            for port in presenter.sequence.target.ports
-            if port.kind == "dac"
-        )
-        delayable = next(
-            port.key
-            for port in presenter.sequence.target.ports
-            if port.kind == "digital"
-        )
-
-        presenter.cycle_binding("duration", period, None)      # -> scan
-        presenter.cycle_binding("analog", period, dac)         # -> scan
-        presenter.cycle_binding("delay", None, delayable)      # -> api
-
+        period = sequence.periods[0].period_id
+        dac = next(port.key for port in sequence.target.ports if port.kind == "dac")
+        digital = next(port.key for port in sequence.target.ports if port.kind == "digital")
+        presenter.set_binding("duration", period, None, True, "api")
+        presenter.set_binding("analog", period, dac, True, "config")
+        presenter.set_binding("delay", None, digital, False, "api")
         schedule = view.schedule_view.schedule
         card = next(item for item in schedule.periods if item.period_id == period)
-        assert card.duration.binding_kind == "scan"
-        assert card.duration.binding_number >= 1
-
         analog = {key: field for key, _mode, field in card.analog}
-        assert analog[dac].binding_kind == "scan"
-        assert analog[dac].binding_number >= 1
-        assert not analog[dac].value_is_typed if hasattr(analog[dac], "value_is_typed") else True
-
-        row = next(item for item in schedule.delay_rows if item.port_key == delayable)
-        assert row.value.binding_kind == "api"
-
-        # A number is allocated within its OWN collection, so the two scan slots
-        # are 1 and 2 and the API parameter is 1 again -- what identifies a
-        # binding on screen is the pair, and the dot is filled in the kind's
-        # colour beside the digit.
-        marks = {
-            (card.duration.binding_kind, card.duration.binding_number),
-            (analog[dac].binding_kind, analog[dac].binding_number),
-            (row.value.binding_kind, row.value.binding_number),
-        }
-        assert marks == {("scan", 1), ("scan", 2), ("api", 1)}, marks
-
-        # Cycling on through every owner and off again.  A field carries the
-        # same name and unit the whole way round: the physical thing does not
-        # change, only who supplies its number.
-        def duration_card():
-            return next(
-                item
-                for item in view.schedule_view.schedule.periods
-                if item.period_id == period
-            )
-
-        presenter.cycle_binding("duration", period, None)      # scan   -> api
-        assert duration_card().duration.binding_kind == "api"
-        presenter.cycle_binding("duration", period, None)      # api    -> config
-        assert duration_card().duration.binding_kind == "config"
-        assert len(presenter.sequence.config_parameters) == 1
-        presenter.cycle_binding("duration", period, None)      # config -> off
-        assert duration_card().duration.binding_kind == ""
-        assert presenter.sequence.config_parameters == ()
+        delay = next(item.value for item in schedule.delay_rows if item.port_key == digital)
+        assert (card.duration.scan, card.duration.source, card.duration.editable) == (True, "api", True)
+        assert (analog[dac].scan, analog[dac].source, analog[dac].editable) == (True, "config", True)
+        assert not delay.can_scan and not delay.scan and delay.source == "api"
+        for source in ("default", "api", "config"):
+            presenter.set_binding("duration", period, None, True, source)
+            card = next(item for item in view.schedule_view.schedule.periods if item.period_id == period)
+            assert card.duration.scan and card.duration.source == source and card.duration.editable
     finally:
         presenter.close()
-
 
 def test_showing_every_row_grows_the_preview_widget_too(sequence) -> None:
     """The canvas was sized once, at mount, and never again.
@@ -3434,7 +3362,7 @@ def test_the_scan_page_says_what_to_do_before_it_says_what_failed(sequence) -> N
     view.open_answer = "/nowhere/table.npy"
     presenter = PulseEditorPresenter(view, sequence)
     try:
-        assert not presenter.sequence.slots, "this fixture starts unbound"
+        assert not presenter.sequence.scan_bindings, "this fixture starts unbound"
 
         presenter.edit_scan_source("scan_table = [[1]]")
         assert presenter.run_scan_program() is False
@@ -3461,7 +3389,7 @@ def test_new_pulse_replaces_the_whole_editor_state_in_one_candidate(
     )
     try:
         period_id = sequence.periods[3].period_id
-        view.binding_cycle_requested.emit("duration", period_id, None)
+        view.binding_committed.emit('duration', period_id, None, True, 'default')
         _run_scan(
             view,
             "import numpy as np\nscan_table = np.array([[0.001], [0.002]])\n",
@@ -3542,7 +3470,7 @@ def test_the_selectors_switch_reaches_the_plot_in_both_directions(presenter) -> 
 
 def test_a_bound_field_is_drawn_where_it_happens(presenter, sequence) -> None:
     """Binding is the most consequential edit on this page, and the picture
-    did not show it: zlc_plot has drawn numbered scan regions and coloured DAC
+    did not show it: zlc_plot has drawn labelled scan regions and coloured DAC
     segments all along, and nothing ever built one, so a bound pulse and an
     unbound one previewed identically."""
 
@@ -3552,16 +3480,15 @@ def test_a_bound_field_is_drawn_where_it_happens(presenter, sequence) -> None:
     dac = next(port for port in sequence.target.ports if port.kind == "dac")
     presenter.set_analog(sequence.periods[1].period_id, dac.key, "edge", 200)
 
-    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    view.binding_cycle_requested.emit("analog", sequence.periods[1].period_id, dac.key)
-    view.binding_cycle_requested.emit("analog", sequence.periods[1].period_id, dac.key)
+    view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
+    view.binding_committed.emit("analog", sequence.periods[1].period_id, dac.key, False, "api")
 
     data = timeline_of(presenter.sequence, include_off=True)
     region = next(iter(data.scan_regions))
     segment = next(iter(data.scan_dac_segments))
     # Over the period whose duration is swept, badged with the column an
     # operator will find it in.
-    assert region.number == 1 and region.kind == "scan"
+    assert region.label == "S" and region.kind == "scan"
     # And on the trace whose level is written -- by a host, one row at a time,
     # which is what the second press means and what the colour will say.
     assert segment.trace_name == dac.key and segment.kind == "api"
@@ -3591,17 +3518,14 @@ def test_a_config_binding_is_not_drawn_and_does_not_stop_the_drawing(
     presenter.set_analog(sequence.periods[1].period_id, dac.key, "edge", 200)
 
     # One duration swept by a table, and one duration plus one DAC level held
-    # as the board's own numbers.  Three presses is the whole cycle.
-    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    for _ in range(3):
-        view.binding_cycle_requested.emit(
-            "duration", sequence.periods[2].period_id, None
-        )
-        view.binding_cycle_requested.emit("analog", sequence.periods[1].period_id, dac.key)
-    assert len(presenter.sequence.config_parameters) == 2
+    # as the board's own numbers.  Binding selection is explicit.
+    view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
+    view.binding_committed.emit("duration", sequence.periods[2].period_id, None, False, "config")
+    view.binding_committed.emit("analog", sequence.periods[1].period_id, dac.key, False, "config")
+    assert len(presenter.sequence.config_bindings) == 2
 
     data = timeline_of(presenter.sequence, include_off=True)
-    # The scan binding still draws, with the number the form shows beside it.
+    # The scan binding still draws, with the same label as the field button.
     assert [region.kind for region in data.scan_regions] == ["scan"]
     assert not data.scan_dac_segments
 
@@ -3671,7 +3595,7 @@ def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) 
     view = presenter.view
     assert view.schedule_view.schedule.scan_summary_text == "no scan slots"
 
-    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
     assert view.schedule_view.schedule.scan_summary_text == "1 slot - 0 pts"
 
     _run_scan(
@@ -3700,7 +3624,7 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
     board.events.clear()
     period_id = sequence.periods[3].period_id
     view.duration_committed.emit(period_id, 1.0, "s")
-    view.binding_cycle_requested.emit("duration", period_id, None)
+    view.binding_committed.emit('duration', period_id, None, True, 'default')
     _run_scan(
         view,
         "import numpy as np\n"
@@ -3746,11 +3670,10 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     assert presenter.adopt_board() is True
     board.events.clear()
     view = presenter.view
-    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    view.binding_cycle_requested.emit("duration", sequence.periods[1].period_id, None)
-    view.binding_cycle_requested.emit("duration", sequence.periods[1].period_id, None)
-    assert len(presenter.sequence.slots) == 1
-    assert len(presenter.sequence.api_parameters) == 1
+    view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
+    view.binding_committed.emit("duration", sequence.periods[1].period_id, None, False, "api")
+    assert len(presenter.sequence.scan_bindings) == 1
+    assert len(presenter.sequence.api_bindings) == 1
     _run_scan(
         view,
         "import numpy as np\n"
@@ -3774,8 +3697,8 @@ def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
     assert uploaded[-1] == (7, 1)
     assert board._run_repeats == 2
     assert board._scan_repeats == 3
-    assert len(board._applied.source.slots) == 1
-    assert board._applied.source.api_parameters == ()
+    assert len(board._applied.source.scan_bindings) == 1
+    assert board._applied.source.api_bindings == ()
     # And a counted number of sweeps is a finite run: wrapping it in the outer
     # forever would repeat the whole scan endlessly and the count would mean
     # nothing.
@@ -3807,19 +3730,16 @@ def test_scan_repeats_govern_nothing_when_no_scan_is_left(presenter, sequence) -
     view = presenter.view
     period = sequence.periods[3].period_id
 
-    view.binding_cycle_requested.emit("duration", period, None)
+    view.binding_committed.emit('duration', period, None, True, 'default')
     _run_scan(
         view,
         "import numpy as np\n"
         "scan_table = (np.arange(4) + 1).reshape(-1, 1) * 0.001\n"
     )
     view.scan_repeats_committed.emit(3)
-    # scan -> api -> config -> off: the field is unbound again.
-    view.binding_cycle_requested.emit("duration", period, None)
-    view.binding_cycle_requested.emit("duration", period, None)
-    view.binding_cycle_requested.emit("duration", period, None)
-    assert not presenter.sequence.slots
-    assert not presenter.sequence.config_parameters
+    view.binding_committed.emit("duration", period, None, False, "default")
+    assert not presenter.sequence.scan_bindings
+    assert not presenter.sequence.config_bindings
 
     board.events.clear()
     assert presenter.fire() is True
@@ -3871,17 +3791,17 @@ def test_every_dac_in_one_period_can_be_bound(presenter, sequence) -> None:
     assert len(dacs) >= 2, "this board has only one DAC to bind"
 
     for port in dacs:
-        presenter.cycle_binding("analog", period_id, port.key)
+        presenter.set_binding('analog', period_id, port.key, True, 'default')
 
     bound = {
         (slot.field_ref.period_id, slot.field_ref.port)
-        for slot in presenter.sequence.slots
+        for slot in presenter.sequence.scan_bindings
         if slot.field_ref.kind == "dac"
     }
     assert bound == {(period_id, port.key) for port in dacs}, presenter.view.warnings
     assert not [text for text in presenter.view.warnings if "unique" in text]
 
-    ids = [slot.slot_id for slot in presenter.sequence.slots]
+    ids = [slot.field_id for slot in presenter.sequence.scan_bindings]
     assert len(ids) == len(set(ids)), ids
 
 
@@ -4188,7 +4108,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
 
         period_id = sequence.periods[3].period_id
         view.duration_committed.emit(period_id, 1.0, "s")
-        view.binding_cycle_requested.emit("duration", period_id, None)
+        view.binding_committed.emit('duration', period_id, None, True, 'default')
         _run_scan(
             view,
             "import numpy as np\nscan_table = np.array([0.5, 1.0, 1.5]).reshape(-1, 1)\n",
@@ -4263,20 +4183,18 @@ def test_a_rebuild_never_silently_unbinds_a_config_parameter(presenter, sequence
     """
 
     period = sequence.periods[3].period_id
-    presenter.cycle_binding("duration", period, None)   # -> scan
-    presenter.cycle_binding("duration", period, None)   # -> api
-    presenter.cycle_binding("duration", period, None)   # -> config
-    (bound,) = presenter.sequence.config_parameters
+    presenter.set_binding("duration", period, None, False, "config")
+    (bound,) = presenter.sequence.config_bindings
 
     presenter.set_document_name("renamed")
     assert presenter.sequence.name == "renamed"
-    assert presenter.sequence.config_parameters == (bound,), (
+    assert presenter.sequence.config_bindings == (bound,), (
         "a rename dropped the config binding"
     )
 
     presenter.set_duration(period, 6, "ms")
     assert presenter.sequence.period_by_id[period].duration == 6
-    assert presenter.sequence.config_parameters == (bound,), (
+    assert presenter.sequence.config_bindings == (bound,), (
         "a typed duration dropped the config binding"
     )
 
@@ -4284,21 +4202,17 @@ def test_a_rebuild_never_silently_unbinds_a_config_parameter(presenter, sequence
     # unrelated change.
     rebuilt = replace_sequence(presenter.sequence, run_repeats=3)
     assert rebuilt.run_repeats == 3
-    assert rebuilt.config_parameters == (bound,)
+    assert rebuilt.config_bindings == (bound,)
     assert rebuilt == replace(presenter.sequence, run_repeats=3)
 
 
 
 def _bind_one_config_parameter(presenter, sequence):
-    """Cycle one duration all the way round to CONFIG, and say what it became."""
-
     period = sequence.periods[3].period_id
-    for _ in range(3):  # off -> scan -> api -> config
-        presenter.view.binding_cycle_requested.emit("duration", period, None)
-    declared = presenter.sequence.config_parameters
-    assert len(declared) == 1, declared
-    return declared[0]
-
+    presenter.view.binding_committed.emit("duration", period, None, False, "config")
+    (binding,) = presenter.sequence.config_bindings
+    presenter.set_config_binding(binding.field_id, "shared_time")
+    return presenter.sequence.config_bindings[0]
 
 def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
     sequence, tmp_path
@@ -4317,19 +4231,18 @@ def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
         parameter = _bind_one_config_parameter(presenter, sequence)
         period = parameter.field_ref.period_id
         api_period = sequence.periods[1]
-        for _ in range(2):
-            presenter.cycle_binding("duration", api_period.period_id, None)
-        presenter.cycle_binding("duration", sequence.periods[2].period_id, None)
+        presenter.set_binding("duration", api_period.period_id, None, False, "api")
+        presenter.set_binding('duration', sequence.periods[2].period_id, None, True, 'default')
         authored_sequence = presenter.sequence
         authored = authored_sequence.period_by_id[period].duration
         path = tmp_path / "config.json"
-        write_config_values(path, {"1": (authored + 20.0, parameter.unit)})
+        write_config_values(path, {"shared_time": (authored + 20.0, parameter.unit)})
         view.open_answer = str(path)
         assert presenter.load_config_values()
         worker.deliver_until(lambda: not presenter._device_busy)
         assert presenter.sequence is authored_sequence
         for amount in (20.0, 40.0):
-            write_config_values(path, {"1": (authored + amount, parameter.unit)})
+            write_config_values(path, {"shared_time": (authored + amount, parameter.unit)})
             view.fire_requested.emit()
             worker.deliver_until(lambda: not presenter._device_busy)
             assert presenter.sequence is authored_sequence
@@ -4347,74 +4260,72 @@ def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
         edited = presenter.sequence
         worker.deliver_until(lambda: not presenter._device_busy)
         assert presenter.sequence is edited
-        assert edited.api_parameters == authored_sequence.api_parameters
-        assert edited.slots == authored_sequence.slots
-        assert edited.config_parameters == authored_sequence.config_parameters
+        assert edited.api_bindings == authored_sequence.api_bindings
+        assert edited.scan_bindings == authored_sequence.scan_bindings
+        assert edited.config_bindings == authored_sequence.config_bindings
         assert edited.period_by_id[period].duration == authored
         assert board._applied.source.period_by_id[period].duration == authored
         assert not presenter.synchronized
         assert "applied" not in board.events, "On Pulse added an applied-state query"
-        view.open_answer = ""
-        assert presenter.load_config_values()
+        assert presenter.unload_config()
         assert presenter._device_busy, "clear must return through the device worker"
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.config_values() == {} and board.config_source == ""
-        assert presenter.sequence is edited and view.done[-1] == "Config cleared"
+        assert presenter.sequence is edited
     finally:
         presenter.close()
 
 
-def test_editor_config_can_be_saved_offline_and_loaded_without_firing_first(
+def test_editor_config_draft_is_independent_and_only_saved_values_execute(
     presenter, sequence, tmp_path
 ) -> None:
-    """Save reads the editor; Load supplies optional sequencer overrides."""
-
-    from zlc_pulse import read_config_values, config_values_from_tree
-    from zlc_pulse import pulse_field_value
+    from zlc_pulse import read_config_values, config_values_from_tree, pulse_field_value
 
     saved = tmp_path / "config.json"
     presenter.view.save_answer = str(saved)
-    assert presenter.sequencer is None
-    assert presenter.save_config_values()
-    assert read_config_values(saved)[2] == {}
     parameter = _bind_one_config_parameter(presenter, sequence)
     period = parameter.field_ref.period_id
-    presenter.set_period_name(period, "MOT")
+    # A scan-capable field still consumes Config when no Scan table is active.
+    presenter.set_binding("duration", period, None, True, "config")
     value = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
+    presenter.edit_config_entries((("shared_time", str(value + 20), parameter.unit),))
+    assert presenter.view.config_page.dirty
+    assert presenter._effective_sequence(presenter.sequence).period_by_id[period].duration == value
     assert presenter.save_config_values()
-    assert read_config_values(saved)[2] == {"1": (value, parameter.unit)}
+    assert not presenter.view.config_page.dirty
+    assert read_config_values(saved) == {"shared_time": (value + 20, parameter.unit)}
     tree = json.loads(saved.read_text(encoding="utf-8"))
-    assert tree["values"]["1"]["field"] == "MOT.duration"
-    tree["values"]["1"]["field"] = "Cooling.delay"
-    assert config_values_from_tree(tree)[2] == {"1": (value, parameter.unit)}
-    tree["values"]["1"]["field"] = 1
-    with pytest.raises(TypeError, match="field must be text"):
+    assert set(tree) == {"format", "values"}
+    assert set(tree["values"]["shared_time"]) == {"value", "unit"}
+    tree["source"] = "old"
+    with pytest.raises(ValueError, match="unknown"):
         config_values_from_tree(tree)
-    del tree["values"]["1"]["field"]
-    assert config_values_from_tree(tree)[2] == {"1": (value, parameter.unit)}
-
+    # Save consumes human-edited Config rows, not changed Pulse defaults.
+    presenter.set_duration(period, value + 40, parameter.unit)
+    presenter.edit_config_entries((("shared_time", str(value + 60), parameter.unit),))
+    presenter.view.discard_config_answer = False
+    assert not presenter.refresh_config_values()
+    assert presenter.view.config_page.dirty
+    assert read_config_values(saved)["shared_time"][0] == value + 20
+    assert presenter._effective_sequence(presenter.sequence).period_by_id[period].duration == value + 20
+    assert presenter.save_config_values()
+    assert read_config_values(saved)["shared_time"][0] == value + 60
     board = _Sequencer()
     presenter.sequencer = board
-    assert presenter.adopt_board() is True
-    # Empty loaded set is legal and is not silently populated by On Pulse.
-    board.events.clear()
-    assert presenter.fire()
-    assert board.config_values() == {}
-    presenter.stop()
-
-    board.load_config_values({"1": (value, parameter.unit), "99": (1.0, "ns")})
-    presenter.view.duration_committed.emit(period, value + 40.0, parameter.unit)
-    board.events.clear()
-    assert presenter.save_config_values()
-    assert board.events == []
-    assert board.config_values()["1"][0] == value
-    assert read_config_values(saved)[2] == {"1": (value + 40.0, parameter.unit)}
+    assert presenter.adopt_board()
     presenter.view.open_answer = str(saved)
     assert presenter.load_config_values()
-    assert board.config_values() == {"1": (value + 40.0, parameter.unit)}
     assert presenter.fire()
-    assert pulse_field_value(board._applied.source, parameter.field_ref, parameter.unit) == value + 40.0
-
+    assert pulse_field_value(board._applied.source, parameter.field_ref, parameter.unit) == value + 60
+    presenter.stop()
+    assert presenter.unload_config()
+    assert presenter.refresh_config_values()
+    assert board.config_values() == {}
+    assert presenter.view.config_page.active_path == ""
+    assert presenter.view.config_page.entries == (("shared_time", str(value + 60).removesuffix(".0"), parameter.unit),)
+    presenter.view.open_answer = ""
+    assert not presenter.load_config_values()
+    assert presenter.view.config_page.file_path == str(saved)
 
 def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
     presenter, sequence, tmp_path
@@ -4439,7 +4350,7 @@ def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
     def give(value: float, name: str) -> None:
         path = tmp_path / name
         write_config_values(
-            path, {"1": (value, parameter.unit)}, name=name
+            path, {"shared_time": (value, parameter.unit)}
         )
         presenter.view.open_answer = str(path)
         assert presenter.load_config_values() is True
@@ -4450,12 +4361,11 @@ def test_loading_a_set_moves_the_stale_dot_without_a_document_edit(
 
     give(authored * 2, "second.json")
     assert presenter._shown_digest() != first
-    assert presenter.view.schedule_view.connection.config_source.endswith("second.json")
-    presenter.view.open_answer = ""
-    assert presenter.load_config_values() is True
+    assert presenter.view.config_page.active_path.endswith("second.json")
+    assert presenter.unload_config() is True
     assert board.config_values() == {} and board.config_source == ""
     assert presenter._shown_digest() == first
-    assert presenter.view.schedule_view.connection.config_source == ""
+    assert presenter.view.config_page.active_path == ""
 
 
 def test_the_connection_box_names_the_set_the_board_is_holding(
@@ -4468,6 +4378,6 @@ def test_the_connection_box_names_the_set_the_board_is_holding(
     board.load_config_values({}, source="/bench/config_values/current.json")
     assert presenter.adopt_board() is True
 
-    shown = presenter.view.schedule_view.connection
-    assert shown.config_source == "/bench/config_values/current.json"
+    shown = presenter.view.config_page
+    assert shown.active_path == "/bench/config_values/current.json"
 

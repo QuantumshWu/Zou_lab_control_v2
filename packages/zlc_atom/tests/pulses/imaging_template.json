@@ -450,40 +450,41 @@
       "analog_steps": []
     }
   ],
-  "slots": [],
-  "api_parameters": [
+  "bindings": [
     {
-      "parameter_id": "reference_probe_duration_before",
-      "number": 1,
-      "unit": "s",
       "field_ref": {
         "kind": "duration",
         "period_id": "long_before",
         "port": null
-      }
+      },
+      "unit": "s",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     },
     {
-      "parameter_id": "readout_probe_duration",
-      "number": 2,
-      "unit": "s",
       "field_ref": {
         "kind": "duration",
         "period_id": "short",
         "port": null
-      }
+      },
+      "unit": "s",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     },
     {
-      "parameter_id": "reference_probe_duration_after",
-      "number": 3,
-      "unit": "s",
       "field_ref": {
         "kind": "duration",
         "period_id": "long_after",
         "port": null
-      }
+      },
+      "unit": "s",
+      "scan": false,
+      "source": "api",
+      "config_key": ""
     }
   ],
-  "config_parameters": [],
   "delays": [],
   "bracket": null,
   "run_repeats": 0

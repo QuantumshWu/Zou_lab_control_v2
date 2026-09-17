@@ -23,7 +23,7 @@ from zlc_pulse import (
     load_streamer_config,
     resolve_api_parameters,
 )
-from zlc_pulse.device import BoardDescription, ConfigValueHolder
+from zlc_pulse.device import AppliedState, BoardDescription, ConfigValueHolder
 from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
 from zlc_atom.authoring import AuthoringField, TunableField
@@ -72,8 +72,6 @@ class _FakeSequencer(ConfigValueHolder):
         self.board = BoardDescription(
             sequence.target, settings["params"], settings["clock_hz"]
         )
-        from zlc_pulse import authored_config_entries
-        self.load_config_values(authored_config_entries(sequence))
         self.fires = 0
         self.safe_calls = 0
         self.on_safe = None
@@ -86,11 +84,17 @@ class _FakeSequencer(ConfigValueHolder):
         if self.on_safe is not None:
             self.on_safe()
 
-    def load(self, program, **_kwargs) -> None:
+    def load(self, program, **kwargs) -> None:
         self.program = program
+        self._applied = AppliedState(program, kwargs.get("source"), tuple(kwargs.get("rows", ())), 1, 1, 0.0)
 
-    def fire(self, **_kwargs) -> None:
+    def fire(self, **kwargs) -> None:
         self.fires += 1
+        from dataclasses import replace
+        self._applied = replace(self._applied, run_repeats=kwargs["run_repeats"], scan_repeats=kwargs.get("scan_repeats", 1))
+
+    def applied(self):
+        return self._applied
 
     def wait_done(self, _timeout):
         return SimpleNamespace(fault=None)
@@ -199,7 +203,7 @@ class _Context:
 
 TEMPLATE_NAME = "mot_field_template.json"
 BIAS_PORTS = tuple(
-    PULSE_PARAM_FAMILY + name
+    PULSE_PARAM_FAMILY + "dac:load:" + name
     for name in ("da_bias_x", "da_bias_y", "da_bias_z")
 )
 #: Long enough that no scheduling jitter could produce it, short enough to pay.

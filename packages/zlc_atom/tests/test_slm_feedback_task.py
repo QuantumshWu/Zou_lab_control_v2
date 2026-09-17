@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from zlc_data.figure_archive import read_archive
 from zlc_pulse import PulseSequence
-from zlc_pulse.device import DoneReport
+from zlc_pulse.device import AppliedState, DoneReport
 from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR, STATUS_RUNNING, STATUS_UNDERFLOW, STATUS_LINK_ERROR
 from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
@@ -81,9 +81,9 @@ FEEDBACK_PULSE_SEQUENCE = PulseSequence(
         for period in _IMAGING_SEQUENCE.periods
         if period.period_id in _FEEDBACK_PERIOD_IDS
     ),
-    api_parameters=tuple(
+    bindings=tuple(
         parameter
-        for parameter in _IMAGING_SEQUENCE.api_parameters
+        for parameter in _IMAGING_SEQUENCE.api_bindings
         if parameter.field_ref.period_id in _FEEDBACK_PERIOD_IDS
     ),
     delays=_IMAGING_SEQUENCE.delays,
@@ -467,6 +467,19 @@ def _task(
     feedback_gain: float = 0.25,
     feedback_mode: str = "qcmos_bright_dark",
 ) -> SlmFeedbackTask:
+    # Numerical-controller cases mock the measurement but still model LOAD's
+    # accepted-program readback; hardware-path doubles provide AppliedState.
+    if isinstance(sequencer, SimpleNamespace) and not hasattr(sequencer, "applied"):
+        load = getattr(sequencer, "load", None)
+        if callable(load):
+            held = [None]
+
+            def load_program(program, **kwargs):
+                load(program, **kwargs)
+                held[0] = SimpleNamespace(program=program)
+
+            sequencer.load = load_program
+            sequencer.applied = lambda: held[0]
     if science_context is None:
         if target is None:
             raise ValueError("test must supply a Target or Science Context")
@@ -2191,6 +2204,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
     class Sequencer:
         def __init__(self) -> None:
             self.loaded = None
+            self._applied = None
             self.fires: list[int | None] = []
 
         def describe(self):
@@ -2199,9 +2213,14 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         def load(self, program, *, source=None, rows=()) -> None:
             assert not rows
             self.loaded = (program, source)
+            self._applied = AppliedState(program, source, (), 0, 1, 0.0)
+
+        def applied(self):
+            return self._applied
 
         def fire(self, *, run_repeats, scan_repeats=1) -> None:
             assert scan_repeats == 1
+            self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
             self.fires.append(run_repeats)
             camera.trigger(int(run_repeats))
 
@@ -2286,7 +2305,9 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         assert device_record["device_snapshots"]["camera"][
             "exposure_seconds"
         ] == pytest.approx(0.020)
-        assert set(device_record["device_snapshots"]["sequencer"]) == {"state"}
+        sequencer_record = device_record["device_snapshots"]["sequencer"]
+        assert set(sequencer_record) == {"state", "program", "pulse"}
+        assert sequencer_record["program"]["digest"] == sequencer.applied().program.digest
         assert device_record["device_snapshots"]["slm"][
             "command_revision"
         ] == slm.command_revision
@@ -2380,15 +2401,20 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     class Sequencer:
         def __init__(self, camera):
             self.camera = camera
+            self._applied = None
 
         def describe(self):
             return object()
 
         def load(self, program, *, source=None, rows=()):
-            return None
+            self._applied = AppliedState(program, source, tuple(rows), 0, 1, 0.0)
+
+        def applied(self):
+            return self._applied
 
         def fire(self, *, run_repeats, scan_repeats=1):
             assert scan_repeats == 1
+            self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
             self.camera.trigger(int(run_repeats))
 
         def wait_done(self, timeout=None):
@@ -2482,6 +2508,7 @@ def test_measure_refuses_faults_without_repeating_the_authored_batch(
     class Sequencer:
         def __init__(self) -> None:
             self.digest = None
+            self._applied = None
             self.loads = 0
             self.fires: list[int | None] = []
             self.reports: list[DoneReport] = []
@@ -2492,12 +2519,16 @@ def test_measure_refuses_faults_without_repeating_the_authored_batch(
             return object()
 
         def load(self, program, *, source=None, rows=()) -> None:
-            del source, rows
+            self._applied = AppliedState(program, source, tuple(rows), 0, 1, 0.0)
             self.loads += 1
             self.digest = program.digest
 
+        def applied(self):
+            return self._applied
+
         def fire(self, *, run_repeats, scan_repeats=1) -> None:
             assert scan_repeats == 1
+            self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
             self.fires.append(run_repeats)
             played = int(run_repeats) if self.trigger_limit is None else self.trigger_limit
             self.trigger_limit = None
@@ -2844,7 +2875,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         },
     }
 
-    def run(name: str, metadata: dict[str, object]) -> list[dict[str, object]]:
+    def run(name: str, metadata: dict[str, object], *, actual_digest=_PROGRAM_DIGEST) -> list[dict[str, object]]:
         fits_served.clear()
         solved_targets.clear()
         context_mapping = _science_context(slm, target=target)
@@ -2856,7 +2887,11 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
             run_directory,
             slm=slm,
             camera=object(),
-            sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
+            sequencer=SimpleNamespace(
+                describe=lambda: object(), safe=lambda: None,
+                load=lambda *_args, **_kwargs: None,
+                applied=lambda: SimpleNamespace(program=SimpleNamespace(digest=actual_digest)),
+            ),
             plane=plane,
             calibration=_calibration_at(
                 np.column_stack((columns, rows)), shape=target.shape
@@ -2867,7 +2902,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         try:
             result = task.execute(_Context(run_directory))
             _phase, saved = _load_candidate(result["artifact_path"])
-            assert saved["program_digest"] == _PROGRAM_DIGEST
+            assert saved["program_digest"] == actual_digest
             assert solved_targets
             return _load_history(result["artifact_path"])
         finally:
@@ -2887,6 +2922,16 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
     assert history[0]["candidate_kind"] == "baseline"
     assert history[0]["probe_sites"] == [17]
     assert history[0]["decision"][17] == "hold_for_probe"
+
+    # Config is applied at LOAD, after pure compilation. Compatibility must
+    # follow what ran, even though resolve_pulse returned the same program.
+    configured_digest = "1" * 32
+    history = run("configured-program", prior, actual_digest=configured_digest)
+    assert history[0]["probe_sites"] == [17]
+    history = run("same-configured-program", {**prior, "program_digest": configured_digest},
+                  actual_digest=configured_digest)
+    assert history[0]["probe_sites"] == []
+    assert history[0]["decision"][17] == "single_bracket_midpoint"
 
 
 def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
@@ -3318,6 +3363,9 @@ def _virtual_feedback_bench(tmp_path: Path):
             signal_plane=plane,
             pulse_template=IMAGING_PULSE_RESOURCE.path.name,
             pulse_resource=IMAGING_PULSE_RESOURCE,
+            reference_before_field="duration:long_before",
+            readout_field="duration:short",
+            reference_after_field="duration:long_after",
             repeats=30,
         )
         calibration_result = calibration_node.run(tmp_path)

@@ -462,7 +462,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         *,
         device_ports: bool = True,
         hardware_slots: bool = False,
-        only_port: str | None = None,
         manual_axes: bool = False,
     ) -> None:
         super().__init__(parent)
@@ -471,11 +470,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # Only a node that can STOP between plays can offer one, so the
         # editor shows the button exactly where the node would honour it.
         self._manual_axes = bool(manual_axes)
-        # A node whose measurement IS about one knob -- release-recapture is a
-        # statement about t_off and nothing else -- offers that knob and no
-        # way to add a second.  The row is always there, so the form opens on
-        # something to edit instead of on an empty table.
-        self._only_port = None if only_port is None else str(only_port)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
@@ -485,14 +479,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.add_manual_button = FluentButton("Add manual axis", color=GREY)
         header.addWidget(title)
         header.addStretch(1)
-        if self._only_port is None:
-            header.addWidget(self.add_button)
-            if self._manual_axes:
-                header.addWidget(self.add_manual_button)
-            else:
-                self.add_manual_button.hide()
+        header.addWidget(self.add_button)
+        if self._manual_axes:
+            header.addWidget(self.add_manual_button)
         else:
-            self.add_button.hide()
             self.add_manual_button.hide()
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
@@ -501,7 +491,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.summary.setWordWrap(True)
         column.addWidget(self.summary)
 
-        # The pulse's API slots, set once for this run.  They are not axes:
+        # The pulse's API fields, set once for this run.  They are not axes:
         # nothing sweeps them, they are the numbers the pulse holds while the
         # table plays.  A slot the plan DOES scan is left out -- the table
         # already says what it plays, and two places saying it is one too many.
@@ -633,8 +623,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _apply_projection(self, ports, sequence, plan_text: str, values_text: str) -> None:
         """Adopt plain port metadata only on the widget's owner thread."""
         ports = label_device_scan_ports(ports, self._device_labels)
-        if self._only_port is not None:
-            ports = tuple(port for port in ports if port.port == self._only_port)
 
         ports_changed = tuple(ports) != self._ports
         if ports_changed:
@@ -710,9 +698,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         }
 
     def _reconcile_values(self, sequence: object) -> None:
-        """One row per API slot this run sets but does not sweep."""
+        """One row per API field this run sets but does not sweep."""
 
-        parameters = tuple(getattr(sequence, "api_parameters", ()) or ())
+        parameters = tuple(getattr(sequence, "api_bindings", ()) or ())
         scanned = self._scanned_parameters()
         self._sequence = sequence
         broken = ""
@@ -734,14 +722,14 @@ class ScanPlanEditor(QtWidgets.QWidget):
             else tuple(
                 parameter
                 for parameter in parameters
-                if parameter.parameter_id not in scanned
+                if parameter.field_id not in scanned
             )
         )
         overrides = self._current_overrides()
         fields = []
         values: dict[str, object] = {}
         for parameter in offered:
-            name = parameter.parameter_id
+            name = parameter.field_id
             authored, unit = self._authored[name]
             column = columns[name]
             # A DAC code comes in whole codes; everything else is a quantity
@@ -962,16 +950,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self.rows_layout.removeWidget(row)
                 retire_widget(row)
             self._rows = kept
-            if self._only_port is not None and not self._rows and self._ports:
-                self._attach_row(None)
         finally:
             self._loading = False
         self._align_columns()
 
     def _build_row(self, axis: Mapping | None) -> _AxisRow:
         row = _AxisRow(self._ports, axis, self, device_labels=self._device_labels)
-        if self._only_port is not None:
-            row.remove_button.hide()
         row.edited.connect(self._emit_plan)
         row.unit_change_requested.connect(self._convert_axis_unit)
         row.remove_requested.connect(self._remove_row)
@@ -1095,14 +1079,12 @@ def scan_plan_editor_factory(
     parent=None,
     *,
     device_ports: bool = True,
-    only_port: str | None = None,
     hardware_slots: bool = False,
     manual_axes: bool = False,
 ) -> ScanPlanEditor:
     return ScanPlanEditor(
         parent,
         device_ports=device_ports,
-        only_port=only_port,
         hardware_slots=hardware_slots,
         manual_axes=manual_axes,
     )

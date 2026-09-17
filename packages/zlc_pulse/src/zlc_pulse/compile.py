@@ -16,7 +16,7 @@ from .model import (
     PORT_DAC,
     PulseFieldRef,
     PulseSequence,
-    PulseSlot,
+    PulseBinding,
     exact_ticks,
 )
 from .wire import StreamerParams, build_fingerprint
@@ -282,10 +282,10 @@ def evaluate_affine_tick(base: int, coefficients: Sequence[int], point: Sequence
 
 
 def _slot_index(sequence: PulseSequence) -> dict[PulseFieldRef, int]:
-    return {slot.field_ref: index for index, slot in enumerate(sequence.slots)}
+    return {slot.field_ref: index for index, slot in enumerate(sequence.scan_bindings)}
 
 
-def _default_slot_value(sequence: PulseSequence, slot: PulseSlot) -> int:
+def _default_slot_value(sequence: PulseSequence, slot: PulseBinding) -> int:
     ref = slot.field_ref
     if ref.kind == FIELD_DURATION:
         # Duration slots are signed deltas around the period's full-width base.
@@ -299,7 +299,7 @@ def _default_slot_value(sequence: PulseSequence, slot: PulseSlot) -> int:
             # -- so the compiler is where a pulse read as a whole says which
             # binding has nothing to bind.
             raise ValueError(
-                f"scan slot {slot.slot_id!r} names the DAC field {ref.port!r} of "
+                f"scan slot {slot.field_id!r} names the DAC field {ref.port!r} of "
                 f"period {ref.period_id!r}, which has no step on that port"
             )
         port = sequence.target.by_key[ref.port]
@@ -310,7 +310,7 @@ def _default_slot_value(sequence: PulseSequence, slot: PulseSlot) -> int:
 def _nominal_slot_row(sequence: PulseSequence) -> tuple[int, ...]:
     """The authored values used only to validate the compiled affine form."""
 
-    return tuple(_default_slot_value(sequence, slot) for slot in sequence.slots)
+    return tuple(_default_slot_value(sequence, slot) for slot in sequence.scan_bindings)
 
 
 def _period_starts(
@@ -320,7 +320,7 @@ def _period_starts(
     slot_tick_scales: Sequence[int],
 ) -> list[tuple[int, tuple[int, ...]]]:
     coefficient_scale = 1 << frac_bits
-    zeros = tuple(0 for _ in sequence.slots)
+    zeros = tuple(0 for _ in sequence.scan_bindings)
     starts: list[tuple[int, tuple[int, ...]]] = [(0, zeros)]
     for period in sequence.periods:
         selector = binding.get(PulseFieldRef(FIELD_DURATION, period.period_id))
@@ -370,7 +370,7 @@ def _effective_rows(
         if active is not None:
             events.setdefault(active, []).append((lane, 1))
             events.setdefault(starts[-1], []).append((lane, 0))
-    zeros = (0, tuple(0 for _ in sequence.slots))
+    zeros = (0, tuple(0 for _ in sequence.scan_bindings))
     events.setdefault(zeros, [])
     events.setdefault(starts[-1], [])
     if sequence.bracket is not None:
@@ -564,9 +564,9 @@ def compile_sequence(
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
     sequence.require_nonempty_bracket()
-    if sequence.api_parameters:
+    if sequence.api_bindings:
         declared = tuple(
-            parameter.parameter_id for parameter in sequence.api_parameters
+            parameter.field_id for parameter in sequence.api_bindings
         )
         raise ValueError(
             f"pulse API parameters must be resolved before compile: {declared}"
@@ -587,7 +587,7 @@ def compile_sequence(
         raise ValueError("clock_hz must be positive and finite")
     if Fraction(str(sequence.time_step_ns)) * Fraction(str(clock_hz)) != 1_000_000_000:
         raise ValueError("sequence time_step_ns does not match the compiler clock_hz")
-    frac_bits = params.coeff_frac_bits if sequence.slots else 0
+    frac_bits = params.coeff_frac_bits if sequence.scan_bindings else 0
     selected_slot_scales = (
         (1,) * sequence.slot_count
         if slot_tick_scales is None
@@ -600,10 +600,10 @@ def compile_sequence(
         raise ValueError("slot_tick_scales must contain one positive integer per slot")
     if any(
         slot.kind != FIELD_DURATION and scale != 1
-        for slot, scale in zip(sequence.slots, selected_slot_scales, strict=True)
+        for slot, scale in zip(sequence.scan_bindings, selected_slot_scales, strict=True)
     ):
         raise ValueError("DAC slot tick scale must remain 1")
-    maximum_tick_scale = maximum_duration_tick_scale(params) if sequence.slots else 1
+    maximum_tick_scale = maximum_duration_tick_scale(params) if sequence.scan_bindings else 1
     if any(value > maximum_tick_scale for value in selected_slot_scales):
         raise ValueError(
             f"slot tick scale exceeds the {params.coeff_width}-bit Q{frac_bits} "
@@ -680,7 +680,7 @@ def compile_sequence(
         loop_start_index=bracket_start_index,
         loop_end_tick=loop_end_tick,
         loop_count=loop_count,
-        slot_kinds=tuple(slot.kind for slot in sequence.slots),
+        slot_kinds=tuple(slot.kind for slot in sequence.scan_bindings),
         loop_end_slot_coeffs=tuple(loop_end_coeffs),
         tick_slot_coeffs=tuple(coeffs),
         scan_coeff_frac_bits=frac_bits,

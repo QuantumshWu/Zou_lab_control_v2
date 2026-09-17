@@ -196,8 +196,8 @@ def test_schedule_projects_scan_and_api_bindings_into_fields() -> None:
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM, DelayRowVM
 app = ensure_qt_app(["pulse-bindings"])
-field_scan = FieldVM("s0", binding_kind="scan", binding_number=1)
-field_api = FieldVM("0", binding_kind="api", binding_number=2)
+field_scan = FieldVM("1000", scan=True)
+field_api = FieldVM("0", source="api")
 port = PortRowVM("d0", "digital", "Gate", "d0")
 vm = ScheduleVM(
     document_generation=1,
@@ -221,22 +221,22 @@ view = PulseScheduleView(); view.set_schedule(vm)
 scan_edit = view._cards["p1"].duration_edit
 api_edit = view._cards["p2"].duration_edit
 delay_edit = view.channel_panel._rows["d0"][0]
-assert scan_edit.dot.isChecked() and scan_edit.dot._number == 1
-assert not api_edit.dot.isChecked() and api_edit.dot._kind == "api" and api_edit.dot._number == 2
-assert not delay_edit.dot.isChecked() and delay_edit.dot._kind == "api" and delay_edit.dot._number == 2
+assert scan_edit.binding_button.scan and not scan_edit.isReadOnly()
+assert api_edit.binding_button.source == "api" and not api_edit.isReadOnly()
+assert delay_edit.binding_button.source == "api" and not delay_edit.isReadOnly()
 assert view.channel_panel.scan_summary_label.text() == "1 slot · 4 pts"
 """
     )
 
 
-def test_pulse_binding_dots_emit_intents_without_mutating_view_state() -> None:
+def test_pulse_binding_popup_emits_independent_scan_source_intents() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
 from examples.demo_pulse_editor import create_window
 
-app = ensure_qt_app(["pulse-binding-cycle"])
+app = ensure_qt_app(["pulse-binding-popup"])
 # Through the demo's own entry, which is the outside entry: what comes back
 # is the handle.  Reaching its view is this package's own business -- the
 # clicks below are on real widgets, which is the point of the test.
@@ -244,25 +244,28 @@ editor = create_window(window_ratio=0.4)
 app.processEvents()
 schedule = editor._view.schedule_view
 requested = []
-schedule.binding_cycle_requested.connect(lambda *payload: requested.append(payload))
+schedule.binding_committed.connect(lambda *payload: requested.append(payload))
 
 before = schedule._schedule
 duration = schedule._cards["p1"].duration_edit
 dac = schedule._cards["p1"].bus_value_edits["da_bias_y"]
 delay = schedule.channel_panel._rows["ch01"][0]
-for dot in (duration.dot, dac.dot, delay.dot):
-    QtTest.QTest.mouseClick(dot, QtCore.Qt.LeftButton)
+for field in (duration, dac, delay):
+    QtTest.QTest.mouseClick(field.binding_button, QtCore.Qt.LeftButton)
+    assert field._popup.isVisible()
+    field.source_combo.setCurrentIndex(field.source_combo.findData("config"))
+    field._popup.hide()
 app.processEvents()
 
 assert requested == [
-    ("duration", "p1", None),
-    ("analog", "p1", "da_bias_y"),
-    ("delay", None, "ch01"),
+    ("duration", "p1", None, True, "config"),
+    ("analog", "p1", "da_bias_y", True, "config"),
+    ("delay", None, "ch01", False, "config"),
 ]
 assert schedule._schedule == before
-assert duration.binding_kind == "scan"
-assert dac.binding_kind == "scan"
-assert delay.binding_kind is None
+assert duration.binding_button.scan and duration.binding_button.source == "default"
+assert dac.binding_button.scan and dac.binding_button.source == "default"
+assert delay.binding_button.source == "default"
 
 # This test owns an isolated QApplication subprocess; letting Qt tear down
 # with the process avoids an intermittent PyQt5/offscreen native crash in
@@ -623,7 +626,9 @@ layout_moves = []
 original_take = strip.layout_main.takeAt
 strip.layout_main.takeAt = lambda index: (layout_moves.append(index), original_take(index))[1]
 
+retired_delay = view.channel_panel._rows["d1"][0].parentWidget()
 view.set_visible_ports(("d0", "d2"))
+assert retired_delay.isHidden(), "retired rows must disappear before deferred deletion"
 app.processEvents()
 assert strip.items() == timeline and strip._posts == posts
 assert not layout_moves, 'hiding a port detached the unchanged timeline'
@@ -857,43 +862,34 @@ app.quit()
 
 
 def test_a_config_binding_wears_its_own_colour_and_stays_editable() -> None:
-    """Three owners, three marks, and only the board's one takes the box away.
-
-    A scan column is written per point by the board, so its field is read
-    only.  An API parameter and a config parameter both hold a number the
-    operator can see and type, so theirs are not -- and the config one is
-    slate rather than violet, because nobody supplies it for a run: it is
-    already the pulse's own.
-    """
+    """Scan is independent of value source and never removes the default."""
 
     _run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE
 from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
-from zlc_ui.pulse.scan_line_edit import _BINDING_FILL
 
 app = ensure_qt_app(["binding-colours"])
-assert _BINDING_FILL == {"scan": ORANGE, "api": API_VIOLET, "config": CONFIG_GREEN}
 
 edit = FluentScanLineEdit("12")
-edit.set_field_state(editable=True, binding="config", number=3)
-assert edit.dot._kind == "config"
-assert edit.dot._number == 3
-assert not edit.dot.isChecked(), "only a scan column marks the box as the board's"
+edit.set_field_state(editable=True, source="config")
+assert edit.binding_button.source == "config"
+assert not edit.binding_button.scan
 assert not edit.isReadOnly(), "a config number is the operator's to read and type"
 assert CONFIG_GREEN in edit.styleSheet()
 
-edit.set_field_state(editable=True, binding="scan", number=1)
-assert edit.isReadOnly() and edit.dot.isChecked()
+edit.set_field_state(editable=True, scan=True, source="config")
+assert not edit.isReadOnly() and edit.binding_button.scan
+assert edit.binding_button.source == "config"
 
-edit.set_field_state(editable=True, binding=None)
-assert edit.dot._kind is None and not edit.isReadOnly()
+edit.set_field_state(editable=True)
+assert edit.binding_button.source == "default" and not edit.isReadOnly()
 
 try:
-    edit.set_field_state(editable=True, binding="whatever")
+    edit.set_field_state(editable=True, source="whatever")
 except ValueError as error:
-    assert "scan" in str(error) and "config" in str(error)
+    assert "api" in str(error) and "config" in str(error)
 else:
     raise AssertionError("an unknown binding must be refused")
 
@@ -902,6 +898,81 @@ app.processEvents()
 """
     )
 
+
+
+def test_config_page_edits_values_separately_from_shared_field_references() -> None:
+    _run_qt(r'''
+from dataclasses import replace
+import sys
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import ConfigPageRecord, PulseEditorView, PulseEditorHandle
+app = ensure_qt_app(["pulse-config"])
+qt_errors = []
+sys.excepthook = lambda kind, error, trace: qt_errors.append(f"{kind.__name__}: {error}")
+view = PulseEditorView()
+handle = PulseEditorHandle(None, view)
+record = ConfigPageRecord(
+    file_path="draft.json", active_path="saved.json", dirty=True,
+    entries=(("bias", "120", "value"),),
+    bindings=(("dac:p1:x", "MOT.bias_x", "bias", "0", "100", "Applied"),
+              ("dac:p2:x", "PGC.bias_x", "bias", "10", "100", "Applied")),
+)
+handle.set_config_page(record)
+config = view.config_view
+view.resize(1100, 800)
+view.tabs.setCurrentWidget(config)
+view.show()
+app.processEvents()
+edits, bindings, saves = [], [], []
+handle.config_entries_edited.connect(edits.append)
+handle.config_entries_edited.connect(lambda entries: handle.set_config_page(replace(record, entries=entries)))
+handle.config_binding_committed.connect(lambda *value: bindings.append(value))
+handle.config_save_requested.connect(lambda: saves.append(True))
+assert config.path_text.text() == "draft.json"
+assert "saved.json" in config.file_status.text()
+assert "saved.json" in view.schedule_view.channel_panel.config_status_button.text()
+table = config.values_table
+index = config.values_model.index(0, 1)
+QtTest.QTest.mouseClick(table.viewport(), QtCore.Qt.LeftButton, pos=table.visualRect(index).center())
+editor = app.focusWidget()
+assert isinstance(editor, QtWidgets.QLineEdit)
+editor.selectAll()
+QtTest.QTest.keyClicks(editor, "not yet a number")
+QtTest.QTest.keyClick(editor, QtCore.Qt.Key_Return)
+app.processEvents()
+assert edits[-1] == (("bias", "not yet a number", "value"),)
+handle.set_config_page(replace(record, entries=edits[-1]))
+assert config.values_model.index(0, 1).data() == "not yet a number"
+assert config.bindings_model.index(0, 3).data() == "100"
+assert config.bindings_model.index(1, 3).data() == "100"
+QtTest.QTest.mouseClick(config.add_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert not qt_errors, qt_errors
+assert config.values_table.verticalHeader().count() == config.values_model.rowCount()
+assert config.values_table.visualRect(config.values_model.index(1, 0)).height() > 0
+editor = app.focusWidget()
+assert isinstance(editor, QtWidgets.QLineEdit)
+QtTest.QTest.keyClicks(editor, "offset")
+QtTest.QTest.keyClick(editor, QtCore.Qt.Key_Return)
+app.processEvents()
+assert edits[-1][1] == ("offset", "", "")
+assert table.viewport().height() >= table.rowHeight(0) * 2
+assert table.geometry().bottom() < config.add_button.geometry().top()
+for row, field_id in enumerate(config._binding_combos):
+    assert config.bindings_table.rowHeight(row) > config._binding_combos[field_id].sizeHint().height()
+combo = config._binding_combos["dac:p2:x"]
+combo.setCurrentIndex(combo.findData(""))
+assert bindings == [("dac:p2:x", "")]
+QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
+assert saves == [True]
+assert not hasattr(view.schedule_view, "save_values_button")
+assert view.scan_view.scan_load_array_button.text() == "Load Array"
+QtTest.QTest.mouseClick(view.schedule_view.channel_panel.config_status_button, QtCore.Qt.LeftButton)
+assert view.current_page == "Config"
+assert not qt_errors, qt_errors
+view.finish_close()
+''')
 
 
 def test_linked_panes_never_starve_a_pane_to_line_the_group_up() -> None:

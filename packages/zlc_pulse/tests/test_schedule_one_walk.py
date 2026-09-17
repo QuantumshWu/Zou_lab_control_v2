@@ -25,7 +25,7 @@ from zlc_pulse import (
     PulseBracket,
     PulsePeriod,
     PulseSequence,
-    PulseSlot,
+    PulseBinding,
     compile_sequence,
     pulse_target_from_xdc,
 )
@@ -57,7 +57,7 @@ def _program(*, periods: int = 9):
         target=_TARGET,
         time_step_ns=20,
         periods=tuple(rows),
-        slots=(PulseSlot("duration", PulseFieldRef("duration", "p0"), "ns", "p0_time"),),
+        bindings=(PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', scan=True),),
         bracket=PulseBracket("p1", f"p{periods - 2}", 4),
     )
     return compile_sequence(sequence, StreamerParams(), 50e6)
@@ -197,14 +197,7 @@ def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
             PulsePeriod("variable", 40, "ns", tuple(states)),
             PulsePeriod("low", 20, "ns", (0,) * len(states)),
         ),
-        slots=(
-            PulseSlot(
-                "duration",
-                PulseFieldRef("duration", "variable"),
-                "ns",
-                "variable_time",
-            ),
-        ),
+        bindings=(PulseBinding(PulseFieldRef('duration', 'variable'), 'ns', scan=True),),
     )
     program = compile_sequence(sequence, StreamerParams(), 50e6)
     table = np.asarray(((-1,), (0,), (1,)), dtype=np.int64)

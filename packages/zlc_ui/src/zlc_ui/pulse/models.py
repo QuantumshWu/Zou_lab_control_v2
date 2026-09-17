@@ -47,9 +47,11 @@ def schedule_item_order(
 class FieldVM:
     text: str
     editable: bool = True
-    binding_kind: str = ""
-    binding_number: int = 0
-    binding_tooltip: str = ""
+    scan: bool = False
+    source: str = "default"
+    can_scan: bool = True
+    effective_text: str = ""
+    source_text: str = ""
     validator_kind: str = VALIDATOR_NONE
     validator_lo: float = 0.0
     validator_hi: float = 0.0
@@ -148,9 +150,6 @@ class ConnectionVM:
     endpoint: str
     status: str
     locked: bool = False
-    #: Which calibrated set the connected board is filling config parameters
-    #: from; empty when there is no board or it holds none.
-    config_source: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.choices, tuple):
@@ -168,8 +167,6 @@ class ConnectionVM:
             )
         if not isinstance(self.endpoint, str) or not isinstance(self.status, str):
             raise TypeError("connection endpoint and status must be strings")
-        if not isinstance(self.config_source, str):
-            raise TypeError("connection config_source must be text")
         if not isinstance(self.locked, bool):
             raise TypeError("connection locked must be bool")
 
@@ -219,16 +216,24 @@ class ScheduleVM:
 
 @dataclass(frozen=True)
 class BindingRecord:
-    """One bound field, as the Scan page lists it.
+    """A physical Pulse field; its readable label is not a mutable alias."""
 
-    ``binding_id`` is the NAME a plan, a saved value set and a run record all
-    use; ``label`` is where it sits on the pulse.  They are different things,
-    which is why the id can be renamed without the field moving.
-    """
-
-    binding_id: str
+    field_id: str
     label: str
-    kind: str
+    scan: bool = False
+    source: str = "default"
+
+
+@dataclass(frozen=True)
+class ConfigPageRecord:
+    """Config draft and saved-file facts projected by the presenter."""
+
+    file_path: str = ""
+    dirty: bool = False
+    entries: tuple[tuple[str, str, str], ...] = ()
+    bindings: tuple[tuple[str, str, str, str, str, str], ...] = ()
+    active_path: str = ""
+    busy: bool = False
 
 
 @dataclass(frozen=True)
@@ -266,6 +271,7 @@ __all__ = [
     "BindingRecord",
     "ConnectionChoiceVM",
     "ConnectionVM",
+    "ConfigPageRecord",
     "DelayRowVM",
     "FieldVM",
     "PeriodVM",

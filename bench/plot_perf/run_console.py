@@ -224,8 +224,9 @@ class ConsoleBench:
             time_step_ns=imaging.time_step_ns,
             periods=tuple(period for period in imaging.periods
                           if period.period_id in feedback_period_ids),
-            api_parameters=tuple(parameter for parameter in imaging.api_parameters
-                                 if parameter.field_ref.period_id in feedback_period_ids),
+            bindings=tuple(binding for binding in imaging.bindings
+                           if binding.field_ref.period_id is None
+                           or binding.field_ref.period_id in feedback_period_ids),
             delays=imaging.delays,
         )
         (self._tmp / "pulses/single_frame_feedback.json").write_text(
@@ -233,7 +234,7 @@ class ConsoleBench:
         )
         imaging_scan = slots_from_plan(imaging, tuple(
             port for port in scan_ports_for(imaging)
-            if port.port == "pulse:param:readout_probe_duration"
+            if port.port == "pulse:param:duration:short"
         ))
         (self._tmp / "pulses/imaging_scan.json").write_text(
             json.dumps(sequence_to_tree(imaging_scan), indent=2), encoding="utf-8",

@@ -287,7 +287,7 @@ def update_pulse_timeline(
 
     def _badge(record) -> dict:
         return {
-            "boxstyle": f"circle,pad={pulse.scan_badge_pad:g}",
+            "boxstyle": f"{'circle' if len(record.label) == 1 else 'round'},pad={pulse.scan_badge_pad:g}",
             "facecolor": _slot_color(record),
             "edgecolor": "none",
         }
@@ -303,7 +303,7 @@ def update_pulse_timeline(
         rectangle.set_visible(show_scan)
         text = scan_labels[index]
         text.set_position(((region.start + region.stop) / 2.0, area_top - row_height / 2.0))
-        text.set_text(str(region.number))
+        text.set_text(region.label)
         text.set_ha("center")
         text.set_va("center")
         text.set_zorder(pulse.annotation_zorder)
@@ -339,15 +339,14 @@ def update_pulse_timeline(
         line.set_solid_capstyle("butt")
         line.set_zorder(pulse.scan_dac_zorder)
         line.set_visible(show_scan)
-        number = segment.number
         text.set_position(((start + stop) / 2.0, row_base + row_height / 2.0))
-        text.set_text(str(number) if number is not None else "")
+        text.set_text(segment.label)
         text.set_ha("center")
         text.set_va("center")
         text.set_zorder(pulse.annotation_zorder)
         text.set_bbox(_badge(segment))
         text.update(scan_text)
-        text.set_visible(show_scan and number is not None)
+        text.set_visible(show_scan and bool(segment.label))
 
     # THE PERIODS, NAMED.  A band above the top row carries each period's
     # name over its span and a rule at every boundary runs down the rows,

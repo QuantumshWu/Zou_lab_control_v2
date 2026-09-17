@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from zlc_pulse import (
     PulseSequence,
-    authored_api_values,
     resolve_api_parameters,
 )
 from zlc_pulse.codec import read_pulse_document
@@ -26,32 +25,13 @@ class ResolvedPulse:
 
 
 def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
-    """Decode one exact JSON file and require calibration-template semantics."""
+    """Decode the chosen Pulse; the task separately chooses its API fields."""
 
     source = Path(path).expanduser().resolve()
     if source.suffix.lower() != ".json" or not source.is_file():
         raise ValueError("calibration pulse template must be an existing JSON file")
     sequence, _editor = read_pulse_document(source)
-    _validate_calibration_sequence(sequence)
     return sequence
-
-
-def _validate_calibration_sequence(sequence: PulseSequence) -> None:
-    """What calibration needs of ANY pulse, said without naming one.
-
-    It used to demand three API parameters carrying three exact identifiers in
-    one exact order -- the private naming of the template that shipped with the
-    node.  An operator's own imaging pulse could not be used at all, however
-    many API slots it had, because the names were not the ones this file
-    happened to contain.  What the protocol actually requires is timing it can
-    set and camera windows it can read; WHICH parameters those are is the
-    operator's choice, made in the task's own form.
-    """
-
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("calibration pulse must be PulseSequence")
-    if sequence.slots:
-        raise ValueError("calibration pulse cannot declare scan slots")
 
 
 def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
@@ -78,19 +58,16 @@ def resolve_pulse(
 ) -> ResolvedPulse:
     """Resolve and compile the already-decoded exact workspace resource.
 
-    Compiled BY the sequencer, because a config parameter's number belongs to
-    the board and is baked into the program: the sequence carried away from
-    here is the filled one, so what ``arm_sequencer`` later hands back as
-    ``source=`` describes what the board is actually playing.
+    API values are resolved here. Saved Config values remain the device's
+    responsibility at LOAD/Fire; execution records read its applied state.
 
-    ``api_values`` names the parameters this run owns, by the identifiers the
-    PULSE declares -- a caller that owns slots addresses them by number and
-    reads the identifier off the declaration in that order.  Every other
+    ``api_values`` addresses the selected API fields by their stable field
+    references, independently of declaration order or period names. Every other
     parameter keeps the value its author gave it, which is what lets one
     imaging pulse carry a MOT duration nobody here has an opinion about.
 
     Nothing about the camera is said here at all.  What the frames mean is the
-    protocol's own arithmetic on the slots it drove, and a task that re-derived
+    protocol's own arithmetic on the fields it drove, and a task that re-derived
     it from windows and exposures made itself depend on the shape of a document
     the operator writes.
     """
@@ -98,18 +75,13 @@ def resolve_pulse(
     board = sequencer.describe()
     if not isinstance(board, BoardDescription):
         raise TypeError("board must be BoardDescription")
-    _validate_calibration_sequence(sequence)
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("calibration pulse must be PulseSequence")
     source = Path(path).expanduser().resolve()
-    declared = authored_api_values(sequence)
-    unknown = tuple(name for name in api_values if name not in declared)
-    if unknown:
-        raise ValueError(
-            f"pulse {sequence.name!r} declares no API parameter "
-            f"{unknown!r}; it offers {tuple(declared)!r}"
-        )
-    values = dict(declared)
-    values.update({name: float(value) for name, value in api_values.items()})
-    resolved = resolve_api_parameters(sequence, values)
+    resolved = resolve_api_parameters(replace(
+        sequence,
+        bindings=tuple(replace(binding, scan=False) for binding in sequence.bindings),
+    ), api_values)
     if resolved.target != board.target:
         raise ValueError(
             "calibration pulse target is incompatible with the connected board"

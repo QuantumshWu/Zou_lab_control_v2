@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -46,17 +45,13 @@ from .models import (
 from .scan_line_edit import FluentScanLineEdit
 
 
-def _field_binding(field: FieldVM) -> tuple[str | None, int | None]:
-    kind = str(field.binding_kind or "").strip().lower()
-    return (kind or None, int(field.binding_number) if kind else None)
-
-
 def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
-    binding, number = _field_binding(field)
     with signals_blocked(widget):
         widget.setText(field.text)
-        widget.set_field_state(editable=field.editable, binding=binding, number=number)
-        if field.validator_kind in (VALIDATOR_INT, VALIDATOR_FLOAT) and not binding == "scan":
+        widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
+                               can_scan=field.can_scan, effective_text=field.effective_text,
+                               source_text=field.source_text)
+        if field.validator_kind in (VALIDATOR_INT, VALIDATOR_FLOAT):
             widget.set_numeric_validator(
                 field.validator_kind,
                 bottom=field.validator_lo,
@@ -75,7 +70,7 @@ class PeriodCard(FluentGroupBox):
     duration_committed = QtCore.pyqtSignal(str, object, str)
     digital_committed = QtCore.pyqtSignal(str, str, bool)
     analog_committed = QtCore.pyqtSignal(str, str, str, object)
-    binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
+    binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
 
     def __init__(self, period: PeriodVM, *, index: int = 0, total_periods: int = 1,
                  ports: tuple[PortRowVM, ...] = (),
@@ -105,12 +100,11 @@ class PeriodCard(FluentGroupBox):
         top_layout.addWidget(self._center_label("Duration"))
         self.duration_edit = FluentScanLineEdit(
             "",
-            tooltip="Click the dot to cycle off → Scan → API → Config → off",
+            tooltip="Edit Scan and value source",
         )
         control_width = period_control_width(width)
         self.duration_edit.setFixedWidth(control_width)
         top_layout.addWidget(self.duration_edit)
-        self.duration_dot = self.duration_edit.dot
         self.unit_combo = FluentComboBox()
         self.unit_combo.setFixedWidth(control_width)
         top_layout.addWidget(self.unit_combo)
@@ -124,7 +118,9 @@ class PeriodCard(FluentGroupBox):
         column.addSpacing(max(0, row_top - px(7)))
         self._column = column
         self.duration_edit.editingFinished.connect(self._commit_duration)
-        self.duration_dot.clicked.connect(self._cycle_duration_binding)
+        self.duration_edit.binding_committed.connect(
+            lambda scan, source: self.binding_committed.emit("duration", self.period_id, None, scan, source)
+        )
         self.unit_combo.currentTextChanged.connect(self._commit_duration)
         self.name_edit.editingFinished.connect(self._commit_name)
         self.set_period(
@@ -180,8 +176,7 @@ class PeriodCard(FluentGroupBox):
             if key not in desired:
                 widget = self.port_rows.pop(key)
                 self._column.removeWidget(widget)
-                widget.hide()
-                widget.deleteLater()
+                retire_widget(widget)
                 self.checks.pop(key, None)
                 self.bus_mode_combos.pop(key, None)
                 self.bus_value_edits.pop(key, None)
@@ -199,8 +194,7 @@ class PeriodCard(FluentGroupBox):
                 # no analog editor at all.
                 widget = self.port_rows.pop(port.key)
                 self._column.removeWidget(widget)
-                widget.hide()
-                widget.deleteLater()
+                retire_widget(widget)
                 self.checks.pop(port.key, None)
                 self.bus_mode_combos.pop(port.key, None)
                 self.bus_value_edits.pop(port.key, None)
@@ -256,7 +250,7 @@ class PeriodCard(FluentGroupBox):
                     tooltip=(
                         f"{port.label}: signed integer {port.lo}..{port.hi} "
                         "(0 = 0 V)\n"
-                        "Click the dot to cycle off → Scan → API → Config → off"
+                        "Edit Scan and value source"
                     ),
                 )
                 edit.set_numeric_validator("int", bottom=port.lo, top=port.hi)
@@ -266,7 +260,7 @@ class PeriodCard(FluentGroupBox):
                     lambda _index, key=port.key: self._commit_analog(key)
                 )
                 edit.editingFinished.connect(lambda key=port.key: self._commit_analog(key))
-                edit.dot.clicked.connect(lambda _checked=False, key=port.key: self.binding_cycle_requested.emit("analog", self.period_id, key))
+                edit.binding_committed.connect(lambda scan, source, key=port.key: self.binding_committed.emit("analog", self.period_id, key, scan, source))
                 row_layout.addWidget(combo)
                 row_layout.addWidget(edit, 1)
                 self.bus_mode_combos[port.key] = combo
@@ -279,9 +273,6 @@ class PeriodCard(FluentGroupBox):
             self._column.insertWidget(2 + index, widget)
             widget.show()
         self._ports = {port.key: port for port in ports}
-
-    def _cycle_duration_binding(self, _checked: bool = False) -> None:
-        self.binding_cycle_requested.emit("duration", self.period_id, None)
 
     def _commit_name(self) -> None:
         value = self.name_edit.text()
@@ -407,7 +398,7 @@ class ChannelNamesPanel(FluentGroupBox):
         for key, field in existing.items():
             holder = self._row_holders.pop(key, field)
             self._layout.removeWidget(holder)
-            holder.deleteLater()
+            retire_widget(holder)
 
     def set_port_label(self, key: str, label: str) -> None:
         if key in self._rows:
@@ -421,12 +412,12 @@ class ChannelNamesPanel(FluentGroupBox):
 
 class ChannelPanel(FluentGroupBox):
     delay_committed = QtCore.pyqtSignal(str, object, str)
-    binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
+    binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
     #: One output in EVERY period at once: on (a digital port high) or off
     #: (a digital port low, an analog port without steps).
     fill_port_requested = QtCore.pyqtSignal(str)
     clear_port_requested = QtCore.pyqtSignal(str)
-    scan_array_load_requested = QtCore.pyqtSignal()
+    config_requested = QtCore.pyqtSignal()
     run_repeats_committed = QtCore.pyqtSignal(int)
 
     def __init__(self, parent=None) -> None:
@@ -476,9 +467,9 @@ class ChannelPanel(FluentGroupBox):
         add_labeled_widget(top_layout, "Clock:", self.clock_label)
         add_labeled_widget(top_layout, "Scan:", self.scan_summary_label)
         add_labeled_widget(top_layout, "Repeat:", self.run_repeats_spin)
-        self.load_array_button = FluentButton("Load Array", color=ACCENT)
-        self.load_array_button.clicked.connect(self.scan_array_load_requested)
-        top_layout.addWidget(self.load_array_button)
+        self.config_status_button = FluentButton("Config: none", color=GREY)
+        self.config_status_button.clicked.connect(self.config_requested)
+        top_layout.addWidget(self.config_status_button)
         top_layout.addStretch(1)
         self._layout.addWidget(top)
         self._rows: dict[
@@ -508,7 +499,7 @@ class ChannelPanel(FluentGroupBox):
             if current is None:
                 edit = FluentScanLineEdit(
                     row.value.text,
-                    tooltip="Click the dot to cycle off → API → Config → off",
+                    tooltip="Edit value source",
                 )
                 edit.setFixedWidth(px(70, minimum=60))
                 combo = FluentComboBox()
@@ -518,7 +509,7 @@ class ChannelPanel(FluentGroupBox):
                 fill.setToolTip("Turn this output on in every period")
                 clear = FluentButton("○", color=ORANGE)
                 clear.setFixedWidth(hide_button_width())
-                edit.dot.clicked.connect(lambda _checked=False, key=row.port_key: self.binding_cycle_requested.emit("delay", None, key))
+                edit.binding_committed.connect(lambda scan, source, key=row.port_key: self.binding_committed.emit("delay", None, key, scan, source))
                 edit.editingFinished.connect(lambda key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 combo.currentTextChanged.connect(lambda _text, key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 fill.clicked.connect(lambda _checked=False, key=row.port_key: self.fill_port_requested.emit(key))
@@ -557,7 +548,7 @@ class ChannelPanel(FluentGroupBox):
             holder = edit.parentWidget()
             if holder is not None:
                 self._layout.removeWidget(holder)
-                holder.deleteLater()
+                retire_widget(holder)
             self._row_labels.pop(key, None)
 
     def set_port_label(self, key: str, label: str) -> None:
@@ -1010,7 +1001,7 @@ class PulseScheduleView(QtWidgets.QWidget):
     digital_committed = QtCore.pyqtSignal(str, str, bool)
     analog_committed = QtCore.pyqtSignal(str, str, str, object)
     delay_committed = QtCore.pyqtSignal(str, object, str)
-    binding_cycle_requested = QtCore.pyqtSignal(str, object, object)
+    binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
     insert_period_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
     remove_period_requested = QtCore.pyqtSignal(str)
@@ -1024,10 +1015,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     sync_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
-    values_save_requested = QtCore.pyqtSignal()
-    values_load_requested = QtCore.pyqtSignal()
+    config_requested = QtCore.pyqtSignal()
     connection_requested = QtCore.pyqtSignal(str, str)
-    scan_array_load_requested = QtCore.pyqtSignal()
     left_panels_collapsed = QtCore.pyqtSignal(bool)
     feedback_requested = QtCore.pyqtSignal(str)
 
@@ -1183,27 +1172,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
-        # The board's calibrated numbers -- a channel delay, a DAC bias --
-        # which it then fills into every pulse it plays.  They belong to the
-        # apparatus. Load gives the sequencer an override set; Save exports
-        # the Config fields of the document currently being edited.
-        self.load_values_button = FluentButton("Load config", color=ORANGE)
-        self.save_values_button = FluentButton("Save config", color=YELLOW)
-        self.load_values_button.setToolTip(
-            "Bind a Config file to the device. Before every Fire it rereads "
-            "the file and applies matching Config numbers (1, 2, ...); "
-            "unmatched fields keep the pulse's original values. "
-            "An empty selection clears the previous file and overrides."
-        )
-        self.save_values_button.setToolTip(
-            "Save this editor's Config numbers, current values and units. "
-            "No connection or On Pulse is required; the sequencer is unchanged."
-        )
         control_buttons = (
             self.run_button, self.stop_button, self.sync_button,
             self.add_button, self.remove_button, self.bracket_button,
             self.save_button, self.load_button, self.collapse_button,
-            self.load_values_button, self.save_values_button,
         )
         for index, button in enumerate(control_buttons):
             button.setFixedHeight(control_height)
@@ -1238,12 +1210,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_status = FluentLineEdit("")
         self.connection_status.setEnabled(False)
         self.connection_status.setFixedHeight(control_height)
-        # Which calibrated set the board is filling config parameters from.
-        # It belongs here rather than beside the pulse's own fields: it is a
-        # fact about the board, and it outlives whatever pulse is open.
-        self.config_source_line = FluentLineEdit("")
-        self.config_source_line.setEnabled(False)
-        self.config_source_line.setFixedHeight(control_height)
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
         connection_row.setContentsMargins(0, 0, 0, 0)
@@ -1252,7 +1218,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_row.addWidget(self.connection_button)
         connection_layout.addLayout(connection_row)
         connection_layout.addWidget(self.connection_status)
-        connection_layout.addWidget(self.config_source_line)
         connection_layout.addStretch(1)
         bar.addWidget(connection_area)
 
@@ -1291,10 +1256,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel.document_name_committed.connect(self.document_name_committed)
         self.names_panel.port_label_committed.connect(self.port_label_committed)
         self.channel_panel.delay_committed.connect(self.delay_committed)
-        self.channel_panel.binding_cycle_requested.connect(self.binding_cycle_requested)
+        self.channel_panel.binding_committed.connect(self.binding_committed)
         self.channel_panel.fill_port_requested.connect(self.fill_port_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
-        self.channel_panel.scan_array_load_requested.connect(self.scan_array_load_requested)
+        self.channel_panel.config_requested.connect(self.config_requested)
         self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
         self.drag_container.reorder_items_requested.connect(self.reorder_items_requested)
         self.drag_container.bracket_count_committed.connect(self._commit_bracket_count)
@@ -1303,8 +1268,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.sync_button.clicked.connect(self.sync_requested)
         self.save_button.clicked.connect(self.save_requested)
         self.load_button.clicked.connect(self.load_requested)
-        self.load_values_button.clicked.connect(self.values_load_requested)
-        self.save_values_button.clicked.connect(self.values_save_requested)
         self.add_button.clicked.connect(lambda: self.insert_period_requested.emit(self._selected_before_item()))
         self.remove_button.clicked.connect(self._request_remove_period)
         self.bracket_button.clicked.connect(self._request_toggle_bracket)
@@ -1416,7 +1379,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         card.duration_committed.connect(self.duration_committed)
         card.digital_committed.connect(self.digital_committed)
         card.analog_committed.connect(self.analog_committed)
-        card.binding_cycle_requested.connect(self.binding_cycle_requested)
+        card.binding_committed.connect(self.binding_committed)
 
     def _rebuild_hidden_ports(self, vm: ScheduleVM) -> None:
         visible = {port.key for port in vm.ports if port.visible}
@@ -1500,9 +1463,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel.set_summary(str(total_text), int(period_count), str(visible_text))
         self.channel_panel.set_scan_summary(str(scan_summary_text))
 
-    def set_scan_busy(self, busy: bool) -> None:
-        self.channel_panel.load_array_button.setEnabled(not bool(busy))
-
     def set_connection(self, vm: ConnectionVM) -> None:
         """Project the presenter's complete connection domain and authority."""
 
@@ -1524,13 +1484,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_button.setEnabled(not vm.locked)
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
-        held = vm.config_source
-        self.config_source_line.setText(
-            f"Config: {Path(held).name}" if held else "Config: none loaded"
-        )
-        # The whole path, because the box is 252px and a calibration set is
-        # identified by which folder it came from as much as by its name.
-        self.config_source_line.setToolTip(held or "no config values loaded")
         self.connection_status.setToolTip(vm.status)
 
     def _request_connection(self) -> None:

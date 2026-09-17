@@ -12,7 +12,7 @@ from zlc_pulse import (
     AnalogStep,
     PulsePeriod,
     PulseSequence,
-    PulseSlot,
+    PulseBinding,
     PulseTarget,
     PulseBracket,
     compile_sequence,
@@ -51,7 +51,7 @@ def _sequence(*, slotted: bool = False, period_ns: int = 40) -> PulseSequence:
     high = [0] * len(target.raw_lanes)
     high[target.raw_lanes.index(_DIGITAL_PORT.lanes[0])] = 1
     low = (0,) * len(target.raw_lanes)
-    slots = (PulseSlot("duration", PulseFieldRef("duration", "p0"), "ns", "p0_time"),) if slotted else ()
+    slots = (PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', scan=True),) if slotted else ()
     return PulseSequence(
         target=target,
         time_step_ns=20,
@@ -65,7 +65,7 @@ def _sequence(*, slotted: bool = False, period_ns: int = 40) -> PulseSequence:
             ),
             PulsePeriod("p1", period_ns, "ns", low),
         ),
-        slots=slots,
+        bindings=slots,
     )
 
 

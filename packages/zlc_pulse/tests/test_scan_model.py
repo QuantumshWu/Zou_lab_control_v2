@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from zlc_pulse import PulsePeriod, PulseSequence, pulse_target_from_xdc
-from zlc_pulse.model import PulseFieldRef, PulseSlot
+from zlc_pulse.model import PulseFieldRef, PulseBinding
 from zlc_pulse.scan import (
     ScanColumnSpec,
     prepare_scan_application,
@@ -19,33 +19,7 @@ from zlc_pulse.scan import (
 )
 
 
-def test_binding_cycle_is_owned_by_canonical_pulse_field_kinds() -> None:
-    from zlc_pulse.model import (
-        FIELD_DAC,
-        FIELD_DELAY,
-        FIELD_DURATION,
-        cycle_binding_kind,
-    )
-
-    # Three ways a field can be supplied, so three stops before off again:
-    # the board per point, a caller per run, and the pulse's own config.
-    for field_kind in (FIELD_DURATION, FIELD_DAC):
-        assert cycle_binding_kind(None, field_kind=field_kind) == "scan"
-        assert cycle_binding_kind("scan", field_kind=field_kind) == "api"
-        assert cycle_binding_kind("api", field_kind=field_kind) == "config"
-        assert cycle_binding_kind("config", field_kind=field_kind) is None
-
-    # A delay has no scan-table column, and every other stop is the same.
-    assert cycle_binding_kind(None, field_kind=FIELD_DELAY) == "api"
-    assert cycle_binding_kind("api", field_kind=FIELD_DELAY) == "config"
-    assert cycle_binding_kind("config", field_kind=FIELD_DELAY) is None
-    with pytest.raises(ValueError, match="not valid"):
-        cycle_binding_kind("scan", field_kind=FIELD_DELAY)
-    with pytest.raises(ValueError, match="unknown pulse field kind"):
-        cycle_binding_kind(None, field_kind="analog")
-
-
-def _sequence(slots=(), *, probe_duration=5.0, probe_unit="ms"):
+def _sequence(bindings=(), *, probe_duration=5.0, probe_unit="ms"):
     target = pulse_target_from_xdc()
     lanes = len(target.raw_lanes)
     return PulseSequence(
@@ -56,7 +30,7 @@ def _sequence(slots=(), *, probe_duration=5.0, probe_unit="ms"):
             PulsePeriod("load", 2.0, "ms", (0,) * lanes),
             PulsePeriod("probe", probe_duration, probe_unit, (0,) * lanes),
         ),
-        slots=slots,
+        bindings=bindings,
     )
 
 
@@ -70,8 +44,8 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     dac_port = next(port for port in pulse_target_from_xdc().ports if port.kind == "dac")
     sequence = _sequence(
         (
-            PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ns"),
-            PulseSlot("dac", PulseFieldRef("dac", period_id="probe", port=dac_port.key), "value"),
+            PulseBinding(PulseFieldRef('duration', period_id='probe'), 'ns', scan=True),
+            PulseBinding(PulseFieldRef('dac', period_id='probe', port=dac_port.key), 'value', scan=True),
         )
     )
     duration, dac = scan_columns_for(sequence)
@@ -86,41 +60,54 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     assert (dac.wire_scale, dac.wire_offset) == (1.0, float(-low))
     with pytest.raises(ValueError, match="DAC code"):
         validate_scan_table(((float(high) + 0.5,),), (dac,))
-    # A time column is in the unit its period is written in, and carries the
-    # ticks-per-unit that gets it onto the wire.  Generated in ticks, it asked
-    # the author to convert; generated in nanoseconds and labelled "ns" while
-    # meaning ticks, it ran twenty times long at 50 MHz.
-    # This period is written in ms, so its column is too -- one unit for one
-    # field, whichever page it is edited on.
-    assert not duration.is_dac and duration.unit == "ms"
-    assert duration.wire_scale == 1e6 / 20.0
-    # The sweep brackets the value the field actually holds: 5 ms.
-    assert duration.lo < 5 < duration.hi
+    # API and Scan share the binding unit, even when the period stores ms.
+    assert not duration.is_dac and duration.unit == "ns"
+    assert duration.wire_scale == 1.0 / 20.0
+    assert duration.lo < 5e6 < duration.hi
 
-    from zlc_pulse import PulseApiParameter, compile_sequence
+    from zlc_pulse import compile_sequence
     from zlc_pulse.binding import field_label
     from zlc_pulse.scan import api_parameter_columns_for
     from zlc_pulse.wire import StreamerParams
+
+    from zlc_pulse import resolve_api_parameters, resolve_scan_point
+    microseconds = replace(sequence, bindings=(
+        PulseBinding(PulseFieldRef("duration", "probe"), "us", scan=True, source="api"),
+    ))
+    scan_column, = scan_columns_for(microseconds)
+    api_column, = api_parameter_columns_for(microseconds)
+    assert scan_column.unit == api_column.unit == "µs"
+    selected = resolve_scan_point(microseconds, (50.0,))
+    assert selected.period_by_id["probe"].duration == pytest.approx(0.05)
+    assert selected.period_by_id["probe"].unit == "ms"
+    assert not selected.api_bindings and not selected.scan_bindings
+    effective, scales, wire = prepare_scan_application(microseconds, ((50.0,), (100.0,)))
+    assert effective == ((50.0,), (100.0,)) and scales == (1,)
+    compiled = compile_sequence(resolve_api_parameters(microseconds), StreamerParams(), 50e6)
+    # 5 ms is the nominal base; the wire holds only the signed tick delta.
+    assert wire == ((2500 - 250000,), (5000 - 250000,))
+    from zlc_pulse.compile import evaluate_affine_tick
+    assert evaluate_affine_tick(
+        compiled.ticks[-1], compiled.tick_slot_coeffs[-1], wire[0],
+        compiled.scan_coeff_frac_bits,
+    ) == compile_sequence(selected, StreamerParams(), 50e6).ticks[-1]
 
     renamed = replace(sequence, periods=(
         sequence.periods[0], replace(sequence.periods[1], name="MOT"),
     ))
     named_duration, named_dac = scan_columns_for(renamed)
-    assert named_duration.name == duration.name == sequence.slots[0].slot_id
+    assert named_duration.name == duration.name == sequence.scan_bindings[0].field_id
     assert named_duration.label == "MOT.duration"
     assert named_dac.label == f"MOT.{dac_port.label or dac_port.key}"
-    assert renamed.slots == sequence.slots
-    assert tuple(item.number for item in renamed.slots) == (1, 2)
-    original_time = replace(sequence, slots=sequence.slots[:1])
-    renamed_time = replace(renamed, slots=renamed.slots[:1])
+    assert renamed.scan_bindings == sequence.scan_bindings
+    original_time = replace(sequence, bindings=sequence.scan_bindings[:1])
+    renamed_time = replace(renamed, bindings=renamed.scan_bindings[:1])
     assert compile_sequence(original_time, StreamerParams(), 50e6) == compile_sequence(renamed_time, StreamerParams(), 50e6)
     digital = next(port for port in renamed.target.ports if port.kind == "digital")
-    delayed = replace(renamed, api_parameters=(PulseApiParameter(
-        "latency", PulseFieldRef("delay", port=digital.key), "ns"
-    ),))
+    delayed = replace(renamed, bindings=(PulseBinding(PulseFieldRef('delay', port=digital.key), 'ns', source='api'),))
     delay_column, = api_parameter_columns_for(delayed)
-    assert delay_column.name == "latency"
-    assert delay_column.label == field_label(delayed, delayed.api_parameters[0].field_ref) == f"{digital.label or digital.key}.delay"
+    assert delay_column.name == f"delay:{digital.key}"
+    assert delay_column.label == field_label(delayed, delayed.api_bindings[0].field_ref) == f"{digital.label or digital.key}.delay"
     assert ScanColumnSpec("bare_variable", 1, 2).label == "bare_variable"
     for periods in (
         (replace(sequence.periods[0], name="MOT"), renamed.periods[1]),
@@ -136,7 +123,7 @@ def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:
     from zlc_pulse.compile import slot_operand_width
 
     sequence = _sequence(
-        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "s"),),
+        (PulseBinding(PulseFieldRef('duration', period_id='probe'), 's', scan=True),),
         probe_duration=1.0,
         probe_unit="s",
     )
@@ -173,7 +160,7 @@ def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:
     np.testing.assert_allclose(edge_effective, edge_rows)
 
     widest = _sequence(
-        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "s"),),
+        (PulseBinding(PulseFieldRef('duration', period_id='probe'), 's', scan=True),),
         probe_duration=43.0,
         probe_unit="s",
     )
@@ -211,7 +198,7 @@ def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:
     with pytest.raises(ValueError, match="DAC slot tick scale"):
         scan_columns_for(
             _sequence(
-                (PulseSlot("dac", PulseFieldRef("dac", "probe", dac_port.key), "value"),)
+                (PulseBinding(PulseFieldRef('dac', 'probe', dac_port.key), 'value', scan=True),)
             ),
             (2,),
         )
@@ -335,15 +322,12 @@ def test_a_resolved_scan_point_is_a_plain_pulse_carrying_that_row() -> None:
             PulsePeriod("probe", 5.0, "ms", (0,) * lanes,
                         (AnalogStep(dac.key, "edge", 0),)),
         ),
-        slots=(
-            PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ms"),
-            PulseSlot("dac", PulseFieldRef("dac", period_id="probe", port=dac.key), "value"),
-        ),
+        bindings=(PulseBinding(PulseFieldRef('duration', period_id='probe'), 'ms', scan=True), PulseBinding(PulseFieldRef('dac', period_id='probe', port=dac.key), 'value', scan=True)),
     )
 
     resolved = resolve_scan_point(sequence, (7.5, 300))
 
-    assert resolved.slots == (), "a resolved point has nothing left to sweep"
+    assert resolved.scan_bindings == (), "a resolved point has nothing left to sweep"
     probe = next(item for item in resolved.periods if item.period_id == "probe")
     assert probe.duration == pytest.approx(7.5), "the duration slot did not land"
     assert probe.analog_steps[0].value == 300, "the DAC slot did not land"
@@ -360,7 +344,7 @@ def test_a_scan_point_must_have_one_value_per_slot() -> None:
     from zlc_pulse import resolve_scan_point
 
     sequence = _sequence(
-        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ms"),)
+        (PulseBinding(PulseFieldRef('duration', period_id='probe'), 'ms', scan=True),)
     )
     with pytest.raises(ValueError, match="one value per slot"):
         resolve_scan_point(sequence, (1.0, 2.0))

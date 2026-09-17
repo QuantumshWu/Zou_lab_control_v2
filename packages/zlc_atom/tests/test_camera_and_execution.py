@@ -225,9 +225,9 @@ def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
         path=IMAGING_PULSE_RESOURCE.path,
         sequencer=sequencer,
         api_values={
-            "reference_probe_duration_before": 0.1,
-            "readout_probe_duration": 0.002,
-            "reference_probe_duration_after": 0.2,
+            "duration:long_before": 0.1,
+            "duration:short": 0.002,
+            "duration:long_after": 0.2,
         },
     )
     sequencer.load(pulse.program, source=pulse.sequence)

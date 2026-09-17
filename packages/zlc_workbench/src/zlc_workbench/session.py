@@ -116,10 +116,8 @@ def _resolved_simulation(space: "Workspace", config: object) -> dict[str, object
 def seed_current_config_values(directory: Path) -> None:
     """The empty set of config values, present so it can be edited.
 
-    Empty on purpose: a seeded channel delay or DAC bias is a WRONG hardware
-    calibration, applied to every pulse on the bench at once.  A board with no
-    set loaded refuses any pulse that declares a config parameter, which is the
-    failure worth having.
+    An empty named table leaves Pulse defaults unchanged; no calibration
+    value is invented merely by opening a workspace.
     """
 
     from zlc_pulse import CURRENT_CONFIG_VALUES, write_config_values
@@ -127,7 +125,7 @@ def seed_current_config_values(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / CURRENT_CONFIG_VALUES
     if not path.exists():
-        write_config_values(path, {}, name="current")
+        write_config_values(path, {})
 
 
 @dataclass(frozen=True)

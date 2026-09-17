@@ -79,30 +79,17 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             0.005,
             minimum=1e-9,
         ),
-        # Which API slot of the chosen pulse carries each exposure, BY NUMBER
-        # -- slot 1 is the first parameter the pulse declares, whatever its
-        # author called it.  That is what lets an operator point this task at
-        # their own imaging pulse: three slots is three slots.
         AuthoringField(
-            "reference_before_slot",
-            "int",
-            "Reference exposure slot (before)",
-            1,
-            minimum=1,
+            "reference_before_field", "text", "Reference before API field",
+            "", required=True,
         ),
         AuthoringField(
-            "readout_slot",
-            "int",
-            "Readout exposure slot",
-            2,
-            minimum=1,
+            "readout_field", "text", "Readout API field",
+            "", required=True,
         ),
         AuthoringField(
-            "reference_after_slot",
-            "int",
-            "Reference exposure slot (after)",
-            3,
-            minimum=1,
+            "reference_after_field", "text", "Reference after API field",
+            "", required=True,
         ),
         AuthoringField(
             "default_model_kind",
@@ -244,9 +231,9 @@ def _build(
                 authored["reference_exposure_seconds"]
             ),
             readout_exposure_seconds=float(authored["readout_exposure_seconds"]),
-            reference_before_slot=int(authored["reference_before_slot"]),
-            readout_slot=int(authored["readout_slot"]),
-            reference_after_slot=int(authored["reference_after_slot"]),
+            reference_before_field=str(authored["reference_before_field"]),
+            readout_field=str(authored["readout_field"]),
+            reference_after_field=str(authored["reference_after_field"]),
             default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
             threshold_method=str(authored["threshold_method"]),
             box_half_width=int(authored["box_half_width"]),
@@ -266,6 +253,57 @@ def _build(
         build_figure_host=build_figure_host,
         save_figure_artifact=save_figure_artifact,
     )
+
+
+def _api_fields_editor_factory(parent=None):
+    """Project the chosen Pulse's API fields through the shared Fluent form."""
+    from collections.abc import Mapping
+    from PyQt5 import QtCore
+    from zlc_pulse import field_label
+    from zlc_ui.form import FluentParameterForm, FormChoice, FormFieldProps, FormSpec
+
+    class CalibrationApiFields(FluentParameterForm):
+        draft_changed = QtCore.pyqtSignal(object)
+        managed_fields = (
+            "reference_before_field", "readout_field", "reference_after_field",
+        )
+
+        def __init__(self, parent=None):
+            super().__init__(FormSpec(()), parent=parent)
+            self.changed.connect(
+                lambda key: self.draft_changed.emit({"values": {key: self.read_value(key)}})
+            )
+
+        def update_projection(self, projection):
+            resources = projection.get("workspace_resources") or {}
+            resource = resources.get("pulse_template") if isinstance(resources, Mapping) else None
+            sequence = getattr(resource, "value", None)
+            choices = (FormChoice("Select API field", ""),)
+            if isinstance(sequence, PulseSequence):
+                choices += tuple(
+                    FormChoice(field_label(sequence, binding.field_ref), binding.field_id)
+                    for binding in sequence.api_bindings
+                )
+            values = projection.get("form_values") or {}
+            fields = []
+            for key, label in zip(self.managed_fields, (
+                "Reference before", "Readout", "Reference after",
+            )):
+                selected = str(values.get(key) or "")
+                offered = choices
+                if selected and not any(choice.value == selected for choice in choices):
+                    offered += (FormChoice(f"Unavailable: {selected}", selected),)
+                fields.append(FormFieldProps(
+                    key, "choice", label, default=selected, choices=offered,
+                ))
+            self.reconcile(FormSpec(tuple(fields)), {
+                key: str(values.get(key) or "") for key in self.managed_fields
+            })
+
+        def set_mutation_enabled(self, enabled):
+            self.setEnabled(enabled)
+
+    return CalibrationApiFields(parent)
 
 
 LOGIC_NODE = LogicNodeDescriptor(
@@ -291,6 +329,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     build=_build,
     workspace_resources=(_CALIBRATION_PULSE_RESOURCE,),
+    ui_contributions=(_api_fields_editor_factory,),
     # Whether it can read that way is the camera's answer: calibration keeps
     # no conversion of its own, so a bench that has not configured one cannot
     # switch this on here either.

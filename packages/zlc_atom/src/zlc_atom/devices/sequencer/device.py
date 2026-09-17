@@ -64,6 +64,7 @@ def sequencer_archive_snapshot(
     description: BoardDescription | None = None,
     state: Mapping[str, object] | None = None,
     config: Mapping[str, tuple[float, str]] | None = None,
+    applied: AppliedState | None = None,
     program: CompiledProgram | None = None,
     source: PulseSequence | None = None,
     rows: Sequence[Sequence[int]] = (),
@@ -78,7 +79,9 @@ def sequencer_archive_snapshot(
     file it came from is overwritten by the next calibration, so naming the
     pulse says nothing about which numbers played.
 
-    ``program`` and ``source`` are the play itself: the compiled program's
+    ``applied`` is the authoritative post-LOAD/Fire state and takes precedence
+    over compile-time arguments. ``program`` and ``source`` describe a play
+    when a caller already holds that proven pair: the compiled program's
     facts -- its digest, duration and loop -- and the filled pulse document
     it was compiled from, every period's duration and levels, every slot and
     bracket, the API and config values in force.  The same argument holds for
@@ -88,6 +91,11 @@ def sequencer_archive_snapshot(
     fire repeated it; both are facts of the program, not of a document.
     """
 
+    if applied is not None:
+        if not isinstance(applied, AppliedState):
+            raise TypeError("sequencer applied state must be AppliedState")
+        program, source, rows = applied.program, applied.source, applied.rows
+        run_repeats, scan_repeats = applied.run_repeats, applied.scan_repeats
     if description is None and state is None and config is None and program is None and source is None:
         raise ValueError(
             "a sequencer archive snapshot needs description, state, config, program or source"

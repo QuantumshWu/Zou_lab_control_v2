@@ -78,11 +78,6 @@ from zlc_atom.nodes.scan import (
 )
 
 
-#: The knob a release-recapture template must offer: the duration of the
-#: period the trap is off for.  A template without it is refused by name when
-#: the plan is bound, against everything that template does offer.
-T_OFF_PARAMETER = "t_off"
-
 #: One release, two pictures.  The pairing is the whole measurement, so a
 #: template that opens any other number of probe windows per cycle is refused
 #: when the camera is armed against it, rather than paired by guesswork.
@@ -148,8 +143,7 @@ class TemperatureTask:
             raise TypeError("plan must be ScanPlan")
         if save_figure_artifact is not None and not callable(save_figure_artifact):
             raise TypeError("save_figure_artifact must be callable or None")
-        release_port = PULSE_PARAM_FAMILY + T_OFF_PARAMETER
-        if len(plan.axes) != 1 or plan.axes[0].port != release_port:
+        if len(plan.axes) != 1 or not plan.axes[0].port.startswith(PULSE_PARAM_FAMILY):
             played = tuple(axis.port for axis in plan.axes)
             raise ValueError(
                 "release-recapture sweeps the release time and nothing else; "
@@ -159,17 +153,16 @@ class TemperatureTask:
         # no release, or a release time outside what the board can play, is
         # refused here, by name, before anything is armed.
         ports = bind_plan(plan, scan_ports_for(sequence))
-        # The release scan authors WHAT varies through the template's API
-        # surface; the board plays slots, so the planned parameter is
-        # compiled into one here -- the explicit API-driven step a seamless
-        # TEMPLATE never takes (its author places the slots directly).
+        _seconds(plan.axes[0].values, plan.axes[0].unit or ports[0].unit)
+        # The selected API field becomes the sole hardware scan column;
+        # other fields retain their source and defaults.
         sequence = slots_from_plan(sequence, ports)
         self._devices = {"camera": str(camera_key), "sequencer": str(sequencer_key)}
         self._calibration = calibration
         self._calibration_path = Path(calibration_path).expanduser().resolve()
         self._save_figure_artifact = save_figure_artifact
         self._model = calibration.select_model(model_kind)
-        self._port = ports[0]
+        self._time_unit = plan.axes[0].unit or ports[0].unit
         self._t_off = plan.axes[0].values
         self._repeats = int(repeats)
         if self._repeats < 1:
@@ -338,7 +331,7 @@ class TemperatureTask:
             where=loaded > 0,
         )
         t_off = self._point_values(snapshot)
-        seconds = _seconds(t_off, self._port.unit)
+        seconds = _seconds(t_off, self._time_unit)
         return {
             "t_off_seconds": [float(value) for value in seconds],
             "loaded_pairs": [int(value) for value in loaded],
@@ -353,7 +346,7 @@ class TemperatureTask:
     def _event_point_axis() -> AxisSpec:
         return AxisSpec(
             AxisId("temperature.t_off"),
-            T_OFF_PARAMETER,
+            "t_off",
             SCAN_POINT,
             1,
             (0.0,),
@@ -364,11 +357,11 @@ class TemperatureTask:
 
         return AxisSpec(
             AxisId("temperature.t_off"),
-            T_OFF_PARAMETER,
+            "t_off",
             SCAN_POINT,
             len(values),
             tuple(float(value) for value in values),
-            unit=self._port.unit or None,
+            unit=self._time_unit or None,
         )
 
     @staticmethod
@@ -521,7 +514,7 @@ class TemperatureTask:
         artifact = {
             "format": TEMPERATURE_ARTIFACT_CONTRACT,
             "t_off": {
-                "unit": self._port.unit,
+                "unit": self._time_unit,
                 "values": list(t_off),
             },
             "run_record": record,
@@ -624,6 +617,5 @@ __all__ = [
     "PROBE_FRAMES",
     "SURVIVAL_OUTPUT",
     "TEMPERATURE_ARTIFACT_CONTRACT",
-    "T_OFF_PARAMETER",
     "TemperatureTask",
 ]

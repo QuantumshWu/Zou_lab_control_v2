@@ -47,6 +47,7 @@ _EXPORTS = {
     "BracketVM": ("zlc_ui.pulse.models", "BracketVM"),
     "BindingRecord": ("zlc_ui.pulse.models", "BindingRecord"),
     "ScanPageRecord": ("zlc_ui.pulse.models", "ScanPageRecord"),
+    "ConfigPageRecord": ("zlc_ui.pulse.models", "ConfigPageRecord"),
     "ScheduleVM": ("zlc_ui.pulse.models", "ScheduleVM"),
     "schedule_item_order": ("zlc_ui.pulse.models", "schedule_item_order"),
     "TargetPortRecord": ("zlc_ui.pulse.models", "TargetPortRecord"),

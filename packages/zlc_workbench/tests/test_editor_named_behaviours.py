@@ -209,8 +209,8 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         device_use=DeviceUseCoordinator(),
     )
     try:
-        presenter.view.binding_cycle_requested.emit(
-            "duration", sequence.periods[3].period_id, None
+        presenter.view.binding_committed.emit(
+            "duration", sequence.periods[3].period_id, None, True, "default"
         )
         presenter.view.scan_source_edited.emit(
             "import numpy as np\n"
@@ -229,7 +229,7 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         assert held is not None
         assert held.rows == ()
         assert held.program.slot_count == 0
-        assert held.source is not None and held.source.slots == ()
+        assert held.source is not None and held.source.scan_bindings == ()
         assert (held.run_repeats, held.scan_repeats) == (0, 1)
 
         assert presenter.step_scan_point(100) is True, presenter.view.warnings
