@@ -576,17 +576,22 @@ def _scope_terms(
 
 def projection_scope(
     schema: DatasetSchema, spec: PlotSpec,
+    *, domains: tuple[AxisDomain, ...] | None = None,
 ) -> tuple[tuple[AxisRef, CoordinateScalar | CoordinateSelector], ...]:
     """Authored pins plus Last's exact last-coordinate pins, never last-valid.
 
     The authored fate table stays reduced. Only the common data restriction
     expands this convenience into Scope, so fit and selection see the same
     sample as the picture. Rolling retains its existing shot carrier.
+    Related signals can restrict this to their shared domains before any
+    source-specific axes are resolved.
     """
 
     scope = _scope_terms(spec)
+    if domains is not None:
+        scope = {ref: coordinate for ref, coordinate in scope.items() if ref.domain in domains}
     if getattr(semantic_spec(spec), "reduction", None) is Reduction.LAST:
-        axes = _fate_row_axes(schema, spec)
+        axes = _fate_row_axes(schema, spec, domains=domains)
         for ref in axes:
             if _fate_of(spec, ref) != FATE_REDUCE:
                 continue
@@ -613,14 +618,21 @@ def _fate_row_axes(
     schema: DatasetSchema,
     spec: PlotSpec,
     offered_axes: tuple[AxisRef, ...] | None = None,
+    *, domains: tuple[AxisDomain, ...] | None = None,
 ) -> tuple[AxisRef, ...]:
     """The one exact editable row for each physical source axis."""
 
     axes = axis_choices_for_schema(schema) if offered_axes is None else offered_axes
-    preferred = {coordinate_axis_ref(schema, axis): axis for axis in getattr(spec, "coordinates", ())}
+    preferred = {
+        coordinate_axis_ref(schema, axis): axis
+        for axis in getattr(spec, "coordinates", ())
+        if domains is None or axis.domain in domains
+    }
     used_axes = _axes_used_by(spec) + tuple(getattr(semantic_spec(spec), "reduced", ()))
     active: dict[AxisRef, AxisRef] = {}
     for ref in used_axes:
+        if domains is not None and ref.domain not in domains:
+            continue
         primary = coordinate_axis_ref(schema, ref)
         if primary in active and active[primary] != ref:
             raise ValueError("alternative coordinates of one axis cannot have different fates")
@@ -628,6 +640,8 @@ def _fate_row_axes(
     preferred.update(active)
     listed: dict[AxisRef, AxisRef] = {}
     for offered in axes:
+        if domains is not None and offered.domain not in domains:
+            continue
         primary = coordinate_axis_ref(schema, offered)
         listed.setdefault(primary, preferred.get(primary, primary))
     for primary, used in preferred.items():
@@ -652,7 +666,7 @@ def _scope_coordinates(
     return SemanticCycleChoices(
         resolved.coordinates,
         resolved.coordinate_labels,
-        locate=resolved.coordinate_position,
+        locate=resolved.domain.axis(resolved.axis_id).coordinate_position,
     )
 
 

@@ -5,7 +5,7 @@ one composed RGBA plane per revision stayed alive on a live image panel --
 about 4 MB each at 1024x1024 and DPR 2, so roughly a gigabyte over 256
 shots, dropped to nothing, and up again, per panel.
 
-And five box caches are keyed by ``id(axes)`` while ``relayout`` is
+And the box caches are keyed by ``id(axes)`` while ``relayout`` is
 exactly where the old Axes are dropped, so a later generation could be
 allocated at a freed address and read a stale answer about itself.
 """
@@ -57,7 +57,7 @@ def test_a_settled_opacity_does_not_keep_its_plane_alive() -> None:
         session.close()
 
 def test_relayout_forgets_the_boxes_of_the_axes_it_drops() -> None:
-    """Five caches keyed by an address that relayout is about to free."""
+    """Box caches cannot retain addresses from any previous layout."""
 
     session = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
     try:
@@ -69,6 +69,7 @@ def test_relayout_forgets_the_boxes_of_the_axes_it_drops() -> None:
             renderer._box_exact,
             renderer._planned_ratio,
             renderer._quantized_bounds,
+            renderer._quantized_box_cache,
         )
         assert any(cache for cache in caches) or renderer._owned_axes, (
             "nothing was recorded, so this proves nothing"
@@ -79,5 +80,24 @@ def test_relayout_forgets_the_boxes_of_the_axes_it_drops() -> None:
         for cache in caches:
             assert set(cache) <= live, sorted(set(cache) - live)
         assert renderer._owned_axes <= live
+        for index in range(12):
+            session.set_size("1x2" if index % 2 else "2x2")
+            live = {id(axes) for axes in renderer._figure.get_axes()}
+            for cache in caches:
+                assert set(cache) <= live
+            assert len(renderer._quantized_box_cache) <= len(live)
+        # A live time axis visits a new range each frame. Sharing a tick
+        # layout across cells must not keep every old range for the run.
+        from zlc_plot.ticks import SmartOffsetLocator
+
+        locator = renderer.primary_axes.xaxis.get_major_locator()
+        assert isinstance(locator, SmartOffsetLocator)
+        for index in range(600):
+            locator.tick_values(float(index), float(index) + 3.0)
+        answers = getattr(renderer.figure, locator._PLACEMENT_CACHE_ATTRIBUTE)
+        assert len(answers) == locator._PLACEMENT_CACHE_LIMIT
+        before = tuple(answers)
+        locator.tick_values(599.0, 602.0)
+        assert tuple(answers) == before
     finally:
         session.close()

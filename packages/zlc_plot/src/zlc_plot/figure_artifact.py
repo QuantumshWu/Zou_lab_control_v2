@@ -32,18 +32,26 @@ from .specs import (
 )
 
 
-def _plain(value: object) -> object:
+def _plain(value: object, memo: dict[int, object] | None = None) -> object:
     if value is None or type(value) in (str, bool, int, float):
         return value
     if isinstance(value, np.generic):
         return value.item()
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise TypeError("figure metadata keys must be text")
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    raise TypeError(f"figure metadata contains unsupported {type(value).__name__}")
+        result = {key: _plain(item, memo) for key, item in value.items()}
+    elif isinstance(value, (tuple, list)):
+        result = [_plain(item, memo) for item in value]
+    else:
+        raise TypeError(f"figure metadata contains unsupported {type(value).__name__}")
+    memo[identity] = result
+    return result
 
 
 def _keys(value: object, expected: set[str], name: str) -> Mapping[str, Any]:

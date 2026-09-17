@@ -51,7 +51,7 @@ _COMPRESSION_MIN_SAVINGS = 0.20
 _DEFLATE_LEVEL = 1
 
 
-def _jsonable(value: Any, path: str = "metadata") -> Any:
+def _jsonable(value: Any, path: str = "metadata", memo: dict[int, Any] | None = None) -> Any:
     """Return the strict JSON tree admitted by the figure format."""
 
     if value is None or isinstance(value, (str, bool, int)):
@@ -60,18 +60,26 @@ def _jsonable(value: Any, path: str = "metadata") -> Any:
         if not math.isfinite(value):
             raise TypeError(f"{path} contains a non-finite metadata number")
         return value
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError(f"{path} metadata keys must be text")
-            result[key] = _jsonable(item, f"{path}.{key}")
+            result[key] = _jsonable(item, f"{path}.{key}", memo)
+        memo[identity] = result
         return result
     if isinstance(value, list):
-        return [
-            _jsonable(item, f"{path}[{index}]")
+        result = [
+            _jsonable(item, f"{path}[{index}]", memo)
             for index, item in enumerate(value)
         ]
+        memo[identity] = result
+        return result
     if isinstance(value, np.ndarray):
         raise TypeError(
             f"{path}: arrays belong beside info as their own entries, "

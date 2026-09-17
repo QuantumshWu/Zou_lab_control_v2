@@ -35,6 +35,7 @@ statement to make.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
@@ -567,6 +568,9 @@ class _MeasuredLocator(ticker.Locator):
     #: inputs are constant over -- one dpi, one font set, one measurer --
     #: and the lifetime the answers may be trusted for.
     _PLACEMENT_CACHE_ATTRIBUTE = "_zlc_tick_placements"
+    # A 64-cell figure has 128 numeric axes. Keep two such shared working
+    # sets, not every distinct limit a live time axis has ever displayed.
+    _PLACEMENT_CACHE_LIMIT = 256
 
     def forget_settled_step(self) -> None:
         """Drop the step this axis settled on, keeping everything else.
@@ -632,12 +636,16 @@ class _MeasuredLocator(ticker.Locator):
             return solve()
         cache = getattr(figure, self._PLACEMENT_CACHE_ATTRIBUTE, None)
         if cache is None:
-            cache = {}
+            cache = OrderedDict()
             setattr(figure, self._PLACEMENT_CACHE_ATTRIBUTE, cache)
         answer = cache.get(key)
         if answer is None:
             answer = solve()
             cache[key] = answer
+            if len(cache) > self._PLACEMENT_CACHE_LIMIT:
+                cache.popitem(last=False)
+        else:
+            cache.move_to_end(key)
         return answer
 
     def _cache_key(

@@ -3005,7 +3005,7 @@ class MatplotlibRenderer:
         self._fit_family = None
         self._fit_model_id = None
         self._image_ranges.clear()
-        # THE BOXES TOO.  These five are keyed by id(axes), and relayout is
+        # THE BOXES TOO.  These are keyed by id(axes), and relayout is
         # exactly where the old Axes are dropped -- so a later generation
         # could be allocated at a freed address, read installed=True out of
         # a stale _owned_axes, and skip installing its own apply_aspect
@@ -3018,6 +3018,7 @@ class MatplotlibRenderer:
         self._box_exact.clear()
         self._planned_ratio.clear()
         self._quantized_bounds.clear()
+        self._quantized_box_cache.clear()
         self._data_revision = None
         self._last_payload = None
         self._last_state = None
