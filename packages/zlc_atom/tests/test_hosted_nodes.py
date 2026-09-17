@@ -297,6 +297,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
             "roi_xywh": None,
             "repeat": 1,
             "frames_per_cycle": windows,
+            "receive_buffer_mib": 128,
             "photoelectrons": True,
         }
         assert record["named_devices"] == {"camera": "camera"}
@@ -773,6 +774,8 @@ def test_finite_capture_rejects_incomplete_terminal_evidence() -> None:
         )
     with pytest.raises(RuntimeError, match="did not stop, drain and join"):
         _strict_terminal(
-            CameraCaptureTerminalRecord(2, True, False, True),
+            CameraCaptureTerminalRecord(2, False, False, True),
             expected_frames=2,
         )
+    pending = CameraCaptureTerminalRecord(3, True, False, True)
+    assert _strict_terminal(pending, expected_frames=2, stopped=True) is pending

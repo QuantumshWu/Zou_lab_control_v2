@@ -12,12 +12,12 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from zlc_data import finite_real, integer, positive_integer
+from zlc_atom.devices import RecordQueue
 
 
 def positive_real(value: object, field: str) -> float:
@@ -49,8 +49,7 @@ class DcamCameraConfig:
 
     ``roi_xywh`` is expressed in unbinned sensor pixels as
     ``(x, y, width, height)``.  Driver-ring cardinality belongs to each arm:
-    complete finite cardinality for exact capture, or the declared monitor
-    history geometry for continuous acquisition.
+    receive capacity independent of the finite target or scientific history.
     """
 
     exposure_seconds: float = 0.02
@@ -131,6 +130,7 @@ class DcamCameraAdapter:
         self._driver = DcamSdkDriver() if driver is None else driver
         self._lane = CameraSdkOwnerLane("zlc-dcam-camera-owner")
         self._state_lock = threading.RLock()
+        self._records = RecordQueue("qCMOS", join_timeout_seconds=config.timeout_seconds)
         self._finish_requested = threading.Event()
         self._device: object | None = None
         self._open = False
@@ -138,12 +138,9 @@ class DcamCameraAdapter:
         self._capture_running = False
         self._ring_size = 0
         self._expected_frames: int | None = 0
-        self._copied_count = 0
         self._last_transfer_count = 0
         self._last_transfer_newest: int | None = None
-        self._pending: deque[CameraFrameRecord] = deque()
         self._terminal: CameraCaptureTerminalRecord | None = None
-        self._terminal_failure: RuntimeError | None = None
         try:
             self._lane.call(self._open_on_owner)
         except BaseException:
@@ -526,10 +523,6 @@ class DcamCameraAdapter:
         expected, _groups = self._finite_groups(frames, source_group_sizes)
         buffer_count = positive_integer(buffer_frame_count, "buffer_frame_count")
         positive_real(timeout, "timeout")
-        if expected is not None and buffer_count != expected:
-            raise ValueError(
-                "finite buffer_frame_count must equal the complete frame count"
-            )
 
         def arm_on_owner() -> None:
             if self._armed:
@@ -575,10 +568,9 @@ class DcamCameraAdapter:
                         self._armed = True
                         self._ring_size = buffer_count
                         self._expected_frames = expected
-                        self._copied_count = 0
                         self._last_transfer_count = 0
                         self._last_transfer_newest = None
-                        self._pending.clear()
+                        self._records.arm(expected, buffer_record_count=buffer_count)
                         self._terminal = None
                 raise
             with self._state_lock:
@@ -589,12 +581,11 @@ class DcamCameraAdapter:
                 self._expected_frames = expected
                 # Frames may already arrive during the post-start readback.
                 # The first ordinary drain still starts at this arm's frame 0.
-                self._copied_count = 0
+                self._records.arm(expected, buffer_record_count=buffer_count)
                 self._last_transfer_count = 0
                 self._last_transfer_newest = None
-                self._pending.clear()
                 self._terminal = None
-                self._terminal_failure = None
+            self._lane.receive = self._receive_on_owner
 
         self._lane.call(arm_on_owner)
 
@@ -609,7 +600,7 @@ class DcamCameraAdapter:
         newest = int(newest_raw)
         if count < 0:
             raise RuntimeError("qCMOS produced count is negative")
-        if count < self._last_transfer_count or count < self._copied_count:
+        if count < self._last_transfer_count or count < self._records.produced_count:
             raise RuntimeError("qCMOS produced count moved backwards")
         if count == 0:
             if newest != -1:
@@ -637,42 +628,41 @@ class DcamCameraAdapter:
         self,
         available: int,
         newest: int,
+        *,
+        finishing: bool = False,
     ) -> None:
-        """Copy out the frames the sensor has ALREADY produced.
+        """Copy one fixed SDK snapshot, independently of consumer timeouts.
 
-        No deadline governs this.  A read's timeout says how long to wait for
-        a frame; it does not say how long a frame that has already arrived may
-        take to copy -- that is work which must finish, because the ring will
-        overwrite what is not copied out of it.  Enforcing the read deadline
-        here made the two indistinguishable, and a frame arriving near the end
-        of a read window was then reported as a timeout INSTEAD of being
-        returned: with a 50 ms monitor slice and a several-hundred-ms cycle,
-        that is every cycle, which is how "the deadline expired before frame
-        commit" came to greet a measurement that had just started.
-
-        The work is bounded without a clock: the snapshot names how many
-        frames to copy, and the loop stops there.  Cancellation still lands
-        immediately, through the finishing checks between copies.
+        The snapshot bounds the work. Stop is checked between copies; after
+        physical stop, the same path drains the final authoritative snapshot.
         """
 
-        if available - self._copied_count > self._ring_size:
-            raise RuntimeError("qCMOS ring overrun overwrote an unread frame")
+        if available - self._records.produced_count > self._ring_size:
+            raise RuntimeError(
+                "qCMOS ring overrun overwrote an unread frame: "
+                f"produced={available}, copied={self._records.produced_count}, capacity={self._ring_size}, "
+                f"observed_at_ns={time.time_ns()}"
+            )
         device = self._require_device()
         snapshot_available = available
         snapshot_newest = newest
-        while self._copied_count < snapshot_available:
-            self._check_not_finishing()
-            ordinal = self._copied_count
+        while self._records.produced_count < snapshot_available:
+            if not finishing:
+                self._check_not_finishing()
+            ordinal = self._records.produced_count
             distance = snapshot_available - 1 - ordinal
             ring_index = (snapshot_newest - distance) % self._ring_size
             image, frame_stamp, camera_stamp, seconds, microseconds = device.copy_frame(
                 ring_index
             )
-            self._check_not_finishing()
+            if not finishing:
+                self._check_not_finishing()
             post_count, _post_newest = self._observe_transfer_on_owner()
             if post_count - ordinal > self._ring_size:
                 raise RuntimeError(
-                    "qCMOS ring advanced far enough to overwrite a frame during copy"
+                    "qCMOS ring advanced far enough to overwrite a frame during copy: "
+                    f"produced={post_count}, copying={ordinal}, capacity={self._ring_size}, "
+                    f"observed_at_ns={time.time_ns()}"
                 )
             record = CameraFrameRecord(
                 image=image,
@@ -685,48 +675,37 @@ class DcamCameraAdapter:
                 host_received_at_ns=time.time_ns(),
                 driver_buffer_index=ring_index,
             )
-            self._check_not_finishing()
-            with self._state_lock:
-                self._pending.append(record)
-                self._copied_count += 1
+            if not self._records.push(record):
+                raise self._records.failure or RuntimeError("qCMOS intake ended before its SDK snapshot")
 
-    def _read_on_owner(
-        self,
-        wanted: int,
-        timeout: float,
-        exact: bool,
-    ) -> list[CameraFrameRecord]:
-        if not self._armed:
-            raise RuntimeError("qCMOS read requires an armed capture")
-        deadline = time.monotonic() + timeout
-        result: list[CameraFrameRecord] = []
-        device = self._require_device()
-        while len(result) < wanted:
+    def _receive_on_owner(self) -> None:
+        """One bounded SDK receive step, independent of publication work."""
+        try:
             self._check_not_finishing()
-            with self._state_lock:
-                while self._pending and len(result) < wanted:
-                    result.append(self._pending.popleft())
-            if len(result) == wanted:
-                break
             available, newest = self._observe_transfer_on_owner()
-            if available > self._copied_count:
+            if available > self._records.produced_count:
                 assert newest is not None
                 self._drain_snapshot_on_owner(available, newest)
-                continue
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                break
-            ready = device.wait_frame_ready(
-                max(1, int(min(_WAIT_SLICE_SECONDS, remaining) * 1000.0))
-            )
-            self._check_not_finishing()
-            if not ready and time.monotonic() >= deadline:
-                break
-        if len(result) != wanted and exact:
-            raise TimeoutError(
-                f"qCMOS returned {len(result)} of {wanted} exact frame(s)"
-            )
-        return result
+            if self._expected_frames is not None and self._records.produced_count == self._expected_frames:
+                self._require_device().stop_capture()
+                if int(self._require_device().capture_status()) == _CAPTURE_STATUS_BUSY:
+                    raise RuntimeError("qCMOS remained busy after finite capture stop")
+                self._capture_running = False
+                self._lane.receive = None
+            elif available == self._records.produced_count:
+                self._require_device().wait_frame_ready(int(_WAIT_SLICE_SECONDS * 1000))
+        except DcamCaptureInterrupted:
+            self._lane.receive = None
+        except BaseException as error:
+            self._lane.receive = None
+            self._records.fail(error)
+            try:
+                self._require_device().stop_capture()
+                if int(self._require_device().capture_status()) == _CAPTURE_STATUS_BUSY:
+                    raise RuntimeError("qCMOS remained busy after intake failure")
+                self._capture_running = False
+            except BaseException as cleanup:
+                error.add_note(f"qCMOS stop after intake failure also failed: {cleanup}")
 
     def read_frame_records(
         self,
@@ -739,22 +718,26 @@ class DcamCameraAdapter:
         bounded_timeout = finite_real(timeout, "timeout", minimum=0.0)
         if type(exact) is not bool:
             raise TypeError("exact must be bool")
-        return self._lane.call(
-            lambda: self._read_on_owner(wanted, bounded_timeout, exact)
-        )
+        return self._records.read(wanted, timeout=bounded_timeout, exact=exact)
 
     def _finish_on_owner(self) -> CameraCaptureTerminalRecord:
+        self._lane.receive = None
         if self._terminal is not None:
             return self._terminal
-        prior_terminal_failure = self._terminal_failure
+        prior_terminal_failure = self._records.failure
         if not self._armed:
-            if prior_terminal_failure is not None:
-                raise prior_terminal_failure
+            self._records.finish()
             self._terminal = CameraCaptureTerminalRecord(0, True, True, True)
             return self._terminal
         device = self._require_device()
         if self._capture_running:
-            device.stop_capture()
+            try:
+                device.stop_capture()
+            except BaseException as error:
+                if prior_terminal_failure is not None:
+                    prior_terminal_failure.add_note(f"qCMOS stop also failed: {error}")
+                    raise prior_terminal_failure
+                raise
             if int(device.capture_status()) == _CAPTURE_STATUS_BUSY:
                 raise RuntimeError("qCMOS remained busy after cap_stop; ring retained")
             self._capture_running = False
@@ -764,7 +747,7 @@ class DcamCameraAdapter:
             count = int(count_raw)
             newest = int(newest_raw)
             if count < max(
-                self._copied_count,
+                self._records.produced_count,
                 self._last_transfer_count,
             ):
                 raise RuntimeError("qCMOS final produced count moved backwards")
@@ -793,6 +776,10 @@ class DcamCameraAdapter:
                     raise RuntimeError(
                         "qCMOS final count/newest-index pair is inconsistent"
                     )
+            if prior_terminal_failure is None and produced_count > self._records.produced_count:
+                if self._expected_frames is not None and produced_count > self._expected_frames:
+                    raise RuntimeError("qCMOS produced more frames than the finite capture requested")
+                self._drain_snapshot_on_owner(produced_count, newest, finishing=True)
         except BaseException as error:
             final_error = error
         try:
@@ -804,21 +791,18 @@ class DcamCameraAdapter:
             self._capture_running = False
             self._ring_size = 0
             self._expected_frames = 0
-            self._pending.clear()
         if final_error is not None:
-            if prior_terminal_failure is not None:
-                raise prior_terminal_failure
-            terminal_failure = RuntimeError(
-                "qCMOS final transfer state is not authoritative"
-            )
-            self._terminal_failure = terminal_failure
-            raise terminal_failure from final_error
-        if prior_terminal_failure is not None:
-            raise prior_terminal_failure
+            if prior_terminal_failure is None:
+                failure = RuntimeError("qCMOS final transfer state is not authoritative")
+                failure.__cause__ = final_error
+                self._records.fail(failure)
+            else:
+                prior_terminal_failure.add_note(f"qCMOS final transfer query also failed: {final_error}")
+        self._records.finish()
         self._terminal = CameraCaptureTerminalRecord(
             produced_count,
             True,
-            True,
+            not self._records.pending_count,
             True,
         )
         return self._terminal
@@ -861,6 +845,7 @@ class DcamCameraAdapter:
 
         if self._device is None:
             self._lane.close()
+            self._records.close()
             return
         failures: list[BaseException] = []
         try:
@@ -876,6 +861,7 @@ class DcamCameraAdapter:
                 raise failures[0]
             raise
         self._lane.close()
+        self._records.close()
         if failures:
             raise failures[0]
 

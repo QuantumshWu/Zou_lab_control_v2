@@ -739,7 +739,6 @@ def test_a_preview_event_carries_the_settings_its_frames_were_frozen_with() -> N
             binning_yx=(1, 1),
             generation="settings",
             revision=1,
-            run_record={"request": {"camera_key": "camera"}},
             value_unit="count",
         )
 

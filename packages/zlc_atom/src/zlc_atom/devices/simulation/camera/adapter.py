@@ -12,6 +12,7 @@ from uuid import uuid4
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField
+from zlc_atom.devices import RecordQueue
 from zlc_atom.devices.camera.contract import (
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
@@ -75,7 +76,7 @@ class VirtualCamera:
         self._sensor_shape_yx = shape
         self._exposure_seconds = float(self.config.exposure_seconds)
         self._roi_xywh = (0, 0, shape[1], shape[0])
-        self._queue: deque[CameraFrameRecord] = deque()
+        self._records = RecordQueue("virtual camera", join_timeout_seconds=2.0)
         self._trigger_queue: deque[
             tuple[
                 int,
@@ -86,16 +87,10 @@ class VirtualCamera:
                 int,
             ]
         ] = deque()
-        self._armed = False
-        self._accepting = False
         self._expected_frames: int | None = None
-        self._buffer_frame_count = 1
         self._next_ordinal = 0
-        self._triggered_count = 0
-        self._produced_count = 0
         self._worker: threading.Thread | None = None
         self._worker_stop: threading.Event | None = None
-        self._worker_error: BaseException | None = None
         self._terminal: CameraCaptureTerminalRecord | None = None
 
     @property
@@ -147,7 +142,7 @@ class VirtualCamera:
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
         with self._condition:
-            if self._armed:
+            if self._records.armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
             if self._exposure_seconds != exposure:
                 self._exposure_seconds = exposure
@@ -193,7 +188,7 @@ class VirtualCamera:
             )
             roi = (x, y, width, height)
         with self._condition:
-            if self._armed:
+            if self._records.armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
             self._roi_xywh = roi
         return self.working_point()
@@ -278,23 +273,15 @@ class VirtualCamera:
             groups = tuple(int(item) for item in (source_group_sizes or ()))
             if expected <= 0 or not groups or sum(groups) != expected or any(item <= 0 for item in groups):
                 raise ValueError("finite arm groups must exactly cover frames")
-            if buffer_count != expected:
-                raise ValueError("finite buffer_frame_count must equal frames")
         with self._condition:
-            if self._armed:
+            if self._records.armed:
                 raise RuntimeError("virtual camera is already armed")
             if self._worker is not None and self._worker.is_alive():
                 raise RuntimeError("previous virtual camera worker is still running")
-            self._queue.clear()
+            self._records.arm(expected, buffer_record_count=buffer_count)
             self._trigger_queue.clear()
-            self._armed = True
-            self._accepting = True
             self._expected_frames = expected
-            self._buffer_frame_count = buffer_count
             self._next_ordinal = 0
-            self._triggered_count = 0
-            self._produced_count = 0
-            self._worker_error = None
             self._terminal = None
             stop = threading.Event()
             # Daemon, unlike the SDK-owning lanes the real cameras keep alive:
@@ -317,8 +304,7 @@ class VirtualCamera:
             except BaseException:
                 self._worker = None
                 self._worker_stop = None
-                self._armed = False
-                self._accepting = False
+                self._records.finish()
                 raise
 
     def _produce(self, stop: threading.Event) -> None:
@@ -326,19 +312,19 @@ class VirtualCamera:
             while True:
                 with self._condition:
                     if self._free_running:
-                        if not self._accepting or stop.is_set():
+                        if not self._records.accepting or stop.is_set():
                             break
                         exposure = self._exposure_seconds
                         roi = self._roi_xywh
                         settings_session_id = self._device_session_id
                         settings_epoch = self._settings_epoch
                         deadline = time.monotonic() + exposure
-                        while self._accepting and not stop.is_set():
+                        while self._records.accepting and not stop.is_set():
                             remaining = deadline - time.monotonic()
                             if remaining <= 0:
                                 break
                             self._condition.wait(timeout=remaining)
-                        if not self._accepting or stop.is_set():
+                        if not self._records.accepting or stop.is_set():
                             break
                         ordinal = self._next_ordinal
                         self._next_ordinal += 1
@@ -346,7 +332,7 @@ class VirtualCamera:
                     else:
                         while (
                             not self._trigger_queue
-                            and self._accepting
+                            and self._records.accepting
                             and not stop.is_set()
                         ):
                             self._condition.wait()
@@ -359,51 +345,34 @@ class VirtualCamera:
                                 settings_session_id,
                                 settings_epoch,
                             ) = self._trigger_queue.popleft()
-                        elif not self._accepting or stop.is_set():
+                        elif not self._records.accepting or stop.is_set():
                             break
                         else:
                             continue
-                source = (
-                    provided
-                    if provided is not None
-                    else self._frame_source(exposure)
-                )
-                image = np.asarray(source)
-                if image.shape != self._sensor_shape_yx:
-                    raise ValueError("virtual frame source returned the wrong shape")
-                if image.dtype.kind not in "iu":
-                    raise TypeError("virtual frame source must return an integer image")
-                x, y, width, height = roi
-                image = image[y : y + height, x : x + width]
-                # One in-place clip into a reused buffer instead of a fresh
-                # clip+astype allocation per frame; CameraFrameRecord then
-                # snapshots the buffer into immutable bytes -- the single
-                # per-frame copy, made here on the producer thread, which
-                # every downstream freeze retains as a view.
-                buffer = self._clip_buffer
-                if buffer is None or buffer.shape != image.shape:
-                    buffer = np.empty(image.shape, dtype=self._frame_dtype)
-                    self._clip_buffer = buffer
-                np.clip(
-                    image,
-                    self._frame_limits.min,
-                    self._frame_limits.max,
-                    out=buffer,
-                    casting="unsafe",
-                )
+                if provided is None:
+                    image = np.asarray(self._frame_source(exposure))
+                    if image.shape != self._sensor_shape_yx:
+                        raise ValueError("virtual frame source returned the wrong shape")
+                    if image.dtype.kind not in "iu":
+                        raise TypeError("virtual frame source must return an integer image")
+                    x, y, width, height = roi
+                    image = image[y : y + height, x : x + width]
+                    buffer = self._clip_buffer
+                    if buffer is None or buffer.shape != image.shape:
+                        buffer = np.empty(image.shape, dtype=self._frame_dtype)
+                        self._clip_buffer = buffer
+                    np.clip(image, self._frame_limits.min, self._frame_limits.max,
+                            out=buffer, casting="unsafe")
+                else:
+                    # The external producer's ROI was frozen at trigger time.
+                    buffer = provided
                 with self._condition:
-                    if stop.is_set() or not self._armed:
+                    if not self._records.armed:
                         break
-                    self._produced_count += 1
-                    if (
-                        self._expected_frames is not None
-                        and self._produced_count >= self._expected_frames
-                    ):
-                        self._accepting = False
                     record = CameraFrameRecord(
                         buffer,
                         ordinal,
-                        self._produced_count,
+                        ordinal + 1,
                         ordinal,
                         ordinal,
                         None,
@@ -412,14 +381,14 @@ class VirtualCamera:
                         settings_session_id=settings_session_id,
                         settings_epochs=(settings_epoch,),
                     )
-                    while len(self._queue) >= self._buffer_frame_count:
-                        self._queue.popleft()
-                    self._queue.append(record)
+                    if not self._records.push(record):
+                        if self._records.failure is not None:
+                            raise self._records.failure
+                        break
                     self._condition.notify_all()
         except BaseException as error:
             with self._condition:
-                self._worker_error = error
-                self._accepting = False
+                self._records.fail(error)
                 self._trigger_queue.clear()
                 self._condition.notify_all()
         finally:
@@ -441,56 +410,57 @@ class VirtualCamera:
         if count <= 0:
             raise ValueError("trigger count must be positive")
         with self._condition:
-            if not self._armed or not self._accepting:
+            if self._records.failure is not None:
+                raise self._records.failure
+            if not self._records.accepting or self._worker_stop is None or self._worker_stop.is_set():
                 return
             if (
                 self._expected_frames is not None
-                and self._triggered_count + count > self._expected_frames
+                and self._next_ordinal + count > self._expected_frames
             ):
                 raise RuntimeError("virtual trigger count exceeds the finite arm")
+            outstanding = self._next_ordinal - self._records.produced_count + self._records.pending_count
+            if outstanding + count > self._records.capacity:
+                error = RuntimeError(
+                    f"virtual camera receive buffer overflow at trigger {self._next_ordinal} "
+                    f"(capacity {self._records.capacity}, observed_at_ns={time.time_ns()}); "
+                    "no accepted frame was discarded"
+                )
+                self._records.fail(error)
+                self._condition.notify_all()
+                raise error
+            provided = None
+            if frame is not None:
+                image = np.asarray(frame)
+                if image.shape != self._sensor_shape_yx or image.dtype.kind not in "iu":
+                    raise ValueError("virtual trigger frame must be an integer sensor image")
+                x, y, width, height = self._roi_xywh
+                provided = np.empty((height, width), dtype=self._frame_dtype)
+                np.clip(image[y:y + height, x:x + width],
+                        self._frame_limits.min, self._frame_limits.max,
+                        out=provided, casting="unsafe")
             for _ in range(count):
                 ordinal = self._next_ordinal
                 self._next_ordinal += 1
                 self._trigger_queue.append(
                     (
                         ordinal,
-                        None if frame is None else np.asarray(frame),
+                        provided,
                         self._exposure_seconds,
                         self._roi_xywh,
                         self._device_session_id,
                         self._settings_epoch,
                     )
                 )
-                self._triggered_count += 1
                 if (
                     self._expected_frames is not None
-                    and self._triggered_count == self._expected_frames
+                    and self._next_ordinal == self._expected_frames
                 ):
-                    self._accepting = False
                     break
             self._condition.notify_all()
 
     def read_frame_records(self, n: int, *, timeout: float, exact: bool) -> list[CameraFrameRecord]:
-        requested = int(n)
-        if requested <= 0:
-            raise ValueError("n must be positive")
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        with self._condition:
-            while len(self._queue) < requested:
-                if self._worker_error is not None:
-                    raise RuntimeError("virtual camera frame worker failed") from self._worker_error
-                worker_running = self._worker is not None and self._worker.is_alive()
-                if not self._armed or (not worker_running and not self._trigger_queue and not self._accepting):
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    break
-                self._condition.wait(remaining)
-            if exact and len(self._queue) < requested:
-                raise TimeoutError("virtual camera did not produce the requested exact frames")
-            count = requested if exact else min(requested, len(self._queue))
-            records = [self._queue.popleft() for _ in range(count)]
-            return records
+        return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
         """End the capture once the producer really has.
@@ -504,11 +474,10 @@ class VirtualCamera:
 
         with self._condition:
             if self._terminal is not None:
+                self._records.finish()
                 return self._terminal
-            if not self._armed:
-                self._terminal = CameraCaptureTerminalRecord(0, True, True, True)
-                return self._terminal
-            self._accepting = False
+            if self._worker_stop is not None:
+                self._worker_stop.set()
             worker = self._worker
             self._condition.notify_all()
         if worker is not None:
@@ -516,21 +485,18 @@ class VirtualCamera:
         with self._condition:
             if worker is not None and worker.is_alive():
                 raise RuntimeError("virtual camera producer did not join")
-            self._armed = False
+            count = self._records.finish()
             self._terminal = CameraCaptureTerminalRecord(
-                self._produced_count,
+                count,
                 True,
-                not self._queue and not self._trigger_queue,
+                not self._records.pending_count and not self._trigger_queue,
                 True,
             )
             self._condition.notify_all()
-            if self._worker_error is not None:
-                raise RuntimeError("virtual camera frame worker failed") from self._worker_error
             return self._terminal
 
     def capture_state(self) -> bool:
-        with self._condition:
-            return self._armed
+        return self._records.armed
 
     def close(self) -> None:
         """Finish an armed capture, then drop the queues.
@@ -540,18 +506,20 @@ class VirtualCamera:
         waits for the worker again instead of returning as if it had.
         """
 
-        if self.capture_state():
-            self.finish_record_capture()
-        with self._condition:
-            self._accepting = False
-            self._queue.clear()
-            self._trigger_queue.clear()
-            self._condition.notify_all()
+        try:
+            if self.capture_state():
+                self.finish_record_capture()
+        finally:
+            if not self.capture_state():
+                with self._condition:
+                    self._records.close()
+                    self._trigger_queue.clear()
+                    self._clip_buffer = None
+                    self._condition.notify_all()
 
     @property
     def produced_count(self) -> int:
-        with self._condition:
-            return self._produced_count
+        return self._records.produced_count
 
 
 __all__ = ["VirtualCamera", "VirtualCameraConfig"]

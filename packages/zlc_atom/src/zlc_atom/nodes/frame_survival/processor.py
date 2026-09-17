@@ -268,14 +268,6 @@ class FrameSurvivalProcessor:
             survival.block.schema.repeat_domain.size
             * survival.block.schema.point_domain.size
         )
-        run_record = {
-            "node": self.instance_id,
-            "parameters": {
-                "occupancy_signal": self.source_signal or signal_value.name,
-                "frames": frames,
-                "pairs": pair_count,
-            },
-        }
         exact = isinstance(signal_value.coverage, DatasetCoverage)
         if exact:
             if (
@@ -330,10 +322,21 @@ class FrameSurvivalProcessor:
                 SURVIVAL_OUTPUTS[0],
                 survival,
                 coverage,
-                run_record,
                 canonical,
                 origin,
             )
+        }
+
+    def describe_run(self, inputs: dict[str, SignalValue]) -> dict[str, object]:
+        source = next(iter(inputs.values()))
+        frame_axis, _site = self._source_axes(source.schema)
+        return {
+            "node": self.instance_id,
+            "parameters": {
+                "occupancy_signal": self.source_signal or source.name,
+                "frames": frame_axis.size,
+                "pairs": len(_forward_pairs(frame_axis.size)),
+            },
         }
 
 

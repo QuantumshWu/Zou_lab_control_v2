@@ -491,7 +491,6 @@ class WaveformMeasurementNode:
                     declaration,
                     snapshot,
                     MonitorCoverage(snapshot.block.schema.point_domain.size, snapshot.block.schema.point_domain.size),
-                    self.run_record,
                     shot_time_seconds=shot_time,
                     event_record=evidence,
                 )
@@ -510,7 +509,6 @@ class WaveformMeasurementNode:
                 declaration,
                 snapshot,
                 DatasetCoverage((index + 1) * schema.point_domain.size, self.repeat * schema.point_domain.size),
-                self.run_record,
                 canonical,
                 (index, 0),
                 event_record=evidence,
@@ -553,6 +551,8 @@ class WaveformMeasurementNode:
         try:
             self._configure()
             self._arm()
+            if owns_generation:
+                self.signal_plane.set_run_record(self, self.run_record)
             return FiniteCapture(
                 self, owns_generation=owns_generation, should_stop=should_stop
             )
@@ -580,6 +580,8 @@ class WaveformMeasurementNode:
         try:
             self._configure()
             self._arm()
+            if owns_generation:
+                self.signal_plane.set_run_record(self, self.run_record)
             return MonitorCapture(
                 self, owns_generation=owns_generation, commit_live=commit_live
             )
@@ -597,6 +599,7 @@ class WaveformMeasurementNode:
         if self.repeat == 0:
             capture = self.monitor(owns_generation=False, commit_live=context.commit_live)
             try:
+                context.set_run_record(self.run_record)
                 context.report_ready()
                 while not context.cancel_requested():
                     capture.poll()
@@ -610,6 +613,7 @@ class WaveformMeasurementNode:
             return {"signals": signals}
         capture = self.prepare(owns_generation=False, should_stop=context.cancel_requested)
         try:
+            context.set_run_record(self.run_record)
             context.report_ready()
         except BaseException:
             capture.close()

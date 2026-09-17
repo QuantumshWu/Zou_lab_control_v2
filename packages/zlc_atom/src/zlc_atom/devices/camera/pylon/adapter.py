@@ -23,6 +23,7 @@ from typing import Sequence
 from uuid import uuid4
 
 import numpy as np
+from zlc_atom.devices import RecordQueue
 
 from ....authoring import AuthoringField, TunableField
 from ..roi_grid import snap_roi_axis
@@ -124,15 +125,19 @@ class PylonCameraAdapter:
         self.config = config
         self._camera = camera
         self._command_lock = threading.RLock()
+        self._records = RecordQueue("pylon", join_timeout_seconds=config.timeout_seconds)
+        self._worker: threading.Thread | None = None
+        self._worker_stop = threading.Event()
+        self._terminal: CameraCaptureTerminalRecord | None = None
+        self._block_id_transport = ""
+        self._block_id_wrap: int | None = None
+        self._last_block_id: int | None = None
         self._device_session_id = uuid4().hex
         self._settings_epoch = 0
         self._settings_transition_epochs: set[int] = set()
         self._gain_default = float(config.gain_db)
-        self._armed_total: int | None = None
-        self._grabbed = 0
         self._armed = False
         self._configured = False
-        self._capture_incomplete = False
         self._monitor_mode = False
         self._working_point: CameraWorkingPoint | None = None
         self._requested_settings: dict[str, object] = {}
@@ -199,8 +204,29 @@ class PylonCameraAdapter:
             raise
         self._camera = camera
 
-    @_serialized
     def close(self) -> None:
+        primary: BaseException | None = None
+        if self._worker is not None:
+            try:
+                self.finish_record_capture()
+            except BaseException as error:
+                primary = error
+                if self._worker is not None and self._worker.is_alive():
+                    raise
+        try:
+            with self._command_lock:
+                self._close_camera()
+        except BaseException as error:
+            if primary is None:
+                raise
+            primary.add_note(f"pylon close also failed: {error}")
+        finally:
+            if self._camera is None:
+                self._records.close()
+        if primary is not None:
+            raise primary
+
+    def _close_camera(self) -> None:
         self._working_point = None
         self._requested_settings.clear()
         camera = self._camera
@@ -249,7 +275,7 @@ class PylonCameraAdapter:
                 if self_inner.was_grabbing:
                     from pypylon import pylon  # noqa: PLC0415
 
-                    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+                    camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
                 return False
 
         return _Pause()
@@ -582,7 +608,7 @@ class PylonCameraAdapter:
             # cannot be confused (and 1.0 was simply not the camera's answer).
             gain=float(10.0 ** (float(camera.Gain.GetValue()) / 20.0)),
             readout_mode=(
-                "pylon:Mono8;free-running;grab=LatestImageOnly"
+                "pylon:Mono8;free-running;grab=OneByOne"
                 if free_running
                 else (
                     f"pylon:Mono8;external={self.config.trigger_source};"
@@ -602,18 +628,15 @@ class PylonCameraAdapter:
         buffer_frame_count: int,
         timeout: float,
     ) -> None:
-        """Start the grab session, with the strategy each mode's semantics need.
+        """Start ordered intake with the requested trigger mode.
 
         A source-less MONITOR acquisition is free-running only for this arm.
         A repeating source group is the Camera Measurement continuous mode and
         remains externally triggered and ordered.  Finish restores the external
         working point in either case.
 
-        HARDWARE TRIGGER gets one bounded session per arm, stopped when done:
-        one trigger, one frame, one shot, strictly.  A resident latest-only
-        stream could hand shot K+1 a late frame from shot K -- a timed-out
-        trigger whose frame arrives after the retry fired -- and per-shot
-        acquisitions are slow enough that the restart cost does not matter.
+        Every mode uses OneByOne and the common bounded FIFO. Finite target
+        size never determines how much SDK or application memory is reserved.
         """
 
         if frames is None:
@@ -647,10 +670,6 @@ class PylonCameraAdapter:
             or buffer_frame_count <= 0
         ):
             raise ValueError("buffer_frame_count must be a positive integer")
-        if expected is not None and buffer_frame_count != expected:
-            raise ValueError(
-                "finite buffer_frame_count must equal the complete frame count"
-            )
         bounded_timeout = float(timeout)
         if not np.isfinite(bounded_timeout) or bounded_timeout <= 0.0:
             raise ValueError("timeout must be positive and finite")
@@ -666,13 +685,22 @@ class PylonCameraAdapter:
                 camera.StopGrabbing()
             if camera.IsGrabbing():
                 raise RuntimeError("pylon remained grabbing after StopGrabbing")
-            camera.MaxNumBuffer.SetValue(buffer_frame_count)
-            if int(camera.MaxNumBuffer.GetValue()) != buffer_frame_count:
+            sdk_capacity = min(buffer_frame_count, int(camera.MaxNumBuffer.GetMax()))
+            camera.MaxNumBuffer.SetValue(sdk_capacity)
+            if int(camera.MaxNumBuffer.GetValue()) != sdk_capacity:
                 raise RuntimeError("pylon did not apply the requested frame-buffer capacity")
             self._apply_trigger(monitor=monitor)
-            if monitor:
-                camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-            elif expected is None:
+            self._block_id_transport = str(camera.GetDeviceInfo().GetDeviceClass())
+            self._block_id_wrap = None
+            if self._block_id_transport == "BaslerGigE":
+                nodes = camera.GetNodeMap()
+                extended = nodes.GetNode("GevGVSPExtendedIDMode")
+                if extended is None:
+                    extended = nodes.GetNode("BslGevGVSPExtendedIDMode")
+                if extended is None or not bool(extended.GetValue()):
+                    self._block_id_wrap = 65535
+            self._last_block_id = None
+            if expected is None:
                 camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
             else:
                 camera.StartGrabbingMax(expected, pylon.GrabStrategy_OneByOne)
@@ -684,14 +712,26 @@ class PylonCameraAdapter:
                     f"pylon rollback after arm failure also failed: {secondary}"
                 )
             raise
-        self._armed_total = expected
-        self._grabbed = 0
         self._armed = True
-        self._capture_incomplete = False
         self._monitor_mode = monitor
         self._working_point = None
+        self._records.arm(expected, buffer_record_count=buffer_frame_count)
+        self._terminal = None
+        self._worker_stop.clear()
+        self._worker = threading.Thread(
+            target=self._receive, name="zlc-pylon-camera-receiver", daemon=True,
+        )
+        try:
+            self._worker.start()
+        except BaseException as error:
+            self._worker = None
+            try:
+                self.finish_record_capture()
+            except BaseException as cleanup:
+                error.add_note(f"pylon cleanup after receiver startup failure also failed: {cleanup}")
+            self._records.fail(error)
+            raise
 
-    @_serialized
     def read_frame_records(
         self,
         n: int,
@@ -699,89 +739,112 @@ class PylonCameraAdapter:
         timeout: float,
         exact: bool,
     ) -> Sequence[CameraFrameRecord]:
-        """Retrieve up to ``n`` frames.
+        """Consume the accepted FIFO; SDK intake never waits for this call."""
+        return tuple(self._records.read(n, timeout=timeout, exact=exact))
 
-        How loudly a missing frame fails follows the trigger mode, and this is
-        the single place that decides it.  Free-running, a missing frame is a
-        viewer seeing no light: return short and let the live view freeze.
-        Hardware-triggered with ``exact``, a missing frame means a trigger was
-        lost, which corrupts the shot -- so it raises rather than returning a
-        short cycle that downstream would treat as complete.
-
-        A frame read after a live tune carries both the old and the new
-        settings epoch, and so does every frame after it until this arm ends:
-        the SDK offers no boundary between frames exposed before and after the
-        change, and a read that happened to drain part of the old queue is no
-        proof that the rest of it is new.  Only a fresh arm starts from one
-        epoch again.
-        """
-
-        if not self._armed:
-            raise RuntimeError("camera is not armed")
-        camera = self._camera
-        records: list[CameraFrameRecord] = []
-        deadline = time.monotonic() + float(timeout)
+    def _receive_one(self, timeout_ms: int) -> None:
+        """Copy one SDK result while holding the existing command lock."""
         frame_epochs = tuple(sorted(self._settings_transition_epochs)) or (
             self._settings_epoch,
         )
-
-        while len(records) < int(n):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            result = camera.RetrieveResult(
-                max(1, int(min(remaining, 0.2) * 1000)),
-                _timeout_handling(),
-            )
-            if result is None or not result.IsValid():
-                continue
-            try:
-                if not result.GrabSucceeded():
-                    self._capture_incomplete = True
-                    if not self._monitor_mode:
+        result = self._camera.RetrieveResult(timeout_ms, _timeout_handling())
+        if result is None or not result.IsValid():
+            return
+        try:
+            if not result.GrabSucceeded():
+                raise RuntimeError("a camera acquisition returned a failed frame")
+            image = np.asarray(result.Array)
+            if image.dtype != np.dtype("uint8"):
+                raise RuntimeError(f"pylon Mono8 capture returned dtype {image.dtype}, expected uint8")
+            block_id = int(result.GetBlockID())
+            previous = self._last_block_id
+            if self._block_id_transport in ("BaslerUsb", "BaslerGigE"):
+                if block_id == (1 << 64) - 1:
+                    raise RuntimeError("pylon returned an invalid hardware BlockID; frame continuity is unprovable")
+                # GigE explicitly uses zero for unsupported IDs; USB's first
+                # valid ID is zero. Only legacy GigE wraps 65535 back to 1.
+                unsupported = self._block_id_transport == "BaslerGigE" and block_id == 0
+                if previous is not None:
+                    expected_id = 1 if previous == self._block_id_wrap else previous + 1
+                    if block_id != expected_id:
                         raise RuntimeError(
-                            "a triggered acquisition returned a failed frame"
+                            f"pylon hardware frame sequence gap: expected {expected_id}, received {block_id}; "
+                            f"accepted={self._records.produced_count}, capacity={self._records.capacity}, "
+                            f"observed_at_ns={time.time_ns()}"
                         )
-                    continue
-                image = np.asarray(result.Array)
-                if image.dtype != np.dtype("uint8"):
-                    raise RuntimeError(
-                        f"pylon Mono8 capture returned dtype {image.dtype}, expected uint8"
-                    )
-                # Own the immutable pixels while the SDK result still holds them.
-                record = CameraFrameRecord(
-                    image,
-                    self._grabbed,
-                    settings_session_id=self._device_session_id,
-                    settings_epochs=frame_epochs,
-                )
-            finally:
-                result.Release()
-            self._grabbed += 1
-            records.append(record)
-
-        if exact and len(records) < int(n):
-            raise RuntimeError(
-                f"a triggered acquisition expected {n} frames and received "
-                f"{len(records)}; a lost trigger corrupts the shot"
+                if not unsupported:
+                    self._last_block_id = block_id
+            else:
+                # No transport-specific numbering contract is asserted here.
+                unsupported = True
+            record = CameraFrameRecord(
+                image, self._records.produced_count,
+                frame_stamp=None if unsupported else block_id,
+                settings_session_id=self._device_session_id, settings_epochs=frame_epochs,
             )
-        return tuple(records)
+        finally:
+            result.Release()
+        if not self._records.push(record):
+            raise self._records.failure or RuntimeError("pylon intake ended before its SDK result")
 
-    @_serialized
+    def _receive(self) -> None:
+        try:
+            while not self._worker_stop.is_set():
+                with self._command_lock:
+                    if self._worker_stop.is_set():
+                        break
+                    self._receive_one(50)
+                    if not self._records.accepting:
+                        break
+        except BaseException as error:
+            self._records.fail(error)
+            try:
+                with self._command_lock:
+                    self._camera.StopGrabbing()
+            except BaseException as cleanup:
+                error.add_note(f"pylon stop after intake failure also failed: {cleanup}")
+        finally:
+            self._worker_stop.set()
+
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
         """End this arm and restore the finite external-trigger working point."""
-
-        camera = self._camera
-        if camera is not None:
-            self._stop_and_restore_external()
-        self._armed = False
-        self._settings_transition_epochs.clear()
-        return CameraCaptureTerminalRecord(
-            self._grabbed,
-            True,
-            not self._capture_incomplete,
-            True,
-        )
+        self._worker_stop.set()
+        worker = self._worker
+        if worker is not None:
+            worker.join(timeout=self.timeout)
+            if worker.is_alive():
+                raise RuntimeError("pylon receive worker did not stop; camera retained")
+        with self._command_lock:
+            if self._terminal is not None:
+                self._records.finish()
+                return self._terminal
+            camera = self._camera
+            if camera is not None:
+                # StopGrabbing clears SDK result queues. Stop the sensor first,
+                # then accept already-ready results before releasing that queue.
+                if self._armed and self._records.failure is None and camera.IsGrabbing():
+                    camera.AcquisitionStop.Execute()
+                    ready = int(camera.NumReadyBuffers.GetValue())
+                    try:
+                        for _ in range(ready):
+                            self._receive_one(0)
+                    except BaseException as error:
+                        self._records.fail(error)
+                try:
+                    self._stop_and_restore_external()
+                except BaseException as error:
+                    if self._records.failure is not None:
+                        self._records.failure.add_note(f"pylon stop also failed: {error}")
+                        raise self._records.failure
+                    raise
+            self._worker = None
+            self._armed = False
+            self._settings_transition_epochs.clear()
+            count = self._records.finish()
+            self._terminal = CameraCaptureTerminalRecord(
+                count, True, not self._records.pending_count, True,
+            )
+            return self._terminal
 
     @_serialized
     def capture_state(self) -> bool:

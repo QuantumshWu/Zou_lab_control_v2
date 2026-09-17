@@ -205,11 +205,24 @@ class CameraAdapter(Protocol):
 
     def working_point(self) -> CameraWorkingPoint: ...
 
-    def arm(self, frames: int | None, *, source_group_sizes: tuple[int, ...] | None, buffer_frame_count: int, timeout: float) -> None: ...
+    def arm(self, frames: int | None, *, source_group_sizes: tuple[int, ...] | None, buffer_frame_count: int, timeout: float) -> None:
+        """Start autonomous ordered intake; capacity is independent of target.
+
+        The SDK ring and accepted FIFO each hold at most buffer_frame_count
+        raw frames. Overflow or an observed sequence gap fails this capture;
+        neither scientific mode silently replaces an older frame.
+        """
+        ...
 
     def read_frame_records(self, n: int, *, timeout: float, exact: bool) -> Sequence[CameraFrameRecord]: ...
 
-    def finish_record_capture(self) -> CameraCaptureTerminalRecord: ...
+    def finish_record_capture(self) -> CameraCaptureTerminalRecord:
+        """Stop intake, preserving accepted frames for reads until the next arm.
+
+        Failures remain observable before queued data, including after Stop.
+        no_more_frames says whether the accepted FIFO is already empty.
+        """
+        ...
 
     def capture_state(self) -> bool: ...
 

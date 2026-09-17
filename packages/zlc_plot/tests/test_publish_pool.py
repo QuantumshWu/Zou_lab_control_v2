@@ -55,32 +55,62 @@ def test_a_released_buffer_is_the_one_reissued(surfaces) -> None:
     again_writable, again_published = pool.take(1024)
     assert again_writable.obj is block
 
-    from zlc_plot.render_process import _SharedFrontPool
+    from queue import Queue
+    from threading import Thread
+    from zlc_plot.render_process import (
+        _SharedFrontPool, _SharedMappingCache, _retire_shared_mappings,
+    )
 
-    shared = _SharedFrontPool()
+    retirements = Queue()
+    cache = _SharedMappingCache(retirements)
+    retirement = Thread(target=_retire_shared_mappings, args=(retirements,), daemon=True)
+    retirement.start()
+    shared = _SharedFrontPool(on_retired=cache.retire)
     try:
         first = [shared.publish(bytes(1024)) for _ in range(surfaces)]
         held_id, held_name, _size = shared.publish(bytes([7]) * 1024)
+        held_mapping = cache.open(held_name)
+        mappings = {name: cache.open(name) for _lease, name, _size in first}
         first_names = {name for _lease, name, _size in first}
         assert held_name not in first_names
-        for lease, _name, _size in first:
+        for lease, name, _size in first:
+            cache.release(name)
             shared.release(lease, surfaces)
         reissued = [shared.publish(bytes(1024)) for _ in range(surfaces)]
         assert {name for _lease, name, _size in reissued} == first_names
+        for _lease, name, _size in reissued:
+            assert cache.open(name) is mappings[name]
+            cache.release(name)
         assert bytes(shared._leased[held_id].memory.buf) == bytes([7]) * 1024
         for lease, _name, _size in reissued:
             shared.release(lease, surfaces)
         shared.trim_free(1)
         assert _free_blocks(shared) == 1
-        for size in range(2, 8):
-            lease, _name, _size = shared.publish(bytes(size * 1024))
+        for size in range(2, 34):
+            lease, name, _size = shared.publish(bytes(size * 1024))
+            cache.open(name)
+            cache.release(name)
             shared.release(lease, surfaces)
             assert _free_blocks(shared) <= surfaces
+            assert len(cache._entries) <= surfaces + 1  # plus the held front
         shared.trim_free(0)
         assert not shared._free
         assert held_id in shared._leased
+        assert set(cache._entries) == {held_name}
+        shared.close()
+        assert bytes(held_mapping[:1024]) == bytes([7]) * 1024
+        assert not held_mapping.closed  # retirement must not invalidate a live view
+        cache.retire_all()
+        cache.release(held_name)
+        assert not cache._entries
     finally:
         shared.close()
+        cache.retire_all()
+        for name, entry in tuple(cache._entries.items()):
+            for _ in range(entry[1]):
+                cache.release(name)
+        retirement.join(2.0)
+        assert not retirement.is_alive()
 
 def test_a_held_buffer_is_never_reissued() -> None:
     """The failure mode of a holder is a fresh allocation, not shared pixels."""

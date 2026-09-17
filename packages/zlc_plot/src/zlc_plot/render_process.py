@@ -9,7 +9,7 @@ one for Edit/export work.
 
 from __future__ import annotations
 
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 import ctypes
@@ -152,16 +152,24 @@ def _receive_message(connection: Connection) -> object:
     return pickle.loads(connection.recv_bytes())
 
 
-def _plain(value: object) -> object:
+def _plain(value: object, memo: dict[int, object] | None = None) -> object:
     """Copy immutable mapping views into the process wire vocabulary."""
 
+    if not isinstance(value, (Mapping, tuple, list)):
+        return value
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
     if isinstance(value, Mapping):
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(_plain(item) for item in value)
-    if isinstance(value, list):
-        return [_plain(item) for item in value]
-    return value
+        result = {key: _plain(item, memo) for key, item in value.items()}
+    elif isinstance(value, tuple):
+        result = tuple(_plain(item, memo) for item in value)
+    else:
+        result = [_plain(item, memo) for item in value]
+    memo[identity] = result
+    return result
 
 
 def _wire_display_state(state: object) -> tuple[object, ...]:
@@ -576,16 +584,16 @@ class _SharedMappingCache:
     one when it creates it -- so a cached mapping is always the segment its
     name meant.  What a mapping must outlive is the frontend's last view of
     it, which may outlive the RenderProcess itself, so each is counted and
-    handed to the retirement lane only once nothing is reading it AND this
-    cache has been told to go.  Holding no reference back to the process,
-    it is what that process's own finalizer can retire.
+    handed to the retirement lane once nothing is reading it and the child
+    has retired the segment. Idle mappings remain reusable only while the
+    child's pool can reuse that name. Process retirement releases all of them.
     """
 
     __slots__ = ("_lock", "_entries", "_closing", "_retirements")
 
     def __init__(self, retirements: Queue) -> None:
         self._lock = Lock()
-        #: name -> [mapping, how many stores are reading it]
+        #: name -> [mapping, how many stores are reading it, segment retired]
         self._entries: dict[str, list] = {}
         self._closing = False
         self._retirements = retirements
@@ -607,7 +615,7 @@ class _SharedMappingCache:
             self._retirements.put((_MAPPING_RELEASED, mapping))
             return mapping
         with self._lock:
-            self._entries[name] = [mapping, 1]
+            self._entries[name] = [mapping, 1, False]
         return mapping
 
     def release(self, name: str) -> None:
@@ -618,7 +626,19 @@ class _SharedMappingCache:
             if entry is None:
                 return
             entry[1] -= 1
-            if entry[1] > 0 or not self._closing:
+            if entry[1] > 0 or not (self._closing or entry[2]):
+                return
+            del self._entries[name]
+        self._retirements.put((_MAPPING_RELEASED, entry[0]))
+
+    def retire(self, name: str) -> None:
+        """The child will never reuse this segment; keep only live views."""
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None:
+                return
+            entry[2] = True
+            if entry[1] > 0:
                 return
             del self._entries[name]
         self._retirements.put((_MAPPING_RELEASED, entry[0]))
@@ -645,6 +665,8 @@ def _retire_shared_mappings(retirements: Queue) -> None:
     outstanding = 0
     stopping = False
     while True:
+        if stopping and outstanding == 0 and not waiting:
+            return
         try:
             # Nothing retained means nothing to retry, and the next event is
             # the only thing that can change that: WAITING on it costs one
@@ -663,8 +685,6 @@ def _retire_shared_mappings(retirements: Queue) -> None:
                 waiting.append(shared)
         except Empty:
             pass
-        if stopping and outstanding == 0 and not waiting:
-            return
         if not waiting:
             continue
         retained: list[SharedMemory] = []
@@ -1965,11 +1985,13 @@ class RenderProcess:
 
     @staticmethod
     def _input_key(value: object) -> object:
-        from zlc_data import OwnedSnapshot
+        from zlc_data import DatasetSchema, OwnedSnapshot
         from .primitives import ImagePointOverlay
 
         if isinstance(value, OwnedSnapshot):
             return "snapshot", value.ref
+        if isinstance(value, DatasetSchema):
+            return "schema", value.fingerprint
         if isinstance(value, ImagePointOverlay):
             return "overlay", id(value), value.revision
         raise TypeError(f"unsupported plot input {type(value).__name__}")
@@ -2006,6 +2028,12 @@ class RenderProcess:
                 return _INPUT_REF, token
             if self._closing or self._closed:
                 raise RuntimeError("render process is closing")
+        from zlc_data import DatasetSchema, OwnedSnapshot
+        from zlc_data.codec import dataset_schema_to_tree
+        # The data input owns one schema hold, independent of how many Hosts
+        # use that input. Revisions share the same existing input token; its
+        # last dependent input releases it through the ordinary refcount path.
+        dependencies: set[int] = set()
         buffers: list[pickle.PickleBuffer] = []
         released_buffers = 0
         shared: list[SharedMemory] = []
@@ -2029,8 +2057,24 @@ class RenderProcess:
             self._discard_input_blocks(spare)
 
         try:
+            if isinstance(value, DatasetSchema):
+                document = ("schema", dataset_schema_to_tree(value))
+            else:
+                snapshot = value if isinstance(value, OwnedSnapshot) else value.status
+                snapshot_document = None
+                if snapshot is not None:
+                    schema_ref = self._input_reference(snapshot.block.schema, dependencies)
+                    block = snapshot.block
+                    snapshot_document = (
+                        "snapshot", schema_ref, snapshot.ref, block.values,
+                        block.validity, block.sigma, block.window,
+                    )
+                document = snapshot_document if isinstance(value, OwnedSnapshot) else (
+                    "overlay", value.revision, value.coordinates, value.point_ids,
+                    value.labels, value.static_statuses, snapshot_document,
+                )
             payload = pickle.dumps(
-                value, protocol=5, buffer_callback=buffers.append
+                document, protocol=5, buffer_callback=buffers.append
             )
             for item in buffers:
                 source = None
@@ -2067,14 +2111,17 @@ class RenderProcess:
                     pass
             buffers.clear()
             discard_blocks()
+            self._release_inputs(tuple(dependencies))
             raise
         with self._lock:
             token = self._reuse_input_token(key, used)
             if token is not None:
                 discard_blocks()
+                self._release_inputs(tuple(dependencies))
                 return _INPUT_REF, token
             if self._closing or self._closed:
                 discard_blocks()
+                self._release_inputs(tuple(dependencies))
                 raise RuntimeError("render process is closing")
             self._input_serial += 1
             token = self._input_serial
@@ -2082,6 +2129,7 @@ class RenderProcess:
                 self._send(("input", token, payload, tuple(descriptors)))
             except BaseException:
                 discard_blocks()
+                self._release_inputs(tuple(dependencies))
                 raise
             self._input_tokens[key] = token
             self._input_keys[token] = key
@@ -2120,7 +2168,11 @@ class RenderProcess:
                 self._input_refcounts[token] = self._input_refcounts.get(token, 0) + 1
 
     def _release_inputs(self, tokens: Sequence[int]) -> None:
+        from zlc_data import OwnedSnapshot
+        from .primitives import ImagePointOverlay
+
         dropped: list[int] = []
+        dependencies: list[int] = []
         with self._lock:
             for token in tokens:
                 if token not in self._input_refcounts:
@@ -2131,7 +2183,14 @@ class RenderProcess:
                     continue
                 self._input_refcounts.pop(token, None)
                 key = self._input_keys.pop(token, None)
-                self._input_identity_owners.pop(token, None)
+                value = self._input_identity_owners.pop(token, None)
+                snapshot = value if isinstance(value, OwnedSnapshot) else (
+                    value.status if isinstance(value, ImagePointOverlay) else None
+                )
+                if snapshot is not None:
+                    schema_token = self._input_tokens.get(self._input_key(snapshot.block.schema))
+                    if schema_token is not None:
+                        dependencies.append(schema_token)
                 self._input_kinds.pop(token, None)
                 if key is not None and self._input_tokens.get(key) == token:
                     self._input_tokens.pop(key, None)
@@ -2141,6 +2200,8 @@ class RenderProcess:
                 self._send(("drop-input", token))
             except Exception:
                 pass
+        if dependencies:
+            self._release_inputs(dependencies)
 
     def _set_host_inputs(self, host_id: str, tokens: Sequence[int]) -> None:
         selected = set(map(int, tokens))
@@ -2227,6 +2288,8 @@ class RenderProcess:
                     self._finish_input_upload(int(message[1]))
                 elif kind == "host-closed":
                     self._receive_host_closed(str(message[1]))
+                elif kind == "segment-retired":
+                    self._mappings.retire(str(message[1]))
                 elif kind == "stopped":
                     break
                 else:
@@ -2643,8 +2706,9 @@ class _SharedFrontPool:
     segment, never somebody else's pixels.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_retired: Callable[[str], None] | None = None) -> None:
         self._lock = Lock()
+        self._on_retired = on_retired
         self._leased: dict[str, _SharedBlock] = {}
         self._by_store: dict[int, _SharedBlock] = {}
         # ONE list of free blocks across all sizes, searched by size.  A list
@@ -2774,7 +2838,10 @@ class _SharedFrontPool:
             while len(self._free) > int(free_budget):
                 retired.append(self._free.popleft())
         for block in retired:
+            name = block.memory.name
             _discard_shared(block.memory)
+            if self._on_retired is not None:
+                self._on_retired(name)
 
     def close(self) -> None:
         with self._lock:
@@ -2783,7 +2850,10 @@ class _SharedFrontPool:
             self._by_store.clear()
             self._free.clear()
         for block in blocks:
+            name = block.memory.name
             _discard_shared(block.memory)
+            if self._on_retired is not None:
+                self._on_retired(name)
 
 
 def _discard_shared(memory: SharedMemory) -> None:
@@ -2811,38 +2881,26 @@ def _discard_shared(memory: SharedMemory) -> None:
         pass
 
 
-def _owned_input(value: object, schemas: OrderedDict[str, object]) -> object:
+def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
     """Move an IPC-backed PlotInput onto ordinary immutable child storage."""
 
-    from copy import deepcopy
     from zlc_data import (
         CellValidity,
         DataBlock,
         DatasetComponentValidity,
         OwnedSnapshot,
     )
-    from zlc_data.codec import dataset_schema_from_tree, dataset_schema_to_tree
-    from .primitives import ImageFrame, ImagePointOverlay
+    from zlc_data.codec import dataset_schema_from_tree
+    from .primitives import ImagePointOverlay
 
-    if isinstance(value, OwnedSnapshot):
-        # DatasetSchema owns several lazy identity/cache sentinels.  Pickle
-        # cannot preserve a module singleton's ``is`` identity, so carrying a
-        # warmed schema object across spawn can turn `_NOT_INDEXED` into an
-        # arbitrary object that consumers mistake for a real history layout.
-        # Rebuild through the data owner's canonical grammar: same scientific
-        # schema, fresh process-local caches.
-        schema_key = str(value.ref.schema_fingerprint)
-        schema = schemas.get(schema_key)
-        if schema is None:
-            schema = dataset_schema_from_tree(
-                dataset_schema_to_tree(value.block.schema)
-            )
-            schemas[schema_key] = schema
-            while len(schemas) > 32:
-                schemas.popitem(last=False)
-        else:
-            schemas.move_to_end(schema_key)
-        validity = value.block.validity
+    kind = value[0]
+    if kind == "schema":
+        # Only public scientific fields cross the process boundary. Lazy
+        # coordinate/layout caches and their process-local sentinels do not.
+        return dataset_schema_from_tree(value[1])
+    if kind == "snapshot":
+        _kind, schema_ref, ref, values, validity, sigma, window = value
+        schema = _resolve_inputs(schema_ref, inputs)
         if isinstance(validity, CellValidity):
             validity = CellValidity(np.asarray(validity.mask))
         elif isinstance(validity, DatasetComponentValidity):
@@ -2850,47 +2908,43 @@ def _owned_input(value: object, schemas: OrderedDict[str, object]) -> object:
                 tuple(validity.axis_ids), np.asarray(validity.mask)
             )
         block = DataBlock(
-            value.block.block_id,
-            value.block.revision,
-            np.asarray(value.block.values),
+            ref.block_id,
+            ref.revision,
+            np.asarray(values),
             validity,
             schema,
             (
                 None
-                if value.block.sigma is None
-                else np.asarray(value.block.sigma)
+                if sigma is None
+                else np.asarray(sigma)
             ),
             # The producer's own statement of which shots this window
             # holds: immutable metadata, and the admission ticket for the
             # incremental integer-history frequency path.
-            value.block.window,
+            window,
         )
-        return OwnedSnapshot(value.ref, block)
-    if isinstance(value, ImagePointOverlay):
+        return OwnedSnapshot(ref, block)
+    if kind == "overlay":
+        _kind, revision, coordinates, point_ids, labels, statuses, status = value
         return ImagePointOverlay(
-            value.revision,
-            np.asarray(value.coordinates),
-            point_ids=value.point_ids,
-            labels=value.labels,
-            static_statuses=value.static_statuses,
+            revision,
+            np.asarray(coordinates),
+            point_ids=point_ids,
+            labels=labels,
+            static_statuses=statuses,
             status=(
                 None
-                if value.status is None
-                else _owned_input(value.status, schemas)
+                if status is None
+                else _owned_input(status, inputs)
             ),
         )
-    if isinstance(value, ImageFrame):
-        return ImageFrame(
-            _owned_input(value.snapshot, schemas),
-            _owned_input(value.overlay, schemas),
-        )
-    return deepcopy(value)
+    raise ValueError(f"unknown render input kind {kind!r}")
 
 
 def _load_input(
     payload: bytes,
     descriptors: Sequence[tuple[str, int]],
-    schemas: OrderedDict[str, object],
+    inputs: Mapping[int, object],
 ) -> object:
     buffers: list[memoryview] = []
     try:
@@ -2911,7 +2965,7 @@ def _load_input(
                 block.close()
             buffers.append(memoryview(owned))
         loaded = pickle.loads(payload, buffers=buffers)
-        return _owned_input(loaded, schemas)
+        return _owned_input(loaded, inputs)
     finally:
         # DataBlock either retained the immutable bytes backing or copied an
         # incompatible layout.  These temporary view objects own no OS handle.
@@ -2973,17 +3027,12 @@ def _render_process_main(connection: Connection, name: str) -> None:
     front_releases: dict[str, Callable[[], None]] = {}
     last_front_sequence: dict[str, int] = {}
     inputs: dict[int, object] = {}
-    schemas: OrderedDict[str, object] = OrderedDict()
     pending: dict[int, Future] = {}
     subscriptions: dict[int, tuple[str, Callable[[], object]]] = {}
-    fronts = _SharedFrontPool()
     # Imported here, not at module scope: the parent imports this module to
     # talk to the child, and it must not pull Matplotlib in to do it.
     from .rendering import install_publish_pool
 
-    # From now on every renderer built in this process writes its fronts
-    # straight into the shared segments, and publishing is a handover.
-    install_publish_pool(fronts)
     save_worker = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix=f"zlc-render-{name}-save",
         initializer=kernels.configure_worker_threads,
@@ -3011,6 +3060,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
         """
 
         outbox.put(_encode_message(message))
+
+    # The same pipe carries front leases and their segment retirement facts.
+    fronts = _SharedFrontPool(on_retired=lambda name: send(("segment-retired", name)))
+    install_publish_pool(fronts)
 
     def reply(request_id: int, message: object) -> None:
         """One request's answer -- or the error that kept it from crossing."""
@@ -3073,22 +3126,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
             warm_process(proceed=lambda: not requested.is_set())
         except Exception:  # noqa: BLE001 -- reported, never fatal
             traceback.print_exc()
-        # WHAT THE WARMING BUILT IS PERMANENT, so stop rescanning it.  A
-        # warmed child holds about two hundred thousand tracked objects --
-        # Matplotlib's font and style tables, numba's typing context, the
-        # compiled kernels -- none of which will ever become garbage, and
-        # the default thresholds walk all of them whenever enough new
-        # objects have been made.  Building a sixty-four cell grid makes
-        # tens of thousands, so it walked into a full collection partway
-        # through: measured, the same panel's first frame took 488 ms at
-        # best, 599 in the middle and 767 at worst.  Frozen, and with the
-        # collector asked less often now that a sweep is cheap, the same
-        # panel is 477 / 484 / 492 -- the tail is not shortened, it is
-        # gone.  Cycles made AFTER this are collected as they always were;
-        # what is frozen is what was already going to outlive the child.
+        # Warming can overlap a real Host. Collect its discarded temporary
+        # objects, but never freeze the process: that also freezes live
+        # Matplotlib cycles and keeps closed Figures alive indefinitely.
         gc.collect()
-        gc.freeze()
-        gc.set_threshold(20000, 50, 50)
         # THE PANEL'S OWN FIT, IN THE FIRST QUIET MOMENT AFTER ITS FIRST
         # FRONT, ON THIS THREAD.  After, because loading a kernel holds
         # numba's compiler lock and a parallel entry's first dispatch
@@ -3119,10 +3160,9 @@ def _render_process_main(connection: Connection, name: str) -> None:
             warm_fit(spec, storage=storage, proceed=lambda: not stopping.is_set())
         except Exception:  # noqa: BLE001 -- reported, never fatal
             traceback.print_exc()
-        # As permanent as the pictures' tables: frozen the same way, so the
-        # panel's frames never rescan them either.
+        # Temporary fit surfaces have the same ordinary lifetime as any
+        # other Figure; a live panel may already be drawing beside them.
         gc.collect()
-        gc.freeze()
 
     Thread(target=warm, name=f"zlc-render-{name}-warm", daemon=True).start()
 
@@ -3540,7 +3580,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
             kind = message[0]
             if kind == "input":
                 token, payload, descriptors = message[1:]
-                inputs[int(token)] = _load_input(payload, descriptors, schemas)
+                inputs[int(token)] = _load_input(payload, descriptors, inputs)
                 send(("input-ack", int(token)))
                 continue
             if kind == "release-front":
@@ -3607,7 +3647,6 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 pass
         save_worker.shutdown(wait=True, cancel_futures=True)
         inputs.clear()
-        schemas.clear()
         fronts.close()
         # Flush what is still queued before the pipe goes: a refusal already
         # handed to the writer is the operator's only word about why, and the

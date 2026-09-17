@@ -53,6 +53,7 @@ class DomainSpec:
     #: Filled on first request, per row asked: the live commit asks the
     #: same domain the same question for every event it publishes.
     _coordinate_counts: Any = field(init=False, repr=False, compare=False, default=None)
+    _row_groups: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         shape = tuple(
@@ -139,6 +140,7 @@ class DomainSpec:
         object.__setattr__(self, "axis_codes", normalized_codes)
         object.__setattr__(self, "_codes", tuple(cached_codes))
         object.__setattr__(self, "_coordinate_counts", {})
+        object.__setattr__(self, "_row_groups", None)
 
     @property
     def size(self) -> int:
@@ -195,6 +197,40 @@ class DomainSpec:
             counts = tuple(result)
             self._coordinate_counts[row] = counts
         return counts
+
+    def coordinate_rows(self, current_row: int) -> slice | np.ndarray:
+        """Physical rows at this exact logical coordinate; topology only."""
+        if self.axis_codes is None:
+            raise ValueError("coordinate rows require a mapped domain")
+        row = int(current_row) % self.size
+        groups = self._row_groups
+        if groups is None:
+            codes = tuple(code for axis, code in zip(self.axes, self._codes, strict=True)
+                          if axis.coordinate_of is None)
+            groups = ()
+            if codes and self.size > 1:
+                order = np.lexsort(codes[::-1])
+                changed = np.zeros(self.size, dtype=bool)
+                changed[0] = True
+                for code in codes:
+                    ordered = code[order]
+                    changed[1:] |= ordered[1:] != ordered[:-1]
+                if not bool(np.all(changed)):
+                    starts = np.append(np.flatnonzero(changed), self.size)
+                    lookup = np.empty(self.size, dtype=np.intp)
+                    lookup[order] = np.cumsum(changed) - 1
+                    for array in (order, starts, lookup):
+                        array.flags.writeable = False
+                    groups = order, starts, lookup
+            object.__setattr__(self, "_row_groups", groups)
+        if not groups:
+            return slice(row, row + 1)
+        order, starts, lookup = groups
+        group = lookup[row]
+        return order[starts[group]:starts[group + 1]]
+
+    def __getstate__(self):
+        return {**self.__dict__, "_row_groups": None}
 
     def physical_dimension(self, axis_id: AxisId) -> int:
         """The domain-local physical dimension carrying one logical axis."""

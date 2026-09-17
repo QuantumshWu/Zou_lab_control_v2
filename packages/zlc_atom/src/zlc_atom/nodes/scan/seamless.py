@@ -321,6 +321,7 @@ class SeamlessScanMeasurement:
                     applied=self.sequencer.applied(),
                     config=self.sequencer.config_values(),
                 ))
+                context.set_run_record(run_record)
             context.report_progress(
                 f"Scanning point {progress_base + 1}/{progress_total}; shots",
                 current=progress_base * shots,
@@ -358,7 +359,6 @@ class SeamlessScanMeasurement:
                         {
                             name: replace(
                                 output,
-                                run_record=run_record,
                                 event_record=value.event_record,
                             )
                             for name, output in companions.items()
@@ -459,7 +459,6 @@ class SeamlessScanMeasurement:
             axes,
             scan_repeats=self.repeats,
             run_repeats=shots,
-            run_record=run_record,
             axis_names=axis_names,
         )
         inner_count = len(effective_inner)

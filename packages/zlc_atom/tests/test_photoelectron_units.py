@@ -384,7 +384,6 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
         binning_yx=point.binning_yx,
         generation="preview-count-unit",
         revision=1,
-        run_record=run_record,
         value_unit=point.count_unit,
     )
     assert preview.snapshot.block.schema.value_schema.value_unit == "count"

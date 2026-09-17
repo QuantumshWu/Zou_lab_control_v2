@@ -75,7 +75,6 @@ class LiveDatasetOutput:
     declaration: DatasetOutputDeclaration
     snapshot: OwnedSnapshot
     coverage: DatasetCoverage | MonitorCoverage
-    run_record: Mapping[str, object] | None = None
     canonical_schema: DatasetSchema | None = None
     cell_origin: tuple[int, int] | None = None
     event_record: Mapping[str, object] | None = None
@@ -97,8 +96,6 @@ class LiveDatasetOutput:
             raise TypeError("snapshot must be OwnedSnapshot")
         if not isinstance(self.coverage, (DatasetCoverage, MonitorCoverage)):
             raise TypeError("coverage must be DatasetCoverage or MonitorCoverage")
-        if self.run_record is not None and not isinstance(self.run_record, Mapping):
-            raise TypeError("run_record must be a mapping or None")
         if self.event_record is not None and not isinstance(
             self.event_record, Mapping
         ):

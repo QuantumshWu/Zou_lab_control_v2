@@ -97,7 +97,7 @@ def _finished_frames(plane, producer: str = "cm") -> str:
     plane.commit_live(
         node,
         {"frames": LiveDatasetOutput(
-            declaration, snapshot, DatasetCoverage(3, 150), {}, canonical, (0, 0),
+            declaration, snapshot, DatasetCoverage(3, 150), canonical, (0, 0),
         )},
     )
     plane.seal_committed(node, cut_short=True)

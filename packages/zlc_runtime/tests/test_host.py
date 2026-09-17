@@ -668,8 +668,10 @@ def test_a_partial_writer_that_fails_on_the_way_out_is_reported_not_dropped(
 
 
 @pytest.mark.parametrize("observer", ("none", "panel-reads", "exact-processor"))
+@pytest.mark.parametrize("failure", (False, True))
 def test_stop_seals_the_same_partial_dataset_independent_of_display(
     observer: str,
+    failure: bool,
 ) -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration("seen", "test.seen")
@@ -678,6 +680,7 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
     plane = SignalDataPlane()
     processor: NodeHost | None = None
     processor_seen = Event()
+    fail_now = Event()
 
     class Node:
         def execute(self, context):
@@ -694,6 +697,8 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
             )
             committed.set()
             while not context.cancel_requested():
+                if fail_now.is_set():
+                    raise RuntimeError("capture overflow")
                 time.sleep(0.001)
 
     host = _host(
@@ -749,16 +754,23 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
             processor.start()
             assert processor_seen.wait(2.0)
 
-        host.cancel("operator stop")
+        if failure:
+            fail_now.set()
+        else:
+            host.cancel("operator stop")
         observation = _wait(host, wake)
-        assert observation.phase == "cancelled"
+        assert observation.phase == ("failed" if failure else "cancelled")
         assert observation.progress is None
         assert not host.final_result_resolved
         partial = plane.current_dataset(signal)
         assert partial.block.values[:, 0, 0].tolist() == [3.0, 0.0]
         assert partial.expanded_validity()[:, 0, 0].tolist() == [True, False]
         if processor is not None:
-            assert _wait(processor, wake).phase == "done"
+            derived = _wait(processor, wake)
+            assert derived.phase == ("failed" if failure else "done")
+            assert plane.current_dataset(processor.signal_key("seen")).block.values[0, 0, 0] == 3.0
+            if failure:
+                assert "capture overflow" in derived.error
     finally:
         if processor is not None:
             processor.shutdown()
@@ -803,7 +815,7 @@ def test_stop_reports_partial_seal_failure_instead_of_cancellation(
         host.start()
         assert committed.wait(2.0)
 
-        def fail_seal(_node, *, cut_short=False):
+        def fail_seal(_node, *, cut_short=False, error=None):
             assert cut_short is True
             raise RuntimeError("seal exploded")
 
@@ -812,7 +824,7 @@ def test_stop_reports_partial_seal_failure_instead_of_cancellation(
         observation = _wait(host, wake)
         assert observation.phase == "failed"
         assert observation.error == (
-            "stopped partial Dataset could not be sealed: "
+            "partial Dataset could not be sealed: "
             "RuntimeError: seal exploded"
         )
         assert observation.progress is None
@@ -1813,5 +1825,47 @@ def test_failure_acceptance_excuses_the_source_lifecycle() -> None:
         other.accept_processor_failure(ValueError("a real defect"))
         observation = other.poll()
         assert observation.phase == "failed", observation
+
+        # A real latest-only worker drains its final accepted publication,
+        # then forwards normal EOS or failure without discarding valid data.
+        from zlc_runtime.streams import SourceFailed, StreamEndedEarly
+        source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+        for index, source_error in enumerate((None, RuntimeError("camera failed"))):
+            source = _Source(f"ending-source-{index}", source_declaration)
+            plane.begin_generation(source)
+            plane.commit_live(source, {"frame": _monitor_output(source_declaration, 1)})
+            seen = []
+
+            class LiveProcessor:
+                def evaluate(self, value):
+                    seen.append(value.snapshot.ref)
+                    return {"derived": _monitor_output(derived_declaration, 1)}
+
+            latest = _host(
+                LiveProcessor(), plane, wake,
+                instance_id=f"ending-latest-{index}", kind="processor",
+                outputs=(derived_declaration,), source=source.signal_key("frame"),
+                delivery="latest",
+            )
+            latest.start()
+            _, tap = plane.follow_publications(latest.signal_key("derived"), replay=False)
+            try:
+                plane.seal_committed(source, cut_short=True, error=source_error)
+                deadline = time.monotonic() + 2.0
+                while not latest.terminal and time.monotonic() < deadline:
+                    plane.freeze()
+                    latest.poll()
+                    wake.wait(0.01)
+                    wake.clear()
+                observation = latest.poll()
+                assert observation.phase == ("done" if source_error is None else "failed"), observation
+                assert len(seen) == 1
+                assert plane.retains(latest.signal_key("derived"))
+                assert tap.next(0.0).value(latest.signal_key("derived")) is not None
+                with pytest.raises(StreamEndedEarly if source_error is None else SourceFailed):
+                    tap.next(0.0)
+            finally:
+                tap.close()
+                latest.shutdown()
     finally:
         plane.close()

@@ -24,12 +24,12 @@ from typing import Sequence
 
 import numpy as np
 
+from zlc_atom.devices import RecordQueue
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
     WaveformOutput,
     WaveformRecord,
-    WaveformRecordQueue,
     WaveformWorkingPoint,
     validate_waveform_outputs,
 )
@@ -185,7 +185,7 @@ class ZishuDaq4211WaveformSource:
         for reading in config.readings:
             self._scale[reading.channel] = reading.unit_per_volt
             self._offset[reading.channel] = reading.offset_volts
-        self._records = WaveformRecordQueue(
+        self._records = RecordQueue(
             f"the {SUPPORTED_MODEL} {config.serial}",
             join_timeout_seconds=config.timeout_seconds + 1.0,
         )
@@ -318,9 +318,9 @@ class ZishuDaq4211WaveformSource:
                     # its length after the one before it, whatever the USB
                     # packets did on the way here.
                     seconds = produced * self.config.record_samples / self._sample_rate
-                    self._records.push(
-                        np.asarray(samples, dtype=np.float32), seconds, 0
-                    )
+                    self._records.push(WaveformRecord(
+                        np.asarray(samples, dtype=np.float32), produced, seconds, 0,
+                    ))
                     produced += 1
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
@@ -337,17 +337,31 @@ class ZishuDaq4211WaveformSource:
         return self._records.read(n, timeout=timeout, exact=exact)
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
-        return self._records.finish()
+        produced = self._records.finish()
+        return WaveformCaptureTerminalRecord(produced, True, not self._records.pending_count, True)
 
     def capture_state(self) -> bool:
         return self._records.armed
 
     def close(self) -> None:
+        failure = None
         try:
             if self._records.armed:
                 self.finish_record_capture()
-        finally:
+        except BaseException as error:
+            if self._records.armed:
+                raise
+            failure = error
+        try:
             self._daq.close(self.config.serial)
+        except BaseException as error:
+            if failure is None:
+                raise
+            failure.add_note(f"DAQ close also failed: {error}")
+            raise failure
+        self._records.close()
+        if failure is not None:
+            raise failure
 
 
 def discover_daq4211(daq=None) -> tuple[str, ...]:

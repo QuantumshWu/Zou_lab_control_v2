@@ -377,7 +377,7 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
         for axis in invalid["occupied"].snapshot.block.schema.point_domain.axes
     ) == ("frame",)
     overlay = image_point_overlay_from_signal(
-        invalid["occupied"].run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD],
+        processor.describe_run({"frames": invalid_source})[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD],
         invalid["occupied"].snapshot,
         invalid["frame_judged"].snapshot,
         revision=1,
@@ -397,6 +397,7 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     event_host = None
     try:
         event_plane.begin_generation(camera_owner)
+        event_plane.set_run_record(camera_owner, source.run_record)
         event_plane.commit_live(
             camera_owner,
             {
@@ -404,7 +405,6 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
                     CAMERA_FRAMES_OUTPUT,
                     source.snapshot,
                     coverage,
-                    source.run_record,
                     canonical_schema,
                     (0, 0),
                 )

@@ -3765,6 +3765,12 @@ class _RunningHost:
     """A started node's host as the runtime contract has it: it runs until a
     cancel has been polled to terminal, and refuses to close before that."""
 
+    instance_id = "running-test-host"
+    dataset_output_declarations = ()
+
+    def signal_key(self, name):
+        return f"@logic/{self.instance_id}/{name}"
+
     def __init__(self) -> None:
         from zlc_runtime.host import LogicNodeObservation
 
@@ -3842,11 +3848,25 @@ def test_clearing_the_board_asks_first_and_then_takes_everything_off(
 
 
 def test_clearing_a_stopped_board_needs_no_beat(presenter, session) -> None:
-    node, snapshot = _one_shot(session)
-    presenter.add_panel(node.signal_key("frames"), snapshot, title="here", kind="image")
-    presenter.add_logic("camera_measurement", open_editor=False)
+    node_id = presenter.add_logic(
+        "camera_measurement", open_editor=False,
+        values={"repeat": 1, "frames_per_cycle": 3, "exposure_seconds": 0.002},
+        device_keys={"camera": "camera"},
+    )
+    presenter.set_logic_auto_preview(node_id, False)
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(node_id)
+    host = presenter.logic[node_id].host
+    assert host.wait_ready(5.0)
+    session.fire(shots=1)
+    _settle_logic(presenter, node_id)
+    signal = host.signal_key("frames")
+    snapshot = session.signal_plane.current_dataset(signal)
+    presenter.add_panel(signal, snapshot, title="here", kind="image")
     assert presenter.clear_board() is True
     assert presenter.panels == {} and presenter.logic == {}
+    assert not session.signal_plane.retains(signal)
+    assert snapshot.block.values.size > 0, "an owned frozen value outlives its producer"
     assert presenter.view.status[-1] == ("task", "board cleared")
 
 

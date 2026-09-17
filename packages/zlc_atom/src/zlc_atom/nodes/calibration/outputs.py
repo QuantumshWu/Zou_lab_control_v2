@@ -339,7 +339,6 @@ def capture_preview_output(
     binning_yx: tuple[int, int],
     generation: object,
     revision: int,
-    run_record: Mapping[str, object],
     value_unit: str | None,
 ) -> LiveDatasetOutput:
     """Translate one complete long/readout/long cycle into its live event.
@@ -363,7 +362,6 @@ def capture_preview_output(
         CAPTURE_PREVIEW_DECLARATION,
         snapshot,
         MonitorCoverage(_PREVIEW_FRAMES, _PREVIEW_FRAMES),
-        run_record,
         event_record=_cycle_settings_record(tuple(cycle)),
     )
 
@@ -378,7 +376,7 @@ def site_review_output(
     revision: int,
     run_record: Mapping[str, object],
     value_unit: str | None,
-) -> LiveDatasetOutput:
+) -> tuple[Mapping[str, object], LiveDatasetOutput]:
     """Publish one detected candidate SiteMap over its reference average."""
 
     values = np.asarray(image)
@@ -414,14 +412,12 @@ def site_review_output(
         labels=labels,
         coordinates_are_indices=True,
     )
-    return LiveDatasetOutput(
-        SITE_REVIEW_DECLARATION,
-        snapshot,
-        MonitorCoverage(1, 1),
+    return (
         {
             **dict(run_record),
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry,
         },
+        LiveDatasetOutput(SITE_REVIEW_DECLARATION, snapshot, MonitorCoverage(1, 1)),
     )
 
 

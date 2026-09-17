@@ -252,7 +252,6 @@ class SteppedScanMeasurement:
             [(port_label(axis.port), axis.unit or port.unit) for axis, port in zip(self.plan.axes, self.ports)],
             scan_repeats=self.repeats,
             run_repeats=shots,
-            run_record=run_record,
             axis_names=tuple(port.label for port in self.ports),
         )
         knobs = ScanDeviceKnobs(self._tunables)
@@ -342,6 +341,7 @@ class SteppedScanMeasurement:
                         applied=applied, config=self.sequencer.config_values(),
                     )
                 )
+                context.set_run_record(run_record)
         if self.gating == "sw_gated":
             single_repeat_seconds = float(program.duration_seconds)
             for shot in range(shots):

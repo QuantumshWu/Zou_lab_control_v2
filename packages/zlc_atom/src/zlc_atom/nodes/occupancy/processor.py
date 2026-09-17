@@ -331,31 +331,7 @@ class OccupancyProcessor:
         result: OccupancyResult,
         *,
         source: SignalValue,
-        frames_signal: str,
     ) -> dict[str, LiveDatasetOutput]:
-        run_record = {
-            "node": self.instance_id,
-            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: image_point_overlay_geometry(
-                source.snapshot,
-                self.readout.site_map.centers_xy,
-                self.readout.site_map.site_ids,
-                status_axis=self.readout.site_map.site_axis,
-                labels=tuple(
-                    str(index)
-                    for index in range(1, self.readout.site_map.n_sites + 1)
-                ),
-                coordinates_are_indices=True,
-            ),
-            "parameters": {
-                "frames_signal": str(frames_signal),
-                "calibration_path": (
-                    None
-                    if self.calibration_path is None
-                    else str(self.calibration_path)
-                ),
-                "model_kind": self.model.kind.value,
-            },
-        }
         event_schema = source.snapshot.block.schema
         event_cells = (
             event_schema.repeat_domain.size * event_schema.point_domain.size
@@ -389,11 +365,29 @@ class OccupancyProcessor:
                 declaration,
                 snapshot,
                 coverage,
-                run_record,
                 output_schema,
                 output_origin,
             )
         return outputs
+
+    def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
+        source = next(iter(inputs.values()))
+        return {
+            "node": self.instance_id,
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: image_point_overlay_geometry(
+                source.snapshot,
+                self.readout.site_map.centers_xy,
+                self.readout.site_map.site_ids,
+                status_axis=self.readout.site_map.site_axis,
+                labels=tuple(str(index) for index in range(1, self.readout.site_map.n_sites + 1)),
+                coordinates_are_indices=True,
+            ),
+            "parameters": {
+                "frames_signal": self.source_signal or source.name,
+                "calibration_path": None if self.calibration_path is None else str(self.calibration_path),
+                "model_kind": self.model.kind.value,
+            },
+        }
 
     def evaluate(self, signal_value: SignalValue) -> dict[str, LiveDatasetOutput]:
         if not isinstance(signal_value, SignalValue):
@@ -411,7 +405,6 @@ class OccupancyProcessor:
         return self._live_outputs(
             result,
             source=signal_value,
-            frames_signal=self.source_signal or signal_value.name,
         )
 
 __all__ = [

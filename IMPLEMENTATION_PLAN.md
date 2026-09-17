@@ -10,6 +10,13 @@
 
 ## 1. 当前实施范围
 
+- 同源复核收尾：RecordQueue区分Stop保留尾部与设备Close释放尾部/失败引用，所有Camera/Waveform adapter在实际关闭成功后使用同一清理入口，SDK拒绝关闭仍保留可重试状态。N100坏帧/序号/时间错误只终止当前capture，原接收线程继续idle drain以支持普通Restart；实际串口I/O故障仍终止接收并明确拒绝重新arm。原直接用例验证释放弱引用、拒绝关闭重试和坏包后恢复，未接实验硬件。
+- Runtime数值物化仍只有一条路径，数组消费者不再构建后丢弃event record；完整记录按需准备，同一atomic bundle的有限prefix及相同indexed窗口共享已准备记录，补记录不重建数组。记录合并、时间坐标填充移出公共锁，旧请求不能覆盖新缓存，Frozen记录不变。64条有限记录逐次取数组的时间条目遍历2080→0；四个同源完整视图8320→2080，合并均不持公共锁。新的平坦不可变完整记录仍需O(N)索引构建，不声称全部完整读取为O(增量)，不引入链式记录容器或第二套缓存owner。并发新旧请求、不同窗口及原sigma/validity物化直接验证通过。
+- 持续采集与发布边界已收口：Camera/Waveform复用从原Waveform迁移的中立RecordQueue，SDK取数仍由具体adapter的原owner执行；相机接收容量按实际帧大小和显式MiB预算，有限目标数不再决定缓冲。真实/Virtual禁止drop-oldest，序号及错误优先由共同队列核验，正常Stop发布已接收完整周期，错误不伪装正常结束。设备模拟与真实NodeHost慢发布/Stop/Restart验证已执行，未操作实验硬件。
+- Run metadata改为generation一次声明，删除LiveDatasetOutput的逐event run_record及重复整表比较；所有生产者、Processor describe_run、Viewer与Task companion已接同一入口。有限结果只持自身数据与祖先元数据，未消费exact输入和已连接same-shot/Frozen所需payload仍按真实所有权保留；exact live队列明确限额，finite replay按需读取，Monitor弃置replay树已删除。Latest/Exact终态均收尾，后续失败保留已验证partial prefix并传播失败；显式Remove/Clear退休被移除owner，不破坏独立Frozen值。
+- 绘图传输沿原input token一次安装静态结构并按真实依赖释放；Scope说明只持其AxisSpec。单次Freeze/Save复用同run记录转换。长期Rolling的tick缓存限定工作集，删除后台全局gc.freeze及回收阈值改写；共享segment退休沿既有进程消息通知，在最后读者释放后解除映射。接收/Runtime/Plot有界性、关闭与重开分别验证，长期时钟坐标与window2000短压测不冒充20小时真机运行。全部benchmark、诊断和截图只留ignored research，不入Git。
+- 同源资源收口补齐：共享映射最后读者晚于service关闭时，退休线程在最终映射关闭后正常退出；relayout同时清旧Axes量化几何缓存。32个退休segment不再留空闲映射，旧front跨pool/service关闭仍可读；12次尺寸切换缓存只含当前Axes。Overlay的Last/Scope在公共语义入口先限制Repeat/Point域，再解析坐标，避免拿image像素轴去解析site状态域；不增加overlay私有Last算法。
+
 - Facet字号/标题碰撞收口：overview同格尺寸统一量化到整数像素，刻度继续由原locator定合法placement、同方向取共同字号；标题改在最终Image方框header内按宽高定价，不借Y刻度gutter。布局签名未变时0次重新规划，变化时复用原文字/placement缓存，放大或移除紧约束后可恢复字号。50×50×50 partial扫描的50cell同文案title/tick交集15→0；长字段名、省略标题、不同limits、focus返回、resize和稳定帧既有6项直接验证通过。窄bench首图（进程已加载）中位246.94→229.95ms，稳态26.22→24.91ms；进程首次1184→782ms受缓存状态影响，不宣称为稳定提速。没有新增Numba kernel或逐帧碰撞矩阵，截图/计时不入Git。
 
 - Processor持续跟随不再被一次输入计算失败永久清除。NodeHost复用唯一实际输入publication，Console只在源generation变化后重接失败输入，同代新shot不重试；新源已经sealed也执行一次。等待时保留原因，Logic行和Editor的Stop均可取消跟随。原Camera→Occupancy跟随用例扩展Frame Survival，真实virtual链1帧失败→3帧自动发布三对→再1帧等待且旧结果退休通过；原无源Start/Stop与armed-before-first-publication用例通过。无帧数特判、无新增重试owner。

@@ -287,6 +287,8 @@ def test_concurrent_generation_starters_share_one_installed_successor() -> None:
             if not self.busy:
                 assert release_cancel.wait(2.0)
 
+        accept_processor_ended = staticmethod(lambda _error: None)
+
         def request_processor_owner_wake(self) -> None:
             self.wake.set()
 
@@ -528,5 +530,35 @@ def test_an_armed_silent_generation_is_followable() -> None:
             )
         with pytest.raises(LookupError):
             plane.follow_publications("nobody:frames", replay=False)
+        plane.begin_generation(node)
+        _, slow = plane.follow_publications(node.signal_key("frames"), replay=False, max_pending=2)
+        _, fast = plane.follow_publications(node.signal_key("frames"), replay=False, max_pending=2)
+        try:
+            for index in range(4):
+                plane.commit_live(node, {"frames": _commit(node, revision=index, total=4, origin=index)})
+                assert fast.next(0.0).event_ref.sequence == index + 1
+            with pytest.raises(SourceFailed, match="3/2 pending events"):
+                slow.next(0.0)
+            assert not slow._queue
+            # Retained scientific history is not poured into the live queue:
+            # a capacity of one still reads the whole finite prefix in order.
+            _, late = plane.follow_publications(node.signal_key("frames"), max_pending=1)
+            try:
+                assert not late._queue
+                assert [late.next(0.0).event_ref.sequence for _ in range(4)] == [1, 2, 3, 4]
+            finally:
+                late.close()
+            _, oversized = plane.follow_publications(node.signal_key("frames"), max_bytes=1)
+            try:
+                with pytest.raises(SourceFailed, match="exact replay event.*payload bytes"):
+                    oversized.next(0.0)
+                assert oversized._replay is None and not oversized._queue
+                with pytest.raises(StreamEndedEarly, match="closed"):
+                    oversized.next(0.0)
+            finally:
+                oversized.close()
+        finally:
+            slow.close()
+            fast.close()
     finally:
         plane.close()

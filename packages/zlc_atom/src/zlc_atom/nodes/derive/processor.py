@@ -58,15 +58,6 @@ class DeriveProcessor:
             name: Operand(value.schema, value.values, value.snapshot.expanded_validity())
             for name, value in by_output.items()
         })
-        record = {
-            "node": self.instance_id,
-            "parameters": {
-                "expressions": self.expressions, "input_view": self.dataset_input_view,
-                "window": self.dataset_input_window if self.dataset_input_view == "window" else None,
-                "source_signal": primary.name,
-                "inputs": {name: value.name for name, value in by_output.items()},
-            },
-        }
         outputs = {}
         for declaration in self.dataset_output_declarations:
             result = results[declaration.name]
@@ -82,10 +73,25 @@ class DeriveProcessor:
             # pasted into a guessed finite placement. Runtime alone retains it
             # and builds history only for consumers that request a lease.
             outputs[declaration.name] = LiveDatasetOutput(
-                declaration, snapshot, MonitorCoverage(cells, cells), record,
+                declaration, snapshot, MonitorCoverage(cells, cells),
                 event_record=primary.event_record,
             )
         return outputs
+
+    def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
+        primary = inputs["a"]
+        return {
+            "node": self.instance_id,
+            "parameters": {
+                "expressions": self.expressions, "input_view": self.dataset_input_view,
+                "window": self.dataset_input_window if self.dataset_input_view == "window" else None,
+                "source_signal": primary.name,
+                "inputs": {
+                    self.primary_output if name == "a" else name: value.name
+                    for name, value in inputs.items()
+                },
+            },
+        }
 
 
 __all__ = ["DeriveProcessor", "declared_outputs"]

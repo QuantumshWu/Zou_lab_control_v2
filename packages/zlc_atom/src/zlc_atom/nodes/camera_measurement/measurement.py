@@ -218,9 +218,8 @@ def _finite_cycle_output(
         CAMERA_FRAMES_OUTPUT,
         event,
         DatasetCoverage((index + 1) * frames, node.repeat * frames),
-        node.run_record,
-        canonical,
-        (index, 0),
+        canonical_schema=canonical,
+        cell_origin=(index, 0),
         event_record=node._camera_event_record(cycle),
     )
 
@@ -243,7 +242,6 @@ def _monitor_cycle_output(
         CAMERA_FRAMES_OUTPUT,
         event,
         MonitorCoverage(frames, frames),
-        node.run_record,
         event_record=node._camera_event_record(cycle),
     )
 
@@ -273,15 +271,16 @@ def _strict_terminal(
 ) -> CameraCaptureTerminalRecord:
     """The device's terminal, checked against the cycles this capture kept.
 
-    The device must have stopped, drained and joined, and it must have
+    The device must have stopped and joined, and it must have
     produced every frame the completed cycles account for.  A capture that was
     asked to stop may have left a partial cycle behind: the frames of the
     cycle it walked away from are the device's honest count, not a lie about
     the cycles it kept, so a surplus is accepted only for a stop.  A run that
-    ended on its own must account for every frame exactly.
+    ended on its own must account for every frame exactly. Accepted FIFO data
+    may still remain for the caller's ordinary-Stop drain.
     """
 
-    if not (terminal.source_stopped and terminal.no_more_frames and terminal.joined):
+    if not (terminal.source_stopped and terminal.joined):
         raise RuntimeError(
             "camera terminal evidence is incomplete: the capture did not stop, "
             "drain and join"
@@ -347,6 +346,7 @@ class CameraMeasurementRequest:
     #: none falls back to raw counts rather than inventing a conversion; the
     #: effective choice rides in the run record.
     photoelectrons: bool = True
+    receive_buffer_mib: int = 128
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
@@ -361,6 +361,8 @@ class CameraMeasurementRequest:
             raise ValueError("repeat must be non-negative")
         if frames_per_cycle <= 0:
             raise ValueError("frames_per_cycle must be positive")
+        if int(self.receive_buffer_mib) < 1:
+            raise ValueError("receive_buffer_mib must be positive")
         roi = self.roi_xywh
         if roi is not None:
             try:
@@ -378,6 +380,7 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
+        object.__setattr__(self, "receive_buffer_mib", int(self.receive_buffer_mib))
 
 
 class CameraCycleSource:
@@ -448,8 +451,11 @@ class CameraCycleSource:
                     owns_generation=False,
                     should_stop=self._should_stop,
                 )
-            except BaseException:
-                self.camera_node.camera.finish_record_capture()
+            except BaseException as error:
+                try:
+                    self.camera_node.camera.finish_record_capture()
+                except BaseException as cleanup:
+                    error.add_note(f"camera cleanup also failed: {cleanup}")
                 raise
 
     def next_value(
@@ -499,6 +505,8 @@ class CameraCycleSource:
 
         if self._capture is None:
             return None
+        if self._should_stop is not None and self._should_stop():
+            self._capture.stopped = True
         terminal = self._capture.close()
         self._capture = None
         return terminal
@@ -555,6 +563,7 @@ class FiniteCapture:
         #: cycles account for: the cycle it was walking away from.
         self.stopped = False
         self.terminal: CameraCaptureTerminalRecord | None = None
+        self._pending_records: list[CameraFrameRecord] = []
 
     def collect(
         self,
@@ -568,12 +577,10 @@ class FiniteCapture:
         ``commit_cycle`` receives only the newly completed cycle and its run
         index.  Runtime owns every prior cycle and the fixed authored shape;
         handing the whole prefix back to a plugin is the O(N^2) path this
-        method replaces.  A run that is asked to stop keeps the cycles it took
-        -- they were measured, verified and committed -- and is sealed short;
-        the partial cycle it was reading is the device's to count and nobody's
-        to publish.  A run stopped before its first cycle has nothing to
-        publish.  Only a device that failed its terminal, or a cycle that
-        failed its checks, withdraws the run.
+        method replaces. A normal Stop first stops intake, then commits every
+        accepted complete cycle before sealing. A final partial cycle is
+        counted but never published as complete. Failures do not publish a
+        remaining queue.
         """
 
         if self.closed:
@@ -597,10 +604,38 @@ class FiniteCapture:
                 if keep:
                     retained.append(cycle)
             terminal = self.close()
-        except BaseException:
+            # Stop first fixes the accepted prefix. Keep every complete cycle
+            # from it, including a cycle partly read when Stop arrived.
+            complete = min(self.repeat, terminal.produced_count // self.frames_per_cycle)
+            while self.completed_cycles < complete:
+                pending = self._pending_records
+                pending.extend(self.node.read_records(
+                    self.frames_per_cycle - len(pending), timeout=0.0, exact=True,
+                ))
+                cycle = _strict_cycle_ordinals(
+                    pending, expected_start=self.completed_cycles * self.frames_per_cycle,
+                    frames_per_cycle=self.frames_per_cycle,
+                )
+                pending.clear()
+                index = self.completed_cycles
+                self.completed_cycles += 1
+                commit_cycle(cycle, index)
+                if keep:
+                    retained.append(cycle)
+            remaining = terminal.produced_count - self.node._next_record_ordinal
+            if remaining:
+                self.node.read_records(remaining, timeout=0.0, exact=True)
+            self._pending_records.clear()
+            terminal = replace(terminal, no_more_frames=True)
+            self.terminal = terminal
+        except BaseException as error:
             if not self.closed:
-                self.camera.finish_record_capture()
-                self.closed = True
+                try:
+                    self.camera.finish_record_capture()
+                except BaseException as cleanup:
+                    error.add_note(f"camera cleanup also failed: {cleanup}")
+                finally:
+                    self.closed = True
             if self.owns_generation:
                 self.node.signal_plane.retire(self.node)
             raise
@@ -648,7 +683,7 @@ class FiniteCapture:
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
-        records: tuple[CameraFrameRecord, ...] = ()
+        records = self._pending_records
         deadline = monotonic() + self.timeout
         while len(records) < self.frames_per_cycle:
             if self.should_stop is not None and self.should_stop():
@@ -660,7 +695,7 @@ class FiniteCapture:
                 exact=False,
             )
             if arrived:
-                records += tuple(arrived)
+                records.extend(arrived)
                 # A frame arrived, so the camera is delivering: the deadline
                 # is how long a FRAME may take, not how long a cycle may.
                 deadline = monotonic() + self.timeout
@@ -687,6 +722,7 @@ class FiniteCapture:
             frames_per_cycle=self.frames_per_cycle,
         )
         self.completed_cycles += 1
+        records.clear()
         return cycle
 
     def close(self) -> CameraCaptureTerminalRecord:
@@ -713,7 +749,7 @@ class FiniteCapture:
 
 
 class MonitorCapture:
-    """A repeat-zero monitor with latest-frame semantics."""
+    """A repeat-zero capture publishing every accepted complete cycle."""
 
     def __init__(
         self,
@@ -759,17 +795,10 @@ class MonitorCapture:
         cycle_size = self.node.frames_per_cycle
         ordinal = int(record.source_ordinal)
         pending = self._pending_records
-        if not pending:
-            if ordinal % cycle_size:
-                return
-            pending.append(record)
-        else:
-            expected = pending[0].source_ordinal + len(pending)
-            if ordinal != expected:
-                pending.clear()
-                if ordinal % cycle_size:
-                    return
-            pending.append(record)
+        expected = self._revision * cycle_size + len(pending)
+        if ordinal != expected:
+            raise RuntimeError(f"camera frame sequence gap: expected {expected}, received {ordinal}")
+        pending.append(record)
         if len(pending) == cycle_size:
             cycle = _strict_cycle_ordinals(
                 pending,
@@ -788,7 +817,7 @@ class MonitorCapture:
                 }
             )
 
-    def close(self) -> CameraCaptureTerminalRecord:
+    def close(self, *, drain: bool = True) -> CameraCaptureTerminalRecord:
         """Disarm the camera, then detach the generation.
 
         Only the terminal the device produced is cached and handed back: a
@@ -805,6 +834,14 @@ class MonitorCapture:
             return self.terminal
         terminal = self.camera.finish_record_capture()
         self.closed = True
+        if drain:
+            remaining = terminal.produced_count - self.node._next_record_ordinal
+            for _ in range(remaining):
+                record, = self.node.read_records(1, timeout=0.0, exact=True)
+                self._accept_record(record)
+            # A partial cycle is counted but is not a scientific publication.
+            self._pending_records.clear()
+            terminal = replace(terminal, no_more_frames=True)
         self.terminal = terminal
         if self.owns_generation:
             if self._revision:
@@ -908,6 +945,7 @@ class CameraMeasurementNode:
     def _configure_for_run(self) -> CameraWorkingPoint:
         self._actual_working_point = None
         self._run_record = None
+        self._next_record_ordinal = 0
         # This measurement owns both: it exists to point the camera.  The
         # geometry first, because it is the expensive one to get wrong.
         self.camera.set_roi(self.request.roi_xywh)
@@ -915,6 +953,18 @@ class CameraMeasurementNode:
         if not isinstance(point, CameraWorkingPoint):
             raise TypeError("camera set_exposure_seconds must return CameraWorkingPoint")
         return point
+
+    def _buffer_frame_count(self, point: CameraWorkingPoint) -> int:
+        # SDK ring and accepted FIFO each hold at most N raw frames. Scientific
+        # history and one-frame copy scratch are not receive-buffer storage.
+        frame_bytes = int(np.prod(point.frame_shape_yx)) * point.dtype.itemsize
+        count = self.request.receive_buffer_mib * 1024 * 1024 // (2 * frame_bytes)
+        if count < self.frames_per_cycle:
+            raise ValueError(
+                f"Receive buffer {self.request.receive_buffer_mib} MiB cannot hold "
+                f"one {self.frames_per_cycle}-frame cycle at {frame_bytes} bytes/frame"
+            )
+        return count
 
     def _configure_capture(self) -> CameraWorkingPoint:
         """Apply and freeze the requested working point without arming."""
@@ -943,9 +993,10 @@ class CameraMeasurementNode:
         self.camera.arm(
             total,
             source_group_sizes=groups,
-            buffer_frame_count=total,
+            buffer_frame_count=self._buffer_frame_count(self._actual_working_point),
             timeout=timeout,
         )
+        self._freeze_working_point(self.camera.working_point())
         return FiniteCapture(
             self,
             repeat=self.request.repeat,
@@ -980,6 +1031,13 @@ class CameraMeasurementNode:
         records = tuple(
             self.camera.read_frame_records(int(count), timeout=timeout, exact=exact)
         )
+        for record in records:
+            if record.source_ordinal != self._next_record_ordinal:
+                raise RuntimeError(
+                    f"camera frame sequence gap: expected {self._next_record_ordinal}, "
+                    f"received {record.source_ordinal}"
+                )
+            self._next_record_ordinal += 1
         if not self.reads_photoelectrons:
             return records
         point = self._actual_working_point
@@ -1010,6 +1068,7 @@ class CameraMeasurementNode:
                 ),
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
+                "receive_buffer_mib": self.request.receive_buffer_mib,
                 PHOTOELECTRONS: photoelectrons,
             },
             "named_devices": {"camera": self.request.camera_key},
@@ -1090,6 +1149,8 @@ class CameraMeasurementNode:
         cycle: tuple[CameraFrameRecord, ...],
         index: int,
     ) -> None:
+        if index == 0:
+            self._run_record = self.signal_plane.set_run_record(self, self.run_record)
         self._commit_direct_outputs(
             {
                 CAMERA_FRAMES_OUTPUT.name: _finite_cycle_output(
@@ -1113,6 +1174,9 @@ class CameraMeasurementNode:
         generation for us, and ``should_stop`` is that host's cancel: a
         capture asks it between reads, which is the only place a blocking
         read can be interrupted.
+
+        The publisher declares run metadata before its first commit; a task
+        may finish static geometry from that first frame before declaring it.
         """
 
         if self.request.repeat <= 0:
@@ -1122,12 +1186,16 @@ class CameraMeasurementNode:
             self._generation = self.signal_plane.begin_generation(self)
         try:
             self._configure_capture()
-            return self._arm_configured(
+            capture = self._arm_configured(
                 owns_generation=owns_generation,
                 should_stop=should_stop,
             )
-        except BaseException:
-            self.camera.finish_record_capture()
+            return capture
+        except BaseException as error:
+            try:
+                self.camera.finish_record_capture()
+            except BaseException as cleanup:
+                error.add_note(f"camera cleanup also failed: {cleanup}")
             if owns_generation:
                 self.signal_plane.retire(self)
             raise
@@ -1149,11 +1217,17 @@ class CameraMeasurementNode:
                 commit_live=context.commit_live,
             )
             try:
+                self._run_record = context.set_run_record(self.run_record)
                 context.report_ready()
                 while not context.cancel_requested():
                     capture.poll()
-            finally:
-                capture.close()
+            except BaseException as error:
+                try:
+                    capture.close(drain=False)
+                except BaseException as cleanup:
+                    error.add_note(f"camera cleanup also failed: {cleanup}")
+                raise
+            capture.close()
             return {
                 "signals": tuple(
                     self.signal_key(value.name)
@@ -1165,6 +1239,7 @@ class CameraMeasurementNode:
             should_stop=context.cancel_requested,
         )
         try:
+            self._run_record = context.set_run_record(self.run_record)
             context.report_ready()
         except BaseException:
             # Stop can arrive between the completed arm and its acknowledgement.
@@ -1198,7 +1273,6 @@ class CameraMeasurementNode:
         commit_live: Callable[..., Mapping[str, SignalValue]] | None = None,
     ) -> MonitorCapture:
         cycle_size = self.frames_per_cycle
-        buffer_frames = 4 * cycle_size
         if self.request.repeat != 0:
             raise ValueError("monitor requires request.repeat equal to zero")
         owns_generation = bool(owns_generation)
@@ -1209,7 +1283,8 @@ class CameraMeasurementNode:
         elif not callable(commit_live):
             raise TypeError("a hosted monitor requires commit_live")
         try:
-            self._configure_for_run()
+            point = self._configure_for_run()
+            buffer_frames = self._buffer_frame_count(point)
             # The camera's own timeout still governs ARMING -- how long the
             # device may take to become ready is the device's fact.
             timeout = float(self.camera.timeout)
@@ -1220,14 +1295,19 @@ class CameraMeasurementNode:
                 timeout=timeout,
             )
             self._freeze_working_point(self.camera.working_point())
+            if owns_generation:
+                self._run_record = self.signal_plane.set_run_record(self, self.run_record)
             return MonitorCapture(
                 self.camera,
                 node=self,
                 owns_generation=owns_generation,
                 commit_live=commit_live,
             )
-        except BaseException:
-            self.camera.finish_record_capture()
+        except BaseException as error:
+            try:
+                self.camera.finish_record_capture()
+            except BaseException as cleanup:
+                error.add_note(f"camera cleanup also failed: {cleanup}")
             if owns_generation:
                 self.signal_plane.retire(self)
             raise

@@ -1338,7 +1338,6 @@ class _ArchiveDatasetProducer:
                     snapshot.block.schema.repeat_domain.size
                     * snapshot.block.schema.point_domain.size,
                 ),
-                run_record,
             )
         }
         if self._status is not None:
@@ -1352,9 +1351,9 @@ class _ArchiveDatasetProducer:
                     status.block.schema.repeat_domain.size
                     * status.block.schema.point_domain.size,
                 ),
-                run_record,
             )
         plane.begin_generation(self)
+        plane.set_run_record(self, run_record)
         plane.commit_live(self, outputs, worker_source=source_publication)
         plane.seal_committed(self)
         return plane.latest_publication(self.data_signal)

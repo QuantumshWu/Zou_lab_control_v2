@@ -166,6 +166,9 @@ class _Context:
     def report_progress(self, *args, **kwargs) -> None:
         self.progress.append((args, kwargs))
 
+    def set_run_record(self, record):
+        self.run_record = record
+
     def commit_live(self, outputs, *, source_publication=None):
         # The NodeContext surface, whole.  Green only because this node has
         # never passed source_publication; the plane double next door failed
@@ -2289,7 +2292,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         assert task._actual_exposure_seconds == pytest.approx(0.020)
         assert camera.working_point().exposure_seconds == pytest.approx(0.020)
         assert sequencer.fires == [10]
-        assert armed_buffer_sizes == [10]
+        # Receiver capacity follows its byte budget, not the finite shot target.
+        assert armed_buffer_sizes == [(128 * 1024 * 1024 // 2) // fluorescence.nbytes]
         device_record = task._device_event_record(
             include_measurement=True,
             candidate=1,
