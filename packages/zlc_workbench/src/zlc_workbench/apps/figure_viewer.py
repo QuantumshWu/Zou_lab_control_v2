@@ -50,7 +50,7 @@ def build(
     from datetime import date
     from types import SimpleNamespace
 
-    from zlc_durable import day_folder
+    from zlc_durable import day_folder, day_folder_path
     from zlc_runtime import SignalDataPlane
     from ..console import ConsolePresenter
     from ..device_use import DeviceUseCoordinator
@@ -74,7 +74,7 @@ def build(
         workspace=workspace,
         installation=SimpleNamespace(devices={}, revision=0),
         device_use=DeviceUseCoordinator(),
-        day_folder_path=lambda: workspace.today,
+        day_folder_path=lambda: day_folder_path(workspace.data, date.today()),
         resolve_device_setting_records=lambda _records: (),
     )
 
@@ -126,7 +126,6 @@ def build(
         signal_plane=plane,
         build_figure_host=editor_render.build_host,
         save_figure_artifact=editor_render.save_figure_artifact,
-        save_front=editor_render.save_front,
         confirm_discard=getattr(view, "confirm_discard", None),
         make_pulse_preview=build_pulse_preview_host,
         resize_pulse_preview=resize_pulse_preview_host,

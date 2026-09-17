@@ -531,6 +531,16 @@ class _SelectorController:
             self._states[state.kind] = stored
         return previous, stored
 
+    def retarget_facet(self, facet_index: int, kinds: tuple[SelectorKind, ...]) -> None:
+        """Move shared geometry to another cell without a numeric revision."""
+        with self._lock:
+            if self._gesture is not None:
+                raise RuntimeError("cannot retarget a selector during a pointer gesture")
+            for kind in kinds:
+                state = self._states.get(kind)
+                if state is not None:
+                    self._states[kind] = replace(state, facet_index=facet_index)
+
     def _commit_finished(
         self,
         state: SelectorState,

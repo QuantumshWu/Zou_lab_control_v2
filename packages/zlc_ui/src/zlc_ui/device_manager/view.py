@@ -109,6 +109,9 @@ class _DeviceCard(FluentFrame):
             self.form.changed.connect(
                 lambda key: self.parameter_committed.emit(self.instance_id, key)
             )
+            self.form.value_normalized.connect(
+                lambda key: self.parameter_committed.emit(self.instance_id, key)
+            )
             self.form.setVisible(not self._collapsed)
             self.form_host.addWidget(self.form)
             return
@@ -319,6 +322,9 @@ class DeviceControlView(QtWidgets.QWidget):
             spec, desired, parent=self, row_cells=self._compose_cells
         )
         self.form.changed.connect(self._desired_changed)
+        self.form.value_normalized.connect(
+            lambda key: self._desired_changed(key, live=False)
+        )
         self.form.shown_unit_changed.connect(self._shown_unit_changed)
         outer.addWidget(self.form)
         outer.addStretch(1)
@@ -573,7 +579,9 @@ class DeviceControlView(QtWidgets.QWidget):
         self.form._unit_pickers[str(key)].select_choice_key(old_unit)
         self.field_unit_requested.emit(str(key), symbol)
 
-    def _desired_changed(self, key: str) -> None:
+    def _desired_changed(self, key: str, *, live: bool = True) -> None:
+        if not live:
+            self._live_timers[str(key)].stop()
         try:
             value = self.form.read_value(key)
         except (TypeError, ValueError):
@@ -582,8 +590,8 @@ class DeviceControlView(QtWidgets.QWidget):
             self._set_editable(name, bool(state.get("editable", False)))
         self.field_desired_changed.emit(str(key), value, self.form._field_for(key).unit or "")
         row = self._field_rows.get(str(key))
-        live = None if row is None else row[2]
-        if live is not None and live.isChecked() and live.isEnabled():
+        toggle = None if row is None else row[2]
+        if live and toggle is not None and toggle.isChecked() and toggle.isEnabled():
             self._live_timers[str(key)].start()
 
     def _set_editable(self, key: str, enabled: bool) -> None:

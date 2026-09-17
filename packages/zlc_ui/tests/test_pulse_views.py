@@ -253,7 +253,9 @@ delay = schedule.channel_panel._rows["ch01"][0]
 for field in (duration, dac, delay):
     QtTest.QTest.mouseClick(field.binding_button, QtCore.Qt.LeftButton)
     assert field._popup.isVisible()
-    field.source_combo.setCurrentIndex(field.source_combo.findData("config"))
+    switch = field.source_switch
+    QtTest.QTest.mouseClick(switch, QtCore.Qt.LeftButton,
+                          pos=QtCore.QPoint(switch.width() * 5 // 6, switch.height() // 2))
     field._popup.hide()
 app.processEvents()
 

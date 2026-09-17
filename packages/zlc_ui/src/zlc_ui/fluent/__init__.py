@@ -27,7 +27,7 @@ for _name in (
     "fluent_confirm", "fluent_save_path", "fluent_open_path", "stamped_file_name",
     "FluentComboBox", "FluentCycleComboBox", "FluentTreeComboBox", "FluentTabWidget",
     "FluentUnitPicker", "fluent_unit_picker", "unit_choice_tree",
-    "FluentSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
+    "FluentSwitch", "FluentTriSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "fluent_count_box", "fluent_integer_box", "FluentCheckBox", "FluentScrollArea",
     "FluentPageBody", "FluentTableView",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",

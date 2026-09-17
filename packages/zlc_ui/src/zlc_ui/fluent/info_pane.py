@@ -220,6 +220,8 @@ class InfoTree(QtWidgets.QTreeWidget):
                 color: {TEXT};
                 border: 1px solid {DIVIDER};
                 border-radius: {radius}px;
+                padding-top: {scaled_px(5, minimum=3)}px;
+                padding-bottom: {scaled_px(5, minimum=3)}px;
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
                 selection-background-color: {ACCENT_TINT};
@@ -513,7 +515,7 @@ class _RowsTab(QtWidgets.QWidget):
         self.setStyleSheet("background: transparent;")
         layout = QtWidgets.QVBoxLayout(self)
         gap = scaled_px(6, minimum=4)
-        layout.setContentsMargins(0, gap, 0, 0)
+        layout.setContentsMargins(0, gap, 0, gap)
         layout.setSpacing(gap)
         self.filter_edit = FluentLineEdit()
         self.filter_edit.setPlaceholderText("filter names and values")

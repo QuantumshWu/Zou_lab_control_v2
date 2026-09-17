@@ -19,6 +19,7 @@ from zlc_ui.fluent import (
     retire_widget,
     ACCENT,
     GREY,
+    ElidedLabel,
     FluentPageBody,
     ORANGE_TINT,
     FluentButton,
@@ -289,7 +290,7 @@ class _DataEditorView(QtWidgets.QWidget):
             str,
             tuple[
                 QtWidgets.QWidget,
-                FluentLabel,
+                QtWidgets.QLabel,
                 FluentCycleComboBox,
             ],
         ] = {}
@@ -316,7 +317,13 @@ class _DataEditorView(QtWidgets.QWidget):
         dataset_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
         dataset_layout.setHorizontalSpacing(window_pad(0.5))
         dataset_layout.setVerticalSpacing(window_pad(0.35))
-        label_width = setting_label_width(("Name", "Type", "Value unit", "Note"), minimum=66)
+        label_width = setting_label_width(
+            ("Name", "Type", "Value unit", "Note", "Length", "Unit", "Domain", "Editing", "Table shows"),
+            minimum=68,
+        )
+        self._manual_label_width = label_width
+        dataset_layout.setColumnStretch(0, 1)
+        dataset_layout.setColumnStretch(1, 1)
         self.name_edit = FluentLineEdit()
         self.dtype_combo = FluentComboBox()
         self.dtype_combo.setMinimumContentsLength(9)
@@ -351,10 +358,7 @@ class _DataEditorView(QtWidgets.QWidget):
         axes_layout = QtWidgets.QVBoxLayout(axes_group)
         axes_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
         axes_layout.setSpacing(window_pad(0.35))
-        axis_label_width = setting_label_width(
-            ("Name", "Length", "Unit", "Domain", "Editing"),
-            minimum=68,
-        )
+        axis_label_width = label_width
         # Creating an axis and choosing which one to edit are two different
         # sentences.  Sharing a row said they were one control with three
         # buttons, so the row above is the CREATE action and the row below
@@ -390,8 +394,10 @@ class _DataEditorView(QtWidgets.QWidget):
         self._axis_rows: dict[str, FluentSettingRow] = {}
         axis_form = QtWidgets.QGridLayout()
         axis_form.setContentsMargins(0, 0, 0, 0)
-        axis_form.setHorizontalSpacing(window_pad(0.35))
+        axis_form.setHorizontalSpacing(window_pad(0.5))
         axis_form.setVerticalSpacing(window_pad(0.25))
+        axis_form.setColumnStretch(0, 1)
+        axis_form.setColumnStretch(1, 1)
         for field, label, control, row_index, column_index in (
             ("name", "Name", self.axis_name_edit, 0, 0),
             ("size", "Length", self.axis_size_spin, 0, 1),
@@ -432,7 +438,7 @@ class _DataEditorView(QtWidgets.QWidget):
         self._axis_view_holder.setStyleSheet("background: transparent;")
         self._axis_view_layout = QtWidgets.QGridLayout(self._axis_view_holder)
         self._axis_view_layout.setContentsMargins(0, 0, 0, 0)
-        self._axis_view_layout.setHorizontalSpacing(window_pad(0.35))
+        self._axis_view_layout.setHorizontalSpacing(window_pad(0.5))
         self._axis_view_layout.setVerticalSpacing(window_pad(0.2))
         data_layout.addWidget(self._axis_view_holder)
         # One sentence, one row: what the table below is showing, and the
@@ -454,9 +460,7 @@ class _DataEditorView(QtWidgets.QWidget):
             FluentSettingRow(
                 "Table shows",
                 component_controls,
-                label_width=setting_label_width(
-                    ("Table shows",), minimum=68
-                ),
+                label_width=label_width,
             )
         )
         self.blank_help_label = muted_note_label("")
@@ -643,17 +647,13 @@ class _DataEditorView(QtWidgets.QWidget):
             axis_id = str(row.get("axis_id", ""))
             controls = self._axis_view_widgets.get(axis_id)
             if controls is None:
-                holder = QtWidgets.QWidget(self._axis_view_holder)
-                holder.setStyleSheet("background: transparent;")
-                layout = QtWidgets.QHBoxLayout(holder)
-                layout.setContentsMargins(0, 0, 0, 0)
-                layout.setSpacing(window_pad(0.25))
-                label = FluentLabel("")
-                label.setMinimumWidth(scaled_px(150, minimum=110))
+                label = ElidedLabel("")
                 mode = FluentCycleComboBox()
                 mode.setMinimumContentsLength(9)
-                layout.addWidget(label, 1)
-                layout.addWidget(mode)
+                holder = FluentSettingRow(
+                    label, mode, label_width=self._manual_label_width,
+                    parent=self._axis_view_holder,
+                )
                 mode.activated.connect(
                     lambda _index, aid=axis_id, control=mode: self._axis_view_mode_changed(
                         aid, control
@@ -766,7 +766,7 @@ class FigureViewerView(QtWidgets.QWidget):
     panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
     panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_plot_error = QtCore.pyqtSignal(str, str)
-    save_image_requested = QtCore.pyqtSignal()
+    save_screenshot_requested = QtCore.pyqtSignal()
     #: An action a Devices row offered was pressed (the action's id).
     info_action_requested = QtCore.pyqtSignal(str)
     #: The operator closed a pulse tab (its key).
@@ -842,17 +842,16 @@ class FigureViewerView(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Fixed,
         )
-        bar_layout = QtWidgets.QVBoxLayout(self._panel_bar)
+        bar_layout = QtWidgets.QGridLayout(self._panel_bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
-        bar_layout.setSpacing(window_pad(0.25))
-        data_row = QtWidgets.QHBoxLayout()
-        data_row.setContentsMargins(0, 0, 0, 0)
-        data_row.setSpacing(window_pad(0.5))
-        data_row.addWidget(FluentSectionLabel("Data"))
+        bar_layout.setHorizontalSpacing(window_pad(0.5))
+        bar_layout.setVerticalSpacing(window_pad(0.25))
+        bar_layout.setColumnStretch(1, 1)
+        bar_layout.addWidget(FluentSectionLabel("Data"), 0, 0)
         self.data_combo = FluentComboBox()
         self.data_combo.setMinimumContentsLength(15)
         self.data_combo.setEnabled(False)
-        data_row.addWidget(self.data_combo, 1)
+        bar_layout.addWidget(self.data_combo, 0, 1)
         # The button beside a chooser acts ON what the chooser holds; the
         # one after it does something else entirely.  Both rows of this bar
         # read that way now -- Edit data / Add panel answer the box to their
@@ -861,27 +860,24 @@ class FigureViewerView(QtWidgets.QWidget):
         self.edit_data_button = FluentButton("Edit data", color=ACCENT)
         self.edit_data_button.setEnabled(False)
         self.edit_data_button.clicked.connect(self._edit_selected_data)
-        data_row.addWidget(self.edit_data_button)
+        bar_layout.addWidget(self.edit_data_button, 0, 2)
         self.new_data_button = FluentButton("New data", color=ACCENT)
         self.new_data_button.clicked.connect(self.new_data_requested)
-        data_row.addWidget(self.new_data_button)
-        bar_layout.addLayout(data_row)
-        panel_row = QtWidgets.QHBoxLayout()
-        panel_row.setContentsMargins(0, 0, 0, 0)
-        panel_row.setSpacing(window_pad(0.5))
-        panel_row.addWidget(FluentSectionLabel("Panels"))
+        bar_layout.addWidget(self.new_data_button, 0, 3)
+        bar_layout.addWidget(FluentSectionLabel("Panels"), 1, 0)
         self.kind_combo = FluentComboBox()
         self.kind_combo.setMinimumContentsLength(12)
-        panel_row.addWidget(self.kind_combo, 1)
+        bar_layout.addWidget(self.kind_combo, 1, 1)
         self.add_panel_button = FluentButton("Add panel", color=ACCENT)
         self.add_panel_button.clicked.connect(self._add_selected_panel)
         self.add_panel_button.setEnabled(False)
-        panel_row.addWidget(self.add_panel_button)
+        bar_layout.addWidget(self.add_panel_button, 1, 2)
         self.save_image_button = FluentButton("Save image", color=ACCENT)
-        self.save_image_button.clicked.connect(self.save_image_requested)
-        self.save_image_button.setEnabled(False)
-        panel_row.addWidget(self.save_image_button)
-        bar_layout.addLayout(panel_row)
+        self.save_image_button.clicked.connect(self.save_screenshot_requested)
+        bar_layout.addWidget(self.save_image_button, 1, 3)
+        for button in (self.edit_data_button, self.new_data_button,
+                       self.add_panel_button, self.save_image_button):
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._surface_layout.addWidget(self._panel_bar)
 
         self.tabs = FluentTabWidget(holder)
@@ -1107,7 +1103,6 @@ class FigureViewerView(QtWidgets.QWidget):
         has_panels = bool(self._cards)
         self.scroll.setVisible(has_panels)
         self._placeholder.setVisible(not has_panels)
-        self.save_image_button.setEnabled(has_panels)
 
     def open_panel_editor(
         self, panel_id: str, projection: object, title: str

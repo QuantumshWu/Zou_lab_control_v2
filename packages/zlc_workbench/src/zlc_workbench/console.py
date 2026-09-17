@@ -174,27 +174,7 @@ def _panel_interaction_subject_matches(
 ) -> bool:
     """Whether one current-host interaction uses this accepted vocabulary."""
 
-    accepted = description.selection_subject
-    if accepted == subject:
-        return True
-    from zlc_plot.specs import FacetGridPlot
-
-    spec = description.spec
-    if not isinstance(spec, FacetGridPlot):
-        return False
-    facet = spec.facet
-    if facet is None:
-        return False
-
-    def without_facet(value: object) -> object:
-        scope = tuple(
-            (ref, coordinate)
-            for ref, coordinate in value.scope
-            if ref != facet
-        )
-        return replace(value, scope=scope)
-
-    return without_facet(accepted) == without_facet(subject)
+    return description.selection_subject == subject
 
 
 _PLOT_TARGET = attrgetter(
@@ -641,12 +621,12 @@ class ConsolePresenter:
         # once here rather than re-strung by whoever built the widget.
         self.view.panel_remove_requested.connect(self._guarded(self.remove_panel))
         self.view.panel_edit_requested.connect(self._guarded(self.edit_panel))
+        self.view.save_screenshot_requested.connect(self._guarded(self.save_screenshot))
         if not self._panel_only:
             self.view.pause_toggled.connect(self._guarded(self.set_paused))
             self.view.save_layout_requested.connect(self._guarded(self.save_layout))
             self.view.load_layout_requested.connect(self._guarded(self.load_layout))
             self.view.clear_board_requested.connect(self._guarded(self.clear_board))
-            self.view.save_screenshot_requested.connect(self._guarded(self.save_screenshot))
             self.view.selectors_toggled.connect(self._guarded(self.set_deriving))
             self.view.add_logic_requested.connect(self._guarded(self.add_logic))
             self.view.logic_start_requested.connect(self._guarded(self.start_logic))
@@ -5352,11 +5332,11 @@ class ConsolePresenter:
         return self.apply_layout(document, stop_running=True)
 
     def save_screenshot(self) -> str:
-        """Save one ordinary image of the whole current TaskConsole GUI."""
+        """Save one ordinary image of the whole current board window."""
 
         path = self.view.ask_save_path(
-            "Save TaskConsole screenshot",
-            str(Path(self.session.day_folder_path()) / "console.png"),
+            "Save screenshot",
+            str(Path(self.session.day_folder_path()) / "screenshot.png"),
             "PNG images (*.png)",
         )
         if not path:

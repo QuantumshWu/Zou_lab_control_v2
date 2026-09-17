@@ -26,7 +26,7 @@ def populate(viewer) -> None:
     viewer.path_committed.connect(remember("path_committed"))
     viewer.add_panel_requested.connect(remember("add_panel_requested"))
     viewer.panel_state_changed.connect(remember("panel_state_changed"))
-    viewer.save_image_requested.connect(remember("save_image_requested"))
+    viewer.save_screenshot_requested.connect(remember("save_screenshot_requested"))
     viewer.close_requested.connect(remember("close_requested"))
     # What the shared panel owner projects: Runtime signals and archive info.
     viewer.set_title("FigureViewer - run.npz")

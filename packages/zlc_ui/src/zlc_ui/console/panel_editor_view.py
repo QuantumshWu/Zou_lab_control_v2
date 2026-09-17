@@ -133,6 +133,7 @@ class PanelEditorView(QtWidgets.QWidget):
             FormSpec(()), {}, runtime=self._signal_runtime
         )
         self.panel_form.changed.connect(self._panel_value_changed)
+        self.panel_form.value_normalized.connect(self._panel_value_changed)
         panel_layout.addWidget(self.panel_form)
         body_layout.addWidget(panel_group)
 
@@ -155,6 +156,9 @@ class PanelEditorView(QtWidgets.QWidget):
             layout.addWidget(unavailable)
             form = FluentParameterForm(FormSpec(()), {})
             form.changed.connect(
+                lambda key, name=section: self._mapping_value_changed(name, str(key))
+            )
+            form.value_normalized.connect(
                 lambda key, name=section: self._mapping_value_changed(name, str(key))
             )
             layout.addWidget(form)

@@ -47,7 +47,6 @@ from .scan_line_edit import FluentScanLineEdit
 
 def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
     with signals_blocked(widget):
-        widget.setText(field.text)
         widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
                                can_scan=field.can_scan, effective_text=field.effective_text,
                                source_text=field.source_text)
@@ -61,6 +60,7 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
             widget.set_allow_any(field.allow_any)
         else:
             widget.setValidator(None)
+        widget.setText(field.text)
 
 
 class PeriodCard(FluentGroupBox):
@@ -118,6 +118,7 @@ class PeriodCard(FluentGroupBox):
         column.addSpacing(max(0, row_top - px(7)))
         self._column = column
         self.duration_edit.editingFinished.connect(self._commit_duration)
+        self.duration_edit.valueNormalized.connect(self._commit_duration)
         self.duration_edit.binding_committed.connect(
             lambda scan, source: self.binding_committed.emit("duration", self.period_id, None, scan, source)
         )
@@ -260,6 +261,7 @@ class PeriodCard(FluentGroupBox):
                     lambda _index, key=port.key: self._commit_analog(key)
                 )
                 edit.editingFinished.connect(lambda key=port.key: self._commit_analog(key))
+                edit.valueNormalized.connect(lambda key=port.key: self._commit_analog(key))
                 edit.binding_committed.connect(lambda scan, source, key=port.key: self.binding_committed.emit("analog", self.period_id, key, scan, source))
                 row_layout.addWidget(combo)
                 row_layout.addWidget(edit, 1)
@@ -476,6 +478,7 @@ class ChannelPanel(FluentGroupBox):
             str, tuple[FluentScanLineEdit, FluentComboBox, FluentButton, FluentButton]
         ] = {}
         self._row_labels: dict[str, FluentLabel] = {}
+        self._delay_models: dict[str, DelayRowVM] = {}
         self._layout.addStretch(1)
 
     def set_delay_rows(
@@ -491,6 +494,7 @@ class ChannelPanel(FluentGroupBox):
         """
 
         by_key = {port.key: port for port in ports}
+        self._delay_models = {row.port_key: row for row in rows}
         existing = self._rows
         self._rows = {}
         for row in rows:
@@ -511,6 +515,7 @@ class ChannelPanel(FluentGroupBox):
                 clear.setFixedWidth(hide_button_width())
                 edit.binding_committed.connect(lambda scan, source, key=row.port_key: self.binding_committed.emit("delay", None, key, scan, source))
                 edit.editingFinished.connect(lambda key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
+                edit.valueNormalized.connect(lambda key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 combo.currentTextChanged.connect(lambda _text, key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 fill.clicked.connect(lambda _checked=False, key=row.port_key: self.fill_port_requested.emit(key))
                 clear.clicked.connect(lambda _checked=False, key=row.port_key: self.clear_port_requested.emit(key))
@@ -561,6 +566,13 @@ class ChannelPanel(FluentGroupBox):
             value = float(field.text())
         except ValueError:
             return
+        previous = self._delay_models.get(key)
+        if previous is not None and units.currentText() == previous.unit:
+            try:
+                if value == float(previous.value.text):
+                    return
+            except ValueError:
+                pass
         self.delay_committed.emit(str(key), value, units.currentText())
 
     def set_clock(self, text: str) -> None:

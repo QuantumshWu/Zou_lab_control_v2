@@ -99,6 +99,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self.artifact_form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.artifact_form)
         self.artifact_form.changed.connect(self._artifact_changed)
+        self.artifact_form.value_normalized.connect(self._artifact_changed)
         self.artifact_form.refresh_requested.connect(
             lambda _key: self.refresh_requested.emit()
         )
@@ -106,6 +107,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self.form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.form)
         self.form.changed.connect(self._parameter_changed)
+        self.form.value_normalized.connect(self._parameter_changed)
         self.form.refresh_requested.connect(
             lambda _key: self.refresh_requested.emit()
         )

@@ -2187,7 +2187,6 @@ class FigureViewerPresenter:
         signal_plane: object,
         build_figure_host: Callable[..., object],
         save_figure_artifact: Callable[..., object],
-        save_front: Callable[..., object],
         confirm_discard: Callable[[str], bool] | None = None,
         make_pulse_preview: Callable[..., object] | None = None,
         resize_pulse_preview: Callable[..., object] | None = None,
@@ -2211,11 +2210,8 @@ class FigureViewerPresenter:
             raise TypeError("build_figure_host must be callable")
         if not callable(save_figure_artifact):
             raise TypeError("save_figure_artifact must be callable")
-        if not callable(save_front):
-            raise TypeError("save_front must be callable")
         self._build_figure_host = build_figure_host
         self._save_figure_artifact = save_figure_artifact
-        self._save_front = save_front
         self._archive_producers: tuple[_ArchiveDatasetProducer, ...] = ()
         self._archive_data: dict[str, dict[str, object]] = {}
         self._data_drafts: dict[str, dict[str, object]] = {}
@@ -2227,7 +2223,6 @@ class FigureViewerPresenter:
         self.timer: object | None = None
         self.path: Path | None = None
         self.description: ArchiveDescription | None = None
-        self._active_panel_id = ""
         self._busy = False
         #: How a played pulse's timeline becomes a picture -- the Pulse
         #: Editor's own preview builder, injected by the composition root.
@@ -2260,14 +2255,6 @@ class FigureViewerPresenter:
             signal = getattr(self.view, signal_name, None)
             if signal is not None:
                 signal.connect(self._guarded(handler))
-        # ConsolePresenter remains the sole panel mutation owner.  Viewer only
-        # remembers which card the operator touched so its one global Save
-        # image action targets that card.
-        self.view.add_panel_requested.connect(self._guarded(self._remember_added_panel))
-        self.view.panel_state_changed.connect(self._guarded(self._remember_panel))
-        self.view.panel_edit_requested.connect(self._guarded(self._remember_panel))
-        self.view.panel_remove_requested.connect(self._guarded(self._remember_removed_panel))
-        self.view.save_image_requested.connect(self._guarded(self.save_image))
 
     def _guarded(self, handler):
         return _guarded_slot(
@@ -2470,17 +2457,6 @@ class FigureViewerPresenter:
         for key in tuple(self._pulse_tabs):
             self.close_pulse_tab(key)
 
-    def _remember_added_panel(self, _kind: object) -> None:
-        self._active_panel_id = next(reversed(self.panels), "")
-
-    def _remember_panel(self, panel_id: str, *_unused: object) -> None:
-        if str(panel_id) in self.panels:
-            self._active_panel_id = str(panel_id)
-
-    def _remember_removed_panel(self, panel_id: str) -> None:
-        if self._active_panel_id == str(panel_id):
-            self._active_panel_id = next(reversed(self.panels), "")
-
     def open(self, path: str) -> None:
         """Submit one complete archive candidate without blocking the Qt owner.
 
@@ -2627,8 +2603,6 @@ class FigureViewerPresenter:
                 panel_presenter.remove_panel(new_panel_id)
             for producer, *_rest in published:
                 plane.retire(producer)
-            if self._active_panel_id not in self.panels:
-                self._active_panel_id = next(reversed(self.panels), "")
             self.view.set_status(
                 "opening cancelled" if cancelled else f"cannot open {resolved.name}: {error}",
                 error=not cancelled,
@@ -2638,7 +2612,6 @@ class FigureViewerPresenter:
         if binding is not None:
             if binding.accepted_display is None:
                 return
-            self._active_panel_id = new_panel_id
         self._opening_archive = None
         producers = tuple(row[0] for row in published)
         for panel_id in previous_panels:
@@ -3138,7 +3111,6 @@ class FigureViewerPresenter:
                     initial_recipe=draft["recipe"],
                 )
             draft["panel_id"] = binding.panel_id
-            self._active_panel_id = binding.panel_id
         self._panel_presenter.beat()
 
     def _save_data_draft(self, draft: dict[str, object], path: str) -> None:
@@ -3223,19 +3195,15 @@ class FigureViewerPresenter:
                 )
 
     def add_panel(self, kind: str) -> None:
-        binding = self._panel_presenter.add_selected_panel(str(kind))
-        if binding is not None:
-            self._active_panel_id = binding.panel_id
+        self._panel_presenter.add_selected_panel(str(kind))
 
     def remove_panel(self, panel_id: str) -> None:
         self._panel_presenter.remove_panel(str(panel_id))
-        self._active_panel_id = next(reversed(self.panels), "")
 
     def reorder_panels(self, order: object) -> None:
         self._panel_presenter.reorder_panels(tuple(order))
 
     def edit_panel(self, panel_id: str) -> object | None:
-        self._active_panel_id = str(panel_id)
         return self._panel_presenter.edit_panel(str(panel_id))
 
     def close_panel_editor(self, panel_id: str) -> None:
@@ -3301,41 +3269,6 @@ class FigureViewerPresenter:
     def _await(operation: object) -> object:
         return operation.result() if hasattr(operation, "result") else operation
 
-    def save_image(self) -> None:
-        """Write the active shared Panel exactly as drawn beside its archive."""
-
-        from zlc_durable import unique_path
-
-        binding = self.panels.get(self._active_panel_id)
-        if binding is None and self.panels:
-            binding = next(reversed(self.panels.values()))
-        if binding is None or self.path is None or binding.host is None:
-            self.view.set_status("there is no figure to save", error=True)
-            return
-        front = binding.host.front
-        if front is None:
-            self.view.set_status("this figure has no complete image yet", error=True)
-            return
-        path = self.path
-        dataset = binding.state.signal.rsplit("/", 1)[-1]
-
-        def write_image() -> object:
-            def write(temporary: Path) -> None:
-                self._await(self._save_front(temporary, front))
-
-            return unique_path(
-                path.parent,
-                f"{path.stem}-{dataset or 'figure'}",
-                ".png",
-                writer=write,
-            )
-
-        self._submit(
-            "saving image…",
-            write_image,
-            lambda target: self.view.set_status(f"saved {target.name}"),
-            "cannot save",
-        )
 
     @classmethod
     def _close_host(cls, host: object) -> None:

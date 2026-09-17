@@ -148,7 +148,7 @@ class _ViewerView:
         self.panel_snapshot_refresh_requested = _Signal()
         self.panel_save_figure_requested = _Signal()
         self.panel_plot_error = _Signal()
-        self.save_image_requested = _Signal()
+        self.save_screenshot_requested = _Signal()
         self.info_action_requested = _Signal()
         self.pulse_tab_closed = _Signal()
         self.pulse_include_off_toggled = _Signal()
@@ -379,14 +379,9 @@ def _built_presenter(view) -> FigureViewerPresenter:
     run_off_thread, close_worker = attach_qt_worker("test-built-figure-viewer")
     monitor_render = SimpleNamespace(build_host=build_figure_host)
 
-    def save_front(path, front):
-        front.buffer.save(path)
-        return Path(path)
-
     editor_render = SimpleNamespace(
         build_host=build_figure_host,
         save_figure_artifact=_async_writer(save_figure_artifact),
-        save_front=_async_writer(save_front),
     )
     presenter = build(
         view,
@@ -404,7 +399,7 @@ def _close_presenter(presenter: FigureViewerPresenter) -> None:
     _wait_until(presenter.close)
 
 def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
-    record = presenter.panels[presenter._active_panel_id]
+    record = presenter.panels[next(reversed(presenter.panels))]
     return {
         "host": record.host,
         "state": record.state,
@@ -426,7 +421,6 @@ def _formal_viewer_window(saved, build_host):
     render = SimpleNamespace(
         build_host=build_host,
         save_figure_artifact=lambda *_args, **_kwargs: None,
-        save_front=lambda *_args, **_kwargs: None,
         retain=lambda: None,
         release=lambda *, timeout=0.0: True,
         close=lambda *, timeout=0.0: True,
@@ -434,6 +428,7 @@ def _formal_viewer_window(saved, build_host):
     path, _snapshot = saved
     window = create_window(
         path=path,
+        workspace=path.parent,
         window_ratio=0.25,
         monitor_render=render,
         editor_render=render,
@@ -1507,7 +1502,7 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved, tmp_path, mon
     assert presenter.view.status[-1] == ("showing @figure/1/data", False)
     assert presenter.view.flow["nodes"]
 
-    panel_id = presenter._active_panel_id
+    panel_id = next(reversed(presenter.panels))
     presenter._panel_presenter.update_panel_state(panel_id, {"size": "4x4"})
     _wait_until(
         lambda: (
@@ -1609,7 +1604,7 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
         _wait_until(
             lambda: bool(staged)
             and bool(window.panel_ids())
-            and window._view.panel_surface(window.presenter._active_panel_id)
+            and window._view.panel_surface(next(reversed(window.presenter.panels)))
             is staged[0]
         )
         accepted = (
@@ -1673,7 +1668,6 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
             raise ValueError("action refused visibly")
 
         for signal, method, arguments in (
-            (window.save_image_requested, "save_image", ()),
             (window.new_data_requested, "new_data", ()),
             (window.data_editor_intent, "data_editor_intent", ("bad", {})),
         ):
@@ -1796,30 +1790,32 @@ def test_the_projection_needs_no_session_and_no_qt() -> None:
     }
     assert not any(name.startswith(("PyQt5", "zlc_atom")) for name in imported), imported
 
-def test_saving_an_image_works_however_the_archive_was_spelled(presenter, saved) -> None:
-    """A relative Open spelling still establishes one absolute archive home."""
+def test_save_image_captures_the_whole_window_in_today_folder(saved, monkeypatch) -> None:
+    from PyQt5 import QtGui, QtTest
 
-    path, _snapshot = saved
-    here = os.getcwd()
-    os.chdir(path.parent)
+    app, QtCore, window, _turns, timer = _formal_viewer_window(saved, build_figure_host)
     try:
-        presenter.open(path.name)
-        _wait_until(lambda: not presenter._busy)
-        assert presenter.path.is_absolute(), "an archive's location is absolute"
-        _wait_until(
-            lambda: (
-                presenter.beat()
-                or _active_record(presenter)["host"] is not None
-            )
-        )
-        presenter.save_image()
-        _wait_until(lambda: not presenter._busy)
-    finally:
-        os.chdir(here)
+        _wait_until(lambda: not window.presenter._busy)
+        suggested_paths = []
 
-    written = next(path.parent.glob("run-data*.png"))
-    assert Path(written).is_file()
-    assert written.parent == path.parent
+        def choose_path(_caption, suggested, _filter):
+            suggested_paths.append(Path(suggested))
+            return suggested
+
+        monkeypatch.setattr(window, "ask_save_path", choose_path)
+        QtTest.QTest.mouseClick(window._view.save_image_button, QtCore.Qt.LeftButton)
+        app.processEvents()
+        path, = suggested_paths
+        assert path.parent == window.presenter._panel_presenter.session.day_folder_path()
+        assert path.parent != saved[0].parent
+        image = QtGui.QImage(str(path))
+        whole = window._window.grab()
+        assert not image.isNull()
+        assert image.size() == whole.size()
+    finally:
+        timer.stop()
+        window.close()
+        _wait_until(lambda: not window.is_visible())
 
 def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     saved,
@@ -1945,7 +1941,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         described = host.describe_display().result().value
         assert described.display_state.values["show_colorbar"] is False
         source_signal = active["state"].signal
-        source_panel_id = real_presenter._active_panel_id
+        source_panel_id = next(reversed(real_presenter.panels))
         _wait_until(
             lambda: (
                 real_presenter.beat()
@@ -2072,7 +2068,6 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         # must not rebuild the host merely because the window DPR snapshot
         # changed meanwhile.
         real_view.dpr = 2.25
-        real_presenter._active_panel_id = panel_id
         real_presenter._panel_presenter.update_panel_state(
             panel_id,
             # x_0 is what the formula prints for center_x; the stored
@@ -2082,19 +2077,19 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         _wait_until(
             lambda: (
                 real_presenter.beat()
-                or _active_record(real_presenter)["state"].fit
+                or real_presenter.panels[panel_id].state.fit
                 == {
                     "model": "anisotropic_gaussian_center",
                     "initial": {"center_x": center_x},
                 }
             )
         )
-        active = _active_record(real_presenter)
-        assert active["state"].fit == {
+        active = real_presenter.panels[panel_id]
+        assert active.state.fit == {
             "model": "anisotropic_gaussian_center",
             "initial": {"center_x": center_x},
         }
-        assert active["host"].wait_for_front(timeout=5.0).device_pixel_ratio == 1.75
+        assert active.host.wait_for_front(timeout=5.0).device_pixel_ratio == 1.75
 
     finally:
         _close_presenter(real_presenter)
@@ -2258,13 +2253,12 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
                 or _active_record(presenter)["host"] is not None
             )
         )
-        panel_id = presenter._active_panel_id
+        panel_id = next(reversed(presenter.panels))
         host = _active_record(presenter)["host"]
         initial = host._session.last_fit
         assert isinstance(initial, FacetFitBatchResult)
         assert len(initial.results) == 2
 
-        presenter._active_panel_id = panel_id
         presenter._panel_presenter.update_panel_state(panel_id, {"fit": {"model": None}})
         _wait_until(
             lambda: (
@@ -2272,7 +2266,6 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
                 or not _active_record(presenter)["state"].fit
             )
         )
-        presenter._active_panel_id = panel_id
         presenter._panel_presenter.update_panel_state(
             panel_id,
             {"fit": {"model": "gaussian_offset"}},

@@ -80,6 +80,24 @@ def test_curve_fit_selection_prefers_area_then_x_range_then_viewport_then_all() 
     assert selected.scope is FitScope.ALL
     assert selected.sample_count == 5
 
+    # The ROI is common numeric geometry; opening another facet must not
+    # discard it or change the selection used for any cell's fit.
+    schema = make_dataset_schema(
+        repeat_domain(size=2),
+        mapped_domain_from_columns({"x": np.arange(5, dtype=float)}),
+        dtype=np.float64,
+    )
+    snapshot = make_snapshot(schema, np.arange(10, dtype=float).reshape(2, 5), revision=1)
+    projection = _projection(
+        FacetGridPlot(AxisRef.repeat("repeat"), spec), snapshot=snapshot,
+        selectors=(replace(x_range, facet_index=0),),
+    )
+    projection = projection._with_context(replace(projection._context, focused_facet_index=1))
+    for index in range(2):
+        selected = projection.fit_selection(model, facet_index=index)
+        assert selected.scope is FitScope.SELECTOR
+        assert selected.sample_count == 3
+
 
 def test_release_recapture_units_and_fixed_expression_use_the_series_contract() -> None:
     from scipy.special import lambertw

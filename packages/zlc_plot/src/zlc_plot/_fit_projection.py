@@ -1110,33 +1110,6 @@ class FitProjection:
             dtype=float,
         )
 
-    def _facet_mask(self, facet_index: int | None = None) -> np.ndarray | None:
-        """The samples one cell owns, or None when no cell restricts them.
-
-        NO RESTRICTION IS NOT A FULL PLANE.  A grid of one -- every plot
-        that is not a facet -- answered this with a freshly allocated
-        all-true array as wide as the dataset, which its one caller then
-        ANDed into a mask it could not change: two megapixel passes and an
-        allocation, 1.87 ms per gesture, to say nothing.
-        """
-
-        if self._view is None:
-            raise TypeError("facet masking requires zlc_data.OwnedSnapshot")
-        if not isinstance(self._spec, FacetGridPlot):
-            return None
-        cells = tuple(getattr(self._payload, "cells", ()))
-        selected = self._focused_facet_index if facet_index is None else facet_index
-        if selected is None or selected < 0 or selected >= len(cells):
-            raise IndexError("facet index is outside the current grid")
-        cell = cells[selected]
-        if self._spec.facet is None:
-            return None
-        coordinate = np.asarray(self._coordinate(self._spec.facet).canonical)
-        return np.asarray(
-            np.equal(coordinate, cell.facet_value_canonical),
-            dtype=bool,
-        )
-
     def _focused_payload(self, facet_index: int | None = None) -> Any:
         if not isinstance(self._spec, FacetGridPlot):
             return self._payload
@@ -1201,94 +1174,121 @@ class FitProjection:
         valid: np.ndarray,
         point_transform: Callable[[np.ndarray], np.ndarray] | None,
     ) -> np.ndarray:
-        """Materialize the nearest valid plotted sample in display space."""
-
+        """Nearest valid sample per facet, using one shared coordinate grid."""
         if self._view is None or not isinstance(state.value, CrosshairPoint):
             raise TypeError("crosshair sample lookup requires zlc_data.OwnedSnapshot")
         displayed = self._display_selector_state(state)
-        assert isinstance(displayed.value, CrosshairPoint)
         target = displayed.value
         samples = self._view.samples
         semantic = self._semantic_spec()
-        # ``valid`` is already the finiteness answer -- see _selector_mask --
-        # and asking it again of the CANONICAL values cast them to float64
-        # first: an 11.35 ms copy of a 2048-square camera frame, per
-        # gesture, to compute a plane that could not clear a bit.  What the
-        # crosshair does need is finiteness of the DISPLAY coordinates it
-        # measures distances in, and that is asked below.
-        candidate = np.array(valid, copy=True, dtype=bool)
-        candidate &= self._rolling_visible_mask()
+        image = isinstance(semantic, ImagePlot)
         if isinstance(semantic, HistogramPlot):
-            x_values = np.asarray(samples.value.display, dtype=float)
-            y_values = np.full(samples.shape, target.y, dtype=float)
+            x_values = np.asarray(samples.value.display)
+            y_values = np.broadcast_to(target.y, samples.shape)
         else:
             x_values = (
                 np.asarray(self._x_quantity().canonical_unit.convert_value_to(
                     self._x_sample_canonical(), self._x_quantity().display_unit
-                ), dtype=float)
+                ))
                 if isinstance(self._spec, RollingPlot)
-                else np.asarray(self._coordinate(self._x_ref()).display, dtype=float)
+                else np.asarray(self._coordinate(self._x_ref()).display)
             )
             y_values = (
-                np.asarray(self._coordinate(self._y_axis_ref()).display, dtype=float)
-                if isinstance(semantic, ImagePlot)
-                else np.asarray(samples.value.display, dtype=float)
+                np.asarray(self._coordinate(self._y_axis_ref()).display)
+                if image else np.asarray(samples.value.display)
             )
-        candidate &= np.isfinite(x_values) & np.isfinite(y_values)
-        flat_indices = np.flatnonzero(candidate.reshape(-1))
+        candidate = valid & np.isfinite(x_values) & np.isfinite(y_values)
+        if isinstance(self._spec, RollingPlot):
+            candidate &= self._rolling_visible_mask()
+
+        def compact(values: np.ndarray) -> np.ndarray:
+            # Broadcast coordinates share one axis/grid across all cells.
+            return values[tuple(slice(0, 1) if stride == 0 else slice(None)
+                                for stride in values.strides)]
+
+        def transformed(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            x, y = np.broadcast_arrays(x, y)
+            points = np.column_stack((x.reshape(-1), y.reshape(-1)))
+            converted = np.asarray(point_transform(points), dtype=float)
+            if converted.shape != points.shape:
+                raise ValueError("point transform returned the wrong shape")
+            return converted[:, 0].reshape(x.shape), converted[:, 1].reshape(y.shape)
+
+        separable = point_transform is None or bool(
+            getattr(getattr(point_transform, "__self__", None), "is_separable", False)
+        )
+        target_x, target_y = target.x, target.y
+        y_transformed = None
+        if point_transform is not None:
+            target_x, target_y = (float(v) for v in
+                                  transformed(np.asarray(target.x), np.asarray(target.y)))
+        if separable:
+            x_distance = compact(x_values)
+            if point_transform is not None:
+                x_distance, _ = transformed(x_distance, np.asarray(target.y))
+            distance = np.abs(x_distance - target_x)
+            if image:
+                y_distance = compact(y_values)
+                if point_transform is not None:
+                    _, y_distance = transformed(np.asarray(target.x), y_distance)
+                distance = np.hypot(distance, y_distance - target_y)
+            elif point_transform is not None and not getattr(point_transform.__self__, "is_affine", False):
+                # Nonlinear y transforms may exclude otherwise finite values.
+                _, y_transformed = transformed(np.asarray(target.x), compact(y_values))
+                candidate &= np.isfinite(y_transformed)
+        else:
+            # Arbitrary callers may supply a coupled transform; preserve its
+            # exact geometry rather than assume independent x/y mappings.
+            x_transformed, y_transformed = transformed(compact(x_values), compact(y_values))
+            candidate &= np.isfinite(y_transformed)
+            distance = np.abs(x_transformed - target_x)
+            if image:
+                distance = np.hypot(distance, y_transformed - target_y)
+        primary = np.where(candidate & np.isfinite(distance), distance, np.inf)
+        facet = self._spec.facet if isinstance(self._spec, FacetGridPlot) else None
+        contract = None if facet is None else resolve_axis(self._view._schema, facet)
+        if contract is None:
+            tied = primary == primary.min()
+        else:
+            # Reduce all non-carrier dimensions once, then group only the
+            # carrier rows by the producer's existing axis codes.
+            dimension = contract.dimension
+            codes = contract.source_indices(self._view._schema)
+            other = tuple(i for i in range(primary.ndim) if i != dimension)
+            row_minimum = np.min(primary, axis=other) if other else primary
+            minimum = np.full(contract.size, np.inf)
+            np.minimum.at(minimum, codes, row_minimum)
+            shape = [1] * primary.ndim
+            shape[dimension] = len(codes)
+            tied = primary == minimum[codes].reshape(shape)
+        tied &= np.isfinite(primary)
+        flat_indices = np.flatnonzero(tied.reshape(-1))
         result = np.zeros(samples.shape, dtype=bool)
         if flat_indices.size == 0:
             return result
-
-        x_candidates = x_values.reshape(-1)[flat_indices]
-        y_candidates = y_values.reshape(-1)[flat_indices]
-        target_point = np.asarray((target.x, target.y), dtype=float)
-        if point_transform is not None:
-            # A transform is the one thing that needs the two coordinates
-            # interleaved, because it is free to mix them.  Everything else
-            # keeps them apart: stacking two million points into one
-            # (N, 2) array copies both coordinates again for no reader.
-            points = np.column_stack((x_candidates, y_candidates))
-            # A transform that fails is not a reason to measure in the wrong
-            # space.  It is the axes' own data-to-pixel transform, and the
-            # nearest sample is the nearest ON SCREEN -- falling back to data
-            # distances silently picked a different sample on any panel whose
-            # two axes are not to the same scale, which is most of them.
-            transformed = np.asarray(
-                point_transform(np.vstack((points, target_point))),
-                dtype=float,
-            )
-            if transformed.shape != (points.shape[0] + 1, 2):
-                raise ValueError("point transform returned the wrong shape")
-            x_candidates = transformed[:-1, 0]
-            y_candidates = transformed[:-1, 1]
-            target_point = transformed[-1]
-        finite = np.isfinite(x_candidates) & np.isfinite(y_candidates)
-        if not bool(finite.any()):
-            return result
-        if not bool(finite.all()):
-            flat_indices = flat_indices[finite]
-            x_candidates = x_candidates[finite]
-            y_candidates = y_candidates[finite]
-        delta_x = np.abs(x_candidates - target_point[0])
-        delta_y = np.abs(y_candidates - target_point[1])
-        if isinstance(semantic, ImagePlot):
-            nearest = int(np.argmin(np.hypot(delta_x, delta_y)))
+        lane_count = 1 if contract is None else contract.size
+        if contract is None:
+            lanes = np.zeros(flat_indices.size, dtype=np.int64)
         else:
-            # NEAREST IS A MINIMUM, NOT AN ORDER.  ``lexsort`` ranked every
-            # one of two million candidates to read element zero -- 384.2 ms
-            # of a 520.9 ms hover.  The smallest x distance, then the
-            # smallest y distance among those tied for it, names the same
-            # sample: both this and ``lexsort`` are stable, so ties resolve
-            # to the lowest flat index either way.
-            closest_x = delta_x.min()
-            tied = np.flatnonzero(delta_x == closest_x)
-            nearest = int(
-                tied[0]
-                if tied.size == 1
-                else tied[int(np.argmin(delta_y[tied]))]
-            )
-        result.reshape(-1)[flat_indices[nearest]] = True
+            stride = math.prod(samples.shape[contract.dimension + 1:])
+            positions = (flat_indices // stride) % samples.shape[contract.dimension]
+            lanes = codes[positions]
+        if not image:
+            positions = np.unravel_index(flat_indices, samples.shape)
+            selected_y = y_values[positions]
+            if point_transform is not None:
+                if y_transformed is None:
+                    _, selected_y = transformed(x_values[positions], selected_y)
+                else:
+                    selected_y = np.broadcast_to(y_transformed, samples.shape)[positions]
+            delta_y = np.abs(selected_y - target_y)
+            nearest_y = np.full(lane_count, np.inf)
+            np.minimum.at(nearest_y, lanes, np.where(np.isfinite(delta_y), delta_y, np.inf))
+            selected = np.isfinite(delta_y) & (delta_y == nearest_y[lanes])
+            flat_indices, lanes = flat_indices[selected], lanes[selected]
+        nearest = np.full(lane_count, result.size, dtype=np.int64)
+        np.minimum.at(nearest, lanes, flat_indices)
+        result.reshape(-1)[nearest[nearest < result.size]] = True
         return result
 
     def _axis_range_plane(
@@ -1351,12 +1351,11 @@ class FitProjection:
         point_transform: Callable[[np.ndarray], np.ndarray] | None = None,
     ) -> np.ndarray:
         samples = self._view.samples
+        if state.kind is SelectorKind.CROSSHAIR:
+            return self._crosshair_sample_mask(state, samples.valid_mask, point_transform)
         mask = np.array(samples.valid_mask, copy=True, dtype=bool)
         if isinstance(self._spec, RollingPlot):
             mask &= self._rolling_visible_mask()
-        cell = self._facet_mask(state.facet_index)
-        if cell is not None:
-            mask &= cell
         value = np.asarray(samples.value.canonical)
         if state.kind is SelectorKind.X_RANGE:
             assert isinstance(state.value, NumericRange)
@@ -1377,8 +1376,6 @@ class FitProjection:
                 mask &= (value >= state.value.y.low) & (value <= state.value.y.high)
         elif state.kind is SelectorKind.THRESHOLD:
             mask &= value >= float(state.value)
-        elif state.kind is SelectorKind.CROSSHAIR:
-            return self._crosshair_sample_mask(state, mask, point_transform)
         # VALIDITY ALREADY ANSWERED FINITENESS.  ``mask`` starts as the
         # snapshot's validity plane, which DataView folds ``isfinite`` into
         # for float samples and which integer samples satisfy by
@@ -1407,7 +1404,6 @@ class FitProjection:
             return bool(
                 state is not None
                 and state.kind in _FIT_SELECTOR_KINDS
-                and state.facet_index == self._focused_facet_index
             )
 
         if selector_kind is not None:
@@ -1416,8 +1412,7 @@ class FitProjection:
                 raise KeyError(selector_kind)
             if not usable(selected):
                 raise ValueError(
-                    "fit selector must belong to the focused facet and contain "
-                    "a numeric selection"
+                    "fit selector must contain a numeric selection"
                 )
             return selected
 
@@ -1461,9 +1456,9 @@ class FitProjection:
     ) -> Callable[[int | None], FitSelection]:
         """Resolve one request's model, units and domain before its cell loop.
 
-        Only the computed cell changes within a batch. The focused cell still
-        identifies whose selector may define the shared region; the closure
-        is local to this request and is not retained by the projection.
+        Only the computed cell changes within a batch. The same canonical
+        region is shared by every cell regardless of which cell is focused;
+        the closure is local to this request and is not retained.
         """
 
         if self._view is None:

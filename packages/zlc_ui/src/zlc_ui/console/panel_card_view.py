@@ -1287,6 +1287,7 @@ class PanelCardView(FluentGroupBox):
             )
             self._settings_pending_rebuild = None
             self._settings_form.changed.connect(self._setting_changed)
+            self._settings_form.value_normalized.connect(self._setting_changed)
             self._apply_settings_enabled_state()
             body_layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()

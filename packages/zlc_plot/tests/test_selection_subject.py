@@ -256,7 +256,7 @@ def test_pure_subject_keeps_the_explicit_scope_coordinate() -> None:
     finally:
         session.close()
 
-def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
+def test_focused_facet_identity_does_not_change_panel_scope() -> None:
     snapshot = _threshold_facet_snapshot()
     site = AxisRef.point("site")
     region = AxisRef.point("region")
@@ -276,7 +276,7 @@ def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
         )
         session.focus_facet(0)
         subject = session.describe_display().selection_subject
-        assert subject.scope == ((region, 120), (site, 20))
+        assert subject.scope == ((region, 120),)
         assert focus_events[0] == (
             0,
             subject,
@@ -350,7 +350,7 @@ def test_panel_and_focused_scope_carry_canonical_event_meaning(
             session,
             lambda: session.set_x_selector(1.0, 3.0, display=False),
         )[-1]
-        assert event.subject.scope == ((scope_axis, 20 if named else 1),)
+        assert event.subject.scope == (() if focused else ((scope_axis, 20 if named else 1),))
         assert session.describe_display().selection_subject == event.subject
         if named and not focused:
             assert event.data_revision == 7

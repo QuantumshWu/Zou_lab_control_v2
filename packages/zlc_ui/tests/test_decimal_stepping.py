@@ -1,10 +1,4 @@
-"""A number box steps in decimal, on its step's grid, inside the owner's bound.
-
-Stepped in binary, 0.1 three times was 0.30000000000000004 and the honest
-formatter printed every digit of it; stepped down to a floor that was not
-on the grid, 0.1 became 0.001 and could not come back up the way it went
-down.  Both are the box deciding arithmetic it was never asked to decide.
-"""
+"""Decimal stepping, actual bounds, and visible precision share one value."""
 
 from __future__ import annotations
 
@@ -48,15 +42,15 @@ def test_a_notch_off_the_grid_goes_to_the_next_grid_point(box) -> None:
     assert _step(box, -1) == "0.2"
 
 
-def test_a_step_stops_at_the_last_grid_point_inside_the_bound(box) -> None:
-    """Down from 0.1 in steps of 0.1 with a floor of 0.001 is still 0.1."""
+def test_a_step_clamps_to_the_bound_and_keeps_interior_decimal_grid(box) -> None:
+    """Exceeded limits clamp, while interior steps still use their own grid."""
 
     box.setRange(0.001, 1.0)
     box.setSingleStep(0.1)
     box.setValue(0.2)
     assert _step(box, -1) == "0.1"
-    assert _step(box, -1) == "0.1", "the floor is off the grid; a step never lands on it"
-    assert _step(box, 1) == "0.2", "and the way back up is the way down"
+    assert _step(box, -1) == "0.001"
+    assert _step(box, 1) == "0.1"
     box.setValue(0.95)
     assert _step(box, 1) == "1"
     assert _step(box, 1) == "1"
@@ -207,3 +201,45 @@ def test_a_box_with_no_bound_steps_in_a_logarithmic_unit(box) -> None:
     assert power.text() == "0"
     assert _step(power, -1) == "-1"
     assert abs(power.value() - 10 ** (-0.1) / 1000) < 1e-15
+
+
+def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> None:
+    from PyQt5 import QtCore, QtGui, QtWidgets
+    from zlc_ui.fluent import signals_blocked
+
+    app = QtWidgets.QApplication.instance()
+    normalized, edited = [], []
+    box.valueNormalized.connect(lambda: normalized.append(box.decimalValue()))
+    box.valueChanged.connect(edited.append)
+    box.resize(110, 32)
+    box.show()
+    try:
+        app.processEvents()
+        with signals_blocked(box):
+            box.setValue(123.456789123456)
+        app.processEvents()
+        assert Decimal(box.text()) == box.decimalValue()
+        assert box.value() == float(box.text())
+        assert box.value() != 123.456789123456
+        assert QtGui.QFontMetrics(box.lineEdit().font()).horizontalAdvance(box.text()) + 2 <= box._text_width
+        assert normalized[-1] == box.decimalValue()
+        edited.clear()
+        box.resize(90, 32)
+        app.processEvents()
+        assert not edited, "a resize is normalization, never a user valueChanged"
+        assert Decimal(box.text()) == box.decimalValue()
+        box.setValueUnit("Hz")
+        box.setValue(123456789.123456)
+        box.setShownUnit("MHz")
+        assert box.decimalValue() == Decimal(box.text()) * Decimal(1000000)
+        assert box.validate("1e-", 3)[0] == QtGui.QValidator.Intermediate
+        box.setValueUnit("1")
+        box.setRange(1.23456789012345, 1.23456789012346)
+        box.setValue(10)
+        app.processEvents()
+        assert box.value() == 1.23456789012346
+        assert Decimal(box.text()) == box.decimalValue()
+        assert QtGui.QFontMetrics(box.lineEdit().font()).horizontalAdvance(box.text()) + 2 <= box._text_width
+    finally:
+        box.close()
+        app.processEvents()

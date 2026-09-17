@@ -10,6 +10,11 @@
 
 ## 1. 当前实施范围
 
+- FigureViewer工具栏Save image复用TaskConsole完整窗口截图与当前日期目录；删除单Plot PNG导出分支及仅为该分支维护的active-panel状态。Edit Save figure不变。Viewer运行跨日时目录按保存当日计算，不冻结在打开窗口当天。
+- Facet选区不再附加当前Focus坐标作为隐藏Scope；范围与最近点选择保留全部facet，显式Scope/Last/window不变。切换Focus仅重定位同一选区的绘制cell，canonical范围/revision不变；producer联动沿原AxisId映射，Image只改XY，Curve只改X，Histogram只筛样本。64格共209万点的隔离Image Area 1.830→0.680ms，Crosshair Image36.20→12.28ms、Curve28.35→12.15ms；新结果覆盖全部64格，旧结果只覆盖一格，不宣称同输出规模比较。
+- Viewer工具栏使用同一四列布局，Manual Data各区共享标签列和列伸缩；公共InfoTree与RowsTab统一上下留白。已用正式Qt创建/预览/保存/重开及截图核对，未按单个tab修补位置。
+- 可编辑数字共用Decimal可见宽度量化，保留原步长/单位机制，舍去的尾数不恢复；QObject拥有的合并通知回到现有草稿通道，布局规范化不发设备命令。Scan只改可见Range端点、保留custom内点和独立Values；Pulse数字也同步回正式序列。Decimal13项、Scan/Control直接边界及实屏窄宽度检查通过。三态Source使用公共FluentTriSwitch，真实popup已截图核对。一次离屏Manual Qt子进程原生退出尚未定位，单跑和两次正式实屏链通过，不据此宣称已查清该退出原因。
+
 - Stepped Scan和Temperature Task及专属实现、入口、测试已删除；只有它们使用的CameraCycleSource、API转Scan分支、settle工具一起删除。Seamless Scan的公共数据放置验证保留在scan测试，release–recapture拟合模型和模拟物理温度不变。
 - Pulse Fire返回既有执行状态，Calibration/Feedback不再追加两次远程查询，Seamless也不追加applied查询；重复次数更新不复制扫描表。Config读取直接复用条目校验，Preview无变化保留Pulse对象；Config UI按行更新并保留未变控件。Feedback只在首次真实Fire后匹配历史，运行中改Config的处理策略按用户裁决不变。
 - FigureViewer与TaskConsole共享Qt动作异常边界，错误进入状态栏及日志；初始文件打开和异步完成同样受保护。显式migrate_pulses.bat离线迁移旧Pulse/Config并备份原始文件，正式reader不增加兼容分支；旧Config数字统一命名config_N，随后仍须显式Load。

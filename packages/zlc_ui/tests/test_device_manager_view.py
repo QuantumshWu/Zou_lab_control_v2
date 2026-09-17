@@ -431,6 +431,41 @@ control.close(); app.processEvents()
 assert closed == [True]
 assert not control.is_visible()
 manager.close(); app.processEvents()
+
+# Width normalization updates the same Desired draft but is not Live Apply.
+from zlc_ui.device_manager.view import DeviceControlView
+from zlc_ui.fluent import signals_blocked
+float_spec = FormSpec((FormFieldProps('gain', 'float', 'Gain', default=2.0,
+                                    minimum=0.0, maximum=100.0),))
+numeric = DeviceControlView(float_spec, {'fields': {'gain': {
+    'current': 2.0, 'desired': 12.12345678901234, 'editable': True,
+    'live_apply': True, 'live_enabled': True, 'apply_enabled': True,
+}}})
+numeric.resize(1300, 250)
+box = numeric.form.widget_for('gain')
+box.setFixedWidth(600)
+numeric.show(); app.processEvents()
+desired, applied = [], []
+numeric.field_desired_changed.connect(lambda key, value, unit: desired.append(value))
+numeric.field_apply_requested.connect(lambda key, value, unit: applied.append(value))
+box.setFixedWidth(100)
+QtTest.QTest.qWait(120)
+assert desired and desired[-1] == numeric.form.read_value('gain'), desired
+assert applied == [], applied
+assert numeric._field_rows['gain'][0].text() == '2'
+
+# A later real wheel/step supersedes an undelivered passive notification.
+box.setFixedWidth(600)
+with signals_blocked(box):
+    box.setValue(12.12345678901234)
+app.processEvents()
+desired.clear(); applied.clear()
+box.setFixedWidth(100)
+assert box._normalization_pending
+box.stepBy(1)
+QtTest.QTest.qWait(120)
+assert desired and applied == [desired[-1]], (desired, applied)
+numeric.close(); app.processEvents()
 """
     )
 

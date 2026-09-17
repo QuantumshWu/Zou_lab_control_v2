@@ -124,7 +124,7 @@ def test_backend_neutral_gesture_geometry_has_one_authority() -> None:
         image_like=True,
     ) == RectangleRange(NumericRange(1.0, 11.0), NumericRange(-1.0, 9.0))
 
-def _float_image_with_holes(height: int = 48, width: int = 48, seed: int = 0):
+def _float_image_with_holes(height: int = 48, width: int = 48, seed: int = 0, repeats: int = 1):
     """A float image that is NOT a camera: a third of its samples are NaN."""
 
     from data_factory import (
@@ -138,7 +138,7 @@ def _float_image_with_holes(height: int = 48, width: int = 48, seed: int = 0):
 
     rng = np.random.default_rng(seed)
     schema = make_dataset_schema(
-        repeat_domain(size=1),
+        repeat_domain(size=repeats),
         mapped_domain_from_columns({"shot": np.asarray([0.0])}),
         cell_axes=(
             axis("y", values=[float(i) for i in range(height)]),
@@ -146,7 +146,7 @@ def _float_image_with_holes(height: int = 48, width: int = 48, seed: int = 0):
         ),
         dtype=np.float64,
     )
-    values = rng.normal(0.0, 1.0, (1, 1, height, width))
+    values = rng.normal(0.0, 1.0, (repeats, 1, height, width))
     values[rng.random(values.shape) < 0.35] = np.nan
     return make_snapshot(schema, values, 1), values
 
@@ -174,11 +174,13 @@ def test_validity_is_the_finiteness_answer_for_float_samples() -> None:
     finally:
         session.close()
 
-def test_crosshair_never_lands_on_a_non_finite_sample() -> None:
-    from zlc_plot import AxisRef, ImagePlot, PlotSession
+@pytest.mark.parametrize("facets", (1, 64))
+def test_crosshair_never_lands_on_a_non_finite_sample(facets) -> None:
+    from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
 
-    snapshot, values = _float_image_with_holes()
-    session = PlotSession(snapshot, ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")))
+    snapshot, values = _float_image_with_holes(repeats=facets)
+    cell = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    session = PlotSession(snapshot, FacetGridPlot(AxisRef.repeat("repeat"), cell) if facets > 1 else cell)
     try:
         session.set_size("2x2")
         session.rgba()
@@ -191,12 +193,21 @@ def test_crosshair_never_lands_on_a_non_finite_sample() -> None:
                     float(rng.uniform(0.0, values.shape[3] - 1)),
                     float(rng.uniform(0.0, values.shape[2] - 1)),
                 ),
-                facet_index=None,
+                facet_index=20 if facets > 1 else None,
             )
             picked = np.flatnonzero(
                 np.asarray(projection._selector_mask(state)).reshape(-1)
             )
-            assert picked.size == 1
-            assert np.isfinite(values.reshape(-1)[picked[0]])
+            assert picked.size == facets
+            assert np.isfinite(values.reshape(-1)[picked]).all()
+            assert np.unique(np.unravel_index(picked, values.shape)[0]).size == facets
+            distance = np.hypot(
+                np.arange(values.shape[3])[None, :] - state.value.x,
+                np.arange(values.shape[2])[:, None] - state.value.y,
+            )
+            expected = np.argmin(
+                np.where(np.isfinite(values), distance, np.inf).reshape(facets, -1), axis=1,
+            ) + np.arange(facets) * values.shape[2] * values.shape[3]
+            np.testing.assert_array_equal(picked, expected)
     finally:
         session.close()

@@ -744,15 +744,13 @@ def _wait_published(plane, name: str, timeout: float = 5.0):
         time.sleep(0.02)
 
 
-def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() -> None:
+def test_a_box_on_a_focused_scan_heatmap_cell_preserves_all_repeats() -> None:
     """The headline chain: heatmap facet cell -> gesture -> derived signal.
 
     This deliberately authored repeat facet contains scan-heatmap image cells
     whose axes are named Point-domain axes. Every
-    committed box on one used to die silently in the bridge with 'image area
-    axes must be source data axes' -- nothing published, nothing said.  And
-    the focused cell's identity used to be dropped, so the cut spanned every
-    repeat instead of the one on screen.
+    committed box names the heatmap axes, not the repeat axis used only to
+    lay out the cells. The same crop must retain every repeat.
     """
 
     plot = pytest.importorskip("zlc_plot")
@@ -787,12 +785,9 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
         assert bridge.last_error is None, bridge.last_error
         assert seen
         selection = seen[-1].state
-        assert tuple(
-            (item.axis, item.value, item.domain) for item in selection.facets
-        ) == (("repeat", 1, "repeat"),)
+        assert selection.facets == ()
 
-        # The derived data equals the slice the committed ranges + focused
-        # repeat select from the source, computed independently here.
+        # The derived data is the same numeric crop across all repeats.
         columns = {
             axis.name: tuple(
                 axis.coordinate_at(int(code))
@@ -809,12 +804,12 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
             )
         ]
         assert 1 <= len(rows) < schema.point_domain.size, rows
-        expected = values[1:2][:, rows]
+        expected = values[:, rows]
 
         roi_frame = _wait_published(plane, "@logic/panel-1/roi_frame")
         roi_mean = _wait_published(plane, "@logic/panel-1/roi_mean")
         np.testing.assert_array_equal(roi_frame.snapshot.block.values, expected)
-        assert roi_frame.snapshot.block.schema.repeat_domain.size == 1
+        assert roi_frame.snapshot.block.schema.repeat_domain.size == schema.repeat_domain.size
         # roi_mean is ONE value per (repeat, point): the reduction consumes the
         # image axes and nothing else.  A square cell makes the same fractional
         # drag cover several scan points, so the comparison must be per point --
@@ -1052,8 +1047,8 @@ def test_a_rolling_region_names_its_scope_like_every_other_kind() -> None:
         host.close()
 
 
-def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
-    """The same translation inside a focused facet cell keeps the cell."""
+def test_an_area_on_a_focused_curve_cell_keeps_focus_out_of_data_scope() -> None:
+    """The focused transform identifies the drag, not a hidden axis scope."""
 
     plot = pytest.importorskip("zlc_plot")
 
@@ -1080,7 +1075,7 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         front, transform = _focused_cell_front(host, 1)
         assert len(focused) == 1
         assert focused[0][0] == 1
-        assert focused[0][1].scope == ((plot.AxisRef.repeat("repeat"), 1),)
+        assert focused[0][1].scope == ()
         assert focused[0][2:] == ("curve-generation", 1)
         _gesture_area(host, front, transform)
         assert source.last_error is None, source.last_error
@@ -1088,12 +1083,16 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         state = committed[-1].state
         assert state.selector_kind == "x_range"
         assert [entry.axis for entry in state.ranges] == ["detuning"]
-        assert tuple(
-            (item.axis, item.value, item.domain) for item in state.facets
-        ) == (("repeat", 1, "repeat"),)
+        assert state.facets == ()
         assert panel_plot_selectors(state, facet_index=1)[0].facet_index == 1
 
-        host.configure(facet_focus=0).result(timeout=15)
+        before = host.selector_state(plot.SelectorKind.AREA).result(timeout=15).value
+        moved = host.configure(facet_focus=0).result(timeout=15)
+        after = host.selector_state(plot.SelectorKind.AREA).result(timeout=15).value
+        assert after.value == before.value and after.revision == before.revision
+        assert after.facet_index == 0
+        painted = next(item for item in moved.front.interaction.selectors if item.kind is plot.SelectorKind.AREA)
+        assert painted.facet_index == 0 and painted.value == before.value
         assert len(focused) == 1
         host.show_facet_overview().result(timeout=15)
         assert len(focused) == 2
@@ -1105,17 +1104,10 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         host.close()
 
 
-def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
+def test_a_box_on_a_focused_frame_cell_derives_all_frames(
     session, frames
 ) -> None:
-    """Frames on the point axis: the focused frame's identity crosses.
-
-    A camera cycle publishes its frames as a named Point-domain axis,
-    and its auto default facets those frames side by side.  A box drawn on
-    one focused frame must derive that frame's region only -- the frame is a
-    named point coordinate, so unlike a repeat facet it crosses as a facet
-    condition on its own axis.
-    """
+    """Camera frame is preserved like every other ordinary facet axis."""
 
     plot = pytest.importorskip("zlc_plot")
     from zlc_plot._kinds.facet_grid import default_spec as facet_default_spec
@@ -1147,20 +1139,17 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
         assert bridge.last_error is None, bridge.last_error
         assert seen
         selection = seen[-1].state
-        assert [facet.axis for facet in selection.facets] == [
-            frame_axis.axis_id.value
-        ]
-        assert selection.facets[0].value == 1.0
+        assert selection.facets == ()
 
         roi_frame = _wait_published(
             session.signal_plane, "@logic/panel-1/roi_frame"
         )
         derived = roi_frame.snapshot.block
-        assert derived.schema.point_domain.size == 1
+        assert derived.schema.point_domain.size == schema.point_domain.size
         derived_axis = derived.schema.point_domain.axis(frame_axis.axis_id)
-        assert derived_axis.coordinates == (frame_axis.coordinate_at(1),)
+        assert derived_axis.coordinates == frame_axis.coordinates
 
-        # The derived pixels are the same crop of frame 1, located through
+        # The derived pixels are the same crop of every frame, located through
         # the derived axes' own origins.
         starts = tuple(
             axis.index_origin
@@ -1180,7 +1169,7 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
         )
         np.testing.assert_array_equal(
             derived.values,
-            snapshot.block.values[(slice(None), slice(1, 2), *window)],
+            snapshot.block.values[(slice(None), slice(None), *window)],
         )
     finally:
         if bridge is not None:

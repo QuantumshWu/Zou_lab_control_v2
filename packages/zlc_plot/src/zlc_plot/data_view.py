@@ -881,7 +881,6 @@ class DataView:
         spec: PlotSpec,
         payload: CurveData | ImageData | HistogramData | FacetData,
         *,
-        facet_index: int | None = None,
         source_window: int | None = None,
     ) -> SelectionSubject:
         """Interaction identity of this already accepted view and payload.
@@ -974,23 +973,9 @@ class DataView:
             )
             scope.append((ref, coordinate))
 
-        if facet_index is not None:
-            if isinstance(facet_index, bool) or not isinstance(
-                facet_index, Integral
-            ):
-                raise TypeError("facet_index must be an integer or None")
-            if not isinstance(payload, FacetData):
-                raise ValueError("facet_index requires an accepted FacetData payload")
-            selected_index = int(facet_index)
-            if not 0 <= selected_index < len(payload.cells):
-                raise ValueError("facet_index is outside the accepted facet payload")
-            if spec.facet is not None:
-                coordinate = canonical_coordinate_scalar(
-                    payload.cells[selected_index].facet_value_canonical,
-                    "selection subject facet coordinate",
-                )
-                scope.append((spec.facet, coordinate))
-
+        # A focused cell only supplies the coordinate transform of the drag.
+        # The numeric region applies to every facet; only authored scope/Last
+        # limits which rows belong to this selection.
         return SelectionSubject(
             semantic.kind,
             x_ref,

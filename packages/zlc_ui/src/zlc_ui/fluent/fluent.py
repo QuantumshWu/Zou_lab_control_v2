@@ -1195,13 +1195,19 @@ def _apply_fluent_context_menu(widget, event) -> None:
 
 
 class FluentLineEdit(QtWidgets.QLineEdit):
+    valueNormalized = QtCore.pyqtSignal()
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self._res_step: float | None = None
         self._allow_any = True
         self._numeric_bounds: tuple[float | None, float | None, str] = (None, None, "float")
+        self._numeric_validator = False
         self._quantity_unit = ""
         self._shown_quantity_unit = ""
+        self._normalization_timer: QtCore.QTimer | None = None
+        self._normalizing = False
+        self._numeric_layout_key: tuple | None = None
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self._apply_style()
         self.setText(str(text))
@@ -1229,16 +1235,94 @@ class FluentLineEdit(QtWidgets.QLineEdit):
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
         text = str(text)
         if self.text() == text:
-            return   # no-op guard: skip the (expensive) re-set + cursor reset when unchanged
+            self._normalize_visible_number()
+            return
         super().setText(text)
+        self._normalize_visible_number()
         if not self.hasFocus():
             self.setCursorPosition(0)
+
+    def _normalize_visible_number(self) -> None:
+        if self._normalizing or self.isReadOnly() or not self.isEnabled() or not self._numeric_validator:
+            return
+        if self.width() <= 1:
+            return
+        margins = self.textMargins()
+        key = (self.text(), self.width(), margins.left(), margins.right(),
+               self._numeric_bounds, self._res_step, self._allow_any,
+               self._quantity_unit, self._shown_quantity_unit)
+        if key == self._numeric_layout_key:
+            return
+        try:
+            number = _finite_decimal(self.text())
+        except (ValueError, TypeError):
+            self._numeric_layout_key = key
+            return  # Incomplete input remains an editable draft.
+        bottom, top, kind = self._numeric_bounds
+        if kind == "quantity":
+            bottom = None if bottom is None else DEFAULT_UNITS.convert(bottom, self._quantity_unit, self._shown_quantity_unit)
+            top = None if top is None else DEFAULT_UNITS.convert(top, self._quantity_unit, self._shown_quantity_unit)
+        low = None if bottom is None else _finite_decimal(bottom)
+        high = None if top is None else _finite_decimal(top)
+        option = QtWidgets.QStyleOptionFrame()
+        self.initStyleOption(option)
+        contents = self.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, self)
+        available = max(1, contents.width() - margins.left() - margins.right())
+        integral = kind == "int"
+        rounded, text, minimum = _visible_decimal(number, low, high, integral, available, self.fontMetrics())
+        if self._res_step and not self._allow_any:
+            aligned = _finite_decimal(align_to_resolution(text, self._res_step, allow_any=False))
+            if aligned != rounded:
+                rounded, text, minimum = _visible_decimal(
+                    aligned, aligned, aligned, integral, available, self.fontMetrics(),
+                )
+        self._normalizing = True
+        try:
+            if minimum > available:
+                self.setMinimumWidth(self.width() - available + minimum)
+            if text != self.text():
+                super().setText(text)
+        finally:
+            self._normalizing = False
+        self._numeric_layout_key = (self.text(), self.width(), *key[2:])
+        if rounded != number:
+            if self._normalization_timer is None:
+                timer = QtCore.QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._emit_normalized_value)
+                self._normalization_timer = timer
+            self._normalization_timer.start(0)
+
+    def _emit_normalized_value(self) -> None:
+        if self.isEnabled() and not self.isReadOnly():
+            self.valueNormalized.emit()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._normalize_visible_number()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            if hasattr(self, "_numeric_layout_key"):
+                self._numeric_layout_key = None
+                self._normalize_visible_number()
 
     def set_resolution(self, step: float | None) -> None:
         self._res_step = None if step in (None, 0) else float(step)
 
     def set_allow_any(self, allow_any: bool = True) -> None:
         self._allow_any = bool(allow_any)
+
+    def setValidator(self, validator) -> None:  # noqa: N802
+        super().setValidator(validator)
+        self._numeric_validator = isinstance(validator, (QtGui.QIntValidator, QtGui.QDoubleValidator))
+        if self._numeric_validator:
+            self._numeric_bounds = (
+                validator.bottom() if math.isfinite(validator.bottom()) else None,
+                validator.top() if math.isfinite(validator.top()) else None,
+                "int" if isinstance(validator, QtGui.QIntValidator) else "float",
+            )
 
     def set_numeric_validator(
         self,
@@ -1296,6 +1380,8 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         # Force a dot decimal separator regardless of the system locale.
         validator.setLocale(QtCore.QLocale.c())
         self.setValidator(validator)
+        self._numeric_bounds = (bottom, top, kind)
+        self._numeric_validator = True
 
     def set_quantity_validator(
         self,
@@ -1410,9 +1496,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
                 else shown
             )
         except (UnitError, ValueError):
-            # Non-numeric text is the validator's business, not this one's, and
-            # a field carrying a scan binding ("s2") is deliberately not a
-            # number at all.
+            # Incomplete text is still owned by the numeric validator.
             return
         clamped = value
         if bottom is not None:
@@ -1434,12 +1518,12 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self.setText(str(clamped))
 
     def _snap_to_resolution(self) -> None:
-        if not self._res_step:
-            return
-        before = self.text()
-        after = align_to_resolution(before, self._res_step, allow_any=self._allow_any)
-        if after != before:
-            self.setText(after)
+        if self._res_step:
+            before = self.text()
+            after = align_to_resolution(before, self._res_step, allow_any=self._allow_any)
+            if after != before:
+                self.setText(after)
+        self._normalize_visible_number()
 
 
 class FluentReadoutEdit(FluentLineEdit):
@@ -4272,6 +4356,104 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     offset = QtCore.pyqtProperty(float, fget=getOffset, fset=setOffset)
 
 
+class FluentTriSwitch(QtWidgets.QAbstractButton):
+    """Three mutually exclusive labelled positions on one capsule track."""
+
+    stateChanged = QtCore.pyqtSignal(int)
+
+    def __init__(self, labels: tuple[str, str, str], parent=None) -> None:
+        super().__init__(parent)
+        if len(labels) != 3 or any(not str(label) for label in labels):
+            raise ValueError("a tri-switch needs three non-empty labels")
+        self._labels = tuple(str(label) for label in labels)
+        self._state = 0
+        self._position = 0.0
+        self._animation = QtCore.QPropertyAnimation(self, b"position", self)
+        self._animation.setDuration(150)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFont(QtGui.QFont(FONT, fluent_font_size()))
+        metrics = self.fontMetrics()
+        segment = max(fluent_text_width(metrics, label) for label in self._labels) + scaled_px(20)
+        self.setMinimumSize(3 * segment, scaled_px(30, minimum=24))
+        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+        self.clicked.connect(lambda: self.setState((self._state + 1) % 3))
+
+    def sizeHint(self) -> QtCore.QSize:
+        return self.minimumSize()
+
+    def state(self) -> int:
+        return self._state
+
+    def setState(self, state: int) -> None:
+        if state not in (0, 1, 2):
+            raise ValueError("tri-switch state must be 0, 1 or 2")
+        if state == self._state:
+            return
+        self._state = int(state)
+        self._animation.stop()
+        if self.isVisible() and self.isEnabled():
+            self._animation.setStartValue(self._position)
+            self._animation.setEndValue(float(state))
+            self._animation.start()
+        else:
+            self._position = float(state)
+            self.update()
+        self.stateChanged.emit(self._state)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton and self.isDown():
+            self.setDown(False)
+            if self.rect().contains(event.pos()):
+                self.setState(min(2, max(0, int(3 * event.pos().x() / max(1, self.width())))))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        changes = {
+            QtCore.Qt.Key_Left: max(0, self._state - 1),
+            QtCore.Qt.Key_Right: min(2, self._state + 1),
+            QtCore.Qt.Key_Home: 0, QtCore.Qt.Key_End: 2,
+        }
+        if event.key() in changes:
+            self.setState(changes[event.key()])
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        height = min(self.height(), self.minimumHeight())
+        top = (self.height() - height) / 2
+        segment = self.width() / 3
+        margin = scaled_px(3, minimum=2)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(PLACEHOLDER if self.isEnabled() else BG))
+        painter.drawRoundedRect(QtCore.QRectF(0, top, self.width(), height), height / 2, height / 2)
+        painter.setBrush(QtGui.QColor(SURFACE))
+        painter.drawRoundedRect(
+            QtCore.QRectF(self._position * segment + margin, top + margin,
+                         segment - 2 * margin, height - 2 * margin),
+            height / 2 - margin, height / 2 - margin,
+        )
+        painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
+        painter.setFont(self.font())
+        for index, label in enumerate(self._labels):
+            painter.drawText(QtCore.QRectF(index * segment, top, segment, height), QtCore.Qt.AlignCenter, label)
+
+    def _get_position(self) -> float:
+        return self._position
+
+    def _set_position(self, value: float) -> None:
+        self._position = value
+        self.update()
+
+    position = QtCore.pyqtProperty(float, fget=_get_position, fset=_set_position)
+
+
 def fluent_spinbox_stylesheet(selector: str) -> str:
     return f"""
     {selector} {{
@@ -4375,6 +4557,7 @@ class _WheelFocusGuardMixin:
 class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._integer_geometry = None
         self._install_wheel_focus_guard()
         # A HALF-TYPED NUMBER IS NOT A VALUE.  With keyboard tracking on,
         # Qt interprets the text on every keystroke: deleting the 1 from
@@ -4392,6 +4575,27 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
+        self._update_integer_geometry()
+
+    def _update_integer_geometry(self) -> None:
+        key = (self.minimum(), self.maximum(), self.font().key())
+        if getattr(self, "_integer_geometry", None) == key:
+            return
+        self._integer_geometry = key
+        metrics = self.fontMetrics()
+        # Integer counts have no fractional precision to discard. Reserve the
+        # range's exact digits instead of changing shots/points to fit a label.
+        digits = max(len(str(abs(self.minimum()))), len(str(abs(self.maximum()))))
+        width = digits * max(metrics.horizontalAdvance(str(n)) for n in range(10))
+        if self.minimum() < 0:
+            width += metrics.horizontalAdvance("-")
+        self.setMinimumWidth(width + scaled_px(2 * EDIT_PADDING_H + COMBO_WIDTH + 4))
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            self._integer_geometry = None
+            self._update_integer_geometry()
 
     def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
         """The owner's range -- applied when it changes.
@@ -4404,6 +4608,7 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         if (int(minimum), int(maximum)) == (self.minimum(), self.maximum()):
             return
         super().setRange(int(minimum), int(maximum))
+        self._update_integer_geometry()
 
     def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
         """Accepted and ignored: a count has no scale to choose between.
@@ -4416,6 +4621,12 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         """
 
         del unit
+
+    def setMinimum(self, minimum: int) -> None:  # noqa: N802
+        self.setRange(int(minimum), self.maximum())
+
+    def setMaximum(self, maximum: int) -> None:  # noqa: N802
+        self.setRange(self.minimum(), int(maximum))
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -4560,34 +4771,12 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
 
 
 class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
-    """A number box whose value is a DECIMAL, stepped on its step's own grid.
+    """One bounded Decimal value, rounded to the digits the operator can see.
 
-    Qt's double is a shadow.  The authority is ``_value``, a Decimal in the
-    owner's unit: what was typed is the decimal of the text, what was
-    stepped is decimal arithmetic on the step, and what a device handed over
-    is the shortest decimal that reads back as that float.  So 0.1 stepped
-    three times is 0.3, not 0.30000000000000004 -- the formatter here never
-    rounds, which is right, and it had been printing every binary digit of
-    a sum that was never meant in binary.
-
-    A STEP STAYS ON THE GRID.  From a value that is on it, one notch is one
-    step; from one that is not, one notch is the next grid point in that
-    direction.  A notch that would leave the owner's range stops at the last
-    grid point inside it, and never lands on the bound itself when the bound
-    is off the grid: down from 0.1 in steps of 0.1 with a floor of 0.001 is
-    0.1, not 0.001, so down-then-up returns exactly where it started.  A
-    NAMED number -- typed, or handed over by the owner -- is clamped to the
-    bound, because naming a value is asking for it and the bound is the
-    owner refusing it.
-
-    The box never invents a range.  It used to derive one from a "length",
-    which is how a field nobody had bounded acquired a floor of 1e-7 and
-    showed it.  A bound is the owner's fact -- the port's, the device's, the
-    board's tick -- and a box with no bound declared has none.
-
-    The unit on screen is the picker's.  A prefix shift between the owner's
-    unit and the shown one is a decimal point moving, done exactly; only a
-    conversion that is not a power of ten (dBm, Vpp) goes through floats.
+    Interior stepping retains the Decimal grid; an exceeded bound clamps to
+    the actual endpoint. Prefix changes stay exact decimal shifts. Display
+    normalization updates the draft separately from a user edit, so resizing
+    a device control cannot be mistaken for a hardware Apply.
     """
 
     #: CLASS attributes, not instance ones.  Qt asks this widget for its text
@@ -4595,6 +4784,13 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #: assignment could have happened -- and a plain AttributeError raised
     #: inside a Qt slot does not become a traceback, it ends the process.
     #: Declared here, there is no instant in which they are missing.
+    valueNormalized = QtCore.pyqtSignal()
+
+    _normalization_pending = False
+    _display_text = ""
+    _text_width = 0
+    _number_metrics = None
+    _number_geometry = None
     _unit = "1"
     _shown_unit = "1"
     _value = Decimal(0)
@@ -4644,6 +4840,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             """
         )
         self._step_btn.clicked.connect(self._on_edit_step)
+        self.editingFinished.connect(self._update_number_geometry)
 
         # No range of its own: a bound is the owner's, declared through
         # setRange, and until then the box holds whatever it is given.
@@ -4656,14 +4853,13 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     # ------------------------------------------------------------ the value
 
     def setValue(self, value: float) -> None:  # noqa: N802 - Qt API name
-        """The owner's number, taken exactly as the shortest decimal of it,
-        inside the owner's own range."""
+        """Project the owner's number through the same bounds/visible precision."""
 
         try:
             number = _finite_decimal(value)
         except ValueError:
             return
-        self._commit(self._bounded(self._quantized(number)))
+        self._commit(self._bounded(self._quantized(number)), notify_normalized=True)
 
     def _bounded(self, number: Decimal) -> Decimal:
         """``number`` inside the owner's range: a box never holds a value
@@ -4697,9 +4893,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # 2**53 read through a double is a different number.
         self._low = None if low <= -sys.float_info.max else _finite_decimal(minimum)
         self._high = None if high >= sys.float_info.max else _finite_decimal(maximum)
-        self._value = self._bounded(self._value)
+        self._value = self._visible_value(self._bounded(self._value))
         super().setRange(low, high)
-        self.lineEdit().setText(self.textFromValue(float(self._value)))
+        self._commit(self._value, notify_normalized=True)
 
     def setMinimum(self, minimum: float) -> None:  # noqa: N802 - Qt API name
         self.setRange(minimum, self.maximum())
@@ -4714,9 +4910,10 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         places = int(places)
         if places == self.decimals():
             return
-        self._value = self._quantized(self._value, places)
+        self._display_text = ""
+        self._value = self._visible_value(self._quantized(self._value, places))
         super().setDecimals(places)
-        self.lineEdit().setText(self.textFromValue(float(self._value)))
+        self._commit(self._value, notify_normalized=True)
 
     def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
         try:
@@ -4733,9 +4930,13 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
         return self._value
 
-    def _commit(self, number: Decimal) -> None:
+    def _commit(self, number: Decimal, *, notify_normalized: bool = False, user_edit: bool = False) -> None:
         """Make ``number`` the value, in the owner's unit, shadow and all."""
 
+        requested = number
+        number = self._visible_value(number)
+        if user_edit and number != self._value:
+            self._normalization_pending = False
         self._value = number
         # Qt compares the double against its own range and last value and
         # emits valueChanged; its rounding to decimals() is why the decimal
@@ -4745,6 +4946,43 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # differs in a digit the double cannot hold would otherwise be shown
         # from the float.
         self.lineEdit().setText(self.textFromValue(float(number)))
+        if notify_normalized and number != requested:
+            self._queue_normalization()
+
+    def _visible_value(self, number: Decimal) -> Decimal:
+        if self.decimals() != 0:
+            number = _finite_decimal(float(number))
+        if number == self._value and self._display_text:
+            return number
+        shown = self._shown_from_value(number)
+        if self._number_metrics is None or self._text_width <= 0:
+            self._display_text = format_quantity(shown, "1")
+            return number
+        low, high = self._shown_bound(self._low), self._shown_bound(self._high)
+        if low is not None and high is not None and low > high:
+            low, high = high, low
+        if self.isReadOnly() or not self.isEnabled():
+            low = high = shown
+        rounded, text, required = _visible_decimal(
+            shown, low, high, self.decimals() == 0, self._text_width, self._number_metrics,
+        )
+        self._display_text = text
+        if required > self._text_width:
+            self.setMinimumWidth(self.width() + required - self._text_width)
+        return self._bounded(self._quantized(self._value_from_shown(rounded)))
+
+    def _queue_normalization(self) -> None:
+        if not self._normalization_pending:
+            self._normalization_pending = True
+            QtCore.QMetaObject.invokeMethod(self, "_deliver_normalization", QtCore.Qt.QueuedConnection)
+
+    @QtCore.pyqtSlot()
+    def _deliver_normalization(self) -> None:
+        if not self._normalization_pending:
+            return
+        self._normalization_pending = False
+        if self.isEnabled() and not self.isReadOnly():
+            self.valueNormalized.emit()
 
     def _quantized(self, number: Decimal, places: int | None = None) -> Decimal:
         """``number`` at the resolution the owner declared, when it did.
@@ -4784,26 +5022,27 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return
         self._unit = wanted
         self._shown_unit = wanted
-        self.lineEdit().setText(self.textFromValue(self.value()))
+        self._display_text = ""
+        self._commit(self._value, notify_normalized=True)
 
     def valueUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._unit
 
     def setShownUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
-        """Which compatible unit the operator is reading and typing in.
+        """Convert to the selected unit and accept its visible precision.
 
-        The VALUE never moves: the owner declared what this number is, and a
-        device that speaks hertz is not asking to be told megahertz.  What
-        the operator chooses is which spelling of the same quantity is on
-        screen -- the number is converted on the way out and back on the way
-        in, so a power field can be read in dBm and typed in mW.
+        The canonical unit is unchanged. Any width-rounding is converted
+        back into the actual value, not retained as a display-only spelling.
         """
 
         wanted = str(unit).strip() or self._unit
+        if wanted == self._shown_unit:
+            return
         if wanted != self._unit:
             DEFAULT_UNITS.convert(0.0, self._unit, wanted)
         self._shown_unit = wanted
-        self.lineEdit().setText(self.textFromValue(self.value()))
+        self._display_text = ""
+        self._commit(self._value, user_edit=True)
 
     def shownUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._shown_unit
@@ -4867,11 +5106,14 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         low, high = self._shown_bound(self._low), self._shown_bound(self._high)
         if low is not None and high is not None and low > high:
             low, high = high, low
-        moved = _last_grid_point_inside(moved, self._step, low, high)
+        if low is not None:
+            moved = max(moved, low)
+        if high is not None:
+            moved = min(moved, high)
         if moved == shown:
             return
         try:
-            self._commit(self._quantized(self._value_from_shown(moved)))
+            self._commit(self._quantized(self._value_from_shown(moved)), user_edit=True)
         except (UnitError, ValueError, ArithmeticError):
             return
         if self.hasFocus():
@@ -4890,6 +5132,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         except ValueError:
             return str(value)
         try:
+            if number == self._value and self._display_text:
+                return self._display_text
             number = self._quantized(number)
             # DIGITS ONLY.  A box is for the number; which unit that number
             # is read in is said once, beside it, by the row that owns it --
@@ -4908,18 +5152,19 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         text, which calls back into here, which would ask again -- one
         unreadable keystroke and the stack is gone.
 
-        A typed number is the operator naming a value, and a named value
-        is what the owner's bound clamps: a step stops short of an off-grid
-        bound, a typed number lands on it.
+        Typed numbers and steps share the owner's bounds; visible precision
+        is part of the committed value, not just its formatting.
         """
 
         try:
             typed = Decimal(str(text).strip())
             if not typed.is_finite():
                 raise ValueError(text)
-            number = self._bounded(self._quantized(self._value_from_shown(typed)))
+            number = self._visible_value(self._bounded(self._quantized(self._value_from_shown(typed))))
         except (UnitError, ValueError, ArithmeticError):
             return float(self._value)
+        if number != self._value:
+            self._normalization_pending = False
         self._value = number
         return float(number)
 
@@ -4932,6 +5177,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         is not finished yet, which "-" and "." and "" are.
         """
 
+        if text == self._display_text:
+            return QtGui.QValidator.Acceptable, text, position
         stripped = str(text).strip()
         if self.decimals() == 0 and "." in stripped:
             # A box at zero decimals holds whole numbers, and a decimal
@@ -4940,18 +5187,57 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return QtGui.QValidator.Invalid, text, position
         if not stripped or stripped in ("+", "-", ".", "+.", "-."):
             return QtGui.QValidator.Intermediate, text, position
+        if self.decimals() != 0 and re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?", stripped):
+            return QtGui.QValidator.Intermediate, text, position
         try:
-            if not Decimal(stripped).is_finite():
+            typed = Decimal(stripped)
+            if not typed.is_finite():
                 return QtGui.QValidator.Invalid, text, position
         except ArithmeticError:
             return QtGui.QValidator.Invalid, text, position
+        if self._number_metrics is not None and self._number_metrics.horizontalAdvance(text) + 2 > self._text_width:
+            low, high = self._shown_bound(self._low), self._shown_bound(self._high)
+            _value, fitted, width = _visible_decimal(
+                typed, low, high, self.decimals() == 0, self._text_width, self._number_metrics,
+            )
+            if width <= self._text_width:
+                return QtGui.QValidator.Acceptable, fitted, min(position, len(fitted))
         return QtGui.QValidator.Acceptable, text, position
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         btn_w = scaled_px(COMBO_WIDTH)
         step_w = scaled_px(STEP_WIDTH)
-        self._step_btn.setGeometry(self.width() - btn_w - step_w, 0, step_w, self.height())
+        if hasattr(self, "_step_btn"):
+            self._step_btn.setGeometry(self.width() - btn_w - step_w, 0, step_w, self.height())
+        self._update_number_geometry()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            self._update_number_geometry()
+
+    def _update_number_geometry(self) -> None:
+        edit = self.lineEdit()
+        if edit is None or not hasattr(self, "_step_btn"):
+            return
+        width = edit.contentsRect().width()
+        if not self._step_btn.isHidden():
+            width = min(width, self.width() - scaled_px(COMBO_WIDTH) - scaled_px(STEP_WIDTH) - edit.x() - 2)
+        geometry = (max(1, width), edit.font().key())
+        if geometry == self._number_geometry and self._display_text:
+            return
+        self._number_geometry = geometry
+        self._text_width = geometry[0]
+        self._number_metrics = QtGui.QFontMetrics(edit.font())
+        self._display_text = ""
+        if edit.isModified() and edit.hasFocus():
+            return
+        previous = self._value
+        with signals_blocked(self):
+            self._commit(previous)
+        if self._value != previous:
+            self._queue_normalization()
 
     def _on_edit_step(self) -> None:
         current = self.singleStep()
@@ -4964,6 +5250,59 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         _paint_fluent_spin_buttons(self)
+
+
+def _visible_decimal(
+    number: Decimal,
+    low: Decimal | None,
+    high: Decimal | None,
+    integral: bool,
+    available_width: int,
+    metrics: QtGui.QFontMetrics,
+) -> tuple[Decimal, str, int]:
+    """The most precise bounded decimal whose complete text fits the editor.
+
+    The returned number, not an unrounded input, is what the control owns.
+    A boundary narrower than any fitting decimal keeps its exact value and
+    requests sufficient text width instead of hiding digits or crossing it.
+    """
+    from decimal import ROUND_HALF_UP
+
+    if low is not None:
+        number = max(number, low)
+    if high is not None:
+        number = min(number, high)
+    digits = len(number.as_tuple().digits)
+    with localcontext() as context:
+        context.prec = max(28, digits + 2)
+        original = number
+        best = None
+        for precision in range(digits, 0, -1):
+            exponent = number.adjusted() - precision + 1 if number else 0
+            if integral:
+                exponent = max(0, exponent)
+            rounded = number.quantize(Decimal(1).scaleb(exponent), rounding=ROUND_HALF_UP)
+            if low is not None:
+                rounded = max(rounded, low)
+            if high is not None:
+                rounded = min(rounded, high)
+            rounded = rounded.normalize() + Decimal(0)
+            fixed = format(rounded, "f")
+            mantissa, _, power = format(rounded, "e").partition("e")
+            scientific = f"{mantissa}e{int(power)}"
+            candidates = ((fixed, metrics.horizontalAdvance(fixed) + 2),)
+            if not integral:
+                candidates += ((scientific, metrics.horizontalAdvance(scientific) + 2),)
+            for text, width in candidates:
+                if width <= available_width:
+                    return rounded, text, width
+            if best is None:
+                text, width = min(candidates, key=lambda item: item[1])
+                best = (original, text, width)
+            if original == low or original == high:
+                break
+    assert best is not None
+    return best
 
 
 def _finite_decimal(value: object) -> Decimal:
@@ -4994,20 +5333,6 @@ def _grid_step(value: Decimal, step: Decimal, steps: int) -> Decimal:
     else:
         index = int(ratio.to_integral_value(rounding=ROUND_CEILING)) + steps
     return (Decimal(index) * step).normalize() + Decimal(0)
-
-
-def _last_grid_point_inside(
-    value: Decimal, step: Decimal, low: Decimal | None, high: Decimal | None
-) -> Decimal:
-    """``value``, or the last multiple of ``step`` still inside ``[low, high]``.
-
-    A side that is None has no bound, so it stops nothing."""
-
-    if high is not None and value > high:
-        return (Decimal(int((high / step).to_integral_value(rounding=ROUND_FLOOR))) * step).normalize() + Decimal(0)
-    if low is not None and value < low:
-        return (Decimal(int((low / step).to_integral_value(rounding=ROUND_CEILING))) * step).normalize() + Decimal(0)
-    return value
 
 
 def fluent_integer_box(

@@ -26,6 +26,19 @@ from .fluent import (
 from .qt import ensure_qt_app
 
 
+def save_window_screenshot(window: Any, path: str) -> str:
+    """Save the complete visible GUI through the shared window boundary."""
+    from pathlib import Path
+
+    pixmap = window.grab()
+    if pixmap.isNull():
+        raise OSError("the window has no image to save")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    if not pixmap.save(str(path), "PNG"):
+        raise OSError(f"could not save screenshot to {path!r}")
+    return str(path)
+
+
 def open_device_control(
     *,
     title: str,
@@ -203,6 +216,7 @@ def open_task_console(
 
 
 __all__ = [
+    "save_window_screenshot",
     "open_device_control",
     "open_device_manager",
     "open_figure_viewer",

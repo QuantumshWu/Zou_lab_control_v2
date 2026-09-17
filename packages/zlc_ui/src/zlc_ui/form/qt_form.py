@@ -1089,12 +1089,14 @@ class FluentParameterForm(QtWidgets.QWidget):
     """Thin exact-key form built from one ordered :class:`FormSpec`."""
 
     changed = QtCore.pyqtSignal(str)
+    #: Editable value rounded to its available width; not a user/device command.
+    value_normalized = QtCore.pyqtSignal(str)
     #: One field asked for its file to be re-read.  The form knows only which
     #: key; what re-reading means belongs to whoever owns the file.
     refresh_requested = QtCore.pyqtSignal(str)
     #: (key, symbol): the operator chose to READ this row in another
-    #: spelling of its unit.  The value did not move; whoever shows a second
-    #: number for the same field -- a device's current reading -- follows.
+    #: spelling of its unit; associated readouts follow the same unit. Any
+    #: visible-precision normalization is separately written to the draft.
     shown_unit_changed = QtCore.pyqtSignal(str, str)
     #: The operator is DONE with this row: Return, or the focus left it.
     #: ``changed`` says every keystroke; a host that acts on a finished
@@ -1109,6 +1111,17 @@ class FluentParameterForm(QtWidgets.QWidget):
         finished = getattr(widget, "editingFinished", None)
         if finished is not None:
             finished.connect(lambda key=key: self.committed.emit(key))
+        normalized = getattr(widget, "valueNormalized", None)
+        if normalized is not None:
+            normalized.connect(lambda: self._value_normalized(key, widget))
+
+    def _value_normalized(self, key: str, widget: QtWidgets.QWidget) -> None:
+        if self._widgets.get(key) is not widget or not widget.isEnabled():
+            return
+        automatic = self._auto_switches.get(key)
+        if (automatic is not None and automatic.isChecked()) or widget.isReadOnly():
+            return
+        self.value_normalized.emit(key)
 
     @staticmethod
     def _dependency_map(spec: FormSpec) -> dict[str, list[str]]:
@@ -1221,6 +1234,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         # once even when the initial schema has no dependencies; reconcile may
         # introduce them later.
         self.changed.connect(self._controller_changed)
+        self.value_normalized.connect(self._controller_changed)
         self._project_enabled_all()
 
     def _controller_changed(self, key: str) -> None:
@@ -1302,7 +1316,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         return picker
 
     def _shown_unit_picked(self, key: str, symbol: str) -> None:
-        """Show this row in another unit: the value is untouched."""
+        """Select this row's unit through the numeric control's one value path."""
 
         widget = self._widgets.get(key)
         if widget is None:

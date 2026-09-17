@@ -283,11 +283,10 @@ class TaskConsoleHandle(QtCore.QObject):
     def save_screenshot(self, path: str) -> str:
         """Write one screenshot of the complete TaskConsole window."""
 
+        from ..windows import save_window_screenshot
+
         target = self._window if self._window is not None else self._view
-        pixmap = target.grab()
-        if pixmap.isNull() or not pixmap.save(str(path), "PNG"):
-            raise OSError(f"could not save TaskConsole screenshot to {path!r}")
-        return str(path)
+        return save_window_screenshot(target, path)
 
     def show_warning(self, title: str, text: str) -> None:
         """Say what was refused, in the one modal this project owns."""

@@ -41,7 +41,7 @@ class FigureViewerHandle(QtCore.QObject):
     panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
     panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_plot_error = QtCore.pyqtSignal(str, str)
-    save_image_requested = QtCore.pyqtSignal()
+    save_screenshot_requested = QtCore.pyqtSignal()
     info_action_requested = QtCore.pyqtSignal(str)
     pulse_tab_closed = QtCore.pyqtSignal(str)
     pulse_include_off_toggled = QtCore.pyqtSignal(str, bool)
@@ -86,7 +86,7 @@ class FigureViewerHandle(QtCore.QObject):
         )
         view.panel_save_figure_requested.connect(self.panel_save_figure_requested)
         view.panel_plot_error.connect(self.panel_plot_error)
-        view.save_image_requested.connect(self.save_image_requested)
+        view.save_screenshot_requested.connect(self.save_screenshot_requested)
         view.info_action_requested.connect(self.info_action_requested)
         view.pulse_tab_closed.connect(self.pulse_tab_closed)
         view.pulse_include_off_toggled.connect(self.pulse_include_off_toggled)
@@ -167,6 +167,18 @@ class FigureViewerHandle(QtCore.QObject):
 
     def set_status(self, text: str, *, error: bool = False) -> None:
         self._view.set_status(text, error=error)
+
+    def ask_save_path(self, caption: str, suggested: str, filter: str) -> str:
+        from ..fluent import fluent_save_path
+
+        return fluent_save_path(self._view, caption, suggested, filter)
+
+    def save_screenshot(self, path: str) -> str:
+        from ..windows import save_window_screenshot
+
+        return save_window_screenshot(
+            self._window if self._window is not None else self._view, path,
+        )
 
     def show_status(self, text: str, severity: str) -> None:
         self._view.show_status(text, severity)

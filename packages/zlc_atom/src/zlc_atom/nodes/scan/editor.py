@@ -76,18 +76,14 @@ def _sweep_values(row: QtWidgets.QWidget) -> tuple[float, ...]:
     return tuple(float(value) for value in values)
 
 
-def _spins_regenerate(row: QtWidgets.QWidget, values: tuple[float, ...]) -> bool:
-    """Whether from/to/points, as the row's spins now hold them, give back
-    exactly these values.
+def _uniform_values(values: tuple[float, ...]) -> bool:
+    """Judge the authored list before its displayed ends are rounded.
 
-    Exactly, not approximately: the grid the spins describe is what the
-    row will author the next time anything on the form changes, so any
-    other list is the operator's and must be kept as it was written.  An
-    approximate comparison once judged 1 000 000, 2 000 000, 3 000 005
-    uniform and silently re-authored it as 1 000 000, 2 000 002.5, 3 000 005.
+    A nonuniform list keeps all interior coordinates; display precision
+    must not turn it into the evenly spaced grid described by its ends.
     """
 
-    return _sweep_values(row) == tuple(values)
+    return tuple(np.linspace(values[0], values[-1], len(values))) == tuple(values)
 
 
 class _AxisRow(QtWidgets.QWidget):
@@ -171,6 +167,8 @@ class _AxisRow(QtWidgets.QWidget):
     def _connect_inputs(self) -> None:
         for spin in (self.start_spin, self.stop_spin, self.points_spin):
             spin.valueChanged.connect(self._spins_edited)
+        for spin in (self.start_spin, self.stop_spin):
+            spin.valueNormalized.connect(self._range_normalized)
         self.values_edit.editingFinished.connect(self.edited.emit)
         self.mode_button.clicked.connect(self._toggle_mode)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self))
@@ -329,7 +327,7 @@ class _AxisRow(QtWidgets.QWidget):
             self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
         self._custom_values = (
-            None if _spins_regenerate(self, axis.values) else axis.values
+            None if _uniform_values(axis.values) else axis.values
         )
         self.custom_label.setText("" if self._custom_values is None else "custom values")
 
@@ -388,6 +386,24 @@ class _AxisRow(QtWidgets.QWidget):
         # describe; a custom list survives only while it is left alone.
         self._custom_values = None
         self.custom_label.setText("")
+        self.edited.emit()
+
+    def _range_normalized(self) -> None:
+        if (not self.isEnabled() or self.start_spin.isReadOnly()
+                or self.stop_spin.isReadOnly()):
+            return
+        if self._custom_values is not None:
+            if len(self._custom_values) == 1:
+                self._custom_values = (self.start_spin.value(),)
+                with signals_blocked(self.stop_spin):
+                    self.stop_spin.setValue(self.start_spin.value())
+            elif self._custom_values:
+                self._custom_values = (
+                    self.start_spin.value(), *self._custom_values[1:-1],
+                    self.stop_spin.value(),
+                )
+        # Only the Range bank changes, even when Values is selected.  Its
+        # independent text and the already running immutable plan are untouched.
         self.edited.emit()
 
     @property
@@ -503,6 +519,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # a row whose field is unchanged keeps its widget.
         self.values_form = FluentParameterForm(FormSpec(()))
         self.values_form.changed.connect(self._value_changed)
+        self.values_form.value_normalized.connect(self._value_changed)
         column.addWidget(self.values_form)
         self.values_note = FluentLabel("")
         self.values_note.setWordWrap(True)

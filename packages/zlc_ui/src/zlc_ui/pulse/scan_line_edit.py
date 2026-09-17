@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK,
     EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
-    RADIUS, SURFACE, FluentCheckBox, FluentComboBox, FluentLabel,
+    RADIUS, SURFACE, FluentCheckBox, FluentTriSwitch, FluentLabel,
     FluentLineEdit, FluentPopup, fluent_font_size, scaled_px, signals_blocked,
     show_fluent_popup_for_anchor,
 )
@@ -90,24 +90,21 @@ class FluentScanLineEdit(FluentLineEdit):
     def _show_binding(self) -> None:
         if self._popup is None:
             self._popup = FluentPopup(self)
-            layout = QtWidgets.QVBoxLayout(self._popup)
+            layout = QtWidgets.QGridLayout(self._popup)
             margin = scaled_px(10)
             layout.setContentsMargins(margin, margin, margin, margin)
             layout.setSpacing(scaled_px(6))
-            self.scan_toggle = FluentCheckBox("Scan")
-            layout.addWidget(self.scan_toggle)
-            source_row = QtWidgets.QHBoxLayout()
-            source_row.addWidget(FluentLabel("Source"))
-            self.source_combo = FluentComboBox()
-            for label, value in (("Default", "default"), ("API", "api"), ("Config", "config")):
-                self.source_combo.addItem(label, value)
-            source_row.addWidget(self.source_combo, 1)
-            layout.addLayout(source_row)
+            layout.addWidget(FluentLabel("Scan"), 0, 0)
+            self.scan_toggle = FluentCheckBox("")
+            layout.addWidget(self.scan_toggle, 0, 1, QtCore.Qt.AlignLeft)
+            layout.addWidget(FluentLabel("Source"), 1, 0)
+            self.source_switch = FluentTriSwitch(("Default", "API", "Config"))
+            layout.addWidget(self.source_switch, 1, 1)
             self.source_info = FluentLabel("")
             self.source_info.setWordWrap(True)
-            layout.addWidget(self.source_info)
+            layout.addWidget(self.source_info, 2, 0, 1, 2)
             self.scan_toggle.toggled.connect(self._commit_binding)
-            self.source_combo.currentIndexChanged.connect(self._commit_binding)
+            self.source_switch.stateChanged.connect(self._commit_binding)
         self._project_popup()
         self._place_popup()
 
@@ -124,10 +121,10 @@ class FluentScanLineEdit(FluentLineEdit):
         if self._popup is None or self._field_state is None:
             return
         _editable, scan, source, can_scan, effective, source_text = self._field_state
-        with signals_blocked(self.scan_toggle, self.source_combo):
+        with signals_blocked(self.scan_toggle, self.source_switch):
             self.scan_toggle.setChecked(scan)
             self.scan_toggle.setEnabled(can_scan)
-            self.source_combo.setCurrentIndex(self.source_combo.findData(source))
+            self.source_switch.setState(("default", "api", "config").index(source))
         info = "Names: Config tab" if source == "config" else ""
         if effective:
             info = f"Effective: {effective}\n{info}".strip()
@@ -136,7 +133,7 @@ class FluentScanLineEdit(FluentLineEdit):
         self.source_info.setVisible(bool(info))
 
     def _commit_binding(self, *_args) -> None:
-        self.binding_committed.emit(self.scan_toggle.isChecked(), str(self.source_combo.currentData()))
+        self.binding_committed.emit(self.scan_toggle.isChecked(), ("default", "api", "config")[self.source_switch.state()])
 
     def set_field_state(self, *, editable: bool, scan: bool = False, source: str = "default",
                         can_scan: bool = True, effective_text: str = "", source_text: str = "") -> None:

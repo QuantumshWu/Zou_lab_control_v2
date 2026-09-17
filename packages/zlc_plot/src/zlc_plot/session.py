@@ -2963,6 +2963,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if changed:
             self._cancel_gesture()
             self._focused_facet_index = index
+            self._selector_controller.retarget_facet(index, tuple(
+                kind for kind in SelectorKind
+                if kind is not SelectorKind.THRESHOLD or not self._threshold_classifier_enabled()
+            ))
             self._viewport = None
             # Opening another cell is looking at the same measurement more
             # closely.  The accepted result of a facet fit is a per-cell batch
@@ -3260,7 +3264,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                                 ),
                                 self.data_revision,
                                 self.data_generation,
-                                self._selection_subject(state),
+                                self._selection_subject(),
                                 (
                                     self._classifier_threshold_targets_state()
                                     if state.kind is SelectorKind.THRESHOLD
@@ -4093,7 +4097,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 display_state,
                 self.data_revision,
                 self.data_generation,
-                self._selection_subject(state),
+                self._selection_subject(),
                 (
                     self._classifier_threshold_targets_state()
                     if state.kind is SelectorKind.THRESHOLD
@@ -4108,7 +4112,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
     def _selection_subject(
         self,
-        state: SelectorState | None = None,
     ) -> SelectionSubject:
         """Return the subject carried by the accepted projection payload."""
 
@@ -4120,9 +4123,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._spec,
             self._payload,
             source_window=self.display_state.values.get("window"),
-            facet_index=(
-                self._facet_focus_index if state is None else state.facet_index
-            ),
         )
 
     def _classifier_threshold_target_for_index(
@@ -4131,8 +4131,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         value: object,
     ) -> Mapping[str, object]:
         subject = self._view.selection_subject(
-            self._spec, self._payload, facet_index=facet_index,
+            self._spec, self._payload,
         )
+        # Classifier thresholds are explicitly authored per distribution,
+        # unlike the ordinary numeric selection shared across the grid.
+        if facet_index is not None and self._spec.facet is not None:
+            subject = replace(subject, scope=subject.scope + ((
+                self._spec.facet,
+                self._payload.cells[facet_index].facet_value_canonical,
+            ),))
         return _classifier_threshold_target_from_subject(
             subject,
             value,

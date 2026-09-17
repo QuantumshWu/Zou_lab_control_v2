@@ -81,6 +81,11 @@ view.set_panel_surface('panel-1', first); view.set_panel_surface('panel-1', seco
 assert view._cards['panel-1'].surface is second and first.parentWidget() is None
 view.resize(1200, 700); view.show(); app.processEvents()
 assert view._panel_bar.height() == view._panel_bar.sizeHint().height()
+for first, second in ((view.data_combo, view.kind_combo),
+                      (view.edit_data_button, view.add_panel_button),
+                      (view.new_data_button, view.save_image_button)):
+    assert first.mapTo(view, QtCore.QPoint()).x() == second.mapTo(view, QtCore.QPoint()).x()
+    assert first.size() == second.size()
 assert view.board._cards['panel-1'] is view._cards['panel-1']
 assert view.scroll.isVisible() and not view._placeholder.isVisible()
 
@@ -371,6 +376,12 @@ view.open_data_editor('manual-1', projection, 'Data · manual image')
 editor = view._data_editors['manual-1']
 view.resize(1500, 900); view.show(); app.processEvents()
 assert editor.dataset_group.width() == editor.axes_group.width() == editor.data_group.width()
+for first, second in ((editor.name_edit, editor.axis_name_edit),
+                      (editor.unit_edit, editor.axis_unit_edit),
+                      (editor.dtype_combo, editor.axis_size_spin),
+                      (editor.note_edit, editor.domain_combo)):
+    assert first.mapTo(editor, QtCore.QPoint()).x() == second.mapTo(editor, QtCore.QPoint()).x()
+    assert first.width() == second.width()
 assert not hasattr(editor, 'role_combo')
 assert not hasattr(editor, 'coordinate_table')
 assert not hasattr(editor, 'axis_up_button')
@@ -674,6 +685,12 @@ pane.resize(520, 640); pane.show(); app.processEvents()
 # branch saying only how many rows are under it.  Nothing is repeated in
 # a tooltip: a wide value is reached by scrolling sideways.
 logic = pane._rows_tabs['Logic'].tree
+pane.info_tabs.setCurrentWidget(pane._rows_tabs['Logic'])
+app.processEvents()
+assert logic.viewport().geometry().top() >= 3
+assert logic.height() - logic.viewport().geometry().bottom() - 1 >= 3
+tab = pane._rows_tabs['Logic']
+assert tab.height() - logic.geometry().bottom() - 1 > 0
 cm = logic.topLevelItem(0)
 assert cm.text(0) == 'cm' and cm.isExpanded()
 assert [cm.child(i).text(0) for i in range(cm.childCount())] == ['outputs', 'parameters']
