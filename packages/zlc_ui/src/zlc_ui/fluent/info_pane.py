@@ -220,8 +220,6 @@ class InfoTree(QtWidgets.QTreeWidget):
                 color: {TEXT};
                 border: 1px solid {DIVIDER};
                 border-radius: {radius}px;
-                padding-top: {scaled_px(5, minimum=3)}px;
-                padding-bottom: {scaled_px(5, minimum=3)}px;
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
                 selection-background-color: {ACCENT_TINT};
@@ -230,7 +228,7 @@ class InfoTree(QtWidgets.QTreeWidget):
             }}
             QTreeView::item {{
                 border: none;
-                padding: {scaled_px(2, minimum=1)}px {scaled_px(5, minimum=3)}px;
+                padding: {scaled_px(5, minimum=3)}px;
             }}
             QTreeView::item:hover:!selected {{
                 background: {BG};
@@ -359,7 +357,16 @@ class InfoTree(QtWidgets.QTreeWidget):
                 self.action_requested.emit(action)
             )
         )
-        self.setItemWidget(item, 1, button)
+        holder = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(holder)
+        padding = scaled_px(5, minimum=3)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(button, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        layout.addStretch(1)
+        button.ensurePolished()
+        size = button.sizeHint().expandedTo(button.minimumSize())
+        item.setSizeHint(1, QtCore.QSize(size.width(), size.height() + 2 * padding))
+        self.setItemWidget(item, 1, holder)
         item.setData(1, QtCore.Qt.UserRole, str(value["text"]))
 
     def _add_entry(

@@ -959,7 +959,7 @@ def _in_value_unit(widget: object, number: float, unit: str | None) -> float:
     shown = _shown_unit_of(widget, unit)
     owner = str(unit or "").strip() or "1"
     return float(number) if shown == owner else float(
-        DEFAULT_UNITS.convert(number, shown, owner)
+        DEFAULT_UNITS.convert_decimal(number, shown, owner)
     )
 
 
@@ -969,7 +969,7 @@ def _in_shown_unit(widget: object, number: float, unit: str | None) -> float:
     shown = _shown_unit_of(widget, unit)
     owner = str(unit or "").strip() or "1"
     return float(number) if shown == owner else float(
-        DEFAULT_UNITS.convert(number, owner, shown)
+        DEFAULT_UNITS.convert_decimal(number, owner, shown)
     )
 
 
@@ -1325,7 +1325,12 @@ class FluentParameterForm(QtWidgets.QWidget):
             widget.setShownUnit(symbol)
         except UnitError:
             return
-        self.shown_unit_changed.emit(key, symbol)
+        accepted = widget.shownUnit()
+        picker = self._unit_pickers.get(key)
+        if picker is not None:
+            picker.set_unit(accepted)
+        if accepted == symbol and not widget.property("numericError"):
+            self.shown_unit_changed.emit(key, symbol)
 
     def shown_unit_for(self, key: str) -> str:
         """The spelling this row is read in right now; "" when it has none."""
@@ -1503,6 +1508,9 @@ class FluentParameterForm(QtWidgets.QWidget):
         automatic = self._auto_switches.get(key)
         if automatic is not None and automatic.isChecked():
             return None
+        error = widget.property("numericError")
+        if error:
+            raise _value_error(field, str(error))
         if (
             field.required
             and handler.is_empty(field, widget)

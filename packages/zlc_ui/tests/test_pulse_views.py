@@ -909,6 +909,7 @@ import sys
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import ConfigPageRecord, PulseEditorView, PulseEditorHandle
+from zlc_ui.fluent import read_editable_combo
 app = ensure_qt_app(["pulse-config"])
 qt_errors = []
 sys.excepthook = lambda kind, error, trace: qt_errors.append(f"{kind.__name__}: {error}")
@@ -929,7 +930,13 @@ app.processEvents()
 edits, bindings, saves = [], [], []
 handle.config_entries_edited.connect(edits.append)
 handle.config_entries_edited.connect(lambda entries: handle.set_config_page(replace(record, entries=entries)))
-handle.config_binding_committed.connect(lambda *value: bindings.append(value))
+def accept_binding(field, key):
+    bindings.append((field, key))
+    if key == 'bad name':
+        return
+    rows = tuple((row[0], row[1], key if row[0] == field else row[2], *row[3:]) for row in record.bindings)
+    handle.set_config_page(replace(record, entries=config._entries(), bindings=rows))
+handle.config_binding_committed.connect(accept_binding)
 handle.config_save_requested.connect(lambda: saves.append(True))
 assert config.path_text.text() == "draft.json"
 assert "saved.json" in config.file_status.text()
@@ -946,10 +953,10 @@ app.processEvents()
 assert edits[-1] == (("bias", "not yet a number", "value"),)
 handle.set_config_page(replace(record, entries=edits[-1]))
 assert config.values_model.index(0, 1).data() == "not yet a number"
-assert config.bindings_model.index(0, 3).data() == "100"
-assert config.bindings_model.index(1, 3).data() == "100"
+assert config._binding_rows['dac:p1:x'][3].text() == "100"
+assert config._binding_rows['dac:p2:x'][3].text() == "100"
 original_items = tuple(config.values_model.item(0, column) for column in range(3))
-original_combos = dict(config._binding_combos)
+original_combos = {key: widgets[1] for key, widgets in config._binding_rows.items()}
 QtTest.QTest.mouseClick(config.add_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert not qt_errors, qt_errors
@@ -962,13 +969,33 @@ QtTest.QTest.keyClicks(editor, "offset")
 QtTest.QTest.keyClick(editor, QtCore.Qt.Key_Return)
 app.processEvents()
 assert edits[-1][1] == ("offset", "", "")
-assert table.viewport().height() >= table.rowHeight(0) * 2
+assert table.verticalScrollBar().maximum() == 0
 assert table.geometry().bottom() < config.add_button.geometry().top()
-for row, field_id in enumerate(config._binding_combos):
-    assert config.bindings_table.rowHeight(row) > config._binding_combos[field_id].sizeHint().height()
-combo = config._binding_combos["dac:p2:x"]
-combo.setCurrentIndex(combo.findData(""))
+entries_before_names = config._entries()
+combo = config._binding_rows["dac:p2:x"][1]
+combo.showPopup()
+QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_Home)
+QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_Return)
 assert bindings == [("dac:p2:x", "")]
+combo.lineEdit().setFocus()
+combo.lineEdit().selectAll()
+QtTest.QTest.keyClicks(combo.lineEdit(), 'Default')
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Return)
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Tab)
+assert bindings[-1] == ('dac:p2:x', 'Default')
+assert bindings.count(('dac:p2:x', 'Default')) == 1
+assert read_editable_combo(combo) == 'Default'
+assert combo.itemText(0) == 'Default (Pulse value)'
+combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
+QtTest.QTest.keyClicks(combo.lineEdit(), 'bad name')
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Return)
+assert read_editable_combo(combo) == 'Default', 'rejected text must return to accepted key'
+combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
+QtTest.QTest.keyClicks(combo.lineEdit(), 'unfinished')
+handle.set_config_page(replace(record, entries=(('other', '5', 'value'),)))
+assert combo.currentText() == 'unfinished', 'a file projection erased an in-progress name'
+combo.lineEdit().setModified(False)
+handle.set_config_page(replace(record, entries=entries_before_names))
 QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]
 assert not hasattr(view.schedule_view, "save_values_button")
@@ -976,17 +1003,16 @@ assert view.scan_view.scan_load_array_button.text() == "Load Array"
 QtTest.QTest.mouseClick(view.schedule_view.channel_panel.config_status_button, QtCore.Qt.LeftButton)
 assert view.current_page == "Config"
 kept_items = tuple(config.values_model.item(1, column) for column in range(3))
+assert all(item is not None for item in kept_items)
 entries = config._entries()
 handle.set_config_page(replace(record, entries=entries[1:]))
 assert tuple(config.values_model.item(0, column) for column in range(3)) == kept_items
 extra = ("dac:new:x", "Added.bias_x", "bias", "0", "100", "Applied")
 handle.set_config_page(replace(record, bindings=(extra, *record.bindings)))
-assert config._binding_combos['dac:p1:x'] is original_combos['dac:p1:x']
-assert config._binding_combos['dac:p2:x'] is original_combos['dac:p2:x']
-assert config.bindings_table.indexWidget(config.bindings_model.index(1, 1)) is original_combos['dac:p1:x']
+assert config._binding_rows['dac:p1:x'][1] is original_combos['dac:p1:x']
+assert config._binding_rows['dac:p2:x'][1] is original_combos['dac:p2:x']
 handle.set_config_page(replace(record, bindings=(record.bindings[1],)))
-assert config._binding_combos['dac:p2:x'] is original_combos['dac:p2:x']
-assert config.bindings_table.indexWidget(config.bindings_model.index(0, 1)) is original_combos['dac:p2:x']
+assert config._binding_rows['dac:p2:x'][1] is original_combos['dac:p2:x']
 assert not qt_errors, qt_errors
 view.finish_close()
 ''')

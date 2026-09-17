@@ -234,12 +234,37 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
         assert box.decimalValue() == Decimal(box.text()) * Decimal(1000000)
         assert box.validate("1e-", 3)[0] == QtGui.QValidator.Intermediate
         box.setValueUnit("1")
+        previous = box.value(), box.width(), box.minimum(), box.maximum()
         box.setRange(1.23456789012345, 1.23456789012346)
-        box.setValue(10)
         app.processEvents()
-        assert box.value() == 1.23456789012346
-        assert Decimal(box.text()) == box.decimalValue()
+        assert (box.value(), box.width(), box.minimum(), box.maximum()) == previous
+        assert "too narrow" in box.property("numericError")
+        box.setRange(0, 10)
+        assert not box.property("numericError")
+        from PyQt5 import QtTest
+        app.clipboard().setText("9.999999999999999e-16")
+        box.lineEdit().setFocus()
+        box.lineEdit().selectAll()
+        QtTest.QTest.keyClick(box.lineEdit(), QtCore.Qt.Key_V, QtCore.Qt.ControlModifier)
         assert QtGui.QFontMetrics(box.lineEdit().font()).horizontalAdvance(box.text()) + 2 <= box._text_width
+        QtTest.QTest.keyClick(box.lineEdit(), QtCore.Qt.Key_Return)
+        assert box.value() == 1e-15 and box.text() == "1e-15"
+        from zlc_ui.fluent import FluentLineEdit
+        plain = FluentLineEdit()
+        plain.set_numeric_validator("float", bottom=0, top=10)
+        plain.resize(110, 32)
+        plain.show()
+        try:
+            app.processEvents()
+            plain.setFocus()
+            QtTest.QTest.keyClicks(plain, "0.00")
+            assert plain.text() == "0.00"
+            QtTest.QTest.keyClicks(plain, "5")
+            assert plain.text() == "0.005"
+            QtTest.QTest.keyClick(plain, QtCore.Qt.Key_Return)
+            assert float(plain.text()) == 0.005
+        finally:
+            plain.close()
     finally:
         box.close()
         app.processEvents()

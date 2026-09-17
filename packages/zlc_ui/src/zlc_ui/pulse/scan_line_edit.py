@@ -49,9 +49,10 @@ class _BindingButton(QtWidgets.QAbstractButton):
 
 
 def _bound_style(color: str, border: str, *, applied: bool = False) -> str:
-    background = f"background: {QtGui.QColor(border).lighter(175).name()}; " if applied else ""
+    background = f"background: {color}; " if applied else "background: white; "
+    text_color = SURFACE if applied else color
     return (
-        f'QLineEdit {{ {background}color: {color}; border: 1px solid {border}; '
+        f'QLineEdit {{ {background}color: {text_color}; border: 1px solid {border}; '
         f'border-radius: {scaled_px(RADIUS)}px; padding: {scaled_px(PADDING_V)}px '
         f'{scaled_px(EDIT_PADDING_H)}px; font: {fluent_font_size()}pt "{FONT}"; }}'
     )

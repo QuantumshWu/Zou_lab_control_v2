@@ -167,7 +167,7 @@ class _AxisRow(QtWidgets.QWidget):
     def _connect_inputs(self) -> None:
         for spin in (self.start_spin, self.stop_spin, self.points_spin):
             spin.valueChanged.connect(self._spins_edited)
-        for spin in (self.start_spin, self.stop_spin):
+        for spin in (self.start_spin, self.stop_spin, self.points_spin):
             spin.valueNormalized.connect(self._range_normalized)
         self.values_edit.editingFinished.connect(self.edited.emit)
         self.mode_button.clicked.connect(self._toggle_mode)
@@ -203,10 +203,17 @@ class _AxisRow(QtWidgets.QWidget):
         self.input_stack.setCurrentIndex(int(entry["mode"] == "values"))
         self._refresh_mode()
 
-    def _show_converted(self, entry: Mapping, unit: str, values) -> None:
+    def _show_converted(self, entry: Mapping, unit: str, values) -> bool:
         count = len(entry["values"])
         self._show_inputs({**entry, "unit": unit, "values": list(values[:count]),
                            "value_text": ", ".join(repr(float(value)) for value in values[count:])})
+        error = (self.start_spin.property("numericError") or self.stop_spin.property("numericError")
+                 or self.points_spin.property("numericError"))
+        if error:
+            self._show_inputs(entry)
+            self.custom_label.setText(str(error))
+            return False
+        return True
 
     def _fill_ports(self, current: str | None) -> None:
         """Offer every port, each under the thing that owns it."""
@@ -261,7 +268,7 @@ class _AxisRow(QtWidgets.QWidget):
         unit = unit or ("" if port is None else port.unit)
         limits = (-1e12, 1e12) if port is None else (port.lo, port.hi)
         if port is not None and unit != port.unit:
-            limits = tuple(float(value) for value in DEFAULT_UNITS.convert(limits, port.unit, unit))
+            limits = tuple(float(DEFAULT_UNITS.convert_decimal(value, port.unit, unit)) for value in limits)
         for spin in (self.start_spin, self.stop_spin):
             spin.setRange(min(limits), max(limits))
             # The port has said all along what its numbers are in -- a
@@ -273,7 +280,7 @@ class _AxisRow(QtWidgets.QWidget):
             # readable, it made it four decimals long: an authored 1.00005 us
             # came back as 1.0 in the box that is supposed to be showing what
             # will run.  Readability is the formatter's job now, and the
-            # formatter does not round.
+            # formatter now owns bounded visible precision.
             spin.setValueUnit(unit)
             spin.setShownUnit(unit)
         self._mount_unit_picker(unit)
@@ -361,11 +368,10 @@ class _AxisRow(QtWidgets.QWidget):
         if entry["port"].startswith(DEVICE_PARAM_FAMILY):
             self.unit_change_requested.emit(self, entry, symbol)
             return
-        values = tuple(float(value) for value in DEFAULT_UNITS.convert(
-            (*entry["values"], *explicit), entry["unit"], symbol
-        ))
-        self._show_converted(entry, symbol, values)
-        self.edited.emit()
+        values = tuple(float(DEFAULT_UNITS.convert_decimal(value, entry["unit"], symbol))
+                       for value in (*entry["values"], *explicit))
+        if self._show_converted(entry, symbol, values):
+            self.edited.emit()
 
     def _port_changed(self, _index: int) -> None:
         self._custom_values = None
@@ -391,6 +397,11 @@ class _AxisRow(QtWidgets.QWidget):
     def _range_normalized(self) -> None:
         if (not self.isEnabled() or self.start_spin.isReadOnly()
                 or self.stop_spin.isReadOnly()):
+            return
+        error = (self.start_spin.property("numericError") or self.stop_spin.property("numericError")
+                 or self.points_spin.property("numericError"))
+        if error:
+            self.custom_label.setText(str(error))
             return
         if self._custom_values is not None:
             if len(self._custom_values) == 1:
@@ -690,8 +701,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
             (port,) = label_device_scan_ports((port,), owner._device_labels)
             owner._ports = tuple(port if item.port == port.port else item for item in owner._ports)
             current._ports = owner._ports
-            current._show_converted(entry, unit, values)
-            owner._emit_plan()
+            if current._show_converted(entry, unit, values):
+                owner._emit_plan()
 
         try:
             self._run_device_read(work, finish, lambda error: finish(error=error))
@@ -888,7 +899,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         range_layouts = tuple(row.range_inputs.layout() for row in self._rows)
         range_widths = [max(layout.itemAt(index).widget().sizeHint().width()
                             for layout in range_layouts) for index in range(6)]
-        range_widths[1] = range_widths[3] = max(range_widths[1], range_widths[3])
+        # Fixed typography budget, never the current value/range's sizeHint.
+        range_widths[1] = range_widths[3] = max(row.start_spin.sizeHint().width() for row in self._rows)
         for layout in range_layouts:
             for index, width in enumerate(range_widths):
                 layout.itemAt(index).widget().setFixedWidth(width)

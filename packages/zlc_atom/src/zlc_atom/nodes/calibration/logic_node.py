@@ -255,22 +255,27 @@ def _build(
     )
 
 
-def _api_fields_editor_factory(parent=None):
-    """Project the chosen Pulse's API fields through the shared Fluent form."""
+def _calibration_editor_factory(parent=None):
+    """Keep exposure and API choices in the same projected Fluent form."""
     from collections.abc import Mapping
+    from dataclasses import replace
     from PyQt5 import QtCore
     from zlc_pulse import field_label
-    from zlc_ui.form import FluentParameterForm, FormChoice, FormFieldProps, FormSpec
+    from zlc_ui.form import FluentParameterForm, FormChoice, FormSpec
 
-    class CalibrationApiFields(FluentParameterForm):
+    class CalibrationForm(FluentParameterForm):
         draft_changed = QtCore.pyqtSignal(object)
-        managed_fields = (
-            "reference_before_field", "readout_field", "reference_after_field",
+        # Resource pickers keep their existing generic Refresh action.
+        managed_fields = tuple(
+            field.name for field in CALIBRATION_SCHEMA.fields if field.value_type != "resource"
         )
 
         def __init__(self, parent=None):
             super().__init__(FormSpec(()), parent=parent)
             self.changed.connect(
+                lambda key: self.draft_changed.emit({"values": {key: self.read_value(key)}})
+            )
+            self.value_normalized.connect(
                 lambda key: self.draft_changed.emit({"values": {key: self.read_value(key)}})
             )
 
@@ -286,24 +291,28 @@ def _api_fields_editor_factory(parent=None):
                 )
             values = projection.get("form_values") or {}
             fields = []
-            for key, label in zip(self.managed_fields, (
-                "Reference before", "Readout", "Reference after",
-            )):
+            for field in projection["form_spec"].fields:
+                key = field.key
+                if key not in self.managed_fields:
+                    continue
+                if key not in {"reference_before_field", "readout_field", "reference_after_field"}:
+                    fields.append(field)
+                    continue
                 selected = str(values.get(key) or "")
                 offered = choices
                 if selected and not any(choice.value == selected for choice in choices):
                     offered += (FormChoice(f"Unavailable: {selected}", selected),)
-                fields.append(FormFieldProps(
-                    key, "choice", label, default=selected, choices=offered,
+                fields.append(replace(
+                    field, kind="choice", default=selected, choices=offered,
                 ))
             self.reconcile(FormSpec(tuple(fields)), {
-                key: str(values.get(key) or "") for key in self.managed_fields
+                field.key: values[field.key] for field in fields
             })
 
         def set_mutation_enabled(self, enabled):
             self.setEnabled(enabled)
 
-    return CalibrationApiFields(parent)
+    return CalibrationForm(parent)
 
 
 LOGIC_NODE = LogicNodeDescriptor(
@@ -329,7 +338,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     build=_build,
     workspace_resources=(_CALIBRATION_PULSE_RESOURCE,),
-    ui_contributions=(_api_fields_editor_factory,),
+    ui_contributions=(_calibration_editor_factory,),
     # Whether it can read that way is the camera's answer: calibration keeps
     # no conversion of its own, so a bench that has not configured one cannot
     # switch this on here either.

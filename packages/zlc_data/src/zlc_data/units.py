@@ -688,6 +688,25 @@ class UnitRegistry:
     ) -> NDArray[np.generic]:
         return self.resolve(source).convert_value_to(values, self.resolve(target))
 
+    def convert_decimal(self, value: object, source: UnitLike, target: UnitLike) -> Decimal:
+        """Convert one authored number without a binary round trip for prefixes."""
+        number = value if isinstance(value, Decimal) else decimal_of(value)
+        if number is None or not number.is_finite():
+            raise UnitError("unit conversion requires a finite scalar")
+        origin, destination = self.resolve(source), self.resolve(target)
+        if not origin.compatible_with(destination):
+            raise UnitError(f"incompatible units: {origin.symbol!r} and {destination.symbol!r}")
+        own_family, own_prefix = self.family_and_prefix(origin)
+        shown_family, shown_prefix = self.family_and_prefix(destination)
+        if own_family == shown_family:
+            return number.scaleb(own_prefix.exponent - shown_prefix.exponent)
+        if origin.decade is not None and destination.decade is not None:
+            return number.scaleb(origin.decade - destination.decade)
+        converted = decimal_of(origin.convert_value_to(float(number), destination))
+        if converted is None:
+            raise UnitError("unit conversion produced a non-finite value")
+        return converted
+
     def inverse_for(self, unit: UnitLike) -> Unit | None:
         """The declared inverse-dimension unit with reciprocal scale, or None.
 

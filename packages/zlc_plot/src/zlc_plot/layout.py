@@ -990,6 +990,17 @@ def resolve_surface(
         selected_name = layout.default_preset if preset is None else layout.validate_preset(preset)
     selected = layout.preset(selected_name)
     data_width, data_height, margins = _panel_design_geometry(selected, canonical_kind, layout)
+    if canonical_kind == "rolling":
+        # The live value is above the history box; the authored title gets
+        # its own line above it. Neither changes the scientific data region.
+        header_pt = (
+            1.2 * (style.fonts.annotation_pt + style.fonts.figure_title_pt)
+            + 3.0 * style.render.axes_title_pad_pt
+        )
+        margins = Margins(
+            margins.left, margins.right, margins.bottom,
+            max(margins.top, math.ceil(header_pt * layout.design_dpi / 72.0)),
+        )
     figure_design_width = margins.left + data_width + margins.right
     figure_design_height = margins.top + data_height + margins.bottom
     logical_size = (

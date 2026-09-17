@@ -71,6 +71,7 @@ class PeriodCard(FluentGroupBox):
     digital_committed = QtCore.pyqtSignal(str, str, bool)
     analog_committed = QtCore.pyqtSignal(str, str, str, object)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
+    feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, period: PeriodVM, *, index: int = 0, total_periods: int = 1,
                  ports: tuple[PortRowVM, ...] = (),
@@ -285,6 +286,9 @@ class PeriodCard(FluentGroupBox):
     def _commit_duration(self, _unit: str | None = None) -> None:
         if not self.unit_combo.isEnabled():
             return
+        if self.duration_edit.property("numericError"):
+            self.feedback_requested.emit(str(self.duration_edit.property("numericError")))
+            return
         try:
             value = float(self.duration_edit.text())
         except ValueError:
@@ -301,6 +305,9 @@ class PeriodCard(FluentGroupBox):
         combo = self.bus_mode_combos.get(port)
         edit = self.bus_value_edits.get(port)
         if combo is None or edit is None:
+            return
+        if edit.property("numericError"):
+            self.feedback_requested.emit(str(edit.property("numericError")))
             return
         mode = combo.currentData()
         if not isinstance(mode, str) or not mode:
@@ -413,6 +420,7 @@ class ChannelNamesPanel(FluentGroupBox):
 
 
 class ChannelPanel(FluentGroupBox):
+    feedback_requested = QtCore.pyqtSignal(str)
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
     #: One output in EVERY period at once: on (a digital port high) or off
@@ -562,6 +570,9 @@ class ChannelPanel(FluentGroupBox):
             widget.setText(str(label))
 
     def _emit_delay(self, key: str, field: FluentScanLineEdit, units: FluentComboBox) -> None:
+        if field.property("numericError"):
+            self.feedback_requested.emit(str(field.property("numericError")))
+            return
         try:
             value = float(field.text())
         except ValueError:
@@ -1268,6 +1279,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel.document_name_committed.connect(self.document_name_committed)
         self.names_panel.port_label_committed.connect(self.port_label_committed)
         self.channel_panel.delay_committed.connect(self.delay_committed)
+        self.channel_panel.feedback_requested.connect(self.feedback_requested)
         self.channel_panel.binding_committed.connect(self.binding_committed)
         self.channel_panel.fill_port_requested.connect(self.fill_port_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
@@ -1392,6 +1404,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         card.digital_committed.connect(self.digital_committed)
         card.analog_committed.connect(self.analog_committed)
         card.binding_committed.connect(self.binding_committed)
+        card.feedback_requested.connect(self.feedback_requested)
 
     def _rebuild_hidden_ports(self, vm: ScheduleVM) -> None:
         visible = {port.key for port in vm.ports if port.visible}

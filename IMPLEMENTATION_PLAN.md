@@ -12,8 +12,10 @@
 
 - FigureViewer工具栏Save image复用TaskConsole完整窗口截图与当前日期目录；删除单Plot PNG导出分支及仅为该分支维护的active-panel状态。Edit Save figure不变。Viewer运行跨日时目录按保存当日计算，不冻结在打开窗口当天。
 - Facet选区不再附加当前Focus坐标作为隐藏Scope；范围与最近点选择保留全部facet，显式Scope/Last/window不变。切换Focus仅重定位同一选区的绘制cell，canonical范围/revision不变；producer联动沿原AxisId映射，Image只改XY，Curve只改X，Histogram只筛样本。64格共209万点的隔离Image Area 1.830→0.680ms，Crosshair Image36.20→12.28ms、Curve28.35→12.15ms；新结果覆盖全部64格，旧结果只覆盖一格，不宣称同输出规模比较。
-- Viewer工具栏使用同一四列布局，Manual Data各区共享标签列和列伸缩；公共InfoTree与RowsTab统一上下留白。已用正式Qt创建/预览/保存/重开及截图核对，未按单个tab修补位置。
-- 可编辑数字共用Decimal可见宽度量化，保留原步长/单位机制，舍去的尾数不恢复；QObject拥有的合并通知回到现有草稿通道，布局规范化不发设备命令。Scan只改可见Range端点、保留custom内点和独立Values；Pulse数字也同步回正式序列。Decimal13项、Scan/Control直接边界及实屏窄宽度检查通过。三态Source使用公共FluentTriSwitch，真实popup已截图核对。一次离屏Manual Qt子进程原生退出尚未定位，单跑和两次正式实屏链通过，不据此宣称已查清该退出原因。
+- Viewer工具栏使用同一四列布局，Manual Data各区共享标签列和列伸缩。InfoTree删除加错位置的外框padding，按实际按钮/文字高度保留行内间距，末行Pulse Open按钮紧凑左对齐、底部到横向滚动条留白。公共Fluent滚动条以边框厚度推导内侧圆角，track与handle同源；首尾实屏截图核对，不改变滚动范围。
+- Config与Manual Data表格共用2000行阈值：以内展开、整个Tab纵向滚动，以上保留有界虚拟viewport。正式Viewer验证2000/2001行边界，100k行仍只读取可见格子。Config bindings删除嵌套表格，改Target式retained Fluent行；公共Combo仅在显式可编辑时创建文本输入。自定义名称、Default与真实名Default、换文件/Unload、拒绝回显及一次提交均已验证；已保存120、未保存300仍执行120，Pulse默认值10/20不变。真正Config覆盖改深绿底白字，其余保持白底绿框。
+- Calibration两个曝光字段与其后的三个API选择共用同一参数表单，资源Refresh不变；正式TaskConsole核对五行同列及真实选择写回。Rolling实时数值在主图框上方右侧，标题另占其上一行，删除旧框内避让方法；原series lock/wheel及保存验证通过，正式Viewer重开截图一致。上述截图/探针仅在ignored research，窗口及渲染子进程已关闭。
+- 可编辑数字共用Decimal可见宽度量化，保留原步长/单位机制，舍去的尾数不恢复；QObject拥有的合并通知回到现有草稿通道，布局规范化不发设备命令。Scan只改可见Range端点、保留custom内点和独立Values；Pulse数字也同步回正式序列。单位前缀换算由公共UnitRegistry做精确Decimal缩放，删除私有重复换算与数值驱动的最小宽度增长；不可表示范围报错且保留原值/单位/宽度。正式TaskConsole单位循环中Scan数值框始终105px，原先105→93→105跳变已消失，文本预算扣除实际边框/焦点/按钮区域。三态Source仍用公共FluentTriSwitch。Viewer直接测试改为真正finish_close后处理DeferredDelete，修正close被忽略而遗留窗口的测试清理错误；不据此断言所有旧原生退出均由此导致。
 
 - Stepped Scan和Temperature Task及专属实现、入口、测试已删除；只有它们使用的CameraCycleSource、API转Scan分支、settle工具一起删除。Seamless Scan的公共数据放置验证保留在scan测试，release–recapture拟合模型和模拟物理温度不变。
 - Pulse Fire返回既有执行状态，Calibration/Feedback不再追加两次远程查询，Seamless也不追加applied查询；重复次数更新不复制扫描表。Config读取直接复用条目校验，Preview无变化保留Pulse对象；Config UI按行更新并保留未变控件。Feedback只在首次真实Fire后匹配历史，运行中改Config的处理策略按用户裁决不变。
@@ -324,7 +326,8 @@
   Data显示与Panel title相同的三domain shape/axis摘要，显式选择Rows与Columns axes；其行列header
   只读显示对应axis values，其他axes用Setting式Scope按真实coordinate value选择。虚拟
   table按当前二维slice读取、支持整块复制粘贴，并让Tab/Shift+Tab连续进入相邻cell、方向键
-  在非编辑态移动current cell；两张table的row/column数量只改变内部scroll range。普通cell
+  在非编辑态移动current cell；不超过2000行时按行高展开并由整个Tab纵向滚动，超过2000行
+  才使用有界内部纵向scroll；列方向仍使用横向scroll，虚拟读取与数据存储不变。普通cell
   修改不得reset model或复制整个slice；blank写入validity而不把空字符串冒充numeric value。
   axis length一次同步resize values/validity/sigma。Apply构造canonical `OwnedSnapshot`并通过
   现有sealed Viewer producer发布，自动交给普通Panel，但未Save前仍是unsaved working copy；

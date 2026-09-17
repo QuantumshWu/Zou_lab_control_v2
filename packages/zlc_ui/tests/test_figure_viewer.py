@@ -190,7 +190,10 @@ editor.snapshot_refresh_requested.emit()
 editor.save_figure_requested.emit('D:/data/copied.npz')
 assert refreshes == ['panel-1']
 assert saves == [('panel-1', 'D:/data/copied.npz')]
-view.close(); app.processEvents()
+view.finish_close()
+assert not view.isVisible()
+view.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
 """
     )
 
@@ -404,6 +407,17 @@ assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0
 assert editor.value_table.horizontalScrollBar().maximum() > 0
 assert values.reads < 500, values.reads
+assert editor.value_table.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
+small = dict(projection)
+small_values = LazyMatrix(2000, 1)
+small['table'] = dict(projection['table'], shape=(2000, 1), values=small_values)
+editor.update_projection(small); app.processEvents()
+assert editor.value_model.rowCount() == 2000
+assert editor.value_table.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAlwaysOff
+assert editor.value_table.verticalScrollBar().maximum() == 0
+assert small_values.reads < 500, small_values.reads
+editor.update_projection(projection); app.processEvents()
+assert editor.value_table.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
 assert editor.value_table.indexWidget(editor.value_model.index(0, 0)) is None
 removed = []; headers = []
 for combo in (editor.dtype_combo, editor.axis_combo, editor.domain_combo,
@@ -556,7 +570,10 @@ assert intents[-1] == (
 )
 view.tabs.tab_close_requested.emit(editor)
 assert data_closed == ['manual-1'] and panel_closed == []
-view.close(); app.processEvents()
+view.finish_close()
+assert not view.isVisible()
+view.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
 """
     )
 
@@ -687,8 +704,7 @@ pane.resize(520, 640); pane.show(); app.processEvents()
 logic = pane._rows_tabs['Logic'].tree
 pane.info_tabs.setCurrentWidget(pane._rows_tabs['Logic'])
 app.processEvents()
-assert logic.viewport().geometry().top() >= 3
-assert logic.height() - logic.viewport().geometry().bottom() - 1 >= 3
+assert logic.sizeHintForRow(0) > logic.fontMetrics().height()
 tab = pane._rows_tabs['Logic']
 assert tab.height() - logic.geometry().bottom() - 1 > 0
 cm = logic.topLevelItem(0)
@@ -736,7 +752,14 @@ assert logic.row_name() == 'cm.parameters'
 
 # A pressed action row still asks for its action.
 actions = []; pane.action_requested.connect(actions.append)
-button = devices.tree.itemWidget(devices.tree.topLevelItem(1), 1)
+holder = devices.tree.itemWidget(devices.tree.topLevelItem(1), 1)
+button = holder.findChild(QtWidgets.QPushButton)
+pane.info_tabs.setCurrentWidget(devices)
+app.processEvents()
+devices.tree.verticalScrollBar().setValue(devices.tree.verticalScrollBar().maximum())
+app.processEvents()
+bottom = button.mapTo(devices.tree.viewport(), QtCore.QPoint()).y() + button.height()
+assert bottom < devices.tree.viewport().height(), 'action content must fit above scrollbar'
 button.click()
 assert actions == ['pulse:k']
 

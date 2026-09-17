@@ -8,7 +8,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT, GREY, ORANGE, YELLOW, FluentButton, FluentComboBox,
-    ElidedLabel, FluentGroupBox, FluentLineEdit, FluentTableView, signals_blocked,
+    ElidedLabel, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
+    FluentTableView, read_editable_combo, retire_widget, signals_blocked,
 )
 
 from ._layout import px, row_height
@@ -28,10 +29,16 @@ class PulseConfigView(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._projecting_entries = False
-        self._binding_combos: dict[str, FluentComboBox] = {}
+        self._binding_rows: dict[str, tuple] = {}
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(px(8), px(8), px(8), px(8))
-        outer.setSpacing(px(8))
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = FluentScrollArea(self)
+        body = QtWidgets.QWidget()
+        self.scroll.set_width_bounded_widget(body)
+        outer.addWidget(self.scroll)
+        content = QtWidgets.QVBoxLayout(body)
+        content.setContentsMargins(px(8), px(8), px(8), px(8))
+        content.setSpacing(px(8))
         file_box = FluentGroupBox("Config file")
         file_layout = QtWidgets.QVBoxLayout(file_box)
         file_layout.setContentsMargins(px(10), px(8), px(10), px(10))
@@ -60,16 +67,11 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_model = QtGui.QStandardItemModel(0, 3, self)
         self.values_model.setHorizontalHeaderLabels(("Name", "Value", "Unit"))
         self.values_table.setModel(self.values_model)
-        self.values_table.ensurePolished()
-        self.values_table.setMinimumHeight(
-            self.values_table.horizontalHeader().sizeHint().height()
-            + 2 * self.values_table.verticalHeader().defaultSectionSize()
-            + 2 * self.values_table.frameWidth()
-        )
+        self.values_table.set_content_rows_limit(2000)
         self.values_table.verticalHeader().hide()
         self.values_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.values_model.itemChanged.connect(lambda _item: self._emit_entries())
-        file_layout.addWidget(self.values_table, 1)
+        file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
         self.add_button = FluentButton("Add parameter", color=ACCENT)
         self.remove_button = FluentButton("Remove selected", color=ORANGE)
@@ -79,21 +81,29 @@ class PulseConfigView(QtWidgets.QWidget):
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
         file_layout.addLayout(actions)
-        outer.addWidget(file_box, 3)
+        content.addWidget(file_box)
 
         bindings_box = FluentGroupBox("This Pulse bindings")
         bindings_layout = QtWidgets.QVBoxLayout(bindings_box)
         bindings_layout.setContentsMargins(px(10), px(8), px(10), px(10))
         hint = ElidedLabel("Assign Config names here. Unassigned fields keep their Pulse default.")
         bindings_layout.addWidget(hint)
-        self.bindings_table = FluentTableView()
-        self.bindings_model = QtGui.QStandardItemModel(0, 5, self)
-        self.bindings_model.setHorizontalHeaderLabels(("Pulse field", "Config name", "Default", "Saved value", "Status"))
-        self.bindings_table.setModel(self.bindings_model)
-        self.bindings_table.verticalHeader().hide()
-        self.bindings_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        bindings_layout.addWidget(self.bindings_table, 1)
-        outer.addWidget(bindings_box, 2)
+        self._binding_grid = QtWidgets.QGridLayout()
+        self._binding_grid.setHorizontalSpacing(px(8))
+        self._binding_grid.setVerticalSpacing(px(6))
+        for column, (title, stretch) in enumerate(zip(
+            ("Pulse field", "Config name", "Pulse default", "Saved value", "Status"),
+            (2, 2, 1, 1, 2),
+        )):
+            header = FluentLabel(title)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            self._binding_grid.addWidget(header, 0, column)
+            self._binding_grid.setColumnStretch(column, stretch)
+        bindings_layout.addLayout(self._binding_grid)
+        content.addWidget(bindings_box)
+        content.addStretch(1)
 
     def _entries(self) -> tuple[tuple[str, str, str], ...]:
         return tuple(
@@ -115,6 +125,20 @@ class PulseConfigView(QtWidgets.QWidget):
         rows = {index.row() for index in self.values_table.selectedIndexes()}
         if rows:
             self.entries_edited.emit(tuple(entry for row, entry in enumerate(self._entries()) if row not in rows))
+
+    def _commit_binding(self, field_id: str) -> None:
+        widgets = self._binding_rows.get(field_id)
+        if widgets is None:
+            return
+        combo = widgets[1]
+        wanted = read_editable_combo(combo)
+        with signals_blocked(combo, combo.lineEdit()):
+            combo.lineEdit().setModified(False)
+            if wanted != (combo.property("accepted_key") or ""):
+                self.binding_committed.emit(field_id, wanted)
+            # The synchronous owner accepts and projects, or reports rejection.
+            accepted = str(combo.property("accepted_key") or "")
+            combo.setCurrentIndex(combo.findData(accepted))
 
     def set_page(self, record: ConfigPageRecord) -> None:
         self.path_text.setText(record.file_path)
@@ -154,51 +178,46 @@ class PulseConfigView(QtWidgets.QWidget):
             finally:
                 self._projecting_entries = False
         fields = tuple(row[0] for row in record.bindings)
-        previous_fields = tuple(self._binding_combos)
-        if fields != previous_fields:
-            for tag, start, stop, new_start, new_stop in reversed(
-                SequenceMatcher(a=previous_fields, b=fields, autojunk=False).get_opcodes()
-            ):
-                if tag == "equal":
-                    continue
-                self.bindings_model.removeRows(start, stop - start)
-                for offset, field_id in enumerate(fields[new_start:new_stop]):
-                    row = start + offset
-                    self.bindings_model.insertRow(row)
-                    combo = FluentComboBox()
-                    combo.currentIndexChanged.connect(
-                        lambda _index, field=field_id, widget=combo: self.binding_committed.emit(field, str(widget.currentData() or ""))
-                    )
-                    self.bindings_table.setIndexWidget(self.bindings_model.index(row, 1), combo)
-                    self.bindings_table.setRowHeight(row, combo.sizeHint().height() + px(4))
-            self._binding_combos = {
-                field_id: self.bindings_table.indexWidget(self.bindings_model.index(row, 1))
-                for row, field_id in enumerate(fields)
-            }
-            self.bindings_table.ensurePolished()
-            self.bindings_table.setMinimumHeight(
-                self.bindings_table.horizontalHeader().sizeHint().height()
-                + sum(self.bindings_table.rowHeight(row) for row in range(min(2, len(fields))))
-                + 2 * self.bindings_table.frameWidth()
-            )
+        for field_id in tuple(self._binding_rows):
+            if field_id not in fields:
+                for widget in self._binding_rows.pop(field_id):
+                    self._binding_grid.removeWidget(widget)
+                    retire_widget(widget)
         keys = tuple(dict.fromkeys(name for name, _value, _unit in record.entries if name))
         for row, (field_id, label, key, default, effective, state) in enumerate(record.bindings):
+            widgets = self._binding_rows.get(field_id)
+            if widgets is None:
+                combo = FluentComboBox()
+                combo.setEditable(True)
+                combo.activated.connect(lambda _index, field=field_id: self._commit_binding(field))
+                combo.editingFinished.connect(lambda field=field_id: self._commit_binding(field))
+                widgets = (ElidedLabel(), combo, FluentLineEdit(), FluentLineEdit(), ElidedLabel())
+                for value_widget in widgets[2:4]:
+                    value_widget.setReadOnly(True)
+                for widget in widgets:
+                    widget.setFixedHeight(row_height())
+                self._binding_rows[field_id] = widgets
+            for column, widget in enumerate(widgets):
+                index = self._binding_grid.indexOf(widget)
+                if index < 0 or self._binding_grid.getItemPosition(index) != (row + 1, column, 1, 1):
+                    self._binding_grid.addWidget(widget, row + 1, column)
             for column, value in ((0, label), (2, default), (3, effective), (4, state)):
-                item = self.bindings_model.item(row, column)
-                if item is None:
-                    item = QtGui.QStandardItem()
-                    item.setEditable(False)
-                    self.bindings_model.setItem(row, column, item)
-                item.setText(value)
-                item.setToolTip(value)
-            combo = self._binding_combos[field_id]
+                if widgets[column].text() != value:
+                    widgets[column].setText(value)
+                    widgets[column].setToolTip(value)
+            combo = widgets[1]
+            draft = combo.currentText() if combo.lineEdit().hasFocus() and combo.lineEdit().isModified() else None
+            combo.setProperty("accepted_key", key)
             choices = ("", *keys, *((key,) if key and key not in keys else ()))
             with signals_blocked(combo):
                 if tuple(combo.itemData(index) for index in range(combo.count())) != choices:
                     combo.clear()
                     for name in choices:
-                        combo.addItem(name or "Default (unassigned)", name)
+                        combo.addItem(name or "Default (Pulse value)", name)
                 combo.setCurrentIndex(combo.findData(key))
+                if draft is not None:
+                    combo.setEditText(draft)
+                    combo.lineEdit().setModified(True)
             combo.setEnabled(not record.busy)
 
 

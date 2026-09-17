@@ -7322,7 +7322,6 @@ class MatplotlibRenderer:
         for annotation in self._series_annotations.values():
             annotation.set_visible(False)
         if active is None or focus_line is None:
-            self._place_rolling_latest()
             return
         axis_id = active[0]
         annotation = self._series_annotations.get(axis_id)
@@ -7346,28 +7345,6 @@ class MatplotlibRenderer:
         )
         annotation.set_color(focus_line.get_color())
         annotation.set_visible(True)
-        self._place_rolling_latest()
-
-    def _place_rolling_latest(self) -> None:
-        """Stack the latest number below a visible series readout by its ink height."""
-
-        latest = self._artists.get(f"{self.primary_surface[0]}:latest")
-        if latest is None:
-            return
-        annotation = self._series_annotations.get(id(latest.axes))
-        if annotation is None or not annotation.get_visible():
-            latest.set_transform(latest.axes.transAxes)
-            latest.set_position((0.97, 0.95))
-            return
-        from matplotlib.transforms import offset_copy
-
-        renderer = _prepare_renderer(self._figure.canvas.get_renderer())
-        height = annotation.get_window_extent(renderer).height
-        _width, _height, descent = renderer.get_text_width_height_descent(
-            "lp", annotation.get_fontproperties(), False)
-        latest.set_position(annotation.get_position())
-        latest.set_transform(offset_copy(annotation.get_transform(), fig=self._figure,
-            x=0, y=-(height + descent) * 72.0 / self._figure.dpi, units="points"))
 
     def _accepts_series_focus(self, axes: Any | None) -> bool:
         """Whether choosing a series is a meaningful gesture on this axes.
@@ -10302,19 +10279,24 @@ class MatplotlibRenderer:
                 latest = float(usable[-1])
         latest_text = self._artists.get(f"{key}:latest")
         if latest_text is None:
+            from matplotlib.transforms import offset_copy
+
             latest_text = history.text(
                 0.97,
-                0.95,
+                1.0,
                 "",
-                transform=history.transAxes,
+                transform=offset_copy(
+                    history.transAxes, fig=self._figure,
+                    y=self.style.render.axes_title_pad_pt, units="points",
+                ),
                 color=self.style.palette.readout,
                 ha="right",
-                va="top",
+                va="bottom",
+                clip_on=False,
                 fontsize=self.style.fonts.annotation_pt,
             )
             self._artists[f"{key}:latest"] = latest_text
         latest_text.set_text("" if latest is None else f"{latest:.6g}")
-        self._place_rolling_latest()
 
         distribution_axes = self._axes.get("distribution", [])
         if distribution_axes:
@@ -11874,10 +11856,13 @@ class MatplotlibRenderer:
             title_artist.set_visible(bool(title))
         else:
             owner = self.primary_axes
+            pad = self.style.render.axes_title_pad_pt
+            if isinstance(self.spec, RollingPlot):
+                pad = 2.0 * pad + 1.2 * self.style.fonts.annotation_pt
             owner.set_title(
                 title,
                 fontsize=self.style.fonts.figure_title_pt,
-                pad=self.style.render.axes_title_pad_pt,
+                pad=pad,
                 y=1.0,
             )
 

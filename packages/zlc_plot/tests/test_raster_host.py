@@ -2112,7 +2112,9 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         latest = renderer._artists[f"{renderer.primary_surface[0]}:latest"]
         measured = renderer.figure.canvas.get_renderer()
         assert latest.get_text() and inspector.get_text()
-        assert latest.get_window_extent(measured).y1 <= inspector.get_window_extent(measured).y0
+        assert latest.get_window_extent(measured).y0 > axes.bbox.y1
+        assert inspector.get_window_extent(measured).y1 < axes.bbox.y1
+        assert latest.get_window_extent(measured).y1 < renderer.figure.bbox.y1
         original_limits = (
             tuple(axes.get_xlim()),
             tuple(axes.get_ylim()),
@@ -2132,7 +2134,7 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
             session.save(tmp_path / "rolling-readouts.png", dpi=200)
         finally:
             renderer.figure.canvas.mpl_disconnect(connection)
-        assert exports and all(latest_box.y1 <= series_box.y0 for latest_box, series_box in exports)
+        assert exports and all(latest_box.y0 >= series_box.y1 for latest_box, series_box in exports)
     finally:
         session.close()
 
