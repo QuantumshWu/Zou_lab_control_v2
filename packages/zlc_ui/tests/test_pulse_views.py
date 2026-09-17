@@ -253,9 +253,15 @@ delay = schedule.channel_panel._rows["ch01"][0]
 for field in (duration, dac, delay):
     QtTest.QTest.mouseClick(field.binding_button, QtCore.Qt.LeftButton)
     assert field._popup.isVisible()
+    assert field._popup.width() == field._popup.sizeHint().width()
+    QtTest.QTest.mouseClick(field.binding_button, QtCore.Qt.LeftButton)
+    assert not field._popup.isVisible()
+    QtTest.QTest.mouseClick(field.binding_button, QtCore.Qt.LeftButton)
+    assert field._popup.isVisible()
     switch = field.source_switch
     QtTest.QTest.mouseClick(switch, QtCore.Qt.LeftButton,
-                          pos=QtCore.QPoint(switch.width() * 5 // 6, switch.height() // 2))
+                          pos=switch._segment_rect(2).center().toPoint())
+    assert field._popup.isVisible(), "source choice must not close the binding popup"
     field._popup.hide()
 app.processEvents()
 
@@ -869,7 +875,7 @@ def test_a_config_binding_wears_its_own_colour_and_stays_editable() -> None:
     _run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE
+from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, ORANGE
 from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
 
 app = ensure_qt_app(["binding-colours"])
@@ -880,6 +886,11 @@ assert edit.binding_button.source == "config"
 assert not edit.binding_button.scan
 assert not edit.isReadOnly(), "a config number is the operator's to read and type"
 assert CONFIG_GREEN in edit.styleSheet()
+edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value")
+assert CONFIG_GREEN_TINT in edit.styleSheet() and CONFIG_GREEN_DARK in edit.styleSheet()
+edit.binding_button.click()
+assert edit.config_name.text() == "bias" and edit.config_name.isVisible()
+edit._popup.hide()
 
 edit.set_field_state(editable=True, scan=True, source="config")
 assert not edit.isReadOnly() and edit.binding_button.scan
@@ -918,6 +929,7 @@ handle = PulseEditorHandle(None, view)
 record = ConfigPageRecord(
     file_path="draft.json", active_path="saved.json", dirty=True,
     entries=(("bias", "120", "value"),),
+    available_names=("bias", "saved_only"),
     bindings=(("dac:p1:x", "MOT.bias_x", "bias", "0", "100", "Applied"),
               ("dac:p2:x", "PGC.bias_x", "bias", "10", "100", "Applied")),
 )
@@ -973,10 +985,15 @@ assert table.verticalScrollBar().maximum() == 0
 assert table.geometry().bottom() < config.add_button.geometry().top()
 entries_before_names = config._entries()
 combo = config._binding_rows["dac:p2:x"][1]
+assert tuple(combo.itemData(i) for i in range(combo.count())) == ('bias', 'saved_only')
 combo.showPopup()
-QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_Home)
+QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_End)
 QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_Return)
-assert bindings == [("dac:p2:x", "")]
+assert bindings == [("dac:p2:x", "saved_only")]
+combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Backspace)
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Return)
+assert bindings[-1] == ("dac:p2:x", "") and combo.currentText() == ""
 combo.lineEdit().setFocus()
 combo.lineEdit().selectAll()
 QtTest.QTest.keyClicks(combo.lineEdit(), 'Default')
@@ -985,16 +1002,19 @@ QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Tab)
 assert bindings[-1] == ('dac:p2:x', 'Default')
 assert bindings.count(('dac:p2:x', 'Default')) == 1
 assert read_editable_combo(combo) == 'Default'
-assert combo.itemText(0) == 'Default (Pulse value)'
+assert tuple(combo.itemData(i) for i in range(combo.count())) == ('bias', 'saved_only')
 combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
 QtTest.QTest.keyClicks(combo.lineEdit(), 'bad name')
 QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Return)
 assert read_editable_combo(combo) == 'Default', 'rejected text must return to accepted key'
 combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
 QtTest.QTest.keyClicks(combo.lineEdit(), 'unfinished')
-handle.set_config_page(replace(record, entries=(('other', '5', 'value'),)))
+handle.set_config_page(replace(record, entries=(('other', '5', 'value'),), available_names=('other',)))
 assert combo.currentText() == 'unfinished', 'a file projection erased an in-progress name'
 combo.lineEdit().setModified(False)
+unloaded_rows = tuple((row[0], row[1], 'Default' if row[0] == 'dac:p2:x' else row[2], *row[3:]) for row in record.bindings)
+handle.set_config_page(replace(record, active_path='', available_names=(), bindings=unloaded_rows))
+assert combo.count() == 0 and combo.currentText() == 'Default'
 handle.set_config_page(replace(record, entries=entries_before_names))
 QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]

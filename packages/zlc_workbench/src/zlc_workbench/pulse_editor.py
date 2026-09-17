@@ -626,7 +626,7 @@ def _binding_field_state(
     else:
         status = "Using the Pulse default."
     return dict(scan=binding.scan, source=binding.source,
-                effective_text=effective, source_text=status)
+                effective_text=effective, source_text=status, config_key=binding.config_key)
 
 
 def _analog_mode(period: PulsePeriod, port: Any) -> str:
@@ -1337,6 +1337,7 @@ class PulseEditorPresenter:
         self.view.set_config_page(ConfigPageRecord(
             file_path=self._config_path, dirty=self._config_dirty(),
             entries=self._config_rows, bindings=tuple(bindings),
+            available_names=tuple(active),
             active_path=self._active_config_path(),
             busy=self._device_busy or self._stop_busy,
         ))

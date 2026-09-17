@@ -143,6 +143,18 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         )
         row.points_spin.setValue(2)
         assert row.axis().values == (1_000_000.0, 3_000_005.0)
+        # Decimal unit conversion need not reproduce linspace's last bit.
+        row._show_values(ScanAxis(BIAS.port, (0.0, 0.1, 0.2, 0.3), "V"))
+        assert row.custom_label.text() == ""
+        assert row._show_converted(row.input_entry(), "mV", (0.0, 100.0, 200.0, 300.0))
+        assert row.custom_label.text() == ""
+        assert row.axis().values == (0.0, 100.0, 200.0, 300.0)
+        # A genuinely nonuniform list remains so; bounds apply to the
+        # stored list too, not only the two visible spinbox endpoints.
+        row._ports = (BIAS,)
+        row._show_values(ScanAxis(BIAS.port, (-2.0, 0.2, 3.0), "V"))
+        assert row.axis().values == (-1.0, 0.2, 1.0)
+        assert row.custom_label.text() == "custom values"
     finally:
         editor.deleteLater()
 

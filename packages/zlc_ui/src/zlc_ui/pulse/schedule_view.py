@@ -49,7 +49,7 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
     with signals_blocked(widget):
         widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
                                can_scan=field.can_scan, effective_text=field.effective_text,
-                               source_text=field.source_text)
+                               source_text=field.source_text, config_key=field.config_key)
         if field.validator_kind in (VALIDATOR_INT, VALIDATOR_FLOAT):
             widget.set_numeric_validator(
                 field.validator_kind,

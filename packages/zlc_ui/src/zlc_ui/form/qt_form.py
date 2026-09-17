@@ -459,12 +459,12 @@ class _IntHandler(_StaticHandler):
     """
 
     @staticmethod
-    def _configure_spin(field: FormFieldProps, widget: FluentDoubleSpinBox) -> None:
+    def _configure_spin(field: FormFieldProps, widget: FluentDoubleSpinBox, value=None) -> None:
         widget.setRange(
             -sys.float_info.max if field.minimum is None else field.minimum,
             sys.float_info.max if field.maximum is None else field.maximum,
+            value=value, unit=field.unit or "1",
         )
-        widget.setValueUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> int | None:
         if value is None:
@@ -512,7 +512,7 @@ class _IntHandler(_StaticHandler):
         if isinstance(widget, FluentDoubleSpinBox):
             if prepared is None:
                 raise _value_error(field, "numeric spin cannot represent None")
-            widget.setValue(prepared)
+            self._configure_spin(field, widget, prepared)
         else:
             widget.setText("" if prepared is None else str(prepared))
 
@@ -584,16 +584,14 @@ class _NumberHandler(_StaticHandler):
 
 class _FloatHandler(_StaticHandler):
     @staticmethod
-    def _configure_spin(field: FormFieldProps, widget: FluentDoubleSpinBox) -> None:
+    def _configure_spin(field: FormFieldProps, widget: FluentDoubleSpinBox, value=None) -> None:
         # The box invents no bound: a side the owner left None is Qt's whole
         # double line, which the box reads as "none".
         widget.setRange(
             -sys.float_info.max if field.minimum is None else float(field.minimum),
             sys.float_info.max if field.maximum is None else float(field.maximum),
+            value=value, unit=field.unit or "1",
         )
-        # The field said what its number is IN.  Nothing read it before, so
-        # every box in this project showed a bare repr and refused a prefix.
-        widget.setValueUnit(field.unit)
 
     def normalize(self, field: FormFieldProps, value: object) -> float | None:
         if value is None:
@@ -649,7 +647,7 @@ class _FloatHandler(_StaticHandler):
         if isinstance(widget, FluentDoubleSpinBox):
             if prepared is None:
                 raise _value_error(field, "numeric spin cannot represent None")
-            widget.setValue(prepared)
+            self._configure_spin(field, widget, prepared)
         else:
             widget.setText(
                 ""
@@ -1041,6 +1039,7 @@ def _reconfigure_widget(
     old_field: FormFieldProps,
     field: FormFieldProps,
     widget: QtWidgets.QWidget,
+    value: object,
 ) -> None:
     """Apply changed presentation constraints to one compatible control.
 
@@ -1065,7 +1064,7 @@ def _reconfigure_widget(
                 _install_validator(field, widget)
     elif isinstance(widget, FluentDoubleSpinBox):
         handler = _IntHandler if field.kind == "int" else _FloatHandler
-        handler._configure_spin(field, widget)
+        handler._configure_spin(field, widget, widget.decimalValue() if being_edited(widget) else value)
     elif isinstance(widget, FluentComboBox):
         if old_field.choices != field.choices:
             _ChoiceHandler._fill(field, widget)
@@ -1809,7 +1808,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     old_field = old_fields[field.key]
                     widget = self._widgets[field.key]
                     handler = new_handlers[field.key]
-                    _reconfigure_widget(old_field, field, widget)
+                    _reconfigure_widget(old_field, field, widget, _seed(field, prepared[field.key]))
                     if field.kind == "keyed_choice":
                         # Its legal keys come from the live runtime context,
                         # not FormSpec.  Put the new choice domain into the

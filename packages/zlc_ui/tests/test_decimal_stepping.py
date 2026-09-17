@@ -248,7 +248,15 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
         QtTest.QTest.keyClick(box.lineEdit(), QtCore.Qt.Key_V, QtCore.Qt.ControlModifier)
         assert QtGui.QFontMetrics(box.lineEdit().font()).horizontalAdvance(box.text()) + 2 <= box._text_width
         QtTest.QTest.keyClick(box.lineEdit(), QtCore.Qt.Key_Return)
-        assert box.value() == 1e-15 and box.text() == "1e-15"
+        assert box.value() == 0 and box.text() == "0"
+        assert box.setRange(0.001, 2.0, value=-1, unit="ms")
+        assert (box.value(), box.text(), box.valueUnit()) == (0.001, "0.001", "ms")
+        assert box.setRange(1, 2000, value=3000, unit="µs")
+        assert (box.value(), box.text(), box.valueUnit()) == (2000, "2000", "µs")
+        accepted = box.value(), box.minimum(), box.maximum(), box.valueUnit(), box.width()
+        assert not box.setRange(1e-15, 2, value=0, unit="s")
+        assert (box.value(), box.minimum(), box.maximum(), box.valueUnit(), box.width()) == accepted
+        assert "too narrow" in box.property("numericError")
         from zlc_ui.fluent import FluentLineEdit
         plain = FluentLineEdit()
         plain.set_numeric_validator("float", bottom=0, top=10)

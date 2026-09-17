@@ -52,6 +52,7 @@ class FieldVM:
     can_scan: bool = True
     effective_text: str = ""
     source_text: str = ""
+    config_key: str = ""
     validator_kind: str = VALIDATOR_NONE
     validator_lo: float = 0.0
     validator_hi: float = 0.0
@@ -231,6 +232,7 @@ class ConfigPageRecord:
     file_path: str = ""
     dirty: bool = False
     entries: tuple[tuple[str, str, str], ...] = ()
+    available_names: tuple[str, ...] = ()
     bindings: tuple[tuple[str, str, str, str, str, str], ...] = ()
     active_path: str = ""
     busy: bool = False

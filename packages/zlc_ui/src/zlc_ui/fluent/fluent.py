@@ -780,8 +780,10 @@ def _popup_content_chrome(
 
     width = height = 0
     child: QtWidgets.QWidget = content
-    widget = content.parentWidget()
-    while widget is not None:
+    while child is not popup:
+        widget = child.parentWidget()
+        if widget is None:
+            break
         if isinstance(widget, QtWidgets.QAbstractScrollArea):
             frame = 2 * widget.frameWidth()
             width += frame
@@ -808,10 +810,7 @@ def _popup_content_chrome(
                         continue
                     if not sibling.isAncestorOf(child):
                         height += sibling.sizeHint().height() + layout.spacing()
-        if widget is popup:
-            break
         child = widget
-        widget = widget.parentWidget()
     return width, height
 
 
@@ -4472,11 +4471,24 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setFont(QtGui.QFont(FONT, fluent_font_size()))
-        metrics = self.fontMetrics()
-        segment = max(fluent_text_width(metrics, label) for label in self._labels) + scaled_px(20)
-        self.setMinimumSize(3 * segment, scaled_px(30, minimum=24))
-        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Fixed)
+        self._measure_segments()
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.clicked.connect(lambda: self.setState((self._state + 1) % 3))
+
+    def _measure_segments(self) -> None:
+        metrics = self.fontMetrics()
+        self._segment_widths = tuple(
+            fluent_text_width(metrics, label) + scaled_px(16) for label in self._labels
+        )
+        self.setFixedSize(sum(self._segment_widths), max(metrics.height() + scaled_px(10), scaled_px(30, minimum=24)))
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange) and hasattr(self, "_segment_widths"):
+            self._measure_segments()
+
+    def _segment_rect(self, index: int) -> QtCore.QRectF:
+        return QtCore.QRectF(sum(self._segment_widths[:index]), 0, self._segment_widths[index], self.height())
 
     def sizeHint(self) -> QtCore.QSize:
         return self.minimumSize()
@@ -4504,7 +4516,10 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
         if event.button() == QtCore.Qt.LeftButton and self.isDown():
             self.setDown(False)
             if self.rect().contains(event.pos()):
-                self.setState(min(2, max(0, int(3 * event.pos().x() / max(1, self.width())))))
+                for index in range(3):
+                    if self._segment_rect(index).contains(QtCore.QPointF(event.pos())):
+                        self.setState(index)
+                        break
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -4525,23 +4540,26 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        height = min(self.height(), self.minimumHeight())
-        top = (self.height() - height) / 2
-        segment = self.width() / 3
+        height = self.height()
         margin = scaled_px(3, minimum=2)
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(PLACEHOLDER if self.isEnabled() else BG))
-        painter.drawRoundedRect(QtCore.QRectF(0, top, self.width(), height), height / 2, height / 2)
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()), height / 2, height / 2)
         painter.setBrush(QtGui.QColor(SURFACE))
+        index = min(2, int(self._position))
+        start = self._segment_rect(index)
+        end = self._segment_rect(min(2, index + 1))
+        fraction = self._position - index
+        thumb = QtCore.QRectF(start.left() + fraction * (end.left() - start.left()), 0,
+                             start.width() + fraction * (end.width() - start.width()), height)
         painter.drawRoundedRect(
-            QtCore.QRectF(self._position * segment + margin, top + margin,
-                         segment - 2 * margin, height - 2 * margin),
+            thumb.adjusted(margin, margin, -margin, -margin),
             height / 2 - margin, height / 2 - margin,
         )
         painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
         painter.setFont(self.font())
         for index, label in enumerate(self._labels):
-            painter.drawText(QtCore.QRectF(index * segment, top, segment, height), QtCore.Qt.AlignCenter, label)
+            painter.drawText(self._segment_rect(index), QtCore.Qt.AlignCenter, label)
 
     def _get_position(self) -> float:
         return self._position
@@ -5071,7 +5089,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             number = _finite_decimal(value)
         except ValueError:
             return
-        self._commit(self._bounded(self._quantized(number)), notify_normalized=True)
+        self._commit(number, notify_normalized=True)
 
     def _bounded(self, number: Decimal) -> Decimal:
         """``number`` inside the owner's range: a box never holds a value
@@ -5083,7 +5101,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return self._high
         return number
 
-    def setRange(self, minimum: float, maximum: float) -> None:  # noqa: N802
+    def setRange(self, minimum: float, maximum: float, *, value: object | None = None,
+                 unit: str | None = None) -> bool:  # noqa: N802
         """The owner's range -- applied when it changes, see FluentSpinBox.
 
         The value it holds is moved inside the new range BEFORE Qt is told:
@@ -5097,26 +5116,40 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         low, high = float(minimum), float(maximum)
         # Qt's reading of an inverted range: the top is raised to the bottom.
         high = max(low, high)
-        if (low, high) == (self.minimum(), self.maximum()):
-            return
+        wanted_unit = self._unit if unit is None else str(unit).strip() or "1"
+        if ((low, high) == (self.minimum(), self.maximum())
+                and wanted_unit == self._unit and not self.property("numericError")
+                and (value is None or _finite_decimal(value) == self._value)):
+            return True
         # The whole double line is Qt's way of saying "no bound", and the form
         # says it the same way for a side its owner left open.
         # From what was GIVEN, not from its float: an integer bound past
         # 2**53 read through a double is a different number.
-        previous = self._low, self._high, self._display_text
+        previous = self._low, self._high, self._unit, self._shown_unit, self._display_text
+        previous_value = self._value
         self._low = None if low <= -sys.float_info.max else _finite_decimal(minimum)
         self._high = None if high >= sys.float_info.max else _finite_decimal(maximum)
+        if wanted_unit != self._unit:
+            self._unit = self._shown_unit = wanted_unit
         self._display_text = ""
         try:
-            value = self._visible_value(self._bounded(self._value))
-        except ValueError as error:
-            self._low, self._high, self._display_text = previous
+            requested = self._value if value is None else _finite_decimal(value)
+            number = self._visible_value(self._bounded(self._quantized(requested)))
+        except (UnitError, ValueError, ArithmeticError) as error:
+            self._low, self._high, self._unit, self._shown_unit, self._display_text = previous
             self.setProperty("numericError", str(error))
             self._queue_normalization()
-            return
-        self._value = value
-        super().setRange(low, high)
-        self._commit(self._value, notify_normalized=True)
+            return False
+        self._value = number
+        with signals_blocked(self):
+            super().setRange(low, high)
+            self._commit(number)
+        if number != previous_value:
+            self.valueChanged[float].emit(float(number))
+            self.valueChanged[str].emit(self.text())
+        if number != requested:
+            self._queue_normalization()
+        return True
 
     def setMinimum(self, minimum: float) -> None:  # noqa: N802 - Qt API name
         self.setRange(minimum, self.maximum())
@@ -5164,7 +5197,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
         requested = number
         try:
-            number = self._visible_value(number)
+            number = self._visible_value(self._bounded(self._quantized(number)))
         except ValueError as error:
             self.setProperty("numericError", str(error))
             self._queue_normalization()
@@ -5190,7 +5223,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return number
         shown = self._shown_from_value(number)
         if self._number_metrics is None or self._text_width <= 0:
-            self._display_text = format_quantity(shown, "1")
+            self._display_text = format(shown.normalize() + Decimal(0), "f")
             return number
         low, high = self._shown_bound(self._low), self._shown_bound(self._high)
         if low is not None and high is not None and low > high:
@@ -5484,8 +5517,8 @@ def _visible_decimal(
     """The most precise bounded decimal whose complete text fits the editor.
 
     The returned number, not an unrounded input, is what the control owns.
-    Bounds are rounded inward to the same precision grid; a genuinely
-    unrepresentable interval is rejected, never widened or crossed.
+    Only fractional places are rounded. Reaching a bound means that exact
+    bound, never a nearby interior value or a scientific-notation fallback.
     """
     from decimal import ROUND_HALF_UP
 
@@ -5495,32 +5528,28 @@ def _visible_decimal(
         number = min(number, high)
     if not integral:
         number = _finite_decimal(float(number))
+    if low is not None:
+        number = max(number, low)
+    if high is not None:
+        number = min(number, high)
     digits = len(number.as_tuple().digits)
     with localcontext() as context:
-        context.prec = max(28, digits + 2)
-        for precision in range(digits, 0, -1):
-            exponent = number.adjusted() - precision + 1 if number else 0
-            if integral:
-                exponent = max(0, exponent)
-            quantum = Decimal(1).scaleb(exponent)
+        context.prec = max(28, digits + 2, number.adjusted() + 2)
+        places = 0 if integral else max(0, -number.as_tuple().exponent)
+        for decimals in range(places, -1, -1):
+            quantum = Decimal(1).scaleb(-decimals)
             rounded = number.quantize(quantum, rounding=ROUND_HALF_UP)
             if low is not None and rounded < low:
-                rounded = low.quantize(quantum, rounding=ROUND_CEILING)
+                rounded = low
             if high is not None and rounded > high:
-                rounded = high.quantize(quantum, rounding=ROUND_FLOOR)
-            if ((low is not None and rounded < low)
-                    or (high is not None and rounded > high)):
-                continue
+                rounded = high
             rounded = rounded.normalize() + Decimal(0)
             fixed = format(rounded, "f")
-            mantissa, _, power = format(rounded, "e").partition("e")
-            scientific = f"{mantissa}e{int(power)}"
-            candidates = ((fixed, metrics.horizontalAdvance(fixed) + 2),)
-            if not integral:
-                candidates += ((scientific, metrics.horizontalAdvance(scientific) + 2),)
-            for text, width in candidates:
-                if width <= available_width:
-                    return rounded, text, width
+            width = metrics.horizontalAdvance(fixed) + 2
+            if width <= available_width:
+                return rounded, fixed, width
+            if rounded == low or rounded == high:
+                break
     raise ValueError("The numeric field is too narrow for a value within its limits; no value was changed.")
 
 

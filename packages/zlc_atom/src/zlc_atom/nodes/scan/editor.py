@@ -24,6 +24,7 @@ at which point it becomes the uniform grid the spins describe.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from weakref import ref as weakref
 
@@ -83,7 +84,11 @@ def _uniform_values(values: tuple[float, ...]) -> bool:
     must not turn it into the evenly spaced grid described by its ends.
     """
 
-    return tuple(np.linspace(values[0], values[-1], len(values))) == tuple(values)
+    expected = np.linspace(values[0], values[-1], len(values))
+    # Unit conversion and linspace round through different float operations.
+    # Allow only their last-bit error, not a scale-independent tolerance.
+    tolerance = 4 * math.ulp(max(abs(values[0]), abs(values[-1])))
+    return bool(np.all(np.abs(expected - values) <= tolerance))
 
 
 class _AxisRow(QtWidgets.QWidget):
@@ -195,25 +200,20 @@ class _AxisRow(QtWidgets.QWidget):
             "value_text": self.values_edit.text(),
         }
 
-    def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False) -> None:
+    def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False) -> bool:
         if not preserve_edit or not being_edited(self.range_inputs):
-            self._show_values(ScanAxis(entry["port"], tuple(entry["values"]), entry["unit"]))
+            if not self._show_values(ScanAxis(entry["port"], tuple(entry["values"]), entry["unit"])):
+                return False
         if not preserve_edit or not being_edited(self.values_edit):
             self.values_edit.setText(entry["value_text"])
         self.input_stack.setCurrentIndex(int(entry["mode"] == "values"))
         self._refresh_mode()
+        return True
 
     def _show_converted(self, entry: Mapping, unit: str, values) -> bool:
         count = len(entry["values"])
-        self._show_inputs({**entry, "unit": unit, "values": list(values[:count]),
-                           "value_text": ", ".join(repr(float(value)) for value in values[count:])})
-        error = (self.start_spin.property("numericError") or self.stop_spin.property("numericError")
-                 or self.points_spin.property("numericError"))
-        if error:
-            self._show_inputs(entry)
-            self.custom_label.setText(str(error))
-            return False
-        return True
+        return self._show_inputs({**entry, "unit": unit, "values": list(values[:count]),
+                                  "value_text": ", ".join(repr(float(value)) for value in values[count:])})
 
     def _fill_ports(self, current: str | None) -> None:
         """Offer every port, each under the thing that owns it."""
@@ -260,8 +260,8 @@ class _AxisRow(QtWidgets.QWidget):
             self._ports = label_device_scan_ports(self._ports, labels)
             self._fill_ports(str(self.port_combo.currentData() or ""))
 
-    def _apply_port_limits(self, unit: str = "") -> None:
-        port = next(
+    def _apply_port_limits(self, unit: str = "", values=None) -> bool:
+        port = None if self.manual else next(
             (p for p in self._ports if p.port == self.port_combo.currentData()),
             None,
         )
@@ -269,21 +269,21 @@ class _AxisRow(QtWidgets.QWidget):
         limits = (-1e12, 1e12) if port is None else (port.lo, port.hi)
         if port is not None and unit != port.unit:
             limits = tuple(float(DEFAULT_UNITS.convert_decimal(value, port.unit, unit)) for value in limits)
-        for spin in (self.start_spin, self.stop_spin):
-            spin.setRange(min(limits), max(limits))
-            # The port has said all along what its numbers are in -- a
-            # duration sweeps in the period's own unit -- and these two boxes
-            # were the one place on the row that never repeated it, so a
-            # seamless axis read "from 1 to 40" with nothing saying of what.
-            #
-            # setDecimals(4) went with it.  It did not make the number
-            # readable, it made it four decimals long: an authored 1.00005 us
-            # came back as 1.0 in the box that is supposed to be showing what
-            # will run.  Readability is the formatter's job now, and the
-            # formatter now owns bounded visible precision.
-            spin.setValueUnit(unit)
-            spin.setShownUnit(unit)
-        self._mount_unit_picker(unit)
+        spins = (self.start_spin, self.stop_spin)
+        previous = tuple((spin.minimum(), spin.maximum(), spin.decimalValue(), spin.valueUnit()) for spin in spins)
+        for index, spin in enumerate(spins):
+            if not spin.setRange(min(limits), max(limits), unit=unit,
+                                 value=None if values is None else values[index]):
+                error = spin.property("numericError")
+                for restored, (low, high, value, old_unit) in zip(spins[:index], previous[:index]):
+                    restored.setRange(low, high, value=value, unit=old_unit)
+                self.custom_label.setText(str(error))
+                return False
+        if self.manual:
+            self.unit_label.setText("" if unit in ("", "1") else unit)
+        else:
+            self._mount_unit_picker(unit)
+        return True
 
     def _mount_unit_picker(self, unit: str) -> None:
         """Offer this port's other spellings, or just name the one it has.
@@ -318,25 +318,23 @@ class _AxisRow(QtWidgets.QWidget):
         layout.addWidget(picker)
         self.unit_picker = picker
 
-    def _show_values(self, axis: ScanAxis) -> None:
+    def _show_values(self, axis: ScanAxis) -> bool:
         """Put this axis's values on the row: its ends, its count, or the
         fact that they are a list nobody's ends describe."""
 
         with signals_blocked(self.start_spin, self.stop_spin, self.points_spin):
-            if self.manual:
-                for spin in (self.start_spin, self.stop_spin):
-                    spin.setValueUnit(axis.unit)
-                    spin.setShownUnit(axis.unit)
-                self.unit_label.setText("" if axis.unit in ("", "1") else axis.unit)
-            else:
-                self._apply_port_limits(axis.unit)
-            self.start_spin.setValue(axis.values[0])
-            self.stop_spin.setValue(axis.values[-1])
+            if not self._apply_port_limits(axis.unit, (axis.values[0], axis.values[-1])):
+                return False
             self.points_spin.setValue(len(axis.values))
+        low, high = self.start_spin.minimum(), self.start_spin.maximum()
         self._custom_values = (
-            None if _uniform_values(axis.values) else axis.values
+            None if _uniform_values(axis.values) else tuple(min(high, max(low, value)) for value in axis.values)
         )
+        if self._custom_values is not None:
+            self._custom_values = ((self.start_spin.value(),) if len(axis.values) == 1 else
+                                   (self.start_spin.value(), *self._custom_values[1:-1], self.stop_spin.value()))
         self.custom_label.setText("" if self._custom_values is None else "custom values")
+        return True
 
     def reconcile(self, ports, entry: Mapping) -> None:
         """Bring this row to its authored inputs, touching only what differs.

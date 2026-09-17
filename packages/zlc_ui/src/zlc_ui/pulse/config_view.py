@@ -139,6 +139,7 @@ class PulseConfigView(QtWidgets.QWidget):
             # The synchronous owner accepts and projects, or reports rejection.
             accepted = str(combo.property("accepted_key") or "")
             combo.setCurrentIndex(combo.findData(accepted))
+            combo.setEditText(accepted)
 
     def set_page(self, record: ConfigPageRecord) -> None:
         self.path_text.setText(record.file_path)
@@ -183,12 +184,13 @@ class PulseConfigView(QtWidgets.QWidget):
                 for widget in self._binding_rows.pop(field_id):
                     self._binding_grid.removeWidget(widget)
                     retire_widget(widget)
-        keys = tuple(dict.fromkeys(name for name, _value, _unit in record.entries if name))
+        keys = record.available_names
         for row, (field_id, label, key, default, effective, state) in enumerate(record.bindings):
             widgets = self._binding_rows.get(field_id)
             if widgets is None:
                 combo = FluentComboBox()
                 combo.setEditable(True)
+                combo.lineEdit().setPlaceholderText("Config name")
                 combo.activated.connect(lambda _index, field=field_id: self._commit_binding(field))
                 combo.editingFinished.connect(lambda field=field_id: self._commit_binding(field))
                 widgets = (ElidedLabel(), combo, FluentLineEdit(), FluentLineEdit(), ElidedLabel())
@@ -208,15 +210,14 @@ class PulseConfigView(QtWidgets.QWidget):
             combo = widgets[1]
             draft = combo.currentText() if combo.lineEdit().hasFocus() and combo.lineEdit().isModified() else None
             combo.setProperty("accepted_key", key)
-            choices = ("", *keys, *((key,) if key and key not in keys else ()))
             with signals_blocked(combo):
-                if tuple(combo.itemData(index) for index in range(combo.count())) != choices:
+                if tuple(combo.itemData(index) for index in range(combo.count())) != keys:
                     combo.clear()
-                    for name in choices:
-                        combo.addItem(name or "Default (Pulse value)", name)
+                    for name in keys:
+                        combo.addItem(name, name)
                 combo.setCurrentIndex(combo.findData(key))
+                combo.setEditText(key if draft is None else draft)
                 if draft is not None:
-                    combo.setEditText(draft)
                     combo.lineEdit().setModified(True)
             combo.setEnabled(not record.busy)
 
