@@ -403,6 +403,13 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
     # Capture boundaries reset stream continuity; all frame kinds participate
     # in the serial counter, and native device timestamps remain untouched.
     class _ControlledModule(_FakeModule):
+        read_error = None
+
+        def read(self, size=1):
+            if self.read_error is not None:
+                raise self.read_error
+            return super().read(size)
+
         def _fill(self):
             if self._packets < 40:
                 super()._fill()
@@ -452,8 +459,31 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
                 source.read_records(1, timeout=0, exact=True)
             with pytest.raises(RuntimeError):
                 source.finish_record_capture()
+            assert source._reader.is_alive(), "capture data errors do not close the serial device"
+            source.arm(1, buffer_record_count=4)
+            with module._lock:
+                module._out += packet(18, 8_000_000)
+            record, = source.read_records(1, timeout=1, exact=True)
+            assert record.source_ordinal == 0 and record.time_seconds == 8.0
+            assert source.finish_record_capture().produced_count == 1
         finally:
             source.close()
+
+    module = _ControlledModule(rate_hz=400)
+    source = _source(module)
+    try:
+        source.arm(None, buffer_record_count=4)
+        module.read_error = OSError("serial cable removed")
+        source._reader.join(timeout=1)
+        assert not source._reader.is_alive()
+        with pytest.raises(RuntimeError, match="serial cable removed"):
+            source.read_records(1, timeout=0, exact=True)
+        with pytest.raises(RuntimeError, match="serial cable removed"):
+            source.finish_record_capture()
+        with pytest.raises(RuntimeError, match="receive thread is not running"):
+            source.arm(1, buffer_record_count=4)
+    finally:
+        source.close()
 
     # The shared FIFO retains every accepted record and fails instead of
     # replacing its oldest entry, even when the caller asks for only one.

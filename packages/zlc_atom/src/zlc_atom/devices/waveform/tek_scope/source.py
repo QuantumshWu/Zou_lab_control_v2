@@ -442,11 +442,24 @@ class TekScopeWaveformSource:
         return self._records.armed
 
     def close(self) -> None:
+        failure = None
         try:
             if self._records.armed:
                 self.finish_record_capture()
-        finally:
+        except BaseException as error:
+            if self._records.armed:
+                raise
+            failure = error
+        try:
             self._link.close()
+        except BaseException as error:
+            if failure is None:
+                raise
+            failure.add_note(f"scope close also failed: {error}")
+            raise failure
+        self._records.close()
+        if failure is not None:
+            raise failure
 
 
 __all__ = [

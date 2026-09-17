@@ -506,11 +506,16 @@ class VirtualCamera:
         waits for the worker again instead of returning as if it had.
         """
 
-        if self.capture_state():
-            self.finish_record_capture()
-        with self._condition:
-            self._trigger_queue.clear()
-            self._condition.notify_all()
+        try:
+            if self.capture_state():
+                self.finish_record_capture()
+        finally:
+            if not self.capture_state():
+                with self._condition:
+                    self._records.close()
+                    self._trigger_queue.clear()
+                    self._clip_buffer = None
+                    self._condition.notify_all()
 
     @property
     def produced_count(self) -> int:

@@ -39,6 +39,9 @@ def test_camera_binding_rejects_an_object_outside_the_camera_contract() -> None:
 
 
 def test_virtual_camera_preserves_frames_and_reports_bounded_intake_failure() -> None:
+    import gc
+    import weakref
+
     world = SimulationWorld()
     camera = VirtualCamera(
         frame_source=lambda exposure: world.render_frame(
@@ -76,15 +79,27 @@ def test_virtual_camera_preserves_frames_and_reports_bounded_intake_failure() ->
     camera.trigger(2)
     with camera._condition:
         assert camera._condition.wait_for(lambda: camera._records.failure is not None, timeout=1.0)
+    failed_frame = weakref.ref(camera._records._queue[0].image)
     # Even a full-enough queue must not conceal a failed capture.
     with pytest.raises(RuntimeError, match="failed while producing"):
         camera.read_frame_records(1, timeout=0.0, exact=True)
     with pytest.raises(RuntimeError, match="failed while producing"):
         camera.finish_record_capture()
+    assert failed_frame() is not None
+    camera.close()
+    gc.collect()
+    assert camera._records.failure is None and camera._records.pending_count == 0
+    assert failed_frame() is None
     camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
     camera.trigger()
-    assert camera.read_frame_records(1, timeout=1.0, exact=True)[0].source_ordinal == 0
+    with camera._condition:
+        assert camera._condition.wait_for(lambda: camera.produced_count == 1, timeout=1.0)
+    tail = weakref.ref(camera._records._queue[0].image)
+    camera.finish_record_capture()
+    assert tail() is not None, "Stop preserves unread complete records"
     camera.close()
+    gc.collect()
+    assert tail() is None and camera._records.pending_count == 0
 
 
 def test_a_close_that_could_not_join_the_producer_waits_for_it_again() -> None:

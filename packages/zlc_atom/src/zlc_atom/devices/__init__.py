@@ -146,7 +146,7 @@ class RecordQueue:
             return True
 
     def fail(self, error: BaseException) -> None:
-        """The producer has died; readers learn it, the capture stops accepting."""
+        """Fail this capture and notify readers; device lifetime is independent."""
 
         with self._condition:
             if self._failure is None:
@@ -212,6 +212,20 @@ class RecordQueue:
                     f"{self._what} failed while producing records: {self._failure}"
                 ) from self._failure
             return self._produced_count
+
+    def close(self) -> None:
+        """Release a stopped device's tail and failure, unlike capture Stop."""
+        with self._condition:
+            if self._worker is not None and self._worker.is_alive():
+                raise RuntimeError(f"{self._what} is still producing records")
+            self._accepting = False
+            self._armed = False
+            self._queue.clear()
+            self._failure = None
+            self._worker = None
+            self._stop = None
+            self._ready.set()
+            self._condition.notify_all()
 
 
 

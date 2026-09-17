@@ -631,10 +631,12 @@ class WheeltecN100WaveformSource:
 
         if self._records.accepting:
             if serial is None:
-                raise RuntimeError("N100 damaged FDILink frame during capture")
+                self._records.fail(RuntimeError("N100 damaged FDILink frame during capture"))
+                return
             previous = self._last_frame_serial
             if previous is not None and serial != (previous + 1) & 0xFF:
-                raise RuntimeError(f"N100 frame sequence gap: expected {(previous + 1) & 0xFF}, received {serial}")
+                self._records.fail(RuntimeError(f"N100 frame sequence gap: expected {(previous + 1) & 0xFF}, received {serial}"))
+                return
             self._last_frame_serial = serial
         if sample is None:
             return
@@ -644,11 +646,13 @@ class WheeltecN100WaveformSource:
             if previous_stamp is not None:
                 elapsed = stamp - previous_stamp
                 if elapsed <= 0:
-                    raise RuntimeError(f"N100 device timestamp did not advance: {previous_stamp} -> {stamp}")
+                    self._records.fail(RuntimeError(f"N100 device timestamp did not advance: {previous_stamp} -> {stamp}"))
+                    return
                 # More than half a packet period beyond the measured interval
                 # is no longer the next sample. Do not bridge that gap.
                 if self._sample_interval is not None and elapsed > 1.5 * self._sample_interval:
-                    raise RuntimeError(f"N100 device timestamp gap: {elapsed:g} s at {1 / self._sample_interval:g} Hz")
+                    self._records.fail(RuntimeError(f"N100 device timestamp gap: {elapsed:g} s at {1 / self._sample_interval:g} Hz"))
+                    return
             self._last_imu_stamp = stamp
         received = time.time_ns()
         self._last_packet_at = time.monotonic()
@@ -1187,7 +1191,10 @@ class WheeltecN100WaveformSource:
                     and self._reader is not threading.current_thread()
                 ):
                     self._reader.join(timeout=self.config.timeout_seconds)
+                if self._reader.is_alive():
+                    raise RuntimeError("N100 receive thread did not stop; serial port retained")
                 self._serial.close()
+                self._records.close()
 
 
 def _listen_for_packets(port, listen_seconds: float) -> int:

@@ -845,6 +845,7 @@ class DcamCameraAdapter:
 
         if self._device is None:
             self._lane.close()
+            self._records.close()
             return
         failures: list[BaseException] = []
         try:
@@ -860,6 +861,7 @@ class DcamCameraAdapter:
                 raise failures[0]
             raise
         self._lane.close()
+        self._records.close()
         if failures:
             raise failures[0]
 

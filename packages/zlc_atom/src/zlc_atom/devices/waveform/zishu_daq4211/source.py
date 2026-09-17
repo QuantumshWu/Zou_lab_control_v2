@@ -344,11 +344,24 @@ class ZishuDaq4211WaveformSource:
         return self._records.armed
 
     def close(self) -> None:
+        failure = None
         try:
             if self._records.armed:
                 self.finish_record_capture()
-        finally:
+        except BaseException as error:
+            if self._records.armed:
+                raise
+            failure = error
+        try:
             self._daq.close(self.config.serial)
+        except BaseException as error:
+            if failure is None:
+                raise
+            failure.add_note(f"DAQ close also failed: {error}")
+            raise failure
+        self._records.close()
+        if failure is not None:
+            raise failure
 
 
 def discover_daq4211(daq=None) -> tuple[str, ...]:

@@ -523,8 +523,16 @@ def test_a_refused_handle_release_keeps_the_handle_for_the_next_close() -> None:
     from, and the next close tries the same release again.
     """
 
+    import gc
+    import weakref
+
     driver = _FakeDcamDriver()
     adapter = DcamCameraAdapter(_config(), driver=driver)
+    adapter.arm(1, source_group_sizes=(1,), buffer_frame_count=2, timeout=1)
+    driver.device.publish((5,), newest=0)
+    with adapter._records._condition:
+        assert adapter._records._condition.wait_for(lambda: adapter._records.pending_count == 1, timeout=1)
+    frame = weakref.ref(adapter._records._queue[0].image)
     driver.device.close_error = RuntimeError("injected handle close failure")
 
     def closes() -> int:
@@ -539,11 +547,14 @@ def test_a_refused_handle_release_keeps_the_handle_for_the_next_close() -> None:
         adapter.close()
     assert closes() == 1
     assert owner_alive(), "the lane the retry must run on was retired"
+    assert frame() is not None and adapter._records.pending_count == 1
 
     driver.device.close_error = None
     adapter.close()
     assert closes() == 2, "the second close did not retry the SDK release"
     assert not owner_alive()
+    gc.collect()
+    assert frame() is None and adapter._records.pending_count == 0
     adapter.close()
     assert closes() == 2
 

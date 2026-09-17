@@ -220,6 +220,9 @@ class PylonCameraAdapter:
             if primary is None:
                 raise
             primary.add_note(f"pylon close also failed: {error}")
+        finally:
+            if self._camera is None:
+                self._records.close()
         if primary is not None:
             raise primary
 

@@ -159,8 +159,12 @@ class VirtualWaveformSource:
         return self._records.armed
 
     def close(self) -> None:
-        if self._records.armed:
-            self._records.finish()
+        try:
+            if self._records.armed:
+                self._records.finish()
+        finally:
+            if not self._records.armed:
+                self._records.close()
 
     @property
     def produced_count(self) -> int:
