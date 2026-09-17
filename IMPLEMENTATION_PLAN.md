@@ -10,6 +10,9 @@
 
 ## 1. 当前实施范围
 
+- Waveform静态链调查后删除已确认冗余：N100 CRC16改用等价标准库函数，删除旧表/逐字节Python循环；所有Waveform连续列/触发transpose复用既有不可变视图，不再advanced-index后再次复制。NodeHost worker commit删除Plane通知之后的重复wake，与processor一致；Runtime indexed history校验只在原子预检/lease入口执行一次。原CRC/顺序/所有权、Host通知/终态及history窗口直接用例通过；未访问实验设备、未以本机CPU测量替代现场10%现象，未改变采样、输出、history或显示deadline。
+- Rolling时间范围复用公共curve summary的坐标极值，latest在valid mask内用NumPy找最后有效位置，不再构建整列临时数组；无新增kernel或cache。真实时间窗口移动仍使刻度背景失效，数据层保持native、每revision一次compose；本轮不以复用旧背景破坏真实坐标，也未新增独立Rolling绘制路线。侧边histogram继续按当前窗口计算。
+
 - FigureViewer工具栏Save image复用TaskConsole完整窗口截图与当前日期目录；删除单Plot PNG导出分支及仅为该分支维护的active-panel状态。Edit Save figure不变。Viewer运行跨日时目录按保存当日计算，不冻结在打开窗口当天。
 - Facet选区不再附加当前Focus坐标作为隐藏Scope；范围与最近点选择保留全部facet，显式Scope/Last/window不变。切换Focus仅重定位同一选区的绘制cell，canonical范围/revision不变；producer联动沿原AxisId映射，Image只改XY，Curve只改X，Histogram只筛样本。64格共209万点的隔离Image Area 1.830→0.680ms，Crosshair Image36.20→12.28ms、Curve28.35→12.15ms；新结果覆盖全部64格，旧结果只覆盖一格，不宣称同输出规模比较。
 - Viewer工具栏使用同一四列布局，Manual Data各区共享标签列和列伸缩。InfoTree删除加错位置的外框padding，按实际按钮/文字高度保留行内间距，末行Pulse Open按钮紧凑左对齐、底部到横向滚动条留白。公共Fluent滚动条以边框厚度推导内侧圆角，track与handle同源；首尾实屏截图核对，不改变滚动范围。

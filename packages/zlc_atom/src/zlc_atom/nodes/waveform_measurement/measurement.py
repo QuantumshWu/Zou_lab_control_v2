@@ -97,18 +97,25 @@ def shot_snapshot(
 ) -> OwnedSnapshot:
     """Continuous samples are Point rows; triggered samples stay in the cell."""
 
-    picked = record.samples[:, list(output.columns)]
+    columns = output.columns
+    first = columns[0]
+    selection = (
+        slice(first, first + len(columns))
+        if columns == tuple(range(first, first + len(columns)))
+        else list(columns)
+    )
+    picked = record.samples[:, selection]
     labels = output.channel_labels
     point_axes = ()
     if picked.shape[0] == 1:
-        values = np.ascontiguousarray(picked[0])[None]
+        values = picked[0][None]
         cell_axes: tuple[AxisSpec, ...] = (_channel_axis(producer, output.name, labels),)
     elif continuous:
-        values = np.ascontiguousarray(picked)[None]
+        values = picked[None]
         cell_axes = (_channel_axis(producer, output.name, labels),)
         point_axes = (_sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0], True),)
     else:
-        values = np.ascontiguousarray(picked.T)[None]
+        values = picked.T[None]
         cell_axes = (
             _channel_axis(producer, output.name, labels),
             _sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0], continuous),

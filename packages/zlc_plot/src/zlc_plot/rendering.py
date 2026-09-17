@@ -10194,8 +10194,11 @@ class MatplotlibRenderer:
             frame = _curve_x_limits(np.asarray([1.0 - window, 0.0]))
         else:
             extents = [
-                (np.min(item.x[item.valid]), np.max(item.x[item.valid]))
-                for item in sliced if bool(np.any(item.valid))
+                item.summary[:2] if item.summary is not None else (
+                    np.min(item.x, where=item.valid, initial=np.inf),
+                    np.max(item.x, where=item.valid, initial=-np.inf),
+                )
+                for item in sliced
             ]
             frame = _curve_x_limits(np.asarray(extents, dtype=float).reshape(-1))
         native_direct = (
@@ -10274,9 +10277,11 @@ class MatplotlibRenderer:
             )
         latest = None
         if sliced:
-            usable = sliced[0].y[sliced[0].valid]
-            if usable.size:
-                latest = float(usable[-1])
+            first = sliced[0]
+            if first.y.size and (first.summary is None or math.isfinite(first.summary[0])):
+                index = first.y.size - 1 - int(np.argmax(first.valid[::-1]))
+                if first.valid[index]:
+                    latest = float(first.y[index])
         latest_text = self._artists.get(f"{key}:latest")
         if latest_text is None:
             from matplotlib.transforms import offset_copy

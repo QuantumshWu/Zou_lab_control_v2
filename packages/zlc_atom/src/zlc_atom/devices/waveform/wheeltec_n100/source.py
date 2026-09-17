@@ -37,6 +37,7 @@ DOING is read off the stream afterwards rather than asked for.
 
 from __future__ import annotations
 
+from binascii import crc_hqx
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,20 +88,7 @@ def _crc8_table() -> tuple[int, ...]:
     return tuple(table)
 
 
-def _crc16_table() -> tuple[int, ...]:
-    """CRC-16/XMODEM, the module's payload check (polynomial 0x1021)."""
-
-    table = []
-    for index in range(256):
-        value = index << 8
-        for _ in range(8):
-            value = ((value << 1) ^ 0x1021) & 0xFFFF if value & 0x8000 else (value << 1) & 0xFFFF
-        table.append(value)
-    return tuple(table)
-
-
 CRC8_TABLE = _crc8_table()
-CRC16_TABLE = _crc16_table()
 
 
 def header_crc8(header: bytes) -> int:
@@ -113,12 +101,9 @@ def header_crc8(header: bytes) -> int:
 
 
 def payload_crc16(payload: bytes) -> int:
-    """The check over the payload bytes."""
+    """CRC-16/XMODEM over the payload (polynomial 0x1021, initial zero)."""
 
-    value = 0
-    for byte in payload:
-        value = ((value << 8) & 0xFF00) ^ CRC16_TABLE[((value >> 8) ^ byte) & 0xFF]
-    return value & 0xFFFF
+    return crc_hqx(payload, 0)
 #: gyroscope xyz (rad/s), accelerometer xyz (m/s^2), magnetometer xyz (mG),
 #: IMU temperature (degC), pressure, pressure temperature, timestamp (us).
 _IMU_PAYLOAD = struct.Struct("<12fq")

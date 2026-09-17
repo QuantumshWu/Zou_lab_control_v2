@@ -164,11 +164,16 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     wake = Event()
     plane = SignalDataPlane()
+    notifications = []
+    owner_wakes = []
+    plane.subscribe_publications(lambda: notifications.append("publication"))
 
     class Node:
         def execute(self, context):
             assert context.instance_id == "camera"
             context.report_progress("capturing", current=1, total=1)
+            wake_count = len(owner_wakes)
+            publication_count = len(notifications)
             context.commit_live(
                 {
                     "frame": _finite_output(
@@ -180,6 +185,8 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
                     )
                 }
             )
+            assert len(notifications) == publication_count + 1
+            assert len(owner_wakes) == wake_count, "commit must not duplicate Plane's notification"
             current = context.current_dataset("frame")
             assert float(current.block.values[0, 0, 0]) == 7.0
             return {"status": "ok"}
@@ -192,6 +199,7 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
         kind="measurement",
         outputs=(declaration,),
     )
+    host._request_owner_wake = lambda: (owner_wakes.append("owner"), wake.set())
     try:
         host.start()
         assert host.observation.running and host.observation.phase == "running"

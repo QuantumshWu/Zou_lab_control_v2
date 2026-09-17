@@ -1087,6 +1087,7 @@ def _update_indexed_history(
     sequence: int,
     demand: int,
 ) -> tuple[_IndexedHistory, bool]:
+    """Apply an event already validated by the caller's atomic preflight."""
     primary_index = value.primary_index
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
@@ -1104,7 +1105,6 @@ def _update_indexed_history(
             ),
             True,
         )
-    _validate_indexed_event(history, event, primary_index, value.shot_time)
     events = history.events
     current = events.get(primary_index)
     changed = current is None or current[0] != sequence
@@ -1898,6 +1898,8 @@ class SignalDataPlane:
                 )
             else:
                 history = state.indexed_history.get(signal_name)
+                if history is not None:
+                    _validate_indexed_event(history, value.snapshot, value.primary_index, value.shot_time)
                 history, data_changed = _update_indexed_history(
                     history,
                     value,

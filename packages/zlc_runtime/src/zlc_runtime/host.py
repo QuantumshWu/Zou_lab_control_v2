@@ -1027,7 +1027,6 @@ class NodeHost:
         )
         with self._start_lock:
             self._live_commit_count += 1
-        self._request_owner_wake()
         return published
 
     def _commit_processor(

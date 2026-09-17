@@ -161,6 +161,7 @@ Node new chunk
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - Selection revision属于用户的数值范围选择，不属于source generation。相同revision、相同数值几何和同source generation是幂等提交；旧revision或同revision改真实范围仍拒绝。兼容选区遇到新的accepted source generation时在原Bridge重新激活派生，不伪造一次用户编辑。仅视觉用的drawn不触发数值重算，Panel文档不另存revision，交回Bridge始终用原binding.selection_revision。
 - 一次commit的siblings共享revision、run record和causal parent。
+- 成功Dataset commit的通知只由Plane的publication订阅发出，worker与processor遵守同一入口；NodeHost不再为同一commit额外唤醒。进度、完成、交互及渲染完成仍沿各自原通知，不能为省唤醒把已到deadline的新数据强制推迟到下一display beat。Indexed history在原子commit预检一次，更新保留窗口不重复执行相同预检；lease变化仍在更新前校验。
 - Run record属于generation声明，不属于每event数据：实际准备完成后只注册/冻结一次，后续commit引用Runtime拥有的不可变记录，不携整张计划反复比较。event record才携本事件变化的时间/设备事实，每次atomic commit只冻结一次；内部siblings/publication复用同一记录。finite物化共享已冻结条目，按需生成精确prefix记录，indexed只保留窗口范围。仅更换DataBlock身份不重扫未改变的数值内容。
 - 数组读取与来源记录读取按真实需求分开、共用同一materialization owner：current_dataset只准备snapshot，不构造随即丢弃的记录；current_dataset_view才准备完整exact记录，并复用同一atomic bundle、同revision/范围的结果。公共锁只截取不可变输入及接纳结果，不合并时间索引或计算时间坐标；需要完整新平坦记录时的线性输出成本放在锁外，不能把“只增量放置数组”误称为所有metadata工作都O(增量)。
 - 接收队列、未消费exact事件、用户科学history、Frozen快照和溯源元数据各有明确寿命；溯源的event identity/run record/parent关系不授予无限保留祖先像素的权力。当前科学求值、same-shot front和Frozen仍持所需真实payload；有限结果只永久保留自身数据及祖先元数据，回放按原chunks顺序按需读取，不在公共锁内构造全历史临时队列。普通Monitor不构造无消费者的finite replay副本。
@@ -173,6 +174,7 @@ Node new chunk
 ### 4.3 Logic Node contract
 
 - Waveform Measurement消费adapter原生record FIFO，每record发布一次，保存全部sample；不按主机Read interval抽取latest或拼成另一种shot。记录数决定finite终点，Receive buffer只决定未消费记录可容纳多久，不是采样率/绘图刷新率。adapter arm成功必须已开始接收或真实启动硬件；Stop必须停止该adapter负责的采集，N100本身的持续广播不因停止一次capture被伪称关闭。公共队列满或capture期CRC/流水号/时间缺口明确失败，不覆盖旧记录。
+- Waveform输出按声明的columns选择数据；连续列使用原不可变record的slice/transpose视图，非连续列才gather，最后都沿DataBlock同一不可变所有权入口，不先为连续内存而重复复制。协议CRC使用等价标准库原生算法时保留原多项式、初值与坏包拒绝，不以取消校验提速。
 - Waveform time_basis只取device_clock、sample_clock或host_receive；设备运行时钟、采样计数推得时间与主机接收时刻不能互相冒充，started_at_ns不是设备时间到UTC的校准。每条record的原时钟/相对run时间/主机收到时间写入Runtime event_record.record_timing，物化只合并被选记录，不另建Measurement历史。
 - 普通Stop先停源，再按原commit路径发布已经进入接收队列的完整record，最后封存；失败时不继续发布，清理失败不得遮蔽原始错误。finite记录数与Receive buffer容量互不替代；Monitor不无限积累，只保留既有consumer明确请求的窗口。
 - AxisSpec.coordinate_of声明同一domain内同一物理行的替代坐标；主轴/替代坐标共用row codes而不形成笛卡尔积或重复fate。Setting以一行fate和坐标选择呈现，Scope切坐标按同一位置转换，Figure保存选择。连续源的SAMPLE_TIME位于Point，Runtime按记录时刻加样本偏移物化真实采样时间轴；Plot、选择、Fit与存档使用同一Dataset坐标，不在renderer临时变换科学时间。触发源的record time保留独立波形首样本相对时间；scope未知触发偏移时不得声称零点是trigger。

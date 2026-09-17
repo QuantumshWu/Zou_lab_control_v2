@@ -435,7 +435,7 @@ def test_a_window_with_no_valid_shot_has_an_empty_distribution() -> None:
     history's lower limit -- a bar for a shot that never happened.
     """
 
-    session = PlotSession(_shots(np.full((1, 3), np.nan)), RollingPlot())
+    session = PlotSession(_shots(np.full((3, 1), np.nan)), RollingPlot())
     try:
         renderer = session._renderer
         renderer.draw()
@@ -448,5 +448,9 @@ def test_a_window_with_no_valid_shot_has_an_empty_distribution() -> None:
             float(np.max(path.vertices[:, 0])) for path in rail.get_paths()
         ]
         assert counts and max(counts) == 0.0
+        readout = next(value for key, value in renderer._artists.items() if key.endswith(":latest"))
+        assert readout.get_text() == ""
+        session.update_data(_shots(np.asarray([[1.0], [3.0], [np.nan]]), revision=1))
+        assert readout.get_text() == "3"
     finally:
         session.close()

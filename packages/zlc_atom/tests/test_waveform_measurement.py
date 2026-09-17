@@ -19,7 +19,7 @@ from zlc_atom.devices.simulation.waveform import (
     VirtualWaveformConfig,
     VirtualWaveformSource,
 )
-from zlc_atom.devices.waveform.contract import WaveformOutput
+from zlc_atom.devices.waveform.contract import WaveformOutput, WaveformRecord
 from zlc_atom.devices.waveform.tek_scope import (
     TIME_PER_DIV_FIELD,
     TekScopeConfig,
@@ -40,6 +40,7 @@ from zlc_atom.nodes.waveform_measurement import (
     WaveformMeasurementNode,
     WaveformMeasurementRequest,
 )
+from zlc_atom.nodes.waveform_measurement.measurement import shot_snapshot
 from zlc_data import PRIMARY_INDEX, SHOT_TIME, AxisId
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
@@ -82,6 +83,7 @@ def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
     """Whole IMU packets come out in order; noise, other packets and a torn
     tail do not: the tail waits for the bytes that complete it."""
 
+    assert payload_crc16(b"123456789") == 0x31C3
     first = _imu_packet(
         gyro=(0.1, 0.2, 0.3),
         accel=(0.0, 0.0, 9.8),
@@ -225,6 +227,26 @@ def test_one_measurement_publishes_what_its_source_carries() -> None:
         with pytest.raises(ValueError, match="at least"):
             WaveformMeasurementRequest("imu", repeat=0, buffer_seconds=0.0)
         assert {field.name for field in LOGIC_NODE.authoring_schema.fields} == {"repeat", "buffer_seconds"}
+        for samples, continuous, columns in (
+            (1, False, (0, 1, 2)),
+            (4, True, (0, 1, 2)),
+            (4, False, (0, 1, 2)),
+            (4, False, (2, 0)),
+        ):
+            raw = np.arange(samples * 10, dtype=np.float32).reshape(samples, 10)
+            record = WaveformRecord(raw, 0, 1.0)
+            output = WaveformOutput("value", "V", tuple(map(str, columns)), columns)
+            snapshot = shot_snapshot(
+                record, output=output, producer="test", generation="test",
+                revision=1, sample_interval_seconds=0.01, continuous=continuous,
+            )
+            expected = raw[:, list(columns)]
+            if samples > 1 and not continuous:
+                expected = expected.T
+            np.testing.assert_array_equal(snapshot.block.values.ravel(), expected.ravel())
+            assert np.shares_memory(snapshot.block.values, record.samples) == (columns == (0, 1, 2))
+            with pytest.raises(ValueError):
+                snapshot.block.values.setflags(write=True)
     finally:
         imu.close()
         scope.close()
