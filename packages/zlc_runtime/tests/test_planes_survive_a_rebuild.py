@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from zlc_data import (
     REPEAT,
@@ -36,10 +37,10 @@ from zlc_data import (
     StreamGenerationId,
     ValueSchema,
 )
+from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.plane import (
     SignalDataPlane,
     _IndexedMaterialization,
-    _MaterializedFinite,
     _materialize_indexed_dataset,
 )
 
@@ -69,6 +70,35 @@ def _shot(
         None if sigma is None else np.asarray([[[sigma]]], dtype=np.float64),
     )
     return OwnedSnapshot(block.ref(GENERATION), block)
+
+
+def _finite_run(schema, chunks, read_after):
+    declaration = DatasetOutputDeclaration("value", "test.value")
+    node = SimpleNamespace(instance_id="scan", dataset_output_declarations=(declaration,),
+                           signal_key=lambda name: "scan/" + name)
+    plane = SignalDataPlane()
+    views = {}
+    try:
+        plane.begin_generation(node)
+        for sequence, (snapshot, origin) in enumerate(chunks, 1):
+            plane.commit_live(node, {"value": LiveDatasetOutput(
+                declaration, snapshot, DatasetCoverage(sequence, len(chunks)), schema, origin,
+            )})
+            if sequence in read_after:
+                views[sequence] = plane.current_dataset("scan/value")
+        _, tap = plane.follow_publications("scan/value")
+        plane.seal_committed(node)
+        plane.retire(node)
+        try:
+            for snapshot, _origin in chunks:
+                replayed = tap.next(0).value("scan/value").snapshot
+                np.testing.assert_array_equal(replayed.block.values, snapshot.block.values)
+                np.testing.assert_equal(replayed.block.sigma, snapshot.block.sigma)
+        finally:
+            tap.close()
+        return views
+    finally:
+        plane.close()
 
 
 def test_indexed_history_keeps_each_shots_stated_error() -> None:
@@ -172,9 +202,7 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
         (_shot(chunk_schema, 4.0, 0.1), (0, 0)),
         (_shot(chunk_schema, 5.0, 0.2), (1, 0)),
     )
-    built = SignalDataPlane._materialize_dataset(
-        "scan/value", 3, run_schema, GENERATION, chunks, None
-    )
+    built = _finite_run(run_schema, chunks, (2,))[2]
     assert built.block.sigma is not None
     np.testing.assert_allclose(
         np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2)
@@ -235,20 +263,10 @@ def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
         (_shot(chunk_schema, 5.0, None), (1, 0)),
         (_shot(chunk_schema, 6.0, 0.3), (2, 0)),
     )
-    whole = SignalDataPlane._materialize_dataset(
-        "scan/value", 3, run_schema, GENERATION, chunks, None
-    )
-    prefix = SignalDataPlane._materialize_dataset(
-        "scan/value", 2, run_schema, GENERATION, chunks[:2], None
-    )
-    extended = SignalDataPlane._materialize_dataset(
-        "scan/value",
-        3,
-        run_schema,
-        GENERATION,
-        chunks[2:],
-        _MaterializedFinite(2, prefix, {}, 2),
-    )
+    whole = _finite_run(run_schema, chunks, (3,))[3]
+    views = _finite_run(run_schema, chunks, (2, 3))
+    prefix, extended = views[2], views[3]
+    assert prefix.block.values.reshape(-1).tolist() == [4.0, 5.0, 0.0]
     np.testing.assert_array_equal(
         np.asarray(extended.block.values), np.asarray(whole.block.values)
     )
@@ -277,15 +295,5 @@ def test_a_run_that_states_no_error_gains_none_from_a_basis() -> None:
     )
     first = (_shot(chunk_schema, 4.0, None), (0, 0))
     second = (_shot(chunk_schema, 5.0, None), (1, 0))
-    prefix = SignalDataPlane._materialize_dataset(
-        "plain/value", 1, run_schema, GENERATION, (first,), None
-    )
-    extended = SignalDataPlane._materialize_dataset(
-        "plain/value",
-        2,
-        run_schema,
-        GENERATION,
-        (second,),
-        _MaterializedFinite(1, prefix, {}, 1),
-    )
+    extended = _finite_run(run_schema, (first, second), (1, 2))[2]
     assert extended.block.sigma is None

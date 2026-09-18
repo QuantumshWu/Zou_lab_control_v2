@@ -759,26 +759,60 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future(grouped_histogr
     finally:
         host.close(timeout=10)
 
-def test_fit_switches_a_native_curve_to_source_scatter_without_a_pointer() -> None:
-    snapshots = _fit_curve_series("native-fit-source-scatter", offset=0.1)
+@pytest.mark.parametrize("kind", ("curve", "rolling", "facet"))
+def test_fit_switches_a_native_curve_to_source_scatter_without_a_pointer(kind) -> None:
+    x = np.arange(9.0)
+    values = 2.0 * np.exp(-0.5 * ((x - 4.0) / 1.2) ** 2)
+    values = values[:, None] + np.asarray((0.1, 4.1, 8.1))
+    group = AxisRef.cell_data("site")
+    curve = CurvePlot(AxisRef.point("x"), group=group)
+    schema = make_dataset_schema(
+        repeat_domain(size=9 if kind == "rolling" else 1),
+        mapped_domain_from_columns(
+            {"sample": (0.0,)} if kind == "rolling" else
+            {"x": np.tile(x, 2), "frame": np.repeat((0.0, 1.0), 9)}
+            if kind == "facet" else {"x": x}
+        ),
+        cell_axes=(axis("site", size=3),), dtype=np.float64,
+    )
+    samples = values[:, None, :] if kind == "rolling" else (
+        np.tile(values, (2, 1))[None] if kind == "facet" else values[None]
+    )
+    spec = RollingPlot(group=group) if kind == "rolling" else (
+        FacetGridPlot(AxisRef.point("frame"), curve) if kind == "facet" else curve
+    )
     session = PlotSession(
-        snapshots(0, 0.2),
-        CurvePlot(AxisRef.point("x")),
+        make_snapshot(schema, samples, 0), spec,
         parameters={"uncertainty": False},
     )
     try:
         assert isinstance(session._renderer._artists.get("curve:prepared"), dict)
+        if kind == "facet":
+            session.focus_facet(0)
         result = session.fit("gaussian_offset", live=True)
-        assert result.success
-        scatter = session._renderer._fit_source_scatter
+        results = result.results if isinstance(result, FacetFitBatchResult) else (result,)
+        assert all(item is not None and item.success for item in results)
+        renderer = session._renderer
+        scatter = renderer._fit_source_scatter
         assert scatter is not None and scatter.get_visible()
-        assert np.asarray(scatter.get_offsets()).shape[0] == 81
-        assert not any(
-            line.get_visible()
-            for line, _identity, _label in session._renderer._series_lines[
-                id(session._renderer.primary_axes)
-            ]
-        )
+        assert np.asarray(scatter.get_offsets()).shape[0] == 9
+        source, identity, _label = renderer._series_lines[id(renderer.primary_axes)][0]
+        assert not source.get_visible()
+        fit_events = []
+        session.subscribe_fit(fit_events.append)
+        transform = next(item for item in session._raster_axes_snapshot()
+                         if item.role == ("history" if kind == "rolling" else
+                                          "facet_cell" if kind == "facet" else "main"))
+        px, py = transform.display_to_normalized(*scatter.get_offsets()[4])
+        assert session._raster_pointer_event(
+            "move", px, py, axes_snapshot=transform,
+        ).publish_front
+        assert renderer._series_hover[1] == identity
+        for action in ("press", "release"):
+            session._raster_pointer_event(action, px, py, button=1, axes_snapshot=transform)
+        assert renderer._series_locked[1] == identity
+        assert not source.get_visible() and scatter.get_visible()
+        assert session.last_fit is result and fit_events == []
     finally:
         session.close()
 
@@ -2024,7 +2058,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         session.close()
 
 def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
-    count = 200_000
+    count = 2_097_152
     x = np.linspace(0.0, 1.0, count)
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -2040,6 +2074,15 @@ def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
         axes = renderer.primary_axes
         renderer._materialize_prepared_curve()
         line = renderer._series_lines[id(axes)][0][0]
+        import tracemalloc
+        px, py = axes.transData.transform((0.5, np.sin(0.5)))
+        tracemalloc.start()
+        try:
+            assert renderer._series_hit(axes, px, py, 10.0) is not None
+            retained, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert retained < 2_000_000 and peak < 4_000_000
         renderer._set_xlim(axes, 0.5, 0.5005)
         assert np.asarray(line.get_xdata()).size == count
         px, py = axes.transData.transform((0.50025, np.sin(0.50025)))
@@ -2549,6 +2592,7 @@ def test_a_grid_overview_does_not_choose_series(monkeypatch) -> None:
     try:
         renderer = session._renderer
         assert renderer._facet_focus_index is None, "this test needs the overview"
+        materialize = renderer._materialize_prepared_curve
         def reject_materialization():
             raise AssertionError("overview must not materialize a series scene it cannot select")
 
@@ -2565,8 +2609,27 @@ def test_a_grid_overview_does_not_choose_series(monkeypatch) -> None:
         assert renderer._series_locked is None
 
         # And the gesture the overview DOES answer still works.
+        monkeypatch.setattr(renderer, "_materialize_prepared_curve", materialize)
+        materialize()
         session.focus_facet(0)
         assert renderer._facet_focus_index == 0
+        axes = renderer.primary_axes
+        px, py = axes.transData.transform((2.0, float(np.sin(2.0))))
+        assert _click_series(renderer, axes, px, py)
+        assert renderer._series_locked is not None
+        hidden = renderer.axes["facet_cell"][1]
+        assert not hidden.get_visible()
+        assert all(line.get_alpha() == renderer.style.artists.curve.alpha
+                   for line, _identity, _label in renderer._series_lines[id(hidden)])
+        session.show_facet_overview()
+        assert renderer._series_locked is None and renderer._series_hover is None
+        assert not any(text.get_visible() for text in renderer._series_annotations.values())
+        for index in (1, 0):
+            session.focus_facet(index)
+            assert all(line.get_alpha() == renderer.style.artists.curve.alpha
+                       and line.get_linewidth() == renderer.style.artists.curve.linewidth
+                       for line, _identity, _label in renderer._series_lines[id(renderer.primary_axes)])
+            session.show_facet_overview()
     finally:
         session.close()
 

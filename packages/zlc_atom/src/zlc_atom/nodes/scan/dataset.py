@@ -245,12 +245,13 @@ def scan_dataset_schema(
 
 
 class ScanDatasetWriter:
-    """Plan one source event's canonical scan placement and reject duplicates.
+    """Plan one source event's canonical scan placement.
 
     The plan's coordinates are the writer's from birth; the SOURCE schema
     belongs to the watched signal and is only knowable from its first captured
     value, so schema planning happens then and every later capture must match
-    it.  Values and validity remain in immutable event chunks owned by Runtime.
+    it. Runtime owns retained values, validity and the written-cell mask which
+    rejects overlapping commits; the writer does not keep a second address set.
     """
 
     def __init__(
@@ -275,7 +276,6 @@ class ScanDatasetWriter:
             raise ValueError("run_repeats must be at least 1")
         self._source_schema: DatasetSchema | None = None
         self._schema: DatasetSchema | None = None
-        self._filled: set[tuple[int, int, int]] = set()
         self._source_points = 0
         self._written = 0
 
@@ -310,11 +310,7 @@ class ScanDatasetWriter:
             self._allocate(value)
         elif value.schema != self._source_schema:
             raise ValueError("the source dataset schema changed during the scan")
-        address = (scan_repeat, run_repeat, row)
-        if address in self._filled:
-            raise ValueError("this Run repeat already captured this scan point")
         points = self._source_points
-        self._filled.add(address)
         self._written += 1
         assert self._schema is not None
         return LiveDatasetOutput(

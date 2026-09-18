@@ -80,9 +80,7 @@ def immutable_array(values, *, dtype: np.dtype, shape: tuple[int, ...]) -> np.nd
     if source.dtype == dtype and is_intrinsically_immutable_array(source):
         return source
     normalized = source.astype(dtype, copy=False)
-    result = np.frombuffer(normalized.tobytes(order="C"), dtype=dtype).reshape(shape)
-    result.setflags(write=False)
-    return result
+    return np.ndarray(shape, dtype=dtype, buffer=normalized.tobytes(order="C"))
 
 
 def immutable_bool_array(values, *, shape: tuple[int, ...]) -> np.ndarray:

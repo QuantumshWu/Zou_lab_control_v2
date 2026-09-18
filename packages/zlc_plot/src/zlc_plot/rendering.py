@@ -2749,12 +2749,14 @@ class MatplotlibRenderer:
                 return index
         return None
 
-    def interactive_axes_at(self, event: Any) -> Any | None:
+    def interactive_axes_at(
+        self, event: Any = None, *, x: float | None = None, y: float | None = None
+    ) -> Any | None:
         """Resolve pointer ownership from visible geometry, not backend hints."""
 
         candidate = getattr(event, "inaxes", None)
-        x = getattr(event, "x", None)
-        y = getattr(event, "y", None)
+        if event is not None:
+            x, y = getattr(event, "x", None), getattr(event, "y", None)
         visible = tuple(axis for axis in self._figure.axes if axis.get_visible())
         if x is None or y is None:
             return candidate if candidate in visible else None
@@ -3542,6 +3544,10 @@ class MatplotlibRenderer:
             return _boxes_meet(axes.bbox, confined.bbox)
 
         for key, value in self._artists.items():
+            if self._facet_focus_index is not None and key.startswith("facet:"):
+                cell = key.split(":", 2)[1]
+                if cell.isdigit() and int(cell) != self._facet_focus_index:
+                    continue
             # The grid's chrome group answers the same question the boundary
             # chrome below does, and it is asked once, there.
             if key not in self._FACET_CHROME_KEYS:
@@ -4258,11 +4264,7 @@ class MatplotlibRenderer:
 
         if not (
             kernels.engaged()
-            and isinstance(self.semantic_spec, (CurvePlot, HistogramPlot))
-            and (
-                not isinstance(self.spec, FacetGridPlot)
-                or self._facet_focus_index is None
-            )
+            and isinstance(self.semantic_spec, (CurvePlot, RollingPlot, HistogramPlot))
         ):
             return None
         data = tuple(
@@ -4775,9 +4777,9 @@ class MatplotlibRenderer:
             ).reshape(segments.shape)
             top_origin = np.asarray(display, dtype=np.float64)
             top_origin[..., 1] = float(height) - top_origin[..., 1]
-            group_x = np.mean(top_origin[..., 0], axis=1)
-            group_low = np.min(top_origin[..., 1], axis=1)
-            group_high = np.max(top_origin[..., 1], axis=1)
+            group_x = (top_origin[:, 0, 0] + top_origin[:, 1, 0]) * 0.5
+            group_low = np.minimum(top_origin[:, 0, 1], top_origin[:, 1, 1])
+            group_high = np.maximum(top_origin[:, 0, 1], top_origin[:, 1, 1])
             xs.append(np.ascontiguousarray(group_x))
             lows.append(np.ascontiguousarray(group_low))
             highs.append(np.ascontiguousarray(group_high))
@@ -5927,29 +5929,23 @@ class MatplotlibRenderer:
                 artist for group in bar_groups for artist in group
             )
             strokes: list[tuple[float, Any, tuple[Any, ...]]] = []
-            for artists, plan, painter in (
-                (
-                    bar_artists,
-                    self._error_bar_plan(bar_groups, canvas) if bar_artists else None,
-                    self._stroke_error_bar_plan,
-                ),
-                (
-                    data_lines,
-                    self._curve_stroke_plan(data_lines, canvas) if data_lines else None,
-                    self._stroke_curve_plan,
-                ),
-                (
-                    fit_lines,
-                    self._curve_stroke_plan(fit_lines, canvas) if fit_lines else None,
-                    self._stroke_curve_plan,
-                ),
+            for artists, planner, painter in (
+                (bar_artists, self._error_bar_plan, self._stroke_error_bar_plan),
+                (data_lines, self._curve_stroke_plan, self._stroke_curve_plan),
+                (fit_lines, self._curve_stroke_plan, self._stroke_curve_plan),
             ):
-                # A group the kernel refuses stays in the bands, drawn as
-                # its artists where the stacking puts them.
-                if artists and plan is not None:
-                    strokes.append(
-                        (min(float(artist.get_zorder()) for artist in artists), (painter, plan), artists)
+                # Focus raises only its own line and bars. Batch at their
+                # actual depths so later dimmed series cannot cover them.
+                by_depth: dict[float, list[Any]] = {}
+                for artist in artists:
+                    by_depth.setdefault(float(artist.get_zorder()), []).append(artist)
+                for depth, group in by_depth.items():
+                    plan = planner(
+                        tuple((artist,) for artist in group) if artists is bar_artists else group,
+                        canvas,
                     )
+                    if plan is not None:
+                        strokes.append((depth, (painter, plan), tuple(group)))
             strokes.sort(key=lambda item: item[0])
             native_ids = {id(artist) for _zorder, _stroke, artists in strokes for artist in artists}
             for position, (zorder, (painter, plan), _artists) in enumerate(strokes):
@@ -7077,15 +7073,25 @@ class MatplotlibRenderer:
             return None
         point = np.asarray((px, py), dtype=float)
         data_point = axes.transData.inverted().transform(point)
-        best = (float(radius) * self.plan.device_pixel_ratio) ** 2
+        reach = float(radius) * self.plan.device_pixel_ratio
+        best = reach ** 2
         hit = None
         entries = self._series_lines.get(id(axes), ())
         current = None if self._series_hover is None else self._series_hover[1]
+        signature = (
+            tuple(map(float, axes.get_xlim())),
+            tuple(map(float, axes.get_ylim())),
+            tuple(map(float, axes.bbox.bounds)),
+        )
         if current is not None:
             entries = tuple(item for item in entries if item[1] == current) + tuple(
                 item for item in entries if item[1] != current)
         for line, identity, label in entries:
-            if not line.get_visible():
+            source_scatter = not line.get_visible() and any(
+                line is source and visible
+                for source, visible in self._fit_hidden_source_lines
+            )
+            if not line.get_visible() and not source_scatter:
                 continue
             if isinstance(line, _BarBuffered):
                 edges, counts = line._zlc_bars
@@ -7095,27 +7101,22 @@ class MatplotlibRenderer:
                     best = 0.0
                     if identity == current:
                         return hit
-                    continue
-            signature = (
-                tuple(map(float, axes.get_xlim())),
-                tuple(map(float, axes.get_ylim())),
-                int(round(float(self._figure.bbox.width))),
-                int(round(float(self._figure.bbox.height))),
-            )
+                continue
             cached = self._series_hit_cache.get(id(line))
-            if cached is not None and cached[0] == signature:
-                x, y, pixels, finite, isolated_glyphs = cached[1]
+            cache_signature = (signature, source_scatter)
+            if cached is not None and cached[0] == cache_signature:
+                x, y, pixels, finite, bounds, sources = cached[1]
             else:
-                registered = self._line_sources.get(id(line))
-                isolated_glyphs = False
-                if registered is not None and registered[0] is line:
-                    _line, _owner, raw_x, raw_y, isolated_glyphs = registered
-                    x = np.asarray(raw_x, dtype=float).reshape(-1)
-                    y = np.asarray(raw_y, dtype=float).reshape(-1)
+                # Pick the geometry already drawn by the common owner,
+                # including its display-column envelope and isolated glyphs.
+                if source_scatter:
+                    offsets = np.asarray(self._fit_source_scatter.get_offsets(), dtype=float)
+                    x, y = offsets[:, 0], offsets[:, 1]
                 else:
                     x, y = _series_xy(line)
                     x, y = np.asarray(x, dtype=float).reshape(-1), np.asarray(y, dtype=float).reshape(-1)
-                if x.size > _ENVELOPE_MAX_COLUMNS * 4:
+                sources = line.get_markevery() if line.get_marker() == "_" and not source_scatter else None
+                if x.size > _ENVELOPE_MAX_COLUMNS * 4 and sources is None and np.all(np.isfinite(x)) and np.all(x[1:] >= x[:-1]):
                     low, high = sorted(map(float, axes.get_xlim()))
                     start = max(0, int(np.searchsorted(x, low)) - 1)
                     stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
@@ -7126,16 +7127,25 @@ class MatplotlibRenderer:
                     pixels[finite] = axes.transData.transform(
                         np.column_stack((x[finite], y[finite]))
                     )
-                self._series_hit_cache[id(line)] = (
-                    signature,
-                    (x, y, pixels, finite, isolated_glyphs),
+                bounds = (
+                    np.min(pixels[finite], axis=0, initial=np.inf),
+                    np.max(pixels[finite], axis=0, initial=-np.inf),
                 )
-            if not np.any(finite):
+                if source_scatter or sources is None and finite.sum() == 1:
+                    sources = np.flatnonzero(finite)
+                else:
+                    sources = np.asarray(() if sources is None else sources, dtype=np.intp)
+                self._series_hit_cache[id(line)] = (
+                    cache_signature,
+                    (x, y, pixels, finite, bounds, sources),
+                )
+            low, high = bounds
+            if px < low[0] - reach or px > high[0] + reach or py < low[1] - reach or py > high[1] + reach:
                 continue
             adjacent = finite[:-1] & finite[1:]
-            starts, ends = pixels[:-1][adjacent], pixels[1:][adjacent]
-            if starts.size:
-                delta = ends - starts
+            starts = pixels[:-1][adjacent]
+            if starts.size and not source_scatter:
+                delta = pixels[1:][adjacent] - starts
                 length = np.einsum("ij,ij->i", delta, delta)
                 t = np.zeros(length.shape)
                 usable = length > 0
@@ -7154,16 +7164,9 @@ class MatplotlibRenderer:
                            float(y[source] + t[local] * (y[source + 1] - y[source])))
                     if identity == current:
                         return hit
-            singleton = (
-                _isolated_curve_mask(np.isfinite(x) & np.isfinite(y))
-                if isolated_glyphs
-                else finite if not starts.size and finite.sum() == 1
-                else np.zeros(finite.shape, dtype=bool)
-            )
-            if bool(np.any(singleton)):
-                sources = np.flatnonzero(singleton)
-                delta = pixels[sources] - point
-                distance = np.einsum("ij,ij->i", delta, delta)
+            if sources.size:
+                point_delta = pixels[sources] - point
+                distance = np.einsum("ij,ij->i", point_delta, point_delta)
                 local = int(np.argmin(distance))
                 if float(distance[local]) <= best:
                     source = int(sources[local])
@@ -7179,17 +7182,11 @@ class MatplotlibRenderer:
                         return hit
         return hit
 
-    def _apply_series_focus(self, only: int | None = None) -> None:
-        """Style every series for the current focus, or just one cell's.
+    def _apply_series_focus(self, only: int | None = None, *, refresh_fit: bool = True) -> None:
+        """Style the painted series, or the one cell its painter just updated.
 
-        ``only`` names ONE axes.  The per-cell painter calls it that way,
-        because the artists it just built are the only ones that can need
-        styling; calling the whole-figure walk from inside the per-cell
-        loop styled every cell once per cell -- 4096 walks to dress 64
-        cells, 43.14 ms of a 169 ms revision on a 64-cell grid.  The memo
-        below cannot absorb that: its token names the error-bar artists,
-        and those are rebuilt every revision by design, so it never
-        matched twice in a row and never can.
+        Hidden cells need no gesture styles. Their existing per-cell update
+        applies the current state when they become painted again.
         """
 
         # A focus taken where it was allowed must not survive onto a surface
@@ -7219,9 +7216,12 @@ class MatplotlibRenderer:
             if axis_id in self._series_lines
         }
         tokens: dict[int, tuple[Any, ...]] = {}
-        for axis_id, entries in self._series_lines.items():
-            if only is not None and axis_id != only:
-                continue
+        axes_to_style = (
+            (only,) if only is not None
+            else tuple(id(axis) for _key, axis, _index in self.painted_surfaces)
+        )
+        for axis_id in axes_to_style:
+            entries = self._series_lines.get(axis_id, ())
             axis_bars = self._series_bars.get(axis_id, {})
             tokens[axis_id] = (
                 locked,
@@ -7246,9 +7246,8 @@ class MatplotlibRenderer:
         identity = None if active is None else active[1]
         focus_line = None
         bar_alpha = self.style.render.uncertainty_bar_alpha
-        for axis_id, entries in self._series_lines.items():
-            if axis_id not in pending:
-                continue
+        for axis_id in pending:
+            entries = self._series_lines.get(axis_id, ())
             axis_bars = self._series_bars.get(axis_id, {})
             for line, series_id, _label in entries:
                 focused = identity is not None and series_id == identity
@@ -7304,7 +7303,7 @@ class MatplotlibRenderer:
                     focus_line = line
             applied[axis_id] = tokens[axis_id]
         self._series_focus_applied_axes = applied
-        if only is None:
+        if only is None and refresh_fit:
             self._refresh_fit_focus()
         if only is not None and (active is None or only != active[0]):
             # The inspector belongs to the focused cell, and this call did
@@ -7480,7 +7479,7 @@ class MatplotlibRenderer:
         )
         if before_state == after_state:
             return handled
-        self._apply_series_focus()
+        self._apply_series_focus(refresh_fit=redraw)
         if redraw:
             with style_context(self.style):
                 self._compose_frame(chrome_stable=True)
@@ -7508,7 +7507,7 @@ class MatplotlibRenderer:
         if x.size and y.size and np.isfinite((x[0], y[0])).all():
             anchor = (float(x[0]), float(y[0]))
         self._series_locked = (locked[0], identity, label, *anchor)
-        self._apply_series_focus()
+        self._apply_series_focus(refresh_fit=redraw)
         if redraw:
             with style_context(self.style):
                 self._compose_frame(chrome_stable=True)
@@ -13195,7 +13194,6 @@ class MatplotlibRenderer:
                 * self._facet_mark_scale()
             )
             label.set_text(content)
-        self._refresh_fit_focus()
 
     def _published_rgba(self) -> Any:
         """The painted canvas as ONE publish block, read-only.

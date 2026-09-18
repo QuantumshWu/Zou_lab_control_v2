@@ -163,6 +163,8 @@ Node new chunk
 - 一次commit的siblings共享revision、run record和causal parent。
 - 成功Dataset commit的通知只由Plane的publication订阅发出，worker与processor遵守同一入口；NodeHost不再为同一commit额外唤醒。进度、完成、交互及渲染完成仍沿各自原通知，不能为省唤醒把已到deadline的新数据强制推迟到下一display beat。Indexed history在原子commit预检一次，更新保留窗口不重复执行相同预检；lease变化仍在更新前校验。
 - Run record属于generation声明，不属于每event数据：实际准备完成后只注册/冻结一次，后续commit引用Runtime拥有的不可变记录，不携整张计划反复比较。event record才携本事件变化的时间/设备事实，每次atomic commit只冻结一次；内部siblings/publication复用同一记录。finite物化共享已冻结条目，按需生成精确prefix记录，indexed只保留窗口范围。仅更换DataBlock身份不重扫未改变的数值内容。
+- Finite保留在原generation owner内直接持有已验证的数值bytes与紧凑逐event事实，不逐shot常驻SignalValue/Snapshot/DataBlock及祖先Publication对象树。Boolean数值与mask无损按位保存、公开读取时仍恢复不可变数组；其它完整连续数值plane复用原不可变byte owner，不额外复制相机图像或sigma。祖先run声明共享，事件只记录其序号、parent关系和实际event record；相同非空record按内容共享，空record不建独立对象。普通数组物化不解码祖先；Exact replay按需重建公共对象，仍保留全部identity、validity、sigma、placement与来源事实。待消费replay只持所选signal的数据，不钉住退休node、其它siblings或整份materialized Dataset；已持有的真实parent payload仍沿原弱引用owner解析。内部紧凑编码不是新增磁盘格式。
+- Boolean bytes直接存入同一append-only事件buffer，不逐plane留独立bytes头；materialization只在锁内截取已提交前缀的引用和范围，逐event拷贝/解码在锁外，不能因大pixel mask扩大公共锁内复制。来自本generation已有commit的parent复用其sequence/offset，不把过去整条祖先链在每个新event重复展开；读取用显式栈，不新增递归深度限制或永久EventRef索引。
 - 数组读取与来源记录读取按真实需求分开、共用同一materialization owner：current_dataset只准备snapshot，不构造随即丢弃的记录；current_dataset_view才准备完整exact记录，并复用同一atomic bundle、同revision/范围的结果。公共锁只截取不可变输入及接纳结果，不合并时间索引或计算时间坐标；需要完整新平坦记录时的线性输出成本放在锁外，不能把“只增量放置数组”误称为所有metadata工作都O(增量)。
 - 接收队列、未消费exact事件、用户科学history、Frozen快照和溯源元数据各有明确寿命；溯源的event identity/run record/parent关系不授予无限保留祖先像素的权力。当前科学求值、same-shot front和Frozen仍持所需真实payload；有限结果只永久保留自身数据及祖先元数据，回放按原chunks顺序按需读取，不在公共锁内构造全历史临时队列。普通Monitor不构造无消费者的finite replay副本。
 - Exact订阅的live待处理队列同时按事件数与payload字节明确限额，默认1024事件、128MiB，可在订阅时显式调整；这是未消费缓冲而非history上限。满额或单事件超额只使该订阅明确失败，不丢旧/取latest、不阻塞其它消费者。原生不可暂停数据源不能承诺无限积压仍无损；有界故障必须携容量和积压信息。
@@ -325,6 +327,7 @@ Node new chunk
 - Semantic Fate中的Scope始终是一个popup action，不得因轴坐标数量隐藏能力，也不得把全部坐标展开成popup rows；只接受实际typed coordinate，不提供Latest。collapsed Fluent control显示`Scope: coordinate`，文字区单击激活/再次单击取消，激活以统一Fluent选中样式表示，右箭头独立打开fate菜单；点击其它位置、Esc、失焦或隐藏取消。只有当前Scope控件已激活时滚轮才按schema真实坐标顺序切换，否则交给外层页面；激活本身不修改参数/触发render，Live metadata更新保留同一控件的激活态。PanelState、PlotSpec与Figure仍只保存完整tagged `scope_fate(coordinate)`，UI不保存第二份mode/coordinate状态。
 - Histogram只有`bins`变更需要一次完整sample projection；`density`/`cumulative`只是已接受bins的representation，不得再扫描full payload。复用已settle tick unit时必须在枚举lattice前先核上界，不得因range大幅变化卡住UI。
 - Histogram的Group是普通axis fate；Single、Group、Facet及Facet×Group共用一次分组分箱，所有分布共享bin edges。Counts保留每组计数，Density每组独立归一，Cumulative沿各组bins累加。保留原来的无描边矩形bin样式，只改变分组颜色与透明度；hover/lock调整填充透明度，不增加step轮廓或不可见替身line。交互直接读取同一bin几何，Group不把科学数据伪装成Curve。逐组Fit保留真实sample axes，不混组、不悄悄取首组；既有fit结果契约以有序sample_axes承载Facet×Group，单fit是同一表的无轴一项。
+- Series命中只读公共绘图owner实际画出的polyline/孤立点、fit源scatter或Histogram bins，不从raw重新构造一套全分辨率屏幕几何。现有命中缓存只保留当前几何及bounds，数据/viewport变化随原入口失效，不常驻每段方向等重复数组。Focus/Rolling复用同一native数据绘制，按真实zorder分批；手势只修改painted axes，accepted interaction map直接定位axes，不扫描隐藏Facet子树。有效hover/lock/wheel只经原OVERLAY入口compose一次，不投影、不重新fit；无变化不发新front。
 - 正式96×128 Camera、小Area ROI、主图atomic fit、并行ROI image与一个fit-parameter Rolling Panel链路以100 ms作为profile警戒线；明显的额外cadence、HOL、错误串行和重复render必须删除。若剩余是必要fit/raster/Qt成本，只有能带来实质收益且不增加不相称复杂度的优化才实施。
 - 性能以真实TaskConsole、1/4/8 panels、fit+overlay、Setting/Edit和Qt owner latency为profile对象。
 

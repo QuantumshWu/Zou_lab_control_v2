@@ -222,6 +222,10 @@ def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
         }
         assert cached_before == cached_after, "a nearby motion recomputed"
         del first, second
+        axes.set_xlim(0.5, 2.5)
+        renderer._series_hit(axes, 101.0, 101.0, 12.0)
+        assert all(id(entry[1]) != cached_before[key]
+                   for key, entry in renderer._series_hit_cache.items())
 
         # New data invalidates: the cache is of the OLD polyline, and the
         # series mutation clears it before the new lines draw.
@@ -229,6 +233,15 @@ def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
         assert not renderer._series_hit_cache, (
             "a series mutation must drop every cached hover polyline"
         )
+        values = np.zeros((24, 4))
+        valid = np.ones(values.shape, dtype=bool)
+        valid[:, 1] = False
+        session.update_data(make_snapshot(_schema(24), values, revision=3, validity=valid))
+        axes.set_xlim(0.0, 3.0)
+        px, py = axes.transData.transform((0.5, 0.0))
+        assert renderer._series_hit(axes, px, py, 1.0) is None
+        px, py = axes.transData.transform((2.5, 0.0))
+        assert renderer._series_hit(axes, px, py, 1.0) is not None
     finally:
         session.close()
 

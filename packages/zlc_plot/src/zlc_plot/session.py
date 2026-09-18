@@ -4762,6 +4762,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         pixel_x = float(x) * float(width)
         pixel_y = (1.0 - float(y)) * float(height)
         interaction_transform = axes_snapshot
+        event_axes = (
+            self._axis_for_transform(interaction_transform)
+            if interaction_transform is not None
+            else self._renderer.interactive_axes_at(x=pixel_x, y=pixel_y)
+        )
         series_changed = False
         def series(action: str, axes: Any | None = None) -> bool:
             nonlocal series_changed
@@ -4793,38 +4798,36 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         elif selected_action == "scroll":
             if float(step) == 0.0:
                 return self._raster_pointer_state(publish_front=False)
-            direction = "up" if float(step) > 0.0 else "down"
-            event = MouseEvent(
-                "scroll_event",
-                canvas,
-                pixel_x,
-                pixel_y,
-                button=direction,
-                step=float(step),
-            )
-            if interaction_transform is not None:
-                event.inaxes = self._axis_for_transform(
-                    interaction_transform
+            if not self._renderer.series_focus_scroll(event_axes, float(step), redraw=False):
+                direction = "up" if float(step) > 0.0 else "down"
+                event = MouseEvent(
+                    "scroll_event",
+                    canvas,
+                    None,
+                    None,
+                    button=direction,
+                    step=float(step),
                 )
-            axes = self._renderer.interactive_axes_at(event)
-            if not self._renderer.series_focus_scroll(axes, float(step), redraw=False):
+                event.x, event.y = int(pixel_x), int(pixel_y)
+                event._set_inaxes(event_axes, (pixel_x, pixel_y))
                 self._on_scroll(event, interaction_transform=interaction_transform)
+        elif selected_action == "move" and button is None:
+            series("move", event_axes)
         else:
             event = MouseEvent(
                 f"button_{selected_action}_event"
                 if selected_action != "move"
                 else "motion_notify_event",
                 canvas,
-                pixel_x,
-                pixel_y,
+                None,
+                None,
                 button=button,
                 dblclick=bool(double),
             )
-            event_axes = (
-                self._axis_for_transform(interaction_transform)
-                if interaction_transform is not None
-                else self._renderer.interactive_axes_at(event)
-            )
+            # The accepted interaction map already resolved the axes; a
+            # synthetic event need not hit-test every hidden Facet patch.
+            event.x, event.y = int(pixel_x), int(pixel_y)
+            event._set_inaxes(event_axes, (pixel_x, pixel_y))
             if selected_action == "press":
                 if button == 1 and not double:
                     series("press", event_axes)
@@ -4832,8 +4835,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     event,
                     interaction_transform=interaction_transform,
                 )
-            elif selected_action == "move" and button is None:
-                series("move", event_axes)
             elif selected_action == "release":
                 handled = button == 1 and series("release", event_axes)
                 if handled:

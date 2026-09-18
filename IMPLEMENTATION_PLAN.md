@@ -10,6 +10,10 @@
 
 ## 1. 当前实施范围
 
+- Finite Runtime保留改为原generation内的不可变数值bytes、packed事件事实/祖先及共享run声明；Exact按需重建公共对象，不常驻逐shot对象树，不保留祖先图像。当前数组读取不解码祖先记录，相同非空record共享、空record无独立对象；去掉ScanDatasetWriter重复地址集合，重叠仍由Plane唯一coverage拒绝。公共不可变数组直接构造最终shape，删除多余一维ndarray壳；没有新增production文件、类或磁盘格式。
+- 同一120000-shot、35bool+component validity、三层祖先的真实Plane/ScanDatasetWriter隔离A/B：Boolean按位保存并合入原事件buffer后实际容器17.52MB，工作集增长591.2→24.0MB；完整采集30.00→30.04s，首次完整数组0.820→0.764s。完整run平均finite commit72.6→85.5µs，而相邻2k短测中位63.25→61.50µs，不宣称正常提交稳定提速。代价是显式逐shot完整replay1.045→8.123s；普通current Dataset显示不走该replay。Boolean解压与metadata/public对象按需恢复的成本明确保留；大mask输入只在锁内捕获引用与范围，已有祖先commit复用引用，删除平方展开。原数值planes/replay/retire、SelectionBridge与Viewer archive直接验证通过；这不是实验机进程归因或硬件采集速度证明。
+- 分组交互的Focus/Rolling回到公共native绘制与真实zorder，跳过隐藏Facet子树及重复fit annotation刷新。命中复用实际画出的LOD/scatter/bin几何，删除raw百万点屏幕副本及中途无收益的segment缓存。真实209万点、同一绘图几何的isolated hit P50由221.87降至0.34ms，缓存35.65MB降至0.206MB；这不是整帧耗时。DPR3的64格Curve Focus有效hover整Host中位139.94降至20.23ms，Rolling23.31降至13.83ms；有效手势仍1 compose/front、0 projection/solver。真实Qt验证沿已有入口，窗口关闭；全部bench/证据留ignored research，不入Git。
+
 - 分组显示收口：Curve/Rolling/Histogram使用同一低饱和series palette与源坐标序号，Histogram共享bin edges、逐组Counts/Density/Cumulative，保留原有无描边矩形bin，删除额外step轮廓；hover/lock只改变bin透明度并直接从bin几何命中。Hover/lock/wheel复用现有交互，Rolling meter随锁组即时更新且同色，不改变Card尺寸。误差棒改为每bar一个工字形并集、单次alpha；不同bar独立混色，Native/Agg/导出同一端点与style，删除三artist旧路。
 - Histogram Group的fit、classifier、Figure及Runtime参数发布完整贯通；sample_axes取代仅一个sample axis的旧字段，Facet×Group保留真实轴，空分布invalid。Single/Facet/Focus fit绘制复用同一topology表；锁组仅换显示/阈值目标，不重新求解。Series交互先接受状态再经原OVERLAY路径呈现一次，删除先compose再记账的旁路；classifier信息和组名共用原Threshold文字，legend未实施。
 - Tick label删除端点内移/alignment状态与半gap虚拟边界；在现有chrome重排时按真实text/data框判断，只缩字号、到下限接受重叠。修复全局rcParams使已接受字号回弹，以及导出换DPI后的漏排版；普通图/侧栏/Facet/Focus/保存共用同一owner。真实Qt截图核对-400/-200/0/200锚点、Group下拉切换、hover/lock/wheel、meter及带fit的保存重开；验收窗口均关闭，截图/探针留ignored research。

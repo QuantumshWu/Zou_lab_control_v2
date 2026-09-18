@@ -1429,26 +1429,42 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     from zlc_plot.render_process import _plain as wire_plain
     from zlc_plot.figure_artifact import _plain as figure_plain
     from zlc_data.figure_archive import _jsonable
-    from zlc_runtime import SignalPublication, SignalValue
-    from zlc_runtime.streams import EventRef, StreamId
-    from zlc_data import StreamGenerationId
+    from zlc_data import REPEAT
+    from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput, SignalDataPlane
 
     record = {"node": "scan", "table": [[float(index)] for index in range(500)]}
-    publications = []
-    for sequence in range(1, 4):
-        event_record = {"shot": sequence}
-        value = SignalValue("scan/value", _snapshot, None, record, event_record=event_record)
-        publication = SignalPublication(
-            EventRef(StreamId("scan"), StreamGenerationId("g"), sequence),
-            {"scan/value": value}, object(),
-            run_record=record, event_record=event_record,
-        )
-        publications.append(SignalPublication._metadata(publication))
-    lineage, _source = capture_run_chain(
-        SimpleNamespace(direct_parent_publications=lambda publication:
-                        tuple(publications[max(0, publication.event_ref.sequence - 2):publication.event_ref.sequence - 1])),
-        publications[-1],
-    )
+    declaration = DatasetOutputDeclaration("value", "test.value")
+    node = SimpleNamespace(instance_id="scan", dataset_output_declarations=(declaration,),
+                           signal_key=lambda name: "scan/" + name)
+    schema = _snapshot.block.schema
+    repeats, points = schema.repeat_domain.size, schema.point_domain.size
+    repeat = AxisSpec(AxisId("scan.repeat"), "repeat", REPEAT, 3 * repeats, tuple(range(3 * repeats)))
+    canonical = DatasetSchema(DomainSpec((3 * repeats,), (repeat,), (tuple(range(3 * repeats)),)), schema.point_domain,
+                              schema.cell_domain, schema.value_schema)
+    plane = SignalDataPlane()
+    try:
+        plane.begin_generation(node)
+        plane.set_run_record(node, record)
+        parent = None
+        for sequence in range(1, 4):
+            plane.commit_live(node, {"value": LiveDatasetOutput(
+                declaration, _snapshot, DatasetCoverage(sequence * repeats * points, 3 * repeats * points),
+                canonical, ((sequence - 1) * repeats, 0), {"shot": sequence},
+            )}, worker_source=None if parent is None else ("scan/value", parent))
+            parent = plane.latest_publication("scan/value")
+        _, tap = plane.follow_publications("scan/value")
+        try:
+            for _ in range(3):
+                publication = tap.next(0)
+        finally:
+            tap.close()
+        plane.seal_committed(node)
+        plane.retire(node)
+        parent = None
+        assert not plane.direct_parent_publications(publication)[0].signals
+        lineage, _source = capture_run_chain(plane, publication)
+    finally:
+        plane.close()
     assert [node["event"]["sequence"] for node in lineage["nodes"]] == [1, 2, 3]
     assert all(node["signals"] == ["scan/value"] for node in lineage["nodes"])
     for prepared in (lineage, wire_plain(lineage), figure_plain(lineage), _jsonable(lineage)):

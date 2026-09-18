@@ -92,6 +92,10 @@ def test_partial_scan_current_dataset_has_invalid_future_points() -> None:
                     )
                 },
             )
+        with pytest.raises(ValueError, match="overlaps"):
+            plane.commit_live(producer, {SCAN_OUTPUT.name: writer.write(
+                source, row=0, scan_repeat=0, run_repeat=0,
+            )})
         assert plane.seal_committed(producer, cut_short=True)
         current = plane.current_dataset(producer.signal_key(SCAN_OUTPUT.name))
         valid = current.expanded_validity()

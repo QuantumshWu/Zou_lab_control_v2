@@ -17,6 +17,7 @@ from zlc_data import (
     REPEAT,
     SCAN_POINT,
     SPATIAL_X,
+    INVALID,
     AxisId,
     AxisSpec,
     BlockId,
@@ -25,6 +26,7 @@ from zlc_data import (
     DatasetRevision,
     DatasetComponentValidity,
     DatasetSchema,
+    IndexedWindow,
     DomainSpec,
     OwnedSnapshot,
     SCALAR_DOMAIN,
@@ -800,7 +802,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         assert prefix_camera["mixed"] is True
         assert first.run_record is second.run_record
         for value, key in ((first, "0"), (second, "2")):
-            assert prefix_record["record_timing"]["camera"][key] is value.event_record["record_timing"]["camera"][key]
+            assert prefix_record["record_timing"]["camera"][key] == value.event_record["record_timing"]["camera"][key]
         with pytest.raises(TypeError):
             prefix_record["record_timing"]["camera"]["0"]["record_time_seconds"] = 99
         assert first.canonical_schema is second.canonical_schema
@@ -956,7 +958,8 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
 
 
 @pytest.mark.parametrize("point_codes", ((0, 1), (0, 1, 0)))
-def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes) -> None:
+@pytest.mark.parametrize("mask_kind", ("components", "subset", "cell", "global"))
+def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes, mask_kind) -> None:
     declaration = DatasetOutputDeclaration("survival", "test.survival")
     node = _node("repeat-title", declaration)
     plane = SignalDataPlane()
@@ -964,10 +967,11 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes
     run = AxisSpec(AxisId("run"), "repeat", REPEAT, 2, (0, 1))
     point = AxisSpec(AxisId("power"), "power", SCAN_POINT, 2, (135, 247))
     site = AxisSpec(AxisId("site"), "site", SPATIAL_X, 2, (0, 1))
+    channel = AxisSpec(AxisId("channel"), "channel", SPATIAL_X, 3, (0, 1, 2))
     canonical = DatasetSchema(
         DomainSpec((6,), (repeat, run), ((0, 0, 1, 1, 2, 2), (0, 1, 0, 1, 0, 1))),
-        DomainSpec((len(point_codes),), (point,), (point_codes,)), DomainSpec((2,), (site,)),
-        ValueSchema(ValidityContract.components(site.axis_id), np.dtype(bool)),
+        DomainSpec((len(point_codes),), (point,), (point_codes,)), DomainSpec((2, 3), (site, channel)),
+        ValueSchema(ValidityContract.components(site.axis_id, channel.axis_id), np.dtype(bool)),
     )
     scalar_event = _event("survival", 0.0).block.schema
     event_schema = replace(canonical, repeat_domain=scalar_event.repeat_domain,
@@ -983,20 +987,37 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes
         plane.begin_generation(node)
         for written, (row, column, expected) in enumerate(steps, 1):
             eligible = np.array([[[written % 2 == 0, False]]], dtype=bool)
+            validity = (INVALID if mask_kind == "global" else
+                        CellValidity(np.zeros((1, 1), dtype=bool)) if mask_kind == "cell" else
+                        DatasetComponentValidity((site.axis_id,), eligible) if mask_kind == "subset" else
+                        DatasetComponentValidity((site.axis_id, channel.axis_id), np.broadcast_to(eligible[..., None], (1, 1, 2, 3))))
             block = DataBlock(BlockId("survival"), DatasetRevision(0),
-                              np.zeros((1, 1, 2), dtype=bool),
-                              DatasetComponentValidity((site.axis_id,), eligible), event_schema)
+                              np.zeros((1, 1, 2, 3), dtype=bool), validity, event_schema,
+                              window=IndexedWindow(written - 1, written, written - 1))
             snapshot = OwnedSnapshot(block.ref(StreamGenerationId("source")), block)
             value = plane.commit_live(node, {"survival": LiveDatasetOutput(
                 declaration, snapshot, DatasetCoverage(written, 6 * len(point_codes)),
                 canonical_schema=canonical, cell_origin=(row, column),
+                shot_time_seconds=written / 10,
             )})[node.signal_key("survival")]
             assert value.repeat_counts == expected
             saved.append((value, expected))
+        _, tap = plane.follow_publications(node.signal_key("survival"))
         assert plane.seal_committed(node, cut_short=True)
         snapshot = plane.current_dataset(node.signal_key("survival"))
-        assert not snapshot.expanded_validity()[..., -1].any()
+        assert not snapshot.expanded_validity()[..., -1, :].any()
         assert all(value.repeat_counts == expected for value, expected in saved)
+        try:
+            for original, expected in saved:
+                replayed = tap.next(0).value(node.signal_key("survival"))
+                assert replayed.repeat_counts == expected
+                assert replayed.coverage == original.coverage
+                assert replayed.primary_index == original.primary_index
+                assert replayed.shot_time == original.shot_time
+                assert replayed.snapshot.block.window == original.snapshot.block.window
+                np.testing.assert_array_equal(replayed.snapshot.expanded_validity(), original.snapshot.expanded_validity())
+        finally:
+            tap.close()
     finally:
         plane.close()
 
@@ -1268,26 +1289,21 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         assert calls == 0
         assert published_value_bytes == 100 * np.dtype(np.float64).itemsize
 
-        # Runtime retains exactly 100 one-cell event arrays plus one 100-cell
+        # Runtime retains exactly 100 one-cell byte planes plus one 100-cell
         # placement mask.  It has not built (or retained) 1+2+...+100 prefixes.
         state = plane._states["linear"]
-        retained = [
-            value
-            for _sequence, value, _origin, _parents in state.commit_chunks[
-                "linear/frame"
-            ]
-        ]
-        assert len(retained) == 100
+        retained = state.commit_chunks["linear/frame"][0]
+        assert len(retained) == 2 * 100
         assert state.materialized == {}
         assert state.publication is not None
-        assert state.publication.value("linear/frame") is retained[-1]
+        assert state.publication.value("linear/frame").snapshot.block.values.tobytes() == retained[-2]
+        parts = iter(retained)
         retained_array_bytes = sum(
-            value.snapshot.block.values.nbytes
-            + value.snapshot.block.validity.mask.nbytes
-            for value in retained
+            len(values)
+            for values, _sigma in zip(parts, parts)
         )
         placement_bytes = state.occupied_cells["linear/frame"].nbytes
-        assert retained_array_bytes + placement_bytes == 100 * (8 + 1) + 100
+        assert retained_array_bytes + placement_bytes == 100 * 8 + 100
 
         assert plane.seal_committed(node)
         assert calls == 0, "ending production must not consume an unread Dataset"

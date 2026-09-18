@@ -22,7 +22,9 @@ from __future__ import annotations
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from array import array
 import math
+import marshal
 import threading
 from types import MappingProxyType
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -33,6 +35,7 @@ from weakref import WeakKeyDictionary, ref as weakref_ref
 import numpy as np
 from zlc_data import (
     INVALID,
+    VALID,
     PRIMARY_INDEX,
     SHOT_TIME,
     SAMPLE_TIME,
@@ -86,6 +89,8 @@ __all__ = [
     "SignalValue",
 ]
 
+_EMPTY_MAPPING = MappingProxyType({})
+
 
 class RetainedPublicationExpired(CancelledError):
     """A queued view refers to an indexed publication already evicted.
@@ -129,6 +134,8 @@ def _freeze_run_record_value(value: object, path: str) -> object:
             raise TypeError(f"{path} contains a non-finite number")
         return value
     if isinstance(value, Mapping):
+        if not value:
+            return _EMPTY_MAPPING
         frozen: dict[str, object] = {}
         for key, item in value.items():
             if type(key) is not str:
@@ -147,6 +154,52 @@ def _freeze_run_record(value: Mapping[str, object]) -> Mapping[str, object]:
     frozen = _freeze_run_record_value(value, "run_record")
     assert isinstance(frozen, Mapping)
     return frozen
+
+
+def _record_primitives(value: object) -> object:
+    """Pack only already-validated metadata, never scientific array payloads."""
+    if isinstance(value, Mapping):
+        return {key: _record_primitives(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_record_primitives(item) for item in value)
+    return value
+
+
+def _retained_bytes(array: np.ndarray) -> bytes:
+    """Pack booleans losslessly; reuse immutable numeric planes unchanged."""
+    if array.dtype == np.bool_ and array.size > 1:
+        return np.packbits(array).tobytes()
+    owner = array
+    while isinstance(owner, np.ndarray) and owner.base is not None:
+        owner = owner.base
+    if isinstance(owner, bytes) and array.flags.c_contiguous and len(owner) == array.nbytes:
+        return owner
+    return array.tobytes()
+
+
+def _retained_array(data: bytes, shape: tuple, dtype) -> np.ndarray:
+    dtype = np.dtype(dtype)
+    if dtype == np.bool_ and math.prod(shape) > 1:
+        # Unpack into immutable bytes before constructing a public array.
+        data = np.unpackbits(np.frombuffer(data, dtype=np.uint8), count=math.prod(shape)).tobytes()
+    return np.ndarray(shape, dtype=dtype, buffer=data)
+
+
+def _finite_planes(chunk: tuple, schema: DatasetSchema, facts: tuple) -> tuple:
+    values, sigma = (facts[6], chunk[0]) if schema.value_schema.dtype == np.bool_ else chunk
+    validity = facts[7]
+    shape = schema.physical_shape
+    values = _retained_array(values, shape, schema.value_schema.dtype)
+    if type(validity) is not bool:
+        positions = facts[5] or ()
+        components = schema.value_schema.validity_contract.component_axis_ids
+        validity_shape = shape[:2] + tuple(
+            axis.size if index in positions else 1
+            for index, axis in enumerate(schema.cell_domain.axes) if axis.axis_id in components
+        )
+        validity = _retained_array(validity, validity_shape, np.bool_)
+    sigma = None if sigma is None else _retained_array(sigma, shape, np.float64)
+    return values, validity, sigma
 
 
 @runtime_checkable
@@ -227,7 +280,7 @@ class SignalValue:
         repeat_counts: tuple[int, ...] = (),
         shot_time: float | None = None,
     ) -> "SignalValue":
-        """Plane-only construction from its already frozen bundle records."""
+        """Plane/Host construction from already validated identity and data."""
 
         result = object.__new__(cls)
         for key, value in (
@@ -239,7 +292,6 @@ class SignalValue:
             ("repeat_counts", repeat_counts),
         ):
             object.__setattr__(result, key, value)
-        result._validate_fields()
         return result
 
     def _validate_fields(self) -> None:
@@ -431,7 +483,6 @@ class SignalPublication:
     run_record: Mapping[str, object] = field(default_factory=dict)
     event_record: Mapping[str, object] = field(default_factory=dict)
     signal_names: tuple[str, ...] = field(init=False)
-    _lineage: "SignalPublication | None" = field(init=False, default=None, repr=False, compare=False)
     _payload_ref: object = field(init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -449,23 +500,12 @@ class SignalPublication:
 
         result = object.__new__(cls)
         for key, value in (
-            ("event_ref", event_ref), ("signals", signals), ("_issuer", _issuer),
+            ("event_ref", event_ref), ("signals", MappingProxyType(signals)), ("_issuer", _issuer),
             ("direct_parent_refs", direct_parent_refs),
             ("run_record", run_record), ("event_record", event_record),
+            ("signal_names", tuple(signals)), ("_payload_ref", None),
         ):
             object.__setattr__(result, key, value)
-        result._validate_fields()
-        return result
-
-    @classmethod
-    def _metadata(cls, publication: "SignalPublication") -> "SignalPublication":
-        """Plane-owned ancestry without retaining the ancestor's array payload."""
-        result = object.__new__(cls)
-        for name in ("event_ref", "_issuer", "direct_parent_refs", "run_record", "event_record", "signal_names"):
-            object.__setattr__(result, name, getattr(publication, name))
-        object.__setattr__(result, "signals", MappingProxyType({}))
-        object.__setattr__(result, "_payload_ref", weakref_ref(publication))
-        object.__setattr__(result, "_lineage", None)
         return result
 
     def _validate_fields(self) -> None:
@@ -508,7 +548,6 @@ class SignalPublication:
             )
         object.__setattr__(self, "signals", MappingProxyType(signals))
         object.__setattr__(self, "signal_names", tuple(signals))
-        object.__setattr__(self, "_lineage", None)
         object.__setattr__(self, "_payload_ref", None)
         object.__setattr__(self, "direct_parent_refs", parents)
 
@@ -820,7 +859,9 @@ def _materialize_indexed_dataset(
                     slice(point_start, point_start + point_count),
                     *trailing,
                 ),
-                snapshot,
+                snapshot.block.values,
+                dataset_validity_storage(snapshot.block.validity, snapshot.block.schema),
+                snapshot.block.sigma,
             )
 
     basis = materialization.basis
@@ -877,17 +918,15 @@ def _rolled_planes(
     values[target] = block.values[source]
     validity[target[:2]] = dataset_validity_storage(block.validity, block.schema)[source[:2]]
     sigma: np.ndarray | None = None
-    if block.sigma is not None or any(
-        snapshot.block.sigma is not None for _place, snapshot in placements
-    ):
+    if block.sigma is not None or any(stated is not None for _place, _values, _validity, stated in placements):
         sigma = np.full(shape, np.nan, dtype=np.float64)
         if block.sigma is not None:
             sigma[target] = block.sigma[source]
-    for place, snapshot in placements:
-        values[place] = snapshot.block.values
-        validity[place[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
-        if snapshot.block.sigma is not None:
-            sigma[place] = snapshot.block.sigma
+    for place, event_values, event_validity, stated in placements:
+        values[place] = event_values
+        validity[place[:2]] = event_validity
+        if stated is not None:
+            sigma[place] = stated
     return values, compact_dataset_validity(validity, schema), sigma
 
 
@@ -914,10 +953,9 @@ def _extended_planes(
     values = np.array(block.values, dtype=schema.value_schema.dtype)
     validity = np.array(dataset_validity_storage(block.validity, block.schema), dtype=np.bool_)
     sigma = None if block.sigma is None else np.array(block.sigma)
-    for target, snapshot in placements:
-        values[target] = snapshot.block.values
-        validity[target[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
-        stated = snapshot.block.sigma
+    for target, event_values, event_validity, stated in placements:
+        values[target] = event_values
+        validity[target[:2]] = event_validity
         if stated is None:
             continue
         if sigma is None:
@@ -948,10 +986,9 @@ def _assembled_planes(
     values = np.zeros(shape, dtype=schema.value_schema.dtype)
     validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
     sigma: np.ndarray | None = None
-    for target, snapshot in placements:
-        values[target] = snapshot.block.values
-        validity[target[:2]] = dataset_validity_storage(snapshot.block.validity, snapshot.block.schema)
-        stated = snapshot.block.sigma
+    for target, event_values, event_validity, stated in placements:
+        values[target] = event_values
+        validity[target[:2]] = event_validity
         if stated is None:
             continue
         if sigma is None:
@@ -1319,17 +1356,16 @@ class _GenerationState:
     publication_stream: AcquisitionStream[SignalPublication] | None = None
     exact_outputs: frozenset[str] | None = None
     canonical_schemas: Mapping[str, DatasetSchema] = field(default_factory=dict)
-    commit_chunks: dict[
-        str,
-        list[
-            tuple[
-                int,
-                SignalValue,
-                tuple[int, int],
-                tuple[SignalPublication, ...],
-            ]
-        ],
-    ] = field(default_factory=dict)
+    # Non-Boolean planes retain their original bytes. Placements and packed
+    # Boolean planes share one append-only event buffer with uint64 offsets.
+    # Metadata buffers only append; consumers take immutable byte slices.
+    commit_chunks: dict[str, tuple[list, bytearray, array]] = field(default_factory=dict)
+    commit_records: bytearray = field(default_factory=bytearray)
+    commit_record_offsets: array = field(default_factory=lambda: array("Q", [0]))
+    commit_record_indices: array = field(default_factory=lambda: array("Q"))
+    event_records: list[bytes] = field(default_factory=lambda: [b""])
+    event_record_indices: dict[bytes, int] = field(default_factory=dict)
+    lineage_runs: list[tuple] = field(default_factory=list)
     occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
     materialized: dict[str, _MaterializedFinite] = field(default_factory=dict)
     indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
@@ -2221,8 +2257,10 @@ class SignalDataPlane:
         sequence: int,
     ) -> tuple[
         DatasetSchema,
+        DatasetSchema,
         StreamGenerationId,
-        tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+        tuple[bytes | None, ...],
+        tuple[bytearray, array, int, int],
         _MaterializedFinite | None,
     ]:
         schema = state.canonical_schemas.get(signal_name)
@@ -2239,34 +2277,42 @@ class SignalDataPlane:
         # Every successful atomic commit appends exactly one entry per finite
         # output; sequence 1 occupies slot 0.  The owned list is already the
         # index, so finding the new suffix needs no scan of earlier shots.
-        chunks = tuple(
-            (value.snapshot, origin)
-            for _sequence, value, origin, _parents in state.commit_chunks[signal_name][floor:sequence]
-        )
-        return schema, state.generation, chunks, basis
+        planes, facts, offsets = state.commit_chunks[signal_name]
+        stride = 1 + int(state.published_schemas[signal_name].value_schema.dtype != np.bool_)
+        chunks = tuple(planes[floor * stride:sequence * stride])
+        packed_facts = (facts, offsets, floor, sequence)
+        return schema, state.published_schemas[signal_name], state.generation, chunks, packed_facts, basis
 
     @staticmethod
     def _materialize_dataset(
         signal_name: str,
         sequence: int,
         schema: DatasetSchema,
+        event_schema: DatasetSchema,
         generation: StreamGenerationId,
-        chunks: tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+        chunks: tuple[bytes | None, ...],
+        packed_facts: tuple[bytearray, array, int, int],
         basis: _MaterializedFinite | None,
     ) -> OwnedSnapshot:
         def placements():
-            for chunk, origin in chunks:
-                repeat_origin, point_origin = origin
-                chunk_schema = chunk.block.schema
-                repeat_stop = repeat_origin + chunk_schema.repeat_domain.size
-                point_stop = point_origin + chunk_schema.point_domain.size
+            records, offsets, floor, stop = packed_facts
+            stride = 1 + int(event_schema.value_schema.dtype != np.bool_)
+            # The writer only appends. Each already-committed prefix remains
+            # fixed; copy/decode individual events outside the Plane lock.
+            for index, sequence in enumerate(range(floor, stop)):
+                facts = marshal.loads(records[offsets[sequence]:offsets[sequence + 1]])
+                chunk = chunks[index * stride:(index + 1) * stride]
+                repeat_origin, point_origin = facts[0]
+                repeat_stop = repeat_origin + event_schema.repeat_domain.size
+                point_stop = point_origin + event_schema.point_domain.size
+                values, validity, sigma = _finite_planes(chunk, event_schema, facts)
                 yield (
                     (
                         slice(repeat_origin, repeat_stop),
                         slice(point_origin, point_stop),
                         *(slice(None) for _axis in schema.cell_domain.axes),
                     ),
-                    chunk,
+                    values, validity, sigma,
                 )
 
         if basis is None:
@@ -2627,13 +2673,12 @@ class SignalDataPlane:
                 event_record=event_record,
                 parents=parents,
             )
-            replay_parents = (
-                ()
-                if parent is None or not exact_qualified
-                else (
-                    self._lineage_publication_locked(parent),
-                )
-            )
+            if exact_qualified:
+                memo = {}
+                ancestry = tuple(self._pack_lineage_locked(state, item, memo) for item in parents)
+                state.commit_records.extend(marshal.dumps(ancestry))
+                state.commit_record_offsets.append(len(state.commit_records))
+                state.commit_record_indices.append(self._pack_event_record_locked(state, event_record))
             for qualified, mask, target in occupied_updates:
                 mask[target] = True
                 occupied_cells[qualified] = mask
@@ -2653,14 +2698,29 @@ class SignalDataPlane:
                 state.last_parent_sequence = source_publication.event_ref.sequence
                 state.last_parent_trigger = trigger
             for qualified in exact_qualified:
-                state.commit_chunks.setdefault(qualified, []).append(
-                    (
-                        sequence,
-                        publication.signals[qualified],
-                        origins[qualified],
-                        replay_parents,
-                    )
-                )
+                value = publication.signals[qualified]
+                block = value.snapshot.block
+                validity = block.validity
+                window = block.window
+                value_bytes = _retained_bytes(block.values)
+                validity_bytes = (True if isinstance(validity, Valid) else False if isinstance(validity, Invalid)
+                                  else _retained_bytes(validity.mask))
+                facts = marshal.dumps((
+                    origins[qualified], None if value.primary_index == sequence else value.primary_index,
+                    value.repeat_counts, value.shot_time,
+                    None if window is None else (window.start, window.latest, window.stable_since),
+                    None if not isinstance(validity, DatasetComponentValidity) else
+                    tuple(index for index, axis in enumerate(block.schema.cell_domain.axes) if axis.axis_id in validity.axis_ids),
+                    value_bytes if block.values.dtype == np.bool_ else None, validity_bytes,
+                ))
+                if qualified not in state.commit_chunks:
+                    state.commit_chunks[qualified] = ([], bytearray(), array("Q", [0]))
+                planes, packed_facts, offsets = state.commit_chunks[qualified]
+                if block.values.dtype != np.bool_:
+                    planes.append(value_bytes)
+                planes.append(None if block.sigma is None else _retained_bytes(block.sigma))
+                packed_facts.extend(facts)
+                offsets.append(len(packed_facts))
             producer = state.publication_stream
             if producer is not None:
                 producer.emit(
@@ -2774,7 +2834,7 @@ class SignalDataPlane:
                 return value.snapshot, value.event_record
             else:
                 committed = state.commit_chunks[name]
-                if not 1 <= sequence <= len(committed):
+                if not 1 <= sequence < len(committed[2]):
                     raise ValueError("publication is not a canonical commit of this run")
                 cached = state.materialized.get(name)
                 if cached is not None and cached.sequence == sequence:
@@ -2793,7 +2853,7 @@ class SignalDataPlane:
                     materialized_record, record_sequence = seed.record, seed.record_sequence
                 if include_record and record_sequence != sequence:
                     # Only capture immutable chunk references under the lock.
-                    record_chunks = tuple(committed[record_sequence:sequence])
+                    record_chunks = (state.event_records, state.commit_record_indices[record_sequence:sequence])
                     merge_record = True
         if snapshot is None:
             snapshot = (
@@ -2805,7 +2865,14 @@ class SignalDataPlane:
             if indexed_input is not None and materialized_record is None:
                 materialized_record = _merge_event_records(indexed_input.records)
             elif merge_record:
-                records = tuple(value.event_record for _sequence, value, _origin, _parents in record_chunks)
+                packed_records, indices = record_chunks
+                decoded = {0: _EMPTY_MAPPING}
+                records = []
+                for index in indices:
+                    if index not in decoded:
+                        decoded[index] = _freeze_run_record(marshal.loads(packed_records[index]))
+                    records.append(decoded[index])
+                records = tuple(records)
                 materialized_record = _merge_event_records(
                     records if materialized_record is None else (materialized_record, *records)
                 )
@@ -3127,37 +3194,23 @@ class SignalDataPlane:
             raise ValueError(
                 "followed publication inputs must be unique siblings of its source"
             )
-        committed = state.commit_chunks.get(signal_name, ()) if replay else ()
-        stop = len(committed)
+        committed = state.commit_chunks.get(signal_name) if replay else None
+        stop = 0 if committed is None else len(committed[2]) - 1
         current = (self._selected_publication_locked(state.publication, selected)
                    if replay and not stop and state.publication is not None else None)
-        chunks = tuple(state.commit_chunks.get(name, ()) for name in selected)
-        owner_id, generation = state.owner_id, state.generation
-        start = (committed[0][0] if stop else
+        start = (1 if stop else
                  current.event_ref.sequence if current is not None else state.next_sequence)
+        payloads = {(item.event_ref, item.signal_names): weakref_ref(item)
+                    for item in self._publication_parents if item._payload_ref is None} if stop else {}
+        replay_input = self._replay_input_locked(state, selected) if stop else None
 
         def retained(index):
             nonlocal current
-            # Append-only chunk lists and one stop cursor replace N wrappers
-            # and per-sibling full-run indexes constructed under this lock.
+            # Recreate only the requested event and siblings from owned bytes.
             if stop:
                 with self._lock:
-                    sequence, value, _origin, parents = committed[index]
-                    signals = {}
-                    for name, entries in zip(selected, chunks, strict=True):
-                        if index >= len(entries):
-                            raise RuntimeError("exact sibling outputs did not commit together")
-                        sibling_sequence, sibling, _placement, sibling_parents = entries[index]
-                        if sibling_sequence != sequence or sibling_parents != parents:
-                            raise RuntimeError("exact sibling outputs did not commit together")
-                        signals[name] = sibling
-                    publication = SignalPublication._from_owned_records(
-                        EventRef(StreamId(owner_id), generation, sequence),
-                        signals, self._publication_issuer,
-                        direct_parent_refs=tuple(parent.event_ref for parent in parents),
-                        run_record=value.run_record, event_record=value.event_record,
-                    )
-                    self._publication_parents[publication] = parents
+                    sequence = index + 1
+                    publication = self._retained_publication_locked(replay_input, sequence, payloads)
                     size = self._publication_payload_bytes_locked(publication)
                     if size > max_bytes:
                         raise SourceFailed(f"exact replay event {sequence} has {size} payload bytes, limit {max_bytes}")
@@ -3581,19 +3634,155 @@ class SignalDataPlane:
         if publication._issuer is not self._publication_issuer:
             raise ValueError("signal publication was not issued by this data plane")
 
-    def _lineage_publication_locked(self, publication: SignalPublication) -> SignalPublication:
-        """One immutable metadata node per event, shared by finite replay routes."""
-        if publication._payload_ref is not None:
-            return publication
-        cached = publication._lineage
+    @staticmethod
+    def _pack_event_record_locked(state: _GenerationState, record: Mapping) -> int:
+        if not record:
+            return 0
+        packed = marshal.dumps(_record_primitives(record))
+        index = state.event_record_indices.get(packed)
+        if index is None:
+            index = len(state.event_records)
+            state.event_records.append(packed)
+            state.event_record_indices[packed] = index
+        return index
+
+    def _pack_lineage_locked(self, state: _GenerationState, publication: SignalPublication, memo: dict) -> tuple:
+        """Keep event facts, sharing generation declarations across the run."""
+        cached = memo.get(publication)
         if cached is not None:
             return cached
-        parents = tuple(self._lineage_publication_locked(parent)
+        reference = publication.event_ref
+        identity = (reference.stream_id, reference.generation, publication.signal_names)
+        index = next((index for index, entry in enumerate(state.lineage_runs) if entry[:3] == identity), None)
+        if index is None:
+            index = len(state.lineage_runs)
+            state.lineage_runs.append((*identity, publication.run_record))
+        if (reference.stream_id.value == state.owner_id and reference.generation == state.generation
+                and 0 < reference.sequence < len(state.commit_record_offsets)):
+            return index, reference.sequence
+        parents = tuple(self._pack_lineage_locked(state, parent, memo)
                         for parent in self._publication_parents[publication])
-        metadata = SignalPublication._metadata(publication)
-        self._publication_parents[metadata] = parents
-        object.__setattr__(publication, "_lineage", metadata)
-        return metadata
+        result = (index, reference.sequence, self._pack_event_record_locked(state, publication.event_record) or None, parents)
+        memo[publication] = result
+        return result
+
+    def _unpack_lineage_locked(self, runs, entry, payloads, restored, records, decoded):
+        packed, offsets, indices, event_records = records
+        pending = [entry]
+        while pending:
+            item = pending[-1]
+            index, sequence = item[:2]
+            key = (index, sequence)
+            if key in restored:
+                pending.pop()
+                continue
+            if len(item) == 2:
+                parents = marshal.loads(packed[offsets[sequence - 1]:offsets[sequence]])
+                item = (index, sequence, indices[sequence - 1], parents)
+                pending[-1] = item
+            record_index, parent_entries = item[2:]
+            missing = [parent for parent in parent_entries if parent[:2] not in restored]
+            if missing:
+                pending.extend(reversed(missing))
+                continue
+            pending.pop()
+            parents = tuple(restored[parent[:2]] for parent in parent_entries)
+            record_index = record_index or 0
+            if record_index not in decoded:
+                decoded[record_index] = _freeze_run_record(marshal.loads(event_records[record_index]))
+            stream, generation, signal_names, run_record = runs[index]
+            reference = EventRef(stream, generation, sequence)
+            payload_ref = payloads.get((reference, signal_names))
+            metadata = object.__new__(SignalPublication)
+            for name, value in (
+                ("event_ref", reference), ("signals", _EMPTY_MAPPING),
+                ("_issuer", self._publication_issuer), ("signal_names", signal_names),
+                ("direct_parent_refs", tuple(parent.event_ref for parent in parents)),
+                ("run_record", run_record), ("event_record", decoded[record_index]),
+                ("_payload_ref", False if payload_ref is None else payload_ref),
+            ):
+                object.__setattr__(metadata, name, value)
+            self._publication_parents[metadata] = parents
+            restored[key] = metadata
+        return restored[entry[:2]]
+
+    @staticmethod
+    def _replay_input_locked(state: _GenerationState, names: tuple[str, ...]) -> tuple:
+        # A pending replay owns its selected bytes, not the retired node,
+        # unselected siblings, or the last full canonical materialization.
+        return (
+            state.owner_id, state.generation, state.committed_run_record,
+            state.published_schemas, state.canonical_schemas,
+            (state.commit_records, state.commit_record_offsets, state.commit_record_indices, state.event_records), state.lineage_runs,
+            {name: state.commit_chunks.get(name, ()) for name in names},
+            {name: state.publication.value(name).snapshot.block for name in names},
+        )
+
+    def _retained_publication_locked(self, replay_input: tuple, sequence: int, payloads=None) -> SignalPublication:
+        owner_id, generation, run_record, schemas, canonicals, records, runs, chunks_by_name, templates = replay_input
+        packed_records, record_offsets, record_indices, event_records = records
+        ancestry = marshal.loads(packed_records[record_offsets[sequence - 1]:record_offsets[sequence]])
+        decoded = {0: _EMPTY_MAPPING}
+        record_index = record_indices[sequence - 1]
+        if record_index:
+            decoded[record_index] = _freeze_run_record(marshal.loads(event_records[record_index]))
+        event_record = decoded[record_index]
+        # The existing weak owner contains only publications actually held by
+        # live work, a queue or a Frozen consumer. Metadata cannot pin pixels.
+        if payloads is None:
+            payloads = {(item.event_ref, item.signal_names): weakref_ref(item)
+                        for item in self._publication_parents if item._payload_ref is None} if ancestry else {}
+        restored = {}
+        parents = tuple(self._unpack_lineage_locked(runs, entry, payloads, restored, records, decoded) for entry in ancestry)
+        signals = {}
+        for name, chunks in chunks_by_name.items():
+            if not chunks or not 0 < sequence < len(chunks[2]):
+                raise RuntimeError("exact sibling outputs did not commit together")
+            planes, packed_facts, offsets = chunks
+            schema = schemas[name]
+            stride = 1 + int(schema.value_schema.dtype != np.bool_)
+            chunk = planes[(sequence - 1) * stride:sequence * stride]
+            facts = marshal.loads(packed_facts[offsets[sequence - 1]:offsets[sequence]])
+            origin, primary_index, repeat_counts, shot_time, window, _validity_axes, _bits, _validity = facts
+            written = sequence * schema.repeat_domain.size * schema.point_domain.size
+            values, validity, sigma = _finite_planes(chunk, schema, facts)
+            if type(validity) is bool:
+                validity = VALID if validity else INVALID
+            elif _validity_axes is None:
+                validity = CellValidity(validity.reshape(schema.physical_shape[:2]))
+            else:
+                axes = tuple(schema.cell_domain.axes[index] for index in _validity_axes)
+                validity = DatasetComponentValidity(
+                    tuple(axis.axis_id for axis in axes),
+                    validity.reshape(schema.physical_shape[:2] + tuple(axis.size for axis in axes)),
+                )
+            # These planes were validated at commit and have only immutable
+            # byte owners. Rehydrate the private identity copy, without
+            # freezing again or scanning a retained image's sigma twice.
+            template = templates[name]
+            block = template.replacing(revision=DatasetRevision(sequence))
+            for field_name, field_value in (
+                ("values", values), ("validity", validity), ("sigma", sigma),
+                ("window", None if window is None else IndexedWindow(*window)),
+            ):
+                object.__setattr__(block, field_name, field_value)
+            snapshot = OwnedSnapshot(block.ref(generation), block)
+            canonical = canonicals[name]
+            signals[name] = SignalValue._from_owned_records(
+                name, snapshot, DatasetCoverage(written, canonical.repeat_domain.size * canonical.point_domain.size),
+                run_record=run_record, event_record=event_record,
+                canonical_schema=canonical, cell_origin=origin,
+                primary_index=sequence if primary_index is None else primary_index,
+                repeat_counts=repeat_counts, shot_time=shot_time,
+            )
+        publication = SignalPublication._from_owned_records(
+            EventRef(StreamId(owner_id), generation, sequence),
+            signals, self._publication_issuer,
+            direct_parent_refs=tuple(parent.event_ref for parent in parents),
+            run_record=run_record, event_record=event_record,
+        )
+        self._publication_parents[publication] = parents
+        return publication
 
     def _resolved_direct_parents_locked(
         self,
@@ -3618,24 +3807,16 @@ class SignalDataPlane:
             if parent._payload_ref is None:
                 resolved.append(parent)
                 continue
-            payload = parent._payload_ref()
+            payload = parent._payload_ref() if parent._payload_ref else None
             if payload is None:
                 state = self._states.get(parent.event_ref.stream_id.value)
                 if state is not None and not state.retired and state.generation == parent.event_ref.generation:
                     sequence = parent.event_ref.sequence
-                    values = {}
-                    for name in parent.signal_names:
-                        chunks = state.commit_chunks.get(name, ())
-                        if 0 < sequence <= len(chunks):
-                            values[name] = chunks[sequence - 1][1]
-                    if values:
-                        payload = SignalPublication._from_owned_records(
-                            parent.event_ref, values, self._publication_issuer,
-                            direct_parent_refs=parent.direct_parent_refs,
-                            run_record=parent.run_record, event_record=parent.event_record,
-                        )
+                    names = tuple(name for name in parent.signal_names if name in state.commit_chunks
+                                  and 0 < sequence < len(state.commit_chunks[name][2]))
+                    if names:
+                        payload = self._retained_publication_locked(self._replay_input_locked(state, names), sequence)
                         self._publication_parents[payload] = self._publication_parents[parent]
-                        object.__setattr__(payload, "_lineage", parent)
                         object.__setattr__(parent, "_payload_ref", weakref_ref(payload))
             resolved.append(parent if payload is None else payload)
         return tuple(resolved)
@@ -3717,7 +3898,7 @@ class SignalDataPlane:
             raise GenerationRetired("signal generation is no longer active")
         if state.terminal:
             raise RuntimeError("signal generation has already published terminal")
-        if len({id(parent) for parent in parents}) != len(parents):
+        if len({parent.event_ref for parent in parents}) != len(parents):
             raise ValueError("signal publication parents must be unique")
         for parent in parents:
             self._require_issued_publication_locked(parent)
