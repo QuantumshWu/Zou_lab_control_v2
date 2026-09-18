@@ -1142,6 +1142,18 @@ class DeclaredFormatter(_TickFormatter):
 # ------------------------------------------------------------- installers
 
 
+def prepare_tick_layout(axis: Any) -> None:
+    """Restore the declared font budget for a changed chrome layout."""
+
+    locator = axis.get_major_locator()
+    if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
+        locator._tick_cache_key = None
+    else:
+        signature = getattr(axis, "_zlc_tick_signature", ())
+        if signature and signature[0] == "named":
+            axis.set_tick_params(labelsize=signature[-1])
+
+
 def apply_smart_ticks(
     axis: Any,
     which: str = "both",

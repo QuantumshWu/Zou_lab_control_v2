@@ -92,6 +92,7 @@ from .ticks import (
     compact_number,
     declare_colorbar_ticks,
     declare_room,
+    prepare_tick_layout,
 )
 from ._validation import readonly_copy
 
@@ -2195,7 +2196,7 @@ def _build_axes(
             axis.tick_params(axis="both", length=style.render.facet_cell_tick_length_pt)
             axis.tick_params(axis="x", labelbottom=False)
             axis.tick_params(axis="y", labelleft=False)
-            axis.set_title("", pad=style.render.compact_axes_title_pad_pt, y=1.0)
+            axis.set_title("", pad=style.render.axes_title_pad_pt, y=1.0)
     return figure, made, others
 
 
@@ -10291,13 +10292,13 @@ class MatplotlibRenderer:
                 "",
                 transform=offset_copy(
                     history.transAxes, fig=self._figure,
-                    y=self.style.render.compact_axes_title_pad_pt, units="points",
+                    y=self.style.render.axes_title_pad_pt, units="points",
                 ),
                 color=self.style.palette.readout,
                 ha="right",
                 va="bottom",
                 clip_on=False,
-                fontsize=self.style.fonts.annotation_pt,
+                fontsize=self.style.fonts.annotation_pt * 0.5,
             )
             self._artists[f"{key}:latest"] = latest_text
             self._update_rolling_meter()
@@ -10792,11 +10793,12 @@ class MatplotlibRenderer:
         self._facet_chrome_signature = None
         self._facet_chrome_shape = None
 
-    def _fit_tick_label_text(self, axes, direction_labels, title_artists) -> None:
+    def _fit_tick_label_text(self, axes, direction_labels, title_artists, *, label_axes=None) -> None:
         # Empty gutter is not an obstacle. Price actual anchored text against
         # other text and the visible data boxes, once per changed chrome
-        # layout. A whole direction shares one size; never shift an endpoint
-        # label or change the locator's chosen ticks to make it fit.
+        # layout. Overview cells share one size per direction; a standalone
+        # panel keeps its main and auxiliary axes separate, spending the
+        # auxiliary font budget first. Tick anchors and values never change.
         renderer = _prepare_renderer(self._figure.canvas.get_renderer())
         obstacles = np.asarray(
             [axis.bbox.extents for axis in axes]
@@ -10806,9 +10808,23 @@ class MatplotlibRenderer:
         labels = [label for group in direction_labels for label in group]
         if not labels:
             return
-        directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
-        sizes = [max((label.get_fontsize() for label in group), default=MIN_TICK_LABEL_PT)
-                 for group in direction_labels]
+        groups = {}
+        group_indices = []
+        priorities = []
+        for direction, lane in enumerate(direction_labels):
+            for label in lane:
+                owner = None if label_axes is None else label_axes[id(label)]
+                key = (None if owner is None else id(owner), direction)
+                if key not in groups:
+                    groups[key] = len(groups)
+                    priorities.append(owner is not None and owner is not self.primary_axes)
+                group_indices.append(groups[key])
+        group_indices = np.asarray(group_indices)
+        priorities = np.asarray(priorities)[group_indices]
+        sizes = np.asarray([
+            max(label.get_fontsize() for label, group in zip(labels, group_indices) if group == index)
+            for index in range(len(groups))
+        ])
         while True:
             boxes = np.asarray([label.get_window_extent(renderer).extents for label in labels])
             # These are the same positive-extent rectangle comparisons as
@@ -10821,26 +10837,36 @@ class MatplotlibRenderer:
                 & (boxes[:, None, 1] <= all_boxes[None, :, 3])
             )
             touching[np.arange(len(boxes)), np.arange(len(boxes))] = False
-            crowded = set(directions[np.any(touching, axis=1)])
-            adjustable = [direction for direction in crowded
-                          if sizes[direction] > MIN_TICK_LABEL_PT + 1e-9]
-            if not adjustable:
+            adjustable = sizes[group_indices] > MIN_TICK_LABEL_PT + 1e-9
+            # A main/auxiliary collision spends only the auxiliary budget
+            # until it reaches the floor. Same-priority lanes share the cost.
+            text_conflicts = touching[:, :len(labels)] & (
+                ~adjustable[None, :] | (priorities[:, None] >= priorities[None, :])
+            )
+            crowded = set(group_indices[adjustable & (
+                np.any(text_conflicts, axis=1) | np.any(touching[:, len(labels):], axis=1)
+            )])
+            if not crowded:
                 break
-            for direction in adjustable:
-                size = sizes[direction] = max(MIN_TICK_LABEL_PT, sizes[direction] * _SHRINK)
-                for label in direction_labels[direction]:
-                    label.set_fontsize(min(size, label.get_fontsize()))
+            for group in crowded:
+                sizes[group] = max(MIN_TICK_LABEL_PT, sizes[group] * _SHRINK)
+            for label, group in zip(labels, group_indices):
+                if group in crowded:
+                    label.set_fontsize(min(sizes[group], label.get_fontsize()))
         # Commit to Axis templates once, after the size search. Re-running
         # tick_params on every hidden cell at every trial dominated planning.
         for direction, name in enumerate(("xaxis", "yaxis")):
             for axis_owner in axes:
+                group = groups.get((None if label_axes is None else id(axis_owner), direction))
+                if group is None:
+                    continue
                 axis = getattr(axis_owner, name)
                 locator = axis.get_major_locator()
                 if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
-                    locator._apply_drawn_size(min(sizes[direction], locator.drawn_pt))
+                    locator._apply_drawn_size(min(sizes[group], locator.drawn_pt))
                 else:
-                    old_size = axis._major_tick_kw.get("labelsize", sizes[direction])
-                    size = min(sizes[direction], old_size)
+                    old_size = axis._major_tick_kw.get("labelsize", sizes[group])
+                    size = min(sizes[group], old_size)
                     if size != old_size:
                         axis_owner.tick_params(axis="x" if direction == 0 else "y", labelsize=size)
 
@@ -10878,32 +10904,43 @@ class MatplotlibRenderer:
         artists it already has instead of replacing them.
         """
 
+        figure_text = tuple(
+            (key, self._artists[key].get_text())
+            for key in ("figure:title", "facet:outer_x", "facet:outer_y")
+            if key in self._artists
+        )
         if not isinstance(self.spec, FacetGridPlot) or self._facet_focus_index is not None:
             if "facet:chrome_labels" in self._artists:
                 self._discard_facet_cell_chrome()
             axes = tuple(axis for axis in self._figure.axes if axis.get_visible() and axis.axison)
             signature = (
                 self._figure.dpi,
+                figure_text,
                 tuple((id(axis), np.round(axis.bbox.extents, 6).tobytes(),
                        axis.viewLim.extents.tobytes(),
                        getattr(axis.xaxis, "_zlc_tick_signature", None),
                        getattr(axis.yaxis, "_zlc_tick_signature", None),
                        _tick_params_key(axis.xaxis), _tick_params_key(axis.yaxis),
-                       axis.title.get_text()) for axis in axes),
+                       axis.title.get_text(), axis.get_xlabel(), axis.get_ylabel()) for axis in axes),
             )
             if self._artists.get("ticks:layout") != signature:
                 direction_labels = ([], [])
+                label_axes = {}
                 for axis_owner in axes:
                     for direction, axis in enumerate((axis_owner.xaxis, axis_owner.yaxis)):
-                        locator = axis.get_major_locator()
-                        if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
-                            locator._tick_cache_key = None
+                        prepare_tick_layout(axis)
                         for tick in axis._update_ticks():
-                            direction_labels[direction].extend(
+                            labels = tuple(
                                 label for label in (tick.label1, tick.label2)
                                 if label.get_visible() and label.get_text()
                             )
-                self._fit_tick_label_text(axes, direction_labels, tuple(axis.title for axis in axes if axis.title.get_text()))
+                            direction_labels[direction].extend(labels)
+                            label_axes.update((id(label), axis_owner) for label in labels)
+                self._fit_tick_label_text(
+                    axes, direction_labels, tuple(axis.title for axis in axes if axis.title.get_text()),
+                    label_axes=label_axes,
+                )
+                self._position_chrome_text(axes, direction_labels)
                 self._artists["ticks:layout"] = signature
                 self._mark_axes_chrome_dirty(*axes)
             return
@@ -10953,6 +10990,7 @@ class MatplotlibRenderer:
         signature = (
             int(round(float(self._figure.bbox.width))),
             int(round(float(self._figure.bbox.height))),
+            figure_text,
             tuple(cell_key(index, axes) for index, axes in visible),
         )
         if signature == self._facet_chrome_signature and all(
@@ -11044,12 +11082,9 @@ class MatplotlibRenderer:
                     horizontal = axis is axes.xaxis
                     locator = axis.get_major_locator()
                     measured = isinstance(locator, (SmartOffsetLocator, DeclaredLocator))
-                    if measured:
-                        # A previous grid may have drawn this lane smaller
-                        # for a neighbour. Re-adopt its own cached placement
-                        # before choosing this grid's common size; no new
-                        # ladder walk is needed for the unchanged question.
-                        locator._tick_cache_key = None
+                    # Re-adopt the declared budget, including named ticks,
+                    # before pricing the changed grid's common size.
+                    prepare_tick_layout(axis)
                     zorder = float(axis.get_zorder())
                     # One artist can carry every MARK of one axis that
                     # strokes the same way -- which major and minor ticks
@@ -11175,7 +11210,7 @@ class MatplotlibRenderer:
             # therefore belongs to that next cell's title, not two owners.
             height = min(room.top + room.bottom for room in rooms)
             height *= float(self._figure.bbox.height) / dots_per_point
-            height -= self.style.render.compact_axes_title_pad_pt
+            height -= self.style.render.axes_title_pad_pt
             fitted = [
                 fitted_facet_cell_title(text, typography, self.style.fonts, height_pt=height)
                 for _axes, text, _size in titles_plan
@@ -11193,7 +11228,7 @@ class MatplotlibRenderer:
         if not reuse:
             self._discard_facet_cell_chrome()
         figure = self._figure
-        pad = self.style.render.compact_axes_title_pad_pt
+        pad = self.style.render.axes_title_pad_pt
         marks = self._artists.get("facet:chrome_marks", [])
         frames = self._artists.get("facet:chrome_spines", [])
         title_artists = self._artists.get("facet:chrome_titles", [])
@@ -11259,6 +11294,7 @@ class MatplotlibRenderer:
         self._artists["facet:chrome_spines"] = frames
         self._artists["facet:chrome_titles"] = title_artists
         self._artists["facet:chrome_labels"] = carrier
+        self._position_chrome_text(tuple(axes for _index, axes in visible), direction_labels)
         self._facet_chrome_shape = topology
         self._facet_chrome_owners = {
             id(artist): axes
@@ -11655,14 +11691,13 @@ class MatplotlibRenderer:
         # walk of it for an answer that is the same.
         self._facet_cell_titles = cell_titles
 
-        outer_labels = (("x", outer_x, 0.5, 0.012, 0.0), ("y", outer_y, 0.008, 0.5, 90.0))
-        for name, value, x_pos, y_pos, rotation in outer_labels:
+        for name, value, rotation in (("x", outer_x, 0.0), ("y", outer_y, 90.0)):
             artist_key = f"facet:outer_{name}"
             artist = self._artists.get(artist_key)
             if artist is None:
                 artist = self._figure.text(
-                    x_pos,
-                    y_pos,
+                    0.0,
+                    0.0,
                     "",
                     ha="center" if name == "x" else "left",
                     va="bottom" if name == "x" else "center",
@@ -11699,7 +11734,7 @@ class MatplotlibRenderer:
                 # label again, not whatever fitted the grid cell's room.
                 focused_title,
                 fontsize=self.style.fonts.figure_title_pt,
-                pad=self.style.render.compact_axes_title_pad_pt,
+                pad=self.style.render.axes_title_pad_pt,
                 y=1.0,
             )
         if isinstance(semantic, ImagePlot):
@@ -11958,11 +11993,11 @@ class MatplotlibRenderer:
             title_artist = self._artists.get("figure:title")
             if title_artist is None:
                 title_artist = self._figure.text(
-                    0.5,
-                    self.style.render.figure_title_y,
+                    0.0,
+                    0.0,
                     "",
                     ha="center",
-                    va="top",
+                    va="baseline",
                     fontsize=self.style.fonts.figure_title_pt,
                 )
                 self._artists["figure:title"] = title_artist
@@ -11975,13 +12010,94 @@ class MatplotlibRenderer:
             owner = self.primary_axes
             pad = self.style.render.axes_title_pad_pt
             if isinstance(self.spec, RollingPlot):
-                pad += self.style.fonts.annotation_pt + self.style.render.compact_axes_title_pad_pt
+                pad += self.style.fonts.annotation_pt * 0.5 + self.style.render.axes_title_pad_pt
             owner.set_title(
                 title,
                 fontsize=self.style.fonts.figure_title_pt,
                 pad=pad,
                 y=1.0,
             )
+
+    def _position_chrome_text(self, axes, direction_labels) -> None:
+        """Place titles against the final data/tick geometry, in one unit system.
+
+        Called only when the existing chrome layout signature changes. The
+        same point gaps apply to a standalone axes, a focused cell and the
+        boundary of an overview; figure-relative magic offsets have no role.
+        """
+
+        if not axes:
+            return
+        figure = self._figure
+        renderer = _prepare_renderer(figure.canvas.get_renderer())
+        dots = float(figure.dpi) / 72.0
+        inverse = figure.transFigure.inverted()
+        label_boxes = {
+            id(label): label.get_window_extent(renderer)
+            for labels in direction_labels for label in labels
+        }
+
+        def place(label, owners, direction, *, side, pad):
+            if label is None or not label.get_visible() or not label.get_text():
+                return
+            boxes = [owner.bbox for owner in owners]
+            if not boxes:
+                return
+            left, right = min(box.x0 for box in boxes), max(box.x1 for box in boxes)
+            bottom, top = min(box.y0 for box in boxes), max(box.y1 for box in boxes)
+            text_boxes = []
+            for owner in owners:
+                axis = owner.xaxis if direction == "x" else owner.yaxis
+                for tick in (*axis.majorTicks, *axis.minorTicks):
+                    for item in (tick.label1, tick.label2):
+                        box = label_boxes.get(id(item))
+                        if box is not None:
+                            text_boxes.append(box)
+            gap = float(pad) * dots
+            if direction == "x":
+                coordinate = (max((box.y1 for box in text_boxes), default=top) + gap
+                              if side == "top" else
+                              min((box.y0 for box in text_boxes), default=bottom) - gap)
+                point = ((left + right) * 0.5, coordinate)
+                label.set_horizontalalignment("center")
+                label.set_verticalalignment("bottom" if side == "top" else "top")
+            else:
+                coordinate = (max((box.x1 for box in text_boxes), default=right) + gap
+                              if side == "right" else
+                              min((box.x0 for box in text_boxes), default=left) - gap)
+                point = (coordinate, (bottom + top) * 0.5)
+                label.set_horizontalalignment("left" if side == "right" else "right")
+                label.set_verticalalignment("center")
+            label.set_rotation_mode("default")
+            label.set_transform(figure.transFigure)
+            label.set_position(tuple(inverse.transform(point)))
+
+        overview = isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None
+        if overview:
+            for direction, side in (("x", "bottom"), ("y", "left")):
+                axis = axes[0].xaxis if direction == "x" else axes[0].yaxis
+                place(self._artists.get(f"facet:outer_{direction}"), axes, direction,
+                      side=side, pad=axis.labelpad)
+        else:
+            for owner in axes:
+                for direction, axis in (("x", owner.xaxis), ("y", owner.yaxis)):
+                    axis._autolabelpos = False
+                    place(axis.label, (owner,), direction,
+                          side=axis.get_label_position(), pad=axis.labelpad)
+
+        title = self._artists.get("figure:title")
+        if title is not None and title.get_visible() and title.get_text():
+            owners = tuple(owner for _key, owner, _index in self.painted_surfaces)
+            if owners:
+                top = max(owner.bbox.y1 for owner in owners)
+                titles = (self._artists.get("facet:chrome_titles", ()) if overview
+                          else (owner.title for owner in owners))
+                top = max((item.get_window_extent(renderer).y1 for item in titles
+                           if item.get_visible() and item.get_text()), default=top)
+                center = (min(owner.bbox.x0 for owner in owners)
+                          + max(owner.bbox.x1 for owner in owners)) * 0.5
+                title.set_position(tuple(inverse.transform(
+                    (center, top + self.style.render.axes_title_pad_pt * dots))))
 
     def _apply_grid(self, state: DisplayState) -> None:
         show_grid = bool(state["show_grid"])

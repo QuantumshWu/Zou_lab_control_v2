@@ -577,14 +577,12 @@ class RenderPolicyConfig:
     #: scene furniture -- and only its stronger alpha marks it out.
     height_bars_cage_alpha: float = 0.2
     axes_title_pad_pt: float = 2.5
-    compact_axes_title_pad_pt: float = 1.5
     #: A grid cell's tick marks, in points.  A cell is a small panel, and
     #: its marks are shorter than a full panel's (``xtick.major.size``) so
     #: that sixty-four of them stay out of one another's way.  The cell
     #: reserve builds cells with this length, so it is part of what the
     #: reserve's bytes are keyed on.
     facet_cell_tick_length_pt: float = 2.0
-    figure_title_y: float = 0.992
     #: The shortest spelling the colorbar's two limit labels start from;
     #: the ladder lengthens it until the two read apart.
     colorbar_limit_label_chars: int = 5
@@ -648,9 +646,7 @@ class RenderPolicyConfig:
             raise ValueError("image_anchor must be a Matplotlib cardinal anchor")
         for field in (
             "axes_title_pad_pt",
-            "compact_axes_title_pad_pt",
             "facet_cell_tick_length_pt",
-            "figure_title_y",
         ):
             object.__setattr__(self, field, _finite(getattr(self, field), field))
         for field in (
@@ -794,7 +790,7 @@ class PlotStyleConfig:
             "axes.labelweight": fonts.weight,
             "axes.titlesize": fonts.figure_title_pt,
             "axes.titleweight": fonts.weight,
-            "axes.titlepad": render.compact_axes_title_pad_pt,
+            "axes.titlepad": render.axes_title_pad_pt,
             "figure.titlesize": fonts.figure_title_pt,
             "figure.titleweight": fonts.weight,
             "legend.fontsize": fonts.legend_pt,
