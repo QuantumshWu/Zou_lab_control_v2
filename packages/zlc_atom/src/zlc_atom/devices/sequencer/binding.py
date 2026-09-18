@@ -18,9 +18,13 @@ def bind_sequencer(
     device: SequencerDevice,
     identity: str,
     type_id: str,
+    *,
+    config_file: str = "",
 ) -> InstalledLeaf:
     if not isinstance(device, SequencerDevice):
         raise TypeError("sequencer must use the canonical SequencerDevice")
+    if config_file.strip():
+        device.load_config_file(config_file.strip())
     binding, proof = bind_verified_device(
         context.broker,
         key=ResourceKey.parse(f"device/{key}"),

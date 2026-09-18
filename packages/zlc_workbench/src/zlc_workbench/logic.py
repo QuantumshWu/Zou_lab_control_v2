@@ -175,6 +175,10 @@ class LogicBinding:
     preview_specs: tuple = ()
     #: Request already projected into a modal, preventing nested event-loop duplicates.
     operator_request_id: str = ""
+    #: Undo values for fields currently authored by a panel selection. The
+    #: draft remains the only current value; manual edits cancel that field's
+    #: undo, and a newer panel takes ownership without stacking old patches.
+    selection_restore: dict[str, tuple[str, Any]] = field(default_factory=dict)
 
 
 _SIGNAL_KEY_PREFIX = "@logic/"

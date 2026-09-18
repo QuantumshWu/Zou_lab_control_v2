@@ -94,24 +94,6 @@ def _current_sensor_shape(context: Mapping[str, object]) -> tuple[int, int]:
     return int(values[0]), int(values[1])
 
 
-def _current_origin(context: Mapping[str, object]) -> tuple[int, int]:
-    raw = context.get("roi_origin_yx")
-    if raw is None:
-        raise ValueError("camera image selection requires current roi_origin_yx")
-    try:
-        values = tuple(raw)  # type: ignore[arg-type]
-    except TypeError as error:
-        raise TypeError("roi_origin_yx must contain two non-negative integers") from error
-    if (
-        len(values) != 2
-        or any(isinstance(value, bool) or not isinstance(value, Integral) for value in values)
-        or any(int(value) < 0 for value in values)
-    ):
-        raise ValueError("roi_origin_yx must contain two non-negative integers")
-    origin_y, origin_x = (int(value) for value in values)
-    return origin_x, origin_y
-
-
 def _current_binning(context: Mapping[str, object]) -> tuple[int, int]:
     raw = context.get("binning_yx")
     if raw is None:
@@ -161,30 +143,11 @@ def _image_area_to_roi_patch(
     }
 
 
-def _applied_roi_values(context: Mapping[str, object]) -> dict[str, int]:
-    """The crop of the sensor this run is actually taking."""
-
-    origin_x, origin_y = _current_origin(context)
-    raw = context.get("roi_shape_yx")
-    if raw is None:
-        raise ValueError("camera ROI readback requires current roi_shape_yx")
-    height, width = (int(value) for value in tuple(raw))  # type: ignore[arg-type]
-    if height <= 0 or width <= 0:
-        raise ValueError("roi_shape_yx must contain two positive integers")
-    return {
-        "roi_x": origin_x,
-        "roi_y": origin_y,
-        "roi_width": width,
-        "roi_height": height,
-    }
-
-
 _IMAGE_AREA_TO_ROI = SelectionMapping(
     plot_kind="image",
     selector_kind="area",
     draft_fields=_ROI_FIELDS,
     map_patch=_image_area_to_roi_patch,
-    applied_values=_applied_roi_values,
 )
 
 

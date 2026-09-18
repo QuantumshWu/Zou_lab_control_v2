@@ -32,6 +32,7 @@ LOCAL_SEQUENCER_SCHEMA = AuthoringSchema(
         ),
         AuthoringField("uart_port", "str", "UART port (blank = probe)", ""),
         AuthoringField("port", "int", "Serve on port", 18861, minimum=1, maximum=65535),
+        AuthoringField("config_file", "str", "Config file (optional)", ""),
     )
 )
 
@@ -66,7 +67,8 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
         device = SequencerDevice(streamer)
         device.open()
         leaf = bind_sequencer(
-            context, key, device, f"sequencer:{key}", "sequencer.local"
+            context, key, device, f"sequencer:{key}", "sequencer.local",
+            config_file=authored["config_file"],
         )
     except BaseException:
         # The loopback client before its server, the order the closer keeps.

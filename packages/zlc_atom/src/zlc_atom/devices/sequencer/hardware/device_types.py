@@ -21,6 +21,7 @@ HARDWARE_SEQUENCER_SCHEMA = AuthoringSchema(
     (
         AuthoringField("host", "str", "Pulse server host", "127.0.0.1"),
         AuthoringField("port", "int", "Pulse server port", 18861, minimum=1, maximum=65535),
+        AuthoringField("config_file", "str", "Config file (optional)", ""),
     )
 )
 
@@ -55,7 +56,8 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
     try:
         device.open()
         return bind_sequencer(
-            context, key, device, f"sequencer:{key}", "sequencer.hardware"
+            context, key, device, f"sequencer:{key}", "sequencer.hardware",
+            config_file=authored["config_file"],
         )
     except BaseException as error:
         try:

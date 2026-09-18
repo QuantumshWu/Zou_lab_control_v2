@@ -2,6 +2,7 @@ import zou_lab_control
 
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -218,6 +219,15 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
         assert view.focus_panel_editor(panel.panel_id)
         app.processEvents()
 
+        # The next-run draft can differ from the active camera readback.
+        # Cancelling a later selector must restore this draft, not the run.
+        draft_roi = (6, 5, 28, 20)
+        presenter.update_logic_draft(node_id, values=dict(zip(
+            ("roi_x", "roi_y", "roi_width", "roi_height"), draft_roi,
+        )))
+        assert _visible_logic_roi(logic_editor) == draft_roi
+        assert _visible_logic_roi(SimpleNamespace(form=panel_editor.producer_form)) == draft_roi
+
         # The real header switch hands all pointer gestures to both the live
         # card and its already-open frozen Edit surface.
         QtTest.QTest.mouseClick(
@@ -235,7 +245,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
 
         _commit_area(panel.editor_host)
         _wait_until(
-            lambda: _visible_logic_roi(logic_editor) != authored_roi,
+            lambda: _visible_logic_roi(logic_editor) != draft_roi,
             presenter,
         )
         draft = presenter.logic[node_id].draft.values
@@ -243,10 +253,13 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
             int(draft[name])
             for name in ("roi_x", "roi_y", "roi_width", "roi_height")
         )
-        assert selected_roi != authored_roi, (
+        assert selected_roi != draft_roi, (
             "committing the Image Area selector left the producer row ROI draft unchanged"
         )
         assert _visible_logic_roi(logic_editor) == selected_roi
+        assert _visible_logic_roi(SimpleNamespace(form=panel_editor.producer_form)) == selected_roi
+        assert all(not panel_editor.producer_form.widget_for(name).isEnabled()
+                   for name in ("roi_x", "roi_y", "roi_width", "roi_height"))
 
         _wheel_frozen_snapshot(panel_editor, panel.editor_host, delta=120)
         _wait_until(lambda: panel.interaction_viewport is not None, presenter)
@@ -256,23 +269,21 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
         assert visible.x.span > authored_roi[2]
         assert visible.y.span > authored_roi[3]
 
-        # Taking the region away leaves the form saying what the camera is
-        # actually set to -- the ROI the running node was started with -- so
-        # restarting from here changes nothing.  It used to write the zoomed
-        # VIEWPORT into the producer instead, which re-pointed the camera at
-        # whatever happened to be on screen.
+        # Removing the region restores what was authored before that region,
+        # not the viewport, last selector geometry or camera readback.
         panel.editor_host.remove_selector(plot.SelectorKind.AREA).result()
         _wait_until(lambda: panel.state.selector == {}, presenter)
         _wait_until(
-            lambda: _visible_logic_roi(logic_editor) == authored_roi,
+            lambda: _visible_logic_roi(logic_editor) == draft_roi,
             presenter,
         )
-        assert _visible_logic_roi(logic_editor) == authored_roi
+        assert _visible_logic_roi(logic_editor) == draft_roi
+        assert _visible_logic_roi(SimpleNamespace(form=panel_editor.producer_form)) == draft_roi
         logic_values = view._logic_editors[node_id].form.read_all()
         assert tuple(
             int(logic_values[name])
             for name in ("roi_x", "roi_y", "roi_width", "roi_height")
-        ) == authored_roi
+        ) == draft_roi
 
         assert presenter.start_logic(node_id) is True
         _wait_until(lambda: presenter.logic[node_id].host is not old_host, presenter)
@@ -287,7 +298,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
             int(actual.roi_origin_yx[0]),
             int(actual.roi_shape_yx[1]),
             int(actual.roi_shape_yx[0]),
-        ) == authored_roi
+        ) == draft_roi
     finally:
         presenter.close()
         _wait_until(presenter.close, presenter)

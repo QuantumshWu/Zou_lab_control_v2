@@ -1665,6 +1665,8 @@ class ConsolePresenter:
                     "panel",
                     severity="warning",
                 )
+        if "selector" in changes and not self._task_science_locked(binding):
+            self._restore_producer_draft(binding.panel_id)
         viewport_cleared = False
         if (
             binding.interaction_viewport is not None
@@ -2292,6 +2294,8 @@ class ConsolePresenter:
                 f"{binding.title}: {_error_text(errors[0])}",
                 severity="error",
             )
+        if not binding.state.selector and not self._task_science_locked(binding):
+            self._restore_producer_draft(binding.panel_id)
 
     def reorder_panels(self, order: Sequence[str]) -> bool:
         """Take the order the operator dragged the cards into.
@@ -2976,6 +2980,7 @@ class ConsolePresenter:
                 self._release_panel(binding)
                 self.view.show_panel(panel_id, None)
             binding.state = candidate
+            self._restore_producer_draft(binding.panel_id)
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.frozen_data = None
             self._publish_panel_state(binding)
@@ -2987,6 +2992,8 @@ class ConsolePresenter:
             # Do not start a candidate only to cancel it during projection.
             self._cancel_panel_configuration(binding)
             binding.state = candidate
+            if candidate.signal != current.signal:
+                self._restore_producer_draft(binding.panel_id)
             binding.vacancy = vacancy_reason
             binding.parameter_surface = (
                 self._schema_projected_parameters(binding, candidate_schema, vacancy_reason)
@@ -3999,8 +4006,51 @@ class ConsolePresenter:
             "frozen_snapshot": None if frozen is None else frozen.snapshot,
             **self._panel_snapshot_status(binding),
             "producer_node_id": producer_node_id,
+            "producer_projection": self._producer_projection(producer_node_id),
             "save_directory": str(self.session.day_folder_path()),
         }
+
+    def _producer_projection(self, node_id: str | None) -> dict[str, Any]:
+        """Only selector-linked fields of the producer's next-run draft."""
+
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return {}
+        fields = {
+            name
+            for mapping in binding.descriptor.selection_mappings
+            for name in mapping.draft_fields
+        }
+        if not fields:
+            return {}
+        from .authoring_form import display_value, project_logic_schema
+
+        spec = project_logic_schema(
+            binding.descriptor, workspace_root=str(self.session.workspace.root)
+        )
+        return {
+            "form_spec": FormSpec(tuple(field for field in spec.fields if field.key in fields)),
+            "form_values": {
+                field.name: display_value(binding.draft.values.get(field.name, field.default))
+                for field in binding.descriptor.authoring_schema.fields
+                if field.name in fields
+            },
+            "ui_contributions": binding.descriptor.ui_contributions,
+            "read_only_fields": frozenset(fields),
+            "device_labels": self.session.device_labels,
+        }
+
+    def _refresh_producer_projections(self, node_id: str) -> None:
+        update = getattr(self.view, "set_panel_producer_projection", None)
+        if not callable(update):
+            return
+        projection = None
+        for panel in self.panels.values():
+            if (panel.editor_open
+                    and self._direct_producer_node_id(panel.state.signal) == node_id):
+                if projection is None:
+                    projection = self._producer_projection(node_id)
+                update(panel.panel_id, projection)
 
     def refresh_panel_editor(self, panel_id: str) -> bool:
         binding = self.panels.get(str(panel_id))
@@ -4804,6 +4854,7 @@ class ConsolePresenter:
         binding = self.panels.pop(key, None)
         if binding is None:
             return False
+        self._restore_producer_draft(key)
         self._release_panel_editor(binding)
         close_editor = getattr(self.view, "close_panel_editor", None)
         if callable(close_editor):
@@ -5892,7 +5943,7 @@ class ConsolePresenter:
                     }),
                 )
             if not self._task_science_locked(binding):
-                self._resync_producer_draft(binding, previous)
+                self._restore_producer_draft(binding.panel_id)
             return _UNCHANGED
 
         remembered = panel_selection_from_document(binding.state.selector)
@@ -6239,37 +6290,28 @@ class ConsolePresenter:
             context=context,
         )
         if patch is not None:
-            self.update_logic_draft(producer_node_id, values=patch)
+            before = {
+                name: producer.selection_restore.get(
+                    name, (panel_id, draft[name])
+                )[1]
+                for name in patch
+            }
+            if self.update_logic_draft(producer_node_id, values=patch):
+                producer.selection_restore.update({
+                    name: (panel_id, value) for name, value in before.items()
+                })
 
-    def _resync_producer_draft(
-        self, binding: PanelBinding, selection: object
-    ) -> None:
-        """Show what the producer is actually set to, once its region is gone.
+    def _restore_producer_draft(self, panel_id: str) -> None:
+        """Undo only the draft fields still owned by this panel's selection."""
 
-        Not what its fields held before the region overwrote them: those were
-        replaced by a deliberate gesture, and a run has happened since with
-        the values the gesture asked for.  Restoring the earlier ones would
-        mean that cancelling a region silently re-points the hardware on the
-        next Start -- an operator who removes an ROI and presses Start expects
-        nothing to change.  So the fields the region owns are filled from the
-        run's own readback, and the descriptor -- which alone knows which
-        fields those are and how a device reports them -- provides both.
-        """
-
-        publication = binding.display_publication
-        if publication is None:
-            return
-        producer_node_id = self._direct_producer_node_id(binding.state.signal)
-        if producer_node_id is None:
-            return
-        producer = self.logic.get(producer_node_id)
-        if producer is None:
-            return
-        applied = producer.descriptor.applied_selection_values(
-            selection, context=self._selection_context(publication, binding.state.signal)
-        )
-        if applied:
-            self.update_logic_draft(producer_node_id, values=dict(applied))
+        for producer in self.logic.values():
+            before = {
+                name: value for name, (owner, value) in producer.selection_restore.items()
+                if owner == panel_id
+            }
+            if before and self.update_logic_draft(producer.node_id, values=before):
+                for name in before:
+                    producer.selection_restore.pop(name, None)
 
     def _selection_context(self, publication: object, signal_name: str = "") -> dict[str, Any]:
         """Public run-time device readback, as data only."""
@@ -7195,6 +7237,9 @@ class ConsolePresenter:
         if binding is None:
             return False
         if values is not None:
+            for name, value in values.items():
+                if name in binding.selection_restore and value != binding.draft.values[name]:
+                    binding.selection_restore.pop(name)
             binding.draft.values.update(dict(values))
         if source_signal is not _UNCHANGED:
             binding.draft.source_signal = str(source_signal)
@@ -7212,6 +7257,7 @@ class ConsolePresenter:
         binding.finalization = None
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
+        self._refresh_producer_projections(binding.node_id)
         return True
 
     def _logic_draft_changed(self, node_id: str, patch: Mapping[str, Any]) -> None:

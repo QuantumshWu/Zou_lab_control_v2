@@ -572,6 +572,37 @@ class ScanPlanEditor(QtWidgets.QWidget):
     # ------------------------------------------------------- host contract
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
+        if projection.get("read_only_fields"):
+            # Panel Edit shows the same draft rows, without offering ports,
+            # reading devices or projecting unrelated API overrides.
+            labels = dict(projection.get("device_labels") or {})
+            labels_changed = labels != self._device_labels
+            self._device_labels = labels
+            plan_text = str((projection.get("form_values") or {}).get("plan") or "")
+            if plan_text != self._plan_text or labels_changed:
+                self._plan_text = plan_text
+                self._reconcile_rows(plan_text)
+                for row in self._rows:
+                    if not row.manual:
+                        port = str(row.port_combo.currentData())
+                        group = port_group(port)
+                        fill_grouped_choice_combo(
+                            row.port_combo, names=(port,),
+                            sources={port: (self._device_labels.get(group, group),)},
+                            metadata={}, labels={port: port_leaf(port)}, current=port,
+                        )
+                self._refresh_summary()
+                for row in self._rows:
+                    if row.input_stack.currentIndex() == 1:
+                        row.input_stack.setCurrentIndex(0)
+                        row.custom_label.setText("Range off")
+                        row.custom_label.setToolTip("Range (inactive in Values mode)")
+            self.add_button.hide()
+            self.add_manual_button.hide()
+            self.values_title.hide()
+            self.values_form.hide()
+            self.values_note.hide()
+            return
         labels = dict(projection.get("device_labels") or {})
         labels_changed = labels != self._device_labels
         if labels_changed:

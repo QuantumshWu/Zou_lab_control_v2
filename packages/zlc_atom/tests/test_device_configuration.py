@@ -106,8 +106,12 @@ def test_virtual_devices_and_shared_world_have_disjoint_strict_vocabularies() ->
 
 
 def test_a_real_board_has_an_endpoint_and_a_virtual_one_does_not() -> None:
-    assert _fields(HARDWARE_SEQUENCER_SCHEMA) == {"host", "port"}
-    assert _fields(VIRTUAL_SEQUENCER_SCHEMA) == set()
+    from zlc_atom.devices.sequencer.local.device_types import LOCAL_SEQUENCER_SCHEMA
+
+    assert _fields(HARDWARE_SEQUENCER_SCHEMA) == {"host", "port", "config_file"}
+    assert _fields(VIRTUAL_SEQUENCER_SCHEMA) == {"config_file"}
+    for schema in (LOCAL_SEQUENCER_SCHEMA, HARDWARE_SEQUENCER_SCHEMA, VIRTUAL_SEQUENCER_SCHEMA):
+        assert schema.project_values({})["config_file"] == ""
     assert _fields(VIRTUAL_SLM_SCHEMA) == set()
 
 
@@ -155,10 +159,17 @@ def test_a_configuration_is_enough_to_ask_for_a_real_board() -> None:
         installation.close()
 
 
-def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
+@pytest.mark.parametrize("config_file", ["", "values.json", "missing.json", "invalid.json"])
+def test_the_composition_root_supplies_the_dialler(tmp_path, config_file) -> None:
     """The saved endpoint reaches one real zlc_pulse device surface."""
 
+    from zlc_pulse.codec import write_config_values
+
+    write_config_values(tmp_path / "values.json", {"exposure": (120.0, "us")})
+    (tmp_path / "invalid.json").write_text('{"format":"old"}', encoding="utf-8")
+    selected = str(tmp_path / config_file) if config_file else ""
     dialled: list[tuple] = []
+    streamers = []
 
     def dial(host, port, **kwargs):
         from zlc_pulse import (
@@ -171,22 +182,32 @@ def test_the_composition_root_supplies_the_dialler(monkeypatch) -> None:
         dialled.append((host, port, kwargs))
         config = load_streamer_config()
         geometry = config["params"]
-        return PulseStreamer(
+        streamer = PulseStreamer(
             MemoryRegisterTransport(geom=geometry, auto_done=True),
             geometry,
             config["clock_hz"],
             target=pulse_target_from_xdc(config_path=config["source"]),
         )
+        streamers.append(streamer)
+        return streamer
 
     installation = create_installation(
         ({"key": "sequencer", "type_id": "sequencer.hardware",
-          "config": {"host": "10.0.0.7", "port": 20000}},),
+          "config": {"host": "10.0.0.7", "port": 20000, "config_file": selected}},),
         connect_pulse=dial,
     )
     try:
-        assert installation.failures == {}
         assert dialled and dialled[0][0] == "10.0.0.7" and dialled[0][1] == 20000
         assert dialled[0][2] == {"request_timeout": 30.0}
+        if config_file in {"missing.json", "invalid.json"}:
+            assert "sequencer" in installation.failures
+            assert "sequencer" not in installation.devices
+            assert not streamers[0].snapshot()["opened"]
+        else:
+            assert installation.failures == {}
+            sequencer = installation.device("sequencer")
+            assert sequencer.config_source == selected
+            assert sequencer.config_values() == ({"exposure": (120.0, "us")} if selected else {})
     finally:
         installation.close()
 
@@ -207,7 +228,7 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
         "camera.virtual_mot",
         "slm.virtual",
     ]
-    assert virtual.devices[1].parameters == {}
+    assert virtual.devices[1].parameters == {"config_file": ""}
     assert virtual.devices[2].instance_id == "mot_camera"
     assert virtual.devices[3].instance_id == "slm"
     installation = create_installation("virtual")
@@ -242,7 +263,7 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
     assert len(mixed) == 2
 
 
-def test_a_local_sequencer_serves_its_own_board_and_dials_loopback() -> None:
+def test_a_local_sequencer_serves_its_own_board_and_dials_loopback(tmp_path) -> None:
     """sequencer.local IS the old server .bat, owned by the installation.
 
     The factory opens the deployed board (the memory backend here -- the
@@ -253,6 +274,10 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback() -> None:
     """
 
     import socket
+    from zlc_pulse.codec import write_config_values
+
+    config_path = tmp_path / "values.json"
+    write_config_values(config_path, {"exposure": (120.0, "us")})
 
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -269,7 +294,7 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback() -> None:
     installation = create_installation(
         (
             {"key": "sequencer", "type_id": "sequencer.local",
-             "config": {"backend": "memory", "port": free_port}},
+             "config": {"backend": "memory", "port": free_port, "config_file": str(config_path)}},
         ),
         connect_pulse=dial,
     )
@@ -278,6 +303,8 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback() -> None:
         assert dialled == [("127.0.0.1", free_port)]
         leaf = installation.devices["sequencer"]
         assert leaf.type_id == "sequencer.local"
+        assert leaf.device.config_source == str(config_path)
+        assert leaf.device.config_values() == {"exposure": (120.0, "us")}
         assert leaf.device.safe().stable
         # The server it holds answers nobody but this machine until the
         # device is published: a peer's connection is accepted and shut

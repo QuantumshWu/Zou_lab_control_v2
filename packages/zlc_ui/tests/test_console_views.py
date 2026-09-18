@@ -1580,6 +1580,50 @@ assert editor.kind_label.text() == 'facet grid · curve cells'
 assert handle.update_panel_editor('panel-1', projection)
 assert editor.producer_summary.text() == 'Logic node: cm'
 assert editor.open_producer_button.isEnabled()
+from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE as camera_descriptor
+from zlc_atom.nodes.seamless_scan.logic_node import LOGIC_NODE as scan_descriptor
+from zlc_workbench.authoring_form import project_logic_schema
+def linked_projection(descriptor, values):
+    fields = frozenset(name for mapping in descriptor.selection_mappings for name in mapping.draft_fields)
+    spec = project_logic_schema(descriptor, workspace_root=save_directory)
+    return {'form_spec': FormSpec(tuple(field for field in spec.fields if field.key in fields)),
+            'form_values': values, 'read_only_fields': fields,
+            'ui_contributions': descriptor.ui_contributions}
+linked = linked_projection(camera_descriptor, {'roi_x': 3, 'roi_y': 4, 'roi_width': 24, 'roi_height': 32})
+handle.set_panel_producer_projection('panel-1', linked)
+assert editor.producer_form.spec.keys == ('roi_x', 'roi_y', 'roi_width', 'roi_height')
+roi_widget = editor.producer_form.widget_for('roi_x')
+assert not roi_widget.isEnabled() and editor.producer_form.read_value('roi_x') == 3
+panel_widget = editor.panel_form.widget_for('title')
+handle.set_panel_producer_projection('panel-1', dict(linked, form_values=dict(linked['form_values'], roi_x=11)))
+assert editor.producer_form.widget_for('roi_x') is roi_widget
+assert editor.producer_form.read_value('roi_x') == 11
+assert editor.panel_form.widget_for('title') is panel_widget
+import json
+plan = {'axes': [
+    {'port': 'manual:position', 'values': [1, 2, 3], 'unit': 'mm', 'mode': 'range', 'value_text': ''},
+    {'port': 'device:rf:frequency', 'values': [1, 2, 3], 'unit': 'MHz'},
+    {'port': 'pulse:param:duration:hold', 'values': [2, 4, 6], 'unit': 'ms', 'mode': 'values', 'value_text': '10, 20'},
+]}
+linked_scan = linked_projection(scan_descriptor, {'plan': json.dumps(plan)})
+handle.set_panel_producer_projection('panel-1', linked_scan)
+scan_readout = next(iter(editor._producer_contributions.values()))
+assert not scan_readout.isEnabled() and not editor.producer_form.spec.keys
+assert scan_readout.values_form.isHidden() and scan_readout.add_button.isHidden()
+row = scan_readout._rows[0]
+assert row.start_spin.value() == 1 and row.stop_spin.value() == 3
+assert scan_readout._rows[1].start_spin.valueUnit() == 'MHz'
+assert scan_readout._rows[2].stop_spin.value() == 6
+assert scan_readout._rows[2].input_stack.currentIndex() == 0
+assert scan_readout._rows[2].mode_button.text() == 'Values'
+assert scan_readout._rows[2].custom_label.text() == 'Range off'
+assert 'not in this pulse' not in scan_readout._rows[1].port_combo.currentText()
+plan['axes'][0]['values'] = [4, 5, 6]
+handle.set_panel_producer_projection('panel-1', dict(linked_scan, form_values={'plan': json.dumps(plan)}))
+assert scan_readout._rows[0] is row and row.start_spin.value() == 4 and row.stop_spin.value() == 6
+assert scan_readout._port_read_request is None
+handle.set_panel_producer_projection('panel-1', {})
+assert not editor._producer_contributions and not editor.producer_form.spec.keys
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)
 assert editor.parameter_forms['display'].spec.keys == (
     'title', 'x_label', 'x_display_unit', 'color_min', 'color_max',

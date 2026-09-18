@@ -418,6 +418,9 @@ class _ConsoleView:
     def set_panel_snapshot_status(self, panel_id: str, status) -> None:
         self.panel_editors[str(panel_id)].update(status)
 
+    def set_panel_producer_projection(self, panel_id: str, projection) -> None:
+        self.panel_editors[str(panel_id)]["producer_projection"] = dict(projection)
+
     def focus_panel_editor(self, panel_id: str) -> None:
         self.focused_panel_editor = str(panel_id)
 
@@ -4236,6 +4239,13 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     projection = presenter.view.panel_editors[panel.panel_id]
     assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == 0
     assert projection["producer_node_id"] == node_id
+    producer = projection["producer_projection"]
+    roi_fields = {"roi_x", "roi_y", "roi_width", "roi_height"}
+    assert set(producer["form_spec"].keys) == roi_fields
+    assert set(producer["form_values"]) == roi_fields
+    assert presenter.update_logic_draft(node_id, values={"roi_x": 7})
+    assert presenter.view.panel_editors[panel.panel_id]["producer_projection"]["form_values"]["roi_x"] == 7
+    assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == 0
     assert projection["stale"] is False
     assert projection["data_advanced"] is False
 
@@ -7836,6 +7846,7 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
     from zlc_atom.nodes.scan import ScanAxis, ScanPlan
     from zlc_atom.nodes.seamless_scan import LOGIC_NODE
     from zlc_runtime import SelectionRange, SelectionState
+    from zlc_workbench.logic import LogicBinding, LogicDraft
 
     plan = ScanPlan((ScanAxis("pulse:param:bias", (0.0, 1.0, 2.0)),))
     routed: list[tuple[str, dict]] = []
@@ -7844,15 +7855,22 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
         _publication_value=lambda _publication, _signal: frozen,
         _direct_producer_node_id=lambda _signal: "scan-owner",
         logic={
-            "scan-owner": SimpleNamespace(
-                descriptor=LOGIC_NODE,
-                draft=SimpleNamespace(values={"plan": json.dumps(plan.to_tree())}),
+            "scan-owner": LogicBinding(
+                "scan-owner", LOGIC_NODE,
+                LogicDraft(values={"plan": json.dumps(plan.to_tree())}),
             )
         },
         _selection_context=lambda _publication, _signal: {
             "axis_units": {"scan.bias": "code"},
         },
-        update_logic_draft=lambda name, **patch: routed.append((name, patch)),
+        _task_command_blocked=lambda _action: False,
+        _refresh_console_projection=lambda: None,
+        refresh_logic_editor=lambda _node: None,
+        _refresh_producer_projections=lambda _node: None,
+        update_logic_draft=lambda name, **patch: (
+            routed.append((name, patch)),
+            ConsolePresenter.update_logic_draft(console, name, **patch),
+        )[1],
     )
     publication = SimpleNamespace(run_record={})
 
@@ -7875,6 +7893,26 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
     assert ScanPlan.from_tree(
         json.loads(routed[0][1]["values"]["plan"])
     ) == narrowed
+
+    # Repeated edits and another panel retain one pre-selection value, not
+    # a stack which could resurrect a cancelled panel's old patch.
+    ConsolePresenter._route_exact_panel_selection(
+        console, "panel-2", "@logic/scan-owner/scan", publication,
+        SelectionState("curve", "x_range", (
+            SelectionRange("scan.bias", 0.4, 0.9, domain="point"),
+        )), expected_snapshot=frozen,
+    )
+    selected = console.logic["scan-owner"].draft.values["plan"]
+    ConsolePresenter._restore_producer_draft(console, "panel-1")
+    assert console.logic["scan-owner"].draft.values["plan"] == selected
+    ConsolePresenter._restore_producer_draft(console, "panel-2")
+    assert console.logic["scan-owner"].draft.values["plan"] == json.dumps(plan.to_tree())
+
+    # A subsequent explicit author edit supersedes selector undo.
+    console.logic["scan-owner"].selection_restore["plan"] = ("panel-1", "old")
+    console.update_logic_draft("scan-owner", values={"plan": selected})
+    ConsolePresenter._restore_producer_draft(console, "panel-1")
+    assert console.logic["scan-owner"].draft.values["plan"] == selected
 
     routed.clear()
     ConsolePresenter._route_exact_panel_selection(

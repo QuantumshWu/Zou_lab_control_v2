@@ -34,6 +34,7 @@ from zlc_ui.fluent import (
     scaled_px,
     setting_label_width,
     stamped_file_name,
+    retire_widget,
 )
 from zlc_ui.form import (
     FluentParameterForm,
@@ -83,6 +84,7 @@ class PanelEditorView(QtWidgets.QWidget):
         #: The projection minus what the snapshot half applies, as last
         #: reconciled from.  A shot that changes neither rebuilds nothing.
         self._applied_structure: dict[str, object] | None = None
+        self._applied_producer: dict[str, object] | None = None
         self._snapshot_colour = ""
         self._state: dict[str, Any] = {}
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
@@ -202,6 +204,10 @@ class PanelEditorView(QtWidgets.QWidget):
             f"color: {GREY}; background: transparent; border: none;"
         )
         producer_layout.addWidget(self.producer_summary)
+        self.producer_form = FluentParameterForm(FormSpec(()), {})
+        self.producer_form.setEnabled(False)
+        producer_layout.addWidget(self.producer_form)
+        self._producer_contributions: dict[object, QtWidgets.QWidget] = {}
         producer_actions = QtWidgets.QHBoxLayout()
         producer_actions.addStretch(1)
         self.open_producer_button = FluentButton("Open Producer", color=ACCENT)
@@ -345,7 +351,7 @@ class PanelEditorView(QtWidgets.QWidget):
         # age and the producer summary, which DO change every shot, are
         # applied by the half below and are excluded for that reason.
         volatile = ("stale", "frozen_snapshot", "data_advanced",
-                    "source_status", "producer_node_id")
+                    "source_status", "producer_node_id", "producer_projection")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
         }
@@ -385,7 +391,41 @@ class PanelEditorView(QtWidgets.QWidget):
             else "This signal has no editable direct producer."
         )
         self.open_producer_button.setEnabled(bool(producer_node_id))
+        self.set_producer_projection(incoming.get("producer_projection") or {})
         self.set_mutation_enabled(self._mutation_enabled)
+
+    def set_producer_projection(self, projection: Mapping[str, object]) -> None:
+        """Show linked draft fields without creating a second Logic editor."""
+
+        incoming = dict(projection)
+        if incoming == self._applied_producer:
+            return
+        self._applied_producer = incoming
+        self._projection["producer_projection"] = incoming
+        fields = incoming.get("read_only_fields", ())
+        factories = tuple(incoming.get("ui_contributions") or ())
+        for factory in tuple(self._producer_contributions):
+            if factory not in factories:
+                retire_widget(self._producer_contributions.pop(factory))
+        managed = set()
+        for factory in factories:
+            widget = self._producer_contributions.get(factory)
+            if widget is None:
+                widget = factory(self.producer_group)
+                if not set(widget.managed_fields).intersection(fields):
+                    retire_widget(widget)
+                    continue
+                widget.setEnabled(False)
+                self._producer_contributions[factory] = widget
+                layout = self.producer_group.layout()
+                layout.insertWidget(layout.count() - 1, widget)
+            managed.update(widget.managed_fields)
+            widget.update_projection(incoming)
+        spec = incoming.get("form_spec", FormSpec(()))
+        visible = FormSpec(tuple(field for field in spec.fields if field.key not in managed))
+        values = incoming.get("form_values") or {}
+        self.producer_form.reconcile(visible, {key: values[key] for key in visible.keys})
+        self.producer_form.setVisible(bool(visible.fields))
 
     def set_snapshot_status(self, status: Mapping[str, object]) -> None:
         """Update frozen age without reconciling the editor's forms."""

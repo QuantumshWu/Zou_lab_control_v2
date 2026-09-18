@@ -183,18 +183,6 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         "roi_height": 8,
     }
     assert all(type(value) is int for value in patch.values())
-    # And the same fields, read back from what the run is set to: what an
-    # operator sees in the form once the region is taken away.
-    assert descriptor.applied_selection_values(
-        selection,
-        context={
-            "frame_shape_yx": (10, 30),
-            "sensor_shape_yx": (40, 100),
-            "binning_yx": (2, 3),
-            "roi_origin_yx": (7, 11),
-            "roi_shape_yx": (20, 90),
-        },
-    ) == {"roi_x": 11, "roi_y": 7, "roi_width": 90, "roi_height": 20}
     assert descriptor.authoring_schema.project_values({**draft, **patch}) == {
         **draft,
         **patch,

@@ -10,6 +10,10 @@
 
 ## 1. 当前实施范围
 
+- Direct producer恢复为descriptor声明的联动字段只读投影：Camera四个ROI字段复用Fluent Form，Scan复用原轴行且禁用输入，不嵌第二份Logic Editor、不读取设备或启动worker。只刷新已打开Editor且复用控件；Values模式保留真实标记，并展示标为inactive的联动Range，不改Values或mode。已用正式Qt窗口和截图核对。
+- ROI撤销恢复首次联动前对应字段的草稿，删除applied_selection_values与Camera readback回填接口；唯一Logic草稿继续供Start冻结，执行中的run不变。现有authoring owner仅持每字段的撤销值，手工改写取消该字段撤销，多Panel不复活旧patch。正式运行中Camera验证草稿与设备readback不同、ROI联动与撤销、只读显示及Restart工作点；Scan区间/Histogram不联动与多Panel/手工改写沿已有直接用例验证。
+- Sequencer local/hardware/virtual的Init增加可选config_file，统一调用已有设备load_config_file；留空不读文件，不恢复隐式current.json。路径属于Workbench客户端，公布local设备不传播本地路径；Pulse Editor读取同一设备的文件和值。配置保存/重开、空值、缺失/坏格式及失败close的memory/virtual直接验证通过，无硬件访问或build。
+
 - Finite Runtime保留改为原generation内的不可变数值bytes、packed事件事实/祖先及共享run声明；Exact按需重建公共对象，不常驻逐shot对象树，不保留祖先图像。当前数组读取不解码祖先记录，相同非空record共享、空record无独立对象；去掉ScanDatasetWriter重复地址集合，重叠仍由Plane唯一coverage拒绝。公共不可变数组直接构造最终shape，删除多余一维ndarray壳；没有新增production文件、类或磁盘格式。
 - 同一120000-shot、35bool+component validity、三层祖先的真实Plane/ScanDatasetWriter隔离A/B：Boolean按位保存并合入原事件buffer后实际容器17.52MB，工作集增长591.2→24.0MB；完整采集30.00→30.04s，首次完整数组0.820→0.764s。完整run平均finite commit72.6→85.5µs，而相邻2k短测中位63.25→61.50µs，不宣称正常提交稳定提速。代价是显式逐shot完整replay1.045→8.123s；普通current Dataset显示不走该replay。Boolean解压与metadata/public对象按需恢复的成本明确保留；大mask输入只在锁内捕获引用与范围，已有祖先commit复用引用，删除平方展开。原数值planes/replay/retire、SelectionBridge与Viewer archive直接验证通过；这不是实验机进程归因或硬件采集速度证明。
 - 分组交互的Focus/Rolling回到公共native绘制与真实zorder，跳过隐藏Facet子树及重复fit annotation刷新。命中复用实际画出的LOD/scatter/bin几何，删除raw百万点屏幕副本及中途无收益的segment缓存。真实209万点、同一绘图几何的isolated hit P50由221.87降至0.34ms，缓存35.65MB降至0.206MB；这不是整帧耗时。DPR3的64格Curve Focus有效hover整Host中位139.94降至20.23ms，Rolling23.31降至13.83ms；有效手势仍1 compose/front、0 projection/solver。真实Qt验证沿已有入口，窗口关闭；全部bench/证据留ignored research，不入Git。
@@ -91,7 +95,7 @@
 - Device UI名称统一投影accepted Role，内部key/端口/保存引用不变；卡片、通用及Pulse/SLM Control、Logic/Scan选择与设备日志使用相同label/value分离。重复Role保留为草稿，在Init/Save统一拒绝，Role-only reconcile不重建设备。Windows真实Qt点击与截图确认；Loaded卡片身份列避免Role被按钮挤掉，所有验收窗口关闭，截图仅保留ignored research。
 - Config性能根修：当前实际字段先比较，无变化不构造Pulse；Config/API/单字段修改复用同一批量writer，真变化只最终构造/校验一次，API解绑定也不再逐项重建。消除中间单位转换与相等值的重复时钟对齐，公共单位层复用immutable Unit/Prefix派生结果，换注册单位不复用旧转换。文件仍每Fire重读，路径只绑定时resolve；Remote Load回简短执行确认，不回传已接受的整份程序/原稿。直接数值/文件/Remote/单位用例通过；正式Pulse界面验证实际值与原稿分离，窗口已关闭。未访问真实硬件、未build；性能报告、bench与截图只存ignored research，不入Git。
 - Config tab独立编辑命名value/unit表，多个Pulse字段可以引用同一名称；Pulse Save只保存引用，Config Save只保存人编辑的命名值。未保存草稿不参与Fire；未分配/未提供名称使用Pulse默认值。执行仍沿设备既有Load/Fire读取已保存文件、统一换算及实际变更编译路径；运行中的Pulse不被草稿改写。旧Config root/name/source/编号/field说明不兼容。
-- 已删除Session初始化/重建设备及独立Pulse Editor连接时的隐式current.json加载、空文件seed和配套入口；Config只由显式Load/Save选择。旧文件不会阻断Device Init，也不会被修改或转换；保留现有设备时不清除已选Config。
+- 已删除Session初始化/重建设备及独立Pulse Editor连接时的隐式current.json加载、空文件seed和配套入口；Config由显式Init config_file或Config tab Load/Save选择。未显式指定的旧文件不会阻断Device Init，也不会被修改或转换；保留现有设备时不清除已选Config。
 - 已删除Exponential按观测窗口跨度设定的A/B/tau自动硬边界，以及四种Histogram概率模型的平底beta及其分类扣除旁路；数学域、显式用户约束、普通Gaussian B和Poisson数值floor保留。
 - 协方差收尾统一为原生Householder R-only QR＋小矩阵SVD；不生成无用大Q/U，不放宽rank阈值，预测数组直接复用。独立高精度比较表明极端病态协方差会放大各稳定算法的舍入，旧SVD并非精确真值；生产只保留QR一个方案，DGESVD桥与原地转置候选只留ignored研究。15组加权/Poisson/fixed/order/masked收尾输出与原native基线一致，真实FitEngine普通数据参数/误差保持。默认32768源点案例的求解仍按既有4096上限，不能冒称全32768求解；报告区分完整输入链与隔离收尾。
 
@@ -268,7 +272,7 @@
 - Clim gesture现与live frame始终消费同一`image:prepared`并保持colorbar为唯一提交态chrome：相同clim press、move及中途live revision的colorbar区域逐像素不变，release才写最终ticks/state。真实TaskConsole MOT、DPR3、2×2、live clim手势中，steady picture gap由`18.12/21.32/28.82`降至`12.80/15.29/18.20 ms`（P50/P90/max），first move `25.32→15.05 ms`，720 moves的实际回答`558→719`；快速frame与完整compose逐像素一致。
 - 四Panel剩余争抢的根因不是Panel线程数量，而是此前把整个进程Numba pool缩成4：四个独立Panel只能轮候同一小pool。现保留16-logical-core process pool，每个RasterHost/PlotSession analysis worker启动时mask为4；40个互不重叠SEM lanes仅在该kernel临时用8并恢复。真实DPR3 MOT四Panel的Curve-Fit为`84.64/93.44/101.82 ms`、Image-Fit为`92.45/97.66/102.68 ms`（P50/P90/max），均0 stalls；Image相对前一正确语义run的`112.77–139.80 ms`显著下降。把Image fit单独提到8 threads实测反而为`96.89/104.12/113.50 ms`，全局fit/render gate也更慢，二者均不保留。
 - Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
-  LogicEditor而只打开已有Logic tab；Qt owner在Host首次render前传入screen DPR；正常已settle
+  完整LogicEditor；现仅投影联动字段的只读控件，编辑仍打开已有Logic tab。Qt owner在Host首次render前传入screen DPR；正常已settle
   Edit首开`update_projection 3→1`、`refresh_panel_editor 3→0`、Form reconcile `19→4`、
   独立Form refresh `4→0`、renderer present `2→1`，Editor对象树由598/337/136个
   QObject/Widget/Layout降为500/280/115。相同FormSpec且Widget已显示目标值时Card只adopt metadata，

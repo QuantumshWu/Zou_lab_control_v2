@@ -47,16 +47,35 @@ def _virtual_apparatus() -> InstallationConfig:
     )
 
 
-def test_a_reopened_apparatus_installs_the_same_world_and_devices(tmp_path) -> None:
-    path = save_installation_config(_virtual_apparatus(), tmp_path / "apparatus.json")
+@pytest.mark.parametrize("config_file", ["", "values.json", "missing.json", "invalid.json"])
+def test_a_reopened_apparatus_installs_the_same_world_and_devices(tmp_path, config_file) -> None:
+    from dataclasses import replace
+    from zlc_pulse.codec import write_config_values
+
+    write_config_values(tmp_path / "values.json", {"exposure": (120.0, "us")})
+    (tmp_path / "invalid.json").write_text('{"format":"old"}', encoding="utf-8")
+    selected = str(tmp_path / config_file) if config_file else ""
+    config = _virtual_apparatus()
+    config = replace(config, devices=(
+        config.devices[0],
+        replace(config.devices[1], parameters={"config_file": selected}),
+    ))
+    path = save_installation_config(config, tmp_path / "apparatus.json")
     reopened = load_installation_config(path)
-    assert reopened == _virtual_apparatus()
+    assert reopened == config
     installation = create_installation(
         reopened.specs(), simulation=reopened.simulation
     )
     try:
-        assert installation.failures == {}
-        assert set(installation.devices) == {"camera", "sequencer"}
+        if config_file in {"missing.json", "invalid.json"}:
+            assert "sequencer" in installation.failures
+            assert set(installation.devices) == {"camera"}
+        else:
+            assert installation.failures == {}
+            assert set(installation.devices) == {"camera", "sequencer"}
+            sequencer = installation.device("sequencer")
+            assert sequencer.config_source == selected
+            assert sequencer.config_values() == ({"exposure": (120.0, "us")} if selected else {})
         assert installation.world.geometry.image_shape_yx == (80, 110)
         assert installation.world.geometry.grid_shape_yx == (4, 6)
         assert installation.world.config.seed == 7
