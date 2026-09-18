@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 通用compiled TRF修复两种假收敛：受信赖域限制的小步不作为ftol证据，xtol按每个自由参数分别判断，不用混合单位的整体参数范数。保留原初始半径、gtol、权重、fixed及cold/warm竞争，无release_recapture特判。固定B=0/f=.13的早期平台不再从A≈0、RSS≈4误报成功；下降段恢复eta30，真实PlotSession连续8帧在有信息后为29.915–30.149且revision/fixed一致。纯平台仍不能唯一确定eta，不强制其稳定在某值。原有数值/单批/损失/权重/regular-image直接用例通过；缓存就绪后25点cold/warm中位约0.63/0.39ms，4点平台约0.64ms。无现场文件，证据来自独立数学对照、确定性复现和真实live管线；研究结果不入Git。
+
 - Direct producer恢复为descriptor声明的联动字段只读投影：Camera四个ROI字段复用Fluent Form，Scan复用原轴行且禁用输入，不嵌第二份Logic Editor、不读取设备或启动worker。只刷新已打开Editor且复用控件；Values模式保留真实标记，并展示标为inactive的联动Range，不改Values或mode。已用正式Qt窗口和截图核对。
 - ROI撤销恢复首次联动前对应字段的草稿，删除applied_selection_values与Camera readback回填接口；唯一Logic草稿继续供Start冻结，执行中的run不变。现有authoring owner仅持每字段的撤销值，手工改写取消该字段撤销，多Panel不复活旧patch。正式运行中Camera验证草稿与设备readback不同、ROI联动与撤销、只读显示及Restart工作点；Scan区间/Histogram不联动与多Panel/手工改写沿已有直接用例验证。
 - Sequencer local/hardware/virtual的Init增加可选config_file，统一调用已有设备load_config_file；留空不读文件，不恢复隐式current.json。路径属于Workbench客户端，公布local设备不传播本地路径；Pulse Editor读取同一设备的文件和值。配置保存/重开、空值、缺失/坏格式及失败close的memory/virtual直接验证通过，无硬件访问或build。

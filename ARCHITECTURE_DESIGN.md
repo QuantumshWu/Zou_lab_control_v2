@@ -316,6 +316,7 @@ Node new chunk
 - 编译、磁盘加载与数值执行都按本次实际请求的输出决定；RegularImage由自身信息矩阵收尾时，通用TRF不编译/加载未使用的普通finalizer/value-Jacobian，也不分配其弃置协方差/误差占位矩阵。全部参数固定的通用收尾只求模型值与质量，不求导数。需要普通收尾的消费者仍沿同一既有路径得到完整结果。
 - 普通fit收尾的模型Jacobian是本次owned工作区；自由列选择与权重/robust缩放写入其前缀，不另建N×free矩阵。只有列重排存在写后读覆盖时才使用一行scratch；invalid行归零。通过Numba现有原生LAPACK Householder QR只取R，再对小R做SVD，保留奇异值/右向量与原秩阈值，不生成不被消费的Q及N×free左向量，也不改成平方条件数的JᵀJ求逆。成功路径直接使用模型返回的owned预测数组，不复制另一份fitted。秩与协方差始终来自最终参数的Jacobian，不读取上一trial的信息矩阵冒充最终导数；single/batch共用同一数学流程。
 - Fit的warm记忆只保留当前request/model/cell最近一次成功参数tuple，失败清除；前次参数仅是与当前数据自动候选竞争的初值，不再通过半径/幅度/history chi-square阈值另设资格状态或扫描原图。RegularImage的线性least-squares proxy只负责寻找初值盆地，可使用与最终输出不同的收敛精度；robust loss仍保留原proxy精度。所有fresh正负候选仍参与，最终参数、残差与协方差必须继续来自完整数据及既有full-refinement精度，不能把proxy结果直接当成最终拟合。
+- 通用compiled TRF的停止判据不得把受信赖域半径限制的小步当作函数收敛；参数步长收敛须每个自由参数各自满足相对变化条件，不将不同单位/数量级的参数合成一个范数，让大参数掩盖其它参数仍需调整的事实。保留原初始半径、梯度判据、误差权重、fixed/free约束与cold/warm候选竞争；不按模型、eta阈值或上一帧结果修饰答案。
 - Title/layout等非plot变化不得re-fit。
 - Histogram classifier先按distribution选择模型来源：调用方已提供Gaussian components就直接呈现该模型，显式空模型直接不画；仅未提供模型的分布自动求解。完整classifier初态必须先于Host首次计算传入，不能先fit再覆盖。拒绝overview/单series的line交互不得物化native artists。
 - 删除重复configure/clear/replay与多front handoff。

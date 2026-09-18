@@ -191,6 +191,32 @@ def test_release_recapture_matches_lambert_reference_and_recovers_parameters() -
     assert fixed.fixed_parameter_names == ("amplitude", "offset")
     np.testing.assert_allclose(fixed.parameter_values, (1.0, 0.0, *truth[2:]), rtol=2e-5)
 
+    # An early live plateau seeds A near zero before B is fixed. Its tiny
+    # trust radius is not convergence, nor may a huge eta hide changes in A.
+    # A plateau constrains the curve, not a unique eta; a later falling
+    # curve must recover eta even after that uninformative warm result.
+    fixed_response = {"offset": (0.0, 0.0), "frequency": (0.13, 0.13)}
+    early_t = np.array((0.0, 2.0, 4.0, 6.0))
+    early = engine.fit(model, (early_t,), np.ones(4), bounds=fixed_response)
+    assert early.success
+    np.testing.assert_allclose(early.fitted_values, 1.0, atol=1e-6)
+    np.testing.assert_allclose(early.parameter_values[[1, 3]], (0.0, 0.13))
+    full_t = np.linspace(0.0, 40.0, 25)
+    full_values = model.evaluate((full_t,), (1.0, 0.0, 30.0, 0.13))
+    batch, failures = engine.fit_batch(
+        model, ((early_t,), (full_t,)), (np.ones(4), full_values),
+        bounds=fixed_response, warm_starts=(None, early.parameter_values),
+    )
+    assert failures == (None, None)
+    np.testing.assert_allclose(batch[0].fitted_values, 1.0, atol=1e-6)
+    np.testing.assert_allclose(batch[1].parameter_values, (1.0, 0.0, 30.0, 0.13), rtol=2e-5)
+    short_t = np.linspace(0.0, 1.0, 25)
+    short_values = model.evaluate((short_t,), (1.0, 0.0, 30.0, 0.13))
+    short_fit = engine.fit(
+        model, (short_t,), short_values, bounds=fixed_response, initial={"eta": 20.0},
+    )
+    np.testing.assert_allclose(short_fit.fitted_values, short_values, atol=1e-7)
+
 
 def test_saturation_response_jacobian_and_fixed_parameters_share_compiled_fit() -> None:
     from scipy.optimize._numdiff import approx_derivative

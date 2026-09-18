@@ -75,6 +75,7 @@ EPSILON = np.finfo(np.float64).eps
 MAD_TO_SIGMA = 1.4826
 COUNT_FLOOR = 1.0e-9
 RSS_TIE_RELATIVE = 1.0e-10
+TRUST_BOUNDARY_FRACTION = 0.95
 
 LOSS_LINEAR = 0
 LOSS_SOFT_L1 = 1
@@ -891,7 +892,7 @@ def _update_radius(
     )
     if ratio < 0.25:
         return 0.25 * step_norm, ratio
-    if ratio > 0.75 and step_norm > 0.95 * radius:
+    if ratio > 0.75 and step_norm > TRUST_BOUNDARY_FRACTION * radius:
         return 2.0 * radius, ratio
     return radius, ratio
 
@@ -900,14 +901,24 @@ def _update_radius(
 def _termination(
     actual: float,
     cost: float,
-    step_norm: float,
-    value_norm: float,
+    step: np.ndarray,
+    values: np.ndarray,
     ratio: float,
     ftol: float,
     xtol: float,
+    trust_limited: bool,
 ) -> int:
-    function_done = actual < ftol * cost and ratio > 0.25
-    parameter_done = step_norm < xtol * (xtol + value_norm)
+    # A small improvement caused by the allowed search radius says nothing
+    # about the nearby minimum: near-boundary seeds may need that radius to
+    # grow before taking a meaningful step.
+    function_done = not trust_limited and actual < ftol * cost and ratio > 0.25
+    # Different parameters have different units and scales. A large eta,
+    # lifetime or position must not hide an amplitude still being corrected.
+    parameter_done = True
+    for index in range(values.size):
+        if abs(step[index]) >= xtol * (xtol + abs(values[index])):
+            parameter_done = False
+            break
     if function_done and parameter_done:
         return STATUS_FTOL_XTOL
     if function_done:
@@ -1462,11 +1473,12 @@ def _solve_seed(
             terminal = _termination(
                 actual,
                 cost,
-                _vector_norm(step),
-                _vector_norm(values),
+                step,
+                values,
                 ratio,
                 ftol,
                 xtol,
+                scaled_norm > TRUST_BOUNDARY_FRACTION * old_radius,
             )
             if radius != 0.0:
                 alpha *= old_radius / radius
