@@ -336,6 +336,7 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
         ).result(timeout=30).value
         fitted = remote.fit("gaussian_offset", live=True).result(timeout=30)
         assert isinstance(fitted.value, FitResult)
+        assert fitted.value.sample_axes == ()
         assert fitted.value.source_revision == current.ref.revision.value
         assert fitted.front is remote.front
         assert fit_event_ready.wait(2.0)
@@ -344,6 +345,7 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
             current.ref.stream_generation.value
         )
         assert fit_events[0].result.source_revision == current.ref.revision.value
+        assert fit_events[0].result.sample_axes == ()
         assert not hasattr(fit_events[0].result, "fitted_values")
         release_fit().result(timeout=30)
         release_fit = None
@@ -704,19 +706,56 @@ def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
     finally:
         host.close(timeout=10)
 
-def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
+@pytest.mark.parametrize("grouped_histogram", (False, True))
+def test_host_facet_live_fit_promotes_one_batch_front_and_future(grouped_histogram) -> None:
     """Facet analysis must publish through the same source-revision contract."""
 
-    spec = facet_spec()
+    import pickle
+    from zlc_plot.render_process import (
+        _wire_fit_summary, _restore_fit_summary,
+        _wire_complete_fit_result, _restore_complete_fit_result,
+    )
+
+    if grouped_histogram:
+        schema = make_dataset_schema(
+            repeat_domain(size=1),
+            mapped_domain_from_columns({"facet": np.repeat((0.0, 1.0), 300), "sample": np.tile(np.arange(300.0), 2)}),
+            cell_axes=(axis("group", values=(10.0, 20.0)),), dtype=np.float64,
+        )
+        source = make_snapshot(schema, np.random.default_rng(14).normal(size=(1, 600, 2)) + np.array([3.0, 7.0]), 0)
+        spec = FacetGridPlot(AxisRef.point("facet"), HistogramPlot(group=AxisRef.cell_data("group")))
+        model = "histogram_gaussian"
+        expected_axes = [("point", 2), ("cell_data", 2)]
+    else:
+        source, spec, model = _facet_snapshot(), facet_spec(), "gaussian_offset"
+        expected_axes = [("point", 2)]
     assert isinstance(spec, FacetGridPlot)
-    host = RasterPlotHost.from_plot(_facet_snapshot(), spec)
+    host = RasterPlotHost.from_plot(source, spec)
     try:
         first = host.wait_for_front(timeout=10)
-        operation = host.fit("gaussian_offset", live=True).result(timeout=30)
+        operation = host.fit(model, live=True).result(timeout=30)
         assert isinstance(operation.value, FacetFitBatchResult)
         assert operation.value.source_revision == operation.front.identity.data_revision
         assert operation.front.identity.sequence > first.identity.sequence
         assert host.front is operation.front
+        result = operation.value
+        assert [(domain, axis.size) for domain, axis in result.sample_axes] == expected_axes
+        assert len(result.results) == (4 if grouped_histogram else 2)
+        for encode, decode in (
+            (_wire_fit_summary, _restore_fit_summary),
+            (_wire_complete_fit_result, _restore_complete_fit_result),
+        ):
+            document = pickle.loads(pickle.dumps(encode(result), protocol=5))
+            restored = decode(document)
+            assert restored.sample_axes == result.sample_axes
+            assert not hasattr(restored, "sample_axis_name")
+            for name in result.parameter_names:
+                np.testing.assert_array_equal(restored.parameter_values[name], result.parameter_values[name])
+                np.testing.assert_array_equal(restored.parameter_errors[name], result.parameter_errors[name])
+            if isinstance(restored, FacetFitBatchResult):
+                assert [(item.facet_index, item.group_key) for item in restored.overlays] == [
+                    (item.facet_index, item.group_key) for item in result.overlays
+                ]
     finally:
         host.close(timeout=10)
 
@@ -2111,6 +2150,8 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         inspector = next(text for text in renderer._series_annotations.values() if text.get_visible())
         latest = renderer._artists[f"{renderer.primary_surface[0]}:latest"]
         measured = renderer.figure.canvas.get_renderer()
+        assert latest.get_text() == "site=1 · 17"
+        assert latest.get_color() == renderer._series_lines[id(axes)][1][0].get_color()
         assert latest.get_text() and inspector.get_text()
         assert latest.get_window_extent(measured).y0 > axes.bbox.y1
         assert inspector.get_window_extent(measured).y1 < axes.bbox.y1
@@ -2123,6 +2164,8 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         changed = event("scroll", -4.0, 13.0, step=-1.0)
         assert changed.publish_front
         assert "site=2" in renderer._series_locked[2]
+        assert latest.get_text() == "site=2 · 27"
+        assert latest.get_color() == renderer._series_lines[id(axes)][2][0].get_color()
         assert (
             tuple(axes.get_xlim()),
             tuple(axes.get_ylim()),
@@ -2135,6 +2178,12 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         finally:
             renderer.figure.canvas.mpl_disconnect(connection)
         assert exports and all(latest_box.y0 >= series_box.y1 for latest_box, series_box in exports)
+        session.update_data(make_snapshot(schema, values + 100, 1))
+        assert latest.get_text() == "site=2 · 127"
+        missing = values.copy()
+        missing[..., 2] = np.nan
+        session.update_data(make_snapshot(schema, missing, 2))
+        assert latest.get_text() == "site=2 · —"
     finally:
         session.close()
 
@@ -2394,6 +2443,45 @@ def _click_series(renderer, axes, px, py):
     return renderer.series_focus(
         "release", axes, px, py, hit_radius=10.0, click_radius=4.0
     )
+
+@pytest.mark.parametrize("facet", [False, True])
+def test_grouped_histogram_reuses_series_hover_lock_and_wheel(facet) -> None:
+    schema = make_dataset_schema(
+        repeat_domain(size=40),
+        mapped_domain_from_columns({"frame": (0, 1)}),
+        cell_axes=(axis("site", size=3),), dtype=np.float64,
+    )
+    values = np.random.default_rng(17).normal(size=(40, 2, 3)) + 8 * np.arange(3)
+    histogram = HistogramPlot(group=AxisRef.cell_data("site"))
+    spec = FacetGridPlot(AxisRef.point("frame"), histogram) if facet else histogram
+    with PlotSession(make_snapshot(schema, values, 0), spec) as session:
+        if facet:
+            session.focus_facet(0)
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        lines = renderer._series_lines[id(axes)]
+        assert len({tuple(line.get_facecolor()[0, :3]) for line, _identity, _label in lines}) == 3
+        line, identity, _label = lines[1]
+        edges, y = line._zlc_bars
+        peak = int(np.argmax(y))
+        x = float(np.mean(edges[peak:peak + 2]))
+        px, py = axes.transData.transform((x, y[peak] * 0.8))
+        before = tuple(axes.get_xlim()), tuple(axes.get_ylim())
+        assert renderer.series_focus("move", axes, px, py, hit_radius=10)
+        assert renderer._series_hover[1] == identity
+        assert line.get_alpha() > lines[0][0].get_alpha()
+        assert lines[0][0].get_alpha() == renderer.style.artists.histogram_fill_alpha
+        assert _click_series(renderer, axes, px, py)
+        assert renderer._series_locked[1] == identity
+        fills = {identity: artist for artist, identity, _label in lines}
+        assert not axes.lines, "histogram bins must not gain a step-outline artist"
+        assert fills[identity].get_alpha() > fills[lines[0][1]].get_alpha()
+        assert renderer.series_focus_scroll(axes, -1)
+        assert renderer._series_locked[1] == lines[2][1]
+        assert (tuple(axes.get_xlim()), tuple(axes.get_ylim())) == before
+        renderer.series_focus("clear", None, 0, 0, hit_radius=10)
+        assert renderer._series_locked is None
+        assert len({fill.get_alpha() for fill in fills.values()}) == 1
 
 def test_one_series_is_not_a_choice(monkeypatch) -> None:
     """A lone line has nothing to choose between, so it does not respond.

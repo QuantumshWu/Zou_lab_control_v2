@@ -121,6 +121,7 @@ def _encode_plot_spec(spec: object) -> dict[str, object]:
             **common,
             "reduction": spec.reduction.value,
             "reduced": [_axis_document(ref) for ref in spec.reduced],
+            "group": _axis_document(spec.group),
         }
     if spec.kind is PlotKind.FACET_GRID:
         return {
@@ -152,12 +153,14 @@ def _decode_plot_spec(value: object) -> object:
         raise TypeError("plot coordinate choices must be an array")
     base["coordinates"] = tuple(_axis(ref, "plot coordinate choice") for ref in value["coordinates"])
     if kind is PlotKind.HISTOGRAM:
-        _keys(value, {"kind", "labels", "scope", "coordinates", "reduction", "reduced"}, "histogram recipe")
+        fields = {"kind", "labels", "scope", "coordinates", "reduction", "reduced"}
+        _keys(value, fields | ({"group"} if "group" in value else set()), "histogram recipe")
         if not isinstance(value["reduced"], list):
             raise TypeError("histogram reduced axes must be an array")
         return HistogramPlot(
             reduction=Reduction(value["reduction"]),
             reduced=tuple(_axis(ref, "histogram reduced axis") for ref in value["reduced"]),
+            group=_axis(value.get("group"), "histogram group"),
             **base,
         )
     if kind is PlotKind.FACET_GRID:

@@ -19,7 +19,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._semantic_spec()
     collapsed = tuple(getattr(spec, "reduced", ()))
     aggregation = getattr(spec, "reduction", None)
-    if not collapsed and view.has_primary_index:
+    if not collapsed and spec.group is None and view.has_primary_index:
         # A window of an integer history is binned from its frequency table,
         # which the view carries from one revision to the next and moves by
         # the shots that entered and left, instead of recounting the window.
@@ -32,36 +32,12 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
             if payload is not None:
                 projection._payload = payload
                 return
-    if window <= 1 and not view.has_primary_index:
-        # One shot: the distribution of what was just measured.  No history is
-        # consulted, and none is kept for it.
-        values, valid = None, None
-    else:
-        # Runtime already owns and bounds cross-publication history.  If some
-        # other consumer keeps the signal indexed, window=1 still selects the
-        # ordinary axis coordinate 0 (latest) instead of pooling every retained
-        # cell.  Plot never copies or retains per-shot raw pools.
-        values, valid = view.history_values(window)
-
-    # REDUCED ONCE.  The pool is what the domain must cover and what the bins
-    # then count, so it is derived here and handed to both -- rather than
-    # deriving it inside the binning, where the domain could not see it and
-    # took its limits from the raw samples instead.
-    pool, pool_valid = view.histogram_pool(
-        values=values,
-        valid=valid,
-        reduce_axes=collapsed,
-        aggregation=aggregation,
+    plan = view._histogram_plan(
+        () if spec.group is None else (spec.group,), collapsed, aggregation, window,
     )
-    projection._payload = view.histogram(
-        bins=projection._histogram_bins(
-            view,
-            state,
-            binned_values=pool,
-            binned_valid=pool_valid,
-        ),
-        values=pool,
-        valid=pool_valid,
+    projection._payload = view._histogram_from_plan(
+        projection._histogram_bins(view, state, binned_values=plan.values, binned_valid=plan.valid),
+        plan,
     )
 
 
@@ -92,7 +68,7 @@ HANDLER = KindHandler(
     "histogram",
     render,
     build_payload,
-    ("kind", "reduction"),
+    ("kind", "group", "reduction"),
     admits,
     default_spec,
     label_roles,

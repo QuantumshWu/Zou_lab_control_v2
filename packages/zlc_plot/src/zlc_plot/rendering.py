@@ -30,7 +30,7 @@ import weakref
 
 import numpy as np
 from matplotlib.artist import Artist
-from matplotlib.collections import LineCollection, PolyCollection
+from matplotlib.collections import PolyCollection
 from matplotlib.patches import Rectangle
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
@@ -60,6 +60,7 @@ from .layout import SurfacePlan, facet_focus_box, facet_focus_room, fitted_facet
 from .parameters import RenderEffect
 from .primitives import ImagePointOverlay, PointStatus, PulseTimelineData
 from .selectors import (
+    series_identity as _series_identity,
     CrosshairPoint,
     NumericRange,
     SelectorKind,
@@ -81,6 +82,8 @@ from .state import DisplayState
 from .style import PlotStyleConfig, style_context
 from .ticks import (
     DeclaredLocator,
+    MIN_TICK_LABEL_PT,
+    _SHRINK,
     SmartOffsetLocator,
     TICKS_FLOOR,
     apply_declared_ticks,
@@ -461,21 +464,22 @@ def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
 
 
 
-class _SegmentBuffered(LineCollection):
-    """A LineCollection whose segments live in one shared float buffer.
+class _SegmentBuffered(PolyCollection):
+    """One filled error-bar glyph per buffered pair of data endpoints.
 
-    The native stroke reads ``_zlc_segment_buffer`` directly and never
-    draws the collection, so the matplotlib Paths -- one object per
-    segment -- are built only when something asks for them: a full draw,
-    an export, ``get_segments``.  A revision of the same size writes the
-    buffer in place, which the materialized Paths view; a resize replaces
-    the buffer and the Paths are rebuilt on the next request.
+    Native draws read the endpoints directly. Agg paths are materialized in
+    current display pixels, so caps keep their point size under zoom/export.
+    Each closed glyph receives alpha once; separate bars still overlap.
     """
 
-    def __init__(self, **style: Any) -> None:
+    def __init__(self, *, capsize: float, **style: Any) -> None:
         super().__init__([], **style)
         self._zlc_segment_buffer: np.ndarray | None = None
-        self._zlc_segments_pending = False
+        self._zlc_capsize = float(capsize)
+        from matplotlib.transforms import IdentityTransform
+
+        self.set_transform(IdentityTransform())
+        self.set_snap(False)
 
     def segment_buffer(self, shape: tuple[int, int, int]) -> np.ndarray:
         """The buffer for ``shape`` segments, kept when the size is unchanged."""
@@ -484,23 +488,43 @@ class _SegmentBuffered(LineCollection):
         if buffer is None or buffer.shape != shape:
             buffer = np.empty(shape, dtype=float)
             self._zlc_segment_buffer = buffer
-            self._zlc_segments_pending = True
         return buffer
 
-    def _materialize(self) -> None:
-        if self._zlc_segments_pending:
-            self._zlc_segments_pending = False
-            buffer = self._zlc_segment_buffer
-            self.set_segments(() if buffer is None else buffer)
-
     def get_paths(self) -> list[Any]:
-        self._materialize()
+        buffer = self._zlc_segment_buffer
+        if buffer is not None and self.axes is not None:
+            points = self.axes.transData.transform(buffer.reshape(-1, 2)).reshape(buffer.shape)
+            x = points[:, 0, 0]
+            low = np.min(points[..., 1], axis=1)
+            high = np.max(points[..., 1], axis=1)
+            radius = max(0.5, float(self.get_linewidths()[0]) * self.figure.dpi / 144.0)
+            cap = max(0.0, self._zlc_capsize * self.figure.dpi / 72.0)
+            if cap <= 0.0:
+                vertices = np.stack((
+                    np.column_stack((x - radius, low)), np.column_stack((x + radius, low)),
+                    np.column_stack((x + radius, high)), np.column_stack((x - radius, high)),
+                ), axis=1)
+            else:
+                if cap >= radius:
+                    steps = np.column_stack((low - radius, low - radius, low + radius, low + radius,
+                                             high - radius, high - radius, high + radius, high + radius,
+                                             high - radius, high - radius, low + radius, low + radius))
+                    widths = np.asarray((-cap, cap, cap, radius, radius, cap, cap, -cap, -cap, -radius, -radius, -cap))
+                else:
+                    steps = np.column_stack((low - radius, low - radius, low, low, high, high,
+                                             high + radius, high + radius, high, high, low, low))
+                    widths = np.asarray((-cap, cap, cap, radius, radius, cap, cap, -cap, -cap, -radius, -radius, -cap))
+                vertices = np.stack((x[:, None] + widths, steps), axis=-1)
+                if cap >= radius:
+                    short = high - low <= 2.0 * radius
+                    if np.any(short):
+                        vertices[short, :, 0] = (x[short, None]
+                            + np.asarray((-cap, cap, cap, -cap, -cap, -cap, -cap, -cap, -cap, -cap, -cap, -cap)))
+                        vertices[short, :, 1] = np.column_stack((low[short] - radius, low[short] - radius,
+                            high[short] + radius, high[short] + radius,
+                            *([low[short] - radius] * 8)))
+            self.set_verts(vertices)
         return super().get_paths()
-
-    def get_segments(self) -> list[np.ndarray]:
-        self._materialize()
-        return super().get_segments()
-
 
 class _BarBuffered(PolyCollection):
     """A PolyCollection whose bars live as edges and tops until asked for.
@@ -551,6 +575,23 @@ class _BarBuffered(PolyCollection):
         return super().get_paths()
 
 
+def _series_xy(artist: Any) -> tuple[np.ndarray, np.ndarray]:
+    if isinstance(artist, _BarBuffered):
+        edges, counts = artist._zlc_bars
+        return np.repeat(edges, 2)[1:-1], np.repeat(counts, 2)
+    return np.asarray(artist.get_xdata()), np.asarray(artist.get_ydata())
+
+
+def _series_colour(artist: Any) -> Any:
+    if isinstance(artist, _BarBuffered):
+        return tuple(artist.get_facecolor()[0, :3])
+    return artist.get_color()
+
+
+def _series_linewidth(artist: Any) -> float:
+    return float(artist.get_linewidths()[0] if isinstance(artist, _BarBuffered) else artist.get_linewidth())
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedSeries:
     x: np.ndarray
@@ -558,6 +599,7 @@ class _PreparedSeries:
     valid: np.ndarray
     label: str
     identity: tuple[tuple[str, str | None, str], ...]
+    group_key: tuple[Any, ...] = ()
     #: Display names for the x positions of a labelled categorical axis.
     x_labels: tuple[str, ...] | None = None
     #: (low, high) display-unit bounds of the standard-error band, or None.
@@ -607,14 +649,15 @@ def _unit_symbol(value: Any) -> str:
     return "" if unit is None else str(getattr(unit, "symbol", unit))
 
 
-def _series_identity(item: Any) -> tuple[tuple[str, str | None, str], ...]:
-    return tuple((value.ref.domain.value, value.ref.axis_id, repr(value.canonical))
-                 for value in getattr(item, "group_key", ()))
+def _series_slot(group_key: Sequence[Any], count: int) -> int:
+    """Source coordinate ordinals stay stable when a displayed subset changes."""
 
-
-def _series_slot(identity: object, count: int) -> int:
-    digest = hashlib.blake2s(repr(identity).encode(), digest_size=2).digest()
-    return 0 if not identity else int.from_bytes(digest, "big") % count
+    if not group_key:
+        return 0
+    if len(group_key) == 1 and group_key[0].index is not None:
+        return 1 + int(group_key[0].index) % (count - 1)
+    digest = hashlib.blake2s(repr(_series_identity(group_key)).encode(), digest_size=2).digest()
+    return 1 + int.from_bytes(digest, "big") % (count - 1)
 
 
 _EXPLICIT_UNIT_SUFFIX = re.compile(r"(?:\[[^\[\]]+\]|\([^()]+\))\s*$")
@@ -2450,19 +2493,16 @@ class MatplotlibRenderer:
         self._last_selectors = SelectorSnapshot(())
         self._fit_artists: list[Any] = []
         self._fit_slots: dict[str, Any] = {}
-        self._facet_fit_topologies: dict[
-            int,
+        self._fit_topologies: dict[
+            tuple[object, object],
             tuple[Any, str, str | None, dict[str, Any], tuple[Any, ...]],
         ] = {}
         self._last_fit_overlay: FitOverlay | None = None
         self._last_fit_overlays: tuple[FitOverlay, ...] = ()
-        self._classifier_artists: dict[int, tuple[tuple[Any, ...], Any, Any]] = {}
+        self._classifier_artists: dict[tuple[object, object], tuple[tuple[Any, ...], Any, Any]] = {}
         self._classifier_labels: tuple[str, ...] = ()
         self._fit_source_scatter: Any | None = None
         self._fit_hidden_source_lines: tuple[tuple[Any, bool], ...] = ()
-        self._fit_axis: Any | None = None
-        self._fit_family: str | None = None
-        self._fit_model_id: str | None = None
         self._data_revision: int | None = None
         #: Cached Agg chrome region (everything except renderer-owned dynamic
         #: artists) and the canvas signature it was captured for.  Payload-only
@@ -2873,7 +2913,7 @@ class MatplotlibRenderer:
                 # drawing sixty-four cells' spines and axes was 237-595 ms of
                 # a first frame, the larger half of it; the same marks,
                 # frames and labels are painted by the grouped artists
-                # :meth:`_sync_facet_cell_chrome` keeps, and this is what
+                # :meth:`_sync_axes_chrome` keeps, and this is what
                 # takes the per-cell draw out.  ``axison`` removes the two
                 # Axis objects, the four spines and the background patch from
                 # ``Axes.draw`` -- the patch is the figure's own white, so it
@@ -2994,16 +3034,13 @@ class MatplotlibRenderer:
         self._last_selectors = SelectorSnapshot(())
         self._fit_artists.clear()
         self._fit_slots.clear()
-        self._facet_fit_topologies.clear()
+        self._fit_topologies.clear()
         self._last_fit_overlay = None
         self._last_fit_overlays = ()
         self._classifier_artists.clear()
         self._classifier_labels = ()
         self._fit_source_scatter = None
         self._fit_hidden_source_lines = ()
-        self._fit_axis = None
-        self._fit_family = None
-        self._fit_model_id = None
         self._image_ranges.clear()
         # THE BOXES TOO.  These are keyed by id(axes), and relayout is
         # exactly where the old Axes are dropped -- so a later generation
@@ -3197,7 +3234,7 @@ class MatplotlibRenderer:
             # Chrome is part of the prepared scene, not a side effect of
             # painting it. Screen and file consumers must receive the same
             # frames, ticks and titles even when no screen front is requested.
-            self._sync_facet_cell_chrome()
+            self._sync_axes_chrome()
             if not compose:
                 return
             self._compose_frame(
@@ -3413,7 +3450,7 @@ class MatplotlibRenderer:
         """Compose one complete Agg frame from the current artist state."""
 
         with style_context(self.style):
-            self._sync_facet_cell_chrome()
+            self._sync_axes_chrome()
             if self._has_prepared_scene():
                 self._background_region = None
                 self._background_signature = None
@@ -4232,7 +4269,7 @@ class MatplotlibRenderer:
             line
             for records in self._series_lines.values()
             for line, _identity, _label in records
-            if line.get_visible() and line.axes.get_visible()
+            if not isinstance(line, _BarBuffered) and line.get_visible() and line.axes.get_visible()
         )
         from matplotlib.lines import Line2D
 
@@ -4278,7 +4315,7 @@ class MatplotlibRenderer:
             ):
                 return None
         if any(
-            len(artists) != 3
+            len(artists) != 1
             or not hasattr(artists[-1], "_zlc_segment_buffer")
             for artists in bars
         ):
@@ -4399,7 +4436,7 @@ class MatplotlibRenderer:
             lows.append(np.ascontiguousarray(np.minimum(low_y, high_y)))
             highs.append(np.ascontiguousarray(np.maximum(low_y, high_y)))
             offsets.append(offsets[-1] + group_x.size)
-            slot = _series_slot(item.identity, len(cycle))
+            slot = _series_slot(item.group_key, len(cycle))
             packed_colour = slot_colours.get(slot)
             if packed_colour is None:
                 rgba = np.asarray(to_rgba(cycle[slot]), dtype=float)
@@ -4646,7 +4683,7 @@ class MatplotlibRenderer:
                     display[:, 1] = float(height) - display[:, 1]
                 vertices.append(display)
                 offsets.append(offsets[-1] + display.shape[0])
-                slot = _series_slot(item.identity, len(cycle))
+                slot = _series_slot(item.group_key, len(cycle))
                 packed_colour = slot_colours.get(slot)
                 if packed_colour is None:
                     rgba = np.asarray(to_rgba(cycle[slot]), dtype=float)
@@ -4684,7 +4721,7 @@ class MatplotlibRenderer:
         Matplotlib remains the style/topology owner: the reused artists carry
         the exact segments, alpha, linewidth, capsize, z-order and focus state.
         This consumer only transforms those facts to physical pixels and
-        rasterises every independent stem/cap without rebuilding artists or
+        rasterises each independent complete bar without rebuilding artists or
         collapsing neighbouring measurements into a display-column envelope.
         ``None`` refuses -- the artists draw -- with the canvas untouched;
         an empty plan has nothing to paint.
@@ -4713,15 +4750,9 @@ class MatplotlibRenderer:
         lane_offsets = [0]
         lane_axis: Any | None = None
         for group in groups:
-            collections = [
-                artist for artist in group if hasattr(artist, "set_segments")
-            ]
-            caps = [
-                artist for artist in group if not hasattr(artist, "set_segments")
-            ]
-            if len(collections) != 1 or len(caps) not in {0, 2}:
+            if len(group) != 1 or not isinstance(group[0], _SegmentBuffered):
                 return None
-            collection = collections[0]
+            collection = group[0]
             if not collection.get_visible():
                 continue
             axes = getattr(collection, "axes", None)
@@ -4752,7 +4783,7 @@ class MatplotlibRenderer:
             highs.append(np.ascontiguousarray(group_high))
             offsets.append(offsets[-1] + group_x.size)
 
-            edge = np.asarray(collection.get_edgecolors(), dtype=float)
+            edge = np.asarray(collection.get_facecolors(), dtype=float)
             line_width = np.asarray(collection.get_linewidths(), dtype=float)
             if edge.ndim != 2 or edge.shape[1] != 4 or not edge.shape[0]:
                 return None
@@ -4768,14 +4799,9 @@ class MatplotlibRenderer:
                 )
             )
             cap_widths.append(
-                0.0
-                if not caps
-                else max(
-                    0.0,
-                    float(caps[0].get_markersize())
+                max(0.0, 2.0 * collection._zlc_capsize
                     * float(self._figure.dpi)
-                    / 72.0,
-                )
+                    / 72.0)
             )
             box = axes.bbox
             clips.append(
@@ -5119,48 +5145,37 @@ class MatplotlibRenderer:
         tops_px: list[np.ndarray] = []
         bases_px: list[float] = []
         offsets = [0]
-        colours = np.empty((len(surfaces), 4), dtype=np.uint8)
+        surface_offsets = [0]
+        colours: list[np.ndarray] = []
         clips = np.empty((len(surfaces), 4), dtype=np.int32)
         painted: set[int] = set()
         for row, (key, axes, _index) in enumerate(surfaces):
-            entry = bars.get(key)
-            collection = self._artists.get(key)
-            if entry is None or collection is None or not hasattr(collection, "get_facecolor"):
+            entries = bars.get(key)
+            if entries is None:
                 return False, frozenset()
-            edges, counts = entry
-            face = np.asarray(collection.get_facecolor(), dtype=float)
-            if face.ndim != 2 or face.shape[0] < 1 or face.shape[1] != 4:
-                return False, frozenset()
-            # The collection's own colour, its alpha folded in the way the
-            # collection folds it, rounded the way Agg rounds it.
-            colours[row] = np.floor(face[0] * 255.0 + 0.5).astype(np.uint8)
-            # Edges along x and bar tops along y through the cell's data
-            # transform to canvas pixels.  A linear cell's transData IS one
-            # affine, applied directly with Matplotlib's own operand order
-            # (a*x + c*y + e) so the pixels are the ones transform()
-            # produces; a log cell keeps the stack.
             transform = axes.transData
-            if transform.is_affine:
-                a, b, c, d, e, f = transform.get_affine().to_values()
-                along_x = a * edges + e
-                top_y = d * counts + f
-                base_y = f
-            else:
-                along = transform.transform(
-                    np.column_stack((edges, np.zeros(edges.size)))
-                )
-                heights = transform.transform(
-                    np.column_stack((np.full(counts.size, float(edges[0])), counts))
-                )
-                along_x = np.asarray(along[:, 0], dtype=np.float64)
-                top_y = np.asarray(heights[:, 1], dtype=np.float64)
-                base_y = float(transform.transform((float(edges[0]), 0.0))[1])
-            edges_px.append(np.asarray(along_x, dtype=np.float64))
-            # One top per bar, padded to one per edge so that the kernel
-            # indexes tops and edges alike across surfaces.
-            tops_px.append(np.append(float(height) - top_y, np.nan))
-            bases_px.append(float(height) - float(base_y))
-            offsets.append(offsets[-1] + edges.size)
+            for collection, edges, counts in entries:
+                face = np.asarray(collection.get_facecolor(), dtype=float)
+                colours.append(np.floor(face[0] * 255.0 + 0.5).astype(np.uint8))
+                if transform.is_affine:
+                    a, b, c, d, e, f = transform.get_affine().to_values()
+                    along_x = a * edges + e
+                    top_y = d * counts + f
+                    base_y = f
+                else:
+                    along_x = transform.transform(
+                        np.column_stack((edges, np.zeros(edges.size)))
+                    )[:, 0]
+                    top_y = transform.transform(
+                        np.column_stack((np.full(counts.size, float(edges[0])), counts))
+                    )[:, 1]
+                    base_y = float(transform.transform((float(edges[0]), 0.0))[1])
+                edges_px.append(np.asarray(along_x, dtype=np.float64))
+                tops_px.append(np.append(float(height) - top_y, np.nan))
+                bases_px.append(float(height) - float(base_y))
+                offsets.append(offsets[-1] + edges.size)
+                painted.add(id(collection))
+            surface_offsets.append(len(colours))
             # Agg rounds the clip box to whole pixels before it clips.
             box = axes.bbox
             clips[row] = (
@@ -5169,15 +5184,15 @@ class MatplotlibRenderer:
                 min(width, int(math.floor(float(box.x1) + 0.5))),
                 min(height, int(math.floor(float(height) - float(box.y0) + 0.5))),
             )
-            painted.add(id(collection))
-        if not surfaces:
+        if not colours:
             return False, frozenset()
         kernels.raster_histogram_bars(
             kernels.readable(np.concatenate(edges_px)),
             kernels.readable(np.concatenate(tops_px)),
             kernels.readable(np.asarray(bases_px, dtype=np.float64)),
             kernels.readable(np.asarray(offsets, dtype=np.int64)),
-            kernels.readable(colours),
+            kernels.readable(np.asarray(surface_offsets, dtype=np.int64)),
+            kernels.readable(np.asarray(colours, dtype=np.uint8)),
             kernels.readable(clips),
             canvas_rgba,
         )
@@ -5284,7 +5299,7 @@ class MatplotlibRenderer:
             return True, frozenset()
         rows = tuple(
             (axis, slots["center"], slots["ring"])
-            for axis, family, _model, slots, _artists in self._facet_fit_topologies.values()
+            for axis, family, _model, slots, _artists in self._fit_topologies.values()
             if family == "ellipse"
             and slots.get("center") is not None
             and slots.get("ring") is not None
@@ -5685,7 +5700,7 @@ class MatplotlibRenderer:
             self._materialize_prepared_histograms()
         facet_ellipse_ids = {
             id(artist)
-            for _axis, family, _model, slots, _artists in self._facet_fit_topologies.values()
+            for _axis, family, _model, slots, _artists in self._fit_topologies.values()
             if family == "ellipse"
             for artist in (slots.get("center"), slots.get("ring"))
             if artist is not None and artist.get_visible()
@@ -6494,7 +6509,8 @@ class MatplotlibRenderer:
                     y,
                     valid,
                     str(label),
-                    _series_identity(item),
+                    _series_identity(getattr(item, "group_key", ())),
+                    tuple(getattr(item, "group_key", ())),
                     x_labels=getattr(item, "x_labels", None),
                     band=band,
                     summary=summary,
@@ -6667,7 +6683,6 @@ class MatplotlibRenderer:
         axes: Any,
         reused: tuple[Any, ...] | None,
         x: np.ndarray,
-        y: np.ndarray,
         low: np.ndarray,
         high: np.ndarray,
         colour: Any,
@@ -6675,19 +6690,9 @@ class MatplotlibRenderer:
     ) -> tuple[Any, ...]:
         """Draw one series' bars, reusing last revision's artists if they fit.
 
-        A bar is a vertical segment and two caps: a LineCollection whose
-        segments are (x, low)-(x, high), and two marker-only Line2Ds.  All
-        three take new data in place, so a revision is a data change --
-        which is what it is -- rather than a teardown and a rebuild.
-
-        The artists are built directly.  ``axes.errorbar`` cost, per
-        series per build, masked-array copies of every bound, a Path per
-        segment, three ``plot`` calls with their transform trees, a datalim
-        update and a container to remove again -- most of a second on a
-        40-cell grid's first paint, for artists the native stroke reads
-        straight off ``_zlc_segment_buffer`` and never asks matplotlib to
-        draw.  :class:`_SegmentBuffered` builds its Paths only when
-        something asks for them.
+        Endpoints remain in the shared data buffer. Each bar's stem and caps
+        become one closed glyph only when Agg actually consumes the paths;
+        native reads the same endpoints/style without building those paths.
         """
 
         policy = self.style.render
@@ -6700,50 +6705,21 @@ class MatplotlibRenderer:
             segments[:, 1, 1] = high
             collection.stale = True
 
-        capped = policy.uncertainty_bar_capsize_pt > 0
         if reused is not None:
-            collections = [
-                artist for artist in reused if hasattr(artist, "set_segments")
-            ]
-            caps = [
-                artist for artist in reused if not hasattr(artist, "set_segments")
-            ]
-            if len(collections) == 1 and len(caps) == (2 if capped else 0):
-                update_segments(collections[0])
-                for cap, edge in zip(caps, (low, high)):
-                    cap.set_data(x, edge)
-                return reused
-            for artist in reused:
-                artist.remove()
-        from matplotlib.lines import Line2D
+            update_segments(reused[0])
+            return reused
 
         collection = _SegmentBuffered(
-            colors=(colour,),
+            facecolors=(colour,),
+            edgecolors="none",
             linewidths=policy.uncertainty_bar_linewidth,
+            capsize=policy.uncertainty_bar_capsize_pt,
             alpha=policy.uncertainty_bar_alpha,
             zorder=zorder,
         )
         axes.add_collection(collection, autolim=False)
         update_segments(collection)
-        caplines: list[Any] = []
-        if capped:
-            # The cap ``errorbar`` draws: a ``_`` marker whose size is
-            # twice the cap length and whose edge is the bar's thickness.
-            for edge in (low, high):
-                cap = Line2D(
-                    x,
-                    edge,
-                    linestyle="none",
-                    marker="_",
-                    markersize=2.0 * policy.uncertainty_bar_capsize_pt,
-                    markeredgewidth=policy.uncertainty_bar_linewidth,
-                    color=colour,
-                    alpha=policy.uncertainty_bar_alpha,
-                    zorder=zorder,
-                )
-                axes.add_line(cap)
-                caplines.append(cap)
-        return (*caplines, collection)
+        return (collection,)
 
     def _withdraw_series_artists(self, axes: Any) -> None:
         """Hide one axes' series artists: its native scene owns the picture.
@@ -6812,7 +6788,7 @@ class MatplotlibRenderer:
         previous_bars = self._series_bars.pop(id(axes), {})
         bars_by_series: dict[object, tuple[Any, ...]] = {}
         for index, item in enumerate(series):
-            colour = cycle[_series_slot(item.identity, len(cycle))]
+            colour = cycle[_series_slot(item.group_key, len(cycle))]
             # NaNs preserve invalid runs as gaps instead of joining neighbours.
             plotted_y = np.where(item.valid, item.y, np.nan)
             self._apply_line_data(
@@ -6847,7 +6823,6 @@ class MatplotlibRenderer:
                         axes,
                         previous_bars.pop(item.identity, None),
                         item.x[band_where],
-                        item.y[band_where],
                         band_low[band_where],
                         band_high[band_where],
                         colour,
@@ -7101,6 +7076,7 @@ class MatplotlibRenderer:
         if axes is None or not axes.get_visible():
             return None
         point = np.asarray((px, py), dtype=float)
+        data_point = axes.transData.inverted().transform(point)
         best = (float(radius) * self.plan.device_pixel_ratio) ** 2
         hit = None
         entries = self._series_lines.get(id(axes), ())
@@ -7111,6 +7087,15 @@ class MatplotlibRenderer:
         for line, identity, label in entries:
             if not line.get_visible():
                 continue
+            if isinstance(line, _BarBuffered):
+                edges, counts = line._zlc_bars
+                index = int(np.searchsorted(edges, data_point[0], side="right")) - 1
+                if 0 <= index < counts.size and 0.0 < data_point[1] <= counts[index]:
+                    hit = (id(axes), identity, label, float(data_point[0]), float(data_point[1]))
+                    best = 0.0
+                    if identity == current:
+                        return hit
+                    continue
             signature = (
                 tuple(map(float, axes.get_xlim())),
                 tuple(map(float, axes.get_ylim())),
@@ -7128,8 +7113,8 @@ class MatplotlibRenderer:
                     x = np.asarray(raw_x, dtype=float).reshape(-1)
                     y = np.asarray(raw_y, dtype=float).reshape(-1)
                 else:
-                    x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
-                    y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
+                    x, y = _series_xy(line)
+                    x, y = np.asarray(x, dtype=float).reshape(-1), np.asarray(y, dtype=float).reshape(-1)
                 if x.size > _ENVELOPE_MAX_COLUMNS * 4:
                     low, high = sorted(map(float, axes.get_xlim()))
                     start = max(0, int(np.searchsorted(x, low)) - 1)
@@ -7222,6 +7207,7 @@ class MatplotlibRenderer:
                 setattr(self, attribute, None)
         locked = self._series_locked
         active = locked or self._series_hover
+        self._update_rolling_meter()
         # Focus styling is a pure function of focus plus exact line/series/bar
         # identities.  All of those artists now survive data revisions, so a
         # per-axes token turns the steady update into zero property writes;
@@ -7284,6 +7270,14 @@ class MatplotlibRenderer:
                     line.set_linewidth(self.style.artists.curve.linewidth)
                     line.set_alpha(self.style.artists.curve.alpha)
                     line.set_zorder(2.0)
+                if isinstance(line, _BarBuffered):
+                    alpha = self.style.artists.histogram_fill_alpha
+                    if locked is not None:
+                        alpha *= 1.6 if focused else 0.25
+                    elif active is not None and focused:
+                        alpha *= 1.3
+                    line.set_alpha(min(1.0, alpha))
+                    line.set_zorder(1.0)
                 # The bars are part of the series: alpha, weight and depth
                 # all move with their line -- dimming to near-nothing behind
                 # a locked focus, thickening with a focused line, and always
@@ -7303,24 +7297,23 @@ class MatplotlibRenderer:
                 for artist in axis_bars.get(series_id, ()):
                     artist.set_alpha(series_bar_alpha)
                     artist.set_zorder(line.get_zorder() - 0.1)
-                    if hasattr(artist, "set_markeredgewidth"):
-                        # A capline is a marker-only Line2D: its visible
-                        # weight is the marker edge.
-                        artist.set_markeredgewidth(series_bar_width)
-                    else:
-                        artist.set_linewidth(series_bar_width)
-                if line.get_marker() == "_":
+                    artist.set_linewidth(series_bar_width)
+                if not isinstance(line, _BarBuffered) and line.get_marker() == "_":
                     line.set_markeredgewidth(line.get_linewidth())
                 if focused and active is not None and axis_id == active[0]:
                     focus_line = line
             applied[axis_id] = tokens[axis_id]
         self._series_focus_applied_axes = applied
+        if only is None:
+            self._refresh_fit_focus()
         if only is not None and (active is None or only != active[0]):
             # The inspector belongs to the focused cell, and this call did
             # not touch it.
             return
         for annotation in self._series_annotations.values():
             annotation.set_visible(False)
+        if self._classifier_annotation_owns_inspector():
+            return
         if active is None or focus_line is None:
             return
         axis_id = active[0]
@@ -7343,7 +7336,7 @@ class MatplotlibRenderer:
             f"{'* ' if locked is not None else ''}"
             f"{_literal_text(active[2]) if active[2] else 'Series'}"
         )
-        annotation.set_color(focus_line.get_color())
+        annotation.set_color(_series_colour(focus_line))
         annotation.set_visible(True)
 
     def _accepts_series_focus(self, axes: Any | None) -> bool:
@@ -7374,8 +7367,9 @@ class MatplotlibRenderer:
     def _series_focus_allowed(self, axis_id: int) -> bool:
         """The rule itself, by axes identity -- which is all a held focus keeps."""
 
-        if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
-            return False
+        if isinstance(self.spec, FacetGridPlot):
+            if self._facet_focus_index is None or axis_id != id(self.primary_axes):
+                return False
         prepared = self._artists.get("curve:prepared")
         if isinstance(prepared, dict) and "series" in prepared:
             series = prepared["series"]
@@ -7414,7 +7408,7 @@ class MatplotlibRenderer:
                     continue
                 for line, identity, label in entries:
                     if identity == selected["key"]:
-                        x, y = np.asarray(line.get_xdata()), np.asarray(line.get_ydata())
+                        x, y = _series_xy(line)
                         anchor = (float(x[0]), float(y[0])) if x.size and y.size else (0.0, 0.0)
                         text = (readout["label"] if readout is not None
                                 and readout["key"] == identity else label)
@@ -7492,12 +7486,12 @@ class MatplotlibRenderer:
                 self._compose_frame(chrome_stable=True)
         return handled if action == "release" else True
 
-    def series_focus_scroll(self, axes: Any | None, step: float) -> bool:
+    def series_focus_scroll(self, axes: Any | None, step: float, *, redraw: bool = True) -> bool:
         locked = self._series_locked
         if (
             locked is None or axes is None or id(axes) != locked[0]
             or not locked[1]
-            or not isinstance(self.semantic_spec, (CurvePlot, RollingPlot))
+            or not isinstance(self.semantic_spec, (CurvePlot, RollingPlot, HistogramPlot))
             or not self._accepts_series_focus(axes)
         ):
             return False
@@ -7509,14 +7503,15 @@ class MatplotlibRenderer:
         if target == current:
             return True
         line, identity, label = entries[target]
-        x, y = np.asarray(line.get_xdata()), np.asarray(line.get_ydata())
+        x, y = _series_xy(line)
         anchor = (locked[3], locked[4])
         if x.size and y.size and np.isfinite((x[0], y[0])).all():
             anchor = (float(x[0]), float(y[0]))
         self._series_locked = (locked[0], identity, label, *anchor)
         self._apply_series_focus()
-        with style_context(self.style):
-            self._compose_frame(chrome_stable=True)
+        if redraw:
+            with style_context(self.style):
+                self._compose_frame(chrome_stable=True)
         return True
 
     def _histogram_arrays(
@@ -7526,7 +7521,7 @@ class MatplotlibRenderer:
         counts = getattr(payload, "counts", None)
         if edges is not None and counts is not None:
             edge_values = np.asarray(_display_array(edges), dtype=float).reshape(-1)
-            count_values = np.asarray(counts, dtype=float).reshape(-1)
+            count_values = np.asarray(counts, dtype=float)
         else:
             values = getattr(payload, "values", payload)
             values = np.asarray(_display_array(values), dtype=float).reshape(-1)
@@ -7535,18 +7530,19 @@ class MatplotlibRenderer:
                 aligned_histogram_edges(values, int(state["bin_count"])),
                 dtype=float,
             )
-            count_values = histogram_counts(values, edge_values).astype(float)
+            count_values = histogram_counts(values, edge_values).astype(float)[None, :]
         density = bool(state["density"])
         cumulative = bool(state["cumulative"])
         if cumulative:
-            count_values = np.cumsum(count_values)
-            if density and count_values.size and count_values[-1] > 0.0:
-                count_values = count_values / count_values[-1]
+            count_values = np.cumsum(count_values, axis=1)
+            if density and count_values.size:
+                totals = count_values[:, -1:]
+                count_values = np.divide(count_values, totals, out=np.zeros_like(count_values), where=totals > 0)
         elif density:
-            total = float(np.sum(count_values))
+            total = np.sum(count_values, axis=1, keepdims=True)
             widths = np.diff(edge_values)
-            if total > 0:
-                count_values = count_values / (total * widths)
+            count_values = np.divide(count_values, total * widths,
+                                     out=np.zeros_like(count_values), where=total > 0)
         return edge_values, count_values
 
     def _update_histogram(
@@ -7561,20 +7557,31 @@ class MatplotlibRenderer:
         paint_labels: bool = True,
     ) -> None:
         edges, counts = self._histogram_arrays(payload, state) if arrays is None else arrays
-        collection = self._artists.get(key)
+        collections = self._artists.setdefault(key, [])
         alpha = self.style.artists.histogram_fill_alpha
-        if collection is None:
-            collection = _BarBuffered(
-                facecolors=self.style.palette.hist_fill,
-                edgecolors="none",
-                alpha=alpha,
-            )
-            # No data limits: the limits are authored below, from the
-            # edges and the count policy, and the data-limit update walks
-            # every bar's path to arrive at numbers that are never read.
+        while len(collections) > len(counts):
+            collections.pop().remove()
+        while len(collections) < len(counts):
+            collection = _BarBuffered(edgecolors="none", alpha=alpha)
             axes.add_collection(collection, autolim=False)
-            self._artists[key] = collection
-        collection.set_bars(edges, counts, swapped=False)
+            collections.append(collection)
+        group_keys = getattr(payload, "group_keys", ((),))
+        labels = getattr(payload, "labels", ("",))
+        cycle = self.style.palette.line_cycle
+        records = []
+        self._series_hit_cache.clear()
+        for collection, row, group_key, label in zip(
+            collections, counts, group_keys, labels, strict=True
+        ):
+            identity = _series_identity(group_key)
+            colour = cycle[_series_slot(group_key, len(cycle))]
+            collection.set_facecolor(colour)
+            collection.set_bars(edges, row, swapped=False)
+            collection.set_label(label)
+            records.append((collection, identity, label))
+        self._series_lines[id(axes)] = tuple(records)
+        self._series_indices[id(axes)] = {identity: index for index, (_line, identity, _label) in enumerate(records)}
+        self._apply_series_focus(id(axes))
         self._artists[f"{key}:projection"] = (edges, counts)
         # THE BARS ARE PAINTED BY THE KERNEL, not by the collection's own
         # draw: sixty-four PolyCollections were fifteen milliseconds of
@@ -7591,9 +7598,9 @@ class MatplotlibRenderer:
             if not isinstance(command, dict):
                 command = {"bars": {}}
                 self._artists["histogram:prepared"] = command
-            command["bars"][key] = (
-                np.asarray(edges, dtype=np.float64),
-                np.asarray(counts, dtype=np.float64),
+            command["bars"][key] = tuple(
+                (collection, np.asarray(edges, dtype=np.float64), np.asarray(row, dtype=np.float64))
+                for collection, row in zip(collections, counts, strict=True)
             )
         if limits is not None:
             selected_x = limits[0]
@@ -10275,13 +10282,6 @@ class MatplotlibRenderer:
                 y_label=y_label,
                 x_limits=frame,
             )
-        latest = None
-        if sliced:
-            first = sliced[0]
-            if first.y.size and (first.summary is None or math.isfinite(first.summary[0])):
-                index = first.y.size - 1 - int(np.argmax(first.valid[::-1]))
-                if first.valid[index]:
-                    latest = float(first.y[index])
         latest_text = self._artists.get(f"{key}:latest")
         if latest_text is None:
             from matplotlib.transforms import offset_copy
@@ -10301,7 +10301,9 @@ class MatplotlibRenderer:
                 fontsize=self.style.fonts.annotation_pt,
             )
             self._artists[f"{key}:latest"] = latest_text
-        latest_text.set_text("" if latest is None else f"{latest:.6g}")
+            self._update_rolling_meter()
+        elif native_direct:
+            self._update_rolling_meter()
 
         distribution_axes = self._axes.get("distribution", [])
         if distribution_axes:
@@ -10354,6 +10356,34 @@ class MatplotlibRenderer:
                 projection_changed=True,
                 tick_profile="rolling",
             )
+
+    def _update_rolling_meter(self) -> None:
+        """Read the selected series from the accepted payload, also between frames."""
+
+        if not isinstance(self.spec, RollingPlot):
+            return
+        text = self._artists.get("rolling:latest")
+        if text is None:
+            return
+        series = self._series(self._last_payload)
+        identity = None if self._series_locked is None else self._series_locked[1]
+        item = next((item for item in series if _series_identity(
+            getattr(item, "group_key", ())
+        ) == identity), None) if identity is not None else next(iter(series), None)
+        latest = None
+        label = ""
+        if item is not None:
+            values = np.asarray(_display_array(item.y), dtype=float)
+            valid = _valid_array(item, values.shape) & np.isfinite(values)
+            if values.size and bool(np.any(valid)):
+                latest = float(values[values.size - 1 - int(np.argmax(valid[::-1]))])
+            label = str(getattr(item, "label", "")) if len(series) > 1 else ""
+            cycle = self.style.palette.line_cycle
+            text.set_color(cycle[_series_slot(
+                getattr(item, "group_key", ()), len(cycle)
+            )])
+        value = "—" if latest is None else f"{latest:.6g}"
+        text.set_text(f"{_literal_text(label)} · {value}" if label else value)
 
     #: Side-chrome artist keys the focused image cell creates under its
     #: ``facet:<i>`` surface namespace.  Purged together with the side axes so
@@ -10763,8 +10793,60 @@ class MatplotlibRenderer:
         self._facet_chrome_signature = None
         self._facet_chrome_shape = None
 
-    def _sync_facet_cell_chrome(self) -> None:
-        """Keep a grid's chrome current with the tick policy its cells carry.
+    def _fit_tick_label_text(self, axes, direction_labels, title_artists) -> None:
+        # Empty gutter is not an obstacle. Price actual anchored text against
+        # other text and the visible data boxes, once per changed chrome
+        # layout. A whole direction shares one size; never shift an endpoint
+        # label or change the locator's chosen ticks to make it fit.
+        renderer = _prepare_renderer(self._figure.canvas.get_renderer())
+        obstacles = np.asarray(
+            [axis.bbox.extents for axis in axes]
+            + [title.get_window_extent(renderer).extents for title in title_artists],
+            dtype=float,
+        ).reshape(-1, 4)
+        labels = [label for group in direction_labels for label in group]
+        if not labels:
+            return
+        directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
+        sizes = [max((label.get_fontsize() for label in group), default=MIN_TICK_LABEL_PT)
+                 for group in direction_labels]
+        while True:
+            boxes = np.asarray([label.get_window_extent(renderer).extents for label in labels])
+            # These are the same positive-extent rectangle comparisons as
+            # Bbox.overlaps, batched instead of thousands of Python calls.
+            all_boxes = np.concatenate((boxes, obstacles))
+            touching = (
+                (boxes[:, None, 2] >= all_boxes[None, :, 0])
+                & (boxes[:, None, 3] >= all_boxes[None, :, 1])
+                & (boxes[:, None, 0] <= all_boxes[None, :, 2])
+                & (boxes[:, None, 1] <= all_boxes[None, :, 3])
+            )
+            touching[np.arange(len(boxes)), np.arange(len(boxes))] = False
+            crowded = set(directions[np.any(touching, axis=1)])
+            adjustable = [direction for direction in crowded
+                          if sizes[direction] > MIN_TICK_LABEL_PT + 1e-9]
+            if not adjustable:
+                break
+            for direction in adjustable:
+                size = sizes[direction] = max(MIN_TICK_LABEL_PT, sizes[direction] * _SHRINK)
+                for label in direction_labels[direction]:
+                    label.set_fontsize(min(size, label.get_fontsize()))
+        # Commit to Axis templates once, after the size search. Re-running
+        # tick_params on every hidden cell at every trial dominated planning.
+        for direction, name in enumerate(("xaxis", "yaxis")):
+            for axis_owner in axes:
+                axis = getattr(axis_owner, name)
+                locator = axis.get_major_locator()
+                if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
+                    locator._apply_drawn_size(min(sizes[direction], locator.drawn_pt))
+                else:
+                    old_size = axis._major_tick_kw.get("labelsize", sizes[direction])
+                    size = min(sizes[direction], old_size)
+                    if size != old_size:
+                        axis_owner.tick_params(axis="x" if direction == 0 else "y", labelsize=size)
+
+    def _sync_axes_chrome(self) -> None:
+        """Prepare anchored tick typography for standalone, focus and overview.
 
         Every cell keeps its Axis -- its locator, its formatter, which of its
         labels the boundary shows -- and draws none of it.  What that policy
@@ -10797,9 +10879,34 @@ class MatplotlibRenderer:
         artists it already has instead of replacing them.
         """
 
-        if not isinstance(self.spec, FacetGridPlot):
+        if not isinstance(self.spec, FacetGridPlot) or self._facet_focus_index is not None:
             if "facet:chrome_labels" in self._artists:
                 self._discard_facet_cell_chrome()
+            axes = tuple(axis for axis in self._figure.axes if axis.get_visible() and axis.axison)
+            signature = (
+                self._figure.dpi,
+                tuple((id(axis), np.round(axis.bbox.extents, 6).tobytes(),
+                       axis.viewLim.extents.tobytes(),
+                       getattr(axis.xaxis, "_zlc_tick_signature", None),
+                       getattr(axis.yaxis, "_zlc_tick_signature", None),
+                       _tick_params_key(axis.xaxis), _tick_params_key(axis.yaxis),
+                       axis.title.get_text()) for axis in axes),
+            )
+            if self._artists.get("ticks:layout") != signature:
+                direction_labels = ([], [])
+                for axis_owner in axes:
+                    for direction, axis in enumerate((axis_owner.xaxis, axis_owner.yaxis)):
+                        locator = axis.get_major_locator()
+                        if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
+                            locator._tick_cache_key = None
+                        for tick in axis._update_ticks():
+                            direction_labels[direction].extend(
+                                label for label in (tick.label1, tick.label2)
+                                if label.get_visible() and label.get_text()
+                            )
+                self._fit_tick_label_text(axes, direction_labels, tuple(axis.title for axis in axes if axis.title.get_text()))
+                self._artists["ticks:layout"] = signature
+                self._mark_axes_chrome_dirty(*axes)
             return
         cells = self._axes.get("facet_cell", ())
         if self._facet_focus_index is not None or not cells:
@@ -10875,6 +10982,7 @@ class MatplotlibRenderer:
         shape: list[Any] = []
         shared_lanes: dict[tuple[object, ...], list[Any]] = {}
         tick_sizes: tuple[list[float], list[float]] = ([], [])
+        direction_labels: tuple[list[Any], list[Any]] = ([], [])
         # A spine's path is in axes coordinates, so every cell's left edge
         # is the same two vertices, and one frozen copy serves the grid:
         # the patch holds the cell's own transform, the path only the
@@ -10987,6 +11095,7 @@ class MatplotlibRenderer:
                         for label in tick_labels:
                             if label.get_visible() and label.get_text():
                                 labels.append(label)
+                                direction_labels[0 if horizontal else 1].append(label)
                     for locs, source in grid_lanes.values():
                         lanes.append((horizontal, "grid", source, locs, zorder, True))
                     for (which, *_stroke), (locs, source) in mark_lanes.items():
@@ -11138,6 +11247,10 @@ class MatplotlibRenderer:
                 title_artists.append(title)
             title.set_text(text_value)
             title.set_fontsize(size_pt)
+
+        self._fit_tick_label_text(
+            tuple(axes for _index, axes in visible), direction_labels, title_artists,
+        )
         carrier = self._artists.get("facet:chrome_labels")
         if not isinstance(carrier, _FacetChromeLabels):
             carrier = _FacetChromeLabels()
@@ -11974,6 +12087,22 @@ class MatplotlibRenderer:
             return "NaN"
         return float(value)
 
+    def _classifier_annotation_owns_inspector(self) -> bool:
+        return bool(isinstance(self.semantic_spec, HistogramPlot)
+                    and self._last_state is not None
+                    and self._last_state.values.get("threshold_classifier")
+                    and any(state.kind is SelectorKind.THRESHOLD for state in self._last_selectors.states))
+
+    def _classifier_series(self, axis: Any) -> tuple[Any, object, str] | None:
+        """The authoring group: the accepted lock, otherwise the first group."""
+        records = self._series_lines.get(id(axis), ())
+        if not records:
+            return None
+        locked = self._series_locked
+        index = (self._series_indices.get(id(axis), {}).get(locked[1], 0)
+                 if locked is not None and locked[0] == id(axis) else 0)
+        return records[index]
+
     def _histogram_threshold_text(self, state: SelectorState) -> str:
         """Describe one effective threshold from the already-painted bins."""
 
@@ -11981,23 +12110,34 @@ class MatplotlibRenderer:
             return ""
         if not isinstance(self.semantic_spec, HistogramPlot):
             return ""
-        if self._classifier_labels:
-            index = 0 if state.facet_index is None else state.facet_index
-            if 0 <= index < len(self._classifier_labels):
-                return self._classifier_labels[index]
+        axis = self._selector_axis(state)
+        selected = self._classifier_series(axis)
+        group_index = (0 if selected is None else
+                       self._series_indices.get(id(axis), {}).get(selected[1], 0))
+        caption = ""
+        if selected is not None and selected[1]:
+            locked = self._series_locked is not None and self._series_locked[0] == id(axis)
+            caption = f"{'* ' if locked else ''}{_literal_text(selected[2])}\n"
+            hover = self._series_hover
+            if not locked and hover is not None and hover[0] == id(axis) and hover[1] != selected[1]:
+                caption = f"{_literal_text(hover[2])} (hover)\n{_literal_text(selected[2])}: "
         payload = self._last_payload
+        label_index = group_index
         if isinstance(self.spec, FacetGridPlot):
             cells = tuple(getattr(payload, "cells", ()))
             index = self._focused_facet_index if state.facet_index is None else state.facet_index
             if index is None or index < 0 or index >= len(cells):
                 return ""
+            label_index += sum(len(getattr(cell, "payload", cell).group_keys) for cell in cells[:index])
             payload = getattr(cells[index], "payload", cells[index])
+        if 0 <= label_index < len(self._classifier_labels):
+            return caption + self._classifier_labels[label_index]
         edges = getattr(getattr(payload, "edges", None), "display", None)
         counts = getattr(payload, "counts", None)
         if edges is None or counts is None:
             return ""
         edges = np.asarray(edges, dtype=float).reshape(-1)
-        weights = np.asarray(counts, dtype=float).reshape(-1)
+        weights = np.asarray(counts, dtype=float)[group_index].reshape(-1)
         if edges.size != weights.size + 1 or not weights.size:
             return ""
         total = float(np.sum(weights))
@@ -12025,7 +12165,7 @@ class MatplotlibRenderer:
                     (np.sum(weights[:index]) + weights[index] * fraction) / total
                 )
         return (
-            f"th={compact_number(threshold)}\n"
+            f"{caption}th={compact_number(threshold)}\n"
             f"L/R={100.0 * left_fraction:.1f}%/"
             f"{100.0 * (1.0 - left_fraction):.1f}%"
         )
@@ -12166,6 +12306,12 @@ class MatplotlibRenderer:
         contexts = []
         for state in snapshot.states:
             axis = self._selector_axis(state)
+            item_threshold_rgba, item_threshold_label = threshold_rgba, threshold_label_rgba
+            if state.kind is SelectorKind.THRESHOLD and isinstance(self.semantic_spec, HistogramPlot):
+                selected = self._classifier_series(axis)
+                if selected is not None and selected[1]:
+                    item_threshold_rgba = tuple(map(float, to_rgba(_series_colour(selected[0]), threshold.alpha)))
+                    item_threshold_label = tuple(map(float, to_rgba(_series_colour(selected[0]))))
             image = self._image_selector_artist(state)
             cmap = None if image is None else image.get_cmap()
             selector_rgba = tuple(map(float, to_rgba(
@@ -12192,8 +12338,8 @@ class MatplotlibRenderer:
                 y_scale=self.axis_scale(axis, "y"),
                 selector_rgba=selector_rgba,
                 color_limit_rgba=(selector_rgba, selector_rgba),
-                threshold_rgba=threshold_rgba,
-                threshold_label_rgba=threshold_label_rgba,
+                threshold_rgba=item_threshold_rgba,
+                threshold_label_rgba=item_threshold_label,
                 threshold_uses_x=self._threshold_uses_x_axis(),
                 threshold_text=self._histogram_threshold_text(state),
                 x_label_factor=pulse_factor,
@@ -12540,10 +12686,10 @@ class MatplotlibRenderer:
         self,
         overlays: tuple[FitOverlay, ...],
     ) -> tuple[FitOverlay, ...]:
-        """Select the one overlay painted by a focused surface."""
+        """Choose the visible cell while retaining all of its fitted groups."""
 
         if not isinstance(self.spec, FacetGridPlot):
-            return overlays[:1]
+            return overlays
         selected = self._focused_facet_index
         if selected is None:
             return ()
@@ -12552,7 +12698,7 @@ class MatplotlibRenderer:
             for overlay in overlays
             if overlay.facet_index in {None, selected}
         )
-        return matching[:1]
+        return matching
 
     def _fit_target(self, overlay: FitOverlay) -> tuple[Any, PlotSpec]:
         if isinstance(self.spec, FacetGridPlot):
@@ -12582,10 +12728,7 @@ class MatplotlibRenderer:
         self._remove_artists(self._fit_artists)
         self._fit_artists.clear()
         self._fit_slots.clear()
-        self._facet_fit_topologies.clear()
-        self._fit_axis = None
-        self._fit_family = None
-        self._fit_model_id = None
+        self._fit_topologies.clear()
 
     def _fit_polyline_token(self, semantic: PlotSpec, polyline: FitPolyline) -> Any:
         if polyline.role == "component":
@@ -12607,8 +12750,7 @@ class MatplotlibRenderer:
         from matplotlib.patches import Ellipse
 
         self._foreground_batches.clear()
-        self._fit_axis = axis
-        self._fit_family = family
+        self._fit_slots["detail"] = annotation
         if family == "failure":
             if annotation is _FitAnnotationDetail.NONE:
                 return
@@ -12713,6 +12855,9 @@ class MatplotlibRenderer:
     ) -> None:
         annotation = self._fit_slots["annotation"]
         content = self._fit_annotation_text(overlay)
+        if overlay.group_key:
+            group_label = _literal_text(", ".join(value.label for value in overlay.group_key))
+            content = f"{group_label}\n{content}"
         annotation.set_text(content)
         annotation.set_visible(bool(content))
 
@@ -12729,6 +12874,9 @@ class MatplotlibRenderer:
             value_artist.set_visible(False)
             return
         symbol, value = self._fit_parameter_parts(parameter)
+        if overlay.group_key:
+            group_label = _literal_text(", ".join(value.label for value in overlay.group_key))
+            symbol = f"{group_label}: {symbol}"
         if symbol_artist.get_text() != symbol:
             symbol_artist.set_text(symbol)
             value_artist.set_transform(self._transform_after(symbol_artist))
@@ -12772,83 +12920,38 @@ class MatplotlibRenderer:
         if family in {"histogram", "curve"}:
             self._set_fit_line(self._fit_slots["line"], overlay.polylines[0])
 
-    def _update_single_fit(
-        self,
-        overlay: FitOverlay | None,
-        model_id: str | None,
-    ) -> None:
-        if overlay is None:
-            self._clear_fit_topology()
-            return
-        axis, semantic = self._fit_target(overlay)
-        family = self._fit_family_for(semantic, overlay)
-        if (
-            self._fit_axis is not axis
-            or self._fit_family != family
-            or self._fit_model_id != model_id
-        ):
-            self._clear_fit_topology()
-            self._build_fit_topology(axis, family, semantic, overlay)
-            self._fit_model_id = model_id
-        if not overlay.success:
-            diagnostic_text = overlay.diagnostic.strip() or "fit failed"
-            diagnostic_text = _truncate_fit_diagnostic(
-                diagnostic_text,
-                _FIT_DIAGNOSTIC_SINGLE_MAX_CHARS,
-            )
-            diagnostic = self._fit_slots["diagnostic"]
-            diagnostic.set_text(f"fit: {diagnostic_text}")
-            diagnostic.set_visible(True)
-            return
-
-        self._update_fit_primitives(family, overlay)
-        self._update_fit_annotation(overlay)
-
-    def _update_facet_fit_overview(
+    def _update_fit(
         self,
         overlays: tuple[FitOverlay, ...],
+        *,
+        overview: bool,
         model_id: str | None,
-        parameter_name: str | None = None,
+        facet_parameter: str | None = None,
     ) -> None:
-        """Paint all cell fit curves without per-cell parameter annotations."""
+        """One topology per real (cell, group), for single/focus/overview."""
 
-        if not isinstance(self.spec, FacetGridPlot):
-            raise TypeError("facet fit overview requires FacetGridPlot")
-        if self._fit_axis is not None:
-            self._clear_fit_topology()
-        axes = self._axes.get("facet_cell", ())
-        semantic = self.semantic_spec
-        active_indices = {
-            overlay.facet_index
-            for overlay in overlays
-            if overlay.facet_index is not None
-            and 0 <= overlay.facet_index < self._visible_facet_count
-        }
-        for index in tuple(self._facet_fit_topologies):
-            if index in active_indices:
+        detail = _FitAnnotationDetail.HEADLINE if overview else _FitAnnotationDetail.FULL
+        targets = {}
+        for overlay in overlays:
+            axis, semantic = self._fit_target(overlay)
+            key = (self.facet_index_for_axes(axis), _series_identity(overlay.group_key))
+            targets[key] = (overlay, axis, semantic)
+        for key in tuple(self._fit_topologies):
+            if key in targets:
                 continue
-            _axis, _family, _model, _slots, artists = (
-                self._facet_fit_topologies.pop(index)
-            )
+            _axis, _family, _model, _slots, artists = self._fit_topologies.pop(key)
             self._remove_artists(artists)
             removed_ids = {id(removed) for removed in artists}
-            self._fit_artists[:] = [
-                artist
-                for artist in self._fit_artists
-                if id(artist) not in removed_ids
-            ]
-        for overlay in overlays:
-            index = overlay.facet_index
-            if index is None or index < 0 or index >= self._visible_facet_count:
-                continue
+            self._fit_artists[:] = [artist for artist in self._fit_artists if id(artist) not in removed_ids]
+        for key, (overlay, axis, semantic) in targets.items():
             family = self._fit_family_for(semantic, overlay)
-            axis = axes[index]
-            topology = self._facet_fit_topologies.get(index)
+            topology = self._fit_topologies.get(key)
             if (
                 topology is None
                 or topology[0] is not axis
                 or topology[1] != family
                 or topology[2] != model_id
+                or topology[3]["detail"] is not detail
             ):
                 if topology is not None:
                     old_artists = topology[4]
@@ -12866,7 +12969,7 @@ class MatplotlibRenderer:
                     family,
                     semantic,
                     overlay,
-                    annotation=_FitAnnotationDetail.HEADLINE,
+                    annotation=detail,
                 )
                 topology = (
                     axis,
@@ -12875,53 +12978,93 @@ class MatplotlibRenderer:
                     dict(self._fit_slots),
                     tuple(self._fit_artists[first:]),
                 )
-                self._facet_fit_topologies[index] = topology
+                self._fit_topologies[key] = topology
             self._fit_slots = topology[3]
-            if family == "failure":
-                diagnostic = self._fit_slots["diagnostic"]
-                diagnostic.set_text(
-                    _truncate_fit_diagnostic(
-                        overlay.diagnostic,
-                        _FIT_DIAGNOSTIC_FACET_MAX_CHARS,
-                    )
-                )
-                diagnostic.set_visible(True)
-            else:
+            if family != "failure":
                 self._update_fit_primitives(family, overlay)
-                self._update_fit_headline_annotation(overlay, parameter_name)
         self._fit_slots = {}
-        self._fit_axis = None
-        self._fit_family = None
-        self._fit_model_id = None
-
-    def _update_fit(
-        self,
-        overlays: tuple[FitOverlay, ...],
-        *,
-        overview: bool,
-        model_id: str | None,
-        facet_parameter: str | None = None,
-    ) -> None:
-        if overview:
-            self._update_facet_fit_overview(
-                overlays,
-                model_id,
-                facet_parameter,
-            )
-            if (
-                kernels.engaged()
-                and isinstance(self.semantic_spec, (CurvePlot, ImagePlot))
-            ):
-                self._artists["facet:fit_native"] = {
-                    "overlays": overlays,
-                    "model_id": model_id,
-                    "parameter": facet_parameter,
-                }
-                return
+        self._refresh_fit_focus()
+        if overview and kernels.engaged() and isinstance(self.semantic_spec, (CurvePlot, ImagePlot)):
+            self._artists["facet:fit_native"] = {
+                "overlays": overlays, "model_id": model_id, "parameter": facet_parameter,
+            }
+        else:
             self._artists.pop("facet:fit_native", None)
+
+    def _refresh_fit_focus(self) -> None:
+        """Mirror the data-series emphasis and select one annotation per axes."""
+        if not self._fit_topologies and not self._classifier_artists:
             return
-        self._artists.pop("facet:fit_native", None)
-        self._update_single_fit(overlays[0] if overlays else None, model_id)
+        selected = {axis_id: records[0][1] for axis_id, records in self._series_lines.items() if records}
+        active = self._series_locked or self._series_hover
+        if active is not None:
+            selected[active[0]] = active[1]
+        for key, (axis, _family, _model, _slots, _artists) in self._fit_topologies.items():
+            selected.setdefault(id(axis), key[1])
+        cycle = self.style.palette.line_cycle
+        for overlay in self._last_fit_overlays:
+            axis, semantic = self._fit_target(overlay)
+            identity = _series_identity(overlay.group_key)
+            topology = self._fit_topologies.get((self.facet_index_for_axes(axis), identity))
+            if topology is None:
+                continue
+            _axis, family, _model, slots, _artists = topology
+            self._fit_slots = slots
+            chosen = selected.get(id(axis)) == identity
+            group_label = _literal_text(", ".join(value.label for value in overlay.group_key))
+            colour = cycle[_series_slot(overlay.group_key, len(cycle))] if overlay.group_key else None
+            data_index = self._series_indices.get(id(axis), {}).get(identity)
+            data_line = None if data_index is None else self._series_lines[id(axis)][data_index][0]
+            alpha = 1.0 if data_line is None or data_line.get_alpha() is None else float(data_line.get_alpha())
+            width = 1.0 if data_line is None else _series_linewidth(data_line) / self.style.artists.curve.linewidth
+            lines = slots.get("lines", ()) or (() if slots.get("line") is None else (slots["line"],))
+            for line, polyline in zip(lines, overlay.polylines):
+                token = self._fit_polyline_token(semantic, polyline)
+                line.set_color(token.color if colour is None else colour)
+                line.set_alpha(token.alpha * alpha)
+                line.set_linewidth(token.linewidth * width)
+            for name in ("annotation", "annotation_value", "diagnostic"):
+                if name in slots:
+                    slots[name].set_visible(chosen)
+            if not chosen:
+                continue
+            if family == "failure":
+                limit = _FIT_DIAGNOSTIC_FACET_MAX_CHARS if slots["detail"] is _FitAnnotationDetail.HEADLINE else _FIT_DIAGNOSTIC_SINGLE_MAX_CHARS
+                content = _truncate_fit_diagnostic(overlay.diagnostic.strip() or "fit failed", limit)
+                slots["diagnostic"].set_text(f"{group_label + ': ' if group_label else ''}fit: {content}")
+            elif slots["detail"] is _FitAnnotationDetail.HEADLINE:
+                parameter = None if self._last_state is None else self._last_state.values.get(FACET_FIT_PARAMETER)
+                self._update_fit_headline_annotation(overlay, parameter)
+            else:
+                self._update_fit_annotation(overlay)
+            if colour is not None:
+                for name in ("annotation", "annotation_value"):
+                    if name in slots:
+                        slots[name].set_color(colour)
+        self._fit_slots = {}
+        for (facet_index, identity), (lines, threshold_line, label) in self._classifier_artists.items():
+            axis = threshold_line.axes
+            data_index = self._series_indices.get(id(axis), {}).get(identity)
+            data_line = None if data_index is None else self._series_lines[id(axis)][data_index][0]
+            alpha = 1.0 if data_line is None or data_line.get_alpha() is None else float(data_line.get_alpha())
+            width = 1.0 if data_line is None else _series_linewidth(data_line) / self.style.artists.curve.linewidth
+            colour = None if data_line is None or not identity else _series_colour(data_line)
+            for line, token in zip(lines, self.style.artists.bimodal_fit_lines, strict=True):
+                line.set_color(token.color if colour is None else colour)
+                line.set_alpha(token.alpha * alpha)
+                line.set_linewidth(token.linewidth * width)
+            threshold_line.set_alpha(self.style.artists.classifier_threshold_line.alpha * alpha)
+            if colour is not None:
+                threshold_line.set_color(colour)
+                label.set_color(colour)
+            interactive = not isinstance(self.spec, FacetGridPlot) or self._facet_focus_index == facet_index
+            selected_series = self._classifier_series(axis)
+            authoring_group = () if selected_series is None else selected_series[1]
+            chosen = authoring_group == identity
+            threshold_line.set_visible(not interactive or not chosen)
+            label.set_visible(not interactive and chosen and bool(label.get_text()))
+            if label.get_visible():
+                label.set_fontsize(self._annotation_size_that_fits(axis, label.get_text()))
 
     def _annotation_size_that_fits(self, axis: Any, content: str) -> float:
         """The size this annotation must shrink to in order to stay inside.
@@ -12974,12 +13117,10 @@ class MatplotlibRenderer:
     ) -> None:
         """Paint Distribution classifier curves separately from ordinary fits."""
 
-        active: dict[int, tuple[tuple[FitPolyline, ...], float, str]] = {}
+        active = {}
         if isinstance(self.semantic_spec, HistogramPlot):
-            for fallback, (overlay, threshold, label) in enumerate(
-                zip(overlays, thresholds, labels, strict=True)
-            ):
-                index = fallback if overlay.facet_index is None else overlay.facet_index
+            for overlay, threshold, label in zip(overlays, thresholds, labels, strict=True):
+                index = overlay.facet_index
                 # The classifier paints the two populations and their sum.
                 curves = tuple(
                     polyline
@@ -12994,10 +13135,12 @@ class MatplotlibRenderer:
                     and len(curves) == 3
                     and (
                         not isinstance(self.spec, FacetGridPlot)
-                        or index < self._visible_facet_count
+                        or index is not None and 0 <= index < self._visible_facet_count
                     )
                 ):
-                    active[index] = (curves, float(threshold), label)
+                    group_label = _literal_text(", ".join(value.label for value in overlay.group_key))
+                    content = f"{group_label}\n{label}" if group_label else label
+                    active[(index, _series_identity(overlay.group_key))] = (curves, float(threshold), content)
         for index in tuple(self._classifier_artists):
             if index in active:
                 continue
@@ -13005,9 +13148,10 @@ class MatplotlibRenderer:
             self._remove_artists((*lines, threshold_line, label))
 
         axes = self._axes.get("facet_cell", ())
-        for index, (curves, threshold, content) in active.items():
+        for key, (curves, threshold, content) in active.items():
+            index, _identity = key
             axis = axes[index] if isinstance(self.spec, FacetGridPlot) else self.primary_axes
-            artists = self._classifier_artists.get(index)
+            artists = self._classifier_artists.get(key)
             if artists is None:
                 lines = tuple(
                     axis.plot((), (), clip_on=True, **token.kwargs())[0]
@@ -13036,7 +13180,7 @@ class MatplotlibRenderer:
                     color=self.style.palette.threshold,
                 )
                 artists = (lines, threshold_line, label)
-                self._classifier_artists[index] = artists
+                self._classifier_artists[key] = artists
             lines, threshold_line, label = artists
             for line, polyline in zip(lines, curves, strict=True):
                 self._set_fit_line(line, polyline)
@@ -13050,22 +13194,8 @@ class MatplotlibRenderer:
                 self.style.artists.classifier_threshold_line.linewidth
                 * self._facet_mark_scale()
             )
-            interactive = (
-                not isinstance(self.spec, FacetGridPlot)
-                or self._facet_focus_index == index
-            )
-            threshold_line.set_visible(not interactive)
-            painted = not interactive and bool(content)
-            label.set_visible(painted)
-            if painted:
-                # MEASURED ONLY WHEN IT IS PAINTED.  Asking what size fits
-                # walks every line of the label through Matplotlib's text
-                # path, and on a facet grid that ran for every cell before
-                # the next line hid all but the focused one: three
-                # measurements a frame on a live histogram, none of which
-                # reached a pixel.
-                label.set_text(content)
-                label.set_fontsize(self._annotation_size_that_fits(axis, content))
+            label.set_text(content)
+        self._refresh_fit_focus()
 
     def _published_rgba(self) -> Any:
         """The painted canvas as ONE publish block, read-only.
@@ -13145,8 +13275,13 @@ class MatplotlibRenderer:
         return self._rgba_buffer()
 
     def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, restore_display: bool = True, **kwargs: Any) -> None:
+        previous_dpi = self._figure.dpi
         try:
             with style_context(self.style):
+                # Prepare the same anchored typography at the actual file
+                # DPI, before savefig's private canvas can reprice any ticks.
+                self._figure.set_dpi(dpi or self.plan.dpi)
+                self._settle_owned_boxes()
                 # ``savefig`` draws through matplotlib's own machinery, which
                 # knows nothing of the native prepared scene -- and that scene
                 # keeps its series artists HIDDEN and empty, and its Facet
@@ -13168,6 +13303,7 @@ class MatplotlibRenderer:
                 # have been resampled up instead.
                 self._exporting = True
                 self._materialize_prepared_images()
+                self._sync_axes_chrome()
                 # A grid's chrome strokes exist for the compose; the export
                 # draws the artists they stand for, and withdraws them after.
                 self._materialize_facet_chrome()
@@ -13181,6 +13317,7 @@ class MatplotlibRenderer:
                 with _MATHTEXT_DRAW_LOCK:
                     self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
         finally:
+            self._figure.set_dpi(previous_dpi)
             self._exporting = False
             self._withdraw_facet_chrome()
             self._apply_series_focus()

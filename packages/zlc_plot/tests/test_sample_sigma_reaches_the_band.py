@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from matplotlib.collections import LineCollection
+from matplotlib.collections import PolyCollection
 
 from data_factory import (
     make_dataset_schema,
@@ -72,9 +72,9 @@ def _curve_sem(snapshot: OwnedSnapshot) -> np.ndarray:
             artist
             for axes in session._renderer.figure.axes
             for artist in axes.collections
-            if isinstance(artist, LineCollection) and artist.get_visible()
+            if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer") and artist.get_visible()
         ]
-        assert any(len(artist.get_segments()) for artist in bars) == bool(
+        assert any(len(artist._zlc_segment_buffer) for artist in bars) == bool(
             np.any(np.isfinite(sem) & (sem > 0.0))
         ), "a finite stated error must reach the rendered single-sample band"
         return sem

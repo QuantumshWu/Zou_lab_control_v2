@@ -88,9 +88,13 @@ def _grid(**cell: object) -> FacetGridPlot:
     return FacetGridPlot(facet=AxisRef.point("p.frame"), cell=HistogramPlot(**cell))
 
 
-def _pools(view: DataView, grid: FacetGridPlot) -> tuple[np.ndarray, ...]:
-    plan = view._facet_histogram_plan(grid, 1)
-    return tuple(np.sort(pool) for pool in plan.pools)
+def _pools(view: DataView, grid: FacetGridPlot, window: int = 1) -> tuple[np.ndarray, ...]:
+    plan = view._histogram_plan((grid.facet,), grid.cell.reduced, grid.cell.reduction, window)
+    stride = int(np.prod(plan.values.shape[plan.code_axis + 1:]))
+    codes = plan.group_codes[(np.arange(plan.values.size) // stride) % plan.group_codes.size]
+    valid = np.broadcast_to(plan.valid, plan.values.shape).reshape(-1)
+    return tuple(np.sort(plan.values.reshape(-1)[valid & (codes == index)])
+                 for index in range(len(plan.group_keys)))
 
 
 def test_each_cell_bins_its_own_means_over_the_reduced_axis() -> None:
@@ -112,6 +116,14 @@ def test_each_cell_bins_its_own_means_over_the_reduced_axis() -> None:
         _SITES,
         _SITES,
     ]
+    grouped = view.facet(_grid(group=AxisRef.cell_data("v.site")), bins=np.arange(-1, 25))
+    standalone = view.histogram(group_by=(AxisRef.cell_data("v.site"),), bins=np.arange(-1, 25))
+    assert standalone.counts.shape == (3, 25)
+    for site in range(_SITES):
+        np.testing.assert_array_equal(standalone.counts[site], np.histogram(values[..., site], bins=np.arange(-1, 25))[0])
+        for row, cell in enumerate(grouped.cells):
+            np.testing.assert_array_equal(cell.payload.counts[site], np.histogram(values[:, row, site], bins=np.arange(-1, 25))[0])
+            assert cell.payload.group_keys[site][0].canonical == site
 
 
 def test_reducing_a_data_axis_leaves_one_value_per_shot_and_row() -> None:
@@ -189,9 +201,8 @@ def test_a_window_and_a_reduction_compose() -> None:
     )
     view = _view(values)
     grid = _grid(reduced=(AxisRef.repeat("repeat"),), reduction=Reduction.MEAN)
-    plan = view._facet_histogram_plan(grid, 2)
     expected = values[-2:].mean(axis=0)
-    for row, pool in enumerate(plan.pools):
+    for row, pool in enumerate(_pools(view, grid, 2)):
         np.testing.assert_allclose(np.sort(pool), np.sort(expected[row]))
 
 
@@ -209,10 +220,10 @@ def test_the_grid_and_the_single_panel_reduce_the_same_way(reduction) -> None:
     )
     single = np.sort(np.asarray(whole)[np.asarray(whole_valid)].reshape(-1))
 
-    grid_pool, _ = view.facet_histogram_pool(
+    grid_pool, grid_valid = view.facet_histogram_pool(
         _grid(reduced=refs, reduction=reduction)
     )
-    np.testing.assert_allclose(np.sort(grid_pool), single)
+    np.testing.assert_allclose(np.sort(grid_pool[grid_valid].reshape(-1)), single)
     if reduction is Reduction.LAST:
         np.testing.assert_allclose(single, np.sort(values[-1].reshape(-1)))
 
@@ -283,13 +294,13 @@ def test_a_reduced_point_axis_groups_the_rows_inside_each_cell() -> None:
             reduced=(AxisRef.point("p.detuning"),), reduction=Reduction.MEAN
         ),
     )
-    plan = view._facet_histogram_plan(grid, 1)
-    assert len(plan.pools) == 2
+    pools = _pools(view, grid)
+    assert len(pools) == 2
     for frame in (0, 1):
         # Rows of this frame, averaged over the three detunings, per repeat
         # and per site -- so repeats x sites values survive in the cell.
         mine = values[:, frame::2, :].mean(axis=1)
-        np.testing.assert_allclose(np.sort(plan.pools[frame]), np.sort(mine.reshape(-1)))
+        np.testing.assert_allclose(np.sort(pools[frame]), np.sort(mine.reshape(-1)))
 
 
 def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:

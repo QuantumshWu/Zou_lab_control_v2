@@ -167,12 +167,7 @@ def _scalar_fit_event(
         parameter_values={"x0": np.asarray([value])},
         parameter_errors={"x0": np.asarray([error])},
         success=np.asarray([True]),
-        sample_axis_domain="",
-        sample_axis_id="",
-        sample_axis_name="",
-        sample_coordinates=np.asarray([0.0]),
-        sample_unit="",
-        sample_labels=None,
+        sample_axes=(),
         source_generation=_source_generation(plane),
         source_revision=1,
         batch_revision=batch_revision,
@@ -1201,12 +1196,8 @@ def _batch_fit_event(
             "width": np.asarray([0.05, np.nan, 0.07]),
         },
         success=np.asarray([True, False, True]),
-        sample_axis_domain="point",
-        sample_axis_id="x",
-        sample_axis_name="x",
-        sample_coordinates=coordinates,
-        sample_unit=unit,
-        sample_labels=labels,
+        sample_axes=(("point", AxisSpec(AxisId("x"), "x", SCAN_POINT, 3,
+                                      tuple(coordinates), unit or None, coordinate_labels=labels)),),
         source_generation=_source_generation(plane),
         source_revision=source_revision,
         batch_revision=batch_revision,
@@ -1267,8 +1258,7 @@ def test_a_region_cut_from_a_fitted_parameter_keeps_each_value_s_error() -> None
         fit_events.emit_fit(
             replace(
                 _batch_fit_event(plane, source_revision=1),
-                sample_coordinates=np.asarray([0.0, 1.0, 2.0]),
-                sample_unit="",
+                sample_axes=(("point", AxisSpec(AxisId("x"), "x", SCAN_POINT, 3, (0.0, 1.0, 2.0))),),
                 parameter_errors={
                     "center": np.asarray([0.1, np.nan, 0.3]),
                     "width": np.asarray([0.05, np.nan, 0.07]),
@@ -1364,12 +1354,7 @@ def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> 
             parameter_values={"mean": np.asarray([8.0])},
             parameter_errors={"mean": np.asarray([0.5])},
             success=np.asarray([True]),
-            sample_axis_domain="",
-            sample_axis_id="",
-            sample_axis_name="",
-            sample_coordinates=np.asarray([0.0]),
-            sample_unit="",
-            sample_labels=None,
+            sample_axes=(),
             source_generation=generation,
             source_revision=1,
             batch_revision=1,
@@ -1494,7 +1479,7 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
             source_revision=1,
             text_samples=True,
         )
-        assert event.sample_labels == ("red", "green", "blue")
+        assert event.sample_axes[0][1].coordinate_labels == ("red", "green", "blue")
         events.emit_fit(event)
         front = plane.freeze()
         value = front.value("@logic/text/center")
@@ -1519,12 +1504,7 @@ def _single_cell_facet_event(
         parameter_values={"center": np.asarray([4.0])},
         parameter_errors={"center": np.asarray([0.25])},
         success=np.asarray([True]),
-        sample_axis_domain="point",
-        sample_axis_id="x",
-        sample_axis_name="x",
-        sample_coordinates=np.asarray([42.0]),
-        sample_unit="V",
-        sample_labels=None,
+        sample_axes=(("point", AxisSpec(AxisId("x"), "x", SCAN_POINT, 1, (42.0,), "V")),),
         source_generation=_source_generation(plane),
         source_revision=source_revision,
         batch_revision=batch_revision,
@@ -2425,12 +2405,9 @@ def _frame_faceted_fit(
         parameter_values={"center": np.arange(count, dtype=np.float64)},
         parameter_errors={"center": np.full(count, 0.5)},
         success=np.ones(count, dtype=np.bool_),
-        sample_axis_domain=sample_domain,
-        sample_axis_id=sample_axis_id,
-        sample_axis_name=sample_axis_name,
-        sample_coordinates=sample_coordinates,
-        sample_unit="",
-        sample_labels=None,
+        sample_axes=((sample_domain, AxisSpec(AxisId(sample_axis_id), sample_axis_name,
+                                             REPEAT if sample_domain == "repeat" else SCAN_POINT,
+                                             count, tuple(sample_coordinates))),),
         source_generation=_source_generation(plane),
         source_revision=source_revision,
         batch_revision=batch_revision,
@@ -2469,6 +2446,22 @@ def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() ->
         assert axis.name == "frame"
         assert axis.role == READOUT_EVENT
         assert value.snapshot.block.values.shape == (1, 3, 1)
+        # Facet(frame) x Group(cycle) keeps both axes. Solver order is
+        # frame-first, while the Dataset's Repeat domain must come first.
+        events.emit_fit(replace(
+            _frame_faceted_fit(plane, "frame", np.asarray([0.0, 1.0, 2.0]), batch_revision=2),
+            sample_axes=(("point", schema.point_domain.axes[0]), ("repeat", schema.repeat_domain.axes[0])),
+            parameter_values={"center": np.arange(6, dtype=float)},
+            parameter_errors={"center": np.arange(6, dtype=float) / 10},
+            success=np.ones(6, dtype=bool),
+        ))
+        grouped = plane.freeze().value("@logic/perframe/center")
+        assert grouped is not None, bridge.last_error
+        assert grouped.snapshot.block.schema.repeat_domain.axes[0].axis_id == schema.repeat_domain.axes[0].axis_id
+        assert grouped.snapshot.block.schema.point_domain.axes[0].role == READOUT_EVENT
+        assert grouped.snapshot.block.values.shape == (2, 3, 1)
+        np.testing.assert_array_equal(grouped.snapshot.block.values[..., 0], [[0, 2, 4], [1, 3, 5]])
+        np.testing.assert_array_equal(grouped.snapshot.block.sigma[..., 0], np.asarray([[0, 2, 4], [1, 3, 5]]) / 10)
     finally:
         _close(bridge, plane, source)
 
@@ -2715,7 +2708,7 @@ def test_retiring_a_fit_route_frees_its_names_before_the_slot_reads_empty() -> N
         """The same fit, one shot later: same names, moved samples."""
 
         event = _scalar_fit_event(plane, value, 0.1, revision)
-        return replace(event, sample_coordinates=np.asarray([coordinate]))
+        return replace(event, sample_axes=(("point", AxisSpec(AxisId("x"), "x", SCAN_POINT, 1, (coordinate,))),))
 
     events.emit_fit(_scalar_fit_event(plane, 2.5, 0.1, 1))
     assert bridge.last_error is None, bridge.last_error
@@ -2864,12 +2857,8 @@ def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
     try:
         event = replace(
             _batch_fit_event(plane, source_revision=1),
-            sample_axis_domain="cell_data",
-            sample_axis_id="pair",
-            sample_axis_name="pair",
-            sample_labels=("0-1", "0-2", "1-2"),
-            sample_unit="",
-            sample_coordinates=np.asarray([0.0, 1.0, 2.0]),
+            sample_axes=(("cell_data", AxisSpec(AxisId("pair"), "pair", COMPONENT, 3,
+                                               (0.0, 1.0, 2.0), coordinate_labels=("0-1", "0-2", "1-2"))),),
         )
         events.emit_fit(event)
         assert bridge.last_error is None, bridge.last_error

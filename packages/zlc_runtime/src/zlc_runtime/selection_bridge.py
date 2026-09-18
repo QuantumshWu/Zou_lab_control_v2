@@ -641,7 +641,7 @@ def _immutable_bool_vector(value: object, field: str) -> np.ndarray:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class FitEventValue:
-    """One fit parameter table with an optional sample axis.
+    """One fit parameter table over ordered, explicitly identified sample axes.
 
     A scalar fit is represented by the same table with one sample.  Arrays
     and mappings are copied into immutable values at this boundary so a
@@ -653,12 +653,7 @@ class FitEventValue:
     parameter_values: Mapping[str, np.ndarray]
     parameter_errors: Mapping[str, np.ndarray]
     success: np.ndarray
-    sample_axis_domain: str
-    sample_axis_id: str
-    sample_axis_name: str
-    sample_coordinates: np.ndarray
-    sample_unit: str
-    sample_labels: tuple[str, ...] | None
+    sample_axes: tuple[tuple[str, AxisSpec], ...]
     source_generation: str
     source_revision: int
     batch_revision: int
@@ -738,75 +733,23 @@ class FitEventValue:
                     f"failed fit values for {name!r} must be NaN"
                 )
 
-        sample_axis_name = canonical_text(
-            self.sample_axis_name,
-            "fit sample_axis_name",
-            empty=True,
-        )
-        if sample_count > 1 and not sample_axis_name:
-            raise ValueError("a batch fit must have a sample_axis_name")
-        sample_axis_domain = canonical_text(
-            self.sample_axis_domain,
-            "fit sample_axis_domain",
-            empty=True,
-        )
-        sample_axis_id = canonical_text(
-            self.sample_axis_id,
-            "fit sample_axis_id",
-            empty=True,
-        )
-        domains = {
-            "repeat",
-            "point",
-            "cell_data",
-        }
-        is_batch = bool(sample_axis_name)
-        if is_batch and sample_axis_domain not in domains:
-            raise ValueError("a batch fit must declare its exact sample axis domain")
-        if not is_batch and (sample_axis_domain or sample_axis_id):
-            raise ValueError("a scalar fit must not declare a sample axis identity")
-        if sample_axis_domain and not sample_axis_id:
-            raise ValueError("a sample axis requires an exact AxisId")
-        sample_coordinates = _immutable_float_vector(
-            self.sample_coordinates,
-            "fit sample_coordinates",
-        )
-        if sample_coordinates.size != sample_count:
-            raise ValueError("fit sample_coordinates must match the parameter table length")
-        if not np.all(np.isfinite(sample_coordinates)):
-            raise ValueError("fit sample_coordinates must be finite")
-        sample_unit = canonical_text(self.sample_unit, "fit sample_unit", empty=True)
-
-        labels = self.sample_labels
-        if labels is not None:
-            labels = tuple(labels)
-            if len(labels) != sample_count:
-                raise ValueError("fit sample_labels must match the parameter table length")
-            if sample_count == 1 and not sample_axis_name:
-                raise ValueError("a scalar fit must not have sample_labels")
-            labels = tuple(
-                canonical_text(label, "fit sample label")
-                for label in labels
-            )
-            if sample_unit:
-                raise ValueError("text sample coordinates cannot declare a unit")
-            expected = np.arange(sample_count, dtype=np.float64)
-            if not np.array_equal(sample_coordinates, expected):
-                raise ValueError(
-                    "text sample coordinates must use numeric indices 0..N-1"
-                )
+        sample_axes = tuple((domain, axis) for domain, axis in self.sample_axes)
+        for domain, axis in sample_axes:
+            if domain not in {"repeat", "point", "cell_data"}:
+                raise ValueError("fit sample axes must declare their exact source domain")
+            if not isinstance(axis, AxisSpec):
+                raise TypeError("fit sample axes must contain AxisSpec values")
+        if len({axis.axis_id for _domain, axis in sample_axes}) != len(sample_axes):
+            raise ValueError("fit sample axis identities must be unique")
+        if math.prod(int(axis.size) for _domain, axis in sample_axes) != sample_count:
+            raise ValueError("fit sample axes must match the parameter table length")
 
         object.__setattr__(self, "parameter_names", names)
         object.__setattr__(self, "parameter_units", MappingProxyType(units))
         object.__setattr__(self, "parameter_values", MappingProxyType(values))
         object.__setattr__(self, "parameter_errors", MappingProxyType(errors))
         object.__setattr__(self, "success", success)
-        object.__setattr__(self, "sample_axis_domain", sample_axis_domain)
-        object.__setattr__(self, "sample_axis_id", sample_axis_id)
-        object.__setattr__(self, "sample_axis_name", sample_axis_name)
-        object.__setattr__(self, "sample_coordinates", sample_coordinates)
-        object.__setattr__(self, "sample_unit", sample_unit)
-        object.__setattr__(self, "sample_labels", labels)
+        object.__setattr__(self, "sample_axes", sample_axes)
         object.__setattr__(
             self,
             "source_generation",
@@ -2057,12 +2000,7 @@ class SelectionBridge:
                 (name, event.parameter_units[name])
                 for name in event.parameter_names
             ),
-            event.sample_axis_domain,
-            event.sample_axis_id,
-            event.sample_axis_name,
-            tuple(float(value) for value in event.sample_coordinates),
-            event.sample_unit,
-            event.sample_labels,
+            event.sample_axes,
         )
 
     def _resolve_axis(
@@ -2088,28 +2026,6 @@ class SelectionBridge:
                 f"{domain} AxisId {axis_id!r} is not present in the source snapshot"
             )
         return wanted, matches[0], domain
-
-    def _faceted_axis(
-        self,
-        schema: DatasetSchema,
-        sample_axis_domain: str,
-        sample_axis_id: str,
-    ) -> tuple[AxisSpec, str] | None:
-        """The parent axis a fit was faceted over, when the parent declares it.
-
-        The fit carries the Plot facet's exact domain and AxisId; the display
-        label never participates in resolution.  A scalar fit names no axis,
-        and a facet over the bare point ordinal names no parent axis either.
-        """
-
-        if not sample_axis_domain:
-            return None
-        _axis_id, axis, kind = self._resolve_axis(
-            schema,
-            sample_axis_domain,
-            sample_axis_id,
-        )
-        return axis, kind
 
     def _build_selection(
         self,
@@ -2415,56 +2331,30 @@ class SelectionBridge:
         output: dict[str, LiveDatasetOutput] = {}
         source_schema = source.block.schema
         sample_count = int(event.success.size)
-        faceted = self._faceted_axis(
-            source_schema,
-            event.sample_axis_domain,
-            event.sample_axis_id,
-        )
-        if faceted is not None and faceted[1] == "repeat":
-            sample_axis = replace(
-                faceted[0],
-                size=sample_count,
-                coordinates=tuple(
-                    float(value) for value in event.sample_coordinates
-                ),
-                unit=event.sample_unit or None,
-                index_origin=0,
-                coordinate_labels=event.sample_labels,
+        axes = []
+        for domain, axis in event.sample_axes:
+            _identity, source_axis, _domain = self._resolve_axis(
+                source_schema, domain, axis.axis_id.value
             )
-            repeat_domain = DomainSpec(
-                (sample_count,),
-                (sample_axis,),
-                (tuple(range(sample_count)),),
-            )
-            point_domain = DomainSpec((1,), (), ())
-        else:
-            repeat_axis = AxisSpec(
-                AxisId("fit.repeat"),
-                "repeat",
-                REPEAT,
-                1,
-                (0,),
-            )
+            axes.append(replace(axis, role=source_axis.role, coordinate_of=None))
+        order = tuple(index for index, (domain, _axis) in enumerate(event.sample_axes) if domain == "repeat")
+        repeat_count = len(order)
+        order += tuple(index for index, (domain, _axis) in enumerate(event.sample_axes) if domain != "repeat")
+        domains = []
+        for indices in (order[:repeat_count], order[repeat_count:]):
+            selected_axes = tuple(axes[index] for index in indices)
+            shape = tuple(int(axis.size) for axis in selected_axes)
+            size = math.prod(shape)
+            codes = tuple(tuple(int(value) for value in column)
+                          for column in np.unravel_index(np.arange(size), shape)) if shape else ()
+            domains.append(DomainSpec((size,), selected_axes, codes))
+        repeat_domain, point_domain = domains
+        if not repeat_count:
+            repeat_axis = AxisSpec(AxisId("fit.repeat"), "repeat", REPEAT, 1, (0,))
             repeat_domain = DomainSpec((1,), (repeat_axis,), ((0,),))
-            if faceted is None:
-                point_domain = DomainSpec((1,), (), ())
-            else:
-                sample_axis = AxisSpec(
-                    AxisId(event.sample_axis_id),
-                    event.sample_axis_name,
-                    faceted[0].role,
-                    sample_count,
-                    tuple(float(value) for value in event.sample_coordinates),
-                    event.sample_unit or None,
-                    coordinate_labels=event.sample_labels,
-                )
-                point_domain = DomainSpec(
-                    (sample_count,),
-                    (sample_axis,),
-                    (tuple(range(sample_count)),),
-                )
+        sample_shape = tuple(int(axis.size) for axis in axes)
         cell_shape = (repeat_domain.size, point_domain.size)
-        value_validity = CellValidity(event.success.reshape(cell_shape))
+        value_validity = CellValidity(event.success.reshape(sample_shape).transpose(order).reshape(cell_shape))
         fit_source_ref = DatasetRevisionRef(
             source.ref.block_id,
             source.ref.stream_generation,
@@ -2495,12 +2385,12 @@ class SelectionBridge:
             # answer -- only its uncertainty is unknown.
             errors = np.asarray(
                 event.parameter_errors[parameter], dtype=np.float64
-            )
+            ).reshape(sample_shape).transpose(order)
             output[parameter] = self._materialize_fit_vector(
                 source,
                 fit_source_ref,
                 parameter,
-                event.parameter_values[parameter],
+                event.parameter_values[parameter].reshape(sample_shape).transpose(order),
                 schema,
                 value_validity,
                 FIT_PARAMETER_CONTRACT,

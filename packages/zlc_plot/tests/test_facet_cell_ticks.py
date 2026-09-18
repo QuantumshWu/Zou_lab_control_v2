@@ -139,6 +139,12 @@ def _assert_shared_marks_boundary_labels(session: PlotSession) -> None:
         assert bool(_labelled_ticks(axis.xaxis)) == label_bottom, (
             f"cell {index}: x labels must appear exactly on the bottom row"
         )
+        for tick in _labelled_ticks(axis.xaxis):
+            assert tick.label1.get_horizontalalignment() == "center"
+            assert tick.label1.get_position()[0] == tick.get_loc()
+        for tick in _labelled_ticks(axis.yaxis):
+            assert tick.label1.get_verticalalignment() == "center_baseline"
+            assert tick.label1.get_position()[1] == tick.get_loc()
     # Identical data domains per fixture, so the shared locator must place
     # the SAME tick values in every cell -- the marks are comparable.
     assert len(x_values) == 1
@@ -287,7 +293,9 @@ def test_overview_cell_ticks_have_one_owner_across_frames(monkeypatch) -> None:
         consistent()
         session.set_size("8x8")
         consistent()
-        assert renderer.axes["facet_cell"][0].yaxis.get_major_locator().drawn_pt > 3.0
+        # Restored ±500 endpoints have a real X/Y text collision at the
+        # bottom-left corner; larger data boxes do not move those anchors.
+        assert renderer.axes["facet_cell"][0].yaxis.get_major_locator().drawn_pt >= 3.0
         refreshed = []
         original = renderer._refresh_facet_cell_chrome
 

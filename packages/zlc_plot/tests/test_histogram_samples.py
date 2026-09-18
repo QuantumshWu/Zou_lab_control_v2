@@ -229,7 +229,7 @@ def test_only_bin_edits_reproject_histogram_samples(monkeypatch) -> None:
             session.set_parameter("bin_count", bin_count)
             assert rebuilds == expected_rebuilds
             assert session._payload is not previous
-            assert len(session._payload.counts) == bin_count
+            assert session._payload.counts.shape == (1, bin_count)
             assert len(session._payload.edges.display) == bin_count + 1
     finally:
         session.close()

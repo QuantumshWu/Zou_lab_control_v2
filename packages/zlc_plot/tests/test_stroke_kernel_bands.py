@@ -141,7 +141,7 @@ def _reference_polylines(vertices, offsets, colours, widths, clips, out):
 def _reference_error_bars(
     x, y_low, y_high, offsets, colours, widths, cap_widths, clips, out
 ):
-    """The serial stem/cap raster, one rectangle at a time, column by column."""
+    """Independent inclusion-exclusion of each bar's three rectangles."""
 
     height, width = out.shape[:2]
     for group in range(offsets.size - 1):
@@ -154,40 +154,31 @@ def _reference_error_bars(
         radius = max(0.5, float(widths[group]) * 0.5)
         cap_half = max(0.0, float(cap_widths[group]) * 0.5)
         alpha_code = float(colours[group, 3]) / 255.0
-        for primitive in range(3):
-            if primitive and cap_half <= 0.0:
+        for point in range(int(offsets[group]), int(offsets[group + 1])):
+            px, low, high = float(x[point]), float(y_low[point]), float(y_high[point])
+            if not all(map(np.isfinite, (px, low, high))):
                 continue
-            for point in range(int(offsets[group]), int(offsets[group + 1])):
-                px, low, high = float(x[point]), float(y_low[point]), float(y_high[point])
-                if not all(map(np.isfinite, (px, low, high))):
-                    continue
-                if high < low:
-                    low, high = high, low
-                if primitive == 0:
-                    left, right, top, bottom = px - radius, px + radius, low, high
-                else:
-                    cap_y = low if primitive == 1 else high
-                    left, right = px - cap_half, px + cap_half
-                    top, bottom = cap_y - radius, cap_y + radius
-                first_column = max(clip_left, int(np.floor(left)))
-                last_column = min(clip_right, int(np.ceil(right)))
-                first_row = max(clip_top, int(np.floor(top)))
-                last_row = min(clip_bottom, int(np.ceil(bottom)))
-                for column in range(first_column, last_column):
-                    coverage_x = min(column + 1.0, right) - max(float(column), left)
-                    if coverage_x <= 0.0:
-                        continue
-                    for row in range(first_row, last_row):
-                        coverage_y = min(row + 1.0, bottom) - max(float(row), top)
-                        if coverage_y <= 0.0:
-                            continue
-                        _blend(
-                            out,
-                            row,
-                            column,
-                            colours[group],
-                            alpha_code * min(1.0, coverage_x * coverage_y),
-                        )
+            low, high = sorted((low, high))
+            if high <= low:
+                continue
+            rectangles = [(px - radius, px + radius, low, high)]
+            if cap_half > 0.0:
+                rectangles += [(px - cap_half, px + cap_half, edge - radius, edge + radius) for edge in (low, high)]
+            from itertools import combinations
+            terms = []
+            for size in range(1, len(rectangles) + 1):
+                for subset in combinations(rectangles, size):
+                    terms.append((1 if size % 2 else -1, (max(r[0] for r in subset),
+                        min(r[1] for r in subset), max(r[2] for r in subset), min(r[3] for r in subset))))
+            for column in range(max(clip_left, int(np.floor(min(r[0] for r in rectangles)))),
+                                min(clip_right, int(np.ceil(max(r[1] for r in rectangles))))):
+                for row in range(max(clip_top, int(np.floor(min(r[2] for r in rectangles)))),
+                                 min(clip_bottom, int(np.ceil(max(r[3] for r in rectangles))))):
+                    cover = sum(sign * max(0., min(column + 1., right) - max(column, left))
+                                * max(0., min(row + 1., bottom) - max(row, top))
+                                for sign, (left, right, top, bottom) in terms)
+                    if cover > 0.0:
+                        _blend(out, row, column, colours[group], alpha_code * min(1., cover))
 
 
 def _blend(out, row, column, colour, alpha):

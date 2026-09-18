@@ -1,36 +1,9 @@
-"""Tick labels: one law, one ladder, for every axis-like surface.
+"""One numeric tick ladder, without changing Matplotlib's label anchors.
 
-Every labelled axis prints at least two DISTINCT labels, and every label it
-prints lies inside the ROOM its surface owns.  The room is geometry the
-layout states once per axes (:class:`~zlc_plot.layout.Room`): the axis's
-own extent plus, at each end, the free margin when nothing labelled lies
-beyond it, or half the gap to the neighbour that labels the same row --
-the image and its distribution rail split their gap, the rolling history
-and its rail split theirs, and facet cells all get half a gap so their
-marks stay identical.  A bare figure with no declared room owns its
-margins.
-
-One ladder decides what fills the room, in one order.  At the size the
-caller draws, the finest lattice whose labels all lie in the room a digit
-apart; when none does, fewer labels; when the count is at its floor,
-smaller labels down to :data:`MIN_TICK_LABEL_PT`; for a surface with a
-declared vocabulary, shorter spellings; and only then may the survivors
-touch.  An edge label that does not fit centred on its tick is anchored
-inward -- a label box need not straddle its tick -- which is what lets a
-range end at "2000" without "2000" hanging into the rail beside it, and
-lets the rail's own zero stand at its left edge without leaning out.  A
-tick whose label cannot be placed even so is not one of that axis's
-ticks: it is never refilled, never centred over the neighbour, and never
-blanked with its neighbour left alone.
-
-A count rail is the same ladder with a declared candidate list: zero and
-the bound when both fit, the bound alone otherwise.  The bound is the
-label that carries the information and is never dropped; the zero is the
-only optional label on any surface.  Two identical labels are one
-statement, so a declared pair spells itself longer until its ends differ.
-Enumerated axes -- a pulse's channel rows, a categorical x -- are not tick
-axes and stand outside this law, and a degenerate interval has one
-statement to make.
+The locator chooses ticks and readable font sizes. Labels may use empty space
+outside their axes; real figure edges and neighboring text can reduce the
+font, but never move a label away from its tick. At the readable size floor,
+overlap is preferable to moving or silently dropping an already chosen label.
 """
 
 from __future__ import annotations
@@ -183,9 +156,9 @@ def _room_pt(axes: Any, axis: Any) -> tuple[float, float, float | None] | None:
     """Room in points along ``axis``: before its low end, past its high end,
     and beyond the side its labels hang on (None when that side is unknown).
 
-    From the layout's declaration when there is one; a bare figure's axes
-    owns its distance to the figure's edges.  In points, like the extent,
-    so DPR, resize and export dpi cannot change the answer.
+    Along-axis labels can use space up to the real figure edge, not an
+    artificial half-gutter per cell. The perpendicular budget for a declared
+    count/color rail still comes from its layout. All distances are points.
     """
 
     figure = getattr(axes, "figure", None)
@@ -200,52 +173,24 @@ def _room_pt(axes: Any, axis: Any) -> tuple[float, float, float | None] | None:
     if room is None:
         bbox, frame = axes.bbox, figure.bbox
         if horizontal:
-            before, after = bbox.x0 - frame.x0, frame.x1 - bbox.x1
             across = bbox.y0 - frame.y0 if side != "top" else frame.y1 - bbox.y1
         else:
-            before, after = bbox.y0 - frame.y0, frame.y1 - bbox.y1
             across = bbox.x0 - frame.x0 if side != "right" else frame.x1 - bbox.x1
-        before, after, across = (
-            before / dots_per_point, after / dots_per_point, across / dots_per_point
-        )
+        across /= dots_per_point
     else:
         width = float(figure.bbox.width) / dots_per_point
         height = float(figure.bbox.height) / dots_per_point
         if horizontal:
             across = (room.top if side == "top" else room.bottom) * height
-            before, after = room.left * width, room.right * width
         else:
             across = (room.right if side == "right" else room.left) * width
-            before, after = room.bottom * height, room.top * height
-    # THE CORNER BELONGS TO THE OTHER AXIS.  The margin past an axis's low
-    # end is where its partner's labels hang -- the y labels' column left of
-    # the x axis, the x labels' row below the y axis -- so at that end the
-    # room is nothing, and the corner label of each axis is anchored inward
-    # instead of the two zeros printing over each other in the corner.
-    other = getattr(axes, "yaxis" if horizontal else "xaxis", None)
-    if other is not None and _labels_shown(other):
-        other_side = str(other.get_ticks_position())
-        if horizontal:
-            if other_side == "right":
-                after = 0.0
-            else:
-                before = 0.0
-        elif other_side == "top":
-            after = 0.0
-        else:
-            before = 0.0
+    bbox, frame = axes.bbox, figure.bbox
+    if horizontal:
+        before, after = bbox.x0 - frame.x0, frame.x1 - bbox.x1
+    else:
+        before, after = bbox.y0 - frame.y0, frame.y1 - bbox.y1
+    before, after = before / dots_per_point, after / dots_per_point
     return before, after, across
-
-
-def _labels_shown(axis: Any) -> bool:
-    """Whether this axis is a labelled one at all.
-
-    Decided by its formatter, not by whether a given cell happens to show
-    its labels: a grid gates labels per cell, and the cells must still lay
-    identical ticks, so the corner is the partner's in every cell alike.
-    """
-
-    return not isinstance(axis.get_major_formatter(), ticker.NullFormatter)
 
 
 @dataclass(frozen=True)
@@ -263,18 +208,15 @@ class _Placement:
 
     ticks: tuple[float, ...]
     texts: tuple[str, ...]
-    #: Per tick: ``center`` on it, or anchored inward -- ``start`` for the
-    #: lowest tick (the box begins AT the tick), ``end`` for the highest.
-    aligns: tuple[str, ...]
     size_pt: float
     payload: Any = None
 
 
-_EMPTY = _Placement((), (), (), MIN_TICK_LABEL_PT)
+_EMPTY = _Placement((), (), MIN_TICK_LABEL_PT)
 
 
 class _MeasuredLocator(ticker.Locator):
-    """The ladder, once: room -> fit -> clear -> inward -> fewer -> smaller -> touch.
+    """The ladder, once: fit -> clear -> fewer -> smaller -> touch.
 
     A subclass only says which candidates an axis has, in tiers from the
     most preferred spelling to the least, each tier from fewest labels to
@@ -313,7 +255,6 @@ class _MeasuredLocator(ticker.Locator):
         self.drawn_pt = float(label_pt)
         self.ticks: list[float] = []
         self.texts: tuple[str, ...] = ()
-        self.aligns: tuple[str, ...] = ()
         self._tick_cache_key: tuple[object, ...] | None = None
 
     # ------------------------------------------------------------ geometry
@@ -389,10 +330,9 @@ class _MeasuredLocator(ticker.Locator):
     ) -> _Placement | None:
         """This candidate at this size, placed -- or None if it cannot be.
 
-        Every label sits in the room: centred on its tick, or -- for the
-        lowest and the highest -- anchored inward when centred would leave.
-        Neighbours stay one digit apart.  Identical labels count once: two
-        that say the same thing are one statement.
+        Labels keep their ordinary tick anchor. Neighbors on this axis stay
+        one digit apart; figure-edge and cross-cell crowding only resize them
+        after this shared numeric placement has been selected.
         """
 
         ticks, texts = candidate.ticks, candidate.texts
@@ -401,12 +341,11 @@ class _MeasuredLocator(ticker.Locator):
         if count < self.FLOOR or len(set(texts)) < floor:
             return None
         geometry = self._geometry()
-        centred = tuple("center" for _tick in ticks)
         if geometry is None or upper <= lower:
-            return _Placement(ticks, texts, centred, size_pt, candidate.payload)
-        extent, before, after, across, horizontal = geometry
+            return _Placement(ticks, texts, size_pt, candidate.payload)
+        extent, _before, _after, across, horizontal = geometry
         if extent <= 0.0:
-            return _Placement(ticks, texts, centred, size_pt, candidate.payload)
+            return _Placement(ticks, texts, size_pt, candidate.payload)
         assert self.measure is not None
         widths = [self.measure(text, size_pt)[0] for text in texts]
         line = _label_line_pt(size_pt)
@@ -423,32 +362,14 @@ class _MeasuredLocator(ticker.Locator):
             return None
         positions = self._positions(lower, upper, ticks, extent)
         order = sorted(range(count), key=lambda item: positions[item])
-        aligns = ["center"] * count
-        boxes: list[tuple[float, float]] = []
-        for rank, index in enumerate(order):
-            position, size = positions[index], along[index]
-            options = [("center", position - size / 2.0, position + size / 2.0)]
-            if rank == 0:
-                options.append(("start", position, position + size))
-            if rank == count - 1:
-                options.append(("end", position - size, position))
-            chosen = None
-            for name, start, end in options:
-                if not room or (
-                    start >= -before - 1e-9 and end <= extent + after + 1e-9
-                ):
-                    chosen = (name, start, end)
-                    break
-            if chosen is None:
-                return None
-            aligns[index] = chosen[0]
-            boxes.append((chosen[1], chosen[2]))
+        boxes = [(positions[index] - along[index] / 2.0,
+                  positions[index] + along[index] / 2.0) for index in order]
         if clear:
             digit = self.measure("0", size_pt)[0]
             for (_start, end), (start, _end) in zip(boxes, boxes[1:]):
                 if start - end < digit - 1e-9:
                     return None
-        return _Placement(ticks, texts, tuple(aligns), size_pt, candidate.payload)
+        return _Placement(ticks, texts, size_pt, candidate.payload)
 
     def _settle(
         self,
@@ -488,9 +409,8 @@ class _MeasuredLocator(ticker.Locator):
                         return placement
         # Nothing fits its room at the readable floor: the axis says what it
         # can.  The most preferred spelling, the fewest labels, as small as
-        # is still readable, touching if they must -- over the edge only if
-        # even that is not enough, which the guard tests prove the product's
-        # layouts never ask for.
+        # is still readable, touching if they must. Do not move or drop a
+        # label to satisfy a box that cannot contain it.
         for ranked in ranked_tiers:
             if not ranked:
                 continue
@@ -507,15 +427,23 @@ class _MeasuredLocator(ticker.Locator):
     def _store(self, placement: _Placement, reverse: bool) -> None:
         ticks = list(placement.ticks)
         texts = tuple(placement.texts)
-        aligns = tuple(placement.aligns)
         if reverse:
             ticks.reverse()
             texts = tuple(reversed(texts))
-            aligns = tuple(reversed(aligns))
         self.ticks = ticks
         self.texts = texts
-        self.aligns = aligns
-        self._apply_drawn_size(placement.size_pt)
+        size = placement.size_pt
+        geometry = self._geometry()
+        if geometry is not None and ticks:
+            extent, before, after, _across, horizontal = geometry
+            positions = self._positions(*self.axis.get_view_interval(), ticks, extent)
+            for text, position in zip(texts, positions):
+                length = (self.measure(text, placement.size_pt)[0] if horizontal
+                          else _label_line_pt(placement.size_pt))
+                room = 2.0 * max(0.0, min(position + before, extent + after - position))
+                if length > room:
+                    size = min(size, max(MIN_TICK_LABEL_PT, placement.size_pt * room / length))
+        self._apply_drawn_size(size)
 
     def _apply_drawn_size(self, size_pt: float) -> None:
         """Draw the labels at the size this layout was priced at.
@@ -529,8 +457,15 @@ class _MeasuredLocator(ticker.Locator):
         if self.axis is None or abs(size_pt - self.drawn_pt) < 1.0e-9:
             return
         self.drawn_pt = float(size_pt)
-        name = "x" if self.axis is getattr(self.axis.axes, "xaxis", None) else "y"
-        self.axis.axes.tick_params(axis=name, labelsize=float(size_pt))
+        # Only the labels changed. tick_params also calls empty setters on
+        # both tick lines and the gridline for every existing Tick. Keep its
+        # one future-Tick template, and mutate just the two Text artists.
+        self.axis._major_tick_kw["labelsize"] = float(size_pt)
+        for tick in self.axis.majorTicks:
+            for label in (tick.label1, tick.label2):
+                if label.get_fontsize() != size_pt:
+                    label.set_fontsize(size_pt)
+        self.axis.stale = True
         # The offset text is one of this axis's labels -- the part the
         # labels share -- and ``tick_params`` does not size it, so it is
         # sized here with them: an offset at the panel's size beside labels
@@ -553,12 +488,6 @@ class _MeasuredLocator(ticker.Locator):
 
         index = self._nearest(value)
         return "" if index is None or index >= len(self.texts) else self.texts[index]
-
-    def align_for(self, value: float) -> str:
-        """How the label nearest ``value`` sits on its tick."""
-
-        index = self._nearest(value)
-        return "center" if index is None or index >= len(self.aligns) else self.aligns[index]
 
     #: Where one figure keeps the ladder's answers.  A locator belongs to
     #: one Axis, and a facet grid gives sixty-four cells the same span in
@@ -609,7 +538,9 @@ class _MeasuredLocator(ticker.Locator):
             float(vmin),
             float(vmax),
             getattr(self.axis, "axis_name", None),
-            geometry,
+            # Cell position only limits the final font at the true figure
+            # edge; it cannot change the numeric tick lattice shared by cells.
+            (geometry[0], geometry[3], geometry[4]),
             self.max_ticks,
             self.label_pt,
             id(self.measure),
@@ -660,7 +591,6 @@ class _MeasuredLocator(ticker.Locator):
             float(vmin), float(vmax), id(axis),
             id(getattr(axes, "figure", None)), getattr(axis, "axis_name", None),
             geometry, self.max_ticks, self.label_pt, id(self.measure),
-            tuple(rcParams.get("font.sans-serif", ())),
             axis.get_transform() if axis is not None and axis.get_scale() == "function" else None,
         )
 
@@ -671,14 +601,8 @@ class _MeasuredLocator(ticker.Locator):
         return [] if vmax == vmin else self.tick_values(vmin, vmax)
 
 
-class _AlignedFormatter(ticker.Formatter):
-    """A formatter that says what its locator decided, where it decided it.
-
-    The ladder may anchor an edge label inward instead of centring it on
-    its tick; the tick artists are told so here, at the one moment
-    matplotlib hands them over with their values, before any of them is
-    drawn.
-    """
+class _TickFormatter(ticker.Formatter):
+    """Format chosen values without mutating their Text alignment."""
 
     def __init__(self, locator: _MeasuredLocator) -> None:
         super().__init__()
@@ -687,23 +611,6 @@ class _AlignedFormatter(ticker.Formatter):
     def __call__(self, value: float, pos: int | None = None) -> str:
         del pos
         return self.locator.text_for(value)
-
-    def format_ticks(self, values: Sequence[float]) -> list[str]:
-        axis = self.axis
-        if axis is not None:
-            horizontal = axis is getattr(axis.axes, "xaxis", None)
-            for tick, value in zip(axis.get_major_ticks(len(values)), values):
-                align = self.locator.align_for(value)
-                for label in (tick.label1, tick.label2):
-                    if horizontal:
-                        label.set_horizontalalignment(
-                            {"start": "left", "end": "right"}.get(align, "center")
-                        )
-                    else:
-                        label.set_verticalalignment(
-                            {"start": "bottom", "end": "top"}.get(align, "center")
-                        )
-        return [self(value, index) for index, value in enumerate(values)]
 
 
 # -------------------------------------------------------- coordinate axes
@@ -1002,7 +909,7 @@ class SmartOffsetLocator(_MeasuredLocator):
         return largest >= 10**self.oom
 
 
-class SmartOffsetFormatter(_AlignedFormatter):
+class SmartOffsetFormatter(_TickFormatter):
     """Formatter paired with :class:`SmartOffsetLocator`."""
 
     def __init__(
@@ -1228,7 +1135,7 @@ class DeclaredLocator(_MeasuredLocator):
         return self.ticks
 
 
-class DeclaredFormatter(_AlignedFormatter):
+class DeclaredFormatter(_TickFormatter):
     """Formatter paired with :class:`DeclaredLocator`."""
 
 

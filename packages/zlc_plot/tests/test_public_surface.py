@@ -274,7 +274,8 @@ def test_session_fit_all_facets_returns_one_result_per_painted_cell() -> None:
         assert isinstance(result, FacetFitBatchResult)
         assert len(result.results) == 2
         assert result.source_revision == 0
-        assert result.facet == AxisRef.point("facet")
+        assert result.sample_axes[0][0] == "point"
+        assert result.sample_axes[0][1].axis_id.value == "facet"
     finally:
         session.close()
 

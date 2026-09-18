@@ -191,6 +191,7 @@ def _wire_fit_summary(result: object) -> dict[str, object]:
     if outcomes is None:
         return {
             "kind": "scalar",
+            "sample_axes": (),
             "parameter_names": tuple(result.parameter_names),
             "parameter_units": dict(result.parameter_units),
             "parameter_values": np.asarray(result.parameter_values),
@@ -215,15 +216,7 @@ def _wire_fit_summary(result: object) -> dict[str, object]:
         "outcomes": tuple(
             None if item is None else bool(item.success) for item in outcomes
         ),
-        "facet": result.facet,
-        "sample_axis_name": str(result.sample_axis_name),
-        "sample_coordinates": (
-            None
-            if result.sample_coordinates is None
-            else np.asarray(result.sample_coordinates)
-        ),
-        "sample_unit": str(result.sample_unit),
-        "sample_labels": result.sample_labels,
+        "sample_axes": tuple(result.sample_axes),
         "source_revision": int(result.source_revision),
         "batch_revision": int(result.batch_revision),
     }
@@ -254,8 +247,7 @@ def _wire_complete_fit_result(result: object) -> dict[str, object]:
         }
     return {
         "kind": "batch",
-        "facet": result.facet,
-        "facet_values": tuple(result.facet_values),
+        "sample_axes": tuple(result.sample_axes),
         "model": result.model,
         "results": tuple(
             None if item is None else _wire_complete_fit_result(item)
@@ -265,10 +257,6 @@ def _wire_complete_fit_result(result: object) -> dict[str, object]:
         "source_revision": int(result.source_revision),
         "overlays": tuple(result.overlays),
         "parameter_units": dict(result.parameter_units),
-        "sample_axis_name": str(result.sample_axis_name),
-        "sample_coordinates": result.sample_coordinates,
-        "sample_unit": str(result.sample_unit),
-        "sample_labels": result.sample_labels,
         "batch_revision": int(result.batch_revision),
     }
 
@@ -384,6 +372,7 @@ def _restore_fit_summary(document: Mapping[str, object]) -> object:
     kind = str(document["kind"])
     if kind == "scalar":
         return SimpleNamespace(
+            sample_axes=tuple(document["sample_axes"]),
             parameter_names=tuple(document["parameter_names"]),
             parameter_units=dict(document["parameter_units"]),
             parameter_values=np.asarray(document["parameter_values"]),
@@ -409,15 +398,7 @@ def _restore_fit_summary(document: Mapping[str, object]) -> object:
             for name, values in document["parameter_errors"].items()
         },
         results=outcomes,
-        facet=document["facet"],
-        sample_axis_name=str(document["sample_axis_name"]),
-        sample_coordinates=(
-            None
-            if document["sample_coordinates"] is None
-            else np.asarray(document["sample_coordinates"])
-        ),
-        sample_unit=str(document["sample_unit"]),
-        sample_labels=document["sample_labels"],
+        sample_axes=tuple(document["sample_axes"]),
         source_revision=int(document["source_revision"]),
         batch_revision=int(document["batch_revision"]),
     )
@@ -447,8 +428,7 @@ def _restore_complete_fit_result(document: Mapping[str, object]) -> object:
             evidence=document["evidence"],
         )
     return FacetFitBatchResult(
-        facet=document["facet"],
-        facet_values=document["facet_values"],
+        sample_axes=tuple(document["sample_axes"]),
         model=document["model"],
         results=tuple(
             None if item is None else _restore_complete_fit_result(item)
@@ -458,10 +438,6 @@ def _restore_complete_fit_result(document: Mapping[str, object]) -> object:
         source_revision=document["source_revision"],
         overlays=document["overlays"],
         parameter_units=document["parameter_units"],
-        sample_axis_name=document["sample_axis_name"],
-        sample_coordinates=document["sample_coordinates"],
-        sample_unit=document["sample_unit"],
-        sample_labels=document["sample_labels"],
         batch_revision=document["batch_revision"],
     )
 

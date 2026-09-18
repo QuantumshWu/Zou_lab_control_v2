@@ -63,7 +63,7 @@ def test_facet_grid_without_facet_is_one_full_cell_and_one_fit() -> None:
             fit_all_facets=True,
         )
         assert isinstance(result, FacetFitBatchResult)
-        assert result.facet is None
+        assert result.sample_axes == ()
         assert len(result.results) == 1
         assert len(result.overlays) == 1
     finally:
@@ -149,7 +149,7 @@ def test_facet_result_publishes_mixed_success_and_explicit_error_validity() -> N
         result = session.fit("gaussian_offset", live=True)
         assert isinstance(result, FacetFitBatchResult)
         assert np.array_equal(result.success, [False, True])
-        assert result.sample_unit == "m"
+        assert result.sample_axes[0][1].unit == "m"
         for name in result.parameter_names:
             assert np.isnan(result.parameter_values[name][0])
             assert np.isnan(result.parameter_errors[name][0])

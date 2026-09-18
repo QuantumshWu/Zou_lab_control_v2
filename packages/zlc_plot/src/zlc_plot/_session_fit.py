@@ -40,6 +40,7 @@ from .selectors import (
     SelectorState,
     _classifier_threshold_key,
     normalize_classifier_threshold_targets,
+    series_identity,
 )
 from .specs import (
     accepts_classifier_thresholds,
@@ -127,48 +128,6 @@ class FitSessionMixin:
             return replace(result, batch_revision=batch_revision)
         return result.with_batch_revision(batch_revision)
 
-    @staticmethod
-    def _facet_batch_geometry(
-        projection: FitProjection,
-        cells: Sequence[Any],
-    ) -> dict[str, object]:
-        """Describe one facet axis identically for successes and gaps."""
-
-        values = tuple(cell.facet_value_canonical for cell in cells)
-        numeric = all(
-            isinstance(value, (int, float, np.number))
-            and not isinstance(value, (bool, np.bool_))
-            for value in values
-        )
-        facet = projection._spec.facet
-        if facet is None:
-            return {
-                "facet": None,
-                "facet_values": values,
-                "sample_axis_name": "Facet",
-                "sample_coordinates": np.ones(len(cells), dtype=np.float64),
-                "sample_unit": "",
-                "sample_labels": None,
-            }
-        coordinate = projection._coordinate(facet)
-        return {
-            "facet": facet,
-            "facet_values": values,
-            "sample_axis_name": coordinate.label,
-            "sample_coordinates": (
-                np.asarray(values, dtype=np.float64)
-                if numeric
-                else np.arange(len(cells), dtype=np.float64)
-            ),
-            "sample_unit": (
-                ""
-                if not numeric or coordinate.canonical_unit.symbol == "1"
-                else coordinate.canonical_unit.symbol
-            ),
-            "sample_labels": (
-                None if numeric else tuple(cell.label for cell in cells)
-            ),
-        }
 
     def _failed_live_fit_event(
         self,
@@ -182,25 +141,23 @@ class FitSessionMixin:
         model = request.model
         message = str(error) or type(error).__name__
         units = projection._fit_parameter_units(model)
-        if request.all_facets and isinstance(projection._spec, FacetGridPlot):
-            cells = tuple(getattr(projection.payload, "cells", ()))
-            if not cells:
-                raise RuntimeError("failed facet fit has no cells to identify")
+        if request.all_facets or projection._has_grouped_histogram():
+            targets = projection._fit_targets(all_facets=request.all_facets)
             failed = FacetFitBatchResult(
                 model=model,
-                results=(None,) * len(cells),
-                failure_messages=(message,) * len(cells),
+                results=(None,) * len(targets),
+                failure_messages=(message,) * len(targets),
                 source_revision=int(source_revision),
                 overlays=tuple(
                     FitOverlay(
                         success=False,
                         diagnostic=message,
-                        facet_index=index,
+                        facet_index=facet_index, group_key=group_key,
                     )
-                    for index in range(len(cells))
+                    for facet_index, _group_index, group_key in targets
                 ),
                 parameter_units=units,
-                **self._facet_batch_geometry(projection, cells),
+                sample_axes=projection._fit_sample_axes(targets),
             )
             result = self._stamp_fit_batch_revision(failed)
             return FitEvent(
@@ -570,7 +527,7 @@ class FitSessionMixin:
         self._notify_fit(presentation.event)
         return presentation.accepted.result
 
-    def _fit_facet_batch(
+    def _fit_batch(
         self,
         projection: FitProjection,
         model: FitModelSpec,
@@ -581,7 +538,8 @@ class FitSessionMixin:
         cancelled: Callable[[], bool] | None,
         request_generation: int | None = None,
         selector_kind: SelectorKind | None = None,
-        facet_indices: Sequence[int] | None = None,
+        distribution_indices: Sequence[int] | None = None,
+        all_facets: bool = True,
     ) -> tuple[FacetFitBatchResult, tuple[FitSelection | None, ...]]:
         """Fit every projected cell and construct overlays through one path.
 
@@ -594,15 +552,12 @@ class FitSessionMixin:
         revision started from it and stayed there for the rest of the run.
         """
 
-        if not isinstance(projection._spec, FacetGridPlot):
-            raise TypeError("facet batch projection requires FacetGridPlot")
-        payload = projection.payload
-        cells = tuple(getattr(payload, "cells", ()))
-        if not cells:
-            raise ValueError("facet grid has no cells to fit")
+        targets = projection._fit_targets(all_facets=all_facets)
+        if not targets:
+            raise ValueError("projection has no distributions to fit")
         requested = (
-            frozenset(range(len(cells)))
-            if facet_indices is None else frozenset(facet_indices)
+            frozenset(range(len(targets)))
+            if distribution_indices is None else frozenset(distribution_indices)
         )
         # Warm starts are resolved on the calling thread so cell workers never
         # touch session locks (the classifier solves under the session lock).
@@ -613,7 +568,7 @@ class FitSessionMixin:
                 facet_index=index,
                 request_generation=request_generation,
             )
-            for index in range(len(cells))
+            for index in range(len(targets))
         )
 
         selections: list[FitSelection | None] = []
@@ -621,23 +576,23 @@ class FitSessionMixin:
         try:
             select_cell = projection._prepare_fit_selection(model, selector_kind)
         except Exception as error:
-            selections = [None] * len(cells)
-            selection_failures = [str(error) or type(error).__name__] * len(cells)
+            selections = [None] * len(targets)
+            selection_failures = [str(error) or type(error).__name__] * len(targets)
         else:
-            for index in range(len(cells)):
+            for index, (facet_index, group_index, _key) in enumerate(targets):
                 if index not in requested:
                     selections.append(None)
                     selection_failures.append("fit not requested")
                     continue
                 try:
-                    selections.append(select_cell(index))
+                    selections.append(select_cell(facet_index, group_index))
                     selection_failures.append(None)
                 except Exception as error:
                     selections.append(None)
                     selection_failures.append(str(error) or type(error).__name__)
 
         parameter_units = projection._fit_parameter_units(model)
-        batch_results: list[FitResult | None] = [None] * len(cells)
+        batch_results: list[FitResult | None] = [None] * len(targets)
         batch_failures = list(selection_failures)
         selected_cells = tuple(
             index
@@ -699,6 +654,7 @@ class FitSessionMixin:
         def solve_cell(
             index: int,
         ) -> tuple[FitResult | None, str | None, FitSelection | None, FitOverlay]:
+            facet_index, _group_index, group_key = targets[index]
             if cancelled is not None and bool(cancelled()):
                 raise FitCancelled("facet fit cancelled")
             selection = selections[index]
@@ -712,7 +668,7 @@ class FitSessionMixin:
                     FitOverlay(
                         success=False,
                         diagnostic=failure,
-                        facet_index=index,
+                        facet_index=facet_index, group_key=group_key,
                     ),
                 )
             try:
@@ -732,7 +688,7 @@ class FitSessionMixin:
                         FitOverlay(
                             success=False,
                             diagnostic=message,
-                            facet_index=index,
+                            facet_index=facet_index, group_key=group_key,
                         ),
                     )
                 overlay = projection._make_fit_overlay(result, selection)
@@ -747,12 +703,12 @@ class FitSessionMixin:
                     FitOverlay(
                         success=False,
                         diagnostic=message,
-                        facet_index=index,
+                        facet_index=facet_index, group_key=group_key,
                     ),
                 )
             return result, None, selection, overlay
 
-        outcomes = [solve_cell(index) for index in range(len(cells))]
+        outcomes = [solve_cell(index) for index in range(len(targets))]
         results = [outcome[0] for outcome in outcomes]
         failure_messages = [outcome[1] for outcome in outcomes]
         selections = [outcome[2] for outcome in outcomes]
@@ -772,7 +728,7 @@ class FitSessionMixin:
             source_revision=projection.data_revision,
             overlays=tuple(overlays),
             parameter_units=parameter_units,
-            **self._facet_batch_geometry(projection, cells),
+            sample_axes=projection._fit_sample_axes(targets),
         )
         return batch, tuple(selections)
 
@@ -841,7 +797,8 @@ class FitSessionMixin:
                             candidate_display,
                         )
                 projection = self._projected
-                if not request.all_facets:
+                batch_fit = request.all_facets or projection._has_grouped_histogram()
+                if not batch_fit:
                     try:
                         selection = projection.fit_selection(
                             request.model,
@@ -874,7 +831,7 @@ class FitSessionMixin:
                         context_generation=self._fit_context_generation,
                         request_generation=self._fit_request_generation,
                     )
-                    if selection is not None or request.all_facets
+                    if selection is not None or batch_fit
                     else None
                 )
         def retire_previous_request() -> None:
@@ -1101,8 +1058,8 @@ class FitSessionMixin:
                 cancelled is not None and bool(cancelled())
             )
 
-        if started.request.all_facets:
-            batch, selections = self._fit_facet_batch(
+        if started.request.all_facets or started.projection._has_grouped_histogram():
+            batch, selections = self._fit_batch(
                 started.projection,
                 started.request.model,
                 initial=started.request.initial,
@@ -1111,6 +1068,7 @@ class FitSessionMixin:
                 cancelled=should_cancel,
                 request_generation=started.request_generation,
                 selector_kind=started.request.selector_kind,
+                all_facets=started.request.all_facets,
             )
             return batch, selections
         selection = started.selection
@@ -1323,8 +1281,8 @@ class FitSessionMixin:
 
         projection = self._projected
         model = self._resolve_fit_model("bimodal_gaussian")
-        facet_grid = isinstance(self._spec, FacetGridPlot)
-        count = len(projection.payload.cells) if facet_grid else 1
+        targets = projection._fit_targets()
+        count = len(targets)
         components = self._classifier_gaussian_components
         if len(components) != count:
             components = self._classifier_gaussian_components = (None,) * count
@@ -1333,16 +1291,16 @@ class FitSessionMixin:
             indices = None
             results = [None] * count
             overlays = [
-                FitOverlay(facet_index=index if facet_grid else None)
-                for index in range(count)
+                FitOverlay(facet_index=facet_index, group_key=group_key)
+                for facet_index, _group_index, group_key in targets
             ]
         else:
             results = list(self._classifier_results)
             overlays = list(self._classifier_overlays)
         requested = set(range(count)) if indices is None else indices
         automatic = tuple(index for index in requested if components[index] is None)
-        if automatic and facet_grid:
-            batch, _selections = self._fit_facet_batch(
+        if automatic:
+            batch, _selections = self._fit_batch(
                 projection,
                 model,
                 initial=None,
@@ -1350,45 +1308,29 @@ class FitSessionMixin:
                 options=None,
                 cancelled=None,
                 request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                facet_indices=automatic,
+                distribution_indices=automatic,
             )
             for index in automatic:
                 results[index] = batch.results[index]
                 overlays[index] = batch.overlays[index]
-        elif automatic:
-            selection = projection.fit_selection(model)
-            warm = self._fit_warm_start(
-                model,
-                None,
-                facet_index=None,
-                request_generation=_CLASSIFIER_REQUEST_GENERATION,
-            )
-            result = self._solve_fit_selection(
-                projection,
-                model,
-                selection,
-                initial=None,
-                bounds=None,
-                options=None,
-                cancelled=None,
-                request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                warm_start=warm,
-            )
-            results[0] = result
-            overlays[0] = projection._make_fit_overlay(result, selection)
         for index in requested:
             authored = components[index]
             if authored is None:
                 continue
-            facet_index = index if facet_grid else None
+            facet_index, group_index, group_key = targets[index]
             if authored:
-                selection = projection.fit_selection(model, facet_index=facet_index)
-                result = self._authored_classifier_result(model, selection, authored)
-                results[index] = result
-                overlays[index] = projection._make_fit_overlay(result, selection)
+                try:
+                    selection = projection.fit_selection(model, facet_index=facet_index, group_index=group_index)
+                    result = self._authored_classifier_result(model, selection, authored)
+                    results[index] = result
+                    overlays[index] = projection._make_fit_overlay(result, selection)
+                except (TypeError, ValueError) as error:
+                    results[index] = None
+                    overlays[index] = FitOverlay(success=False, diagnostic=str(error),
+                                                 facet_index=facet_index, group_key=group_key)
             else:
                 results[index] = None
-                overlays[index] = FitOverlay(facet_index=facet_index)
+                overlays[index] = FitOverlay(facet_index=facet_index, group_key=group_key)
         self._remember_classifier_warm_starts(model, results)
         self._classifier_results = tuple(results)
         self._classifier_overlays = tuple(overlays)
@@ -1406,13 +1348,12 @@ class FitSessionMixin:
     ) -> None:
         """Seed the next classifier refresh from each accepted cell solution."""
 
-        facet = isinstance(self._spec, FacetGridPlot)
         with self._lock:
             for index, result in enumerate(results):
                 key = (
                     _CLASSIFIER_REQUEST_GENERATION,
                     model.model_id,
-                    index if facet else None,
+                    index,
                 )
                 if result is None or not result.success or result.reduced:
                     self._fit_warm_starts.pop(key, None)
@@ -1449,24 +1390,25 @@ class FitSessionMixin:
         if not thresholds:
             return ()
         snapshot = self._selector_controller.snapshot()
-        selected = (
-            snapshot.candidate
-            if snapshot.candidate is not None
-            and snapshot.candidate.kind is SelectorKind.THRESHOLD
-            else next(
-                (
-                    state
-                    for state in snapshot.committed
-                    if state.kind is SelectorKind.THRESHOLD
-                ),
-                None,
-            )
-        )
-        if selected is not None:
-            index = 0 if selected.facet_index is None else selected.facet_index
-            if 0 <= index < len(thresholds):
+        selected = snapshot.candidate
+        if selected is not None and selected.kind is SelectorKind.THRESHOLD:
+            index = self._classifier_distribution_index(selected.facet_index)
+            if index is not None and index < len(thresholds):
                 thresholds[index] = float(selected.value)
         return tuple(thresholds)
+
+    def _classifier_distribution_index(self, facet_index: int | None = None) -> int | None:
+        """Locate the displayed group through the existing series-lock identity."""
+        if isinstance(self._spec, FacetGridPlot) and facet_index is None:
+            facet_index = self._focused_facet_index or 0
+        candidates = tuple((index, key) for index, (facet, _group, key)
+                           in enumerate(self._projected._fit_targets()) if facet == facet_index)
+        locked = self.display_state.interaction.get("series_lock")
+        if locked is not None and locked["facet_index"] == self._focused_facet_index:
+            for index, key in candidates:
+                if series_identity(key) == tuple(tuple(value) for value in locked["key"]):
+                    return index
+        return candidates[0][0] if candidates else None
 
     def _classifier_labels(
         self,
@@ -1507,8 +1449,8 @@ class FitSessionMixin:
         settled = self._classifier_thresholds_settled()
         if not self._threshold_classifier_enabled() or not settled:
             return None
-        index = 0 if self._focused_facet_index is None else self._focused_facet_index
-        if index < 0 or index >= len(settled):
+        index = self._classifier_distribution_index()
+        if index is None or index >= len(settled):
             return None
         threshold = settled[index]
         if threshold is None:
@@ -1516,7 +1458,7 @@ class FitSessionMixin:
         return SelectorState(
             SelectorKind.THRESHOLD,
             float(threshold),
-            facet_index=(index if isinstance(self._spec, FacetGridPlot) else None),
+            facet_index=self._projected._fit_targets()[index][0],
         )
 
     def _set_classifier_thresholds_state(
@@ -1530,11 +1472,10 @@ class FitSessionMixin:
             raise RuntimeError("threshold classifier is not enabled")
         selected = normalize_classifier_threshold_targets(thresholds)
         expected: dict[tuple[object, ...], int] = {}
-        facet_grid = isinstance(self._spec, FacetGridPlot)
-        count = len(self._payload.cells) if facet_grid else 1
+        count = len(self._projected._fit_targets())
         for index in range(count):
             target = self._classifier_threshold_target_for_index(
-                index if facet_grid else None,
+                index,
                 None,
             )
             identity = _classifier_threshold_key(target)
@@ -1586,7 +1527,6 @@ class FitSessionMixin:
         *,
         settled: bool = False,
     ) -> tuple[Mapping[str, object], ...]:
-        facet_grid = isinstance(self._spec, FacetGridPlot)
         targets: list[Mapping[str, object]] = []
         values = (
             enumerate(self._classifier_thresholds_settled())
@@ -1597,7 +1537,7 @@ class FitSessionMixin:
                 continue
             target = dict(
                 self._classifier_threshold_target_for_index(
-                    index if facet_grid else None,
+                    index,
                     value,
                 )
             )
@@ -1861,10 +1801,11 @@ class FitSessionMixin:
                         "facet fit selection does not match its data projection"
                     )
             else:
-                selections = self._facet_fit_selections(
+                selections = self._batch_fit_selections(
                     projection,
                     batch.model,
                     selector_kind=started.request.selector_kind,
+                    all_facets=started.request.all_facets,
                 )
         return (
             _AcceptedFit(
@@ -1948,26 +1889,25 @@ class FitSessionMixin:
             return started.selection_cell.selection
         return None
 
-    def _facet_fit_selections(
+    def _batch_fit_selections(
         self,
         projection: FitProjection,
         model: FitModelSpec,
         *,
         selector_kind: SelectorKind | None,
+        all_facets: bool,
     ) -> tuple[FitSelection | None, ...]:
         """Recreate cell selections from the same frozen projection only."""
 
-        if not isinstance(projection._spec, FacetGridPlot):
-            raise TypeError("facet fit selections require FacetGridPlot")
-        cells = tuple(getattr(projection.payload, "cells", ()))
+        targets = projection._fit_targets(all_facets=all_facets)
         selections: list[FitSelection | None] = []
         try:
             select_cell = projection._prepare_fit_selection(model, selector_kind)
         except (TypeError, ValueError, KeyError):
-            return (None,) * len(cells)
-        for index, _cell in enumerate(cells):
+            return (None,) * len(targets)
+        for facet_index, group_index, _group_key in targets:
             try:
-                selections.append(select_cell(index))
+                selections.append(select_cell(facet_index, group_index))
             except (TypeError, ValueError, KeyError):
                 selections.append(None)
         return tuple(selections)

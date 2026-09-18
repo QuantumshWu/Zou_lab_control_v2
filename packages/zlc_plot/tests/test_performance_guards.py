@@ -235,7 +235,7 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     shares: list[bool] = []
     histogram_inputs: list[tuple[bool, bool]] = []
     original = DataView._image_from_planes
-    original_histogram = data_view_module._facet_kernel_counts
+    original_histogram = data_view_module._histogram_kernel_counts
 
     def observed(
         self,
@@ -272,7 +272,7 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
 
     monkeypatch.setattr(DataView, "_image_from_planes", observed)
     monkeypatch.setattr(
-        data_view_module, "_facet_kernel_counts", observed_histogram
+        data_view_module, "_histogram_kernel_counts", observed_histogram
     )
     tracemalloc.start()
     tracemalloc.reset_peak()

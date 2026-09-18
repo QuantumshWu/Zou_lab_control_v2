@@ -2247,7 +2247,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     refreshed.append(previous)
                     continue
                 cell_projection = projection._with_context(
-                    replace(projection._context, focused_facet_index=index)
+                    replace(projection._context, focused_facet_index=selection.facet_index)
                 )
                 refreshed.append(
                     cell_projection._make_fit_overlay(result, selection)
@@ -3734,8 +3734,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     stored.kind is SelectorKind.THRESHOLD
                     and self._threshold_classifier_enabled()
                 ):
-                    index = 0 if stored.facet_index is None else stored.facet_index
-                    if 0 <= index < len(self._classifier_results):
+                    index = self._classifier_distribution_index(stored.facet_index)
+                    if index is not None and index < len(self._classifier_results):
                         updated = dict(self._classifier_thresholds)
                         updated[index] = float(stored.value)
                         self._classifier_thresholds = updated
@@ -4127,12 +4127,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
     def _classifier_threshold_target_for_index(
         self,
-        facet_index: int | None,
+        distribution_index: int,
         value: object,
     ) -> Mapping[str, object]:
         subject = self._view.selection_subject(
             self._spec, self._payload,
         )
+        facet_index, _group_index, group_key = self._projected._fit_targets()[distribution_index]
         # Classifier thresholds are explicitly authored per distribution,
         # unlike the ordinary numeric selection shared across the grid.
         if facet_index is not None and self._spec.facet is not None:
@@ -4140,6 +4141,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._spec.facet,
                 self._payload.cells[facet_index].facet_value_canonical,
             ),))
+        if group_key:
+            subject = replace(subject, scope=subject.scope + tuple((entry.ref, entry.canonical) for entry in group_key))
         return _classifier_threshold_target_from_subject(
             subject,
             value,
@@ -4563,9 +4566,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         """Return the sole painted/hit-tested state for every selector kind."""
 
         snapshot = self._selector_controller.snapshot()
+        if not self._threshold_classifier_enabled():
+            return snapshot
         derived = self._derived_threshold_classifier_selector()
         if derived is None:
-            return snapshot
+            return SelectorSnapshot(tuple(state for state in snapshot.committed if state.kind is not SelectorKind.THRESHOLD),
+                                    snapshot.candidate if snapshot.candidate is not None and snapshot.candidate.kind is not SelectorKind.THRESHOLD else None)
         candidate = snapshot.candidate
         active_index = derived.facet_index
         if (
@@ -4575,15 +4581,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         ):
             threshold = candidate
         else:
-            threshold = next(
-                (
-                    state
-                    for state in snapshot.committed
-                    if state.kind is SelectorKind.THRESHOLD
-                    and state.facet_index == active_index
-                ),
-                derived,
-            )
+            threshold = derived
         committed = tuple(
             state
             for state in snapshot.committed
@@ -4764,12 +4762,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         pixel_x = float(x) * float(width)
         pixel_y = (1.0 - float(y)) * float(height)
         interaction_transform = axes_snapshot
+        series_changed = False
         def series(action: str, axes: Any | None = None) -> bool:
-            return self._renderer.series_focus(
+            nonlocal series_changed
+            changed = self._renderer.series_focus(
                 action, axes, pixel_x, pixel_y,
                 hit_radius=self._defaults.interaction.selector_handle_radius_px,
                 click_radius=self._defaults.interaction.double_click_radius_px,
+                redraw=False,
             )
+            series_changed = series_changed or changed
+            return changed
         if selected_action == "cancel":
             series("clear")
             self.cancel_interaction()
@@ -4804,7 +4807,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     interaction_transform
                 )
             axes = self._renderer.interactive_axes_at(event)
-            if not self._renderer.series_focus_scroll(axes, float(step)):
+            if not self._renderer.series_focus_scroll(axes, float(step), redraw=False):
                 self._on_scroll(event, interaction_transform=interaction_transform)
         else:
             event = MouseEvent(
@@ -4841,6 +4844,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._on_motion(event)
         before_state = self.display_state
         state = self._display_store._commit_interaction(self._renderer.series_interaction())
+        if series_changed or state is not before_state:
+            self._render_current(RenderEffect.OVERLAY)
         if state is not before_state:
             self._notify_display(state)
         return self._raster_pointer_state(

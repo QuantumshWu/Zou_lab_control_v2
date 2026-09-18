@@ -30,7 +30,7 @@ from zlc_plot.selectors import (
     (
         CurvePlot(AxisRef.point("x"), group=AxisRef.cell_data("component")),
         ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
-        HistogramPlot(labels=PlotLabels(title="distribution")),
+        HistogramPlot(group=AxisRef.cell_data("site"), labels=PlotLabels(title="distribution")),
         RollingPlot(group=AxisRef.cell_data("site")),
         FacetGridPlot(
             AxisRef.cell_data("site"),
@@ -41,6 +41,12 @@ from zlc_plot.selectors import (
 def test_plot_spec_recipe_round_trip_is_exact(spec) -> None:
     document = encode_plot_recipe(spec, parameters={}, size="2x2")
     assert decode_plot_recipe(document)["spec"] == spec
+    if isinstance(spec, HistogramPlot):
+        document["spec"].pop("group")
+        assert decode_plot_recipe(document)["spec"] == replace(spec, group=None)
+        document["spec"]["unrecognized"] = None
+        with pytest.raises(ValueError, match="histogram recipe fields differ"):
+            decode_plot_recipe(document)
 
 
 def test_plot_recipe_round_trip_keeps_view_and_rejects_unknown_fields() -> None:

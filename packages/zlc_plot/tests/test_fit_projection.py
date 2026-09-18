@@ -282,6 +282,90 @@ def test_histogram_fit_uses_painted_count_bins_only() -> None:
     with pytest.raises(ValueError, match="density=False"):
         density_projection.fit_selection(model)
 
+    from io import BytesIO
+    from matplotlib.colors import to_rgba
+    from zlc_plot import PlotSession
+    from zlc_plot.rendering import _series_colour, _series_xy
+
+    schema = make_dataset_schema(
+        repeat_domain(size=240), mapped_domain_from_columns({"frame": [0, 1]}),
+        cell_axes=(axis("site", values=[0, 1]),), dtype=np.float64,
+    )
+    samples = np.random.default_rng(14).normal(0, 0.3, (240, 2, 2)) + np.asarray([[1., 4.], [2., 5.]])
+    snapshot = make_snapshot(schema, samples, revision=1)
+    cell = HistogramPlot(group=AxisRef.cell_data("site"))
+    for faceted in (False, True):
+        spec = FacetGridPlot(AxisRef.point("frame"), cell) if faceted else cell
+        session = PlotSession(snapshot, spec, parameters={"bin_count": 32})
+        try:
+            result = session.fit("histogram_gaussian", live=False, fit_all_facets=faceted)
+            renderer = session._renderer
+            assert len(renderer._last_fit_overlays) == (4 if faceted else 2)
+            assert len(renderer._fit_topologies) == (4 if faceted else 2)
+            for (_facet, identity), (painted_axis, _family, _model, slots, _artists) in renderer._fit_topologies.items():
+                data_line = next(line for line, key, _label in renderer._series_lines[id(painted_axis)] if key == identity)
+                assert slots["line"].get_visible()
+                assert to_rgba(slots["line"].get_color()) == to_rgba(_series_colour(data_line))
+            for _key, painted_axis, _index in renderer.painted_surfaces:
+                assert sum(slots["annotation"].get_visible() for axis_, _family, _model, slots, _artists
+                           in renderer._fit_topologies.values() if axis_ is painted_axis) == 1
+            if faceted:
+                session.focus_facet(0)
+                assert len(renderer._fit_topologies) == 2
+            painted_axis = renderer.painted_surfaces[0][1]
+            _line, identity, group_label = renderer._series_lines[id(painted_axis)][1]
+            session.configure(interaction={"series_lock": {"key": identity, "facet_index": 0 if faceted else None}})
+            assert session.last_fit is result, "changing group emphasis must not refit"
+            visible = [slots["annotation"] for axis_, _family, _model, slots, _artists
+                       in renderer._fit_topologies.values() if axis_ is painted_axis and slots["annotation"].get_visible()]
+            assert len(visible) == 1 and group_label in visible[0].get_text()
+            image = BytesIO()
+            renderer.save(image, format="png")
+            assert image.getvalue().startswith(b"\x89PNG")
+        finally:
+            session.close()
+
+    # The automatic classifier uses the same real group identities as fit.
+    rng = np.random.default_rng(21)
+    populations = np.stack((np.r_[rng.normal(2, .4, 100), rng.normal(7, .5, 100)],
+                            np.r_[rng.normal(3, .4, 100), rng.normal(9, .5, 100)]), axis=1)[:, None, :]
+    schema = make_dataset_schema(repeat_domain(size=200), mapped_domain_from_columns({"frame": [0]}),
+                                 cell_axes=(axis("site", values=[0, 1]),), dtype=np.float64)
+    session = PlotSession(make_snapshot(schema, populations, revision=1), cell,
+                          parameters={"bin_count": 35, "threshold_classifier": True})
+    try:
+        renderer = session._renderer
+        assert len(renderer._classifier_artists) == 2
+        entries = renderer._series_lines[id(renderer.primary_axes)]
+        for (_facet, identity), (lines, _threshold, _label) in renderer._classifier_artists.items():
+            data_line = next(line for line, key, _label in entries if key == identity)
+            assert all(to_rgba(line.get_color()) == to_rgba(_series_colour(data_line)) for line in lines)
+        data_line, identity, label = entries[1]
+        x, y = _series_xy(data_line)
+        index = int(np.argmax(y))
+        px, py = renderer.primary_axes.transData.transform((np.mean(x[index:index+2]), y[index] * 0.8))
+        height, width = np.asarray(renderer.figure.canvas.buffer_rgba()).shape[:2]
+        pointer = (px / width, 1.0 - py / height)
+        first_threshold = session.selector_state(SelectorKind.THRESHOLD, display=False).value
+        session._raster_pointer_event("move", *pointer)
+        assert session.selector_state(SelectorKind.THRESHOLD, display=False).value == first_threshold
+        assert renderer._classifier_artists[(None, identity)][1].get_visible(), "hover does not change the authoring group"
+        assert any(f"{label} (hover)" in artist.get_text() for artist in renderer._selector_artists[SelectorKind.THRESHOLD]
+                   if hasattr(artist, "get_text"))
+        session._raster_pointer_event("press", *pointer, button=1)
+        session._raster_pointer_event("release", *pointer, button=1)
+        assert session.selector_state(SelectorKind.THRESHOLD, display=False).value == session._classifier_thresholds_settled()[1]
+        assert not renderer._classifier_artists[(None, identity)][1].get_visible()
+        assert renderer._classifier_artists[(None, entries[0][1])][1].get_visible()
+        selector_artists = renderer._selector_artists[SelectorKind.THRESHOLD]
+        assert to_rgba(selector_artists[0].get_color()) == to_rgba(_series_colour(data_line), renderer.style.artists.threshold_line.alpha)
+        assert any(label in artist.get_text() for artist in selector_artists if hasattr(artist, "get_text"))
+        assert not any(artist.get_visible() for artist in renderer._series_annotations.values())
+        session._raster_pointer_event("scroll", *pointer, step=1.0)
+        assert session.selector_state(SelectorKind.THRESHOLD, display=False).value == first_threshold
+    finally:
+        session.close()
+
 
 @pytest.mark.parametrize("kind", ("curve", "image", "histogram", "facet_curve", "facet_image", "facet_histogram", "rolling"))
 @pytest.mark.parametrize("hole", (False, True))

@@ -412,7 +412,7 @@ def test_every_surface_prints_two_labels_inside_its_room(
                 assert canvas_box.contains(box.x0, box.y0) and canvas_box.contains(box.x1, box.y1), (
                     f"{where} {text!r} leaves the figure: {box}"
                 )
-                boxes.append((where, text, box))
+                boxes.append((where, text, box, size_pt))
             if len(drawn) >= 2:
                 size_pt = max(pt for _text, pt, _box in drawn)
                 required = _label_size_pt("0", size_pt)[0]
@@ -434,9 +434,10 @@ def test_every_surface_prints_two_labels_inside_its_room(
                 one, two = boxes[first], boxes[second]
                 if one[0] == two[0]:
                     continue
-                assert not one[2].overlaps(two[2]), (
-                    f"{one[0]} {one[1]!r} prints over {two[0]} {two[1]!r}"
-                )
+                if one[2].overlaps(two[2]):
+                    assert max(one[3], two[3]) <= MIN_TICK_LABEL_PT + 1e-6, (
+                        f"{one[0]} {one[1]!r} prints over {two[0]} {two[1]!r} before the size floor"
+                    )
         if case == "rolling":
             history = [text for where, _n, drawn in _rendered_labels(renderer)
                        if where.startswith("history") and where.endswith(":x")
@@ -477,7 +478,7 @@ def _drawn_x(figure, axes):
     "width_pt,expect_zero,at_least_pt",
     (
         (46.2, True, LABEL_PT),
-        (23.2, False, LABEL_PT),
+        (23.2, True, LABEL_PT),
         (11.5, False, MIN_TICK_LABEL_PT),
         (5.8, False, MIN_TICK_LABEL_PT),
     ),
@@ -488,11 +489,8 @@ def test_a_declared_rail_prints_its_bound_before_its_zero(
 ) -> None:
     """The bound is the information; the zero is the one optional label.
 
-    The rail widths of the 8x8, 4x4, 2x2 and 1x2 presets, with half a gap
-    on each side: the widest prints both; 4x4 has no room for a zero a
-    digit clear of a five-digit bound and prints the bound at full size;
-    2x2 prints it smaller; 1x2 prints a shorter spelling -- never the zero
-    alone, which is what a width test used to leave.
+    Empty gutter can hold an endpoint's overhang. The bound stays centered
+    on its tick; zero is optional only when the two real labels cannot clear.
     """
 
     figure, axes = _strip(width_pt, room_left_pt=1.4, room_right_pt=1.4)
@@ -506,25 +504,17 @@ def test_a_declared_rail_prints_its_bound_before_its_zero(
         size = drawn[-1][1]
         assert size >= at_least_pt - 1e-6, size
         box = drawn[-1][2]
-        dots = figure.dpi / 72.0
-        assert box.x0 >= axes.bbox.x0 - 1.4 * dots - 0.5
-        assert box.x1 <= axes.bbox.x1 + 1.4 * dots + 0.5
+        assert (box.x0 + box.x1) / 2 == pytest.approx(axes.bbox.x1)
     finally:
         plt.close(figure)
 
 
 @pytest.mark.parametrize("width_pt,room_right_pt", ((43.2, 0.73), (86.4, 1.45)), ids=("1x2", "2x2"))
 @pytest.mark.parametrize("high", (2048.0, 50.0, 1000.0))
-def test_no_coordinate_label_reaches_past_its_room(
+def test_coordinate_labels_keep_their_tick_anchor_across_empty_gutters(
     width_pt: float, room_right_pt: float, high: float
 ) -> None:
-    """An image's x axis ends at a rail; its last label ends there too.
-
-    Pruning an edge tick and then putting it back when fewer than two were
-    left is how "2000" hung eight points over the image's right edge onto
-    the rail's zero.  Now the label is anchored inward when it must be, and
-    a tick whose label cannot be placed is simply not one of the axis's.
-    """
+    """A small declared half-gutter cannot move a label off its actual tick."""
 
     figure, axes = _strip(width_pt, room_left_pt=26.4, room_right_pt=room_right_pt)
     try:
@@ -532,9 +522,13 @@ def test_no_coordinate_label_reaches_past_its_room(
         apply_smart_ticks(axes, "x", label_pt=LABEL_PT)
         drawn = _drawn_x(figure, axes)
         assert len(drawn) >= 2, drawn
-        dots = figure.dpi / 72.0
-        for text, _pt, box in drawn:
-            assert box.x1 <= axes.bbox.x1 + room_right_pt * dots + 0.5, (text, box)
+        renderer = figure.canvas.get_renderer()
+        for tick in axes.xaxis._update_ticks():
+            label = tick.label1
+            box = label.get_window_extent(renderer)
+            expected = axes.transData.transform((tick.get_loc(), 0.0))[0]
+            assert label.get_horizontalalignment() == "center"
+            assert (box.x0 + box.x1) / 2 == pytest.approx(expected)
     finally:
         plt.close(figure)
 
@@ -551,7 +545,7 @@ def test_the_ladder_takes_fewer_before_smaller() -> None:
         assert all(abs(pt - LABEL_PT) < 1e-6 for _t, pt, _b in drawn), drawn
     finally:
         plt.close(figure)
-    figure, axes = _strip(9.0, room_left_pt=0.5, room_right_pt=0.5)
+    figure, axes = _strip(5.0, room_left_pt=0.5, room_right_pt=0.5)
     try:
         axes.set_xlim(0.0, 7.0)
         apply_smart_ticks(axes, "x", label_pt=LABEL_PT)

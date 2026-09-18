@@ -610,7 +610,7 @@ def raster_error_bars(
     band_count,
     out,
 ):
-    """Raster independent stem/cap error bars with subpixel coverage.
+    """Raster each complete error bar once with analytic union coverage.
 
     Each input sample remains one vertical stem and two horizontal caps.  No
     display-column aggregation is permitted: neighbouring measurements may
@@ -663,68 +663,56 @@ def raster_error_bars(
             )
             alpha_code = np.float64(colours[group, 3]) / np.float64(255.0)
 
-            # Agg's errorbar topology is one LineCollection of all stems
-            # followed by the low-cap and high-cap Line2Ds.  Preserve that
-            # painter order so overlapping translucent bars accumulate the
-            # way the public artist scene does.
-            for primitive in range(3):
-                if primitive and cap_half <= 0.0:
+            # All three rectangles share their x centre. Their intersection
+            # is a central strip spanning the whole glyph; the remaining
+            # width belongs only to the stem or only to the two caps.
+            # Sum those disjoint areas, then alpha-blend this BAR once.
+            for point in range(offsets[group], offsets[group + 1]):
+                px = np.float64(x[point])
+                low = np.float64(y_low[point])
+                high = np.float64(y_high[point])
+                if not (np.isfinite(px) and np.isfinite(low) and np.isfinite(high)):
                     continue
-                for point in range(offsets[group], offsets[group + 1]):
-                    px = np.float64(x[point])
-                    low = np.float64(y_low[point])
-                    high = np.float64(y_high[point])
-                    if not (
-                        np.isfinite(px)
-                        and np.isfinite(low)
-                        and np.isfinite(high)
-                    ):
-                        continue
-                    if high < low:
-                        low, high = high, low
-                    if primitive == 0:
-                        left = px - radius
-                        right = px + radius
-                        top = low
-                        bottom = high
-                    else:
-                        cap_y = low if primitive == 1 else high
-                        left = px - cap_half
-                        right = px + cap_half
-                        top = cap_y - radius
-                        bottom = cap_y + radius
-                    first_column = max(clip_left, int(np.floor(left)))
-                    last_column = min(clip_right, int(np.ceil(right)))
-                    first_row = max(clip_top, int(np.floor(top)))
-                    last_row = min(clip_bottom, int(np.ceil(bottom)))
-                    for column in range(first_column, last_column):
-                        coverage_x = min(
-                            np.float64(column + 1), right
-                        ) - max(np.float64(column), left)
-                        if coverage_x <= 0.0:
+                if high < low:
+                    low, high = high, low
+                if high <= low:
+                    continue
+                half = max(radius, cap_half)
+                top = low - radius if cap_half > 0.0 else low
+                bottom = high + radius if cap_half > 0.0 else high
+                first_column = max(clip_left, int(np.floor(px - half)))
+                last_column = min(clip_right, int(np.ceil(px + half)))
+                first_row = max(clip_top, int(np.floor(top)))
+                last_row = min(clip_bottom, int(np.ceil(bottom)))
+                for column in range(first_column, last_column):
+                    stem_x = max(0.0, min(column + 1.0, px + radius) - max(column, px - radius))
+                    cap_x = max(0.0, min(column + 1.0, px + cap_half) - max(column, px - cap_half))
+                    shared_x = min(stem_x, cap_x)
+                    stem_x -= shared_x
+                    cap_x -= shared_x
+                    row = first_row
+                    while row < last_row:
+                        if shared_x == 0.0 and stem_x == 0.0 and row >= low + radius and row + 1.0 <= high - radius:
+                            row = int(np.floor(high - radius))
                             continue
-                        for row in range(first_row, last_row):
-                            coverage_y = min(
-                                np.float64(row + 1), bottom
-                            ) - max(np.float64(row), top)
-                            if coverage_y <= 0.0:
-                                continue
-                            alpha = alpha_code * min(
-                                np.float64(1.0), coverage_x * coverage_y
-                            )
+                        full_y = max(0.0, min(row + 1.0, bottom) - max(row, top))
+                        covered = shared_x * full_y
+                        if stem_x > 0.0:
+                            covered += stem_x * max(0.0, min(row + 1.0, high) - max(row, low))
+                        if cap_x > 0.0:
+                            caps_y = full_y
+                            if low + radius < high - radius:
+                                caps_y = (max(0.0, min(row + 1.0, low + radius) - max(row, low - radius))
+                                          + max(0.0, min(row + 1.0, high + radius) - max(row, high - radius)))
+                            covered += cap_x * caps_y
+                        if covered > 0.0:
+                            alpha = alpha_code * min(np.float64(1.0), covered)
                             inverse = np.float64(1.0) - alpha
                             for channel in range(3):
-                                value = (
-                                    np.float64(colours[group, channel]) * alpha
-                                    + np.float64(out[row, column, channel]) * inverse
-                                )
-                                out[row, column, channel] = np.uint8(
-                                    min(
-                                        np.float64(255.0),
-                                        np.floor(value + np.float64(0.5)),
-                                    )
-                                )
+                                value = np.float64(colours[group, channel]) * alpha + np.float64(out[row, column, channel]) * inverse
+                                out[row, column, channel] = np.uint8(min(np.float64(255.0), np.floor(value + np.float64(0.5))))
                             out[row, column, 3] = np.uint8(255)
+                        row += 1
 
 
 @njit(cache=True, inline="always")
@@ -746,7 +734,7 @@ def _agg_fill_channel(dst, src, alpha):
 
 @njit(cache=True, parallel=True, nogil=True)
 def raster_histogram_bars(
-    edges, tops, bases, offsets, colours, clips, out
+    edges, tops, bases, offsets, surface_offsets, colours, clips, out
 ):
     """Paint histogram bars the way Agg paints an unstroked PolyCollection.
 
@@ -762,65 +750,57 @@ def raster_histogram_bars(
     ``offsets`` cut the edge array per surface, ``colours`` is one RGBA per
     surface with the fill alpha folded in, and ``clips`` the surfaces'
     boxes already snapped.
-    Surfaces are disjoint boxes, so they paint in parallel.
+    surface_offsets partitions distributions into disjoint surfaces. Groups
+    on one surface blend sequentially; only different surfaces run in parallel.
     """
 
     height, width = out.shape[:2]
-    surface_count = offsets.size - 1
+    surface_count = surface_offsets.size - 1
     for surface in prange(surface_count):
-        start = offsets[surface]
-        stop = offsets[surface + 1]
-        if stop - start < 2:
-            continue
         clip_left = max(0, clips[surface, 0])
         clip_top = max(0, clips[surface, 1])
         clip_right = min(width, clips[surface, 2])
         clip_bottom = min(height, clips[surface, 3])
         if clip_right <= clip_left or clip_bottom <= clip_top:
             continue
-        red = int(colours[surface, 0])
-        green = int(colours[surface, 1])
-        blue = int(colours[surface, 2])
-        alpha = int(colours[surface, 3])
-        if alpha <= 0:
-            continue
-        base = bases[surface]
-        if not np.isfinite(base):
-            continue
-        base_row = int(np.floor(base + np.float64(0.5)))
-        for bar in range(start, stop - 1):
-            left_edge = edges[bar]
-            right_edge = edges[bar + 1]
-            top = tops[bar]
-            if not (
-                np.isfinite(left_edge) and np.isfinite(right_edge) and np.isfinite(top)
-            ):
+        for group in range(surface_offsets[surface], surface_offsets[surface + 1]):
+            start = offsets[group]
+            stop = offsets[group + 1]
+            red = int(colours[group, 0])
+            green = int(colours[group, 1])
+            blue = int(colours[group, 2])
+            alpha = int(colours[group, 3])
+            base = bases[group]
+            if alpha <= 0 or not np.isfinite(base):
                 continue
-            x0 = int(np.floor(left_edge + np.float64(0.5)))
-            x1 = int(np.floor(right_edge + np.float64(0.5)))
-            if x1 < x0:
-                x0, x1 = x1, x0
-            top_row = int(np.floor(top + np.float64(0.5)))
-            y0 = min(top_row, base_row)
-            y1 = max(top_row, base_row)
-            x0 = max(x0, clip_left)
-            x1 = min(x1, clip_right)
-            y0 = max(y0, clip_top)
-            y1 = min(y1, clip_bottom)
-            if x1 <= x0 or y1 <= y0:
-                continue
-            for row in range(y0, y1):
-                for column in range(x0, x1):
-                    out[row, column, 0] = np.uint8(
-                        _agg_fill_channel(int(out[row, column, 0]), red, alpha)
-                    )
-                    out[row, column, 1] = np.uint8(
-                        _agg_fill_channel(int(out[row, column, 1]), green, alpha)
-                    )
-                    out[row, column, 2] = np.uint8(
-                        _agg_fill_channel(int(out[row, column, 2]), blue, alpha)
-                    )
-                    out[row, column, 3] = np.uint8(255)
+            base_row = int(np.floor(base + np.float64(0.5)))
+            for bar in range(start, stop - 1):
+                left_edge = edges[bar]
+                right_edge = edges[bar + 1]
+                top = tops[bar]
+                if not (np.isfinite(left_edge) and np.isfinite(right_edge) and np.isfinite(top)):
+                    continue
+                x0 = int(np.floor(left_edge + np.float64(0.5)))
+                x1 = int(np.floor(right_edge + np.float64(0.5)))
+                if x1 < x0:
+                    x0, x1 = x1, x0
+                top_row = int(np.floor(top + np.float64(0.5)))
+                y0 = max(min(top_row, base_row), clip_top)
+                y1 = min(max(top_row, base_row), clip_bottom)
+                x0 = max(x0, clip_left)
+                x1 = min(x1, clip_right)
+                for row in range(y0, y1):
+                    for column in range(x0, x1):
+                        out[row, column, 0] = np.uint8(
+                            _agg_fill_channel(int(out[row, column, 0]), red, alpha)
+                        )
+                        out[row, column, 1] = np.uint8(
+                            _agg_fill_channel(int(out[row, column, 1]), green, alpha)
+                        )
+                        out[row, column, 2] = np.uint8(
+                            _agg_fill_channel(int(out[row, column, 2]), blue, alpha)
+                        )
+                        out[row, column, 3] = np.uint8(255)
 
 
 @njit(cache=True, inline="always")

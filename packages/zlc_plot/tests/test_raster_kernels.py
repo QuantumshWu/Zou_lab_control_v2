@@ -25,7 +25,7 @@ from zlc_plot import Reduction
 from zlc_plot.data_view import (
     _aggregate_by_codes,
     _axis_kernel_aggregate,
-    _facet_kernel_counts,
+    _histogram_kernel_counts,
     _masked_leading_reduce,
     histogram_counts,
 )
@@ -186,14 +186,14 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
                 valid[..., selected],
             ))
         kernels.ENGINE = "auto"
-        batched = _facet_kernel_counts(
+        batched = _histogram_kernel_counts(
             values, valid, facet_codes, 3, 3, edges
         )
     finally:
         kernels.ENGINE = previous
     assert batched is not None
     np.testing.assert_array_equal(np.asarray(expected), batched)
-    single = _facet_kernel_counts(
+    single = _histogram_kernel_counts(
         values, valid, np.zeros(values.shape[3], dtype=np.int64), 3, 1, edges
     )
     np.testing.assert_array_equal(single[0], histogram_counts(values, edges, valid))

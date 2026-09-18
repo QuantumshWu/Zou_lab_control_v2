@@ -145,11 +145,16 @@ _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
 )
 def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     view = DataView(_scan_of_frames())
+    if isinstance(spec.cell, HistogramPlot):
+        data = view.facet(spec, bins=bins)
+        values, valid = view.samples.value.canonical.reshape(-1), view.samples.valid_mask.reshape(-1)
+        for cell, (_key, positions) in zip(data.cells, view._groups((spec.facet,), view._all_positions()), strict=True):
+            expected, _edges = np.histogram(values[positions[valid[positions]]], bins=bins)
+            np.testing.assert_array_equal(cell.payload.counts[0], expected)
+        return
     dense = view._factored_facet(spec, False)
-    if dense is None and isinstance(spec.cell, HistogramPlot):
-        dense = view._dense_histogram_facet(spec, bins)
     assert dense is not None, "a tensor/factored path must actually engage here"
-    generic = view._facet_from_positions(spec, bins, view._all_positions())
+    generic = view._facet_from_positions(spec, view._all_positions())
     _assert_facets_equal(dense, generic)
 
 @pytest.mark.parametrize(

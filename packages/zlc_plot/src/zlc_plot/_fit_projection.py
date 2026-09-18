@@ -12,7 +12,7 @@ import math
 
 import numpy as np
 
-from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot, Selection
+from zlc_data import AxisSpec, BlockId, DatasetRevisionRef, OwnedSnapshot, Selection
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID, indexed_history_layout, restrict_snapshot, value_selection
 
 from .data_contract import (
@@ -274,6 +274,7 @@ class FitSelection:
     facet_index: int | None = None
     selector_kind: SelectorKind | None = None
     regular_image: RegularImageFitInput | None = None
+    group_key: tuple[AxisValue, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, FitScope):
@@ -1435,16 +1436,65 @@ class FitProjection:
             )
         return FitAuthority(selector, viewport)
 
+    def _fit_targets(self, *, all_facets: bool = True) -> tuple[tuple[int | None, int | None, tuple[AxisValue, ...]], ...]:
+        if isinstance(self._spec, FacetGridPlot):
+            cells = tuple((index, cell.payload) for index, cell in enumerate(self._payload.cells)
+                          if all_facets or index == (self._focused_facet_index or 0))
+        else:
+            cells = ((None, self._payload),)
+        return tuple(
+            (facet_index, group_index, key)
+            for facet_index, payload in cells
+            for group_index, key in (
+                enumerate(payload.group_keys) if isinstance(payload, HistogramData) else ((None, ()),)
+            )
+        )
+
+    def _has_grouped_histogram(self) -> bool:
+        semantic = self._semantic_spec()
+        return isinstance(semantic, HistogramPlot) and semantic.group is not None
+
+    def _fit_sample_axes(self, targets: tuple) -> tuple[tuple[str, AxisSpec], ...]:
+        """The real retained coordinates, in the same order as flattened fits."""
+        axes = []
+        if isinstance(self._spec, FacetGridPlot) and self._spec.facet is not None:
+            indices = tuple(dict.fromkeys(target[0] for target in targets))
+            cells = self._payload.cells
+            axes.append((self._spec.facet, tuple(cells[index].facet_value_canonical for index in indices)))
+        group = getattr(self._semantic_spec(), "group", None)
+        if self._has_grouped_histogram():
+            axes.append((group, tuple(dict.fromkeys(target[2][0].canonical for target in targets))))
+        projected = []
+        for ref, values in axes:
+            resolved = self._view._resolve(ref).contract
+            original = resolved.domain.axis(resolved.axis_id)
+            coordinate = self._coordinate(ref)
+            unit = coordinate.canonical_unit.symbol
+            labels = None
+            if original.coordinate_labels is not None:
+                dimension = int(self._view._resolve(ref).dimension)
+                shape = self._view.samples.shape
+                positions = np.arange(shape[dimension], dtype=np.int64) * math.prod(shape[dimension + 1:])
+                source_values = self._view._domain(ref, positions).values
+                by_value = {value.canonical: original.coordinate_labels[value.index] for value in source_values}
+                labels = tuple(by_value[value] for value in values)
+            projected.append((ref.domain.value, replace(
+                original, size=len(values), coordinates=values, unit=None if unit == "1" else unit,
+                coordinate_labels=labels, index_origin=0, coordinate_of=None,
+            )))
+        return tuple(projected)
+
     def fit_selection(
         self,
         model: FitModelSpec,
         *,
         selector_kind: SelectorKind | None = None,
         facet_index: int | None = None,
+        group_index: int | None = None,
     ) -> FitSelection:
         """The single-cell call uses the same prepared selection as a batch."""
 
-        return self._prepare_fit_selection(model, selector_kind)(facet_index)
+        return self._prepare_fit_selection(model, selector_kind)(facet_index, group_index)
 
     def _prepare_fit_selection(
         self,
@@ -1469,7 +1519,7 @@ class FitProjection:
             for relation in model.coordinate_relations
         )
 
-        def select(facet_index: int | None = None) -> FitSelection:
+        def select(facet_index: int | None = None, group_index: int | None = None) -> FitSelection:
             if facet_index is None:
                 facet_index = self._focused_facet_index
             payload = self._focused_payload(facet_index)
@@ -1490,7 +1540,7 @@ class FitProjection:
                     raise RuntimeError("histogram projection did not produce histogram data")
                 return self._histogram_fit_selection(
                     model, authority=authority, solver_units=solver_units,
-                    payload=payload, facet_index=facet_index,
+                    payload=payload, facet_index=facet_index, group_index=group_index,
                 )
             if not isinstance(payload, ImageData):
                 raise TypeError("unsupported fit projection payload")
@@ -1589,6 +1639,7 @@ class FitProjection:
         solver_units: tuple[Unit, ...],
         payload: HistogramData,
         facet_index: int | None = None,
+        group_index: int | None = None,
     ) -> FitSelection:
         """Fit the exact bins painted by the current histogram projection."""
 
@@ -1600,7 +1651,13 @@ class FitProjection:
                 "and cumulative=False"
             )
         canonical = np.asarray(payload.centers.canonical, dtype=float).reshape(-1)
-        counts = np.asarray(payload.counts, dtype=float).reshape(-1)
+        if group_index is None:
+            if len(payload.group_keys) != 1:
+                raise ValueError("a grouped histogram fit must select each distribution")
+            group_index = 0
+        counts = np.asarray(payload.counts[group_index], dtype=float)
+        if not np.any(counts > 0):
+            raise ValueError("histogram distribution has no samples")
         valid = np.isfinite(canonical) & np.isfinite(counts)
 
         active = authority.selector
@@ -1643,6 +1700,7 @@ class FitProjection:
             observations=counts[valid],
             selected_indices=indices,
             facet_index=facet_index,
+            group_key=payload.group_keys[group_index],
             selector_kind=None if active is None else active.kind,
         )
 
@@ -2079,6 +2137,7 @@ class FitProjection:
             parameter_display=parameter_display,
             diagnostic=result.message,
             facet_index=selection.facet_index,
+            group_key=selection.group_key,
             headline_parameter=headline_parameter,
             evidence=evidence,
         )

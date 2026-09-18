@@ -188,7 +188,7 @@ def test_threshold_classifier_refresh_warm_starts_from_prior_solution() -> None:
         settled = session._classifier_thresholds_settled()
         assert len(settled) == 1
         assert settled[0] is not None
-        key = (-1, "bimodal_gaussian", None)
+        key = (-1, "bimodal_gaussian", 0)
         assert key in session._fit_warm_starts
         seeded = session._fit_warm_starts[key]
         first_threshold = settled[0]

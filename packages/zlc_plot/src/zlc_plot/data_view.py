@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import product
 import math
 from numbers import Integral
 from typing import Any, TypeAlias
@@ -491,16 +492,30 @@ class HistogramData:
     edges: QuantityArray
     centers: QuantityArray
     counts: NDArray[np.int64] | ArrayLike
+    group_keys: tuple[tuple[AxisValue, ...], ...] = ((),)
 
     def __post_init__(self) -> None:
         counts = _readonly(self.counts, dtype=np.int64)
         if self.edges.canonical.ndim != 1 or self.centers.canonical.ndim != 1:
             raise ValueError("histogram edges and centers must be one-dimensional")
-        if self.edges.canonical.size != counts.size + 1:
+        keys = tuple(tuple(key) for key in self.group_keys)
+        if counts.ndim != 2 or counts.shape[0] != len(keys):
+            raise ValueError("histogram counts must have shape (groups, bins)")
+        if any(not isinstance(value, AxisValue) for key in keys for value in key):
+            raise TypeError("histogram group keys must contain AxisValue objects")
+        if self.edges.canonical.size != counts.shape[1] + 1:
             raise ValueError("histogram requires one more edge than count")
-        if self.centers.canonical.size != counts.size:
+        if self.centers.canonical.size != counts.shape[1]:
             raise ValueError("histogram centers and counts must have equal length")
         object.__setattr__(self, "counts", counts)
+        object.__setattr__(self, "group_keys", keys)
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        return tuple(
+            ", ".join(value.label for value in key) if key else self.edges.label
+            for key in self.group_keys
+        )
 
 
 FacetPayload: TypeAlias = CurveData | ImageData | HistogramData
@@ -650,19 +665,14 @@ class _ReductionBuckets:
 
 
 @dataclass(frozen=True)
-class _FacetHistogramPlan:
-    """What each histogram cell of one grid will bin, decided once.
+class _HistogramPlan:
+    """Reduced samples and coordinate-owned distribution codes, prepared once."""
 
-    The shared bin edges must cover what is ACTUALLY binned, and with a
-    reduced cell that is the per-group statistic rather than the raw
-    samples -- so the projection asks for these pools before it chooses the
-    edges, and the cells then bin the very same arrays.  Asked twice per
-    frame, computed once.
-    """
-
-    pools: tuple[NDArray[Any], ...]
-    facet_values: tuple[AxisValue, ...]
-    pool: NDArray[Any]
+    values: NDArray[Any]
+    valid: NDArray[np.bool_]
+    group_codes: NDArray[np.int64]
+    code_axis: int
+    group_keys: tuple[tuple[AxisValue, ...], ...]
 
 
 #: The most integer levels a window frequency table is kept for.  A narrow
@@ -707,7 +717,7 @@ class DataView:
         "_flat_cache",
         "_pooled_cache",
         "_positions_cache",
-        "_facet_histogram_cache",
+        "_histogram_cache",
         "_domain_carry",
         "_unit_registry_revision",
         "_history_layout",
@@ -779,7 +789,7 @@ class DataView:
         self._flat_cache: dict[AxisRef, NDArray[np.int64]] = {}
         self._pooled_cache: NDArray[Any] | None = None
         self._positions_cache: NDArray[np.int64] | None = None
-        self._facet_histogram_cache: tuple[object, "_FacetHistogramPlan"] | None = None
+        self._histogram_cache: tuple[object, "_HistogramPlan"] | None = None
         #: The Runtime history's shot structure, read off the schema once
         #: (it is cached there) and the per-window sample mask derived from
         #: it, built once per view however many projections ask.
@@ -2800,6 +2810,8 @@ class DataView:
         valid: NDArray[np.bool_] | None = None,
         reduce_axes: Sequence[AxisRef] = (),
         aggregation: Reduction = Reduction.MEAN,
+        group_by: tuple[AxisRef, ...] = (),
+        window: int = 1,
     ) -> HistogramData:
         """Distribution of the acquired values.
 
@@ -2809,13 +2821,16 @@ class DataView:
         distribution of each site's mean over shots.
         """
 
-        selected, usable = self.histogram_pool(
-            values=values,
-            valid=valid,
-            reduce_axes=reduce_axes,
-            aggregation=aggregation,
-        )
-        return self._histogram_from_values(bins, selected, valid=usable)
+        if values is None and valid is None:
+            plan = self._histogram_plan(tuple(group_by), tuple(reduce_axes), aggregation, window)
+        else:
+            if group_by:
+                raise ValueError("grouped histogram uses its coordinate-owned source values")
+            selected, usable = self.histogram_pool(
+                values=values, valid=valid, reduce_axes=reduce_axes, aggregation=aggregation,
+            )
+            plan = _HistogramPlan(selected, usable, np.zeros(1, dtype=np.int64), 0, ((),))
+        return self._histogram_from_plan(bins, plan)
 
     def _reduction_plan(
         self, refs: Sequence[AxisRef]
@@ -3810,226 +3825,128 @@ class DataView:
         return selected, usable
 
     def facet_histogram_pool(
-        self,
-        spec: FacetGridPlot,
-        *,
-        window: int = 1,
+        self, spec: FacetGridPlot, *, window: int = 1,
     ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-        """Every value this grid's histogram cells will bin, and its validity.
+        plan = self._histogram_plan(
+            tuple(ref for ref in (spec.facet, spec.cell.group) if ref is not None),
+            spec.cell.reduced, spec.cell.reduction, window,
+        )
+        return plan.values, plan.valid
 
-        The cells partition the samples, so without a reduction the union is
-        simply every sample the window admits -- and asking that costs
-        nothing, where building the partition would cost a walk of the whole
-        dataset that the dense paths exist to avoid.
-        """
-
-        cell = spec.cell
-        if not isinstance(cell, HistogramPlot):
-            raise TypeError("facet histogram pools require a Histogram cell")
-        if spec.facet is None:
-            values, valid = (
-                self.history_values(window)
-                if self.has_primary_index or _history_window(window) > 1
-                else (None, None)
-            )
-            return self.histogram_pool(
-                values=values,
-                valid=valid,
-                reduce_axes=tuple(cell.reduced),
-                aggregation=cell.reduction,
-            )
-        if not cell.reduced:
-            validity = (
-                self.history_validity(window)
-                if self.has_primary_index or _history_window(window) > 1
-                else self._samples.valid_mask
-            )
-            return self._samples.value.canonical, validity
-        plan = self._facet_histogram_plan(spec, window)
-        return plan.pool, np.ones(plan.pool.shape, dtype=np.bool_)
-
-    def _facet_histogram_plan(
-        self, spec: FacetGridPlot, window: int
-    ) -> "_FacetHistogramPlan":
+    def _histogram_plan(
+        self, groups: tuple[AxisRef, ...], reduced: tuple[AxisRef, ...],
+        aggregation: Reduction, window: int,
+    ) -> "_HistogramPlan":
+        """Keep grouping identities through the same named-axis reduction."""
         window = _history_window(window)
-        if spec.cell.reduction is Reduction.LAST:
-            scoped = self._last_view(reduced=spec.cell.reduced)
-            return scoped._facet_histogram_plan(
-                replace(spec, cell=replace(spec.cell, reduction=Reduction.MEAN)), window,
+        if aggregation is Reduction.LAST:
+            return self._last_view(keep=groups, reduced=reduced)._histogram_plan(
+                groups, (), Reduction.MEAN, window,
             )
-        key = (spec, window)
-        remembered = self._facet_histogram_cache
+        key = (groups, reduced, aggregation, window)
+        remembered = self._histogram_cache
         if remembered is not None and remembered[0] == key:
             return remembered[1]
-        plan = self._build_facet_histogram_plan(spec, window)
-        self._facet_histogram_cache = (key, plan)
+        values = self._samples.value.canonical
+        shape = values.shape
+        valid = (self.history_validity(window)
+                 if self.has_primary_index or window > 1 else self._samples.valid_mask)
+        dimensions, coordinates = self._reduction_plan(reduced)
+        domains = []
+        for ref in groups:
+            dimension = int(self._resolve(ref).dimension)
+            stride = math.prod(shape[dimension + 1:])
+            domain = self._domain(ref, np.arange(shape[dimension], dtype=np.int64) * stride)
+            domains.append((dimension, domain))
+        keys = tuple(product(*(domain.values for _, domain in domains))) if groups else ((),)
+        if coordinates:
+            buckets = self._reduction_buckets(dimensions, coordinates)
+            values, counts = _aggregate_by_codes(
+                values.reshape(-1), np.asarray(valid, dtype=bool).reshape(-1),
+                np.asarray(buckets.codes).reshape(-1), buckets.count, aggregation,
+            )
+            valid = np.asarray(counts) > 0
+            combined = np.zeros(buckets.count, dtype=np.int64)
+            for dimension, domain in domains:
+                codes = np.asarray(domain.codes, dtype=np.int64)
+                carrier = buckets.groups_for_axis(dimension)
+                if carrier is not None:
+                    grouped = np.full(
+                        int(buckets.extents[buckets.axes.index(dimension)]), -1, dtype=np.int64,
+                    )
+                    grouped[carrier] = codes
+                    codes = grouped
+                combined = combined * len(domain.values) + codes[buckets.axis_index(dimension)]
+            code_axis = 0
+        else:
+            if reduced:
+                values, valid = self._collapse_axes(values, valid, reduced, aggregation)
+            kept = tuple(axis for axis in range(len(shape)) if axis not in dimensions)
+            if groups:
+                first = min(kept.index(dimension) for dimension, _domain in domains)
+                code_axis = max(kept.index(dimension) for dimension, _domain in domains)
+                code_shape = values.shape[first:code_axis + 1]
+                combined = np.zeros(code_shape, dtype=np.int64)
+                for dimension, domain in domains:
+                    spread = [1] * len(code_shape)
+                    spread[kept.index(dimension) - first] = -1
+                    combined = combined * len(domain.values) + np.asarray(domain.codes).reshape(spread)
+                combined = combined.reshape(-1)
+            else:
+                combined, code_axis = np.zeros(1, dtype=np.int64), 0
+        plan = _HistogramPlan(values, valid, combined, code_axis, keys)
+        self._histogram_cache = (key, plan)
         return plan
 
-    def _build_facet_histogram_plan(
-        self, spec: FacetGridPlot, window: int
-    ) -> "_FacetHistogramPlan":
-        cell = spec.cell
-        if not isinstance(cell, HistogramPlot):
-            raise TypeError("facet histogram pools require a Histogram cell")
-        if not cell.reduced:
-            raise ValueError("a facet histogram plan is only needed for a reduction")
-        shape = self._samples.value.canonical.shape
-        validity = (
-            self.history_validity(window)
-            if self.has_primary_index or window > 1
-            else np.broadcast_to(self._samples.valid_mask, shape)
+    def _histogram_from_plan(
+        self, bins: int | Sequence[float], plan: "_HistogramPlan",
+    ) -> HistogramData:
+        _require_real_numeric(plan.values, None)
+        edges = self._canonical_histogram_bins(bins)
+        if isinstance(edges, int):
+            values = np.asarray(plan.values)
+            usable = np.broadcast_to(plan.valid, values.shape)
+            edges = np.histogram_bin_edges(values[usable], bins=edges)
+        counts = _histogram_kernel_counts(
+            plan.values, plan.valid, plan.group_codes, plan.code_axis,
+            len(plan.group_keys), edges,
         )
-        dimensions, coordinates = self._reduction_plan(tuple(cell.reduced))
+        if counts is None:
+            values = np.asarray(plan.values)
+            stride = math.prod(values.shape[plan.code_axis + 1:])
+            codes = plan.group_codes[(np.arange(values.size) // stride) % plan.group_codes.size]
+            usable = np.broadcast_to(plan.valid, values.shape).reshape(-1)
+            counts = np.asarray([
+                histogram_counts(values.reshape(-1), edges, usable & (codes == index))
+                for index in range(len(plan.group_keys))
+            ], dtype=np.int64)
+        return self._histogram_from_counts(edges, counts, plan.group_keys)
 
-        # ASK THE FACET AXIS, NOT EVERY SAMPLE.  The facet axis survives the
-        # reduction -- validate_facet refuses a grid that reduces the axis it
-        # facets by -- so every reduced value lies in exactly one cell, and
-        # which one is fixed by its index along that axis.  Reading it per
-        # sample instead grouped two million positions to learn four answers:
-        # 0.40 s of a 0.58 s build, nearly all of it one argsort and one
-        # unique.  One representative element per index along the axis puts
-        # the same domain machinery on an array the size of the AXIS.
-        facet_axis = int(self._resolve(spec.facet).dimension)
-        strides_flat = [1] * len(shape)
-        for axis in range(len(shape) - 2, -1, -1):
-            strides_flat[axis] = strides_flat[axis + 1] * int(shape[axis + 1])
-        representatives = (
-            np.arange(int(shape[facet_axis]), dtype=np.int64)
-            * strides_flat[facet_axis]
-        )
-        domain = self._domain(spec.facet, representatives)
-        axis_codes = np.asarray(domain.codes, dtype=np.int64)
-        cell_count = len(domain.values)
-
-        if not coordinates:
-            # WHOLE AXES ARE A UFUNC.  Naming only tensor axes -- reduce over
-            # repeat, the ordinary case -- is exactly what _collapse_axes
-            # already does with np.sum/np.min over an axis, and the answer
-            # keeps the array's own shape minus those axes.  So the facet
-            # index is an INDEX, read straight off the surviving axis, and
-            # none of the per-sample machinery below is needed.  Measured on
-            # 2M samples: the sum itself is 0.7 ms where scattering the same
-            # reduction into buckets costs 20.7 ms plus 7.4 ms to build the
-            # codes.
-            reduced, present = self._collapse_axes(
-                self._samples.value.canonical,
-                validity,
-                tuple(cell.reduced),
-                cell.reduction,
-            )
-            kept = [axis for axis in range(len(shape)) if axis not in dimensions]
-            spread = [1] * len(kept)
-            spread[kept.index(facet_axis)] = -1
-            cells = axis_codes.reshape(spread)
-            pools = tuple(
-                np.asarray(reduced[present & (cells == index)], dtype=float)
-                for index in range(cell_count)
-            )
-        else:
-            # A point coordinate regroups the point ROWS, so the surviving
-            # point axis is no longer the array's: the identity has to be
-            # built per sample.
-            flat_values = np.asarray(self._samples.value.canonical).reshape(-1)
-            usable = np.asarray(validity, dtype=bool).reshape(-1)
-            buckets = self._reduction_buckets(dimensions, coordinates)
-            codes = np.ascontiguousarray(buckets.codes).reshape(-1)
-            reduced, counts = _aggregate_by_codes(
-                flat_values, usable, codes, buckets.count, cell.reduction
-            )
-            present = np.asarray(counts) > 0
-            carrier_groups = buckets.groups_for_axis(facet_axis)
-            if carrier_groups is not None:
-                # The kept carrier axis stands for groups of physical rows,
-                # and every row in one group shares this surviving facet
-                # coordinate, so any row of the group names its cell.
-                grouped = np.full(
-                    int(buckets.extents[buckets.axes.index(facet_axis)]),
-                    -1,
-                    dtype=np.int64,
-                )
-                grouped[carrier_groups] = axis_codes
-                axis_codes = grouped
-            bucket_facet = axis_codes[buckets.axis_index(facet_axis)]
-            pools = tuple(
-                np.asarray(reduced[present & (bucket_facet == index)], dtype=float)
-                for index in range(cell_count)
-            )
-
-        joined = np.concatenate(pools) if pools else np.empty(0, dtype=float)
-        return _FacetHistogramPlan(pools, tuple(domain.values), joined)
-
-    def _reduced_histogram_facet(
-        self,
-        spec: FacetGridPlot,
-        shared_bins: int | Sequence[float],
-        window: int,
+    def _histogram_facet(
+        self, spec: FacetGridPlot, bins: int | Sequence[float], window: int,
     ) -> FacetData:
-        """Every cell of a reducing histogram grid, from one pass of the data.
-
-        One walk builds the buckets, one aggregation fills them, and the
-        cells are slices of that result -- rather than a reduction per cell,
-        which would re-derive the same identities once per facet value.
-        """
-
-        plan = self._facet_histogram_plan(spec, window)
-        cells = tuple(
-            FacetCell(
-                facet_index=index,
-                facet_value_canonical=facet_value.canonical,
-                facet_value_display=facet_value.display,
-                label=facet_value.label,
-                payload=self._histogram_from_values(shared_bins, plan.pools[index]),
-            )
-            for index, facet_value in enumerate(plan.facet_values)
-        )
-        return FacetData(
-            revision=self._samples.revision,
-            generation=self._samples.generation,
-            spec=spec,
-            cells=cells,
-        )
-
-    def _histogram_from_positions(
-        self,
-        bins: int | Sequence[float],
-        positions: NDArray[np.int64],
-        *,
-        validity: NDArray[np.bool_] | None = None,
-    ) -> HistogramData:
-        mask = self._samples.valid_mask if validity is None else validity
-        if positions is self._positions_cache:
-            # The whole revision: bin values + mask directly, no gather.
-            return self._histogram_from_values(
-                bins,
-                self._samples.value.canonical,
-                valid=mask,
-            )
-        flat_valid = np.asarray(np.broadcast_to(mask, self._samples.value.canonical.shape)).reshape(-1)
-        flat_values = self._samples.value.canonical.reshape(-1)
-        return self._histogram_from_values(
-            bins, flat_values[positions[flat_valid[positions]]]
-        )
-
-    def _histogram_from_values(
-        self,
-        bins: int | Sequence[float],
-        values: NDArray[Any],
-        *,
-        valid: NDArray[np.bool_] | None = None,
-    ) -> HistogramData:
-        _require_real_numeric(values, None)
-        canonical_bins = self._canonical_histogram_bins(bins)
-        if isinstance(canonical_bins, int):
-            source = np.asarray(values)
-            if valid is None or bool(np.all(valid)):
-                selected = source.reshape(-1)
-            else:
-                selected = source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
-            counts, edges = np.histogram(selected, bins=canonical_bins)
+        groups = tuple(ref for ref in (spec.facet, spec.cell.group) if ref is not None)
+        plan = self._histogram_plan(groups, spec.cell.reduced, spec.cell.reduction, window)
+        histogram = self._histogram_from_plan(bins, plan)
+        if spec.facet is None:
+            cells = (FacetCell(0, 1, 1, "Facet 1", histogram),)
         else:
-            counts = histogram_counts(values, canonical_bins, valid)
-            edges = canonical_bins
-        return self._histogram_from_counts(edges, counts)
+            cells = []
+            start = 0
+            while start < len(plan.group_keys):
+                value = plan.group_keys[start][0]
+                stop = start + 1
+                while stop < len(plan.group_keys) and plan.group_keys[stop][0] == value:
+                    stop += 1
+                cells.append(FacetCell(
+                    len(cells), value.canonical, value.display, value.label,
+                    replace(histogram, counts=histogram.counts[start:stop],
+                            group_keys=tuple(key[1:] for key in plan.group_keys[start:stop])),
+                ))
+                start = stop
+            cells = tuple(cells)
+        return FacetData(self._samples.revision, self._samples.generation, spec, cells)
+
 
     def _canonical_histogram_bins(
         self, bins: int | Sequence[float]
@@ -4059,11 +3976,12 @@ class DataView:
         self,
         edges: NDArray[Any],
         counts: NDArray[np.int64],
+        group_keys: tuple[tuple[AxisValue, ...], ...] = ((),),
     ) -> HistogramData:
         """Speak already-counted canonical bins as one Histogram payload."""
 
         edges = np.asarray(edges)
-        counts = np.asarray(counts, dtype=np.int64)
+        counts = np.asarray(counts, dtype=np.int64).reshape(len(group_keys), edges.size - 1)
         centers = (edges[:-1] + edges[1:]) / 2.0
         display_edges = self._samples.value.canonical_unit.convert_value_to(
             edges, self._samples.value.display_unit
@@ -4089,6 +4007,7 @@ class DataView:
                 self._samples.value.label,
             ),
             counts=counts,
+            group_keys=group_keys,
         )
 
     def validate_facet(self, spec: FacetGridPlot) -> None:
@@ -4113,6 +4032,8 @@ class DataView:
         elif isinstance(cell, ImagePlot):
             self._validate_image_shape(cell.x, cell.y)
         elif isinstance(cell, HistogramPlot):
+            if cell.group is not None:
+                self._resolve(cell.group)
             for ref in cell.reduced:
                 self._resolve(ref)
             if spec.facet is not None and spec.facet in cell.reduced:
@@ -4147,134 +4068,52 @@ class DataView:
         return self._domain(spec.facet, representatives).size
 
     def facet(
-        self,
-        spec: FacetGridPlot,
-        *,
-        bins: int | Sequence[float] | None = None,
-        uncertainty: bool = False,
-        window: int = 1,
+        self, spec: FacetGridPlot, *, bins: int | Sequence[float] | None = None,
+        uncertainty: bool = False, window: int = 1,
     ) -> FacetData:
         self.validate_facet(spec)
         cell = spec.cell
+        if isinstance(cell, HistogramPlot):
+            if uncertainty:
+                raise ValueError("uncertainty is accepted only for Curve facet cells")
+            if bins is None:
+                raise DataViewError("histogram facet cells require explicit bins")
+            return self._histogram_facet(spec, bins, window)
         if cell.reduction is Reduction.LAST:
             kept = tuple(ref for ref in (
                 spec.facet, getattr(cell, "x", None), getattr(cell, "y", None),
                 getattr(cell, "group", None), *(ref for ref, _value in spec.scope),
             ) if ref is not None)
-            scoped = self._last_view(
-                keep=kept, reduced=cell.reduced if isinstance(cell, HistogramPlot) else None,
-            )
-            payload = scoped.facet(
+            payload = self._last_view(keep=kept).facet(
                 replace(spec, cell=replace(cell, reduction=Reduction.MEAN)),
                 bins=bins, uncertainty=uncertainty, window=window,
             )
             return replace(payload, spec=spec)
-        if not isinstance(cell, HistogramPlot) and bins is not None:
+        if bins is not None:
             raise ValueError("bins are accepted only for Histogram facet cells")
         if uncertainty and not isinstance(cell, CurvePlot):
             raise ValueError("uncertainty is accepted only for Curve facet cells")
-        shared_bins = bins
-        if isinstance(cell, HistogramPlot) and isinstance(bins, bool):
-            raise TypeError("histogram bin count must be an integer")
-        if isinstance(cell, HistogramPlot) and isinstance(bins, (int, np.integer)):
-            if int(bins) <= 0:
-                raise ValueError("histogram bin count must be positive")
-            # Shared edges over every value keep all cell histograms
-            # comparable on one axis.
-            flat_valid = self._samples.valid_mask.reshape(-1)
-            display_values = np.asarray(self._samples.value.display).reshape(-1)
-            values = display_values[flat_valid]
-            _require_real_numeric(values, None)
-            values = values[np.isfinite(values)]
-            shared_bins = aligned_histogram_edges(values, int(bins))
-        if isinstance(cell, HistogramPlot) and bins is None:
-            raise DataViewError("histogram facet cells require explicit bins")
         if spec.facet is None:
-            if isinstance(cell, CurvePlot):
-                payload: FacetPayload = self.curve(
-                    cell.x,
-                    group_by=(() if cell.group is None else (cell.group,)),
-                    aggregation=cell.reduction,
-                    uncertainty=uncertainty,
-                )
-            elif isinstance(cell, ImagePlot):
-                payload = self.image(
-                    cell.x,
-                    cell.y,
-                    aggregation=cell.reduction,
-                )
-            else:
-                assert shared_bins is not None
-                pool, pool_valid = self.facet_histogram_pool(
-                    spec,
-                    window=window,
-                )
-                payload = self._histogram_from_values(
-                    shared_bins,
-                    pool,
-                    valid=pool_valid,
-                )
-            return FacetData(
-                revision=self._samples.revision,
-                generation=self._samples.generation,
-                spec=spec,
-                cells=(
-                    FacetCell(
-                        facet_index=0,
-                        facet_value_canonical=1,
-                        facet_value_display=1,
-                        label="Facet 1",
-                        payload=payload,
-                    ),
-                ),
+            payload = (
+                self.curve(cell.x, group_by=(() if cell.group is None else (cell.group,)),
+                           aggregation=cell.reduction, uncertainty=uncertainty)
+                if isinstance(cell, CurvePlot)
+                else self.image(cell.x, cell.y, aggregation=cell.reduction)
             )
-        if isinstance(cell, HistogramPlot) and cell.reduced:
-            # A reducing cell needs a per-sample bucket identity, which the
-            # slab paths below have no shape for; and one pass over the whole
-            # grid answers for every cell at once.
-            assert shared_bins is not None
-            return self._reduced_histogram_facet(spec, shared_bins, window)
-        # WHICH SAMPLES COUNT.  Window is part of the Histogram cell's own
-        # vocabulary; Image and Curve cells have no such control and consume
-        # every valid facet already retained by Runtime.  Treating their
-        # internal default ``1`` as a window left all history facet titles in
-        # place while masking every cell except the latest one.
-        validity = (
-            self.history_validity(window)
-            if isinstance(cell, HistogramPlot)
-            and (self.has_primary_index or int(window) > 1)
-            else None
-        )
+            return FacetData(
+                self._samples.revision, self._samples.generation, spec,
+                (FacetCell(0, 1, 1, "Facet 1", payload),),
+            )
         factored = self._factored_facet(spec, uncertainty)
         if factored is not None:
             return factored
-        dense = (
-            self._dense_histogram_facet(
-                spec,
-                shared_bins,
-                validity=validity,
-            )
-            if isinstance(cell, HistogramPlot)
-            else None
-        )
-        if dense is not None:
-            return dense
-        return self._facet_from_positions(
-            spec,
-            shared_bins,
-            self._all_positions(),
-            uncertainty,
-            validity=validity,
-        )
+        return self._facet_from_positions(spec, self._all_positions(), uncertainty)
 
     def _facet_from_positions(
         self,
         spec: FacetGridPlot,
-        shared_bins: int | Sequence[float] | None,
         base_positions: NDArray[np.int64],
         uncertainty: bool = False,
-        *,
-        validity: NDArray[np.bool_] | None = None,
     ) -> FacetData:
         cell = spec.cell
         cells: list[FacetCell] = []
@@ -4298,12 +4137,7 @@ class DataView:
                     cell.reduction,
                 )
             else:
-                assert shared_bins is not None
-                payload = self._histogram_from_positions(
-                    shared_bins,
-                    cell_positions,
-                    validity=validity,
-                )
+                raise TypeError("position facets require Curve or Image cells")
             cells.append(
                 FacetCell(
                     facet_index=facet_index,
@@ -4320,112 +4154,6 @@ class DataView:
             cells=tuple(cells),
         )
 
-    def _dense_histogram_facet(
-        self,
-        spec: FacetGridPlot,
-        shared_bins: int | Sequence[float] | None,
-        *,
-        validity: NDArray[np.bool_] | None = None,
-    ) -> FacetData | None:
-        """Bin every regular tensor Facet cell without sorting samples."""
-
-        facet = spec.facet
-        cell = spec.cell
-        if not isinstance(cell, HistogramPlot):
-            return None
-        values = self._samples.value.canonical
-        valid_mask = self._samples.valid_mask if validity is None else validity
-        try:
-            slice_axis = int(self._resolve(facet).dimension)
-        except AxisResolutionError:
-            return None
-
-        # One representative element per candidate slice puts the existing
-        # domain machinery (labels, declared indices, units) to work on an
-        # array the size of the SLICE COUNT, not of the dataset.
-        stride = 1
-        for size in values.shape[slice_axis + 1:]:
-            stride *= int(size)
-        representatives = (
-            np.arange(values.shape[slice_axis], dtype=np.int64)
-            * stride
-        )
-        domain = self._domain(facet, representatives)
-        if not domain.values:
-            return None
-        assert shared_bins is not None
-        batch_edges = self._canonical_histogram_bins(shared_bins)
-        batch_counts = (
-            None
-            if isinstance(batch_edges, int)
-            else _facet_kernel_counts(
-                values,
-                valid_mask,
-                np.asarray(domain.codes, dtype=np.int64),
-                slice_axis,
-                len(domain.values),
-                batch_edges,
-            )
-        )
-
-        cells: list[FacetCell] = []
-        for facet_index, facet_value in enumerate(domain.values):
-            selector = np.flatnonzero(domain.codes == facet_index)
-            # A SLICE IS A VIEW AT ANY STEP, not only at step one.  A facet
-            # over a point DIMENSION takes every tenth row, and asking for
-            # step one only meant those cells fell to fancy indexing and
-            # copied their whole share of the tensor -- twice, once for the
-            # values and once for the validity.  Measured on a ten-cell
-            # image facet that was 4.67 ms of a 25.9 ms revision; the
-            # equivalent strided view is 0.0001 ms and bit-identical.
-            steps = np.diff(selector)
-            regular = bool(selector.size) and (
-                selector.size == 1 or bool(np.all(steps == steps[0]))
-            )
-            selected: slice | NDArray[np.int64] = (
-                slice(
-                    int(selector[0]),
-                    int(selector[-1]) + 1,
-                    1 if selector.size == 1 else int(steps[0]),
-                )
-                if regular
-                else selector
-            )
-            def sliced(plane: Any) -> Any:
-                if plane is None:
-                    return None
-                slices = [slice(None)] * np.ndim(plane)
-                slices[slice_axis] = selected
-                return plane[tuple(slices)]
-
-            cell_values = sliced(values)
-            cell_valid = sliced(valid_mask)
-            payload = (
-                self._histogram_from_counts(
-                    batch_edges, batch_counts[facet_index]
-                )
-                if batch_counts is not None and not isinstance(batch_edges, int)
-                else self._histogram_from_values(
-                    shared_bins,
-                    cell_values,
-                    valid=cell_valid,
-                )
-            )
-            cells.append(
-                FacetCell(
-                    facet_index=facet_index,
-                    facet_value_canonical=facet_value.canonical,
-                    facet_value_display=facet_value.display,
-                    label=facet_value.label,
-                    payload=payload,
-                )
-            )
-        return FacetData(
-            revision=self._samples.revision,
-            generation=self._samples.generation,
-            spec=spec,
-            cells=tuple(cells),
-        )
 
     def _all_positions(self) -> NDArray[np.int64]:
         cached = self._positions_cache
@@ -4984,7 +4712,7 @@ def _kernel_counts(
     return counted[0]
 
 
-def _facet_kernel_counts(
+def _histogram_kernel_counts(
     values: NDArray[Any],
     valid: NDArray[np.bool_],
     facet_codes: NDArray[np.int64],
@@ -4992,7 +4720,7 @@ def _facet_kernel_counts(
     facet_count: int,
     edges: NDArray[Any],
 ) -> NDArray[np.int64] | None:
-    """Count all regular tensor Facet cells in one compiled pass."""
+    """Count coordinate-owned distributions in one shared compiled pass."""
 
     from . import _raster_kernels as kernels
 

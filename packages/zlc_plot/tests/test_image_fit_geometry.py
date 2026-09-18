@@ -116,7 +116,7 @@ def test_image_fit_ring_uses_the_occupied_point_ring_style(faceted: bool) -> Non
             assert tuple(native["overlays"]) == accepted.overlays
             assert renderer.style.artists.point_occupied.linewidth > 0.0
             return
-        slots = renderer._fit_slots
+        slots = renderer._fit_topologies[(None, ())][3]
         ring = slots["ring"]
         center = slots["center"]
         annotation = slots["annotation"]

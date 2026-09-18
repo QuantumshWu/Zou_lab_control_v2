@@ -18,6 +18,12 @@ from ._validation import integer
 from .kinds import AxisDomain, AxisRef
 
 
+def series_identity(group_key: Sequence[object]) -> tuple[tuple[str, str | None, str], ...]:
+    """Portable group identity shared by interaction and scientific overlays."""
+    return tuple((value.ref.domain.value, value.ref.axis_id, repr(value.canonical))
+                 for value in group_key)
+
+
 def _selector_precision(span: float) -> int:
     """Decimal precision shared by native and raster selector labels."""
 

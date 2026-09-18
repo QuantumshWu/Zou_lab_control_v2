@@ -7,7 +7,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-from matplotlib.collections import LineCollection
+from matplotlib.collections import PolyCollection
 
 from data_factory import (
     axis,
@@ -39,7 +39,7 @@ def _bands(session: PlotSession) -> list[PolyCollection]:
         artist
         for axes in session._renderer.figure.axes
         for artist in axes.collections
-        if isinstance(artist, LineCollection)
+        if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer")
     ]
 
 def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
@@ -260,13 +260,13 @@ def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
         bars = _bands(session)
         assert bars, "the case must draw bars for this test to mean anything"
         identities = [id(artist) for artist in bars]
-        segments = [np.array(bars[0].get_segments(), copy=True)]
+        segments = [np.array(bars[0]._zlc_segment_buffer, copy=True)]
         for revision in range(2, 6):
             session.update_data(_snapshot(6, revision, 1.0 + 0.3 * revision))
             session.rgba()
             current = _bands(session)
             assert [id(artist) for artist in current] == identities
-            segments.append(np.array(current[0].get_segments(), copy=True))
+            segments.append(np.array(current[0]._zlc_segment_buffer, copy=True))
         moved = sum(
             1
             for before, after in zip(segments, segments[1:])
@@ -362,7 +362,10 @@ def test_bars_are_built_directly_on_their_shared_buffer() -> None:
 
     import io
 
-    from matplotlib.lines import Line2D
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from zlc_plot.rendering import _SegmentBuffered
+    from zlc_plot import _raster_kernels as kernels
     from zlc_plot import FacetGridPlot
 
     rng = np.random.default_rng(5)
@@ -395,19 +398,15 @@ def test_bars_are_built_directly_on_their_shared_buffer() -> None:
             for group in bars.values()
         ]
         assert len(groups) == 2, "one bar group per cell"
-        capped = renderer.style.render.uncertainty_bar_capsize_pt > 0
         for group in groups:
+            assert len(group) == 1, "one alpha application per complete error bar"
             collection = group[-1]
             buffer = collection._zlc_segment_buffer
             assert isinstance(buffer, np.ndarray) and buffer.shape == (4, 2, 2)
             assert np.all(buffer[:, 0, 0] == buffer[:, 1, 0]), "a bar is vertical"
             assert np.all(buffer[:, 0, 1] <= buffer[:, 1, 1])
-            caps = group[:-1]
-            assert len(caps) == (2 if capped else 0)
-            assert all(isinstance(cap, Line2D) for cap in caps)
-            for cap, edge in zip(caps, (buffer[:, 0, 1], buffer[:, 1, 1])):
-                assert np.array_equal(np.asarray(cap.get_ydata()), edge)
-            assert np.array_equal(np.asarray(collection.get_segments()), buffer)
+            assert collection._zlc_capsize == renderer.style.render.uncertainty_bar_capsize_pt
+            assert len(collection.get_paths()) == len(buffer)
         collection = groups[0][-1]
         buffer = collection._zlc_segment_buffer
         renderer.save(io.BytesIO(), format="png")
@@ -416,6 +415,35 @@ def test_bars_are_built_directly_on_their_shared_buffer() -> None:
         renderer.draw()
         renderer._materialize_prepared_curve()
         assert collection._zlc_segment_buffer is buffer, "same size: same buffer"
-        assert np.array_equal(np.asarray(collection.get_segments()), buffer)
+        assert len(collection.get_paths()) == len(buffer)
     finally:
         session.close()
+
+    # A clean 40px axes isolates the joint from the series line/chrome.
+    figure = Figure(figsize=(0.4, 0.4), dpi=100)
+    canvas = FigureCanvasAgg(figure)
+    axes = figure.add_axes((0, 0, 1, 1))
+    axes.set(xlim=(0, 40), ylim=(0, 40))
+    axes.set_axis_off()
+    bar = _SegmentBuffered(capsize=6 * 72 / 100, facecolors="black", edgecolors="none",
+                           linewidths=4 * 72 / 100, alpha=128 / 255)
+    axes.add_collection(bar, autolim=False)
+    bar.segment_buffer((1, 2, 2))[0] = ((10, 10), (10, 30))
+    canvas.draw()
+    pixels = np.asarray(canvas.buffer_rgba())
+    np.testing.assert_array_equal(pixels[10, 10], pixels[20, 10])
+    assert pixels[10, 10, 0] == 127
+    out = np.full((40, 40, 4), 255, dtype=np.uint8)
+    for high, count, expected in ((30., 1, 127), (30., 2, 63), (10., 1, 255)):
+        out.fill(255)
+        kernels.raster_error_bars(
+            kernels.readable(np.full(count, 10.)), kernels.readable(np.full(count, 10.)),
+            kernels.readable(np.full(count, high)), kernels.readable(np.asarray((0, count), dtype=np.int64)),
+            kernels.readable(np.asarray(((0, 0, 0, 128),), dtype=np.uint8)),
+            kernels.readable(np.asarray((4.,))), kernels.readable(np.asarray((12.,))),
+            kernels.readable(np.asarray(((0, 0, 40, 40),), dtype=np.int32)),
+            kernels.readable(np.asarray((0, 1), dtype=np.int64)), 1, out,
+        )
+        assert out[10, 10, 0] == expected
+        assert out[10, 10, 0] == out[20, 10, 0]
+    figure.clear()

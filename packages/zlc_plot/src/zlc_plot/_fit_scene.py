@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ._validation import readonly_copy
 from .fit import FitParameterDisplay
+
+if TYPE_CHECKING:
+    from .data_view import AxisValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +51,7 @@ class FitOverlay:
     parameter_display: tuple[FitParameterDisplay, ...] = ()
     diagnostic: str = ""
     facet_index: int | None = None
+    group_key: tuple[AxisValue, ...] = ()
     headline_parameter: FitParameterDisplay | None = None
     #: One line under the parameters saying how the two-population question
     #: was decided, for a model that asks it; empty otherwise.

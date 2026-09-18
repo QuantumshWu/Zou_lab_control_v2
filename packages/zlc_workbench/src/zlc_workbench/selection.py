@@ -1118,12 +1118,7 @@ def _scalar_fit_value(result: object, source_generation: str) -> FitEventValue:
             for index, name in enumerate(names)
         },
         success=np.array([success]),
-        sample_axis_domain="",
-        sample_axis_id="",
-        sample_axis_name="",
-        sample_coordinates=np.array([0.0]),
-        sample_unit="",
-        sample_labels=None,
+        sample_axes=(),
         source_generation=str(source_generation),
         source_revision=int(result.source_revision),
         batch_revision=int(result.batch_revision),
@@ -1138,9 +1133,6 @@ def _batch_fit_value(batch: object, source_generation: str) -> FitEventValue:
         [item is not None and bool(item.success) for item in outcomes],
         dtype=np.bool_,
     )
-    coordinates = batch.sample_coordinates
-    if coordinates is None:
-        raise _Unbridgeable("a facet fit batch without sample coordinates cannot be placed")
     parameter_values = batch.parameter_values
     parameter_errors = batch.parameter_errors
 
@@ -1156,12 +1148,7 @@ def _batch_fit_value(batch: object, source_generation: str) -> FitEventValue:
             for name in names
         },
         success=success,
-        sample_axis_domain=str(batch.facet.domain.value),
-        sample_axis_id=batch.facet.axis_id,
-        sample_axis_name=str(batch.sample_axis_name),
-        sample_coordinates=np.asarray(coordinates, dtype=np.float64).reshape(-1),
-        sample_unit=str(batch.sample_unit),
-        sample_labels=batch.sample_labels,
+        sample_axes=batch.sample_axes,
         source_generation=str(source_generation),
         source_revision=int(batch.source_revision),
         batch_revision=int(batch.batch_revision),

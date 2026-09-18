@@ -33,6 +33,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
+from zlc_data import AxisSpec
 
 from . import _fit_compiled as _compiled_fit
 from ._validation import finite_real as _finite_real
@@ -1138,20 +1139,8 @@ class FitResult:
         })
 
     @property
-    def sample_axis_name(self) -> str:
-        return ""
-
-    @property
-    def sample_coordinates(self) -> np.ndarray:
-        return _readonly(np.asarray((0.0,), dtype=np.float64))
-
-    @property
-    def sample_unit(self) -> str:
-        return ""
-
-    @property
-    def sample_labels(self) -> None:
-        return None
+    def sample_axes(self) -> tuple[tuple[str, AxisSpec], ...]:
+        return ()
 
     #: Fields that carry no array and decide nothing about one: a result
     #: already validated stays validated when one of these is attached.
@@ -1485,39 +1474,36 @@ def _bimodal_classifier_metrics(
 
 @dataclass(frozen=True, slots=True)
 class FacetFitBatchResult:
-    """Ordered fit results for every cell of one FacetGrid projection."""
+    """Independent projected fits ordered by their retained scientific axes."""
 
-    facet: AxisRef | None
-    facet_values: tuple[Any, ...]
+    sample_axes: tuple[tuple[str, AxisSpec], ...]
     model: FitModelSpec
     results: tuple[FitResult | None, ...]
     failure_messages: tuple[str | None, ...]
     source_revision: int
     overlays: tuple["FitOverlay", ...]
     parameter_units: Mapping[str, str] = field(default_factory=dict)
-    sample_axis_name: str = ""
-    sample_coordinates: np.ndarray | None = None
-    sample_unit: str = ""
-    sample_labels: tuple[str, ...] | None = None
     batch_revision: int = 0
 
     def __post_init__(self) -> None:
-        if self.facet is not None and not isinstance(self.facet, AxisRef):
-            raise TypeError("facet must be AxisRef or None")
         if not isinstance(self.model, FitModelSpec):
             raise TypeError("model must be FitModelSpec")
-        values = tuple(self.facet_values)
+        axes = tuple(self.sample_axes)
+        if any(domain not in {"repeat", "point", "cell_data"} or not isinstance(axis, AxisSpec)
+               for domain, axis in axes):
+            raise TypeError("fit sample axes must contain source domains and AxisSpec values")
+        if len({(domain, axis.axis_id) for domain, axis in axes}) != len(axes):
+            raise ValueError("fit sample axes must have distinct identities")
+        sample_count = math.prod(axis.size for _domain, axis in axes)
         results = tuple(self.results)
         errors = tuple(self.failure_messages)
         overlays = tuple(self.overlays)
-        if not values:
-            raise ValueError("facet fit batch cannot be empty")
-        if len(results) != len(values) or len(errors) != len(values):
+        if len(results) != sample_count or len(errors) != sample_count:
             raise ValueError(
-                "facet values, results and failure messages must have equal length"
+                "fit results and failures must match the sample axes"
             )
-        if len(overlays) != len(values):
-            raise ValueError("facet values and overlays must have equal length")
+        if len(overlays) != sample_count:
+            raise ValueError("fit overlays must match the sample axes")
         from ._fit_scene import FitOverlay
 
         if any(not isinstance(overlay, FitOverlay) for overlay in overlays):
@@ -1544,16 +1530,12 @@ class FacetFitBatchResult:
                     raise ValueError(
                         "a facet fit cell cannot have both result and failure message"
                     )
-                if overlay.facet_index != index:
-                    raise ValueError("facet fit overlay index does not match its cell")
                 normalized.append(None)
             else:
                 if not isinstance(error, str) or not error.strip():
                     raise ValueError("a failed facet fit cell requires a failure message")
-                if overlay.facet_index != index:
-                    raise ValueError("facet fit overlay index does not match its cell")
                 normalized.append(error.strip())
-        object.__setattr__(self, "facet_values", values)
+        object.__setattr__(self, "sample_axes", axes)
         object.__setattr__(self, "results", results)
         object.__setattr__(self, "failure_messages", tuple(normalized))
         object.__setattr__(self, "source_revision", revision)
@@ -1584,51 +1566,6 @@ class FacetFitBatchResult:
                 for name in names
             }),
         )
-        axis_name = _text(
-            self.sample_axis_name,
-            "facet fit sample axis name",
-            allow_empty=True,
-        )
-        raw_coordinates = self.sample_coordinates
-        numeric_values = all(
-            isinstance(value, (Real, np.number)) and not isinstance(value, (bool, np.bool_))
-            for value in values
-        )
-        if raw_coordinates is None:
-            if numeric_values:
-                coordinates = np.asarray(values, dtype=np.float64)
-                labels = None
-            else:
-                coordinates = np.arange(len(values), dtype=np.float64)
-                labels = tuple(str(value) for value in values)
-        else:
-            coordinates = np.asarray(raw_coordinates, dtype=np.float64).reshape(-1)
-            labels = None if self.sample_labels is None else tuple(self.sample_labels)
-        if coordinates.shape != (len(values),) or not np.all(np.isfinite(coordinates)):
-            raise ValueError("facet fit sample coordinates must match facet values")
-        if labels is not None and len(labels) != len(values):
-            raise ValueError("facet fit sample labels must match facet values")
-        if numeric_values and labels is not None:
-            raise ValueError("numeric facet coordinates cannot have sample labels")
-        if not numeric_values:
-            labels = tuple(
-                _text(label, "facet fit sample label") for label in (labels or ())
-            )
-        sample_unit = _text(
-            self.sample_unit,
-            "facet fit sample unit",
-            allow_empty=True,
-        )
-        if sample_unit == "1":
-            sample_unit = ""
-        if not numeric_values:
-            sample_unit = ""
-        if not axis_name:
-            axis_name = self.facet.axis_id
-        object.__setattr__(self, "sample_axis_name", axis_name)
-        object.__setattr__(self, "sample_coordinates", _readonly(coordinates))
-        object.__setattr__(self, "sample_unit", sample_unit)
-        object.__setattr__(self, "sample_labels", labels)
 
     @property
     def parameter_names(self) -> tuple[str, ...]:

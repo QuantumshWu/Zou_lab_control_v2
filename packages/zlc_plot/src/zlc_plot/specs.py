@@ -311,8 +311,8 @@ class HistogramPlot:
     collapsed under the reduction before the values are binned, which is
     the difference between "the distribution of every shot" and "the
     distribution of each site's mean over shots" -- two different
-    measurements of the same data.  There is no group fate: a histogram
-    draws one distribution, and several belong in a facet grid.
+    measurements of the same data. Group keeps one distribution per axis
+    coordinate on the same axes; Facet places distributions in separate cells.
     """
 
     reduction: Reduction = Reduction.MEAN
@@ -322,6 +322,7 @@ class HistogramPlot:
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     coordinates: tuple[AxisRef, ...] = ()
+    group: AxisRef | None = None
     kind: ClassVar[PlotKind] = PlotKind.HISTOGRAM
 
     def __post_init__(self) -> None:
@@ -330,6 +331,8 @@ class HistogramPlot:
             raise TypeError("HistogramPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("HistogramPlot.labels must be PlotLabels")
+        if self.group is not None and not isinstance(self.group, AxisRef):
+            raise TypeError("HistogramPlot.group must be AxisRef or None")
         reduced = tuple(self.reduced)
         if any(not isinstance(ref, AxisRef) for ref in reduced):
             raise TypeError("HistogramPlot.reduced must contain AxisRef values")
@@ -339,6 +342,8 @@ class HistogramPlot:
         pinned = {term[0] for term in scope}
         if pinned & set(reduced):
             raise ValueError("an axis cannot be both reduced and pinned")
+        if self.group is not None and (self.group in pinned or self.group in reduced):
+            raise ValueError("a group axis cannot also be reduced or pinned")
         object.__setattr__(self, "reduced", reduced)
         object.__setattr__(self, "scope", scope)
 

@@ -497,7 +497,8 @@ def _with_reduced(spec: PlotSpec, reduced: tuple[AxisRef, ...]) -> PlotSpec:
     """
 
     semantic = semantic_spec(spec)
-    updated = replace(semantic, reduced=reduced)
+    updated = replace(semantic, reduced=reduced,
+                      group=None if semantic.group in reduced else semantic.group)
     if semantic is spec:
         return updated
     return replace(spec, cell=updated)

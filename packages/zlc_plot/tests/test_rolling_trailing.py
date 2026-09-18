@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-from matplotlib.collections import LineCollection
+from matplotlib.collections import PolyCollection
 
 from data_factory import (
     axis,
@@ -167,7 +167,7 @@ def test_the_trailing_band_renders(tmp_path) -> None:
             artist
             for axes in session._renderer.figure.axes
             for artist in axes.collections
-            if isinstance(artist, LineCollection)
+            if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer")
         ]
         assert bands, "a trailing rolling trace must draw its sem bars"
     finally:
@@ -226,7 +226,7 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
             artist
             for axes in session._renderer.figure.axes
             for artist in axes.collections
-            if isinstance(artist, LineCollection)
+            if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer")
         ]
         assert bands, "plain rolling with uncertainty must draw the bars"
     finally:

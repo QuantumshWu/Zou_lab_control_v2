@@ -10,6 +10,10 @@
 
 ## 1. 当前实施范围
 
+- 分组显示收口：Curve/Rolling/Histogram使用同一低饱和series palette与源坐标序号，Histogram共享bin edges、逐组Counts/Density/Cumulative，保留原有无描边矩形bin，删除额外step轮廓；hover/lock只改变bin透明度并直接从bin几何命中。Hover/lock/wheel复用现有交互，Rolling meter随锁组即时更新且同色，不改变Card尺寸。误差棒改为每bar一个工字形并集、单次alpha；不同bar独立混色，Native/Agg/导出同一端点与style，删除三artist旧路。
+- Histogram Group的fit、classifier、Figure及Runtime参数发布完整贯通；sample_axes取代仅一个sample axis的旧字段，Facet×Group保留真实轴，空分布invalid。Single/Facet/Focus fit绘制复用同一topology表；锁组仅换显示/阈值目标，不重新求解。Series交互先接受状态再经原OVERLAY路径呈现一次，删除先compose再记账的旁路；classifier信息和组名共用原Threshold文字，legend未实施。
+- Tick label删除端点内移/alignment状态与半gap虚拟边界；在现有chrome重排时按真实text/data框判断，只缩字号、到下限接受重叠。修复全局rcParams使已接受字号回弹，以及导出换DPI后的漏排版；普通图/侧栏/Facet/Focus/保存共用同一owner。真实Qt截图核对-400/-200/0/200锚点、Group下拉切换、hover/lock/wheel、meter及带fit的保存重开；验收窗口均关闭，截图/探针留ignored research。
+
 - Layout恢复统一按当前定义读取交集、补默认、忽略不存在的字段；Logic与rows列、设备/资源输入、Panel/Display/Interaction/Fit沿现有声明，不保留废弃buffer字段的特判，也不猜旧轴。当前字段的类型/数值、必需身份、未知model及运行时Plot API仍严格，未完成业务草稿可Load后在Start校验。直接恢复用例通过；正式Console点击Load读取用户原layout，两个Measurement与两个Panel恢复、旧buffer字段不再进入草稿，原文件未改、窗口关闭。
 - Hold沿FieldVM.editable整块禁用并灰显数值与Slot，已开popup关闭；模式Combo继续可用，切回Edge/Ramp恢复编辑。Config使用用户选定C色#D1E8E1。Edit页Config文件按钮复用Clock/Scan/Repeat两列，显示basename、tooltip保留全路径，受限FluentButton仅绘制时省略长文本。正式Pulse按钮操作与截图通过，无错误或遗留窗口。
 
