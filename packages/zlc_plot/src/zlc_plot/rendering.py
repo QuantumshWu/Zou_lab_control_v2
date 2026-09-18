@@ -655,9 +655,9 @@ def _series_slot(group_key: Sequence[Any], count: int) -> int:
     if not group_key:
         return 0
     if len(group_key) == 1 and group_key[0].index is not None:
-        return 1 + int(group_key[0].index) % (count - 1)
+        return int(group_key[0].index) % count
     digest = hashlib.blake2s(repr(_series_identity(group_key)).encode(), digest_size=2).digest()
-    return 1 + int.from_bytes(digest, "big") % (count - 1)
+    return int.from_bytes(digest, "big") % count
 
 
 _EXPLICIT_UNIT_SUFFIX = re.compile(r"(?:\[[^\[\]]+\]|\([^()]+\))\s*$")

@@ -239,7 +239,7 @@ class PaletteConfig:
 
     @property
     def line_cycle(self) -> tuple[str, ...]:
-        """Shared series inks; the first entry is the ungrouped trace."""
+        """Shared series inks; group zero and ungrouped traces use grey."""
 
         return (self.line_single, *self.series)
 
@@ -839,7 +839,7 @@ def build_plot_style() -> PlotStyleConfig:
     )
     palette = PaletteConfig(
         series=("#517FA6", "#B17D4B", "#568C79", "#99719B", "#B36F72", "#558F9C", "#7E7CA5", "#92924F"),
-        line_single="#73808A",
+        line_single="#808080",
         pulse_cycle=("#5D7583", "#C37D5A", "#6F8D73", "#A66E87", "#7A6FA4", "#B5A262", "#5E9A9A", "#9A765E", "#7890B5", "#8B8B8B", "#B97878", "#679174"),
         bracket_cycle=("#6A6A6A", "#C96F3D", "#4F7EA8", "#8B6BB8"),
         hist_fill="grey",

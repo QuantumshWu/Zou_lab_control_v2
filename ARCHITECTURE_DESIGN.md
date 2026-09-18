@@ -338,6 +338,7 @@ Node new chunk
 - Data、Fit和Overlay共同使用同一个scope/axis/fate projection；动态Overlay读取其exact publication，并跟随主图已物化快照的范围：主图没有`DataBlock.window`时读取canonical prefix，不受其它Panel对companion的history lease影响，也不用最后event chunk覆盖finite前缀；主图有window时读取相同start/latest，不能拿另一个保留范围拼图。范围事实只由Runtime提供，不按axis名字猜测。公共`projection_scope`将`Last`化为各Reduced axis声明顺序的末coordinate，随后与显式Scope和facet走同一限制；不是最后valid值，不回退到之前已采位置。Overlay只借Repeat/Point确定对应采集cell，保留自身完整site向量，不把图像pixel axis当site axis。Mean没有另外一套Boolean归约/共识判断；scope后仍有多个Repeat/Point cells就不画离散判决。无法唯一对齐则拒绝。
 - 图像数据更新是一份完整presentation输入；新数据未携overlay表示该帧没有overlay，直接更新与Host管线都必须清除旧层。同一数据上的显式overlay-only编辑仍是独立配置事务。动态status的invalid或无法唯一选定状态不画判断圈；静态Calibration/point-review显式标记不受该数据有效性规则影响。
 - ROI/binning坐标只由一个transform owner处理。
+- 分组颜色直接按源坐标序号读取公共line cycle，不跳过首槽：group[0]与未分组曲线均为原灰色#808080，其余依次使用共享色表。Curve/Rolling/Histogram、Facet overview/focus及meter共用同一映射；颜色不随当前可见子集重新编号。
 - Producer联动只修改下一次运行的唯一Logic草稿，不改正在执行的运行。删除ROI时恢复联动前对应字段的草稿值，不从设备readback或Panel显示范围猜初值；必要的撤销记录留在现有authoring owner，不成为另一份可编辑草稿。每个字段只由最近写入它的Panel持有撤销权，多Panel不堆叠旧patch；用户之后手动改写的字段不被ROI撤销覆盖。没有producer参数语义的Histogram选区只限制数据，不联动producer。
 - ROI统计按已启用输出准备计算：仅Mean/Sum不构造整数直方图，均值与总和共享一次累加；确实请求尾部统计时才用原计数路径，并保持全部结果一致。已知全有效的stacked结果不先分配随后丢弃的零矩阵。此规则不改变默认发布开关或推断订阅需求。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
