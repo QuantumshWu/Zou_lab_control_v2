@@ -10,10 +10,7 @@
 
 ## 1. 当前实施范围
 
-- group[0]恢复原灰色#808080：删除分组跳过公共色表首槽的偏移，未分组曲线及Curve/Rolling/Histogram、Facet和meter共用同一源序号映射。
-
-- Plot文字布局统一在既有renderer完成：删除overview轴名/总标题的figure比例定位及单独compact标题间距，按最终数据框、tick文字边界及共同point间距摆放。Single/Focus主轴与辅助轴分别定字号；显式labels真实重排时恢复声明字号，overview→Focus不再永久继承小字。Rolling meter字号6.5→3.25pt，复用原Text且不扩大外框或改变数据框；稳定数据更新复用布局，不增加逐帧碰撞扫描。研究截图和测量仅留ignored research。
-- 本轮直接4项验证通过；同一DPR3/2×2尺寸的7种单图或Focus连续更新均未重复规划文字，数据框尺寸不变。正式FigureViewer经真实Qt操作完成Rolling锁定/滚轮换组及Facet Focus往返，截图核对meter、标题、科学offset/长单位/log刻度；所有验收窗口已关闭。显式labels仍全部保留，最小字号下空间不足时允许重叠，不把它描述成所有文字永不重叠。
+- group[0]恢复原灰色#808080：删除分组跳过公共色表首槽的偏移，未分组曲线及Curve/Rolling/Histogram、Facet和meter共用同一源序号映射。未修改title/ticks/axis-title的布局逻辑。
 
 - 通用compiled TRF修复两种假收敛：受信赖域限制的小步不作为ftol证据，xtol按每个自由参数分别判断，不用混合单位的整体参数范数。保留原初始半径、gtol、权重、fixed及cold/warm竞争，无release_recapture特判。固定B=0/f=.13的早期平台不再从A≈0、RSS≈4误报成功；下降段恢复eta30，真实PlotSession连续8帧在有信息后为29.915–30.149且revision/fixed一致。纯平台仍不能唯一确定eta，不强制其稳定在某值。原有数值/单批/损失/权重/regular-image直接用例通过；缓存就绪后25点cold/warm中位约0.63/0.39ms，4点平台约0.64ms。无现场文件，证据来自独立数学对照、确定性复现和真实live管线；研究结果不入Git。
 

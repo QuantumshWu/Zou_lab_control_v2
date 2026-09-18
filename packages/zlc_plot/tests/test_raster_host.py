@@ -2171,8 +2171,6 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         renderer = session._renderer
         axes = renderer.primary_axes
         width, height = canvas_physical_size(renderer.figure.canvas)
-        frame_bounds = axes.bbox.bounds
-        tick_sizes = tuple(label.get_fontsize() for label in axes.get_xticklabels())
 
         def event(action, x, y, *, button=None, step=0.0):
             px, py = axes.transData.transform((x, y))
@@ -2194,7 +2192,6 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         assert "site=1" in renderer._series_locked[2]
         inspector = next(text for text in renderer._series_annotations.values() if text.get_visible())
         latest = renderer._artists[f"{renderer.primary_surface[0]}:latest"]
-        assert latest.get_fontsize() == renderer.style.fonts.annotation_pt * 0.5
         measured = renderer.figure.canvas.get_renderer()
         assert latest.get_text() == "site=1 · 17"
         assert latest.get_color() == renderer._series_lines[id(axes)][1][0].get_color()
@@ -2212,8 +2209,6 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         assert "site=2" in renderer._series_locked[2]
         assert latest.get_text() == "site=2 · 27"
         assert latest.get_color() == renderer._series_lines[id(axes)][2][0].get_color()
-        assert tuple(label.get_fontsize() for label in axes.get_xticklabels()) == tick_sizes
-        np.testing.assert_allclose(axes.bbox.bounds, frame_bounds)
         assert (
             tuple(axes.get_xlim()),
             tuple(axes.get_ylim()),
@@ -2226,15 +2221,12 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
         finally:
             renderer.figure.canvas.mpl_disconnect(connection)
         assert exports and all(latest_box.y0 >= series_box.y1 for latest_box, series_box in exports)
-        assert latest.get_fontsize() == renderer.style.fonts.annotation_pt * 0.5
         session.update_data(make_snapshot(schema, values + 100, 1))
         assert latest.get_text() == "site=2 · 127"
         missing = values.copy()
         missing[..., 2] = np.nan
         session.update_data(make_snapshot(schema, missing, 2))
         assert latest.get_text() == "site=2 · —"
-        assert latest.get_fontsize() == renderer.style.fonts.annotation_pt * 0.5
-        np.testing.assert_allclose(axes.bbox.bounds, frame_bounds)
     finally:
         session.close()
 

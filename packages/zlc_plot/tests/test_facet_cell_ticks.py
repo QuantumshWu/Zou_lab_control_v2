@@ -326,7 +326,7 @@ def test_boundary_label_gating_refires_after_focus_round_trip() -> None:
     finally:
         session.close()
 
-def test_declared_coordinate_names_survive_the_overview_and_the_focus(monkeypatch) -> None:
+def test_declared_coordinate_names_survive_the_overview_and_the_focus() -> None:
     """A producer's coordinate labels tick the x axis BY NAME on every surface.
 
     The native overview cell skipped the cell painter and the grid's tick
@@ -340,15 +340,13 @@ def test_declared_coordinate_names_survive_the_overview_and_the_focus(monkeypatc
 
     from zlc_plot import CurvePlot
 
-    declared_names = ("coordinate zero", "coordinate one", "coordinate two")
-    values = np.linspace(1.21, 3.47, 6)[None, :]
     points = mapped_domain_from_columns(
         {"facet": np.repeat([0, 1], 3), "x": np.tile(np.arange(3), 2)}
     )
     points = replace(
         points,
         axes=tuple(
-            replace(item, coordinate_labels=declared_names)
+            replace(item, coordinate_labels=("zero", "one", "two"))
             if item.name == "x"
             else item
             for item in points.axes
@@ -356,9 +354,8 @@ def test_declared_coordinate_names_survive_the_overview_and_the_focus(monkeypatc
     )
     schema = make_dataset_schema(repeat_domain(size=1), points)
     session = PlotSession(
-        make_snapshot(schema, values, revision=0),
+        make_snapshot(schema, np.arange(6.0)[None, :], revision=0),
         FacetGridPlot(AxisRef.point("facet"), CurvePlot(AxisRef.point("x"))),
-        parameters={"relim_mode": "fixed", "y_min": 0.1, "y_max": 4.1},
     )
     try:
 
@@ -367,29 +364,14 @@ def test_declared_coordinate_names_survive_the_overview_and_the_focus(monkeypatc
             axis = session._renderer.axes["facet_cell"][index]
             return [text.get_text() for text in axis.get_xticklabels()]
 
-        assert names(0) == list(declared_names)
-        renderer = session._renderer
-        cell = renderer.axes["facet_cell"][0]
-        compact_size = cell.get_xticklabels()[0].get_fontsize()
-        assert compact_size < renderer.style.fonts.tick_pt
-        refreshed = []
-        refresh = renderer._refresh_facet_cell_chrome
-
-        def counted(*args):
-            refreshed.append(True)
-            return refresh(*args)
-
-        monkeypatch.setattr(renderer, "_refresh_facet_cell_chrome", counted)
+        assert names(0) == ["zero", "one", "two"]
         session.update_data(
-            make_snapshot(schema, values, revision=1)
+            make_snapshot(schema, np.arange(6.0)[None, :] + 1.0, revision=1)
         )
-        assert names(0) == list(declared_names)
-        assert not refreshed, "stable named ticks must not replan each shot"
+        assert names(0) == ["zero", "one", "two"]
         session.focus_facet(0)
-        assert names(0) == list(declared_names)
-        assert cell.get_xticklabels()[0].get_fontsize() == renderer.style.fonts.tick_pt
+        assert names(0) == ["zero", "one", "two"]
         session.show_facet_overview()
-        assert names(1) == list(declared_names)
-        assert cell.get_xticklabels()[0].get_fontsize() == compact_size
+        assert names(1) == ["zero", "one", "two"]
     finally:
         session.close()
