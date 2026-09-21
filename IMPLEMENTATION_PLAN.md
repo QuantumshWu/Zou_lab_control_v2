@@ -178,6 +178,7 @@
 
 - 2026-09-10本次验证：真实UART串行帧证明LOAD完成回复及SAFE抢占；真实top＋既有Xilinx BRAM行为模型证明首次装载4shots与SAFE后驻留重放4shots的18 TTL/40 DAC data逐tick一致、4 DAC clock工作、同ID不重复Fire。没有运行FPGA build/synthesis/program，旧时序报告不代表新ABI已通过。相关软件定向验证覆盖驻留重用、丢ACK、pending LOAD取消、新server握手、device/manual扫描及错误恢复。
 - RF正常设频率/幅度为1 write＋1 query（两次发送、一个响应）；Control Apply与单位投影不额外读设备。没有未经厂商证实的复合SCPI；真实native UNIT切换另发一次必要写入。错误后的current/unit/range保持unknown直到必要操作或显式Refresh确认。Fabric与SLM remote各在原session内复用连接，断线不自动重放写入，关闭释放idle连接。
+- DG4000在自身device owner内增加每通道`fsk_hop_frequency`，使用厂商`:SOURceN:MOD:FSKey:FREQuency`单字段write＋readback并读取该waveform下的MIN/MAX；不改通用`RfSourceBase`能力、不自动切FSK或打开modulation。字段以Hz进入既有Control/Remote/Scan/Seamless与restore，`frequency_low/high`同时约束carrier和hop；两类频率写入都使可能被仪器限幅的power current/range失效。模拟真实SCPI的RF直接用例覆盖双通道、单位、设备边界、policy strand拒绝、epoch、Scan暴露及restore；未连接真实DG4000。
 - 窗口首个Close保留关闭意图；device read/tune/init/discovery完成后由原Qt owner继续完整关闭，不要求再次点击、不加timer或平行生命周期。直接Qt验证覆盖有/无TaskConsole的pending关闭，测试窗口均已关闭。原始探针/日志只在ignored目录，不进入git。
 
 - 2026-09-10通信收口：Seamless仅Start准备一次Acquisition；按最新裁决删除全部settle参数/UI/等待/记录。正常DONE后不追加SAFE。Pulse使用带command ID的完成握手，驻留Fire不重load/不清clock，软件与RTL同一新ABI；实验机需重启server并自行build/program。本次不执行FPGA build/program，软件与RTL仿真证据单独列出。

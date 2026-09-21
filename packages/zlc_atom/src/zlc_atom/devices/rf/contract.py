@@ -1,20 +1,22 @@
 """The device-independent RF source surface every implementation answers.
 
-An RF source is, to this system, its TUNABLE SURFACE: per output channel a
-frequency, a power and an output switch, each read and written through the
-same duck-typed quartet every tunable device speaks (``tunable_fields`` /
-``tune`` / ``tunable_values`` / ``settings_provenance``).  A scan axis, the
-generic control panel and the device-axis executor all consume exactly that
-quartet, so the capability Protocol IS the quartet -- there is no second,
-RF-only vocabulary for a consumer to learn.
+An RF source is, to this system, its TUNABLE SURFACE: every source has per
+output channel a carrier frequency, a power and an output switch, and a
+concrete source may declare further real knobs such as a DG4000's FSK hop.
+All are read and written through the same duck-typed quartet every tunable
+device speaks (``tunable_fields`` / ``tune`` / ``tunable_values`` /
+``settings_provenance``).  A scan axis, the generic control panel and the
+device-axis executor all consume exactly that quartet, so the capability
+Protocol IS the quartet -- there is no second, RF-only vocabulary for a
+consumer to learn.
 
 CHANNELS ARE THE DEVICE'S OWN STRUCTURE.  One instrument is one installed
 instance whatever its channel count -- a two-channel generator is not two
-devices to manage, it is one device with six knobs.  A single-channel
-source keeps the bare field names (``frequency``); a multi-channel one
-prefixes them with its own channel names (``ch1_frequency``), so the
-add-axis combo and the control panel show every knob of the one instrument
-under its one card.
+devices to manage, it is one device with both channels' knobs.  A
+single-channel source keeps the bare field names (``frequency``); a
+multi-channel one prefixes them with its own channel names
+(``ch1_frequency``), so the add-axis combo and the control panel show every
+knob of the one instrument under its one card.
 
 TWO FENCES, ONE RANGE.  A knob is bounded by the instrument's own limits,
 read from the device when the connection opens, and by an optional bench
