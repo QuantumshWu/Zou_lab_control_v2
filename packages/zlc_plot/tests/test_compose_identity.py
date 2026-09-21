@@ -610,17 +610,24 @@ def test_a_cell_focused_after_a_materialization_draws_its_error_bars(tmp_path) -
         session.close()
 
 
-def test_a_rolling_rails_count_labels_each_have_a_mark() -> None:
+@pytest.mark.parametrize("device_pixel_ratio", (1.0, 3.0))
+def test_a_rolling_rails_count_labels_each_have_a_mark(device_pixel_ratio, tmp_path, monkeypatch) -> None:
     """The side distribution printed its two declared labels with every
     mark on the rail hidden; a label without its mark is half a statement.
     The marks are the house's, inward, as on the image rail."""
 
     first, second, spec = _generic_kind_pair("rolling")
-    session = PlotSession(first, spec, parameters={"side_distribution": True})
+    session = PlotSession(first, spec, size="2x2", parameters={"side_distribution": True},
+                          device_pixel_ratio=device_pixel_ratio)
     try:
         session.update_data(second)
         session.rgba()
         rail = session._renderer._axes["distribution"][0]
+        locator = rail.xaxis.get_major_locator()
+        assert "0" not in locator.texts, "the optional rail zero crowds the history endpoint"
+        assert locator.drawn_pt == session._renderer.style.fonts.tick_pt, (
+            "the high count fits at normal size once the optional zero is omitted"
+        )
         ticks = rail.xaxis.get_major_ticks()[: len(rail.xaxis.get_majorticklocs())]
         assert ticks
         for tick in ticks:
@@ -628,6 +635,26 @@ def test_a_rolling_rails_count_labels_each_have_a_mark() -> None:
             assert tick.get_tickdir() == "in"
         assert not any(tick.tick1line.get_visible() for tick in rail.yaxis.get_major_ticks())
         assert _composed_matches_full_draw(session) == 0
+        session.save(tmp_path / "rail.png", dpi=session._renderer.figure.dpi)
+        assert "0" not in locator.texts
+        for size, shows_zero in (("8x8", True), ("2x2", False)):
+            session.set_size(size)
+            session.rgba()
+            rail = session._renderer._axes["distribution"][0]
+            locator = rail.xaxis.get_major_locator()
+            assert ("0" in locator.texts) == shows_zero
+            assert locator.drawn_pt == session._renderer.style.fonts.tick_pt
+            assert _composed_matches_full_draw(session) == 0
+        renderer = session._renderer
+        planned = []
+        plan = renderer._fit_tick_label_text
+        def counted(*args):
+            planned.append(True)
+            return plan(*args)
+        monkeypatch.setattr(renderer, "_fit_tick_label_text", counted)
+        renderer._sync_axes_chrome()
+        renderer._sync_axes_chrome()
+        assert not planned, "settled typography must not repeat collision planning"
     finally:
         session.close()
 

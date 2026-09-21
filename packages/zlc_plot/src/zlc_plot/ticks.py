@@ -1082,6 +1082,18 @@ class DeclaredLocator(_MeasuredLocator):
         #: may stand alone; a pair of ends is nothing without both.
         self.FLOOR = 1 if self.zero_optional else 2
 
+    def omit_optional_zero(self) -> None:
+        """Let final cross-axis layout refine this answer, not another cache.
+
+        The next changed geometry starts from the normal candidates again.
+        Keeping the decision on the locator also makes full draws/export use
+        the same ticks as the composed frame.
+        """
+        if self.zero_optional and 0.0 in self.ticks:
+            kept = [(tick, text) for tick, text in zip(self.ticks, self.texts) if tick != 0.0]
+            self._store(_Placement(tuple(tick for tick, _ in kept),
+                                   tuple(text for _, text in kept), self.drawn_pt), False)
+
     def tick_values(self, vmin: float, vmax: float) -> list[float]:
         geometry = self._geometry()
         cache_key = (

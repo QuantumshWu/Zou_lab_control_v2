@@ -296,7 +296,7 @@ Node new chunk
 - FacetGrid的facet role可为空；为空不是semantic vacancy，也不允许UI或renderer伪造Dataset轴，而是唯一一个完整cell，标题为`Facet 1`。同一cell kind的projection、fit、selector、Focus和Figure grammar仍走普通Facet路径；给真实轴Facet fate后才扩为多cell。
 - Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。每根SEM误差棒以stem与两cap的几何并集为一个工字形，subpixel coverage之后只应用一次alpha；不同误差棒仍独立混色，不能按整数display column合并为min/max envelope。Native、Agg与导出读取同一端点与屏幕尺度style。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。
-- Tick label保持默认对应tick的锚点，不得为防重叠向内移或改变alignment。碰撞判断使用最终实际text/data-frame几何，cell间空白可容纳label，不以虚构cell文字边界限制。只有字号可缩小，达到可读下限后接受重叠；Single、side axes、Facet与Focus共用此规则，稳定布局不重复规划。
+- Tick label保持默认对应tick的锚点，不得为防重叠向内移或改变alignment。碰撞判断使用最终实际text/data-frame几何，cell间空白可容纳label，不以虚构cell文字边界限制。计数侧分布已声明可选的零刻度若参与跨轴碰撞，应在缩字前由同一locator省略，保留高端值；布局变宽后重新选择，不永久隐藏。其余必需刻度只可缩字号，达到可读下限后接受重叠；Single、side axes、Facet与Focus共用此规则，稳定布局不重复规划。
 - Facet overview在最终实际cell几何上共同安排标题header和刻度gutter，同方向刻度与cell标题分别使用统一字号；像素取整不得让相同cell跨不同字号档，标题不得借用刻度空间。只在已有chrome布局签名变化时重新定价，复用同一文字度量/placement缓存，稳态数据更新不跑额外碰撞扫描；Focus仍用单图预算，屏幕与导出消费同一chrome。
 - Color-limit drag的每个accepted move是一个原子preview transaction：先更新candidate与native/Agg共享clim authority，再compose一次并发布该front；不得先发布旧颜色front，再在独立cadence分支recolor，release只负责提交最终DisplayState而不是第一次显示颜色变化。
 - Staged Monitor widget的自动front与手势回复只能即时呈现当前已安装数据identity的preview；拖动不授予切换shot的权力。新数据仍由Board按same-shot group显式呈现，交互description若已带新数据则只请求已有presentation pass，不单独推进该成员。普通自动呈现的Notebook/Edit不受Monitor cohort门约束。

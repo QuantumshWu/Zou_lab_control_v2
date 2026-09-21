@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 侧分布零刻度让位不再只在孤立locator内生效：公共最终跨轴碰撞阶段先让参与碰撞的可选zero退场，再判断是否需要缩字号。Image/Rolling同owner，更新locator最终答案供compose/full draw/export共同消费，不只隐藏Text。真实Rolling的主轴0与side0碰撞复现，修后高端和主横轴4.16→6.5pt；DPR1/3、扩大恢复0/缩回省0、完整重绘与导出、未变布局不重规划的原直接用例通过。图像产物仅在ignored research。
+
 - group[0]恢复原灰色#808080：删除分组跳过公共色表首槽的偏移，未分组曲线及Curve/Rolling/Histogram、Facet和meter共用同一源序号映射。未修改title/ticks/axis-title的布局逻辑。
 
 - 通用compiled TRF修复两种假收敛：受信赖域限制的小步不作为ftol证据，xtol按每个自由参数分别判断，不用混合单位的整体参数范数。保留原初始半径、gtol、权重、fixed及cold/warm竞争，无release_recapture特判。固定B=0/f=.13的早期平台不再从A≈0、RSS≈4误报成功；下降段恢复eta30，真实PlotSession连续8帧在有信息后为29.915–30.149且revision/fixed一致。纯平台仍不能唯一确定eta，不强制其稳定在某值。原有数值/单批/损失/权重/regular-image直接用例通过；缓存就绪后25点cold/warm中位约0.63/0.39ms，4点平台约0.64ms。无现场文件，证据来自独立数学对照、确定性复现和真实live管线；研究结果不入Git。

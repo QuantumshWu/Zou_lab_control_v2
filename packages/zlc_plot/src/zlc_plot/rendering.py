@@ -10795,8 +10795,8 @@ class MatplotlibRenderer:
     def _fit_tick_label_text(self, axes, direction_labels, title_artists) -> None:
         # Empty gutter is not an obstacle. Price actual anchored text against
         # other text and the visible data boxes, once per changed chrome
-        # layout. A whole direction shares one size; never shift an endpoint
-        # label or change the locator's chosen ticks to make it fit.
+        # layout. Optional count-rail zero yields before a whole direction
+        # shrinks; required ticks keep their ordinary anchors and identities.
         renderer = _prepare_renderer(self._figure.canvas.get_renderer())
         obstacles = np.asarray(
             [axis.bbox.extents for axis in axes]
@@ -10809,6 +10809,15 @@ class MatplotlibRenderer:
         directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
         sizes = [max((label.get_fontsize() for label in group), default=MIN_TICK_LABEL_PT)
                  for group in direction_labels]
+        optional = []
+        for axis_owner in axes:
+            for direction, axis in enumerate((axis_owner.xaxis, axis_owner.yaxis)):
+                locator = axis.get_major_locator()
+                if (isinstance(locator, DeclaredLocator) and locator.zero_optional
+                        and 0.0 in locator.ticks):
+                    zero_labels = {id(label) for tick in axis.majorTicks if tick.get_loc() == 0.0
+                                   for label in (tick.label1, tick.label2)}
+                    optional.append((direction, axis, locator, zero_labels))
         while True:
             boxes = np.asarray([label.get_window_extent(renderer).extents for label in labels])
             # These are the same positive-extent rectangle comparisons as
@@ -10821,7 +10830,28 @@ class MatplotlibRenderer:
                 & (boxes[:, None, 1] <= all_boxes[None, :, 3])
             )
             touching[np.arange(len(boxes)), np.arange(len(boxes))] = False
-            crowded = set(directions[np.any(touching, axis=1)])
+            collisions = np.any(touching, axis=1)
+            crowded_labels = ({id(label) for label, hit in zip(labels, collisions) if hit}
+                              if optional else set())
+            dropped = False
+            for direction, axis, locator, zero_labels in optional:
+                if 0.0 not in locator.ticks or not crowded_labels.intersection(zero_labels):
+                    continue
+                previous = {id(label) for tick in axis.majorTicks for label in (tick.label1, tick.label2)}
+                locator.omit_optional_zero()
+                direction_labels[direction][:] = [label for label in direction_labels[direction]
+                                                   if id(label) not in previous]
+                direction_labels[direction].extend(
+                    label for tick in axis._update_ticks() for label in (tick.label1, tick.label2)
+                    if label.get_visible() and label.get_text()
+                )
+                dropped = True
+            optional.clear()
+            if dropped:
+                labels = [label for group in direction_labels for label in group]
+                directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
+                continue
+            crowded = set(directions[collisions])
             adjustable = [direction for direction in crowded
                           if sizes[direction] > MIN_TICK_LABEL_PT + 1e-9]
             if not adjustable:
