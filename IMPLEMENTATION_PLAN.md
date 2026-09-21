@@ -251,6 +251,7 @@
   explicit row codes，Cell-data使用不物化pixel codes的dense implicit stride；`ValueSchema`
   保留dtype/unit/validity及可选数值name。旧的平行row-coordinate/topology与Plot双身份路径整体删除；
   scan、history、selection、fit与Figure只读取同一axis domain/code truth。
+- 公共Scope裁剪按选中行读取codes，连续局部范围借slice；跨revision的不可变切片复用归入既有projection cache，Frozen/拒绝事务互不修改，window缩小、取消Scope和关闭后不保留未消费条目。数值坐标精确定位共用有序方向/排序索引，避免逐点Python字典。
 - Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
   64-cell等容量限制只在真实replace/layout transaction执行。旧semantic probe、cache和kind validate
   wrapper已删除，schema vocabulary不再随size、DPR或renderer可用性改变。

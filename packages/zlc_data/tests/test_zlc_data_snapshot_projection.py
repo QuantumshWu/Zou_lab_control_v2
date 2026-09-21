@@ -23,6 +23,7 @@ from zlc_data.snapshot_projection import (
     indexed_schemas_compatible,
     materialize_derived_dataset,
     restrict_snapshot,
+    restricted_schema,
 )
 from zlc_data.validity import INVALID, VALID, ValidityContract
 from zlc_data.value import (
@@ -210,12 +211,50 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
     segmented = OwnedSnapshot(source.ref, segmented_block)
     unchanged = restrict_snapshot(segmented, reference_for=_reference_for("unchanged"))
     assert unchanged.block.segments[0] is planes
-    cropped = restrict_snapshot(segmented, selection, reference_for=_reference_for("projection-result"))
+    memo = {}
+    cropped = restrict_snapshot(segmented, selection, reference_for=_reference_for("projection-result"), slice_memo=memo)
     assert cropped.block.segments[0] is not planes
     actual = cropped.materialize()
     np.testing.assert_array_equal(actual.block.values, projected.block.values)
     np.testing.assert_array_equal(actual.expanded_validity(), projected.expanded_validity())
     np.testing.assert_array_equal(actual.block.sigma, projected.block.sigma)
+    held = dict(memo)
+    reused = restrict_snapshot(segmented, selection, reference_for=_reference_for("next"), slice_memo=memo)
+    assert reused.block.segments[0] is cropped.block.segments[0]
+    assert np.shares_memory(reused.block.segments[0][0], planes[0])
+    def refuse_reference(_schema):
+        raise ValueError("refused projection")
+    with pytest.raises(ValueError, match="refused projection"):
+        restrict_snapshot(segmented, selection, reference_for=refuse_reference, slice_memo=memo)
+    assert memo.keys() == held.keys() and all(memo[key] is entry for key, entry in held.items())
+
+    doubled_schema = DatasetSchema(
+        DomainSpec((6,), schema.repeat_domain.axes,
+                   tuple(np.tile(schema.repeat_domain.codes(axis.axis_id), 2) for axis in schema.repeat_domain.axes)),
+        schema.point_domain, schema.cell_domain, schema.value_schema,
+    )
+    doubled_block = DataBlock._from_owned_segments(
+        BlockId("doubled"), source.ref.revision, doubled_schema, (planes, planes),
+        origins=np.asarray(((0, 0), (3, 0))), shapes=np.asarray(((3, 3), (3, 3))),
+    )
+    doubled = OwnedSnapshot(doubled_block.ref(source.ref.stream_generation), doubled_block)
+    candidate = dict(memo)
+    repeated = restrict_snapshot(doubled, selection, reference_for=_reference_for("repeated"), slice_memo=candidate)
+    assert repeated.block.segments[0] is repeated.block.segments[1]
+    assert repeated.block.segments[0] is cropped.block.segments[0]
+    restrict_snapshot(doubled, reference_for=_reference_for("whole"), slice_memo=candidate)
+    assert not candidate and memo.keys() == held.keys()
+
+    # Mixed signed/large unsigned coordinates cannot pass through NumPy's
+    # inferred float64 dtype, which rounds away the low integer bits.
+    exact_values = (-1, 2**63 + 3, 2**63 + 1, 2**63 + 2)
+    exact_axis = AxisSpec(x_id, "x", SPATIAL_X, 4, exact_values)
+    exact_schema = DatasetSchema(schema.repeat_domain, schema.point_domain,
+                                DomainSpec((4,), (exact_axis,)), schema.value_schema)
+    for indices in (range(1, 3), (0, 2)):
+        selected_schema = restricted_schema(exact_schema, range(3), range(3), {x_id: indices})
+        selected_axis = selected_schema.cell_domain.axis(x_id)
+        assert tuple(selected_axis.coordinate_at(i) for i in range(len(indices))) == tuple(exact_values[i] for i in indices)
 
 
 def _indexed_schema(offsets: tuple[int, ...]) -> DatasetSchema:

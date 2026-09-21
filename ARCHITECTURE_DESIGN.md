@@ -47,6 +47,7 @@
 
 - `OwnedSnapshot`是外部不可变数据面；schema、coordinates、labels、units和validity共同定义truth。
 - Snapshot restriction必须对values、validity、coordinates、labels和coordinate frame执行同一projection。
+- 公共restriction按已选行读取紧凑映射，连续局部范围保留slice；固定Scope跨revision只在原有projection cache中复用相同不可变plane和相同局部选区。候选缓存与已接受/Frozen状态隔离，成功后仅保留本次消费条目，取消限制或关闭时释放；schema、placement和ref始终来自本次snapshot，不以复用切片替代科学身份。
 - Validity的存储与组装只沿schema声明的component轴，不为整cell判决展开逐像素mask再压回；需要逐像素布尔视图的数值消费者才广播。裁剪保留未改变的不可变Axis/Domain身份，不重建无变化的坐标与codes。
 - Validity入口只接受明确bool contract，不做numeric truthiness转换。
 - Selection按AxisId和typed coordinate唯一解析；重名或不可唯一映射必须拒绝。

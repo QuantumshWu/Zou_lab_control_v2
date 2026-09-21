@@ -203,7 +203,7 @@ class DomainSpec:
         inner, outer = (1, 1) if self.axis_code_repeats is None else self.axis_code_repeats[index]
         return self.axis_codes[index], inner, outer
 
-    def codes(self, axis_id: AxisId, rows: np.ndarray | None = None) -> np.ndarray:
+    def codes(self, axis_id: AxisId, rows: np.ndarray | range | None = None) -> np.ndarray:
         """Read requested rows, or expand and cache the complete vector once."""
 
         axis = self.axis(axis_id)
@@ -216,11 +216,16 @@ class DomainSpec:
                 return cached
         base, inner, outer = self.code_mapping(axis_id)
         if rows is not None:
-            rows = np.asarray(rows)
-            if not issubclass(rows.dtype.type, np.integer):
-                raise TypeError("domain rows must be integers")
-            if bool(np.any(rows < 0)) or bool(np.any(rows >= len(base) * inner * outer)):
-                raise IndexError("domain row is outside its physical dimension")
+            if isinstance(rows, range):
+                if rows and (min(rows[0], rows[-1]) < 0 or max(rows[0], rows[-1]) >= len(base) * inner * outer):
+                    raise IndexError("domain row is outside its physical dimension")
+                rows = np.arange(rows.start, rows.stop, rows.step, dtype=np.int64)
+            else:
+                rows = np.asarray(rows)
+                if not issubclass(rows.dtype.type, np.integer):
+                    raise TypeError("domain rows must be integers")
+                if bool(np.any(rows < 0)) or bool(np.any(rows >= len(base) * inner * outer)):
+                    raise IndexError("domain row is outside its physical dimension")
             positions = (rows.astype(np.int64, copy=False) // inner) % len(base)
             array = (base.start + positions * base.step if isinstance(base, range)
                      else base[positions])

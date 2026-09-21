@@ -614,7 +614,7 @@ class FitProjection:
         #: carries over when the coordinate plane did not change.  Consumed
         #: and released by the first _build_view.
         self._inherit_view = inherit_view
-        self._scoped_cache: tuple[object, OwnedSnapshot] | None = None
+        self._scoped_cache: tuple[object, OwnedSnapshot, object, dict] | None = None
         self._payload = None
         selected_revision = integer(revision, "projection revision", minimum=0)
         self._validate_input(data, self._spec)
@@ -641,7 +641,7 @@ class FitProjection:
     ) -> "FitProjection":
         """Capture immutable worker inputs using this projection's configuration."""
 
-        return FitProjection(
+        frozen = FitProjection(
             data=data,
             revision=revision,
             spec=self._spec,
@@ -651,6 +651,8 @@ class FitProjection:
             histogram_projection=self._histogram_projection,
             inherit_view=self._view,
         )
+        frozen._scoped_cache = self._scoped_cache
+        return frozen
 
     def _reproject(
         self,
@@ -667,6 +669,7 @@ class FitProjection:
             self._view,
             self._payload,
             self._histogram_projection,
+            self._scoped_cache,
         )
         try:
             self._context = context
@@ -680,6 +683,7 @@ class FitProjection:
                 self._view,
                 self._payload,
                 self._histogram_projection,
+                self._scoped_cache,
             ) = previous
             raise
 
@@ -820,6 +824,7 @@ class FitProjection:
         count = layout.shot_count if layout is not None else self._data.block.schema.repeat_domain.size
         narrowed = window is not None and window < count
         if not scope and not narrowed:
+            self._scoped_cache = None
             return self._data
         source = self._data
         schema = source.block.schema
@@ -835,14 +840,13 @@ class FitProjection:
             f"{domain}:{axis_id}={value!r}"
             for domain, axis_id, value in sorted(identity)
         )
-        key = (
-            source.ref.block_id,
-            source.ref.stream_generation,
-            source.ref.revision,
-            digest,
-        )
+        key = source.ref, digest
         if self._scoped_cache is not None and self._scoped_cache[0] == key:
             return self._scoped_cache[1]
+        scope_identity = tuple((domain, axis_id, type(value), value) for domain, axis_id, value in sorted(identity))
+        context = source.ref.stream_generation, scope_identity, schema.cell_domain, schema.value_schema
+        memo = (dict(self._scoped_cache[3]) if scope and self._scoped_cache is not None
+                and self._scoped_cache[2] == context else {})
 
         def reference_for(derived_schema: object) -> DatasetRevisionRef:
             # Deterministic: the same source and the same scope name the same
@@ -869,8 +873,9 @@ class FitProjection:
         if scope:
             scoped = restrict_snapshot(
                 scoped, value_selection(scoped.block.schema, terms), reference_for=reference_for,
+                slice_memo=memo,
             )
-        self._scoped_cache = (key, scoped)
+        self._scoped_cache = (key, scoped, context, memo)
         return scoped
 
     def _install_view(self, view: "DataView | None") -> None:

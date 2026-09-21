@@ -194,6 +194,55 @@ def test_the_table_moves_with_the_window_and_stays_exact(monkeypatch) -> None:
         _assert_exact(view, snapshot, 4)
         _assert_exact(view, snapshot, 2)
         assert view._frequency_carry.snapshot is snapshot
+
+        # The normal worker fork must preserve a fixed Scope's slices after
+        # the window cutter, without changing a held Frozen projection.
+        scoped_session = PlotSession(snapshot, HistogramPlot(scope=((AxisRef.point("frame"), 1),)),
+                                     parameters={"window": 4})
+        try:
+            owner = scoped_session._projection
+            frozen = owner._fork_frozen(data=snapshot, revision=snapshot.ref.revision.value, context=owner._context)
+            frozen._build_view_and_payload()
+            old_cache = frozen._scoped_cache
+            old_memo = dict(old_cache[3])
+            frozen_counts = frozen.payload.counts.copy()
+            event = make_snapshot(event_schema, np.stack((_frame(7), _frame(8)))[None], 7)
+            plane.commit_live(node, {"value": LiveDatasetOutput(declaration, event, MonitorCoverage(2, 2))})
+            snapshot = plane.current_dataset("frequency/value")
+            reads.clear()
+            with monkeypatch.context() as patch:
+                patch.setattr(DataBlock, "packed_planes", observed)
+                scoped_session.update_data(snapshot)
+            assert sum(reads) == 2 * HEIGHT * WIDTH, "fixed Scope counts only entering/leaving slices"
+            current_cache = scoped_session._projection._scoped_cache
+            assert len({id(item) for item in old_cache[1].block.segments}
+                       & {id(item) for item in current_cache[1].block.segments}) == 3
+            assert frozen._scoped_cache is old_cache and old_cache[3].keys() == old_memo.keys()
+            assert all(old_cache[3][key] is entry for key, entry in old_memo.items())
+            np.testing.assert_array_equal(frozen.payload.counts, frozen_counts)
+            scoped_session.set_parameters({"window": 2})
+            smaller = scoped_session._projection._scoped_cache
+            assert len(smaller[3]) == 2
+            assert all(left is right for left, right in
+                       zip(smaller[1].block.segments, current_cache[1].block.segments[-2:]))
+            scoped_session.set_parameters({"window": 4})
+            assert len(scoped_session._projection._scoped_cache[3]) == 4
+            scoped_session.replace_spec(HistogramPlot(scope=((AxisRef.point("frame"), 0),)))
+            assert not current_cache[3].keys() & scoped_session._projection._scoped_cache[3].keys()
+            selected = np.concatenate([item[0][:, 0:1].reshape(-1) for item in snapshot.block.segments[-4:]])
+            expected, _ = np.histogram(selected, bins=scoped_session._payload.edges.canonical)
+            np.testing.assert_array_equal(scoped_session._payload.counts, expected[None])
+            accepted_cache = scoped_session._projection._scoped_cache
+            with pytest.raises(ValueError):
+                scoped_session.replace_spec(HistogramPlot(scope=((AxisRef.point("frame"), 99),)))
+            assert scoped_session._projection._scoped_cache is accepted_cache
+            scoped_session.replace_spec(HistogramPlot(), parameters={"window": 6})
+            assert scoped_session._projection._scoped_cache is None
+            scoped_session.replace_spec(HistogramPlot(scope=((AxisRef.point("frame"), 1),)))
+            assert scoped_session._projection._scoped_cache is not None
+        finally:
+            scoped_session.close()
+        assert scoped_session._projection._scoped_cache is None
     finally:
         lease.close()
         plane.close()
