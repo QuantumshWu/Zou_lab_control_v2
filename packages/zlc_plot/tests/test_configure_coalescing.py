@@ -66,7 +66,7 @@ def test_a_later_configure_carries_the_queued_one_forward() -> None:
         host.set_crosshair_selector(1.0, 2.0, display=False)
         first = host.configure(parameters={"title": "from Setting"},
                                selector_updates={SelectorKind.X_RANGE: x_range})
-        viewport = RectangleRange(NumericRange(0.5, 1.5), NumericRange(1.5, 2.5))
+        viewport = (NumericRange(0.5, 1.5), None)
         second = host.configure(viewport=viewport)
         gate.set()
         second.result(timeout=10)

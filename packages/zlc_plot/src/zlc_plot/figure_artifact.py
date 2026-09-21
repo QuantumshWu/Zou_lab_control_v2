@@ -25,6 +25,8 @@ from .selectors import (
     RectangleRange,
     SelectorKind,
     SelectorState,
+    Viewport,
+    normalize_viewport,
 )
 from .specs import (
     CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotLabels,
@@ -191,23 +193,28 @@ def _decode_plot_spec(value: object) -> object:
     return factory(**arguments)
 
 
-def _viewport_document(value: RectangleRange | None) -> object:
+def _viewport_document(value: Viewport | None) -> object:
+    value = normalize_viewport(value)
     if value is None:
         return None
-    return {"x": [value.x.low, value.x.high], "y": [value.y.low, value.y.high]}
+    return {name: None if bounds is None else [bounds.low, bounds.high]
+            for name, bounds in zip(("x", "y"), value)}
 
 
-def _viewport(value: object) -> RectangleRange | None:
+def _viewport(value: object) -> Viewport | None:
     if value is None:
         return None
     entry = _keys(value, {"x", "y"}, "plot viewport")
     axes = []
     for name in ("x", "y"):
         bounds = entry[name]
+        if bounds is None:
+            axes.append(None)
+            continue
         if not isinstance(bounds, list) or len(bounds) != 2:
             raise ValueError(f"plot viewport {name} must contain two bounds")
         axes.append(NumericRange(*bounds))
-    return RectangleRange(*axes)
+    return normalize_viewport(tuple(axes))
 
 
 def _selectors_document(values: object) -> list[dict[str, object]]:
@@ -322,7 +329,7 @@ def _restore_overlay(snapshot: OwnedSnapshot, arrays: Mapping[str, np.ndarray], 
 
 def encode_plot_recipe(
     spec: object, *, parameters: Mapping[str, object], size: str,
-    viewport: RectangleRange | None = None, classifier_thresholds: object = (),
+    viewport: Viewport | None = None, classifier_thresholds: object = (),
     facet_focus: int | None = None, fit: Mapping[str, object] | None = None,
     selectors: object = (),
     overlay: object = None,
@@ -529,7 +536,7 @@ def _submit_figure_artifact(
     spec: object,
     parameters: Mapping[str, object],
     size: str,
-    viewport: RectangleRange | None = None,
+    viewport: Viewport | None = None,
     classifier_thresholds: object = (),
     facet_focus: int | None = None,
     fit: Mapping[str, object] | None = None,
@@ -613,7 +620,7 @@ def _submit_figure_artifact(
 
 def save_figure_artifact(
     base_path: str | Path, *, plot_input: object, spec: object,
-    parameters: Mapping[str, object], size: str, viewport: RectangleRange | None = None,
+    parameters: Mapping[str, object], size: str, viewport: Viewport | None = None,
     classifier_thresholds: object = (), facet_focus: int | None = None,
     fit: Mapping[str, object] | None = None, lineage: Mapping[str, object] | None = None,
     selectors: object = (),

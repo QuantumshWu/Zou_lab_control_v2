@@ -12,7 +12,7 @@ from zlc_data import SelectionChange
 from ._fit_projection import FitProjection, FitSelection
 from ._fit_scene import FitOverlay
 from ._selector_scene import ColorLimitCandidate
-from .selectors import RectangleRange, SelectorKind, SelectorState, _SelectorController
+from .selectors import Viewport, SelectorKind, SelectorState, _SelectorController
 from .primitives import ImagePointOverlay
 
 
@@ -170,7 +170,7 @@ class _ProjectionPresentation:
     ]
     previous_focused_facet_index: int | None
     previous_facet_focus_index: int | None
-    previous_viewport: RectangleRange | None
+    previous_viewport: Viewport | None
     previous_layout_revision: int
     previous_plan: "SurfacePlan"
 

@@ -275,6 +275,7 @@ Node new chunk
   Viewport identity还包含Dataset schema fingerprint、accepted spec、display coordinate units和
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
+- Navigation viewport按X/Y分别记录可选范围；未操作的轴为None，继续由已有自动/Fixed参数决定。只缩放或平移X不得捕获当时Y。显式轴limits/mode编辑在同一Plot配置事务中撤回该轴旧navigation覆盖，保留另一轴；重放完整相同target不算重新编辑。普通Image的square/pixel-grid约束仍由原几何owner统一解析。Renderer、Fit、Live/Edit镜像及Figure读同一逐轴状态，不以完整矩形的旧Y覆盖新设置；真实Area selector仍必须是完整数据坐标矩形。
 - TaskConsole与FigureViewer的显示执行固定为三个进程、一个Plot真相源：B是Qt主进程并继续拥有
   Runtime、Logic、device client、PanelState、SelectionBridge、LiveBoard与same-shot accept；A只承载
   全部Monitor card的`RasterPlotHost -> PlotSession -> DataView/Fit/Render/Compose`；C承载Panel Edit、

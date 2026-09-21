@@ -147,7 +147,7 @@ def test_selectors_on_an_axis_not_in_base_units_round_trip_exactly() -> None:
         assert abs(moved.value.x.low - 2.0) < 1e-9 and abs(moved.value.x.high - 3.0) < 1e-9
 
         session.set_viewport(NumericRange(0.001, 0.002), NumericRange(0.0, 1.0))
-        assert abs(session.viewport.x.low - 0.001) < 1e-12
+        assert abs(session.viewport[0].low - 0.001) < 1e-12
     finally:
         session.close()
 

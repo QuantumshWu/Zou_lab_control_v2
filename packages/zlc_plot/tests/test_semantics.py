@@ -35,7 +35,7 @@ from data_factory import (
 )
 from zlc_data import OwnedSnapshot
 from zlc_plot._kinds import HANDLERS
-from zlc_plot.selectors import NumericRange, RectangleRange
+from zlc_plot.selectors import NumericRange
 from zlc_plot.specs import parameter_schema_for
 from zlc_plot.session_policy import replace_spec_initial_state
 from zlc_plot.ui import semantic_controls
@@ -452,7 +452,7 @@ def test_replace_spec_policy_revalidates_and_retains_only_valid_state() -> None:
     new_schema = parameter_schema_for(new, style=DEFAULTS.style)
     values = dict(old_schema.initial_values())
     values.update({"title": "kept", "x_display_unit": "mV"})
-    viewport = RectangleRange(NumericRange(0.0, 1.0), NumericRange(0.0, 1.0))
+    viewport = (NumericRange(0.0, 1.0), NumericRange(0.0, 1.0))
     result = replace_spec_initial_state(
         old,
         new,
@@ -470,8 +470,8 @@ def test_replace_spec_policy_keeps_viewport_for_reduction_only_change() -> None:
     snapshot = _snapshot()
     session = PlotSession(snapshot, CurvePlot(AxisRef.point("x")))
     try:
-        viewport = RectangleRange(NumericRange(0.0, 1.0), NumericRange(0.0, 1.0))
-        session.set_viewport(viewport.x, viewport.y)
+        viewport = (NumericRange(0.0, 1.0), None)
+        session.set_viewport(*viewport)
         session.replace_spec(
             CurvePlot(AxisRef.point("x"), reduction=Reduction.MIN)
         )

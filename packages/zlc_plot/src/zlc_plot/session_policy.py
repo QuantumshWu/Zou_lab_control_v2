@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 from ._kinds import handler_for
 from .parameters import ParameterSchema
-from .selectors import RectangleRange
+from .selectors import Viewport, normalize_viewport
 from .specs import (
     CurvePlot,
     FacetGridPlot,
@@ -44,15 +44,14 @@ class ReplaceSpecInitialState:
 
     parameters: Mapping[str, object]
     size: str
-    viewport: RectangleRange | None
+    viewport: Viewport | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.parameters, Mapping):
             raise TypeError("replacement parameters must be a mapping")
         if not isinstance(self.size, str) or not self.size:
             raise ValueError("replacement size must be non-empty text")
-        if self.viewport is not None and not isinstance(self.viewport, RectangleRange):
-            raise TypeError("replacement viewport must be RectangleRange or None")
+        object.__setattr__(self, "viewport", normalize_viewport(self.viewport))
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
 
 
@@ -154,7 +153,7 @@ def replace_spec_initial_state(
     new_schema: ParameterSchema,
     *,
     size: str,
-    viewport: RectangleRange | None = None,
+    viewport: Viewport | None = None,
     parameters: Mapping[str, object] | None = None,
 ) -> ReplaceSpecInitialState:
     """Compute the initial state for a semantic rebuild without side effects.
