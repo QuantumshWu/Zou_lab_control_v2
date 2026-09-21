@@ -5318,7 +5318,28 @@ def _sem_from_moments(
 
     n = counts.astype(np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
-        spread = np.clip(mean_of_squares - np.square(mean), 0.0, None)
+        squared_mean = np.square(mean)
+        raw_spread = mean_of_squares - squared_mean
+        # The moment reduction sums ``n`` squares, divides once, squares the
+        # mean and subtracts.  A constant bucket can therefore leave a small
+        # POSITIVE residual as well as a negative one when the two equal
+        # moments round in opposite directions.  Clipping only below zero
+        # turns that last bit into a fake SEM and hence an enormous fit
+        # weight.  Values inside the first-order forward-error bound are
+        # numerically indistinguishable from zero; this scales with the
+        # arithmetic that formed the moment, not with the observed data.
+        roundoff = np.abs(mean_of_squares)
+        roundoff += squared_mean
+        roundoff *= np.finfo(np.float64).eps
+        # ``squared_mean`` is no longer needed; reuse it for the operation
+        # count so this common large-tensor path retains the original three
+        # temporary planes instead of allocating a fourth and fifth.
+        np.maximum(n, 1.0, out=squared_mean)
+        squared_mean += 3.0
+        roundoff *= squared_mean
+        np.copyto(raw_spread, 0.0, where=raw_spread <= roundoff)
+        np.maximum(raw_spread, 0.0, out=raw_spread)
+        spread = raw_spread
         # The unbiased sample variance; NaN where one sample cannot show a
         # spread, so that fmax below takes the sigma instead of a zero.
         variance = np.where(n > 1.0, spread * n / (n - 1.0), np.nan)

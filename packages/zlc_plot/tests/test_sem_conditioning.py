@@ -78,6 +78,28 @@ def test_the_answer_does_not_depend_on_where_zero_is() -> None:
     far, _ = _drawn_sem(6.834e9, scatter)
     np.testing.assert_allclose(near, far, rtol=1e-9)
 
+def test_a_constant_bucket_does_not_turn_one_roundoff_bit_into_a_sem() -> None:
+    """A one-ulp moment residual is numerical zero, not extreme confidence.
+
+    Curve moments share one nearby reference across buckets.  A bucket whose
+    samples are all zero can therefore subtract two equal non-binary squares;
+    if their last bit rounds in opposite directions, clipping only negative
+    residuals leaves a fake positive SEM near 1e-9.
+    """
+
+    from zlc_plot.data_view import _sem_from_moments
+
+    mean = np.asarray([-0.21644806294627436])
+    square = np.square(mean)
+    mean_of_squares = np.nextafter(square, np.inf)
+    sem = _sem_from_moments(mean, mean_of_squares, np.asarray([20]))
+    assert sem[0] == 0.0
+
+    distinguishable = square + (
+        128.0 * np.finfo(np.float64).eps * (np.abs(square) + square)
+    )
+    assert _sem_from_moments(mean, distinguishable, np.asarray([20]))[0] > 0.0
+
 def test_the_mean_of_samples_that_carry_their_own_error() -> None:
     """The scatter already contains the errors; the sigma fills its silence.
 
