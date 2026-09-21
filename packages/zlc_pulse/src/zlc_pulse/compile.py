@@ -1,10 +1,20 @@
-"""Lower PulseSequence values to the frozen edge-table program."""
+"""Lower PulseSequence values to the frozen period-table program.
+
+The board plays a PERIOD TABLE: one row per authored period holding how long
+the row lasts (a tick count, or which scan slot supplies it), the TTL levels
+it holds, and what each DAC bus does when the row is entered.  Brackets are a
+separate loop table the board's row walker follows, so a bracket body is
+stored once however many times it plays.  Nothing here is affine: a scan
+point is the plain vector of slot values -- a duration in ticks, a DAC code --
+that the rows read at run time.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from itertools import chain
 import math
 
 from .canonical import canonical_digest
@@ -12,11 +22,11 @@ from .model import (
     FIELD_DAC,
     FIELD_DURATION,
     MAXIMUM_REPEAT_COUNT,
+    MINIMUM_BRACKET_COUNT,
     PORT_CLOCK,
     PORT_DAC,
     PulseFieldRef,
     PulseSequence,
-    PulseBinding,
     exact_ticks,
 )
 from .wire import StreamerParams, build_fingerprint
@@ -39,34 +49,105 @@ class TargetBusDelay:
 
 
 @dataclass(frozen=True)
-class TargetBusSegment:
+class TargetBusAction:
+    """What one DAC bus does when one row is entered.
+
+    ``edge`` takes the value at the row's first tick; ``ramp`` walks from the
+    level the bus holds when the row is entered to the value over the row's
+    whole duration.  ``value`` is the offset-binary code, unless
+    ``value_select`` names a scan slot (``k`` = slot ``k-1``) that supplies it.
+    """
+
+    row: int
     bus_index: int
     bus_name: str
-    start_tick: int
-    stop_tick: int
-    start_value: int
-    stop_value: int
     mode: str
-    value_select: int
-    stop_value_select: int
-    start_tick_coeffs: tuple[int, ...] = ()
-    stop_tick_coeffs: tuple[int, ...] = ()
+    value: int
+    value_select: int = 0
 
     def __post_init__(self) -> None:
-        if isinstance(self.bus_index, bool) or not isinstance(self.bus_index, int) or self.bus_index < 0:
-            raise ValueError("bus_index must be a non-negative integer")
+        for name in ("row", "bus_index", "value", "value_select"):
+            item = getattr(self, name)
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         if not isinstance(self.bus_name, str) or not self.bus_name:
             raise ValueError("bus_name must be non-empty text")
-        for name in ("start_tick", "stop_tick", "start_value", "stop_value", "value_select", "stop_value_select"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(f"{name} must be an integer")
-        if self.start_tick < 0 or self.stop_tick < self.start_tick:
-            raise ValueError("bus segment ticks are out of order")
         if self.mode not in BUS_MODES:
-            raise ValueError("bus segment mode must be 'edge' or 'ramp'")
-        object.__setattr__(self, "start_tick_coeffs", tuple(int(value) for value in self.start_tick_coeffs))
-        object.__setattr__(self, "stop_tick_coeffs", tuple(int(value) for value in self.stop_tick_coeffs))
+            raise ValueError("bus action mode must be 'edge' or 'ramp'")
+
+
+def bracket_iterations(loop_count: int, bodies: int | None) -> Iterable[int]:
+    """Which replays of a Bracket to walk: every one, or a bounded first-and-last.
+
+    A delay-FIFO check needs the TRUE elapsed time of a Pulse -- so the
+    Pulses after it land where they really land -- but not every body of a
+    Bracket that replays a billion times.  The bodies are identical, so once
+    ``bodies`` of them have played a queue has either overflowed or repeats
+    its state, and the last ``bodies`` see the loop out exactly the way the
+    first saw it in; the ones between are the same again at ticks no window
+    can tell apart from those.  Walking a SHORTENED loop instead moved every
+    later Pulse earlier, and a body that changed no level at all -- which
+    adds no entry to any queue -- was refused for crowding runs together
+    that the board plays comfortably apart.  ``None`` walks every replay.
+    """
+
+    if bodies is None or loop_count <= 2 * bodies:
+        return range(loop_count)
+    return chain(range(bodies), range(loop_count - bodies, loop_count))
+
+
+@dataclass(frozen=True)
+class LoopNode:
+    """One loop of the table with the loops it encloses, in row order."""
+
+    start: int
+    end: int
+    count: int
+    children: tuple["LoopNode", ...] = ()
+
+
+def loop_tree(loops: Sequence[tuple[int, int, int]]) -> tuple[LoopNode, ...]:
+    """The loop table as a forest, outermost loops at the top level.
+
+    The table is stored outer-first (start ascending, end descending), which
+    is exactly the order the board's walker pushes loops, so a stack rebuilds
+    the nesting without searching.
+    """
+
+    roots: list[LoopNode] = []
+    pending: list[tuple[int, int, int, list[LoopNode]]] = []
+
+    def close(node: tuple[int, int, int, list[LoopNode]]) -> None:
+        built = LoopNode(node[0], node[1], node[2], tuple(node[3]))
+        if pending:
+            pending[-1][3].append(built)
+        else:
+            roots.append(built)
+
+    for start, end, count in loops:
+        while pending and not (pending[-1][0] <= start and end <= pending[-1][1]):
+            close(pending.pop())
+        pending.append((start, end, count, []))
+    while pending:
+        close(pending.pop())
+    return tuple(roots)
+
+
+def loop_nesting_depth(loops: Sequence[tuple[int, int, int]]) -> int:
+    """How many loops the board must hold on its stack at once."""
+
+    return max(
+        (
+            1 + sum(
+                other != index
+                and loops[other][0] <= start
+                and end <= loops[other][1]
+                for other in range(len(loops))
+            )
+            for index, (start, end, _count) in enumerate(loops)
+        ),
+        default=0,
+    )
 
 
 @dataclass(frozen=True)
@@ -75,18 +156,18 @@ class CompiledProgram:
     target_abi_fingerprint: str
     geometry_fingerprint: int
     channels: tuple[str, ...]
-    ticks: tuple[int, ...]
+    #: Per row: how many ticks it lasts when no slot supplies the duration.
+    durations: tuple[int, ...]
+    #: Per row: ``0`` plays ``durations[row]``; ``k`` plays scan slot ``k-1``.
+    duration_slots: tuple[int, ...]
+    #: Per row: the TTL levels held for the whole row (raw-lane bits).
     masks: tuple[int, ...]
+    #: ``(first_row, last_row, count)`` per bracket, outermost first.
+    loops: tuple[tuple[int, int, int], ...]
     duration_seconds: float
-    loop_start_index: int
-    loop_end_tick: int
-    loop_count: int
     slot_kinds: tuple[str, ...] = ()
-    loop_end_slot_coeffs: tuple[int, ...] = ()
-    tick_slot_coeffs: tuple[tuple[int, ...], ...] = ()
-    scan_coeff_frac_bits: int = 0
     bus_names: tuple[str, ...] = ()
-    bus_segments: tuple[TargetBusSegment, ...] = ()
+    bus_actions: tuple[TargetBusAction, ...] = ()
     bus_delays: tuple[TargetBusDelay, ...] = ()
     channel_delays: tuple[int, ...] = ()
     clk_enable: int = 0
@@ -105,95 +186,145 @@ class CompiledProgram:
         ):
             raise ValueError("geometry_fingerprint must be an unsigned 32-bit integer")
         channels = tuple(self.channels)
-        ticks = tuple(int(value) for value in self.ticks)
-        masks = tuple(int(value) for value in self.masks)
         if not channels or len(set(channels)) != len(channels):
             raise ValueError("program channels must be unique and non-empty")
-        if not ticks or len(ticks) != len(masks) or ticks[0] != 0:
-            raise ValueError("program edge rows must start at zero and have equal lengths")
-        if masks[-1] != 0:
-            raise ValueError("program must finish at the all-low mask")
+        durations = tuple(int(value) for value in self.durations)
+        duration_slots = tuple(int(value) for value in self.duration_slots)
+        masks = tuple(int(value) for value in self.masks)
+        rows = len(durations)
+        if not rows or len(duration_slots) != rows or len(masks) != rows:
+            raise ValueError("program rows must be non-empty and of equal lengths")
+        if any(not 1 <= value <= MAXIMUM_REPEAT_COUNT for value in durations):
+            raise ValueError("every row duration must be from 1 through 2^32-1 ticks")
         slot_kinds = tuple(self.slot_kinds)
-        if any(right < left for left, right in zip(ticks, ticks[1:])):
-            raise ValueError("program edge tick bases must be non-decreasing")
-        if not slot_kinds and any(right <= left for left, right in zip(ticks, ticks[1:])):
-            raise ValueError("static program edge ticks must be strictly increasing")
         if any(kind not in (FIELD_DURATION, FIELD_DAC) for kind in slot_kinds):
             raise ValueError("program contains an unsupported slot kind")
-        slot_count = len(slot_kinds)
-        coeffs = tuple(tuple(int(value) for value in row) for row in self.tick_slot_coeffs)
-        if len(coeffs) != len(ticks) or any(len(row) != slot_count for row in coeffs):
-            raise ValueError("program coefficient matrix has the wrong shape")
-        loop_coeffs = tuple(int(value) for value in self.loop_end_slot_coeffs)
-        if len(loop_coeffs) != slot_count:
-            raise ValueError("program loop coefficient width differs from slot count")
+        for selector in duration_slots:
+            if selector < 0 or selector > len(slot_kinds):
+                raise ValueError("a row names a duration slot the program does not have")
+            if selector and slot_kinds[selector - 1] != FIELD_DURATION:
+                raise ValueError("a row duration can only come from a duration slot")
+        if any(value < 0 for value in masks):
+            raise ValueError("row masks must be non-negative")
+        loops = tuple(
+            (int(start), int(end), int(count)) for start, end, count in self.loops
+        )
+        for start, end, count in loops:
+            if not 0 <= start <= end < rows:
+                raise ValueError("a loop lies outside the row table")
+            if not MINIMUM_BRACKET_COUNT <= count <= MAXIMUM_REPEAT_COUNT:
+                raise ValueError("a loop count must be from 2 through 2^32-1")
+        for index, (start, end, _count) in enumerate(loops):
+            for other_start, other_end, _other in loops[index + 1:]:
+                nested = (
+                    (start <= other_start and other_end <= end)
+                    or (other_start <= start and end <= other_end)
+                )
+                disjoint = end < other_start or other_end < start
+                if not (nested or disjoint):
+                    raise ValueError("loops overlap without one lying inside the other")
+        if loops != tuple(sorted(loops, key=lambda loop: (loop[0], -loop[1]))):
+            raise ValueError("loops must be stored outermost first")
         channel_delays = tuple(self.channel_delays) or (0,) * len(channels)
         if len(channel_delays) != len(channels):
             raise ValueError("channel delay vector must match channels")
+        bus_names = tuple(self.bus_names)
+        actions = tuple(self.bus_actions)
+        if any(not isinstance(action, TargetBusAction) for action in actions):
+            raise TypeError("bus_actions must contain TargetBusAction values")
+        placed: set[tuple[int, int]] = set()
+        for action in actions:
+            if action.row >= rows:
+                raise ValueError("a bus action names a row outside the table")
+            if action.bus_index >= len(bus_names) or bus_names[action.bus_index] != action.bus_name:
+                raise ValueError("a bus action names a bus the program does not have")
+            if action.value_select > len(slot_kinds):
+                raise ValueError("a bus action names a slot the program does not have")
+            if action.value_select and slot_kinds[action.value_select - 1] != FIELD_DAC:
+                raise ValueError("a bus value can only come from a DAC slot")
+            key = (action.row, action.bus_index)
+            if key in placed:
+                raise ValueError("a row has at most one action per DAC bus")
+            placed.add(key)
+        safe_values = tuple(int(value) for value in self.bus_safe_values)
+        if len(safe_values) != len(bus_names):
+            raise ValueError("one safe value per DAC bus")
         if (
-            isinstance(self.loop_start_index, bool)
-            or not isinstance(self.loop_start_index, int)
-            or self.loop_start_index < 0
-            or self.loop_start_index >= len(ticks)
+            isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not math.isfinite(float(self.duration_seconds))
+            or self.duration_seconds < 0
         ):
-            raise ValueError("loop_start_index is outside the edge table")
-        if (
-            isinstance(self.loop_count, bool)
-            or not isinstance(self.loop_count, int)
-            or not 1 <= self.loop_count <= MAXIMUM_REPEAT_COUNT
-            or self.loop_end_tick <= ticks[self.loop_start_index]
-        ):
-            raise ValueError("program loop metadata is invalid")
+            raise ValueError("duration_seconds must be a finite non-negative number")
         object.__setattr__(self, "channels", channels)
-        object.__setattr__(self, "ticks", ticks)
+        object.__setattr__(self, "durations", durations)
+        object.__setattr__(self, "duration_slots", duration_slots)
         object.__setattr__(self, "masks", masks)
+        object.__setattr__(self, "loops", loops)
         object.__setattr__(self, "slot_kinds", slot_kinds)
-        object.__setattr__(self, "tick_slot_coeffs", coeffs)
-        object.__setattr__(self, "loop_end_slot_coeffs", loop_coeffs)
-        object.__setattr__(self, "bus_segments", tuple(self.bus_segments))
+        object.__setattr__(self, "bus_actions", actions)
         object.__setattr__(self, "bus_delays", tuple(self.bus_delays))
-        object.__setattr__(self, "bus_names", tuple(self.bus_names))
+        object.__setattr__(self, "bus_names", bus_names)
         object.__setattr__(self, "logical_digital_outputs", tuple(tuple(item) for item in self.logical_digital_outputs))
-        object.__setattr__(self, "bus_safe_values", tuple(self.bus_safe_values))
+        object.__setattr__(self, "bus_safe_values", safe_values)
         object.__setattr__(self, "channel_delays", tuple(int(value) for value in channel_delays))
-        # Prove the derived scan-unit metadata now, while malformed programs
-        # can still be refused at their construction boundary.
-        self._duration_tick_scales()
 
     @property
     def slot_count(self) -> int:
         return len(self.slot_kinds)
 
-    def _duration_tick_scales(self) -> tuple[int, ...]:
-        quantum = 1 << int(self.scan_coeff_frac_bits)
-        result: list[int] = []
-        for index, kind in enumerate(self.slot_kinds):
-            if kind == FIELD_DAC:
-                result.append(1)
-                continue
-            coefficients = {
-                row[index]
-                for row in self.tick_slot_coeffs
-                if row[index]
-            }
-            if self.loop_end_slot_coeffs[index]:
-                coefficients.add(self.loop_end_slot_coeffs[index])
-            if (
-                not coefficients
-                or any(value <= 0 or value % quantum for value in coefficients)
-                or len({value // quantum for value in coefficients}) != 1
-            ):
-                raise ValueError(
-                    "duration slot coefficients do not describe one tick scale"
-                )
-            result.append(next(iter(coefficients)) // quantum)
-        return tuple(result)
+    @property
+    def row_count(self) -> int:
+        return len(self.durations)
 
     @property
-    def slot_tick_scales(self) -> tuple[int, ...]:
-        """Wire tick quanta, derived from the affine coefficients themselves."""
+    def loop_depth(self) -> int:
+        """How many loops the board holds on its stack at once for this program."""
 
-        return self._duration_tick_scales()
+        return loop_nesting_depth(self.loops)
+
+    def resolved_durations(self, point: Sequence[int] = ()) -> tuple[int, ...]:
+        """How long each row lasts for one scan point, in ticks."""
+
+        values = tuple(int(value) for value in point)
+        if len(values) != self.slot_count:
+            raise ValueError(
+                f"a scan point has one value per slot: {self.slot_count} "
+                f"slot(s), {len(values)} value(s)"
+            )
+        return tuple(
+            values[selector - 1] if selector else literal
+            for literal, selector in zip(self.durations, self.duration_slots, strict=True)
+        )
+
+    def resolved_bus_value(self, action: TargetBusAction, point: Sequence[int] = ()) -> int:
+        """The offset-binary code one action drives for one scan point."""
+
+        if action.value_select:
+            return int(point[action.value_select - 1])
+        return int(action.value)
+
+    def frame_visits(
+        self,
+        point: Sequence[int] = (),
+        *,
+        bracket_bodies: int | None = None,
+    ) -> tuple[tuple[int, int], ...]:
+        """Every row the board enters in one Pulse, as ``(row, start tick)``.
+
+        Loops are expanded in the board's own order.  ``bracket_bodies``
+        walks only the first and last that many replays of every loop, at
+        their true ticks (see :func:`bracket_iterations`), which is what
+        bounds a capacity check over a loop that replays a body a billion
+        times.
+        """
+
+        return frame_visits(self.resolved_durations(point), self.loops, bracket_bodies)
+
+    def frame_ticks(self, point: Sequence[int] = ()) -> int:
+        """How many ticks one complete Pulse lasts for one scan point."""
+
+        return frame_ticks(self.resolved_durations(point), self.loops)
 
     @property
     def digest(self) -> str:
@@ -206,7 +337,7 @@ class CompiledProgram:
         something else, and neither side has to remember anything.
 
         Of the compiled program, deliberately, not of the document it came
-        from: a renamed period changes the document and not one edge the board
+        from: a renamed period changes the document and not one row the board
         will play, and reporting that as stale teaches an operator to ignore
         the light.
 
@@ -217,239 +348,102 @@ class CompiledProgram:
 
         return canonical_digest(self)
 
-def _frozen_slot_operand_width() -> int:
-    from .wire import FROZEN_SLOT_MUL_WIDTH  # noqa: PLC0415 -- config, not a cycle
 
-    return int(FROZEN_SLOT_MUL_WIDTH)
+def _loop_span(node: LoopNode, durations: Sequence[int]) -> int:
+    """How many ticks one replay of a loop body lasts, inner loops fully played."""
 
-
-#: How many signed bits the board's affine multiplier takes of a slot value.
-#:
-#: The RTL's, said once: ``load_streamer_config`` refuses any config whose
-#: ``slot_mul_width`` differs from the frozen width the bitstream synthesises
-#: with, so reading the config for it -- a directory search and a JSON parse
-#: in every process that imports this package, at import, before anything has
-#: asked to compile -- could only ever return that same number.
-SLOT_OPERAND_WIDTH = _frozen_slot_operand_width()
+    total = 0
+    row = node.start
+    for child in node.children:
+        total += sum(durations[row:child.start]) + child.count * _loop_span(child, durations)
+        row = child.end + 1
+    return total + sum(durations[row:node.end + 1])
 
 
-def slot_operand_width() -> int:
-    """How many signed bits the board's affine multiplier takes of a slot value."""
+def frame_ticks(durations: Sequence[int], loops: Sequence[tuple[int, int, int]]) -> int:
+    """How many ticks one complete Pulse of resolved row durations lasts."""
 
-    return SLOT_OPERAND_WIDTH
-
-
-def maximum_duration_tick_scale(params: StreamerParams) -> int:
-    """Largest whole-tick duration coefficient the deployed Q format holds."""
-
-    if not isinstance(params, StreamerParams):
-        raise TypeError("params must be StreamerParams")
-    return ((1 << (params.coeff_width - 1)) - 1) >> params.coeff_frac_bits
+    return _loop_span(LoopNode(0, len(durations) - 1, 1, loop_tree(loops)), durations)
 
 
-def narrow_slot_operand(value: int) -> int:
-    """One slot value as the board's multiplier will see it.
+def frame_visits(
+    durations: Sequence[int],
+    loops: Sequence[tuple[int, int, int]],
+    bracket_bodies: int | None = None,
+) -> tuple[tuple[int, int], ...]:
+    """Every row one Pulse enters, as ``(row, start tick)``, in the board's order."""
 
-    The RTL takes ``$signed(slots[.. +: SLOT_MUL_WIDTH])`` -- the low bits,
-    signed.  A value that does not fit wraps, and the board then plays an edge
-    at a tick the host never predicted.
-    """
-
-    width = SLOT_OPERAND_WIDTH
-    mask = (1 << width) - 1
-    narrowed = int(value) & mask
-    if narrowed & (1 << (width - 1)):
-        narrowed -= 1 << width
-    return narrowed
+    visits: list[tuple[int, int]] = []
+    _walk_rows(loop_tree(loops), 0, len(durations) - 1, 0, durations, bracket_bodies, visits)
+    return tuple(visits)
 
 
-def evaluate_affine_tick(base: int, coefficients: Sequence[int], point: Sequence[int], frac_bits: int) -> int:
-    """The tick one edge lands on for one scan point, as the BOARD computes it.
-
-    The slot operand is narrowed the way the RTL narrows it.  Duration slots
-    carry signed tick deltas around a full-width nominal base; DAC slots carry
-    their offset-binary code.  Values outside the multiplier width are refused
-    before this function is used for a hardware application.
-    """
-
-    return int(base) + (
-        sum(
-            int(coefficient) * narrow_slot_operand(value)
-            for coefficient, value in zip(coefficients, point)
-        )
-        >> int(frac_bits)
-    )
+def _walk_rows(
+    nodes: Sequence[LoopNode],
+    first_row: int,
+    last_row: int,
+    tick: int,
+    durations: Sequence[int],
+    bodies: int | None,
+    visits: list[tuple[int, int]],
+) -> int:
+    row = first_row
+    for node in nodes:
+        for index in range(row, node.start):
+            visits.append((index, tick))
+            tick += durations[index]
+        span = _loop_span(node, durations)
+        previous = -1
+        for iteration in bracket_iterations(node.count, bodies):
+            tick += (iteration - previous - 1) * span
+            tick = _walk_rows(node.children, node.start, node.end, tick, durations, bodies, visits)
+            previous = iteration
+        tick += (node.count - 1 - previous) * span
+        row = node.end + 1
+    for index in range(row, last_row + 1):
+        visits.append((index, tick))
+        tick += durations[index]
+    return tick
 
 
 def _slot_index(sequence: PulseSequence) -> dict[PulseFieldRef, int]:
     return {slot.field_ref: index for index, slot in enumerate(sequence.scan_bindings)}
 
 
-def _default_slot_value(sequence: PulseSequence, slot: PulseBinding) -> int:
-    ref = slot.field_ref
-    if ref.kind == FIELD_DURATION:
-        # Duration slots are signed deltas around the period's full-width base.
-        return 0
-    if ref.kind == FIELD_DAC:
-        period = sequence.period_by_id[ref.period_id]
-        step = next((item for item in period.analog_steps if item.port == ref.port), None)
-        if step is None:
-            # The model admits a binding whose step is gone -- taking a step
-            # away is a legal intermediate state of an edit, pruned afterwards
-            # -- so the compiler is where a pulse read as a whole says which
-            # binding has nothing to bind.
-            raise ValueError(
-                f"scan slot {slot.field_id!r} names the DAC field {ref.port!r} of "
-                f"period {ref.period_id!r}, which has no step on that port"
-            )
-        port = sequence.target.by_key[ref.port]
-        return int(step.value - port.signed_range[0])
-    raise ValueError(f"unsupported scan slot kind {ref.kind!r}")
+def nominal_slot_values(sequence: PulseSequence) -> tuple[int, ...]:
+    """The authored value of every scan slot, as the wire carries it.
 
+    A duration slot holds the period's tick count; a DAC slot holds the
+    step's offset-binary code.  This is the point a scan-bound pulse plays
+    before any table has been authored, and what previews are drawn from.
+    """
 
-def _nominal_slot_row(sequence: PulseSequence) -> tuple[int, ...]:
-    """The authored values used only to validate the compiled affine form."""
-
-    return tuple(_default_slot_value(sequence, slot) for slot in sequence.scan_bindings)
-
-
-def _period_starts(
-    sequence: PulseSequence,
-    binding: Mapping[PulseFieldRef, int],
-    frac_bits: int,
-    slot_tick_scales: Sequence[int],
-) -> list[tuple[int, tuple[int, ...]]]:
-    coefficient_scale = 1 << frac_bits
-    zeros = tuple(0 for _ in sequence.scan_bindings)
-    starts: list[tuple[int, tuple[int, ...]]] = [(0, zeros)]
-    for period in sequence.periods:
-        selector = binding.get(PulseFieldRef(FIELD_DURATION, period.period_id))
-        nominal = exact_ticks(
-            period.duration,
-            period.unit,
-            sequence.time_step_ns,
-            "period duration",
-        )
-        if selector is None:
-            base = nominal
-            coeff = zeros
-        else:
-            base = nominal
-            tick_scale = int(slot_tick_scales[selector])
-            coeff = tuple(
-                coefficient_scale * tick_scale if index == selector else 0
-                for index in range(sequence.slot_count)
-            )
-        starts.append((
-            starts[-1][0] + base,
-            tuple(left + right for left, right in zip(starts[-1][1], coeff)),
-        ))
-    return starts
-
-
-def _effective_rows(
-    sequence: PulseSequence,
-    starts: Sequence[tuple[int, tuple[int, ...]]],
-    frac_bits: int,
-    reference: Sequence[int],
-) -> tuple[list[int], list[int], list[tuple[int, ...]]]:
-    lane_bits = {lane: index for index, lane in enumerate(sequence.target.raw_lanes)}
-    events: dict[tuple[int, tuple[int, ...]], list[tuple[str, int]]] = {}
-    for lane_index, lane in enumerate(sequence.target.raw_lanes):
-        owner = next(port for port in sequence.target.ports if lane in port.lanes)
-        if owner.kind != "digital":
-            continue
-        active: tuple[int, tuple[int, ...]] | None = None
-        for period_index, period in enumerate(sequence.periods):
-            if period.states[lane_index] and active is None:
-                active = starts[period_index]
-            elif not period.states[lane_index] and active is not None:
-                events.setdefault(active, []).append((lane, 1))
-                events.setdefault(starts[period_index], []).append((lane, 0))
-                active = None
-        if active is not None:
-            events.setdefault(active, []).append((lane, 1))
-            events.setdefault(starts[-1], []).append((lane, 0))
-    zeros = (0, tuple(0 for _ in sequence.scan_bindings))
-    events.setdefault(zeros, [])
-    events.setdefault(starts[-1], [])
-    if sequence.bracket is not None:
-        start_index = next(
-            index
-            for index, period in enumerate(sequence.periods)
-            if period.period_id == sequence.bracket.start_period_id
-        )
-        events.setdefault(starts[start_index], [])
-    ordered = sorted(
-        events,
-        key=lambda expression: (
-            evaluate_affine_tick(expression[0], expression[1], reference, frac_bits),
-            expression,
-        ),
-    )
-    reference_ticks = [evaluate_affine_tick(base, coeff, reference, frac_bits) for base, coeff in ordered]
-    if reference_ticks[0] != 0 or any(right <= left for left, right in zip(reference_ticks, reference_ticks[1:])):
-        raise ValueError("slot values make edge rows collide or move before time zero")
-    masks: list[int] = []
-    ticks: list[int] = []
-    coeffs: list[tuple[int, ...]] = []
-    current = 0
-    for expression in ordered:
-        for lane, state in events[expression]:
-            bit = 1 << lane_bits[lane]
-            current = current | bit if state else current & ~bit
-        ticks.append(expression[0])
-        masks.append(current)
-        coeffs.append(expression[1])
-    if masks[-1] != 0:
-        raise ValueError("sequence must end with all digital outputs low")
-    return ticks, masks, coeffs
-
-
-def _bus_segments(
-    sequence: PulseSequence,
-    starts: Sequence[tuple[int, tuple[int, ...]]],
-    binding: Mapping[PulseFieldRef, int],
-) -> tuple[tuple[str, ...], tuple[TargetBusSegment, ...]]:
-    buses = sorted((port for port in sequence.target.ports if port.kind == PORT_DAC), key=lambda port: port.bus_index)
-    names = tuple(port.key for port in buses)
-    segments: list[TargetBusSegment] = []
-    for port in buses:
-        for period_index, period in enumerate(sequence.periods):
-            action = next((item for item in period.analog_steps if item.port == port.key), None)
-            if action is None:
-                continue
-            ref = PulseFieldRef(FIELD_DAC, period.period_id, port.key)
-            selector = binding.get(ref)
-            if selector is None:
-                code = action.value - port.signed_range[0]
-                start_value = stop_value = code
-                value_select = stop_select = 0
-            else:
-                start_value = stop_value = 0
-                value_select = stop_select = selector + 1
-            start_tick, start_coeff = starts[period_index]
-            stop_tick, stop_coeff = starts[period_index + 1]
-            if action.mode == "edge":
-                stop_tick, stop_coeff = start_tick, start_coeff
-                stop_value, stop_select = start_value, value_select
-            else:
-                start_value = 0
-                value_select = 0
-            segments.append(TargetBusSegment(
-                int(port.bus_index),
-                port.key,
-                start_tick,
-                stop_tick,
-                start_value,
-                stop_value,
-                action.mode,
-                value_select,
-                stop_select,
-                tuple(start_coeff),
-                tuple(stop_coeff),
+    values: list[int] = []
+    for slot in sequence.scan_bindings:
+        ref = slot.field_ref
+        if ref.kind == FIELD_DURATION:
+            period = sequence.period_by_id[ref.period_id]
+            values.append(exact_ticks(
+                period.duration, period.unit, sequence.time_step_ns,
+                f"period {period.period_id} duration",
             ))
-    return names, tuple(segments)
+        elif ref.kind == FIELD_DAC:
+            period = sequence.period_by_id[ref.period_id]
+            step = next((item for item in period.analog_steps if item.port == ref.port), None)
+            if step is None:
+                # The model admits a binding whose step is gone -- taking a step
+                # away is a legal intermediate state of an edit, pruned afterwards
+                # -- so the compiler is where a pulse read as a whole says which
+                # binding has nothing to bind.
+                raise ValueError(
+                    f"scan slot {slot.field_id!r} names the DAC field {ref.port!r} of "
+                    f"period {ref.period_id!r}, which has no step on that port"
+                )
+            port = sequence.target.by_key[ref.port]
+            values.append(int(step.value - port.signed_range[0]))
+        else:
+            raise ValueError(f"unsupported scan slot kind {ref.kind!r}")
+    return tuple(values)
 
 
 def analog_levels(sequence: PulseSequence) -> dict[str, tuple[tuple[int, int], ...]]:
@@ -556,14 +550,12 @@ def compile_sequence(
     sequence: PulseSequence,
     geom: StreamerParams,
     clock_hz: float,
-    *,
-    slot_tick_scales: Sequence[int] | None = None,
 ) -> CompiledProgram:
     """Compile once; slot rows are data written later by the device API."""
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    sequence.require_nonempty_bracket()
+    sequence.require_nonempty_brackets()
     if sequence.api_bindings:
         declared = tuple(
             parameter.field_id for parameter in sequence.api_bindings
@@ -587,121 +579,111 @@ def compile_sequence(
         raise ValueError("clock_hz must be positive and finite")
     if Fraction(str(sequence.time_step_ns)) * Fraction(str(clock_hz)) != 1_000_000_000:
         raise ValueError("sequence time_step_ns does not match the compiler clock_hz")
-    frac_bits = params.coeff_frac_bits if sequence.scan_bindings else 0
-    selected_slot_scales = (
-        (1,) * sequence.slot_count
-        if slot_tick_scales is None
-        else tuple(slot_tick_scales)
-    )
-    if (
-        len(selected_slot_scales) != sequence.slot_count
-        or any(type(value) is not int or value < 1 for value in selected_slot_scales)
-    ):
-        raise ValueError("slot_tick_scales must contain one positive integer per slot")
-    if any(
-        slot.kind != FIELD_DURATION and scale != 1
-        for slot, scale in zip(sequence.scan_bindings, selected_slot_scales, strict=True)
-    ):
-        raise ValueError("DAC slot tick scale must remain 1")
-    maximum_tick_scale = maximum_duration_tick_scale(params) if sequence.scan_bindings else 1
-    if any(value > maximum_tick_scale for value in selected_slot_scales):
+    if sequence.slot_count > params.num_slots:
         raise ValueError(
-            f"slot tick scale exceeds the {params.coeff_width}-bit Q{frac_bits} "
-            f"coefficient range ({maximum_tick_scale})"
+            f"sequence binds {sequence.slot_count} scan slot(s) but the streamer "
+            f"geometry holds {params.num_slots}"
+        )
+    if len(sequence.periods) > params.max_rows:
+        raise ValueError(
+            f"sequence has {len(sequence.periods)} periods but the streamer geometry "
+            f"holds {params.max_rows} rows"
+        )
+    if len(sequence.brackets) > params.max_loops:
+        raise ValueError(
+            f"sequence has {len(sequence.brackets)} brackets but the streamer geometry "
+            f"holds {params.max_loops} loops"
+        )
+    depth = max(sequence.bracket_depths, default=0)
+    if depth > params.loop_depth:
+        raise ValueError(
+            f"brackets nest {depth} deep but the streamer geometry holds "
+            f"{params.loop_depth} levels"
         )
     binding = _slot_index(sequence)
-    starts = _period_starts(
-        sequence,
-        binding,
-        frac_bits,
-        selected_slot_scales,
-    )
-    reference = _nominal_slot_row(sequence)
-    ticks, masks, coeffs = _effective_rows(sequence, starts, frac_bits, reference)
-    clk_enable = 0
+    nominal = nominal_slot_values(sequence)
     lane_index = {lane: index for index, lane in enumerate(sequence.target.raw_lanes)}
+    clk_enable = 0
     for port in sequence.target.ports:
         if port.kind == PORT_CLOCK:
             clk_enable |= 1 << lane_index[port.lanes[0]]
-    masks = [mask & ~clk_enable for mask in masks]
-    bus_names, bus_segments = _bus_segments(sequence, starts, binding)
+    buses = sorted((port for port in sequence.target.ports if port.kind == PORT_DAC), key=lambda port: port.bus_index)
+    bus_names = tuple(port.key for port in buses)
+    durations: list[int] = []
+    duration_slots: list[int] = []
+    masks: list[int] = []
+    actions: list[TargetBusAction] = []
+    for row, period in enumerate(sequence.periods):
+        durations.append(exact_ticks(
+            period.duration, period.unit, sequence.time_step_ns,
+            f"period {period.period_id} duration",
+        ))
+        selector = binding.get(PulseFieldRef(FIELD_DURATION, period.period_id))
+        duration_slots.append(0 if selector is None else selector + 1)
+        mask = 0
+        for index, state in enumerate(period.states):
+            if state:
+                mask |= 1 << index
+        masks.append(mask & ~clk_enable)
+        for port in buses:
+            step = next((item for item in period.analog_steps if item.port == port.key), None)
+            if step is None:
+                continue
+            selector = binding.get(PulseFieldRef(FIELD_DAC, period.period_id, port.key))
+            actions.append(TargetBusAction(
+                row,
+                int(port.bus_index),
+                port.key,
+                step.mode,
+                0 if selector is not None else step.value - port.signed_range[0],
+                0 if selector is None else selector + 1,
+            ))
+    loops = tuple(
+        (start, end - 1, bracket.count)
+        for bracket, (start, end) in zip(sequence.brackets, sequence.bracket_bounds, strict=True)
+    )
     channel_delays, bus_delays = _delay_values(sequence)
-    bracket_start_index = 0
-    loop_end_tick, loop_end_coeffs = starts[-1]
-    loop_count = 1
-    if sequence.bracket is not None:
-        start_period = next(
-            index
-            for index, period in enumerate(sequence.periods)
-            if period.period_id == sequence.bracket.start_period_id
-        )
-        end_period = next(
-            index
-            for index, period in enumerate(sequence.periods)
-            if period.period_id == sequence.bracket.end_period_id
-        )
-        start_expr = starts[start_period]
-        bracket_matches = [
-            index
-            for index, row in enumerate(zip(ticks, coeffs))
-            if row == start_expr
-        ]
-        if bracket_matches:
-            bracket_start_index = bracket_matches[0]
-        loop_end_tick, loop_end_coeffs = starts[end_period + 1]
-        loop_count = sequence.bracket.count
-    final_tick = evaluate_affine_tick(ticks[-1], coeffs[-1], reference, frac_bits)
-    loop_start = evaluate_affine_tick(
-        ticks[bracket_start_index], coeffs[bracket_start_index], reference, frac_bits
-    )
-    nominal_loop_end = evaluate_affine_tick(
-        loop_end_tick, loop_end_coeffs, reference, frac_bits
-    )
-    duration = (
-        final_tick + (loop_count - 1) * (nominal_loop_end - loop_start)
-    ) / clock_hz
     logical = tuple(sorted(
         (port.key, port.lanes[0])
         for port in sequence.target.ports
         if port.kind == "digital"
     ))
-    safe_values = tuple(
-        port.safe_value
-        for port in sorted((port for port in sequence.target.ports if port.kind == PORT_DAC), key=lambda item: item.bus_index)
+    nominal_durations = tuple(
+        nominal[selector - 1] if selector else literal
+        for literal, selector in zip(durations, duration_slots, strict=True)
     )
     return CompiledProgram(
         clock_hz=clock_hz,
         target_abi_fingerprint=sequence.target.abi_fingerprint,
         geometry_fingerprint=build_fingerprint(params),
         channels=sequence.target.raw_lanes,
-        ticks=tuple(ticks),
+        durations=tuple(durations),
+        duration_slots=tuple(duration_slots),
         masks=tuple(masks),
-        duration_seconds=duration,
-        loop_start_index=bracket_start_index,
-        loop_end_tick=loop_end_tick,
-        loop_count=loop_count,
+        loops=loops,
+        duration_seconds=frame_ticks(nominal_durations, loops) / clock_hz,
         slot_kinds=tuple(slot.kind for slot in sequence.scan_bindings),
-        loop_end_slot_coeffs=tuple(loop_end_coeffs),
-        tick_slot_coeffs=tuple(coeffs),
-        scan_coeff_frac_bits=frac_bits,
         bus_names=bus_names,
-        bus_segments=bus_segments,
+        bus_actions=tuple(actions),
         bus_delays=bus_delays,
         channel_delays=channel_delays,
         clk_enable=clk_enable,
         logical_digital_outputs=logical,
-        bus_safe_values=safe_values,
+        bus_safe_values=tuple(port.safe_value for port in buses),
     )
 
 
 __all__ = [
     "COMPILER_ID",
     "CompiledProgram",
+    "LoopNode",
+    "TargetBusAction",
     "TargetBusDelay",
-    "TargetBusSegment",
+    "bracket_iterations",
     "compile_sequence",
-    "evaluate_affine_tick",
-    "maximum_duration_tick_scale",
-    "narrow_slot_operand",
-    "slot_operand_width",
+    "frame_ticks",
+    "frame_visits",
+    "loop_nesting_depth",
+    "loop_tree",
+    "nominal_slot_values",
 ]

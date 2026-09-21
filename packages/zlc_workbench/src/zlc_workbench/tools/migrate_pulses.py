@@ -103,8 +103,14 @@ def migrate_tree(before: Mapping) -> tuple[dict, tuple[str, ...]]:
                     })
             tree["bindings"] = bindings
             notes.append("physical Scan/API fields; named Config bindings")
-        if "repeat" in tree and "bracket" not in tree:
+        if "repeat" in tree and "bracket" not in tree and "brackets" not in tree:
             tree["bracket"] = tree.pop("repeat")
+        if "bracket" in tree and "brackets" not in tree:
+            # One optional bracket became a list of named, nestable brackets.
+            single = tree.pop("bracket")
+            tree["brackets"] = [] if single is None else [{"bracket_id": "bracket_1", **single}]
+            if single is not None:
+                notes.append("bracket -> brackets[bracket_1]")
         tree.setdefault("run_repeats", 0)
         if "config_source" in tree:
             tree.pop("config_source")

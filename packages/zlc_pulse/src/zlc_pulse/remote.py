@@ -27,7 +27,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from .compile import CompiledProgram, TargetBusDelay as _TargetBusDelay, TargetBusSegment as _TargetBusSegment
+from .compile import CompiledProgram, TargetBusAction as _TargetBusAction, TargetBusDelay as _TargetBusDelay
 from .device import (
     AppliedState,
     ConfigValueHolder,
@@ -98,8 +98,8 @@ _TREE_TYPES = {
         PulseTarget,
         SafeReadback,
         StreamerParams,
+        _TargetBusAction,
         _TargetBusDelay,
-        _TargetBusSegment,
     )
 }
 
@@ -191,14 +191,15 @@ def _drop_connection(connection: socket.socket) -> None:
 
 
 def _program_summary(program: object, *, source: object = None) -> str:
-    """Describe a loaded program without printing its full edge or DAC data."""
+    """Describe a loaded program without printing its full row or DAC data."""
 
     if not isinstance(program, CompiledProgram):
         return _log_fields(program_type=type(program).__name__)
     return _log_fields(
-        edges=len(program.ticks),
+        periods=program.row_count,
+        loops=len(program.loops),
         lanes=len(program.channels),
-        dac_segments=len(program.bus_segments),
+        dac_actions=len(program.bus_actions),
         slots=program.slot_count,
         duration_us=f"{program.duration_seconds * 1e6:.3f}",
         source="provided" if source is not None else "none",

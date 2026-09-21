@@ -164,7 +164,7 @@ def test_a_build_reads_the_config_as_one_exact_grammar(tmp_path: Path) -> None:
         require_streamer_config(tmp_path / "absent.json")
     with pytest.raises(ValueError, match="fields are not exact"):
         require_streamer_config(written(json.dumps({**document, "extra": 1})))
-    fewer = {key: value for key, value in document["params"].items() if key != "max_edges"}
+    fewer = {key: value for key, value in document["params"].items() if key != "max_rows"}
     with pytest.raises(ValueError, match="params fields are not exact"):
         require_streamer_config(written(json.dumps({**document, "params": fewer})))
     with pytest.raises(ValueError, match="duplicate key"):
@@ -187,7 +187,7 @@ def test_a_build_reads_the_config_as_one_exact_grammar(tmp_path: Path) -> None:
             require_streamer_config(written(json.dumps({**document, "uart_baud": invalid})))
 
 
-def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -> None:
+def test_frozen_35t_estimate_is_the_calibrated_period_table_model() -> None:
     config = load_streamer_config()
     assert config["target_pct"] == 98.0
 
@@ -195,23 +195,21 @@ def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -
         config["params"], part=config["fpga_part"], target_pct=config["target_pct"]
     )
     assert frozen["lut"] == {
-        "used": 19778,
+        "used": 11408,
         "budget": 20384,
         "total": 20800,
-        "pct": 95.1,
+        "pct": 54.8,
         "ok": True,
     }
     at_default = estimate_resources(config["params"], part=config["fpga_part"])
-    assert at_default["lut"]["ok"] is False
+    assert at_default["lut"]["ok"] is True
     assert at_default["lut"]["budget"] == 18720
 
-    assert frozen["ramb36"]["used"] == 37
-    assert frozen["ff"]["used"] == 14806
-    assert frozen["dsp"]["used"] == 76
-    baseline = replace(config["params"], channel_count=63, evt_fifo_depth=64)
-    assert estimate_resources(baseline, part=config["fpga_part"])["lut"]["used"] == 20050
-    with pytest.raises(ValueError, match=r"90% planning target: LUT 19778 > 18720"):
-        solve_capacity(config["fpga_part"])
+    # One 128-bit x 512 row BRAM (2 tiles), the two 2048-point scan banks
+    # (16 tiles) and the routed top's three tiles outside the geometry memories.
+    assert frozen["ramb36"]["used"] == 21
+    assert frozen["ff"]["used"] == 9000
+    assert frozen["dsp"]["used"] == 16
 
     planning = solve_capacity("xc7a50t")
     assert planning.all_within_budget()
@@ -227,21 +225,21 @@ def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -
 
 
 def test_capacity_search_uses_the_estimators_fixed_ramb36_cost() -> None:
-    # At 35 tiles the old solver's private +1 formula admitted 4096 edges,
-    # while the estimator's routed +3 accounting correctly reports 37. One
-    # estimator authority must instead choose the next 2048-edge geometry.
-    part = FpgaPartProfile("boundary", 35, 100000, 100000, 1000, 100000)
+    # 4096 rows of 128 bits are 16 tiles; with the 16-tile scan window and
+    # the routed +3 they need 35.  At 34 the one estimator authority must
+    # choose the next 2048-row geometry (8 + 16 + 3 = 27) instead.
+    part = FpgaPartProfile("boundary", 34, 100000, 100000, 1000, 100000)
     solved = solve_capacity(
         part,
         target_pct=100,
-        max_edges_cap=4096,
+        max_rows_cap=4096,
         engine_logic_luts=0,
         engine_ff=0,
         engine_dsp=0,
     )
-    assert solved.params.max_edges == 2048
-    assert solved.ramb36_used == 29
-    assert solved.ramb36_budget == 35
+    assert solved.params.max_rows == 2048
+    assert solved.ramb36_used == 27
+    assert solved.ramb36_budget == 34
     assert solved.all_within_budget()
     assert solved.resource_report == estimate_resources(
         solved.params,

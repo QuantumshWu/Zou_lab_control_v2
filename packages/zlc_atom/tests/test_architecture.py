@@ -426,7 +426,7 @@ def test_pulse_resolver_uses_the_project_json_document(
         "periods",
         "bindings",
         "delays",
-        "bracket",
+        "brackets",
         "run_repeats",
     )
     assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse"

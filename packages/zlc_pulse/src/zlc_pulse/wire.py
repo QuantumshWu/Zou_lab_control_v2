@@ -21,13 +21,13 @@ __all__ = [
     "STATUS_LOADED", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR", "STATUS_UNDERFLOW", "STATUS_LINK_ERROR",
     "REGISTER_LAYOUT_ID", "LAYOUT_STRUCT_VERSION", "build_fingerprint",
     "DEFAULT_CONFIG_PATH", "load_streamer_config", "params_from_config", "default_params",
-    "FROZEN_CLOCK_HZ", "FROZEN_SLOT_MUL_WIDTH",
+    "FROZEN_CLOCK_HZ",
     "DEFAULT_UART_BAUD", "default_uart_baud",
 ]
 
 # CTRL word 63 is the single host/bitstream geometry handshake.  The RTL carries
 # the precomputed value; host packing and generated headers call this function.
-LAYOUT_STRUCT_VERSION = 7   # TTL-only edge/delay words; DAC bus-index clock enable.
+LAYOUT_STRUCT_VERSION = 8   # period-table rows + nested loop table; unsigned slot values.
 
 # Only host-side validation caps are excluded; all other geometry fields are hashed.
 _FINGERPRINT_HOST_ONLY = frozenset({"ttl_delay_max_ticks"})
@@ -83,16 +83,11 @@ STATUS_LINK_ERROR = 1 << 5
 class CtrlWords:
     COMMAND = 1            # host -> top: LOAD/FIRE/RESET/SAFE (rising-edge)
     STATUS = 2            # top -> host: LOADED/RUNNING/DONE/ERROR/UNDERFLOW/LINK_ERROR
-    PROG_COUNT = 3        # number of edges
+    PROG_COUNT = 3        # number of period rows
     SCAN_COUNT = 4        # unique rows N in one sweep; may exceed the two-bank window
     SCAN_ENABLE = 5
     RUN_REPEAT_COUNT = 6   # complete Pulse executions per scan row; 0 = infinite
-    LOOP_START = 7
-    LOOP_COUNT = 8
-    LOOP_END_TICK = 9
-    LOOP_END_LO = 10
-    LOOP_END_HI = 11
-    BUS_COUNTS = 12
+    LOOP_TABLE_COUNT = 7   # loop-table entries in use (nested brackets, outermost first)
     BANK_SIZE = 13        # scan points per ping-pong bank
     SLOT_COUNT = 14
     CURSOR = 15           # top -> host: cumulative row-visit ordinal; unchanged by Run repeats
@@ -138,15 +133,13 @@ class StreamerParams:
     # Defaults come from streamer_config.json; literals are offline fallbacks.
     channel_count: int = _geom("channel_count", 69)
     num_slots: int = _geom("num_slots", 4)
-    coeff_width: int = _geom("coeff_width", 16)
     tick_width: int = _geom("tick_width", 32)
-    coeff_frac_bits: int = _geom("coeff_frac_bits", 8)
-    max_edges: int = _geom("max_edges", 4096)
+    max_rows: int = _geom("max_rows", 512)
     bank_size: int = _geom("bank_size", 2048)
     bus_count: int = _geom("bus_count", 4)
     bus_width: int = _geom("bus_width", 10)
-    bus_seg_addr_width: int = _geom("bus_seg_addr_width", 6)
-    bus_sel_width: int = _geom("bus_sel_width", 3)
+    max_loops: int = _geom("max_loops", 8)
+    loop_depth: int = _geom("loop_depth", 4)
     ttl_delay_max_ticks: int = _geom("ttl_delay_max_ticks", (1 << 31) - 1)
     evt_fifo_depth: int = _geom("evt_fifo_depth", 32)          # power of two (event-FIFO ring)
     bus_evt_fifo_depth: int = _geom("bus_evt_fifo_depth", 64)
@@ -187,40 +180,51 @@ class StreamerParams:
         return int(CtrlWords.LAYOUT_ID) - self.ctrl_scratch_base
 
     @property
-    def coeff_bits(self) -> int:
-        return self.num_slots * self.coeff_width
+    def slot_sel_width(self) -> int:
+        """Bits of a slot selector: ``0`` = literal, ``k`` = slot ``k-1``."""
+        return _addr_width(self.num_slots + 1)
 
     @property
     def slot_bits(self) -> int:
         return self.num_slots * self.tick_width
 
     @property
-    def coeff_words(self) -> int:
-        return _ceil(self.coeff_bits, 32)
-
-    @property
-    def mask_words(self) -> int:
-        return _ceil(self.num_delay_ch, 32)
-
-    @property
     def scan_words(self) -> int:
         return self.num_slots          # one 32-bit slot value per word
 
     @property
-    def max_bus_segments(self) -> int:
-        return 1 << self.bus_seg_addr_width
+    def bus_action_bits(self) -> int:
+        """One row's action for one DAC bus: mode (2), slot selector, value."""
+        return 2 + self.slot_sel_width + self.bus_width
 
     @property
-    def bus_rows(self) -> int:
-        return self.bus_count * self.max_bus_segments
+    def row_bits(self) -> int:
+        """One period row: duration, its slot selector, the TTL mask, one action per bus."""
+        return (self.tick_width + self.slot_sel_width + self.num_delay_ch
+                + self.bus_count * self.bus_action_bits)
 
     @property
-    def bus_words(self) -> int:
-        return 2 + 2 * self.coeff_words + 1
+    def row_words(self) -> int:
+        """32-bit words one row occupies in the host image (a power of two, so the
+        row BRAM's wide read port is a power-of-two multiple of its write port)."""
+        return _pow2_at_least(_ceil(self.row_bits, 32))
 
     @property
-    def edge_addr_width(self) -> int:
-        return _addr_width(self.max_edges)
+    def row_portb_bits(self) -> int:
+        return self.row_words * 32
+
+    @property
+    def row_addr_width(self) -> int:
+        return _addr_width(self.max_rows)
+
+    @property
+    def loop_index_width(self) -> int:
+        return _addr_width(max(2, self.max_loops))
+
+    @property
+    def loop_words(self) -> int:
+        """Image words per loop-table entry: ``first | last << 16`` then the count."""
+        return 2
 
     @property
     def scan_addr_width(self) -> int:
@@ -242,41 +246,35 @@ def _addr_width(depth: int) -> int:
 def region_bases(p: StreamerParams) -> dict:
     """Word-address bases of each AXI write region (the host<->top contract).
 
-    TTL channel delays followed by per-bus DAC delays live in their own DELAY
-    register region (one 32-bit word per signal, delay_region_words reserved).
-    The CTRL block is the 20 command/mailbox words 0..19, DAC CLK_ENABLE at
-    20, completion acknowledgements, scratch from ctrl_scratch_base, and LAYOUT_ID
-    at word 63 -- no delay words live in CTRL."""
+    Period rows and the scan window are BRAM images; the loop table and the
+    per-signal delays (TTL channels then DAC buses, one 32-bit word each,
+    delay_region_words reserved) are register regions.  The CTRL block is the
+    20 command/mailbox words 0..19, DAC CLK_ENABLE at 20, completion
+    acknowledgements, scratch from ctrl_scratch_base, and LAYOUT_ID at word
+    63 -- no delay words live in CTRL."""
     ctrl = 0
-    tick = CTRL_WORDS
-    coeff = tick + p.max_edges * 1
-    mask = coeff + p.max_edges * p.coeff_words
-    scan = mask + p.max_edges * p.mask_words
-    bus = scan + 2 * p.bank_size * p.scan_words
-    delay = bus + p.bus_rows * p.bus_words
+    rows = CTRL_WORDS
+    scan = rows + p.max_rows * p.row_words
+    loop = scan + 2 * p.bank_size * p.scan_words
+    delay = loop + p.max_loops * p.loop_words
     total = delay + p.delay_region_words
-    return {"ctrl": ctrl, "tick": tick, "coeff": coeff, "mask": mask,
-            "scan": scan, "bus": bus, "delay": delay, "total": total}
+    return {"ctrl": ctrl, "rows": rows, "scan": scan, "loop": loop,
+            "delay": delay, "total": total}
 
 def build_ip_sizes(p: StreamerParams) -> dict:
     """Return BRAM/IP sizes derived from the geometry."""
     bases = region_bases(p)
     return {
-        # asymmetric edge/scan BRAM port-B widths: 32-bit host writes on port A, wide engine reads
-        # on port B (one whole edge / scan point per access).  == top.v COEFF/MASK/SCAN_PORTB_BITS.
-        "coeff_portb_bits": _ceil(p.coeff_bits, 32) * 32,        # 64
-        "mask_portb_bits": p.mask_words * 32,
+        # asymmetric row/scan BRAM port-B widths: 32-bit host writes on port A, wide engine reads
+        # on port B (one whole row / scan point per access).  == top.v ROW/SCAN_PORTB_BITS.
+        "row_portb_bits": p.row_portb_bits,                      # 128
         "scan_portb_bits": p.slot_bits,                          # 128
-        # bus-image BRAM must hold every bus-segment row (bus_rows*bus_words words); scan/edge port-A
-        # depths follow their region.  Power-of-two depth that covers the used words.
-        "busimg_depth": _pow2_at_least(p.bus_rows * p.bus_words),        # 2048
-        "edge_addr_width": p.edge_addr_width,
+        "row_addr_width": p.row_addr_width,
         "bank_size": p.bank_size,
-        "coeff_porta_depth": p.max_edges * (_ceil(p.coeff_bits, 32) * 32 // 32),
-        "mask_porta_depth": p.max_edges * p.mask_words,
+        "row_porta_depth": p.max_rows * p.row_words,
         "scan_porta_depth": (2 * p.bank_size) * (p.slot_bits // 32),
         # the single axi_bram_ctrl window must cover the whole word-address image (region total).
-        "axi_bram_depth": _pow2_at_least(bases["total"]),               # 65536
+        "axi_bram_depth": _pow2_at_least(bases["total"]),
     }
 
 # --------------------------------------------------------------------------- bits
@@ -291,27 +289,9 @@ def _checked_unsigned(value: int, width: int, name: str) -> int:
         raise ValueError(f"{name}={value} does not fit the unsigned {width}-bit wire field")
     return value
 
-def _checked_signed(value: int, width: int, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, Integral):
-        raise TypeError(f"{name} must be an integer")
-    value = int(value)
-    low = -(1 << (width - 1))
-    high = 1 << (width - 1)
-    if value < low or value >= high:
-        raise ValueError(f"{name}={value} does not fit the signed {width}-bit wire field")
-    return value
-
 def _field_words(value: int, total_bits: int) -> list[int]:
     value &= (1 << total_bits) - 1
     return [(value >> (32 * i)) & 0xFFFFFFFF for i in range(_ceil(total_bits, 32))]
-
-def _pack_coeffs(coeffs, p: StreamerParams) -> int:
-    coeffs = list(coeffs or [])
-    acc = 0
-    for j in range(p.num_slots):
-        c = coeffs[j] if j < len(coeffs) else 0
-        acc |= _to_unsigned(_checked_signed(c, p.coeff_width, f"coefficient[{j}]"), p.coeff_width) << (j * p.coeff_width)
-    return acc
 
 def _is_pow2(v: int) -> bool:
     return int(v) > 0 and (int(v) & (int(v) - 1)) == 0
@@ -320,26 +300,11 @@ def check_rtl_assumptions(p: StreamerParams) -> None:
     """Reject geometries that would silently corrupt the shipped RTL contract."""
     if p.num_delay_ch < 1 or p.bus_count < 0 or p.bus_count > 32:
         raise ValueError("geometry requires TTL channels and at most 32 DAC clock-enable bits")
-    if not _is_pow2(p.mask_words):
-        raise ValueError("TTL mask BRAM port width must be a power-of-two multiple of 32 bits")
-    if p.num_slots > 4:
+    if not _is_pow2(p.num_slots):
         raise ValueError(
-            f"num_slots must be at most 4 for the shipped RTL (got {p.num_slots}); "
-            "zlc_effective_tick has four balanced affine lanes, so additional host "
-            "slots would be silently truncated."
-        )
-    if p.coeff_width > 18:
-        raise ValueError(
-            f"coeff_width must be at most 18 for the shipped RTL resource model "
-            f"(got {p.coeff_width}); one affine lane is calibrated as one "
-            "DSP48E1 25x18 multiplier, and wider coefficients need a different "
-            "multiplier and merge accounting model."
-        )
-    if p.num_slots * p.coeff_width != 64:
-        raise ValueError(
-            f"num_slots*coeff_width must be 64 for the shipped RTL (got {p.num_slots}*{p.coeff_width}="
-            f"{p.num_slots * p.coeff_width}); the top's 2-word coeff assembly would truncate. "
-            "Fix zlc_pulse_streamer_top.v L_EMIT before changing this geometry.")
+            f"num_slots must be a power of two (got {p.num_slots}): the scan BRAM reads one "
+            "whole slot vector per access, and its wide read port must be a power-of-two "
+            "multiple of the 32-bit host write port.")
     if p.ctrl_scratch_words < 2:
         raise ValueError(
             f"CTRL register file has no scratch room: defined words reach "
@@ -347,24 +312,20 @@ def check_rtl_assumptions(p: StreamerParams) -> None:
             f"layout fingerprint; grow CTRL_WORDS / the RTL ctrl_reg file in "
             "lock-step."
         )
-    flags_bits = 2 * p.bus_width + 2 + 2 * p.bus_sel_width
-    if flags_bits > 32:
-        raise ValueError(
-            f"bus flags word needs {flags_bits} bits (> 32) at bus_width={p.bus_width}, "
-            f"bus_sel_width={p.bus_sel_width}; the top packs it into ONE 32b cap word.")
-    counts_bits = p.bus_count * (p.bus_seg_addr_width + 1)
-    if counts_bits > 32:
-        raise ValueError(
-            f"the BUS_COUNTS ctrl word needs {counts_bits} bits (> 32) at bus_count={p.bus_count}, "
-            f"bus_seg_addr_width={p.bus_seg_addr_width}: it packs each bus's segment count in "
-            f"(bus_seg_addr_width+1)={p.bus_seg_addr_width + 1} bits into ONE 32b word, so the high "
-            "buses' counts would truncate/alias.  Lower bus_count or bus_seg_addr_width.")
     if p.bank_size <= 0 or (p.bank_size & (p.bank_size - 1)) != 0:
         raise ValueError(
             f"bank_size must be a power of two (got {p.bank_size}); scan_addr_of concatenates "
             "{bank_bit, offset} and would alias the two banks otherwise.")
-    if p.max_edges <= 0 or (p.max_edges & (p.max_edges - 1)) != 0:
-        raise ValueError(f"max_edges must be a power of two (got {p.max_edges}); MAX_EDGES = 1 << EDGE_ADDR_WIDTH.")
+    if not _is_pow2(p.max_rows):
+        raise ValueError(f"max_rows must be a power of two (got {p.max_rows}); MAX_ROWS = 1 << ROW_ADDR_WIDTH.")
+    if p.max_rows >= (1 << 16):
+        raise ValueError(
+            f"max_rows must fit a 16-bit loop-table row field (got {p.max_rows}); one loop word "
+            "packs its first and last row into two 16-bit halves.")
+    if p.max_loops < 1 or p.loop_depth < 1 or p.loop_depth > p.max_loops:
+        raise ValueError(
+            f"max_loops ({p.max_loops}) and loop_depth ({p.loop_depth}) must be at least one, "
+            "with the depth no deeper than the table.")
     if not _is_pow2(p.evt_fifo_depth) or not _is_pow2(p.bus_evt_fifo_depth):
         raise ValueError(
             f"evt_fifo_depth ({p.evt_fifo_depth}) and bus_evt_fifo_depth ({p.bus_evt_fifo_depth}) must "
@@ -372,7 +333,7 @@ def check_rtl_assumptions(p: StreamerParams) -> None:
             "the distributed-RAM array is exactly `depth` deep, so a non-pow2 depth reaches indices "
             "depth..2^k-1 = out-of-bounds LUTRAM (silent X corruption of scheduled toggles).")
     if p.tick_width != 32:
-        raise ValueError(f"tick_width must be 32 (got {p.tick_width}); the tick BRAM port and CTRL words are 32b.")
+        raise ValueError(f"tick_width must be 32 (got {p.tick_width}); the row duration, scan slots and CTRL words are 32b.")
     if p.ttl_delay_max_ticks < 0 or p.ttl_delay_max_ticks >= (1 << 32):
         raise ValueError(
             f"ttl_delay_max_ticks ({p.ttl_delay_max_ticks}) must fit the 32-bit R_DELAY register field "
@@ -390,13 +351,51 @@ def _raise_mode(m):
     raise ValueError(f"unsupported bus segment mode {m!r}.")
 
 # --------------------------------------------------------------------------- pack
+def pack_row(p: StreamerParams, duration: int, duration_slot: int, mask: int,
+             actions: Mapping[int, tuple[str, int, int]]) -> list[int]:
+    """One period row as its image words, least-significant word first.
+
+    The row's bit vector, LSB first: the duration (tick_width), its slot
+    selector (slot_sel_width; 0 = the literal), the TTL mask (num_delay_ch),
+    then one action per DAC bus (value, slot selector, mode).  ``actions``
+    maps a bus index to ``(mode, value, value_select)``; a bus without one
+    holds its level.  The RTL slices the same vector with the same widths.
+    """
+
+    bits = _checked_unsigned(duration, p.tick_width, "row duration")
+    if bits < 1:
+        raise ValueError("a row lasts at least one tick")
+    offset = p.tick_width
+    bits |= _checked_unsigned(duration_slot, p.slot_sel_width, "row duration slot") << offset
+    if duration_slot > p.num_slots:
+        raise ValueError(f"row duration slot {duration_slot} exceeds num_slots {p.num_slots}")
+    offset += p.slot_sel_width
+    bits |= _checked_unsigned(mask, p.num_delay_ch, "TTL row mask") << offset
+    offset += p.num_delay_ch
+    for bus in range(p.bus_count):
+        action = actions.get(bus)
+        if action is not None:
+            mode, value, select = action
+            if select > p.num_slots:
+                raise ValueError(f"bus {bus} value slot {select} exceeds num_slots {p.num_slots}")
+            field = _checked_unsigned(value, p.bus_width, f"bus {bus} value")
+            field |= _checked_unsigned(select, p.slot_sel_width, f"bus {bus} value slot") << p.bus_width
+            field |= (_bus_mode_value(mode) & 0x3) << (p.bus_width + p.slot_sel_width)
+            bits |= field << offset
+        offset += p.bus_action_bits
+    words = _field_words(bits, p.row_bits)
+    return words + [0] * (p.row_words - len(words))
+
+
 def pack_program(program, params: StreamerParams | None = None, *, target) -> dict[int, int]:
     """Pack a CompiledProgram into the FINAL AXI write image (sparse).
 
-    Edges -> TICK/COEFF/MASK regions and bus -> BUS region.  Runtime rows,
-    Run/Scan repeat counts are applied only by ``PulseStreamer.fire``.
-    COMMAND/STATUS/CURSOR/BANK_READY are runtime mailbox words. The target owns
-    the raw-pin to DAC-bus clock mapping; the compiled program keeps raw identity."""
+    Period rows -> the ROWS region, brackets -> the LOOP region, delays ->
+    the DELAY region.  Runtime rows and Run/Scan repeat counts are applied
+    only by ``PulseStreamer.fire``.  COMMAND/STATUS/CURSOR/BANK_READY are
+    runtime mailbox words.  The target owns the raw-pin to DAC-bus clock
+    mapping; the compiled program keeps raw identity."""
+    from .compile import loop_nesting_depth
     from .model import PORT_DAC, PulseTarget
 
     p = params or StreamerParams()
@@ -407,97 +406,59 @@ def pack_program(program, params: StreamerParams | None = None, *, target) -> di
             or tuple(program.channels) != target.raw_lanes):
         raise ValueError("compiled target ABI/channels do not match the wire target")
     bases = region_bases(p)
-    ticks = [int(t) for t in program.ticks]
-    masks = [int(m) for m in program.masks]
-    n_edges = len(ticks)
-    if n_edges > p.max_edges:
-        raise ValueError(f"{n_edges} edges > max_edges {p.max_edges}.")
-    slot_count = int(getattr(program, "slot_count", 0) or 0)
-    if slot_count < 0 or slot_count > p.num_slots:
+    durations = [int(value) for value in program.durations]
+    duration_slots = [int(value) for value in program.duration_slots]
+    masks = [int(value) for value in program.masks]
+    n_rows = len(durations)
+    if n_rows > p.max_rows:
+        raise ValueError(f"{n_rows} rows > max_rows {p.max_rows}.")
+    slot_count = int(program.slot_count)
+    if slot_count > p.num_slots:
         raise ValueError(f"program slot count {slot_count} exceeds wire capacity {p.num_slots}")
-    coeffs = list(getattr(program, "tick_slot_coeffs", None) or [[0] * slot_count for _ in ticks])
-    bus_segments = list(getattr(program, "bus_segments", None) or [])
+    loops = [tuple(int(value) for value in loop) for loop in program.loops]
+    if len(loops) > p.max_loops:
+        raise ValueError(f"{len(loops)} loops > max_loops {p.max_loops}.")
+    depth = loop_nesting_depth(loops)
+    if depth > p.loop_depth:
+        raise ValueError(f"loops nest {depth} deep > loop_depth {p.loop_depth}.")
+    actions_by_row: dict[int, dict[int, tuple[str, int, int]]] = {}
+    for action in program.bus_actions:
+        if not 0 <= int(action.bus_index) < p.bus_count:
+            raise ValueError(
+                f"bus action index {action.bus_index} is outside the "
+                f"{p.bus_count}-bus wire geometry"
+            )
+        actions_by_row.setdefault(int(action.row), {})[int(action.bus_index)] = (
+            str(action.mode), int(action.value), int(action.value_select)
+        )
 
     w: dict[int, int] = {}
-    w[CtrlWords.PROG_COUNT] = n_edges
+    w[CtrlWords.PROG_COUNT] = n_rows
     w[CtrlWords.SCAN_COUNT] = 0
     w[CtrlWords.SCAN_ENABLE] = 0
     w[CtrlWords.RUN_REPEAT_COUNT] = 1
-    w[CtrlWords.LOOP_START] = int(program.loop_start_index)
     w[CtrlWords.SCAN_REPEAT_COUNT] = 1
-    loop_count = _checked_unsigned(program.loop_count, 32, "loop count")
-    if loop_count < 1:
-        raise ValueError("loop count must be at least one")
-    w[CtrlWords.LOOP_COUNT] = loop_count
-    w[CtrlWords.LOOP_END_TICK] = _checked_unsigned(
-        int(getattr(program, "loop_end_tick", 0)), p.tick_width, "loop end tick"
-    )
-    le = _field_words(_pack_coeffs(getattr(program, "loop_end_slot_coeffs", None), p), p.coeff_bits)
-    w[CtrlWords.LOOP_END_LO] = le[0]
-    w[CtrlWords.LOOP_END_HI] = le[1] if len(le) > 1 else 0
+    w[CtrlWords.LOOP_TABLE_COUNT] = len(loops)
     w[CtrlWords.BANK_SIZE] = p.bank_size
     w[CtrlWords.SLOT_COUNT] = slot_count
 
-    # edge fields
-    for i in range(n_edges):
-        w[bases["tick"] + i] = _checked_unsigned(ticks[i], p.tick_width, f"edge tick {i}")
-        cw = _field_words(_pack_coeffs(coeffs[i], p), p.coeff_bits)
-        for k in range(p.coeff_words):
-            w[bases["coeff"] + i * p.coeff_words + k] = cw[k] if k < len(cw) else 0
-        mask = _checked_unsigned(masks[i], p.num_delay_ch, f"TTL edge mask {i}")
-        mw = _field_words(mask, p.num_delay_ch)
-        for k in range(p.mask_words):
-            w[bases["mask"] + i * p.mask_words + k] = mw[k] if k < len(mw) else 0
+    for i in range(n_rows):
+        words = pack_row(p, durations[i], duration_slots[i], masks[i], actions_by_row.get(i, {}))
+        for k, word in enumerate(words):
+            w[bases["rows"] + i * p.row_words + k] = word
+
+    for i, (first, last, count) in enumerate(loops):
+        if not 0 <= first <= last < n_rows:
+            raise ValueError(f"loop {i} rows {first}..{last} lie outside the {n_rows}-row table")
+        w[bases["loop"] + i * p.loop_words] = first | (last << 16)
+        count = _checked_unsigned(count, 32, f"loop {i} count")
+        if count < 2:
+            raise ValueError(f"loop {i} count must be at least two")
+        w[bases["loop"] + i * p.loop_words + 1] = count
 
     # Runtime rows do not belong to the compiled image.
     w[CtrlWords.BANK0_CHUNK] = 0
     w[CtrlWords.BANK1_CHUNK] = 1
-
-    # bus segments (bus-major)
-    per_bus: list[list[object]] = [[] for _ in range(p.bus_count)]
-    for seg in bus_segments:
-        bus_index = int(getattr(seg, "bus_index", 0))
-        if not 0 <= bus_index < p.bus_count:
-            raise ValueError(
-                f"bus segment index {bus_index} is outside the "
-                f"{p.bus_count}-bus wire geometry"
-            )
-        segments = per_bus[bus_index]
-        if len(segments) >= p.max_bus_segments:
-            raise ValueError(
-                f"bus {bus_index} has more than {p.max_bus_segments} "
-                "hardware segment rows"
-            )
-        segments.append(seg)
-    cnt_w = p.bus_seg_addr_width + 1
-    bus_counts = 0
-    for b in range(p.bus_count):
-        segs = per_bus[b]
-        bus_counts |= (len(segs) & ((1 << cnt_w) - 1)) << (b * cnt_w)
-        for addr, seg in enumerate(segs):
-            row = bases["bus"] + (b * p.max_bus_segments + addr) * p.bus_words
-            w[row + 0] = _checked_unsigned(int(getattr(seg, "start_tick", 0)), p.tick_width, "bus start tick")
-            w[row + 1] = _checked_unsigned(int(getattr(seg, "stop_tick", 0)), p.tick_width, "bus stop tick")
-            sc = _field_words(_pack_coeffs(getattr(seg, "start_tick_coeffs", None), p), p.coeff_bits)
-
-            ec = _field_words(_pack_coeffs(getattr(seg, "stop_tick_coeffs", None), p), p.coeff_bits)
-            for k in range(p.coeff_words):
-                w[row + 2 + k] = sc[k] if k < len(sc) else 0
-                w[row + 2 + p.coeff_words + k] = ec[k] if k < len(ec) else 0
-            flags = 0
-            start_value = _checked_unsigned(int(getattr(seg, "start_value", 0)), p.bus_width, "bus start value")
-            stop_value = _checked_unsigned(int(getattr(seg, "stop_value", 0)), p.bus_width, "bus stop value")
-            value_select = _checked_unsigned(int(getattr(seg, "value_select", 0)), p.bus_sel_width, "bus start selector")
-            flags |= start_value << 0
-            flags |= stop_value << p.bus_width
-            flags |= (_bus_mode_value(getattr(seg, "mode", "edge")) & 0x3) << (2 * p.bus_width)
-            flags |= value_select << (2 * p.bus_width + 2)
-            # stop-endpoint select (bits above start select) lets a ramp scan BOTH
-            # value endpoints; edge/hold segments default it to value_select.
-            _stop_sel = int(getattr(seg, "stop_value_select", getattr(seg, "value_select", 0)))
-            flags |= _checked_unsigned(_stop_sel, p.bus_sel_width, "bus stop selector") << (2 * p.bus_width + 2 + p.bus_sel_width)
-            w[row + 2 + 2 * p.coeff_words] = flags
-    w[CtrlWords.BUS_COUNTS] = bus_counts
 
     # PER-CHANNEL TTL OUTPUT DELAY -- the EVENT SCHEDULER.  One 32-bit word per channel in
     # the DELAY register region (0 = passthrough).  A delay is bounded by the host's
@@ -629,48 +590,41 @@ class SolvedCapacity:
     def all_within_budget(self) -> bool:
         return all(r["ok"] for r in self.resource_report.values())
 
-def _edge_ramb(max_edges: int, p: StreamerParams) -> int:
-    # 3 parallel edge BRAMs: tick 32b, coeff coeff_bits, TTL-only mask.
-    return (_ceil(p.tick_width, 36) * _ceil(max_edges, 1024)
-            + _ceil(p.coeff_bits, 36) * _ceil(max_edges, 1024)
+def _ramb36(width_bits: int, depth: int) -> int:
+    """RAMB36 tiles one ``width x depth`` block RAM occupies.
 
-            + _ceil(p.mask_words * 32, 36) * _ceil(max_edges, 1024))
+    A RAMB18 is 512 x 36; two make a tile.  Width slices of 36 bits, depth
+    slices of 512 words, so a 512-deep memory costs half a tile per slice.
+    """
+    return _ceil(_ceil(width_bits, 36) * _ceil(depth, 512), 2)
+
+def _row_ramb(max_rows: int, p: StreamerParams) -> int:
+    return _ramb36(p.row_portb_bits, max_rows)
 
 def _scan_ramb(bank_size: int, p: StreamerParams) -> int:
-    return _ceil(p.slot_bits, 36) * _ceil(2 * bank_size, 1024)
+    return _ramb36(p.slot_bits, 2 * bank_size)
 
 def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFAULT_TARGET_PCT,
-                       slot_mul_width: int = 25, engine_logic_luts: int = 16234,
-                       engine_ff: int = 14806, engine_dsp: int | None = None) -> dict:
+                       engine_logic_luts: int = 9000,
+                       engine_ff: int = 9000, engine_dsp: int | None = None) -> dict:
     """Resource usage of a CONCRETE ``StreamerParams`` vs a part, per axis.
 
     This is the single accounting model shared by :func:`solve_capacity` (which
-    searches for the largest ``max_edges`` that fits) and the config-check CLI
+    searches for the largest ``max_rows`` that fits) and the config-check CLI
     (which reports whether the configured geometry fits as-is).  Returns
     ``{"ramb36"|"lut"|"ff"|"dsp": {"used","budget","total","pct","ok"}}``.
 
-    The 2026-09-11 routed 35T baseline used 20050 LUTs (16243 logic + 3807
-    memory), 14806 FF, 76 DSP and 41 BRAM tiles with 19 TTLs and 64-deep FIFOs.
-    Its synth report mapped each TTL FIFO to 17 RAM64M and each DAC FIFO to
-    74 RAM64M. ``engine_logic_luts`` is the fixed remainder after the table
-    and scheduler estimates below. FIFO depth uses actual primitive width,
-    not an ideal bits/64 ratio. The TTL-only mask reduces edge BRAM directly.
-    FF remains that historical total, not a channel-scaled prediction; control
-    logic and deep-bank mux estimates require a new routed report. No savings
-    from narrowing the engine datapath are assumed before such a build."""
+    ``engine_logic_luts`` and ``engine_ff`` are the fixed remainder of the
+    routed period-table engine after the scheduler estimates below; both are
+    calibrated from a routed report (see ``test_fpga_assets``).  FIFO depth
+    uses actual primitive width, not an ideal bits/64 ratio."""
     check_rtl_assumptions(params)
     prof = part_profile(part)
     pct = _resource_target_pct(target_pct)
     # The routed top consumes three BRAM36-equivalent tiles outside the
-    # geometry memories (old full-pin masks: 40 RAMB36 + two RAMB18 = 41 tiles).
-    # Report the conservative integer ceiling used by the capacity solver.
-    ramb36_used = (_edge_ramb(params.max_edges, params) + _scan_ramb(params.bank_size, params)
-                   + _ceil(params.bus_rows * params.bus_words, 1024) + 3)
-    # per bus-segment row: start+stop tick (2*tick_width), start+stop tick coeffs
-    # (2*coeff_bits), start+stop value (2*bus_width), mode (2), start+stop value_select
-    # (2*bus_sel_width -- a ramp can scan both endpoints).
-    bus_lutram = _ceil((2 * params.tick_width + 2 * params.coeff_bits + 2 * params.bus_width
-                        + 2 + 2 * params.bus_sel_width) * params.bus_rows, 64)
+    # geometry memories.  Report the conservative integer ceiling used by
+    # the capacity solver.
+    ramb36_used = _row_ramb(params.max_rows, params) + _scan_ramb(params.bank_size, params) + 3
     # TTL EVENT SCHEDULER: an EVT_DEPTH x 49b LUTRAM event FIFO,
     # a 48b equality comparator (~14) and push/pop control (~6) per channel.
     # The FIFOs are COMPACTED to the channels that can carry a delay -- only channels
@@ -688,13 +642,13 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
                 else 4 * _ceil(width, 3) * _ceil(depth, 64))
 
     ttl_sched_luts = num_delay_ch * (20 + fifo_ram_luts(evt_depth, 49))
-    # DAC delay is instruction-level: one FIFO of resolved segment descriptors per bus, followed
-    # by one delayed ramp re-player.  This mirrors zlc_edge_streamer.g_busseg exactly; storage scales
-    # with segments in flight, not with DA bits or ramp value changes.  SEG_W is the RTL descriptor:
-    # three 48-bit global times, two BUS_WIDTH values, one TICK_WIDTH denominator, two BUS_WIDTH+1
-    # step/remainder fields, and three flags.
+    # DAC delay is instruction-level: one FIFO of resolved action descriptors per bus, followed
+    # by one delayed ramp re-player.  This mirrors zlc_period_streamer.g_busseg exactly; storage
+    # scales with actions in flight, not with DA bits or ramp value changes.  SEG_W is the RTL
+    # descriptor: two 48-bit global times, two BUS_WIDTH values, one TICK_WIDTH denominator, two
+    # BUS_WIDTH+1 step/remainder fields, and three flags.
     bus_segment_bits = (
-        3 * 48
+        2 * 48
         + 2 * params.bus_width
         + params.tick_width
         + 2 * (params.bus_width + 1)
@@ -704,22 +658,10 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
         20 + fifo_ram_luts(bus_evt_depth, bus_segment_bits)
     )
     delay_lutram = ttl_sched_luts + bus_sched_luts
-    # DSP: 12 affine evaluators (2/bus + 4 main), each implemented as the four
-    # slot multipliers plus one balanced-tree merge DSP; and two exact reciprocal
-    # products in each of the live + delayed ramp players (4 DSPs per bus).
+    # DSP: two exact reciprocal products in each of the live + delayed ramp
+    # players (4 DSPs per bus).  The period table has no affine evaluators.
     if engine_dsp is None:
-        mac_instances = 2 * params.bus_count + 4
-        if isinstance(slot_mul_width, bool) or not isinstance(slot_mul_width, Integral):
-            raise TypeError("slot_mul_width must be an integer")
-        if slot_mul_width <= 0:
-            raise ValueError("slot_mul_width must be positive")
-        # One DSP48E1 covers one signed 25x18 product.  The shipped gate above
-        # keeps coeff_width inside that calibrated lane; this factor also keeps
-        # recovery estimates honest if the slot operand itself is widened.
-        dsp_per_mult = _ceil(slot_mul_width, 25) * _ceil(params.coeff_width, 18)
-        affine_dsp = mac_instances * (params.num_slots * dsp_per_mult + 1)
-        ramp_dsp = 4 * params.bus_count
-        engine_dsp = affine_dsp + ramp_dsp
+        engine_dsp = 4 * params.bus_count
 
     def res(used, total):
         b = int(total * pct / 100.0)
@@ -728,24 +670,21 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
 
     return {
         "ramb36": res(ramb36_used, prof.ramb36),
-        "lut": res(engine_logic_luts + bus_lutram + delay_lutram, prof.lut),
+        "lut": res(engine_logic_luts + delay_lutram, prof.lut),
         "ff": res(engine_ff, prof.ff),
         "dsp": res(engine_dsp, prof.dsp),
     }
 
-def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, num_slots: int = 4, coeff_width: int = 16,
-                   tick_width: int = 32, coeff_frac_bits: int = 8, bus_count: int = 4,
-                   bus_width: int = 10, bus_seg_addr_width: int = 6, bus_sel_width: int = 3,
-                   slot_mul_width: int = 25,
+def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, num_slots: int = 4,
+                   tick_width: int = 32, bus_count: int = 4,
+                   bus_width: int = 10, max_loops: int = 8, loop_depth: int = 4,
                    target_pct: float = DEFAULT_TARGET_PCT, bank_size: int = 2048,
-                   max_edges_cap: int = 16384,
-                   engine_logic_luts: int = 16234, engine_ff: int = 14806, engine_dsp: int | None = None) -> SolvedCapacity:
-    """Maximise max_edges while every resource stays within ``target_pct``.
+                   max_rows_cap: int = 16384,
+                   engine_logic_luts: int = 9000, engine_ff: int = 9000, engine_dsp: int | None = None) -> SolvedCapacity:
+    """Maximise max_rows while every resource stays within ``target_pct``.
 
-    Scan storage
-    is the two-bank resident window, whose depth controls refill slack rather
-
-    than total scan length; edge fields are parallel BRAMs (no width padding).
+    Scan storage is the two-bank resident window, whose depth controls refill
+    slack rather than total scan length; the row table is one wide BRAM.
 
     All resource estimates use :func:`estimate_resources` and its documented
     routed baseline and limits. The ordinary default is 90% planning headroom;
@@ -753,22 +692,21 @@ def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, n
     fails rather than returning a capacity whose own report is over budget."""
     prof = part_profile(part)
     pct = _resource_target_pct(target_pct)
-    base = StreamerParams(channel_count=channel_count, num_slots=num_slots, coeff_width=coeff_width,
-                          tick_width=tick_width, coeff_frac_bits=coeff_frac_bits, max_edges=256,
+    base = StreamerParams(channel_count=channel_count, num_slots=num_slots,
+                          tick_width=tick_width, max_rows=256,
                           bank_size=bank_size, bus_count=bus_count, bus_width=bus_width,
-                          bus_seg_addr_width=bus_seg_addr_width, bus_sel_width=bus_sel_width)
+                          max_loops=max_loops, loop_depth=loop_depth)
     estimate_kwargs = {
         "part": prof,
         "target_pct": pct,
-        "slot_mul_width": slot_mul_width,
         "engine_logic_luts": engine_logic_luts,
         "engine_ff": engine_ff,
         "engine_dsp": engine_dsp,
     }
 
-    # LUT/FF/DSP do not change with edge or scan BRAM depth in this calibrated
+    # LUT/FF/DSP do not change with row or scan BRAM depth in this calibrated
     # model.  Reject an impossible planning target before searching RAM sizes;
-    # reducing max_edges cannot make an over-budget logic footprint fit.
+    # reducing max_rows cannot make an over-budget logic footprint fit.
     minimum_report = estimate_resources(base, **estimate_kwargs)
     fixed_over = tuple(
         axis for axis in ("lut", "ff", "dsp") if not minimum_report[axis]["ok"]
@@ -785,18 +723,18 @@ def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, n
 
     # Every candidate is admitted by the same concrete estimator used by the
     # CLI.  There is no second fixed-RAM formula in the solver.
-    max_edges = None
+    max_rows = None
     for cand in (16384, 8192, 4096, 2048, 1024, 512, 256):
-        if cand > max_edges_cap:
+        if cand > max_rows_cap:
             continue
-        candidate = _dataclass_replace(base, max_edges=cand)
+        candidate = _dataclass_replace(base, max_rows=cand)
         if estimate_resources(candidate, **estimate_kwargs)["ramb36"]["ok"]:
-            max_edges = cand
+            max_rows = cand
             break
-    if max_edges is None:
+    if max_rows is None:
         minimum = estimate_resources(base, **estimate_kwargs)["ramb36"]
         raise ValueError(
-            f"{prof.name} cannot fit the minimum 256-edge, {bank_size}-point-bank "
+            f"{prof.name} cannot fit the minimum 256-row, {bank_size}-point-bank "
             f"geometry at {pct:g}% RAMB36 ({minimum['used']} > {minimum['budget']})"
         )
 
@@ -806,7 +744,7 @@ def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, n
     for cand in sorted({8192, 4096, 2048, 1024, bank_size}, reverse=True):
         if cand < bank_size:
             continue
-        candidate = _dataclass_replace(base, max_edges=max_edges, bank_size=cand)
+        candidate = _dataclass_replace(base, max_rows=max_rows, bank_size=cand)
         candidate_report = estimate_resources(candidate, **estimate_kwargs)
         if candidate_report["ramb36"]["ok"]:
             params = candidate
@@ -826,10 +764,9 @@ def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, n
 DEFAULT_CONFIG_FILENAME = "streamer_config.json"
 DEFAULT_FPGA_PART = "xc7a35tfgg484-2"
 FROZEN_CLOCK_HZ = 50_000_000.0
-FROZEN_SLOT_MUL_WIDTH = 25
 
-# StreamerParams constructor field names (so config["params"] can carry extra keys
-# like slot_mul_width without breaking the dataclass).
+# StreamerParams constructor field names: exactly the deployed geometry members
+# of config["params"].
 _PARAM_FIELD_NAMES = tuple(f.name for f in _dataclass_fields(StreamerParams))
 
 def _config_search_paths() -> list[Path]:
@@ -851,9 +788,8 @@ DEFAULT_CONFIG_PATH = _default_config_path()
 def params_from_config(params_map: Mapping | None) -> StreamerParams:
     """Build a :class:`StreamerParams` from a config ``params`` mapping.
 
-    Only known dataclass fields are forwarded; extra keys (``slot_mul_width``,
-    underscore comment keys) are ignored, so the JSON can hold estimator-only knobs
-    alongside the geometry."""
+    Only known dataclass fields are forwarded; underscore comment keys are
+    ignored."""
     kwargs = {k: v for k, v in dict(params_map or {}).items() if k in _PARAM_FIELD_NAMES}
     return StreamerParams(**kwargs)
 
@@ -870,7 +806,7 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
     """Load the single streamer config file.
 
     Returns a normalized dict: ``{"params": StreamerParams, "fpga_part", "clock_hz", "uart_baud",
-    "target_pct", "slot_mul_width", "source": Path|None, "warnings": [...]}``.  Missing
+    "target_pct", "source": Path|None, "warnings": [...]}``.  Missing
     file or unreadable JSON falls back to built-in defaults (so offline/GUI workflows
     never crash) and records a warning -- the estimator CLI surfaces these."""
     warnings: list[str] = []
@@ -896,8 +832,7 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
         if not isinstance(raw_params, dict):
             warnings.append("config has no params object; using built-in defaults.")
         else:
-            required = set(_PARAM_FIELD_NAMES) | {"slot_mul_width"}
-            missing = tuple(sorted(required - set(raw_params)))
+            missing = tuple(sorted(set(_PARAM_FIELD_NAMES) - set(raw_params)))
             if missing:
                 warnings.append(
                     "config params omit deployed fields: " + ", ".join(missing)
@@ -916,16 +851,6 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
     except (TypeError, ValueError) as exc:
         warnings.append(f"invalid params in config ({exc}); using built-in defaults.")
         params = StreamerParams()
-    slot_mul = params_map.get("slot_mul_width", FROZEN_SLOT_MUL_WIDTH)
-    try:
-        slot_mul = int(slot_mul)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("slot_mul_width must be an integer") from exc
-    if isinstance(slot_mul, bool) or slot_mul != FROZEN_SLOT_MUL_WIDTH:
-        raise ValueError(
-            "slot_mul_width differs from the frozen RTL "
-            f"({FROZEN_SLOT_MUL_WIDTH})"
-        )
     try:
         clock_hz = float(raw.get("clock_hz", FROZEN_CLOCK_HZ))
     except (TypeError, ValueError) as exc:
@@ -947,7 +872,6 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
         "clock_hz": clock_hz,
         "uart_baud": uart_baud,
         "target_pct": float(raw.get("target_pct", DEFAULT_TARGET_PCT)),
-        "slot_mul_width": slot_mul,
         "source": source,
         "warnings": warnings,
     }
@@ -995,8 +919,7 @@ def require_streamer_config(path: str | Path) -> dict:
     )
     if not isinstance(raw, dict) or set(raw) != CONFIG_TOP_LEVEL_FIELDS:
         raise ValueError("streamer_config.json fields are not exact")
-    expected = set(_PARAM_FIELD_NAMES) | {"slot_mul_width"}
-    if not isinstance(raw["params"], dict) or set(raw["params"]) != expected:
+    if not isinstance(raw["params"], dict) or set(raw["params"]) != set(_PARAM_FIELD_NAMES):
         raise ValueError("streamer_config.json params fields are not exact")
     if not isinstance(raw["board"], dict):
         raise ValueError("streamer_config.json board must be an object")
@@ -1033,8 +956,7 @@ def check_config_capacity(path: str | Path | None = None) -> dict:
     geometry.  Returns ``{config, params, part, target_pct, report, ok, warnings}``."""
     cfg = load_streamer_config(path)
     params = cfg["params"]
-    report = estimate_resources(params, part=cfg["fpga_part"], target_pct=cfg["target_pct"],
-                                slot_mul_width=cfg["slot_mul_width"])
+    report = estimate_resources(params, part=cfg["fpga_part"], target_pct=cfg["target_pct"])
     return {
         "config": cfg,
         "params": params,
@@ -1057,8 +979,8 @@ def format_capacity_report(result: dict) -> str:
         f"  config:     {src if src else '(built-in defaults -- no streamer_config.json found)'}",
         f"  part:       {result['part_string']}  (profile {result['part']})",
         f"  target:     {result['target_pct']:g}% of each resource",
-        f"  geometry:   channels={p.channel_count} edges={p.max_edges} bank_size={p.bank_size} "
-        f"slots={p.num_slots} buses={p.bus_count}x{p.bus_width}b "
+        f"  geometry:   channels={p.channel_count} rows={p.max_rows} loops={p.max_loops}x{p.loop_depth}deep "
+        f"bank_size={p.bank_size} slots={p.num_slots} buses={p.bus_count}x{p.bus_width}b "
         f"evt_fifo={p.evt_fifo_depth} bus_evt_fifo={p.bus_evt_fifo_depth}",
         "",
         f"  {'resource':<8} {'used':>8} {'budget':>8} {'total':>8}  {'%use':>6}  verdict",
@@ -1081,7 +1003,6 @@ def format_capacity_report(result: dict) -> str:
     for w in result.get("warnings", []):
         lines.append(f"  note: {w}")
     lines.append("")
-    lines.append("  FF uses the 2026-09-11 routed baseline; channel-dependent logic needs a new routed report.")
     lines.append("  final note: Vivado report_utilization after synthesis; this is a design-budget estimate.")
     return "\n".join(lines)
 
@@ -1099,18 +1020,19 @@ GEOMETRY_VH_FILENAME = "zlc_geometry.vh"
 _GEOMETRY_VH_MACROS = (
     ("ZLC_CHANNEL_COUNT", "channel_count"),
     ("ZLC_NUM_SLOTS", "num_slots"),
-    ("ZLC_COEFF_WIDTH", "coeff_width"),
+    ("ZLC_SLOT_SEL_WIDTH", "slot_sel_width"),
     ("ZLC_TICK_WIDTH", "tick_width"),
-    ("ZLC_COEFF_FRAC_BITS", "coeff_frac_bits"),
-    ("ZLC_EDGE_ADDR_WIDTH", "edge_addr_width"),
+    ("ZLC_ROW_ADDR_WIDTH", "row_addr_width"),
+    ("ZLC_ROW_BITS", "row_bits"),
+    ("ZLC_ROW_WORDS", "row_words"),
     ("ZLC_BANK_SIZE", "bank_size"),
     ("ZLC_SCAN_ADDR_WIDTH", "scan_addr_width"),
     ("ZLC_BUS_COUNT", "bus_count"),
     ("ZLC_BUS_INDEX_WIDTH", "bus_index_width"),
     ("ZLC_BUS_WIDTH", "bus_width"),
-    ("ZLC_BUS_SEG_ADDR_WIDTH", "bus_seg_addr_width"),
-    ("ZLC_BUS_SEL_WIDTH", "bus_sel_width"),
-
+    ("ZLC_MAX_LOOPS", "max_loops"),
+    ("ZLC_LOOP_INDEX_WIDTH", "loop_index_width"),
+    ("ZLC_LOOP_DEPTH", "loop_depth"),
     ("ZLC_EVT_FIFO_DEPTH", "evt_fifo_depth"),
     ("ZLC_BUS_EVT_FIFO_DEPTH", "bus_evt_fifo_depth"),
     ("ZLC_NUM_DELAY_CH", "num_delay_ch"),
@@ -1155,24 +1077,21 @@ def emit_geometry_vh(params: "StreamerParams", *, uart_baud: int = DEFAULT_UART_
 def emit_geom_tcl(params: "StreamerParams") -> str:
     """The Vivado geometry Tcl create_project.tcl sources (via ZLC_PS_GEOM_TCL).  Sets ONLY the
     BRAM-IP sizing vars -- every one DERIVED from the config via :func:`build_ip_sizes`, so a
-    geometry change auto-resizes the IPs (busimg depth grows with bus_rows*bus_words; the single
-    axi_bram window grows with the region total) and can never silently overflow a hard-coded BRAM
-    depth.  The RTL PARAMETERS come from the generated ``zlc_geometry.vh`` the .v sources
-    ``\\`include`` -- NOT from ``-generic`` overrides -- so there is ONE geometry bridge and no
-    duplicated generic list to keep in sync.  When the env var is unset, create_project.tcl falls
-    back to its in-file literals, so the shipped build is byte-identical."""
+    geometry change auto-resizes the IPs (the row BRAM follows max_rows and the row width; the
+    single axi_bram window grows with the region total) and can never silently overflow a
+    hard-coded BRAM depth.  The RTL PARAMETERS come from the generated ``zlc_geometry.vh`` the .v
+    sources ``\\`include`` -- NOT from ``-generic`` overrides -- so there is ONE geometry bridge and
+    no duplicated generic list to keep in sync."""
     check_rtl_assumptions(params)   # same gate as emit_geometry_vh: an invalid config fails BOTH
     #                                 emitters together, never writing a half-updated .vh/geom.tcl pair
     ip = build_ip_sizes(params)
     return (
         "# AUTO-GENERATED from streamer_config.json by image.emit_geom_tcl -- do not edit.\n"
         "# BRAM-IP sizing vars for create_project.tcl (all derived from the config geometry).\n"
-        f"set zlc_edge_addr_width {params.edge_addr_width}\n"
+        f"set zlc_row_addr_width {params.row_addr_width}\n"
+        f"set zlc_row_portb_bits {ip['row_portb_bits']}\n"
         f"set zlc_bank_size {params.bank_size}\n"
-        f"set zlc_coeff_portb_bits {ip['coeff_portb_bits']}\n"
-        f"set zlc_mask_portb_bits {ip['mask_portb_bits']}\n"
         f"set zlc_scan_portb_bits {ip['scan_portb_bits']}\n"
-        f"set zlc_busimg_depth {ip['busimg_depth']}\n"
         f"set zlc_axi_bram_depth {ip['axi_bram_depth']}\n"
     )
 
@@ -1215,8 +1134,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
     if args.part:
         # Re-estimate against an override part without editing the file.
         cfg = result["config"]
-        report = estimate_resources(cfg["params"], part=args.part, target_pct=cfg["target_pct"],
-                                    slot_mul_width=cfg["slot_mul_width"])
+        report = estimate_resources(cfg["params"], part=args.part, target_pct=cfg["target_pct"])
         result = {**result, "part": part_profile(args.part).name, "part_string": args.part,
                   "report": report, "ok": all(a["ok"] for a in report.values())}
     print(format_capacity_report(result))
@@ -1264,12 +1182,9 @@ def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[in
         row = base + off * geom.scan_words
         for j in range(geom.num_slots):
             val = point[j] if j < slot_count else 0
-            words[row + j] = _to_unsigned(
-                _checked_signed(
-                    val,
-                    geom.tick_width,
-                    f"scan row {idx} slot {j}",
-                ),
+            words[row + j] = _checked_unsigned(
+                val,
                 geom.tick_width,
+                f"scan row {idx} slot {j}",
             )
     return words

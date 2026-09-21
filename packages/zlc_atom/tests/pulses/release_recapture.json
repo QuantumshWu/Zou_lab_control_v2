@@ -537,6 +537,6 @@
     }
   ],
   "delays": [],
-  "bracket": null,
+  "brackets": [],
   "run_repeats": 0
 }

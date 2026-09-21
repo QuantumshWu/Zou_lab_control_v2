@@ -81,16 +81,14 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     assert selected.period_by_id["probe"].duration == pytest.approx(0.05)
     assert selected.period_by_id["probe"].unit == "ms"
     assert not selected.api_bindings and not selected.scan_bindings
-    effective, scales, wire = prepare_scan_application(microseconds, ((50.0,), (100.0,)))
-    assert effective == ((50.0,), (100.0,)) and scales == (1,)
+    effective, wire = prepare_scan_application(microseconds, ((50.0,), (100.0,)))
+    assert effective == ((50.0,), (100.0,))
     compiled = compile_sequence(resolve_api_parameters(microseconds), StreamerParams(), 50e6)
-    # 5 ms is the nominal base; the wire holds only the signed tick delta.
-    assert wire == ((2500 - 250000,), (5000 - 250000,))
-    from zlc_pulse.compile import evaluate_affine_tick
-    assert evaluate_affine_tick(
-        compiled.ticks[-1], compiled.tick_slot_coeffs[-1], wire[0],
-        compiled.scan_coeff_frac_bits,
-    ) == compile_sequence(selected, StreamerParams(), 50e6).ticks[-1]
+    # The wire holds the row's whole tick count.
+    assert wire == ((2500,), (5000,))
+    assert compiled.resolved_durations(wire[0]) == compile_sequence(
+        selected, StreamerParams(), 50e6
+    ).durations
 
     renamed = replace(sequence, periods=(
         sequence.periods[0], replace(sequence.periods[1], name="MOT"),
@@ -117,10 +115,8 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
             replace(sequence, periods=periods)
 
 
-def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:
-    """The 25-bit DSP operand limits variation, not absolute period length."""
-
-    from zlc_pulse.compile import slot_operand_width
+def test_a_duration_column_spans_one_tick_to_the_whole_row_counter() -> None:
+    """A duration slot is the row's tick count: one tick up to 2^32-1 of them."""
 
     sequence = _sequence(
         (PulseBinding(PulseFieldRef('duration', period_id='probe'), 's', scan=True),),
@@ -129,79 +125,31 @@ def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:
     )
     column, = scan_columns_for(sequence)
 
-    delta = (1 << (slot_operand_width() - 1)) * 20.0e-9
     assert column.limit_lo == pytest.approx(20.0e-9)
-    assert column.limit_hi > 40.0
+    assert column.limit_hi == pytest.approx(((1 << 32) - 1) * 20.0e-9)
     assert column.lo < 1.0 < column.hi
-    assert column.wire_offset == -50_000_000.0
+    assert column.wire_offset == 0.0 and column.wire_scale == pytest.approx(50e6)
 
     authored = ((0.4,), (1.0,), (1.6,))
-    effective, scales, wire = prepare_scan_application(sequence, authored)
-    assert scales == (2,)
-    assert wire == ((-15_000_000,), (0,), (15_000_000,))
+    effective, wire = prepare_scan_application(sequence, authored)
+    assert wire == ((20_000_000,), (50_000_000,), (80_000_000,))
     assert effective == authored
-    execution_column, = scan_columns_for(sequence, scales)
-    assert scan_rows_from_wire(wire, (execution_column,)) == authored
-    assert execution_column.wire_scale == column.wire_scale / 2.0
-    assert delta * scales[0] > 0.6
+    assert scan_rows_from_wire(wire, (column,)) == authored
 
-    negative_limit = 1 << (slot_operand_width() - 1)
-    positive_limit = negative_limit - 1
-    edge_rows = (
-        (1.0 - negative_limit * 20.0e-9,),
-        (1.0 + positive_limit * 20.0e-9,),
-    )
-    edge_effective, edge_scales, edge_wire = prepare_scan_application(
-        sequence,
-        edge_rows,
-    )
-    assert edge_scales == (1,)
-    assert edge_wire == ((-negative_limit,), (positive_limit,))
+    edge_rows = ((20.0e-9,), (((1 << 32) - 1) * 20.0e-9,))
+    edge_effective, edge_wire = prepare_scan_application(sequence, edge_rows)
+    assert edge_wire == ((1,), ((1 << 32) - 1,))
     np.testing.assert_allclose(edge_effective, edge_rows)
-
-    widest = _sequence(
-        (PulseBinding(PulseFieldRef('duration', period_id='probe'), 's', scan=True),),
-        probe_duration=43.0,
-        probe_unit="s",
-    )
-    widest_rows = (
-        (43.0 - negative_limit * 127 * 20.0e-9,),
-        (43.0 + positive_limit * 127 * 20.0e-9,),
-    )
-    widest_effective, widest_scales, widest_wire = prepare_scan_application(
-        widest,
-        widest_rows,
-    )
-    assert widest_scales == (127,)
-    assert widest_wire == ((-negative_limit,), (positive_limit,))
-    np.testing.assert_allclose(widest_effective, widest_rows)
-
-    coarse_effective, coarse_scales, _coarse_wire = prepare_scan_application(
-        sequence,
-        ((20.0e-9,), (43.5,)),
-    )
-    assert coarse_scales == (127,)
-    assert coarse_effective[0][0] >= 20.0e-9
-    assert coarse_effective[1][0] <= column.limit_hi
     with pytest.raises(ValueError, match="become identical"):
         prepare_scan_application(
             sequence,
-            ((0.4,), (0.40000002,), (1.6,)),
+            ((0.4,), (0.4 + 1e-10,), (1.6,)),
         )
 
     with pytest.raises(ValueError, match="s must be within"):
-        validate_scan_table(((50.0,),), (column,))
-
-    dac_port = next(
-        port for port in pulse_target_from_xdc().ports if port.kind == "dac"
-    )
-    with pytest.raises(ValueError, match="DAC slot tick scale"):
-        scan_columns_for(
-            _sequence(
-                (PulseBinding(PulseFieldRef('dac', 'probe', dac_port.key), 'value', scan=True),)
-            ),
-            (2,),
-        )
+        validate_scan_table(((100.0,),), (column,))
+    with pytest.raises(ValueError, match="s must be within"):
+        validate_scan_table(((0.0,),), (column,))
 
 
 def test_the_starter_program_builds_one_table_of_the_right_width() -> None:

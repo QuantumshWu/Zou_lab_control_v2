@@ -58,7 +58,7 @@ def _program(*, periods: int = 9):
         time_step_ns=20,
         periods=tuple(rows),
         bindings=(PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', scan=True),),
-        bracket=PulseBracket("p1", f"p{periods - 2}", 4),
+        brackets=(PulseBracket("body", "p1", f"p{periods - 2}", 4),),
     )
     return compile_sequence(sequence, StreamerParams(), 50e6)
 
@@ -82,13 +82,13 @@ def test_a_point_is_shaped_once_however_many_lanes_ask_about_it(monkeypatch) -> 
     program = _program()
     table = _table(5)
     calls: list[tuple[int, ...]] = []
-    original = schedule._point_timing
+    original = type(program).frame_visits
 
-    def counted(prog, point, point_index):
-        calls.append(point)
-        return original(prog, point, point_index)
+    def counted(prog, point=(), *, bracket_bodies=None):
+        calls.append(tuple(point))
+        return original(prog, point, bracket_bodies=bracket_bodies)
 
-    monkeypatch.setattr(schedule, "_point_timing", counted)
+    monkeypatch.setattr(type(program), "frame_visits", counted)
     trigger_edge_ticks(program, _LANES, table, run_repeats=4)
 
     assert len(calls) == 5, f"{len(calls)} derivations for 5 distinct rows"
@@ -163,7 +163,7 @@ def test_a_bounded_bracket_walk_keeps_the_true_timeline() -> None:
     """
 
     program = _program()
-    assert program.loop_count == 4
+    assert program.loops == ((1, 7, 4),)
     table = _table(2)
     full = trigger_edge_ticks(program, _LANES, table, run_repeats=2)
     bounded = trigger_edge_ticks(
@@ -200,7 +200,7 @@ def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:
         bindings=(PulseBinding(PulseFieldRef('duration', 'variable'), 'ns', scan=True),),
     )
     program = compile_sequence(sequence, StreamerParams(), 50e6)
-    table = np.asarray(((-1,), (0,), (1,)), dtype=np.int64)
+    table = np.asarray(((1,), (2,), (3,)), dtype=np.int64)
 
     windows = trigger_windows_by_channel(
         program,

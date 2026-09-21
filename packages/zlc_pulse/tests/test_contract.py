@@ -12,7 +12,6 @@ def test_pure_function_signatures_match_contract() -> None:
         "sequence",
         "geom",
         "clock_hz",
-        "slot_tick_scales",
     )
     assert tuple(inspect.signature(pack_program).parameters) == ("program", "params", "target")
     assert tuple(inspect.signature(pack_scan_rows).parameters) == (
@@ -49,7 +48,7 @@ def test_the_remote_client_mirrors_the_config_value_surface() -> None:
 
     for streamer in (PulseStreamer, RemotePulseStreamer):
         assert tuple(inspect.signature(streamer.compile_pulse).parameters) == (
-            "self", "sequence", "geom", "clock_hz", "slot_tick_scales",
+            "self", "sequence", "geom", "clock_hz",
         )
         assert tuple(inspect.signature(streamer.load_config_values).parameters) == (
             "self", "entries", "source",

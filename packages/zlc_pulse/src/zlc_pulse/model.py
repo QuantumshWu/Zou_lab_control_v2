@@ -483,13 +483,22 @@ MAXIMUM_REPEAT_COUNT = (1 << 32) - 1
 
 @dataclass(frozen=True)
 class PulseBracket:
-    """Loop one continuous range of timeline periods, at least twice."""
+    """Loop one continuous range of timeline periods, at least twice.
 
+    A pulse holds any number of brackets; each is named by ``bracket_id`` the
+    way a period is named by ``period_id``, so an editor, the remote API and a
+    saved document all point at the same bracket without counting positions.
+    Two brackets are either disjoint or one lies inside the other; the board
+    plays them as nested loops.
+    """
+
+    bracket_id: str
     start_period_id: str | None
     end_period_id: str | None
     count: int
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "bracket_id", _identifier(self.bracket_id, "bracket_id"))
         object.__setattr__(
             self,
             "start_period_id",
@@ -514,6 +523,43 @@ class PulseBracket:
             raise ValueError("bracket count does not fit the hardware 32-bit count")
 
 
+def _bracket_gap_bounds(
+    bracket: PulseBracket, period_ids: tuple[str, ...]
+) -> tuple[int, int]:
+    """Half-open period gaps of one bracket; equal gaps are an empty bracket.
+
+    A missing start anchor means "after the last period" and a missing end
+    anchor "before the first", so an empty bracket can sit at either edge of
+    the timeline where it has no outer neighbour to anchor to.
+    """
+
+    return (
+        len(period_ids)
+        if bracket.start_period_id is None
+        else period_ids.index(bracket.start_period_id),
+        0 if bracket.end_period_id is None else period_ids.index(bracket.end_period_id) + 1,
+    )
+
+
+def bracket_contains(outer: tuple[int, int], inner: tuple[int, int]) -> bool:
+    """Whether ``inner`` lies inside ``outer`` (gap bounds, both half-open).
+
+    An empty bracket occupies one gap.  It is inside another bracket only when
+    that gap is strictly inside it: at a bracket's own boundary gap an empty
+    bracket sits beside it, not within it, so a bracket's nesting is decided
+    by its bounds alone and an editor can draw it from the same rule.
+    """
+
+    start, end = inner
+    if not (outer[0] <= start and end <= outer[1]):
+        return False
+    return start < end or outer[0] < start < outer[1]
+
+
+def brackets_disjoint(first: tuple[int, int], second: tuple[int, int]) -> bool:
+    return first[1] <= second[0] or second[1] <= first[0]
+
+
 @dataclass(frozen=True, init=False)
 class PulseSequence:
     name: str
@@ -522,9 +568,11 @@ class PulseSequence:
     periods: tuple[PulsePeriod, ...]
     bindings: tuple[PulseBinding, ...]
     delays: tuple[OutputDelay, ...]
-    bracket: PulseBracket | None
+    #: Outer brackets first; a bracket that lies inside another follows it.
+    brackets: tuple[PulseBracket, ...]
     run_repeats: int
     _period_by_id: Mapping[str, PulsePeriod] = field(init=False, repr=False, compare=False)
+    _bracket_bounds: tuple[tuple[int, int], ...] = field(init=False, repr=False, compare=False)
 
     def __init__(
         self,
@@ -534,7 +582,7 @@ class PulseSequence:
         periods: tuple[PulsePeriod, ...] = (),
         bindings: tuple[PulseBinding, ...] = (),
         delays: tuple[OutputDelay, ...] = (),
-        bracket: PulseBracket | None = None,
+        brackets: tuple[PulseBracket, ...] = (),
         run_repeats: int = 0,
     ) -> None:
         if target is None:
@@ -595,14 +643,43 @@ class PulseSequence:
                 port = target.by_key.get(ref.port)
                 if port is None or port.kind not in (PORT_DIGITAL, PORT_DAC):
                     raise ValueError(f"binding references missing delay port {ref.port!r}")
-        if bracket is not None:
-            if not isinstance(bracket, PulseBracket):
-                raise TypeError("bracket must be PulseBracket or None")
+        bracket_values = tuple(brackets)
+        if any(not isinstance(bracket, PulseBracket) for bracket in bracket_values):
+            raise TypeError("brackets must contain PulseBracket values")
+        if len({bracket.bracket_id for bracket in bracket_values}) != len(bracket_values):
+            raise ValueError("bracket ids must be unique")
+        for bracket in bracket_values:
             if (
                 (bracket.start_period_id is not None and bracket.start_period_id not in by_period)
                 or (bracket.end_period_id is not None and bracket.end_period_id not in by_period)
             ):
-                raise ValueError("bracket references a missing period")
+                raise ValueError(f"bracket {bracket.bracket_id!r} references a missing period")
+        bounds = {
+            bracket.bracket_id: _bracket_gap_bounds(bracket, ids) for bracket in bracket_values
+        }
+        for bracket in bracket_values:
+            start, end = bounds[bracket.bracket_id]
+            if start > end:
+                raise ValueError(f"bracket {bracket.bracket_id!r} end precedes its start")
+        for index, outer in enumerate(bracket_values):
+            for inner in bracket_values[index + 1:]:
+                first, second = bounds[outer.bracket_id], bounds[inner.bracket_id]
+                if not (
+                    brackets_disjoint(first, second)
+                    or bracket_contains(first, second)
+                    or bracket_contains(second, first)
+                ):
+                    raise ValueError(
+                        f"brackets {outer.bracket_id!r} and {inner.bracket_id!r} overlap "
+                        "without one lying inside the other"
+                    )
+        # Outer first: an enclosing bracket starts no later and ends no earlier
+        # than what it encloses, and a stable sort keeps the authored order
+        # for brackets with identical bounds.
+        ordered = tuple(sorted(
+            bracket_values,
+            key=lambda bracket: (bounds[bracket.bracket_id][0], -bounds[bracket.bracket_id][1]),
+        ))
         run_repeats = _nonnegative_int(run_repeats, "run_repeats")
         if run_repeats > MAXIMUM_REPEAT_COUNT:
             raise ValueError("run_repeats does not fit the hardware 32-bit count")
@@ -612,28 +689,51 @@ class PulseSequence:
         object.__setattr__(self, "periods", periods)
         object.__setattr__(self, "bindings", binding_values)
         object.__setattr__(self, "delays", delay_values)
-        object.__setattr__(self, "bracket", bracket)
-        bounds = self.bracket_bounds
-        if bounds is not None and bounds[0] > bounds[1]:
-            raise ValueError("bracket end precedes bracket start")
+        object.__setattr__(self, "brackets", ordered)
+        object.__setattr__(
+            self, "_bracket_bounds", tuple(bounds[bracket.bracket_id] for bracket in ordered)
+        )
         object.__setattr__(self, "run_repeats", run_repeats)
         object.__setattr__(self, "_period_by_id", MappingProxyType(by_period))
 
     @property
-    def bracket_bounds(self) -> tuple[int, int] | None:
-        """Half-open period gaps; equal gaps preserve an empty authored bracket."""
-        if self.bracket is None:
-            return None
-        ids = tuple(period.period_id for period in self.periods)
-        return (
-            len(ids) if self.bracket.start_period_id is None else ids.index(self.bracket.start_period_id),
-            0 if self.bracket.end_period_id is None else ids.index(self.bracket.end_period_id) + 1,
+    def bracket_bounds(self) -> tuple[tuple[int, int], ...]:
+        """Half-open period gaps of each bracket, aligned with ``brackets``.
+
+        Equal gaps preserve an empty authored bracket.
+        """
+
+        return self._bracket_bounds
+
+    def bracket_by_id(self, bracket_id: str) -> PulseBracket:
+        for bracket in self.brackets:
+            if bracket.bracket_id == bracket_id:
+                return bracket
+        raise ValueError(f"no bracket exists with id {bracket_id!r}")
+
+    @property
+    def bracket_depths(self) -> tuple[int, ...]:
+        """How many brackets each bracket lies inside, plus one; aligned with ``brackets``.
+
+        The deepest value is the loop nesting the board must hold at once.
+        """
+
+        return tuple(
+            1 + sum(
+                bracket_contains(outer, inner)
+                for other, outer in enumerate(self._bracket_bounds)
+                if other != index
+            )
+            for index, inner in enumerate(self._bracket_bounds)
         )
 
-    def require_nonempty_bracket(self) -> None:
-        bounds = self.bracket_bounds
-        if bounds is not None and bounds[0] == bounds[1]:
-            raise ValueError("The bracket is empty. Put a period inside it or remove the bracket before running or saving.")
+    def require_nonempty_brackets(self) -> None:
+        for bracket, (start, end) in zip(self.brackets, self._bracket_bounds, strict=True):
+            if start == end:
+                raise ValueError(
+                    f"Bracket {bracket.bracket_id} is empty. Put a period inside it or "
+                    "remove the bracket before running or saving."
+                )
 
     @property
     def scan_bindings(self) -> tuple[PulseBinding, ...]:
@@ -698,6 +798,8 @@ __all__ = [
     "PORT_DAC",
     "PORT_DIGITAL",
     "TIME_UNIT_CHOICES",
+    "bracket_contains",
+    "brackets_disjoint",
     "canonical_time_unit",
     "config_parameter_key",
     "BINDING_DEFAULT",

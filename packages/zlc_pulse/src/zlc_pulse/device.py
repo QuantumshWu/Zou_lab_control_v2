@@ -14,14 +14,9 @@ import time
 from collections.abc import Mapping
 
 from .binding import apply_config_values, config_parameter_key
-from .compile import (
-    CompiledProgram,
-    compile_sequence,
-    evaluate_affine_tick,
-    slot_operand_width,
-)
-from .model import MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
-from .schedule import bracket_iterations, trigger_edge_ticks
+from .compile import CompiledProgram, compile_sequence
+from .model import FIELD_DURATION, MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
+from .schedule import bus_action_ticks, trigger_edge_ticks
 from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
 from .wire import (
     CMD_FIRE,
@@ -44,7 +39,6 @@ from .wire import (
 # Loader and SAFE handshakes share the same five-second action budget.
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
-_MIN_SEAM_SPAN_TICKS = 3
 
 
 def _repeat_count(value: int, name: str) -> int:
@@ -314,16 +308,12 @@ class ConfigValueHolder:
         sequence: PulseSequence,
         geom: StreamerParams,
         clock_hz: float,
-        *,
-        slot_tick_scales: "Sequence[int] | None" = None,
     ) -> tuple[PulseSequence, CompiledProgram]:
         """Compile the authored pulse without Config mutation or file/device I/O."""
 
         if not isinstance(sequence, PulseSequence):
             raise TypeError("sequence must be PulseSequence")
-        return sequence, compile_sequence(
-            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
-        )
+        return sequence, compile_sequence(sequence, geom, clock_hz)
 
     def _prepare_config_program(
         self,
@@ -341,10 +331,7 @@ class ConfigValueHolder:
             )
         if filled is compiled_source:
             return program, compiled_source
-        return compile_sequence(
-            filled, self.describe().geometry, program.clock_hz,
-            slot_tick_scales=program.slot_tick_scales,
-        ), filled
+        return compile_sequence(filled, self.describe().geometry, program.clock_hz), filled
 
     @property
     def config_source(self) -> str:
@@ -610,22 +597,6 @@ class PulseStreamer(ConfigValueHolder):
             if self._validated_execution != (run_repeats, scan_repeats):
                 self._validate_delay_capacity(self._program, self._scan_rows,
                                               run_repeats, scan_repeats)
-            # The single registered affine cache is prepared two clocks before
-            # every frame seam.  A one-shot may be only one tick long, but every
-            # point which is followed by another point must reach that schedule
-            # tick after starting at tick 1.  Refuse an impossible seamless run
-            # before touching the mailbox instead of letting RTL underflow or
-            # consume the previous point's cache.
-            if self._validated_execution != (run_repeats, scan_repeats):
-                table = self._scan_rows or ((),)
-                if run_repeats == 0:
-                    seam_rows = table[:1]
-                elif run_repeats > 1 or scan_repeats != 1:
-                    seam_rows = table
-                else:
-                    seam_rows = table[:-1]
-                for row in seam_rows:
-                    self._validate_slot_row(self._program, row, require_outer_seam=True)
             self._validated_execution = (run_repeats, scan_repeats)
             self._run_repeats = run_repeats
             self._scan_repeats = scan_repeats
@@ -873,66 +844,24 @@ class PulseStreamer(ConfigValueHolder):
         self,
         program: CompiledProgram,
         row: Sequence[int],
-        *,
-        require_outer_seam: bool = False,
     ) -> None:
-        # A value the multiplier cannot hold is refused, not wrapped.  The host
-        # and the board now agree about what a wrapped value plays.  Duration
-        # slots are signed deltas around a full-width base, so this limits the
-        # scan span rather than the absolute period.
-        width = slot_operand_width()
-        limit = 1 << (width - 1)
-        for index, value in enumerate(row):
-            if not -limit <= int(value) < limit:
-                raise ValueError(
-                    f"scan slot {index} value {int(value)} does not fit the board's "
-                    f"{width}-bit signed multiplier operand "
-                    f"([{-limit}, {limit - 1}])"
-                )
-        effective = tuple(
-            evaluate_affine_tick(base, coeffs, row, program.scan_coeff_frac_bits)
-            for base, coeffs in zip(program.ticks, program.tick_slot_coeffs)
-        )
+        # A value the row cannot hold is refused, not wrapped: a duration slot
+        # is the row's whole tick count, a DAC slot its offset-binary code.
         tick_limit = 1 << self.geom.tick_width
-        if (
-            effective[0] != 0
-            or any(value < 0 or value >= tick_limit for value in effective)
-            or any(right <= left for left, right in zip(effective, effective[1:]))
-        ):
-            raise ValueError(
-                "slot row makes compiled edge ticks collide or leave the "
-                "unsigned hardware tick range"
-            )
-        loop_start = evaluate_affine_tick(
-            program.ticks[program.loop_start_index],
-            program.tick_slot_coeffs[program.loop_start_index],
-            row,
-            program.scan_coeff_frac_bits,
-        )
-        loop_end = evaluate_affine_tick(
-            program.loop_end_tick,
-            program.loop_end_slot_coeffs,
-            row,
-            program.scan_coeff_frac_bits,
-        )
-        if loop_end <= loop_start or loop_end > effective[-1]:
-            raise ValueError("slot row makes compiled loop metadata invalid")
-        if program.loop_count == 2 and loop_end < _MIN_SEAM_SPAN_TICKS:
-            raise ValueError(
-                "PulseBracket boundary must occur at or after "
-                f"hardware tick {_MIN_SEAM_SPAN_TICKS}"
-            )
-        if program.loop_count > 2 and loop_end - loop_start < _MIN_SEAM_SPAN_TICKS:
-            raise ValueError(
-                "PulseBracket span must be at least "
-                f"{_MIN_SEAM_SPAN_TICKS} hardware ticks"
-            )
-        outer_origin = loop_start if program.loop_count > 1 else 0
-        if require_outer_seam and effective[-1] - outer_origin < _MIN_SEAM_SPAN_TICKS:
-            raise ValueError(
-                "each Pulse run before another run must leave at least "
-                f"{_MIN_SEAM_SPAN_TICKS} hardware ticks after its final restart"
-            )
+        code_limit = 1 << self.geom.bus_width
+        for index, (kind, value) in enumerate(zip(program.slot_kinds, row, strict=True)):
+            value = int(value)
+            if kind == FIELD_DURATION:
+                if not 1 <= value < tick_limit:
+                    raise ValueError(
+                        f"scan slot {index} duration {value} is outside the board's "
+                        f"[1, {tick_limit - 1}] tick range"
+                    )
+            elif not 0 <= value < code_limit:
+                raise ValueError(
+                    f"scan slot {index} DAC code {value} is outside the board's "
+                    f"[0, {code_limit - 1}] range"
+                )
 
     def _validate_delay_capacity(
         self,
@@ -1042,65 +971,22 @@ class PulseStreamer(ConfigValueHolder):
             )
 
         if bus_delays:
-            by_bus: dict[int, list[int]] = {bus: [] for bus in bus_delays}
-            run_offset = 0
-            for point in execution_rows:
-                effective = tuple(
-                    evaluate_affine_tick(
-                        base,
-                        coefficients,
-                        point,
-                        program.scan_coeff_frac_bits,
-                    )
-                    for base, coefficients in zip(
-                        program.ticks,
-                        program.tick_slot_coeffs,
-                    )
-                )
-                loop_start = effective[program.loop_start_index]
-                loop_end = evaluate_affine_tick(
-                    program.loop_end_tick,
-                    program.loop_end_slot_coeffs,
-                    point,
-                    program.scan_coeff_frac_bits,
-                )
-                span = loop_end - loop_start
-                final = effective[-1]
-                total = final + (program.loop_count - 1) * span
-                for segment in program.bus_segments:
-                    bus = int(segment.bus_index)
-                    if bus not in by_bus:
-                        continue
-                    start = evaluate_affine_tick(
-                        segment.start_tick,
-                        segment.start_tick_coeffs,
-                        point,
-                        program.scan_coeff_frac_bits,
-                    )
-                    if start < loop_start:
-                        by_bus[bus].append(run_offset + start)
-                    elif start < loop_end:
-                        by_bus[bus].extend(
-                            run_offset + start + iteration * span
-                            for iteration in bracket_iterations(
-                                program.loop_count, kept_bodies
-                            )
-                        )
-                    else:
-                        by_bus[bus].append(
-                            run_offset
-                            + start
-                            + (program.loop_count - 1) * span
-                        )
-                run_offset += total
-            # Finite completion captures one final SAFE descriptor per bus.
-            if finite_completion:
-                for events in by_bus.values():
-                    events.append(run_offset)
-            for bus, events in by_bus.items():
+            actions = bus_action_ticks(
+                program,
+                execution_rows,
+                run_repeats=1,
+                scan_repeats=1,
+                bracket_bodies=kept_bodies,
+            )
+            run_end = sum(program.frame_ticks(point) for point in execution_rows)
+            for bus, delay in bus_delays.items():
+                events = list(actions[bus])
+                # Finite completion captures one final SAFE descriptor per bus.
+                if finite_completion:
+                    events.append(run_end)
                 self._check_delay_window(
-                    sorted(events),
-                    bus_delays[bus],
+                    events,
+                    delay,
                     self.geom.bus_evt_fifo_depth,
                     f"DAC bus {bus}",
                 )

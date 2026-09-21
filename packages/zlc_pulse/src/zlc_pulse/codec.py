@@ -177,7 +177,7 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    sequence.require_nonempty_bracket()
+    sequence.require_nonempty_brackets()
     target = sequence.target
     return {
         "format": PULSE_TREE_FORMAT,
@@ -233,15 +233,15 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
             {"port": delay.port, "value": delay.value, "unit": delay.unit}
             for delay in sequence.delays
         ],
-        "bracket": (
-            None
-            if sequence.bracket is None
-            else {
-                "start_period_id": sequence.bracket.start_period_id,
-                "end_period_id": sequence.bracket.end_period_id,
-                "count": sequence.bracket.count,
+        "brackets": [
+            {
+                "bracket_id": bracket.bracket_id,
+                "start_period_id": bracket.start_period_id,
+                "end_period_id": bracket.end_period_id,
+                "count": bracket.count,
             }
-        ),
+            for bracket in sequence.brackets
+        ],
         "run_repeats": sequence.run_repeats,
     }
 
@@ -263,7 +263,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             "periods",
             "bindings",
             "delays",
-            "bracket",
+            "brackets",
             "run_repeats",
         ),
         "pulse",
@@ -374,17 +374,15 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             for item in _array(tree["delays"], "pulse delays")
         )
     )
-    bracket_tree = tree["bracket"]
-    bracket = (
-        None
-        if bracket_tree is None
-        else PulseBracket(
+    brackets = tuple(
+        PulseBracket(
             **_object(
-                bracket_tree,
-                ("start_period_id", "end_period_id", "count"),
+                item,
+                ("bracket_id", "start_period_id", "end_period_id", "count"),
                 "pulse bracket",
             )
         )
+        for item in _array(tree["brackets"], "pulse brackets")
     )
     sequence = PulseSequence(
         name=tree["name"],
@@ -393,10 +391,10 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         periods=periods,
         bindings=tuple(bindings),
         delays=delays,
-        bracket=bracket,
+        brackets=brackets,
         run_repeats=tree["run_repeats"],
     )
-    sequence.require_nonempty_bracket()
+    sequence.require_nonempty_brackets()
     return sequence
 
 

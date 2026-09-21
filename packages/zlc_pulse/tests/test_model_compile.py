@@ -20,7 +20,6 @@ from zlc_pulse import (
     sequence_from_tree,
     sequence_to_tree,
 )
-from zlc_pulse.compile import evaluate_affine_tick
 from zlc_pulse import pulse_field_value
 from zlc_pulse.model import PulseFieldRef
 from zlc_pulse.schedule import trigger_edge_ticks, trigger_windows_by_channel
@@ -53,54 +52,51 @@ def _sequence(*, bindings=(), delays=(), first_duration=20) -> PulseSequence:
     )
 
 
-def test_static_compile_has_safe_terminal_row_and_pure_trigger_projection() -> None:
-    program = compile_sequence(_sequence(), StreamerParams(max_edges=8, bank_size=2), 50e6)
-    assert program.masks[-1] == 0
-    assert program.ticks[0] == 0
+def test_static_compile_is_one_row_per_period_and_pure_trigger_projection() -> None:
+    program = compile_sequence(_sequence(), StreamerParams(max_rows=8, bank_size=2), 50e6)
+    assert program.durations == (1, 1, 1)
+    assert program.duration_slots == (0, 0, 0)
+    assert program.masks == (0b01, 0b10, 0)
+    assert program.loops == ()
+    assert program.bus_actions[0].row == 0 and program.bus_actions[0].value == 2
     edges = trigger_edge_ticks(program, ("d0", "d1"))
     assert edges["d0"][0::2] == (0,)
     assert edges["d1"][0::2] == (1,)
 
 
-def test_slot_compile_changes_only_affine_data_and_dac_selectors() -> None:
+def test_slot_compile_changes_only_the_row_and_dac_selectors() -> None:
     slot = PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', scan=True)
     program = compile_sequence(
         _sequence(bindings=(slot,)),
-        StreamerParams(max_edges=8, bank_size=2),
+        StreamerParams(max_rows=8, bank_size=2),
         50e6,
-        slot_tick_scales=(2,),
     )
     assert program.slot_kinds == ("duration",)
-    assert program.slot_tick_scales == (2,)
     assert program.slot_count == 1
-    assert program.tick_slot_coeffs[1][0] == 2 << program.scan_coeff_frac_bits
-    assert evaluate_affine_tick(
-        program.ticks[1],
-        program.tick_slot_coeffs[1],
-        (1,),
-        program.scan_coeff_frac_bits,
-    ) == 3
-    with np.testing.assert_raises_regex(ValueError, "coefficient range"):
-        compile_sequence(
-            _sequence(bindings=(slot,)),
-            StreamerParams(max_edges=8, bank_size=2),
-            50e6,
-            slot_tick_scales=(128,),
-        )
+    assert program.duration_slots == (1, 0, 0)
+    assert program.resolved_durations((3,)) == (3, 1, 1)
+    assert program.frame_visits((3,)) == ((0, 0), (1, 3), (2, 4))
+    assert program.frame_ticks((3,)) == 5
     dac_slot = PulseBinding(PulseFieldRef('dac', 'p0', 'dac'), 'value', scan=True)
-    with np.testing.assert_raises_regex(ValueError, "DAC slot tick scale"):
+    scanned = compile_sequence(
+        _sequence(bindings=(slot, dac_slot)),
+        StreamerParams(max_rows=8, bank_size=2),
+        50e6,
+    )
+    assert scanned.bus_actions[0].value_select == 2
+    assert scanned.resolved_bus_value(scanned.bus_actions[0], (3, 1)) == 1
+    with np.testing.assert_raises_regex(ValueError, "scan slot"):
         compile_sequence(
-            _sequence(bindings=(dac_slot,)),
-            StreamerParams(max_edges=8, bank_size=2),
+            _sequence(bindings=(slot, dac_slot)),
+            StreamerParams(max_rows=8, bank_size=2, num_slots=1),
             50e6,
-            slot_tick_scales=(2,),
         )
 
 
 def test_negative_bus_delay_shifts_every_driven_ttl_lane() -> None:
     program = compile_sequence(
         _sequence(delays=(OutputDelay("dac", -40, "ns"),)),
-        StreamerParams(max_edges=8, bank_size=2),
+        StreamerParams(max_rows=8, bank_size=2),
         50e6,
     )
     assert program.channel_delays[:2] == (2, 2)
@@ -108,7 +104,7 @@ def test_negative_bus_delay_shifts_every_driven_ttl_lane() -> None:
     assert program.bus_delays == ()
     declared_zero = compile_sequence(
         _sequence(delays=(OutputDelay("dac", -40, "ns"), OutputDelay("d1", 0, "ns"))),
-        StreamerParams(max_edges=8, bank_size=2),
+        StreamerParams(max_rows=8, bank_size=2),
         50e6,
     )
     assert declared_zero.channel_delays[:2] == (2, 2)
@@ -132,20 +128,71 @@ def test_model_rejects_non_binary_states_and_non_dac_value_slots() -> None:
 def test_a_full_span_bracket_is_only_an_internal_timeline_loop() -> None:
     """A bracket's position never decides finite/forever run policy."""
 
-    whole = replace(_sequence(), bracket=PulseBracket("p0", "p2", 3))
-    program = compile_sequence(whole, StreamerParams(max_edges=8, bank_size=2), 50e6)
-    assert program.loop_start_index == 0
-    assert program.loop_count == 3
-    assert program.loop_end_tick == program.ticks[-1]
+    whole = replace(_sequence(), brackets=(PulseBracket("whole", "p0", "p2", 3),))
+    program = compile_sequence(whole, StreamerParams(max_rows=8, bank_size=2), 50e6)
+    assert program.loops == ((0, 2, 3),)
+    assert program.frame_ticks() == 9
     windows = trigger_windows_by_channel(program, ("d0", "d1"))
     assert windows["d0"] == ((0, 1), (3, 4), (6, 7))
     assert windows["d1"] == ((1, 2), (4, 5), (7, 8))
 
 
+def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
+    """Several brackets: disjoint or one inside the other, never crossing.
+
+    The board walks them as nested loops, so the compiled loop table is
+    outermost first and its depth is what the geometry must hold.
+    """
+
+    base = _sequence()
+    inner = PulseBracket("inner", "p1", "p1", 3)
+    outer = PulseBracket("outer", "p0", "p1", 2)
+    nested = replace(base, brackets=(inner, outer))
+    assert [bracket.bracket_id for bracket in nested.brackets] == ["outer", "inner"]
+    assert nested.bracket_bounds == ((0, 2), (1, 2))
+    assert nested.bracket_depths == (1, 2)
+    program = compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2), 50e6)
+    assert program.loops == ((0, 1, 2), (1, 1, 3))
+    assert program.loop_depth == 2
+    assert program.frame_visits() == (
+        (0, 0), (1, 1), (1, 2), (1, 3), (0, 4), (1, 5), (1, 6), (1, 7), (2, 8),
+    )
+    assert program.frame_ticks() == 9
+    assert trigger_windows_by_channel(program, ("d0", "d1")) == {
+        "d0": ((0, 1), (4, 5)),
+        "d1": ((1, 4), (5, 8)),
+    }
+    apart = replace(base, brackets=(
+        PulseBracket("late", "p2", "p2", 2), PulseBracket("early", "p0", "p0", 2),
+    ))
+    assert [bracket.bracket_id for bracket in apart.brackets] == ["early", "late"]
+    assert apart.bracket_depths == (1, 1)
+    with np.testing.assert_raises_regex(ValueError, "overlap"):
+        replace(base, brackets=(
+            PulseBracket("a", "p0", "p1", 2), PulseBracket("b", "p1", "p2", 2),
+        ))
+    with np.testing.assert_raises_regex(ValueError, "unique"):
+        replace(base, brackets=(inner, replace(inner, count=4)))
+    with np.testing.assert_raises_regex(ValueError, "nest 2 deep"):
+        compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2, loop_depth=1), 50e6)
+    with np.testing.assert_raises_regex(ValueError, "2 brackets"):
+        compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2, max_loops=1), 50e6)
+    # An empty bracket at another bracket's boundary gap sits beside it: an
+    # editor draws it from the same rule, so nesting is decided by bounds alone.
+    beside = replace(base, brackets=(
+        PulseBracket("empty", "p2", "p1", 2), PulseBracket("body", "p0", "p1", 2),
+    ))
+    assert beside.bracket_depths == (1, 1)
+    within = replace(base, brackets=(
+        PulseBracket("empty", "p1", "p0", 2), PulseBracket("body", "p0", "p1", 2),
+    ))
+    assert within.bracket_depths == (1, 2)
+
+
 def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:
     for invalid in (True, 1.5, 1, 0, -1, 2**32):
         with np.testing.assert_raises((TypeError, ValueError)):
-            PulseBracket("p0", "p2", invalid)
+            PulseBracket("b", "p0", "p2", invalid)
 
     sequence = _sequence()
     for valid in (0, 1, 2**32 - 1):
@@ -154,7 +201,7 @@ def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:
         with np.testing.assert_raises((TypeError, ValueError)):
             replace(sequence, run_repeats=invalid)
 
-    geometry = StreamerParams(max_edges=8, bank_size=2)
+    geometry = StreamerParams(max_rows=8, bank_size=2)
     assert compile_sequence(sequence, geometry, 50e6) == compile_sequence(
         replace(sequence, run_repeats=7), geometry, 50e6
     )
@@ -163,32 +210,35 @@ def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:
         PulseBinding(PulseFieldRef('delay', port='d0'), 'ns', scan=True)
 
 
-def test_pulse_tree_uses_only_bracket_and_run_repeats() -> None:
+def test_pulse_tree_uses_only_brackets_and_run_repeats() -> None:
     authored = replace(
         _sequence(),
-        bracket=PulseBracket("p0", "p2", 3),
+        brackets=(PulseBracket("loop", "p0", "p2", 3),),
         run_repeats=7,
     )
     tree = sequence_to_tree(authored)
 
-    assert tree["bracket"] == {
+    assert tree["brackets"] == [{
+        "bracket_id": "loop",
         "start_period_id": "p0",
         "end_period_id": "p2",
         "count": 3,
-    }
+    }]
     assert tree["run_repeats"] == 7
-    assert "repeat" not in tree
-    assert not hasattr(authored, "repeat")
+    assert "repeat" not in tree and "bracket" not in tree
+    assert not hasattr(authored, "repeat") and not hasattr(authored, "bracket")
     assert sequence_from_tree(tree) == authored
 
     for start, end, gap in (("p0", None, 0), ("p1", "p0", 1), (None, "p2", 3)):
-        empty = replace(authored, bracket=PulseBracket(start, end, 3))
-        assert empty.bracket_bounds == (gap, gap)
-        raw = {**tree, "bracket": {"start_period_id": start, "end_period_id": end, "count": 3}}
+        empty = replace(authored, brackets=(PulseBracket("loop", start, end, 3),))
+        assert empty.bracket_bounds == ((gap, gap),)
+        raw = {**tree, "brackets": [
+            {"bracket_id": "loop", "start_period_id": start, "end_period_id": end, "count": 3},
+        ]}
         messages = []
         for operation in (
-            empty.require_nonempty_bracket,
-            lambda: compile_sequence(empty, StreamerParams(max_edges=8, bank_size=2), 50e6),
+            empty.require_nonempty_brackets,
+            lambda: compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6),
             lambda: sequence_to_tree(empty),
             lambda: sequence_from_tree(raw),
         ):
@@ -198,18 +248,19 @@ def test_pulse_tree_uses_only_bracket_and_run_repeats() -> None:
                 messages.append(str(error))
             else:
                 raise AssertionError("empty authoring bracket escaped the execution/save boundary")
-        assert len(set(messages)) == 1 and "bracket is empty" in messages[0]
+        assert len(set(messages)) == 1 and "Bracket loop is empty" in messages[0]
     with np.testing.assert_raises_regex(ValueError, "end precedes"):
-        replace(authored, bracket=PulseBracket("p2", "p0", 3))
+        replace(authored, brackets=(PulseBracket("loop", "p2", "p0", 3),))
 
-    obsolete = dict(tree)
-    obsolete["repeat"] = obsolete.pop("bracket")
-    with np.testing.assert_raises_regex(ValueError, "unknown pulse field.*repeat"):
-        sequence_from_tree(obsolete)
+    for obsolete_key in ("repeat", "bracket"):
+        obsolete = dict(tree)
+        obsolete[obsolete_key] = obsolete.pop("brackets")[0]
+        with np.testing.assert_raises_regex(ValueError, f"unknown pulse field.*{obsolete_key}"):
+            sequence_from_tree(obsolete)
 
 
 def test_compile_binds_the_document_clock_and_complete_geometry() -> None:
-    geometry = StreamerParams(max_edges=8, bank_size=2)
+    geometry = StreamerParams(max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geometry, 50e6)
     assert program.geometry_fingerprint != 0
     with np.testing.assert_raises(ValueError):
@@ -330,7 +381,7 @@ def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:
     carrying them compiles to exactly the program its numbers describe.
     """
 
-    geometry = StreamerParams(max_edges=8, bank_size=2)
+    geometry = StreamerParams(max_rows=8, bank_size=2)
     configured = _configured()
     program = compile_sequence(configured, geometry, 50e6)
     bare = compile_sequence(
@@ -338,7 +389,7 @@ def test_a_declared_config_parameter_needs_no_resolving_to_compile() -> None:
         geometry,
         50e6,
     )
-    assert program.ticks == bare.ticks
+    assert program.durations == bare.durations
     assert program.masks == bare.masks
 
 
@@ -360,7 +411,7 @@ def test_a_dac_slot_whose_step_is_gone_is_named_by_the_compiler() -> None:
     )
     assert sequence_from_tree(sequence_to_tree(sequence)) == sequence
     with np.testing.assert_raises_regex(ValueError, "'dac:p0:dac'.*'dac'.*'p0'.*no step"):
-        compile_sequence(sequence, StreamerParams(max_edges=8, bank_size=2), 50e6)
+        compile_sequence(sequence, StreamerParams(max_rows=8, bank_size=2), 50e6)
 
 
 def test_a_named_duration_that_is_not_positive_is_refused_not_rounded_up() -> None:

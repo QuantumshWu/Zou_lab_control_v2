@@ -7,13 +7,12 @@ Every query walks one table in hardware order: each row holds for
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from itertools import chain
+from collections.abc import Sequence
 from numbers import Integral
 
 import numpy as np
 
-from .compile import CompiledProgram, evaluate_affine_tick
+from .compile import CompiledProgram, bracket_iterations
 from .model import MAXIMUM_REPEAT_COUNT
 
 
@@ -62,8 +61,8 @@ def trigger_edge_ticks(
     question also meant refusing a program for an exposure-shaped reason (a
     lane still high at the end) from inside a FIFO-capacity check.
 
-    ``bracket_bodies`` walks only the first and last that many replays of the
-    Bracket in every Pulse, at their true ticks -- see
+    ``bracket_bodies`` walks only the first and last that many replays of
+    every Bracket in every Pulse, at their true ticks -- see
     :func:`bracket_iterations` -- which is what bounds a capacity check over
     a loop that replays a body a billion times.
     """
@@ -84,24 +83,34 @@ def trigger_edge_ticks(
     )
 
 
-def bracket_iterations(loop_count: int, bodies: int | None) -> Iterable[int]:
-    """Which replays of a Bracket to walk: every one, or a bounded first-and-last.
+def bus_action_ticks(
+    prog: CompiledProgram,
+    table: np.ndarray | None = None,
+    *,
+    run_repeats: int = 1,
+    scan_repeats: int = 1,
+    bracket_bodies: int | None = None,
+) -> dict[int, tuple[int, ...]]:
+    """The tick every DAC bus is handed an action, per bus, in playback order.
 
-    A delay-FIFO check needs the TRUE elapsed time of a Pulse -- so the
-    Pulses after it land where they really land -- but not every body of a
-    Bracket that replays a billion times.  The bodies are identical, so once
-    ``bodies`` of them have played a queue has either overflowed or repeats
-    its state, and the last ``bodies`` see the loop out exactly the way the
-    first saw it in; the ones between are the same again at ticks no window
-    can tell apart from those.  Walking a SHORTENED loop instead moved every
-    later Pulse earlier, and a body that changed no level at all -- which
-    adds no entry to any queue -- was refused for crowding runs together
-    that the board plays comfortably apart.  ``None`` walks every replay.
+    One entry per row visit that carries an action for that bus: this is what
+    a bus's delayed descriptor FIFO holds, so a capacity check asks this.
+    Bus delays are not applied here; the FIFO fills at the undelayed tick.
     """
 
-    if bodies is None or loop_count <= 2 * bodies:
-        return range(loop_count)
-    return chain(range(bodies), range(loop_count - bodies, loop_count))
+    if not isinstance(prog, CompiledProgram):
+        raise TypeError("prog must be CompiledProgram")
+    by_row: dict[int, list[int]] = {}
+    for action in prog.bus_actions:
+        by_row.setdefault(action.row, []).append(action.bus_index)
+    ticks: dict[int, list[int]] = {index: [] for index in range(len(prog.bus_names))}
+    run_offset = 0
+    for point in _scan_points(prog, table, run_repeats, scan_repeats):
+        for row, tick in prog.frame_visits(point, bracket_bodies=bracket_bodies):
+            for bus in by_row.get(row, ()):
+                ticks[bus].append(run_offset + tick)
+        run_offset += prog.frame_ticks(point)
+    return {bus: tuple(values) for bus, values in ticks.items()}
 
 
 def _windows_of(edges: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
@@ -123,12 +132,8 @@ def run_duration_seconds(
     """Return the exact finite playback duration for one program/table run."""
 
     return sum(
-        total for _effective, _loop_start, _loop_end, _final, _span, total in (
-            _point_timing(prog, point, index)
-            for index, point in enumerate(
-                _scan_points(prog, table, run_repeats, scan_repeats)
-            )
-        )
+        prog.frame_ticks(point)
+        for point in _scan_points(prog, table, run_repeats, scan_repeats)
     ) / float(prog.clock_hz)
 
 
@@ -148,14 +153,18 @@ def _channel_edges(
     tick allocated a tuple per edge -- 3.9 million of them for one 200-point
     fire -- to restate what counting says.
 
-    THE SHAPE OF A POINT IS SHARED BY EVERY LANE.  ``_point_timing`` has no
-    channel argument, and a scan of N rows has N shapes however many run or
-    scan repeats it plays.  Derived per lane, a program with
+    THE SHAPE OF A POINT IS SHARED BY EVERY LANE.  A scan of N rows has N
+    row-visit shapes however many run or scan repeats it plays, and one
+    shape serves every lane asked for.  Derived per lane, a program with
     nine delayed lanes derived the same table nine times -- and nine is
     authorable by accident, because a delay is written per port and a
     NEGATIVE one is expressed by lifting every OTHER driven lane, so one
     ``-100 ns`` turns every driven lane into a delayed channel.  This runs
     inside fire(), before the board is strobed, with the operator waiting.
+
+    A level carried across a Pulse seam does not toggle: the next Pulse's
+    first row takes over at the tick the last row ends, exactly as the board
+    plays it.  Only the end of a finite run lowers every lane.
     """
 
     if not isinstance(prog, CompiledProgram):
@@ -172,64 +181,33 @@ def _channel_edges(
         bits.append(bit)
 
     points = _scan_points(prog, table, run_repeats, scan_repeats)
-    loop_count = prog.loop_count
-    loop_start_index = prog.loop_start_index
-    shapes: dict[tuple[int, ...], tuple] = {}
+    shapes: dict[tuple[int, ...], tuple[tuple[tuple[int, int], ...], int]] = {}
+    for point in points:
+        if point not in shapes:
+            shapes[point] = (
+                prog.frame_visits(point, bracket_bodies=bracket_bodies),
+                prog.frame_ticks(point),
+            )
 
     streams: list[tuple[int, ...]] = []
     for bit in bits:
         delay = int(prog.channel_delays[bit])
-        # One lookup per stop instead of a shift and a mask: the mask table
-        # has 41 rows and the walk visits them hundreds of thousands of times.
+        # One lookup per visit instead of a shift and a mask: the mask table
+        # is short and the walk visits it hundreds of thousands of times.
         levels = tuple(bool((mask >> bit) & 1) for mask in prog.masks)
-        terminal = levels[-1]
         ticks: list[int] = []
         previous = False
         run_offset = 0
-        for point_index, point in enumerate(points):
-            shape = shapes.get(point)
-            if shape is None:
-                effective, _loop_start, loop_end, final, span, total = _point_timing(
-                    prog, point, point_index
-                )
-                prefix = tuple(range(loop_start_index))
-                body = tuple(
-                    index
-                    for index in range(loop_start_index, len(effective))
-                    if effective[index] < loop_end
-                )
-                extra = tuple(
-                    index
-                    for index in range(loop_start_index, len(effective))
-                    if loop_end <= effective[index] < final
-                )
-                shape = (effective, prefix, body, extra, final, span, total)
-                shapes[point] = shape
-            effective, prefix, body, extra, final, span, total = shape
-
-            for index in prefix:
-                level = levels[index]
+        for point in points:
+            visits, total = shapes[point]
+            for row, tick in visits:
+                level = levels[row]
                 if level != previous:
                     previous = level
-                    ticks.append(run_offset + effective[index] + delay)
-            for iteration in bracket_iterations(loop_count, bracket_bodies):
-                offset = run_offset + iteration * span
-                for index in body:
-                    level = levels[index]
-                    if level != previous:
-                        previous = level
-                        ticks.append(offset + effective[index] + delay)
-            offset = run_offset + (loop_count - 1) * span
-            for index in extra:
-                level = levels[index]
-                if level != previous:
-                    previous = level
-                    ticks.append(offset + effective[index] + delay)
-
-            if terminal != previous:
-                previous = terminal
-                ticks.append(offset + final + delay)
+                    ticks.append(run_offset + tick + delay)
             run_offset += total
+        if previous:
+            ticks.append(run_offset + delay)
         streams.append(tuple(ticks))
 
     return tuple(streams)
@@ -288,32 +266,9 @@ def _finite_repeat_count(value: int, field_name: str) -> int:
     return count
 
 
-def _point_timing(
-    prog: CompiledProgram,
-    point: tuple[int, ...],
-    point_index: int,
-) -> tuple[tuple[int, ...], int, int, int, int, int]:
-    effective = tuple(
-        evaluate_affine_tick(base, coeffs, point, prog.scan_coeff_frac_bits)
-        for base, coeffs in zip(prog.ticks, prog.tick_slot_coeffs)
-    )
-    loop_start = effective[prog.loop_start_index]
-    loop_end = evaluate_affine_tick(
-        prog.loop_end_tick,
-        prog.loop_end_slot_coeffs,
-        point,
-        prog.scan_coeff_frac_bits,
-    )
-    final = effective[-1]
-    if loop_end <= loop_start or loop_end > final:
-        raise ValueError(f"point {point_index} has invalid loop metadata")
-    span = loop_end - loop_start
-    total = final + (prog.loop_count - 1) * span
-    return effective, loop_start, loop_end, final, span, total
-
-
 __all__ = [
     "bracket_iterations",
+    "bus_action_ticks",
     "run_duration_seconds",
     "trigger_windows_by_channel",
     "trigger_edge_ticks",

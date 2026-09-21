@@ -160,7 +160,7 @@ def _sequence_geometry() -> StreamerParams:
         channel_count=4,
         bus_count=1,
         bus_width=2,
-        max_edges=8,
+        max_rows=8,
         bank_size=2,
     )
 
@@ -168,7 +168,7 @@ def _sequence_geometry() -> StreamerParams:
 def test_remote_owner_transfer_requires_stable_safe_and_rejects_stale_handler(
     monkeypatch,
 ) -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
     )
@@ -328,7 +328,7 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
 def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) -> None:
     geom = _sequence_geometry()
     source = _sequence(slotted=True, configured=True)
-    program = compile_sequence(source, geom, 50e6, slot_tick_scales=(2,))
+    program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     # The client owns Config; a distinct set on the server must not reapply.
@@ -384,8 +384,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
                 assert report.cursor == 2
                 assert state.authored_source == source
                 assert state.source.period_by_id["p1"].duration == duration
-                assert state.program.slot_tick_scales == (2,)
-                assert state.program == compile_sequence(state.source, geom, 50e6, slot_tick_scales=(2,))
+                assert state.program == compile_sequence(state.source, geom, 50e6)
                 assert state.rows == ((1,),)
                 assert state.run_repeats == 2 and state.scan_repeats == 3
             # A new connection can Fire the resident pulse without another Load.
@@ -668,7 +667,7 @@ def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
     import json
     import struct
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
     )
@@ -766,7 +765,8 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "ZLC CLIENT CONNECTED" in output
     assert "ZLC OPEN" in output
     assert "ZLC LOAD" in output
-    assert "edges=3" in output
+    assert "periods=2" in output
+    assert "loops=0" in output
     assert "ZLC FIRE" in output
     assert "run_repeats=1" in output
     assert "scan_repeats=1" in output
@@ -792,7 +792,7 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
     amount of asking can be relied on to unmask.
     """
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
     )
@@ -1182,7 +1182,7 @@ def test_main_explicit_backend_failure_is_logged_and_returns_two(monkeypatch, ca
 
 
 def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None:
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     dac = next(port for port in _BOARD_TARGET.ports if port.kind == "dac" and port.bus_index == 3)
     source = replace(_sequence(slotted=True), target=_BOARD_TARGET, periods=(
         PulsePeriod("p0", 40, "ns", (0,) * 24 + (1,) + (0,) * 44,
@@ -1263,7 +1263,7 @@ def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
     import socket as socket_module
     import struct as struct_module
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom, auto_done=True),
         geom,
@@ -1355,7 +1355,7 @@ def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> 
     import json
     import struct
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
     )
@@ -1475,7 +1475,7 @@ def test_local_pulse_service_serves_a_supplied_streamer_and_narrates(caplog) -> 
 
     from zlc_pulse.remote import LocalPulseService
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
     )
@@ -1519,7 +1519,7 @@ def test_a_local_service_admits_peers_only_while_told_to() -> None:
 
     from zlc_pulse.remote import LocalPulseService
 
-    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
     )

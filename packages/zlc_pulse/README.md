@@ -24,9 +24,12 @@ advances; after the last row, `scan_repeats` controls complete table sweeps.
 `0` means infinite for either hardware repeat count. With no scan table,
 `scan_repeats` is exactly `1`.
 
-`PulseBracket` is the optional single continuous interval inside the timeline.
-Its count is at least two, and it compiles only to the program's `LOOP_*`
-metadata. Even a bracket spanning the whole Pulse does not become or alter
+A `PulseBracket` is one continuous interval inside the timeline, named by its
+`bracket_id`. A Pulse holds any number of them; two brackets are either
+disjoint or one lies inside the other, and the board plays them as nested
+loops (`loop_depth` levels deep, `max_loops` per Pulse, both geometry
+constants). Each count is at least two and compiles only to the program's
+loop table. Even a bracket spanning the whole Pulse does not become or alter
 `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 
@@ -75,8 +78,8 @@ schedule queries are pure finite host-side projections. They take finite
 the device.
 
 Pulse documents use the stable strict root `zlc.pulse` with no numeric format
-version. Their sequence root contains `bracket` and `run_repeats`; the removed
-`repeat` field is not accepted. The codec accepts only the current complete
+version. Their sequence root contains `brackets` and `run_repeats`; the removed
+`repeat` and single `bracket` fields are not accepted. The codec accepts only the current complete
 grammar, so unsupported workspace files are refused.
 
 For a separated FPGA machine, the bench serves the board in-process (the

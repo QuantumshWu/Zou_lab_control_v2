@@ -32,7 +32,7 @@ def _geometry() -> StreamerParams:
         channel_count=3,
         bus_count=1,
         bus_width=2,
-        max_edges=8,
+        max_rows=8,
         bank_size=2,
     )
 
@@ -214,7 +214,7 @@ def test_a_pulse_declaring_nothing_needs_no_set(streamer):
     )
     filled, program = device.compile_pulse(bare, geom, 50e6)
     assert filled == bare
-    assert program.ticks == compile_sequence(bare, geom, 50e6).ticks
+    assert program.durations == compile_sequence(bare, geom, 50e6).durations
 
 
 def test_the_set_survives_a_close_and_reopen(streamer):
@@ -246,14 +246,14 @@ def test_the_remote_client_holds_its_own_set_and_compiles_without_io() -> None:
     geom = _geometry()
     filled, program = client.compile_pulse(sequence, geom, 50e6)
     assert filled is sequence
-    assert program.ticks == compile_sequence(sequence, geom, 50e6).ticks
+    assert program.durations == compile_sequence(sequence, geom, 50e6).durations
     client.load_config_values({"probe_time": (100, "ns")}, source="today.json")
     assert client.config_values() == {"probe_time": (100.0, "ns")}
     assert client.config_source == "today.json"
 
     filled, program = client.compile_pulse(sequence, geom, 50e6)
     assert filled is sequence
-    assert program.ticks == compile_sequence(filled, geom, 50e6).ticks
+    assert program.durations == compile_sequence(filled, geom, 50e6).durations
 
 
 def test_a_set_that_is_not_a_set_is_refused_at_the_door(streamer) -> None:
