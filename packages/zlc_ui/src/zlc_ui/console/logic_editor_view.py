@@ -107,7 +107,9 @@ class LogicEditorView(QtWidgets.QWidget):
         self.form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.form)
         self.form.changed.connect(self._parameter_changed)
-        self.form.value_normalized.connect(self._parameter_changed)
+        self.form.value_normalized.connect(
+            lambda key: self._parameter_changed(key, normalized=True)
+        )
         self.form.refresh_requested.connect(
             lambda _key: self.refresh_requested.emit()
         )
@@ -468,13 +470,16 @@ class LogicEditorView(QtWidgets.QWidget):
         combo.setCurrentIndex(max(0, index))
         combo.blockSignals(False)
 
-    def _parameter_changed(self, key: str) -> None:
+    def _parameter_changed(self, key: str, *, normalized: bool = False) -> None:
         try:
             value = self.form.read_value(str(key))
         except (TypeError, ValueError) as error:
             self.status_label.setText(str(error))
             return
-        self.draft_changed.emit({"values": {str(key): value}})
+        patch = {"values": {str(key): value}}
+        if normalized:
+            patch["normalized"] = True
+        self.draft_changed.emit(patch)
 
     def _artifact_changed(self, key: str) -> None:
         try:

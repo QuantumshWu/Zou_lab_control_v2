@@ -112,8 +112,9 @@ def _visible_logic_roi(editor) -> tuple[int, int, int, int]:
     )
 
 
+@pytest.mark.parametrize("selection_surface", ["live", "frozen"])
 def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_restarts(
-    tmp_path,
+    tmp_path, selection_surface,
 ) -> None:
     plot = pytest.importorskip("zlc_plot")
     app = ensure_qt_app(["guard-b-task-console-interaction"])
@@ -243,7 +244,8 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
             presenter,
         )
 
-        _commit_area(panel.editor_host)
+        selection_host = panel.host if selection_surface == "live" else panel.editor_host
+        _commit_area(selection_host)
         _wait_until(
             lambda: _visible_logic_roi(logic_editor) != draft_roi,
             presenter,
@@ -271,7 +273,19 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
 
         # Removing the region restores what was authored before that region,
         # not the viewport, last selector geometry or camera readback.
-        panel.editor_host.remove_selector(plot.SelectorKind.AREA).result()
+        if selection_surface == "live":
+            window.tabs.setCurrentIndex(0)
+        else:
+            assert view.focus_panel_editor(panel.panel_id)
+        app.processEvents()
+        selection_widget = selection_host.qt_widget()
+        front = selection_widget._front
+        left, bottom, right, top = front.interaction.axes[0].bounds
+        blank = QtCore.QPoint(
+            round((left + 0.1 * (right - left)) * selection_widget.width()),
+            round((bottom + 0.1 * (top - bottom)) * selection_widget.height()),
+        )
+        QtTest.QTest.mouseClick(selection_widget, QtCore.Qt.LeftButton, pos=blank)
         _wait_until(lambda: panel.state.selector == {}, presenter)
         _wait_until(
             lambda: _visible_logic_roi(logic_editor) == draft_roi,

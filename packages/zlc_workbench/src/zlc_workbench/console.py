@@ -1656,7 +1656,9 @@ class ConsolePresenter:
                         binding,
                         host,
                         host.configure(selector_updates={
-                            SelectorKind(selection.selector_kind): None,
+                            item.kind: None for item in panel_plot_selectors(
+                                selection, facet_index=binding.state.focused_cell,
+                            )
                         }),
                     )
                 self._report(
@@ -5939,7 +5941,9 @@ class ConsolePresenter:
             if other_host is not None:
                 self._track_panel_configuration(
                     binding, other_host, other_host.configure(selector_updates={
-                        SelectorKind(previous.selector_kind): None,
+                        item.kind: None for item in panel_plot_selectors(
+                            previous, facet_index=binding.state.focused_cell,
+                        )
                     }),
                 )
             if not self._task_science_locked(binding):
@@ -7224,11 +7228,12 @@ class ConsolePresenter:
         node_id: str,
         *,
         values: Mapping[str, Any] | None = None,
+        normalized: bool = False,
         source_signal: object = _UNCHANGED,
         device_keys: Mapping[str, str] | None = None,
         artifact_inputs: Mapping[str, str] | None = None,
     ) -> bool:
-        """Patch the row draft without mutating its current run."""
+        """Patch the draft; passive display normalization is not a manual edit."""
 
         if self._task_command_blocked("changing a logic draft"):
             return False
@@ -7238,7 +7243,8 @@ class ConsolePresenter:
             return False
         if values is not None:
             for name, value in values.items():
-                if name in binding.selection_restore and value != binding.draft.values[name]:
+                if (not normalized and name in binding.selection_restore
+                        and value != binding.draft.values[name]):
                     binding.selection_restore.pop(name)
             binding.draft.values.update(dict(values))
         if source_signal is not _UNCHANGED:
@@ -7265,6 +7271,7 @@ class ConsolePresenter:
         self.update_logic_draft(
             node_id,
             values=patch.get("values"),
+            normalized=bool(patch.get("normalized", False)),
             source_signal=source,
             device_keys=patch.get("device_keys"),
             artifact_inputs=patch.get("artifact_inputs"),
