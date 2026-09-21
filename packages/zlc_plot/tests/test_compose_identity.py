@@ -300,6 +300,7 @@ def test_tight_chrome_reuses_one_exact_background_without_residue(
             staticmethod(counted_draw),
         )
         session.update_data(_snapshot(schema, size, 35.0, 3, seed=14))
+        assert native_draws == 0, "dynamic side limits must not invalidate unchanged main chrome"
         small = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
         _cmap, limits, _label, _rail = renderer._artists["image:colorbar_state"]
         assert tuple(renderer._artists["image:colorbar_mappable"].get_clim()) == limits
@@ -307,9 +308,13 @@ def test_tight_chrome_reuses_one_exact_background_without_residue(
         renderer._composed_generation = -1
         repeated = np.array(session.rgba(), copy=True)
         np.testing.assert_array_equal(repeated, small)
+        assert native_draws == 1, "explicitly stale pixels require one complete redraw"
         session.update_data(_snapshot(schema, size, 39000.0, 4, seed=15))
 
-        assert native_draws <= 1
+        assert native_draws == 1, "the next side update must reuse the refreshed background"
+        current = session.rgba().copy()
+        np.testing.assert_array_equal(session.rgba(), current)
+        assert native_draws == 1, "reading the current frame never redraws"
         composed = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
         renderer.draw()
         full = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)

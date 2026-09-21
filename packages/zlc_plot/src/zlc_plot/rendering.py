@@ -10923,6 +10923,10 @@ class MatplotlibRenderer:
             )
             if self._artists.get("ticks:layout") != signature:
                 direction_labels = ([], [])
+                previous_sizes = tuple(
+                    (axis.xaxis._major_tick_kw.get("labelsize"),
+                     axis.yaxis._major_tick_kw.get("labelsize")) for axis in axes
+                )
                 for axis_owner in axes:
                     for direction, axis in enumerate((axis_owner.xaxis, axis_owner.yaxis)):
                         locator = axis.get_major_locator()
@@ -10935,7 +10939,14 @@ class MatplotlibRenderer:
                             )
                 self._fit_tick_label_text(axes, direction_labels, tuple(axis.title for axis in axes if axis.title.get_text()))
                 self._artists["ticks:layout"] = signature
-                self._mark_axes_chrome_dirty(*axes)
+                # Limits, layout and explicit style changes already invalidate
+                # their owners. Repricing a dynamic side rail is not a change
+                # to every static background; only propagated font changes are.
+                self._mark_axes_chrome_dirty(*(
+                    axis for axis, before in zip(axes, previous_sizes)
+                    if before != (axis.xaxis._major_tick_kw.get("labelsize"),
+                                  axis.yaxis._major_tick_kw.get("labelsize"))
+                ))
             return
         cells = self._axes.get("facet_cell", ())
         if self._facet_focus_index is not None or not cells:

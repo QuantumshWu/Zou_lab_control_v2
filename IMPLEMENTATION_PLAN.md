@@ -11,6 +11,7 @@
 ## 1. 当前实施范围
 
 - 侧分布零刻度让位不再只在孤立locator内生效：公共最终跨轴碰撞阶段先让参与碰撞的可选zero退场，再判断是否需要缩字号。Image/Rolling同owner，更新locator最终答案供compose/full draw/export共同消费，不只隐藏Text。真实Rolling的主轴0与side0碰撞复现，修后高端和主横轴4.16→6.5pt；DPR1/3、扩大恢复0/缩回省0、完整重绘与导出、未变布局不重规划的原直接用例通过。图像产物仅在ignored research。
+- Image旧重绘断言已查清并修实现：跨轴字号规划把动态侧栏变化无差别标成全部背景失效；现只补充实际字号改变的轴，保留原limits/layout/style失效。两次大幅clim变化的多余背景draw由2次降到0，测试主动置画面失效的1次完整draw保留；断言拆成各阶段精确计数，未放宽总次数。DPR1/2、Rolling侧刻度与重新布局、变化前后完整像素一致的直接验证通过。
 
 - group[0]恢复原灰色#808080：删除分组跳过公共色表首槽的偏移，未分组曲线及Curve/Rolling/Histogram、Facet和meter共用同一源序号映射。未修改title/ticks/axis-title的布局逻辑。
 
