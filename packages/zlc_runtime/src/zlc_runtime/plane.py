@@ -871,24 +871,29 @@ def _materialize_indexed_dataset(
         )
     point_count = event_schema.point_domain.size
     basis = materialization.basis
-    segments = {}
+    retained = ()
     if basis is not None:
-        for origin, planes in zip(basis.snapshot.block.segment_origins, basis.snapshot.block.segments, strict=True):
-            index = basis.start + origin[1] // point_count
-            if start <= index <= latest_index:
-                segments[index] = planes
-    segments.update((index, snapshot.block.as_segment()) for index, snapshot in materialization.appended
-                    if start <= index <= latest_index)
-    ordered = sorted(segments)
-    origins = np.zeros((len(ordered), 2), dtype=np.int64)
-    origins[:, 1] = (np.asarray(ordered, dtype=np.int64) - start) * point_count
+        previous = basis.snapshot.block
+        shift = (start - basis.start) * point_count
+        first = int(np.searchsorted(previous.segment_origins[:, 1], shift))
+        retained = previous.segments[first:]
+    # The input already orders appends after the retained basis, without overlap.
+    appended = materialization.appended
+    segments = (*retained, *(snapshot.block.as_segment() for _index, snapshot in appended))
+    origins = np.zeros((len(segments), 2), dtype=np.int64)
+    if retained:
+        origins[:len(retained), 1] = previous.segment_origins[first:, 1] - shift
+    origins[len(retained):, 1] = np.fromiter(
+        ((index - start) * point_count for index, _snapshot in appended),
+        dtype=np.int64, count=len(appended),
+    )
     sizes = np.frombuffer(np.asarray(event_schema.physical_shape[:2], dtype=np.int64).tobytes(), dtype=np.int64)
     block = DataBlock._from_owned_segments(
         BlockId(f"{materialization.signal_name}.indexed/{start}:{latest_index}"),
         DatasetRevision(materialization.sequence), schema,
         window=IndexedWindow(start, latest_index, materialization.stable_since),
-        segments=tuple(segments[index] for index in ordered), origins=origins,
-        shapes=np.broadcast_to(sizes, (len(ordered), 2)),
+        segments=segments, origins=origins,
+        shapes=np.broadcast_to(sizes, (len(segments), 2)),
     )
     return OwnedSnapshot(block.ref(materialization.generation), block)
 
