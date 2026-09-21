@@ -14,7 +14,7 @@ def test_pure_function_signatures_match_contract() -> None:
         "clock_hz",
         "slot_tick_scales",
     )
-    assert tuple(inspect.signature(pack_program).parameters) == ("program", "params")
+    assert tuple(inspect.signature(pack_program).parameters) == ("program", "params", "target")
     assert tuple(inspect.signature(pack_scan_rows).parameters) == (
         "rows", "geom", "bank", "chunk",
     )

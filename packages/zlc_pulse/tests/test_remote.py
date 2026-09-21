@@ -48,10 +48,11 @@ def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequen
     from zlc_pulse.model import PulseFieldRef
 
     target = PulseTarget(
-        lanes=("d0", "a0", "a1"),
+        lanes=("d0", "a0", "a1", "clock"),
         ports=(
             PulsePortSpec("d0", "digital", ("d0",)),
-            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0),
+            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0, latch_clock="clock"),
+            PulsePortSpec("clock", "clock", ("clock",)),
         ),
     )
     slots = (PulseBinding(PulseFieldRef('duration', 'p0'), 'ns', scan=True),) if slotted else ()
@@ -64,8 +65,8 @@ def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequen
         target=target,
         time_step_ns=20,
         periods=(
-            PulsePeriod("p0", 40, "ns", (1, 0, 0), (AnalogStep("dac", "edge", 0),)),
-            PulsePeriod("p1", 40, "ns", (0, 0, 0)),
+            PulsePeriod("p0", 40, "ns", (1, 0, 0, 0), (AnalogStep("dac", "edge", 0),)),
+            PulsePeriod("p1", 40, "ns", (0, 0, 0, 0)),
         ),
         bindings=slots + configured_bindings,
     )
@@ -156,7 +157,7 @@ def test_remote_json_frame_rejects_lossy_json(payload: bytes, message: str) -> N
 def _sequence_geometry() -> StreamerParams:
     return replace(
         StreamerParams(),
-        channel_count=3,
+        channel_count=4,
         bus_count=1,
         bus_width=2,
         max_edges=8,
@@ -1181,14 +1182,21 @@ def test_main_explicit_backend_failure_is_logged_and_returns_two(monkeypatch, ca
 
 
 def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None:
-    geom = _sequence_geometry()
-    source = _sequence(slotted=True)
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    dac = next(port for port in _BOARD_TARGET.ports if port.kind == "dac" and port.bus_index == 3)
+    source = replace(_sequence(slotted=True), target=_BOARD_TARGET, periods=(
+        PulsePeriod("p0", 40, "ns", (0,) * 24 + (1,) + (0,) * 44,
+                    (AnalogStep(dac.key, "edge", 17),)),
+        PulsePeriod("p1", 40, "ns", (0,) * 69),
+    ))
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
     with _server(streamer) as server:
         client_a = _client(server)
         client_a.load(program, source=source, rows=((1,),))
+        assert transport.words[CtrlWords.CLK_ENABLE] == 0b1111
+        assert len(program.channels) == 69 and program.clk_enable & (1 << 68)
         client_a.disconnect()
 
         client_b = _client(server)
@@ -1201,8 +1209,12 @@ def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None
             assert state.scan_repeats == 1
             assert state.source is not None
             rebuilt = compile_sequence(state.source, geom, 50e6)
-            assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
+            assert pack_program(rebuilt, geom, target=source.target) == pack_program(
+                state.program, geom, target=source.target,
+            )
             assert pack_scan_rows(state.rows, geom, 0, 0) == pack_scan_rows(((1,),), geom, 0, 0)
+            client_b.fire(run_repeats=1)
+            assert client_b.wait_done(1.0) is not None
         finally:
             client_b.close()
     assert streamer.applied() is None
@@ -1232,7 +1244,9 @@ def test_a_pulse_that_declares_a_config_parameter_survives_the_wire() -> None:
             assert state.source == source
             assert state.source.config_bindings == source.config_bindings
             rebuilt = compile_sequence(state.source, geom, 50e6)
-            assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
+            assert pack_program(rebuilt, geom, target=source.target) == pack_program(
+                state.program, geom, target=source.target,
+            )
         finally:
             client.close()
 

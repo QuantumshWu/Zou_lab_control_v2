@@ -80,7 +80,8 @@ There is no `ZLC_PS_SERVER_BACKEND` environment switch.
 separately approved, evidence-driven recovery after an actual RTL/deployment
 defect has been established; that workflow must close routed setup/hold timing
 and requalify the image before it may replace the frozen bitstream. Its default
-action builds only; program/flash requires one explicit target.
+action builds and programs; use explicit `--build-only` to generate reports and
+a bitstream without connecting to hardware. Flash remains a separate action.
 
 Default clock is 50 MHz (20 ns tick); the minimal pulse width and resolution are
 1 tick. The qualified deployment has 4096 edge rows and two 2048-point scan

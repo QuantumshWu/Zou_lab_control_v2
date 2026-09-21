@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 import re
@@ -194,17 +195,22 @@ def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -
         config["params"], part=config["fpga_part"], target_pct=config["target_pct"]
     )
     assert frozen["lut"] == {
-        "used": 20144,
+        "used": 19778,
         "budget": 20384,
         "total": 20800,
-        "pct": 96.8,
+        "pct": 95.1,
         "ok": True,
     }
     at_default = estimate_resources(config["params"], part=config["fpga_part"])
     assert at_default["lut"]["ok"] is False
     assert at_default["lut"]["budget"] == 18720
 
-    with pytest.raises(ValueError, match=r"90% planning target: LUT 20144 > 18720"):
+    assert frozen["ramb36"]["used"] == 37
+    assert frozen["ff"]["used"] == 14806
+    assert frozen["dsp"]["used"] == 76
+    baseline = replace(config["params"], channel_count=63, evt_fifo_depth=64)
+    assert estimate_resources(baseline, part=config["fpga_part"])["lut"]["used"] == 20050
+    with pytest.raises(ValueError, match=r"90% planning target: LUT 19778 > 18720"):
         solve_capacity(config["fpga_part"])
 
     planning = solve_capacity("xc7a50t")
@@ -221,10 +227,10 @@ def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -
 
 
 def test_capacity_search_uses_the_estimators_fixed_ramb36_cost() -> None:
-    # At 39 tiles the old solver's private +1 formula admitted 4096 edges,
-    # while the estimator's routed +3 accounting correctly reports 41.  One
+    # At 35 tiles the old solver's private +1 formula admitted 4096 edges,
+    # while the estimator's routed +3 accounting correctly reports 37. One
     # estimator authority must instead choose the next 2048-edge geometry.
-    part = FpgaPartProfile("boundary", 39, 100000, 100000, 1000, 100000)
+    part = FpgaPartProfile("boundary", 35, 100000, 100000, 1000, 100000)
     solved = solve_capacity(
         part,
         target_pct=100,
@@ -234,8 +240,8 @@ def test_capacity_search_uses_the_estimators_fixed_ramb36_cost() -> None:
         engine_dsp=0,
     )
     assert solved.params.max_edges == 2048
-    assert solved.ramb36_used == 31
-    assert solved.ramb36_budget == 39
+    assert solved.ramb36_used == 29
+    assert solved.ramb36_budget == 35
     assert solved.all_within_budget()
     assert solved.resource_report == estimate_resources(
         solved.params,
@@ -253,8 +259,9 @@ def test_clock_and_safe_pin_boundary_are_explicit() -> None:
         encoding="utf-8"
     )
     assert re.search(r"create_clock\s+-period\s+20(?:\.0+)?\s+.*get_ports\s+clk", xdc)
-    assert "eng_reset ? 1'b0" in top
-    assert "zlc_physical_active && clk_en" in top
+    assert "eng_reset ? {TTL_CHANNEL_COUNT{1'b0}} : out" in top
+    assert "bus_clk_enable[cmx]" in top
+    assert "zlc_safe_latching || (!eng_reset && zlc_physical_active)" in top
     assert "bus_out_final" in top
     assert "eng_reset ? bus_safe_pack : zlc_bus_out" in top
 

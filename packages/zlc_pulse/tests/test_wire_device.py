@@ -81,7 +81,7 @@ def test_build_fingerprint_covers_each_geometry_field_except_host_cap() -> None:
 
 
 def test_default_geometry_is_pinned_to_deployed_word63() -> None:
-    assert build_fingerprint(StreamerParams()) == 0x5A59C160
+    assert build_fingerprint(StreamerParams()) == 0x5A94F3B6
 
 
 def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> None:
@@ -93,12 +93,14 @@ def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> Non
         check_rtl_assumptions(
             replace(StreamerParams(), num_slots=2, coeff_width=32)
         )
+    with pytest.raises(ValueError, match="power-of-two multiple of 32"):
+        check_rtl_assumptions(replace(StreamerParams(), channel_count=109))
 
 
 def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    words = pack_program(program, geom)
+    words = pack_program(program, geom, target=_BOARD_TARGET)
     payload = b"".join(
         int(address).to_bytes(4, "little") + int(value).to_bytes(4, "little")
         for address, value in sorted(words.items())
@@ -108,16 +110,34 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     assert words[CtrlWords.SCAN_COUNT] == 0
     assert words[CtrlWords.RUN_REPEAT_COUNT] == 1
     assert words[CtrlWords.SCAN_REPEAT_COUNT] == 1
-    assert program.clk_enable == sum(1 << bit for bit in (29, 40, 51, 62))
+    assert program.clk_enable == sum(1 << bit for bit in (35, 46, 57, 68))
+    assert words[CtrlWords.CLK_ENABLE] == 0b1111
+    assert CtrlWords.CLK_ENABLE + 1 not in words
+    assert geom.num_delay_ch == 25 and geom.mask_words == 1
+    bases = region_bases(geom)
+    assert sorted(address - bases["delay"] for address in words if address >= bases["delay"]) == list(range(29))
     assert hashlib.sha256(payload).hexdigest() == (
-        "d15842da7f0ffa597b081ed27edeb2b1af76cefb290d6a705652bab5e9f2ea38"
+        "8be58a3d7716bffe7b0a8842064daa608b5b61e950b0564f7f6ba832216062e9"
     )
+    # All newly added TTL lanes use the same single-word edge path; the final
+    # physical clock above bit 63 maps to bus 3 rather than a third CTRL word.
+    high = (1,) * geom.num_delay_ch + (0,) * (geom.channel_count - geom.num_delay_ch)
+    sequence = _sequence()
+    all_ttl = compile_sequence(replace(sequence, periods=(
+        replace(sequence.periods[0], states=high), sequence.periods[1],
+    )), geom, 50e6)
+    packed = pack_program(all_ttl, geom, target=_BOARD_TARGET)
+    assert packed[bases["mask"]] == (1 << 25) - 1
+    assert packed[bases["mask"] + 1] == 0
+    assert pack_program(replace(program, clk_enable=1 << 68), geom, target=_BOARD_TARGET)[CtrlWords.CLK_ENABLE] == 8
+    with pytest.raises(ValueError, match="not a DAC latch clock"):
+        pack_program(replace(program, clk_enable=1), geom, target=_BOARD_TARGET)
 
 
 def test_pack_slot_scan_image_matches_frozen_byte_baseline() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    words = pack_program(program, geom)
+    words = pack_program(program, geom, target=_BOARD_TARGET)
     assert words[CtrlWords.SCAN_COUNT] == 0
     assert words[CtrlWords.SCAN_ENABLE] == 0
     assert words[CtrlWords.RUN_REPEAT_COUNT] == 1
@@ -544,7 +564,9 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     del source, program
     assert echoed_source is not None
     rebuilt = compile_sequence(echoed_source, geom, 50e6)
-    assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
+    assert pack_program(rebuilt, geom, target=echoed_source.target) == pack_program(
+        state.program, geom, target=echoed_source.target,
+    )
     packed = pack_scan_rows(echoed_rows, geom, 0, 0)
     assert packed == pack_scan_rows(rows, geom, 0, 0)
     remainder = pack_scan_rows(echoed_rows, geom, 1, 1)
@@ -981,6 +1003,13 @@ def test_a_dac_bus_delay_reaches_the_board_word_it_was_asked_for() -> None:
     # 200 ns at 20 ns/tick, carried on the record the compiler actually builds.
     assert program.bus_delays == (TargetBusDelay(bus_index=0, delay_ticks=10),)
 
-    words = pack_program(program, geom)
+    words = pack_program(program, geom, target=_BOARD_TARGET)
     bases = region_bases(geom)
-    assert words[bases["delay"] + geom.channel_count + 0] == 10
+    assert words[bases["delay"] + geom.num_delay_ch] == 10
+    assert [words[bases["delay"] + geom.num_delay_ch + bus] for bus in range(4)] == [10, 0, 0, 0]
+    invalid_delays = list(program.channel_delays)
+    invalid_delays[geom.num_delay_ch] = 1
+    with pytest.raises(ValueError, match="NOT delay-eligible"):
+        pack_program(replace(program, channel_delays=tuple(invalid_delays)), geom, target=_BOARD_TARGET)
+    with pytest.raises(ValueError, match="TTL edge mask"):
+        pack_program(replace(program, masks=(1 << geom.num_delay_ch, *program.masks[1:])), geom, target=_BOARD_TARGET)

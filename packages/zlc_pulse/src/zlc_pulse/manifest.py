@@ -19,7 +19,7 @@ _PIN = re.compile(
 )
 _ASSIGN = re.compile(
     r"\bassign\s+(?P<port>[A-Za-z_][A-Za-z0-9_]*(?:\[\d+\])?)\s*=\s*"
-    r"(?P<source>(?:out_final|bus_out_final)\[\d+\])\s*;"
+    r"(?P<source>(?:out_final|bus_out_final|bus_clk_final)\[\d+\])\s*;"
 )
 _VERILOG_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 _SYSTEM_PORT = re.compile(
@@ -82,6 +82,9 @@ def _board_lanes(path: Path, params: StreamerParams) -> tuple[_Lane, ...]:
         raise ValueError(
             f"board lane indices must be exactly 0..{params.channel_count - 1}"
         )
+    if any((role == "digital") != (index < params.num_delay_ch)
+           for index, _logical, _port, _pin, role, _bus, _bit in lanes):
+        raise ValueError("board digital lanes must be the leading TTL control domain")
     for field, label in ((2, "rtl_port"), (3, "package_pin")):
         values = tuple(lane[field] for lane in lanes)
         if len(set(values)) != len(values):
@@ -172,6 +175,7 @@ def _validate_top(path: Path, lanes: tuple[_Lane, ...], bus_width: int) -> None:
         expected = (
             f"bus_out_final[{bus * bus_width + bit}]"
             if role == "dac_data"
+            else f"bus_clk_final[{bus}]" if role == "dac_clock"
             else f"out_final[{index}]"
         )
         if actual.get(port) != expected:

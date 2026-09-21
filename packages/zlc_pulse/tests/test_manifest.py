@@ -61,7 +61,7 @@ def _write_fixture(
                 "assign bus_q[1] = bus_out_final[1];",
                 "assign sig_a = out_final[0];",
                 f"assign bus_q[0] = bus_out_final[{1 if bad_top else 0}];",
-                "assign bus_q_clk = out_final[4];",
+                "assign bus_q_clk = bus_clk_final[0];",
             )
         ),
         encoding="utf-8",
@@ -71,9 +71,17 @@ def _write_fixture(
 
 def test_default_board_manifest_generates_host_and_validates_both_projections() -> None:
     target = pulse_target_from_xdc()
-    assert target.raw_lanes == tuple(f"ch{index:02d}" for index in range(63))
-    assert len(target.package_pins) == 63
-    assert sum(port.kind == "digital" for port in target.ports) == 19
+    assert target.raw_lanes == tuple(f"ch{index:02d}" for index in range(69))
+    assert len(target.package_pins) == 69
+    assert sum(port.kind == "digital" for port in target.ports) == 25
+    for name, pin in {
+        "shutter_420": "F13", "trig": "R17", "pgc_1D": "P19",
+        "push_shutter": "G16", "single_cooling_shutter": "G15",
+        "cooling_pgc": "J14", "sweep_trig": "H13",
+        "push_freq_switch": "K14", "pgc_1D_freq_switch": "J16",
+    }.items():
+        assert target.package_pins[target.by_key[name].lanes[0]] == pin
+    assert "arb_wave" not in target.by_key
     buses = tuple(port for port in target.ports if port.kind == "dac")
     assert len(buses) == 4
     assert {port.width for port in buses} == {10}

@@ -151,7 +151,7 @@ echo is fpga\build\ps\.zlc_src_hash.
 echo.
 echo Real build XDC:
 echo   fpga\board_config\board.xdc
-echo   This is the default 62-output board pin map ^(see fpga\board_config\README.md^).
+echo   The physical pin map is defined by streamer_config.json ^(see fpga\board_config\README.md^).
 echo   For a different board, replace board.xdc or set:
 echo   set ZLC_PS_XDC=C:\path\to\board.xdc
 echo.
@@ -217,7 +217,7 @@ findstr /C:"<PIN_CH" "!ZLC_SELECTED_XDC!" >nul && (
   echo ERROR: selected XDC still contains PIN_CH placeholders: !ZLC_SELECTED_XDC!
   exit /b 2
 )
-echo ZLC FINAL source contract: channels=62 num_slots=4 control=JTAG-to-AXI (jtag_axi+axi_bram_ctrl+5 BRAMs, forced edge latency 2)
+echo ZLC FINAL source contract: geometry from streamer_config.json, UART/JTAG-to-AXI, forced edge latency 2
 echo ZLC FINAL XDC: !ZLC_SELECTED_XDC!
 exit /b 0
 

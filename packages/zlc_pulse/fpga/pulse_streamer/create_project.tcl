@@ -21,7 +21,7 @@
 #   EDGE_ADDR_WIDTH=12 (4096 edges):
 #     tick  BRAM 32b/32b  depth 4096
 #     coeff BRAM 32b(A)/64b(B)  port-A depth 8192, port-B depth 4096
-#     mask  BRAM 32b(A)/64b(B)  port-A depth 8192, port-B depth 4096
+#     mask  BRAM 32b(A)/32b(B)  port-A depth 4096, port-B depth 4096 (25 TTL)
 #   BANK_SIZE=2048 -> scan depth 2*2048=4096:
 #     scan  BRAM 32b(A)/128b(B) port-A depth 16384, port-B depth 4096
 #   bus image 256*7=1792 words (bus_rows = bus_count*2^bus_seg_addr_width = 4*64); CTRL 64 -> axi_bram depth 65536.
@@ -271,7 +271,7 @@ zlc_force_latency2 blk_mem_gen_edge_coeff
 zlc_dump_ip blk_mem_gen_edge_coeff
 generate_target all [get_ips blk_mem_gen_edge_coeff]
 
-# --- EDGE MASK BRAM: asymmetric 32b(A)/64b(B), forced port-B latency 2 ---------
+# --- TTL MASK BRAM: 32b(A)/geometry-padded TTL bits(B), port-B latency 2 -------
 create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_edge_mask
 zlc_try "mask TDP"      {set_property CONFIG.Memory_Type {True_Dual_Port_RAM} [get_ips blk_mem_gen_edge_mask]}
 zlc_try "mask ByteWE"   {set_property CONFIG.Use_Byte_Write_Enable {true} [get_ips blk_mem_gen_edge_mask]}
@@ -279,8 +279,8 @@ zlc_try "mask ByteSize8" {set_property CONFIG.Byte_Size {8} [get_ips blk_mem_gen
 zlc_try "mask WWA=32"   {set_property CONFIG.Write_Width_A {32} [get_ips blk_mem_gen_edge_mask]}
 zlc_try "mask RWA=32"   {set_property CONFIG.Read_Width_A {32} [get_ips blk_mem_gen_edge_mask]}
 zlc_try "mask WDA"      {set_property CONFIG.Write_Depth_A $zlc_mask_porta_depth [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask WWB=64"   {set_property CONFIG.Write_Width_B $zlc_mask_portb_bits [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask RWB=64"   {set_property CONFIG.Read_Width_B $zlc_mask_portb_bits [get_ips blk_mem_gen_edge_mask]}
+zlc_try "mask WWB"      {set_property CONFIG.Write_Width_B $zlc_mask_portb_bits [get_ips blk_mem_gen_edge_mask]}
+zlc_try "mask RWB"      {set_property CONFIG.Read_Width_B $zlc_mask_portb_bits [get_ips blk_mem_gen_edge_mask]}
 zlc_try "mask ENA"      {set_property CONFIG.Enable_A {Use_ENA_Pin} [get_ips blk_mem_gen_edge_mask]}
 zlc_try "mask ENB"      {set_property CONFIG.Enable_B {Use_ENB_Pin} [get_ips blk_mem_gen_edge_mask]}
 zlc_try "mask noRSTA"   {set_property CONFIG.Use_RSTA_Pin {false} [get_ips blk_mem_gen_edge_mask]}

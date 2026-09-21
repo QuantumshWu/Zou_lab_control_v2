@@ -27,7 +27,7 @@ __all__ = [
 
 # CTRL word 63 is the single host/bitstream geometry handshake.  The RTL carries
 # the precomputed value; host packing and generated headers call this function.
-LAYOUT_STRUCT_VERSION = 6   # Completion-acknowledged commands and resident replay.
+LAYOUT_STRUCT_VERSION = 7   # TTL-only edge/delay words; DAC bus-index clock enable.
 
 # Only host-side validation caps are excluded; all other geometry fields are hashed.
 _FINGERPRINT_HOST_ONLY = frozenset({"ttl_delay_max_ticks"})
@@ -136,7 +136,7 @@ def _geom(name: str, fallback: int) -> int:
 @dataclass(frozen=True)
 class StreamerParams:
     # Defaults come from streamer_config.json; literals are offline fallbacks.
-    channel_count: int = _geom("channel_count", 63)
+    channel_count: int = _geom("channel_count", 69)
     num_slots: int = _geom("num_slots", 4)
     coeff_width: int = _geom("coeff_width", 16)
     tick_width: int = _geom("tick_width", 32)
@@ -148,13 +148,13 @@ class StreamerParams:
     bus_seg_addr_width: int = _geom("bus_seg_addr_width", 6)
     bus_sel_width: int = _geom("bus_sel_width", 3)
     ttl_delay_max_ticks: int = _geom("ttl_delay_max_ticks", (1 << 31) - 1)
-    evt_fifo_depth: int = _geom("evt_fifo_depth", 64)          # power of two (event-FIFO ring)
+    evt_fifo_depth: int = _geom("evt_fifo_depth", 32)          # power of two (event-FIFO ring)
     bus_evt_fifo_depth: int = _geom("bus_evt_fifo_depth", 64)
     delay_region_words: int = _geom("delay_region_words", 128)
 
     @property
     def channel_bit_width(self) -> int:
-        return _addr_width(max(2, self.channel_count))   # bits to index an output channel
+        return _addr_width(max(2, self.num_delay_ch))   # bits to index a TTL delay
 
     @property
     def bus_index_width(self) -> int:
@@ -167,8 +167,8 @@ class StreamerParams:
 
     @property
     def clk_enable_words(self) -> int:
-        # per-channel clk mask: 1 bit per channel, in 32b words
-        return _ceil(self.channel_count, 32)
+        # CTRL20 carries one enable bit per DAC bus, not per physical pin.
+        return 1
 
     @property
     def ctrl_scratch_base(self) -> int:
@@ -200,7 +200,7 @@ class StreamerParams:
 
     @property
     def mask_words(self) -> int:
-        return _ceil(self.channel_count, 32)
+        return _ceil(self.num_delay_ch, 32)
 
     @property
     def scan_words(self) -> int:
@@ -244,8 +244,8 @@ def region_bases(p: StreamerParams) -> dict:
 
     TTL channel delays followed by per-bus DAC delays live in their own DELAY
     register region (one 32-bit word per signal, delay_region_words reserved).
-    The CTRL block is the 20 command/mailbox words 0..19, the CLK_ENABLE mask at
-    20..21, scratch from ctrl_scratch_base, and the hardwired LAYOUT_ID readback
+    The CTRL block is the 20 command/mailbox words 0..19, DAC CLK_ENABLE at
+    20, completion acknowledgements, scratch from ctrl_scratch_base, and LAYOUT_ID
     at word 63 -- no delay words live in CTRL."""
     ctrl = 0
     tick = CTRL_WORDS
@@ -265,7 +265,7 @@ def build_ip_sizes(p: StreamerParams) -> dict:
         # asymmetric edge/scan BRAM port-B widths: 32-bit host writes on port A, wide engine reads
         # on port B (one whole edge / scan point per access).  == top.v COEFF/MASK/SCAN_PORTB_BITS.
         "coeff_portb_bits": _ceil(p.coeff_bits, 32) * 32,        # 64
-        "mask_portb_bits": _ceil(p.channel_count, 32) * 32,      # 64
+        "mask_portb_bits": p.mask_words * 32,
         "scan_portb_bits": p.slot_bits,                          # 128
         # bus-image BRAM must hold every bus-segment row (bus_rows*bus_words words); scan/edge port-A
         # depths follow their region.  Power-of-two depth that covers the used words.
@@ -273,7 +273,7 @@ def build_ip_sizes(p: StreamerParams) -> dict:
         "edge_addr_width": p.edge_addr_width,
         "bank_size": p.bank_size,
         "coeff_porta_depth": p.max_edges * (_ceil(p.coeff_bits, 32) * 32 // 32),
-        "mask_porta_depth": p.max_edges * (_ceil(p.channel_count, 32) * 32 // 32),
+        "mask_porta_depth": p.max_edges * p.mask_words,
         "scan_porta_depth": (2 * p.bank_size) * (p.slot_bits // 32),
         # the single axi_bram_ctrl window must cover the whole word-address image (region total).
         "axi_bram_depth": _pow2_at_least(bases["total"]),               # 65536
@@ -318,6 +318,10 @@ def _is_pow2(v: int) -> bool:
 
 def check_rtl_assumptions(p: StreamerParams) -> None:
     """Reject geometries that would silently corrupt the shipped RTL contract."""
+    if p.num_delay_ch < 1 or p.bus_count < 0 or p.bus_count > 32:
+        raise ValueError("geometry requires TTL channels and at most 32 DAC clock-enable bits")
+    if not _is_pow2(p.mask_words):
+        raise ValueError("TTL mask BRAM port width must be a power-of-two multiple of 32 bits")
     if p.num_slots > 4:
         raise ValueError(
             f"num_slots must be at most 4 for the shipped RTL (got {p.num_slots}); "
@@ -341,8 +345,7 @@ def check_rtl_assumptions(p: StreamerParams) -> None:
             f"CTRL register file has no scratch room: defined words reach "
             f"{p.ctrl_scratch_base} but word {int(CtrlWords.LAYOUT_ID)} holds the "
             f"layout fingerprint; grow CTRL_WORDS / the RTL ctrl_reg file in "
-            f"lock-step.  channel_count={p.channel_count} needs "
-            f"{p.clk_enable_words} clock-enable word(s)."
+            "lock-step."
         )
     flags_bits = 2 * p.bus_width + 2 + 2 * p.bus_sel_width
     if flags_bits > 32:
@@ -374,10 +377,10 @@ def check_rtl_assumptions(p: StreamerParams) -> None:
         raise ValueError(
             f"ttl_delay_max_ticks ({p.ttl_delay_max_ticks}) must fit the 32-bit R_DELAY register field "
             "(0 <= cap < 2^32).")
-    if p.channel_count + p.bus_count > p.delay_region_words:
+    if p.num_delay_ch + p.bus_count > p.delay_region_words:
         raise ValueError(
-            f"channel_count {p.channel_count} + bus_count {p.bus_count} exceeds the DELAY register "
-            f"region ({p.delay_region_words} words; one 32b delay word per channel, then per bus).")
+            f"TTL count {p.num_delay_ch} + bus_count {p.bus_count} exceeds the DELAY register "
+            f"region ({p.delay_region_words} words; one 32b word per TTL, then per bus).")
 
 def _bus_mode_value(mode) -> int:
     m = str(mode).strip().lower()
@@ -387,14 +390,22 @@ def _raise_mode(m):
     raise ValueError(f"unsupported bus segment mode {m!r}.")
 
 # --------------------------------------------------------------------------- pack
-def pack_program(program, params: StreamerParams | None = None) -> dict[int, int]:
+def pack_program(program, params: StreamerParams | None = None, *, target) -> dict[int, int]:
     """Pack a CompiledProgram into the FINAL AXI write image (sparse).
 
     Edges -> TICK/COEFF/MASK regions and bus -> BUS region.  Runtime rows,
     Run/Scan repeat counts are applied only by ``PulseStreamer.fire``.
-    COMMAND/STATUS/CURSOR/BANK_READY are runtime mailbox words."""
+    COMMAND/STATUS/CURSOR/BANK_READY are runtime mailbox words. The target owns
+    the raw-pin to DAC-bus clock mapping; the compiled program keeps raw identity."""
+    from .model import PORT_DAC, PulseTarget
+
     p = params or StreamerParams()
     check_rtl_assumptions(p)   # hard gate: never pack for a geometry the shipped RTL corrupts
+    if not isinstance(target, PulseTarget):
+        raise TypeError("target must be PulseTarget")
+    if (program.target_abi_fingerprint != target.abi_fingerprint
+            or tuple(program.channels) != target.raw_lanes):
+        raise ValueError("compiled target ABI/channels do not match the wire target")
     bases = region_bases(p)
     ticks = [int(t) for t in program.ticks]
     masks = [int(m) for m in program.masks]
@@ -433,8 +444,8 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
         cw = _field_words(_pack_coeffs(coeffs[i], p), p.coeff_bits)
         for k in range(p.coeff_words):
             w[bases["coeff"] + i * p.coeff_words + k] = cw[k] if k < len(cw) else 0
-        mask = _checked_unsigned(masks[i], p.channel_count, f"edge mask {i}")
-        mw = _field_words(mask, p.channel_count)
+        mask = _checked_unsigned(masks[i], p.num_delay_ch, f"TTL edge mask {i}")
+        mw = _field_words(mask, p.num_delay_ch)
         for k in range(p.mask_words):
             w[bases["mask"] + i * p.mask_words + k] = mw[k] if k < len(mw) else 0
 
@@ -491,7 +502,7 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     # PER-CHANNEL TTL OUTPUT DELAY -- the EVENT SCHEDULER.  One 32-bit word per channel in
     # the DELAY register region (0 = passthrough).  A delay is bounded by the host's
     # ttl_delay_max_ticks (conservative default (1<<31)-1 ticks ~ 42.9 s inside the 32-bit
-    # register field), NOT by the bus-ring depth; pack always writes ALL channel
+    # register field), NOT by the bus-ring depth; pack always writes ALL TTL
     # words so stale delays from a previous program can never linger.
     channel_delays = [int(d) for d in (getattr(program, "channel_delays", None) or [])]
     for ch, d in enumerate(channel_delays):
@@ -504,26 +515,20 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
                 f"channel bit {ch} delay {d} ticks is outside [0, {p.ttl_delay_max_ticks}] "
                 f"(~{p.ttl_delay_max_ticks * 20e-9:.1f} s at 20 ns/tick).")
         # DELAY-ELIGIBILITY.  Only the leading ``num_delay_ch`` channels (real TTL outputs) have an
-        # event FIFO; channels num_delay_ch..channel_count-1 are DAC bus-member bits / da_clk pins
-        # whose engine ``out`` bit is always 0 and whose delay the RTL gates to PASSTHROUGH -- so a
-        # non-zero delay there silently never happens on the rig.  pack is the LAST place the index
-        # == the hardware channel position (``validate_pulse_streamer_program`` sees only the
-        # program's channel SUBSET and cannot check this), so fail loud HERE instead of letting the
-        # delay vanish on hardware.  The user-facing set_channel_delay API already rejects it; this
-        # backstops any program that reaches pack another way (a loaded pulse, a raw .delays dict).
+        # event FIFO; the remaining physical lanes have no TTL delay word.
         if d and ch >= p.num_delay_ch:
             raise ValueError(
                 f"channel bit {ch} has a non-zero delay ({d} ticks) but is NOT delay-eligible: "
                 f"only channels 0..{p.num_delay_ch - 1} (real TTL outputs) carry a hardware delay; "
                 f"{p.num_delay_ch}..{p.channel_count - 1} are DAC bus-member / da_clk pins the RTL "
-                "would pass through undelayed.")
-    for ch in range(p.channel_count):
+                "does not address as TTL delays.")
+    for ch in range(p.num_delay_ch):
         d = channel_delays[ch] if ch < len(channel_delays) else 0
         w[bases["delay"] + ch] = _to_unsigned(d, 32)
 
     # PER-BUS DAC DELAY -- each bus has one delayed segment-descriptor FIFO and re-player; all
     # bits share that bus's 32-bit delay.  A bus delay is 32-bit like TTL and rides the SAME R_DELAY region,
-    # one 32b word per bus right after the channels (words channel_count .. channel_count+bus_count-1).
+    # one 32b word per bus immediately after the TTL delay words.
     # Pack ALL bus_count words (0 = passthrough for any bus NOT in bus_delays) -- exactly like the
     # channel loop above.  Writing only the listed buses left every OTHER bus's R_DELAY word at its
     # PREVIOUS program's value, so after a negative-delay run (global shift G delays all driven
@@ -548,13 +553,25 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
                 f"(~{p.ttl_delay_max_ticks * 20e-9:.1f} s at 20 ns/tick).")
         bus_delay_by_index[b] = d
     for b in range(p.bus_count):
-        w[bases["delay"] + p.channel_count + b] = _to_unsigned(bus_delay_by_index.get(b, 0), 32)
+        w[bases["delay"] + p.num_delay_ch + b] = _to_unsigned(bus_delay_by_index.get(b, 0), 32)
 
-    # PER-CHANNEL CLK MASK -- 1 bit per channel (bit b = channel b's pin driven by clk).
-    # The compiler already forced these bits to 0 in the edge masks; the top muxes clk on.
-    clk_enable = int(getattr(program, "clk_enable", 0))
-    for i in range((p.channel_count + 31) // 32):
-        w[CtrlWords.CLK_ENABLE + i] = (clk_enable >> (32 * i)) & 0xFFFFFFFF
+    # Keep physical clock identity in the program, but only bus bits cross CTRL20.
+    raw_clocks = _checked_unsigned(program.clk_enable, p.channel_count, "clock-enable mask")
+    known_clocks = 0
+    bus_clocks = 0
+    for port in target.ports:
+        if port.kind != PORT_DAC or port.latch_clock is None:
+            continue
+        if port.bus_index >= p.bus_count:
+            raise ValueError("target DAC bus exceeds the wire geometry")
+        clock = target.by_key[port.latch_clock]
+        raw_bit = 1 << target.raw_lanes.index(clock.lanes[0])
+        known_clocks |= raw_bit
+        if raw_clocks & raw_bit:
+            bus_clocks |= 1 << port.bus_index
+    if raw_clocks & ~known_clocks:
+        raise ValueError("clock-enable mask contains a lane that is not a DAC latch clock")
+    w[CtrlWords.CLK_ENABLE] = bus_clocks
     return w
 
 # --------------------------------------------------------------------- capacity
@@ -577,8 +594,8 @@ FPGA_PARTS: dict[str, FpgaPartProfile] = {
 
 # The ordinary capacity-planning target keeps ten percent headroom.  A frozen
 # deployment may explicitly choose a higher target only when its own manifest
-# records a routed report; the current 35T deployment does so at 98% because
-# its measured LUT use is 96.51%.  The generic solver must never silently turn
+# records a routed report; the 35T deployment uses 98% against a measured
+# 96.39% baseline. The generic solver must never silently turn
 # that deployment exception into its default.
 DEFAULT_TARGET_PCT = 90.0
 
@@ -613,18 +630,18 @@ class SolvedCapacity:
         return all(r["ok"] for r in self.resource_report.values())
 
 def _edge_ramb(max_edges: int, p: StreamerParams) -> int:
-    # 3 parallel edge BRAMs: tick 32b, coeff coeff_bits, mask channel_count
+    # 3 parallel edge BRAMs: tick 32b, coeff coeff_bits, TTL-only mask.
     return (_ceil(p.tick_width, 36) * _ceil(max_edges, 1024)
             + _ceil(p.coeff_bits, 36) * _ceil(max_edges, 1024)
 
-            + _ceil(p.channel_count, 36) * _ceil(max_edges, 1024))
+            + _ceil(p.mask_words * 32, 36) * _ceil(max_edges, 1024))
 
 def _scan_ramb(bank_size: int, p: StreamerParams) -> int:
     return _ceil(p.slot_bits, 36) * _ceil(2 * bank_size, 1024)
 
 def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFAULT_TARGET_PCT,
-                       slot_mul_width: int = 25, engine_logic_luts: int = 16989,
-                       engine_ff: int = 14053, engine_dsp: int | None = None) -> dict:
+                       slot_mul_width: int = 25, engine_logic_luts: int = 16234,
+                       engine_ff: int = 14806, engine_dsp: int | None = None) -> dict:
     """Resource usage of a CONCRETE ``StreamerParams`` vs a part, per axis.
 
     This is the single accounting model shared by :func:`solve_capacity` (which
@@ -632,22 +649,20 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
     (which reports whether the configured geometry fits as-is).  Returns
     ``{"ramb36"|"lut"|"ff"|"dsp": {"used","budget","total","pct","ok"}}``.
 
-    LUT is CALIBRATED to a REAL Vivado 2019.1 SYNTH+PLACE+ROUTE of the current 35T build
-    (2026-08-21, zlc_pulse_streamer_top_utilization_routed.rpt): 20075 of 20800 slice LUTs
-    (96.51%, FITS) at evt_fifo_depth=64 / bus_evt_fifo_depth=64.  ``engine_logic_luts``
-    (=16989) is the fixed, non-depth-scaled remainder (logic LUTs + the LUTRAM the geometry
-    terms below do not capture) once the bus-segment LUTRAM and the two event-FIFO terms
-    (ttl_sched + per-bus segment scheduler, which DO scale with evt_fifo_depth /
-    bus_evt_fifo_depth) are
-    subtracted -- so the model reproduces the real 20075 at (64/64) and predicts other
-    depths honestly.  FF (real 14053), DSP (real 76, exact)
-    and block RAM (40 RAMB36 + 2 RAMB18 = 41 tiles) are calibrated to the same routed build; edge fields are parallel
-    BRAMs and the event FIFOs are distributed RAM (LUTs in SLICEM, no RAMB36)."""
+    The 2026-09-11 routed 35T baseline used 20050 LUTs (16243 logic + 3807
+    memory), 14806 FF, 76 DSP and 41 BRAM tiles with 19 TTLs and 64-deep FIFOs.
+    Its synth report mapped each TTL FIFO to 17 RAM64M and each DAC FIFO to
+    74 RAM64M. ``engine_logic_luts`` is the fixed remainder after the table
+    and scheduler estimates below. FIFO depth uses actual primitive width,
+    not an ideal bits/64 ratio. The TTL-only mask reduces edge BRAM directly.
+    FF remains that historical total, not a channel-scaled prediction; control
+    logic and deep-bank mux estimates require a new routed report. No savings
+    from narrowing the engine datapath are assumed before such a build."""
     check_rtl_assumptions(params)
     prof = part_profile(part)
     pct = _resource_target_pct(target_pct)
-    # The routed top also consumes two fixed BRAM36-equivalent tiles outside the
-    # geometry memories (40 RAMB36 + two RAMB18 = 41 tiles for this profile).
+    # The routed top consumes three BRAM36-equivalent tiles outside the
+    # geometry memories (old full-pin masks: 40 RAMB36 + two RAMB18 = 41 tiles).
     # Report the conservative integer ceiling used by the capacity solver.
     ramb36_used = (_edge_ramb(params.max_edges, params) + _scan_ramb(params.bank_size, params)
                    + _ceil(params.bus_rows * params.bus_words, 1024) + 3)
@@ -656,8 +671,8 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
     # (2*bus_sel_width -- a ramp can scan both endpoints).
     bus_lutram = _ceil((2 * params.tick_width + 2 * params.coeff_bits + 2 * params.bus_width
                         + 2 + 2 * params.bus_sel_width) * params.bus_rows, 64)
-    # TTL EVENT SCHEDULER: an EVT_DEPTH x 49b LUTRAM event FIFO (~ceil(EVT_DEPTH*49/64)
-    # RAM LUTs), a 48b equality comparator (~14) and push/pop control (~6) per channel.
+    # TTL EVENT SCHEDULER: an EVT_DEPTH x 49b LUTRAM event FIFO,
+    # a 48b equality comparator (~14) and push/pop control (~6) per channel.
     # The FIFOs are COMPACTED to the channels that can carry a delay -- only channels
     # whose engine bit drives a pin, i.e. NOT the bus-member bits (their pin is driven by
     # bus_out, their `out` bit is always 0).  At deep EVT_DEPTH this is what keeps the
@@ -666,14 +681,13 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
     bus_evt_depth = max(1, int(params.bus_evt_fifo_depth))
     # Delay-eligible channels = real TTL outputs (single source: StreamerParams.num_delay_ch).
     num_delay_ch = params.num_delay_ch
-    # Each slot's FIFO is a SIMPLE-DUAL-PORT distributed RAM (sync write @wr, async read @rd
-    # at an INDEPENDENT address), instantiated once per slot in the g_evtfifo generate loop.
-    # It MUST be RAM, not a flat 3D reg array: a 3D array with per-slot independent pointers
-    # does NOT infer as distributed RAM (Vivado falls back to registers -> 226k FF at depth
-    # 256, which does not fit).  7-series packs SDP LUTRAM at ~0.7-1.0 LUT per 64x1 cell, so
-    # ceil(EVT_DEPTH*49/64) LUTs per slot plus ~20 LUTs of pointer/comparator control is an
-    # honest, slightly-conservative estimate.
-    ttl_sched_luts = num_delay_ch * (20 + _ceil(evt_depth * 49, 64))
+    def fifo_ram_luts(depth: int, width: int) -> int:
+        # One independent-read/write RAM64M provides 3 data bits per 4 LUTs;
+        # RAM32M provides 6. Wider/deeper FIFOs need whole primitives/banks.
+        return (4 * _ceil(width, 6) if depth <= 32
+                else 4 * _ceil(width, 3) * _ceil(depth, 64))
+
+    ttl_sched_luts = num_delay_ch * (20 + fifo_ram_luts(evt_depth, 49))
     # DAC delay is instruction-level: one FIFO of resolved segment descriptors per bus, followed
     # by one delayed ramp re-player.  This mirrors zlc_edge_streamer.g_busseg exactly; storage scales
     # with segments in flight, not with DA bits or ramp value changes.  SEG_W is the RTL descriptor:
@@ -687,7 +701,7 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
         + 3
     )
     bus_sched_luts = params.bus_count * (
-        20 + _ceil(bus_evt_depth * bus_segment_bits, 64)
+        20 + fifo_ram_luts(bus_evt_depth, bus_segment_bits)
     )
     delay_lutram = ttl_sched_luts + bus_sched_luts
     # DSP: 12 affine evaluators (2/bus + 4 main), each implemented as the four
@@ -719,13 +733,13 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
         "dsp": res(engine_dsp, prof.dsp),
     }
 
-def solve_capacity(part, *, channel_count: int = 63, num_slots: int = 4, coeff_width: int = 16,
+def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, num_slots: int = 4, coeff_width: int = 16,
                    tick_width: int = 32, coeff_frac_bits: int = 8, bus_count: int = 4,
                    bus_width: int = 10, bus_seg_addr_width: int = 6, bus_sel_width: int = 3,
                    slot_mul_width: int = 25,
                    target_pct: float = DEFAULT_TARGET_PCT, bank_size: int = 2048,
                    max_edges_cap: int = 16384,
-                   engine_logic_luts: int = 16989, engine_ff: int = 14053, engine_dsp: int | None = None) -> SolvedCapacity:
+                   engine_logic_luts: int = 16234, engine_ff: int = 14806, engine_dsp: int | None = None) -> SolvedCapacity:
     """Maximise max_edges while every resource stays within ``target_pct``.
 
     Scan storage
@@ -733,14 +747,10 @@ def solve_capacity(part, *, channel_count: int = 63, num_slots: int = 4, coeff_w
 
     than total scan length; edge fields are parallel BRAMs (no width padding).
 
-    LUT/FF/DSP/RAMB36 estimates are CALIBRATED to a real Vivado 2019.1 place+ROUTE of the
-    35T build (zlc_pulse_streamer_top, 2026-08-21 routed): 20075 slice LUTs (96.51%), 14053 FF
-    (33.78%), 76 DSP (84.44%), 40 RAMB36 + 2 RAMB18 (41 tiles) at evt_fifo_depth=64 /
-    bus_evt_fifo_depth=64.  The
-    LUT/FF defaults reproduce those at this geometry and scale the depth-driven LUTRAM terms.
-    The ordinary default is 90% planning headroom; the frozen 35T manifest explicitly uses
-    98% because this frozen, resource-tight deployment is separately routed.  Asking this solver for the 35T at 90% therefore
-    fails loudly instead of returning a capacity whose own report says it is over budget."""
+    All resource estimates use :func:`estimate_resources` and its documented
+    routed baseline and limits. The ordinary default is 90% planning headroom;
+    the resource-tight 35T manifest explicitly uses 98%. An impossible target
+    fails rather than returning a capacity whose own report is over budget."""
     prof = part_profile(part)
     pct = _resource_target_pct(target_pct)
     base = StreamerParams(channel_count=channel_count, num_slots=num_slots, coeff_width=coeff_width,
@@ -758,7 +768,7 @@ def solve_capacity(part, *, channel_count: int = 63, num_slots: int = 4, coeff_w
 
     # LUT/FF/DSP do not change with edge or scan BRAM depth in this calibrated
     # model.  Reject an impossible planning target before searching RAM sizes;
-    # reducing max_edges cannot make the frozen 35T's 96.51% LUT use fit 90%.
+    # reducing max_edges cannot make an over-budget logic footprint fit.
     minimum_report = estimate_resources(base, **estimate_kwargs)
     fixed_over = tuple(
         axis for axis in ("lut", "ff", "dsp") if not minimum_report[axis]["ok"]
@@ -1061,8 +1071,8 @@ def format_capacity_report(result: dict) -> str:
                      f"{a['pct']:>5.1f}%  {verdict}")
     lines.append("")
     if result["ok"]:
-        lines.append(f"  RESULT: the {result['part_string']} HAS enough resources for this configuration "
-                     f"(every axis within {result['target_pct']:g}%).")
+        lines.append(f"  RESULT: estimated resources are within {result['target_pct']:g}% on "
+                     f"{result['part_string']}; synthesis, routing and timing are not verified.")
     else:
         over = [label[k] for k in ("lut", "ff", "dsp", "ramb36") if not report[k]["ok"]]
         lines.append(f"  RESULT: INSUFFICIENT -- {', '.join(over)} exceed {result['target_pct']:g}% on "
@@ -1071,6 +1081,7 @@ def format_capacity_report(result: dict) -> str:
     for w in result.get("warnings", []):
         lines.append(f"  note: {w}")
     lines.append("")
+    lines.append("  FF uses the 2026-09-11 routed baseline; channel-dependent logic needs a new routed report.")
     lines.append("  final note: Vivado report_utilization after synthesis; this is a design-budget estimate.")
     return "\n".join(lines)
 

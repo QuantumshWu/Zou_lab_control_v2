@@ -14,6 +14,9 @@
 
 - 数据/历史投影收口：整体snapshot唯一schema/ref，内部仅不可变三plane与数值布局，不逐记录恢复public snapshot。显式整数组与Plot共用DataBlock原始打包，sigma仍按需；缩小窗口和关闭history清理不再适用的carry。传输依赖改为整数列，新增planes共享类型/单元描述成批编码，接收由原串行owner按序安装；删除重复查找表及child身份补偿缓存。源schema形状/大小只首次计算。真实Qt验证Fate、Frozen与保存精确数据，窗口及进程已关闭；具体性能和剩余必要成本仅记ignored报告，不宣称硬件极限。合并保留同期master的局部方差/Chan-Welford、显示及设备修改。
 
+- FPGA扩展为69物理lane/25TTL，新增6个原GND输出；F13旧cooling_pgc改shutter_420，新J14 cooling_pgc，R17 trig不改。TTL边沿mask32位、延时25TTL+4bus、独立4bit DAC clock enable共用ABI7，指纹0x5A94F3B6。删除engine旧稀疏映射/无用物理lane输出，保留原SAFE最终DAC锁存和DONE尾部语义。TTL FIFO32、DAC FIFO64，其余容量/精度保持；源manifest、XDC/top、host打包与生成header/Tcl同步。资源模型仍估19778LUT/37BRAM/76DSP，2026-09-21正式build-only已验证实际19645LUT/14590FF/37BRAM/76DSP，50MHz routed setup+0.170ns、hold+0.036ns，12条bus-skew均MET；生成bitstream但未program/flash，不宣称实验板验收通过。
+- 复用bin/migrate_pulses.bat显式离线迁移63→69：按实际pin保持旧波形，新TTL低；F13关联binding/delay/显示选择同步，Config名称/值、scan列和源码、用户自定义label不变。无editor的纯Pulse仍为纯Pulse，外板不误迁；dry-run、原件备份、重复执行no-op及正式reader读取已验证，3个仓库测试Pulse已升级，未改用户workspace。主机真实69lane的Memory/TCP Load、重连、Fire/Done、旧ABI与容量拒绝直接验证通过；现有5个xsim行为oracle验证25TTL/独立clock/SAFE/32队列边界/延时DONE/TTL-DAC相位。2026-09-21再用本次生成的5个真实BRAM IP跑原tb_t_ff：两次4shot输出零差异，SAFE中断LOAD/驻留重放/重复命令去重通过；实验机验收仍未执行，诊断及build产物不入Git。
+
 - 侧分布零刻度让位不再只在孤立locator内生效：公共最终跨轴碰撞阶段先让参与碰撞的可选zero退场，再判断是否需要缩字号。Image/Rolling同owner，更新locator最终答案供compose/full draw/export共同消费，不只隐藏Text。真实Rolling的主轴0与side0碰撞复现，修后高端和主横轴4.16→6.5pt；DPR1/3、扩大恢复0/缩回省0、完整重绘与导出、未变布局不重规划的原直接用例通过。图像产物仅在ignored research。
 - Image旧重绘断言已查清并修实现：跨轴字号规划把动态侧栏变化无差别标成全部背景失效；现只补充实际字号改变的轴，保留原limits/layout/style失效。两次大幅clim变化的多余背景draw由2次降到0，测试主动置画面失效的1次完整draw保留；断言拆成各阶段精确计数，未放宽总次数。DPR1/2、Rolling侧刻度与重新布局、变化前后完整像素一致的直接验证通过。
 
@@ -489,7 +492,9 @@
 
 以下证据来自2026-09-03在当前三层repeat tree上强制执行的Vivado 2019.1纯build，不代替实验板验收：
 
-本节是旧命令ABI的历史build证据，不能用于确认当前`0x5A59C160`的资源或时序；当前版本由操作员在实验机build/program。
+2026-09-21用户授权后，在独立ttl25 worktree由正式`build_and_program.bat --build-only`完成新扩展ABI `0x5A94F3B6`的Vivado 2019.1 build：19645/20800 LUT（94.45%）、14590/41600 FF（35.07%）、76/90 DSP、37/50 BRAM；setup WNS+0.170ns/TNS0，hold+0.036ns/THS0，12条bus-skew全部MET（最差实际skew0.811ns）。无critical warning/error，bitstream SHA256 `66160133406786698DE8461E341961A5B806DA4026677E04A2F5A32041B58672`。报告和构建receipt在该worktree的ignored `packages/zlc_pulse/fpga/build/ps`；未连接、program或flash实验板。
+
+2026-09-21只读核对本机实际2026-09-11 routed报告及synth参数：63物理lane、19TTL、两类FIFO64、fingerprint 0x5A59C160；LUT20050/20800（96.39%）、FF14806/41600（35.59%）、DSP76/90、BRAM41/50，WNS+0.116ns、WHS+0.036ns。实际FIFO映射每TTL17个RAM64M、每DAC74个RAM64M，用于本次估算器校准；新25TTL版本仍无routed结果。
 
 - Vivado 2019.1 fresh project完成全部IP、top synth、place/route、reports和bitstream。
 - Routed setup WNS `+0.193 ns`、TNS `0`；hold WHS `+0.036 ns`、THS `0`；全部约束MET。

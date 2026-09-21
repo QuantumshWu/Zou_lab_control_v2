@@ -1,15 +1,16 @@
 `timescale 1ns/1ps
+`include "zlc_geometry.vh"
 // Real-IP gap sweep: the user's e6/e7/e8 shape with the e4->e5 gap parameterized via
 // `GAP.  Reproduces the dropped-e7 bug and proves the fix across gaps 1,2,3,5,10,50,500.
 `ifndef GAP
  `define GAP 500
 `endif
 module tb_gapsweep;
-  localparam integer CH=62, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10;
+  localparam integer CH=`ZLC_NUM_DELAY_CH, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10;
   localparam integer GAP = `GAP;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
-  reg [12:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
-  wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [63:0] mrd;
+  reg [11:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
+  wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [31:0] mrd;
   wire [CH-1:0] edge_mask_rdata = mrd[CH-1:0];
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
@@ -35,7 +36,7 @@ module tb_gapsweep;
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks({CH*DTW{1'b0}}),
     .out(out),.bus_out(bus_out),.running(running),.done(done));
   integer i;
-  task pa; input t; input [12:0] a; input [31:0] d; begin
+  task pa; input t; input [11:0] a; input [31:0] d; begin
     @(posedge clk); wt<=t; wm<=~t; we<=4'hF; wa<=a; wd<=d;
     @(posedge clk); @(posedge clk); wt<=0; wm<=0; we<=0; @(posedge clk); end
   endtask
@@ -47,7 +48,7 @@ module tb_gapsweep;
     masks[5]='h200; masks[6]='ha00; masks[7]='h208; masks[8]=0; masks[9]=0;
     reset=1; start=0;
     for (i=0;i<10;i=i+1) pa(1'b1, i, ticks[i]);
-    for (i=0;i<10;i=i+1) begin pa(1'b0, 2*i, masks[i]); pa(1'b0, 2*i+1, 32'd0); end
+    for (i=0;i<10;i=i+1) pa(1'b0, i, masks[i]);
     repeat (200) @(posedge clk); reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
   integer tcount=0; reg emp=0; integer lo=-1, nbad=0, np=0, nrise=0, nperiodbad=0;

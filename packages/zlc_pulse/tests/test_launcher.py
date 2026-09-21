@@ -110,7 +110,7 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
         check=False,
     )
     assert estimate.returncode == 0, estimate.stdout + estimate.stderr
-    assert "configured part HAS enough resources" in estimate.stdout
+    assert "within the configured budget" in estimate.stdout
     assert "!ZLC_STATUS!" not in estimate.stdout
 
     failing = tmp_path / "failing-python.bat"
@@ -158,8 +158,8 @@ def test_shipped_board_includes_pgc_1d_without_a_local_mutation_step() -> None:
 
     target = pulse_target_from_xdc()
     geometry = default_params()
-    assert len(target.raw_lanes) == geometry.channel_count == 63
-    assert geometry.num_delay_ch == 19
+    assert len(target.raw_lanes) == geometry.channel_count == 69
+    assert geometry.num_delay_ch == 25
     channel = target.by_key["pgc_1D"]
     assert channel.kind == "digital" and channel.lanes == ("ch18",)
     assert target.package_pins[channel.lanes[0]] == "P19"

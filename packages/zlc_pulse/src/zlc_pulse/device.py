@@ -531,7 +531,7 @@ class PulseStreamer(ConfigValueHolder):
                 self._applied = replace(self._applied, source=source, authored_source=authored_source)
                 return
             self._validate_application(prog, normalized)
-            words = pack_program(prog, self.geom)
+            words = pack_program(prog, self.geom, target=self._target)
             self.safe()
             self._stop.clear()
             self._loaded = False; self._program = None; self._applied = None

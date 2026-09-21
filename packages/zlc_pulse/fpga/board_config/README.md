@@ -17,7 +17,7 @@ This file describes the approved board and frozen deployment geometry:
 | `target_pct` | resource-budget target for the estimate |
 | `board.id` | explicit board-manifest identity |
 | `board.lanes` | indexed host/RTL/XDC lane and pin mapping |
-| `params.channel_count` | number of raw pulse lanes |
+| `params.channel_count` | physical raw lanes, including TTL, DAC data and latch clocks |
 | `params.bus_count` / `bus_width` | DAC bus geometry |
 | remaining `params.*` fields | edge, scan, coefficient, delay, and FIFO limits |
 
@@ -28,8 +28,31 @@ lane identity.
 
 The returned target keeps the manifest package pin for every raw lane in
 `target.package_pins`. Any missing, extra, or differently pinned pulse port in
-the XDC fails immediately. A top-level RTL assignment to the wrong
-`out_final[index]` or DAC bit also fails validation.
+the XDC fails immediately. A top-level RTL assignment to the wrong TTL
+`out_final[index]`, DAC bit or `bus_clk_final[bus]` also fails validation.
+
+The expansion has 69 physical lanes: 25 TTL, four 10-bit DAC buses and four
+latch clocks. Only the 25 leading TTL lanes occupy the edge mask (one 32-bit
+word). DAC data has its own segment engine; CTRL word 20 holds four bus-clock
+enable bits. Delay words contain the 25 TTL delays followed by four DAC delays.
+The TTL event FIFO is 32 deep; the DAC event FIFO remains 64 deep. This is ABI
+version 7 / fingerprint `0x5A94F3B6`, requiring a matching new bitstream.
+
+## Upgrading existing Pulse files
+
+Run `bin\migrate_pulses.bat --dry-run` first, then the same command without
+`--dry-run`. Double-click uses the discovered workspace's `pulses` and
+`config_values`; passing files/folders explicitly restricts the migration.
+Each changed file is validated, backed up beside its original and atomically
+replaced. Running the tool again does not modify an already migrated file.
+
+Existing waveforms stay on their physical pins: the former F13 `cooling_pgc`
+is named `shutter_420`, while the added J14 `cooling_pgc` starts low. R17 `trig`
+is unchanged. All six new TTL outputs start low. DAC bit order, scan rows,
+timing, saved Config names/values and authored Pulse parameters are retained.
+The normal loader does not silently migrate old wiring. Build/program the new
+FPGA design and update client/server software together before using it; never
+use a capacity estimate as a routed/timing acceptance report.
 
 Editing JSON cannot alter a programmed FPGA. A hardware change needs an
 approved rebuild and qualification. The layout fingerprint proves geometry

@@ -11,7 +11,7 @@ hardware acceptance remains the runbook in `fpga\README.md`.
 ## Files
 
 - `zlc_edge_streamer.v`: the engine. A global edge table held in three parallel
-  block RAMs (tick 32b / coeff 64b / mask 62b, forced `READ_LATENCY_B=2`), a
+  block RAMs (tick 32b / coeff 64b / TTL mask 32b, forced `READ_LATENCY_B=2`), a
   depth-`FIFO_DEPTH` (=`RD_LAT`+3=5) continuous edge prefetch that hides the BRAM
   latency so back-to-back 1-tick (20 ns) edges fire one per clock, a 2-bank
   continuous cyclic ping-pong scan window (`BANK_SIZE`=2048, 4096 bank-local
@@ -81,18 +81,19 @@ rows that actually cross such a seam before FIRE/LOAD, rather than allowing a
 stale boundary cache to cross the seam or misreporting the deterministic
 scheduling error as a scan-refill underflow.
 
-Frozen profile (from `zlc_pulse.wire.StreamerParams` and the deployed manifest's
-explicit 98% ceiling; the generic 90% solver correctly rejects this tight 35T):
-`CHANNEL_COUNT=62`, `NUM_SLOTS=4`, `MAX_EDGES=4096`, `BANK_SIZE=2048` (4096
-bank-local resident slots), `TICK_WIDTH=32`, `COEFF_WIDTH=16`, `COEFF_FRAC_BITS=8`,
-`RD_LAT=2`, `FIFO_DEPTH=5`, `EVT_FIFO_DEPTH=64`, `BUS_EVT_FIFO_DEPTH=64`,
-`CLOCK_HZ=50 MHz` (20 ns tick). Vivado `report_utilization` is the final
-resource authority. The forced routed build of the three-layer repeat ABI on
-2026-09-03 uses block-RAM tiles 82.00%, Slice LUTs 94.38%, FFs 33.99%, and
-DSPs 84.44%; `bin\estimate_resources.bat` remains the conservative pre-build
-gate calibrated from the earlier routed design.
-This frozen 35T deployment is tight on LUTs; proposed geometry changes must be
-re-estimated and routed rather than inferred from the old 2026-06 profile.
+Expansion profile: `CHANNEL_COUNT=69` physical pins, 25 TTL control bits,
+`NUM_SLOTS=4`, `MAX_EDGES=4096`, `BANK_SIZE=2048` (4096 bank-local resident rows),
+`TICK_WIDTH=32`, `COEFF_WIDTH=16`, `COEFF_FRAC_BITS=8`, `RD_LAT=2`, `FIFO_DEPTH=5`,
+`EVT_FIFO_DEPTH=32`, `BUS_EVT_FIFO_DEPTH=64`, `CLOCK_HZ=50 MHz` (20 ns tick).
+The previous 63-lane build's 2026-09-11 routed report used 20050/20800 LUTs,
+14806/41600 registers, 76/90 DSPs and 41/50 BRAM tiles, with setup WNS +0.116 ns.
+The updated estimator gives 19778 LUTs and 37 BRAM tiles. The new ABI's actual
+2026-09-21 Vivado 2019.1 build-only result is 19645 LUTs (94.45%), 14590 registers
+(35.07%), 76 DSPs and 37 BRAM tiles. Routed setup WNS is +0.170 ns and hold
+slack +0.036 ns; all 12 bus-skew constraints pass. The generated 32-bit mask IP
+also passes the existing full-top replay/SAFE oracle. No hardware was connected
+or programmed; experimental pin/timing acceptance remains required. Migration
+itself never builds or programs a bitstream.
 
 ## CTRL Register-File Mailbox
 

@@ -1,4 +1,4 @@
-"""Offline migration of numbered Pulse bindings and Config files.
+"""Offline migration of Pulse bindings, board channels and Config files.
 
 The runtime readers remain strict. Originals are retained beside each migrated
 file; numeric Config N becomes the same neutral name ``config_N`` everywhere.
@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 from zlc_durable import atomic_write_bytes, readable_json_bytes, unique_path
-from zlc_pulse import config_values_from_tree
+from zlc_pulse import PulseTarget, config_values_from_tree, pulse_target_from_xdc, sequence_to_tree
 from zlc_pulse.codec import (
     CONFIG_VALUES_FORMAT,
     PULSE_TREE_FORMAT,
     parse_pulse_tree_json,
 )
 
-from ..pulse_state import state_from_tree
+from ..pulse_state import state_from_tree, state_to_tree
 from ..session import Workspace
 
 
@@ -108,7 +109,74 @@ def migrate_tree(before: Mapping) -> tuple[dict, tuple[str, ...]]:
         if "config_source" in tree:
             tree.pop("config_source")
             notes.append("removed implicit Config path; explicitly Load Config before Fire")
-        state_from_tree(tree)
+        state = state_from_tree(tree)
+        sequence = state.sequence
+        target = pulse_target_from_xdc()
+        if len(sequence.target.raw_lanes) == 63 and len(target.raw_lanes) == 69:
+            old = sequence.target
+            if old.raw_lanes != tuple(f"ch{index:02d}" for index in range(63)):
+                raise ValueError("not the known 63-lane board; raw lanes cannot be inferred")
+            if old.package_pins:
+                by_pin = {pin: lane for lane, pin in target.package_pins.items()}
+                try:
+                    lanes = {lane: by_pin[pin] for lane, pin in old.package_pins.items()}
+                except KeyError as error:
+                    raise ValueError(f"old board pin is absent from the current manifest: {error}") from error
+            else:
+                # Known pre-expansion board only: the complete port geometry
+                # below must match, not merely the number of state entries.
+                lanes = {lane: target.raw_lanes[index if index < 19 else index + 6]
+                         for index, lane in enumerate(old.raw_lanes)}
+            port_names = {port.key: "shutter_420" if port.key == "cooling_pgc" else port.key
+                          for port in old.ports}
+            for port in old.ports:
+                candidate = target.by_key.get(port_names[port.key])
+                if (candidate is None or candidate.kind != port.kind
+                    or candidate.lanes != tuple(lanes[lane] for lane in port.lanes)
+                    or (candidate.bus_index, candidate.width, candidate.encoding, candidate.safe_value,
+                        candidate.latch_clock) != (port.bus_index, port.width, port.encoding, port.safe_value,
+                                                  port.latch_clock)):
+                    raise ValueError(f"old port {port.key!r} does not match the known board wiring")
+            if len(old.ports) != len(target.ports) - 6:
+                raise ValueError("old board does not declare every pre-expansion port")
+            labels = {port_names[port.key]: port.label for port in old.ports
+                      if port.label != port.key}
+            if labels:
+                target = PulseTarget(
+                    target.raw_lanes,
+                    tuple(replace(port, label=labels.get(port.key, port.label)) for port in target.ports),
+                    package_pins=target.package_pins,
+                )
+            indices = {lane: index for index, lane in enumerate(target.raw_lanes)}
+            periods = []
+            for period in sequence.periods:
+                states = [0] * len(target.raw_lanes)
+                for lane, value in zip(old.raw_lanes, period.states, strict=True):
+                    states[indices[lanes[lane]]] = value
+                periods.append(replace(period, states=tuple(states)))
+            sequence = replace(
+                sequence, target=target, periods=tuple(periods),
+                bindings=tuple(replace(binding, field_ref=replace(
+                    binding.field_ref,
+                    port=None if binding.field_ref.port is None else port_names[binding.field_ref.port],
+                )) for binding in sequence.bindings),
+                delays=tuple(replace(delay, port=port_names[delay.port]) for delay in sequence.delays),
+            )
+            # Scan columns retain their binding order and numeric table. Its
+            # Python source produces positional columns, not port-key lookups;
+            # preserve authored code instead of replacing arbitrary strings.
+            if "editor" in tree:
+                tree = state_to_tree(replace(
+                    state, sequence=sequence,
+                    visible_ports=(None if state.visible_ports is None else frozenset(port_names[key] for key in state.visible_ports)),
+                ))
+            else:
+                tree = sequence_to_tree(sequence)
+            state_from_tree(tree)
+            notes.append("63 -> 69 physical lanes; F13 cooling_pgc -> shutter_420; six new TTL outputs low")
+        elif (sequence.target.abi_fingerprint != target.abi_fingerprint
+              or (sequence.target.package_pins and sequence.target.package_pins != target.package_pins)):
+            notes.append("board target left unchanged: not this board's known predecessor")
     else:
         raise ValueError("not a Pulse or Config document")
     return tree, tuple(notes)
@@ -121,7 +189,7 @@ def migrate_file(path: Path, *, dry_run: bool = False) -> str:
         return "SKIP (not Pulse/Config)"
     after, notes = migrate_tree(before)
     if before == after:
-        return "CURRENT"
+        return f"SKIP: {'; '.join(notes)}" if notes else "CURRENT"
     detail = "; ".join(notes) or "removed obsolete Config metadata"
     if dry_run:
         return f"WOULD MIGRATE: {detail}"

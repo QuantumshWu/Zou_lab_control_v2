@@ -130,7 +130,7 @@ module axi_bram_ctrl_0(
 endmodule
 
 `ifdef ZLC_IVERILOG
-// Icarus-only black boxes for the pin-boundary test below.  The test forces
+// IP-free black boxes for the pin-boundary test below.  The test forces
 // the engine-side signals and checks the real top-level pin equations; BRAM
 // behaviour is deliberately outside this small SAFE-gate proof.
 module blk_mem_gen_edge_tick(
@@ -144,8 +144,8 @@ module blk_mem_gen_edge_coeff(
   assign douta=0; assign doutb=0;
 endmodule
 module blk_mem_gen_edge_mask(
-  input clka, input ena, input [3:0] wea, input [12:0] addra, input [31:0] dina, output [31:0] douta,
-  input clkb, input enb, input [7:0] web, input [11:0] addrb, input [63:0] dinb, output [63:0] doutb);
+  input clka, input ena, input [3:0] wea, input [11:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [3:0] web, input [11:0] addrb, input [31:0] dinb, output [31:0] doutb);
   assign douta=0; assign doutb=0;
 endmodule
 module blk_mem_gen_scan(
@@ -162,30 +162,38 @@ endmodule
 module tb_safe_gate;
   reg clk=0; always #10 clk=~clk;
   wire [1:0] led;
-  wire cooling,cooling_pgc,repump,probe,pushout,state_pre,trig,coil,grey_cooling,trap,UV,emCCD;
+  wire cooling,shutter_420,repump,probe,pushout,state_pre,trig,coil,grey_cooling,trap,UV,emCCD;
   wire microwave,address_w,cooling_shutter,repump_shutter,probe_shutter,bias;
-  wire GND1,pgc_1D,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
+  wire GND1,pgc_1D,push_shutter,single_cooling_shutter,cooling_pgc,sweep_trig,push_freq_switch,pgc_1D_freq_switch;
+  wire GND11,GND12,GND13,GND14,GND15;
   wire [9:0] da_dipole,da_bias_y,da_bias_x,da_bias_z;
   wire da_clk0,da_clk1,da_clk2,da_clk3,uart_tx;
   zlc_pulse_streamer_top dut(
     .clk(clk),.uart_rx(1'b1),.uart_tx(uart_tx),.led(led),
-    .cooling(cooling),.cooling_pgc(cooling_pgc),.repump(repump),.probe(probe),
+    .cooling(cooling),.shutter_420(shutter_420),.repump(repump),.probe(probe),
     .pushout(pushout),.state_pre(state_pre),.trig(trig),.coil(coil),.grey_cooling(grey_cooling),
     .trap(trap),.UV(UV),.emCCD(emCCD),.microwave(microwave),.address(address_w),
-    .GND1(GND1),.pgc_1D(pgc_1D),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
-    .GND9(GND9),.GND10(GND10),.GND11(GND11),.cooling_shutter(cooling_shutter),
+    .GND1(GND1),.pgc_1D(pgc_1D),.push_shutter(push_shutter),.single_cooling_shutter(single_cooling_shutter),
+    .cooling_pgc(cooling_pgc),.sweep_trig(sweep_trig),.push_freq_switch(push_freq_switch),
+    .pgc_1D_freq_switch(pgc_1D_freq_switch),.GND11(GND11),.cooling_shutter(cooling_shutter),
     .GND12(GND12),.repump_shutter(repump_shutter),.GND13(GND13),.probe_shutter(probe_shutter),
     .GND14(GND14),.bias(bias),.GND15(GND15),.da_dipole(da_dipole),.da_clk0(da_clk0),
     .da_bias_y(da_bias_y),.da_clk1(da_clk1),.da_bias_x(da_bias_x),.da_clk2(da_clk2),
     .da_bias_z(da_bias_z),.da_clk3(da_clk3));
 
-  integer safe_cycle;
+  wire [24:0] ttl_pins = {pgc_1D_freq_switch,push_freq_switch,sweep_trig,cooling_pgc,single_cooling_shutter,push_shutter,
+    pgc_1D,bias,probe_shutter,repump_shutter,cooling_shutter,address_w,microwave,emCCD,UV,trap,grey_cooling,
+    coil,trig,state_pre,pushout,probe,repump,shutter_420,cooling};
+  reg [24:0] ttl_pattern;
+  integer safe_cycle, ttl_bit;
   reg     saw_the_latch;
 
   task expect_safe_data; begin
     #1;
     if ({da_bias_z,da_bias_x,da_bias_y,da_dipole} !== {4{10'd512}})
       $fatal(1,"DAC data was not midpoint-safe");
+    if (ttl_pins !== 25'b0)
+      $fatal(1,"SAFE did not clear all 25 TTL pins");
   end endtask
 
   // AFTER the park window: nothing strobes while the board is idle.
@@ -214,8 +222,9 @@ module tb_safe_gate;
   end endtask
 
   initial begin
-    force dut.clk_en = {`ZLC_CHANNEL_COUNT{1'b1}};
-    force dut.out = {`ZLC_CHANNEL_COUNT{1'b0}};
+    force dut.bus_clk_enable = 4'b1111;
+    ttl_pattern = 25'b0;
+    force dut.out = ttl_pattern;
     force dut.zlc_bus_out = {4{10'd37}};
     force dut.zlc_physical_active = 1'b1;
     force dut.eng_reset = 1'b1;
@@ -228,6 +237,20 @@ module tb_safe_gate;
     @(negedge clk); #1;
     if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b1111)
       $fatal(1,"enabled DAC clocks did not toggle while physically active");
+    for (ttl_bit = 0; ttl_bit < 25; ttl_bit = ttl_bit + 1) begin
+      ttl_pattern = 25'b1 << ttl_bit;
+      #1;
+      if (ttl_pins !== ttl_pattern)
+        $fatal(1,"TTL pin mapping mismatch for bit %0d: %h",ttl_bit,ttl_pins);
+    end
+    ttl_pattern = {25{1'b1}};
+
+    // The four enable bits are bus-indexed, independent of TTL pin indices.
+    force dut.bus_clk_enable = 4'b0101;
+    @(negedge clk); #1;
+    if ({da_clk3,da_clk2,da_clk1,da_clk0} !== 4'b0101)
+      $fatal(1,"bus clock enable bits did not select independent converters");
+    force dut.bus_clk_enable = 4'b1111;
 
     // A single SAFE assertion dominates an active engine and arbitrary bus
     // data -- and takes the safe code all the way into the converters.
@@ -253,9 +276,10 @@ module tb_t_ff;
   localparam integer NFR = 4;                 // frames captured per fire
   reg clk = 0; always #10 clk = ~clk;
   wire [1:0] led;
-  wire cooling, cooling_pgc, repump, probe, pushout, state_pre, trig, coil;
+  wire cooling, shutter_420, repump, probe, pushout, state_pre, trig, coil;
   wire grey_cooling, trap, UV, emCCD, microwave, address_w;
-  wire GND1,pgc_1D,GND5,GND6,GND7,GND8,GND9,GND10,GND11,GND12,GND13,GND14,GND15;
+  wire GND1,pgc_1D,push_shutter,single_cooling_shutter,cooling_pgc,sweep_trig,push_freq_switch,pgc_1D_freq_switch;
+  wire GND11,GND12,GND13,GND14,GND15;
   wire cooling_shutter, repump_shutter, probe_shutter, bias;
   wire [9:0] da_dipole, da_bias_y, da_bias_x, da_bias_z;
   wire da_clk0, da_clk1, da_clk2, da_clk3;
@@ -267,12 +291,13 @@ module tb_t_ff;
   // that with a deliberate 512-vs-2048 skew).
   zlc_pulse_streamer_top dut (
     .clk(clk), .led(led), .uart_rx(1'b1),
-    .cooling(cooling), .cooling_pgc(cooling_pgc), .repump(repump), .probe(probe),
+    .cooling(cooling), .shutter_420(shutter_420), .repump(repump), .probe(probe),
     .pushout(pushout), .state_pre(state_pre), .trig(trig), .coil(coil),
     .grey_cooling(grey_cooling), .trap(trap), .UV(UV), .emCCD(emCCD),
     .microwave(microwave), .address(address_w),
-    .GND1(GND1),.pgc_1D(pgc_1D),.GND5(GND5),.GND6(GND6),.GND7(GND7),.GND8(GND8),
-    .GND9(GND9),.GND10(GND10),.GND11(GND11),
+    .GND1(GND1),.pgc_1D(pgc_1D),.push_shutter(push_shutter),.single_cooling_shutter(single_cooling_shutter),
+    .cooling_pgc(cooling_pgc),.sweep_trig(sweep_trig),.push_freq_switch(push_freq_switch),
+    .pgc_1D_freq_switch(pgc_1D_freq_switch),.GND11(GND11),
     .cooling_shutter(cooling_shutter), .GND12(GND12), .repump_shutter(repump_shutter),
     .GND13(GND13), .probe_shutter(probe_shutter), .GND14(GND14), .bias(bias), .GND15(GND15),
     .da_dipole(da_dipole), .da_clk0(da_clk0),
@@ -286,7 +311,7 @@ module tb_t_ff;
   reg [9:0] bh [0:2*NFR*200];      // [fire*NFR*T_FRAME + t]
   reg       chh [0:2*NFR*200];
   reg [39:0] all_bus [0:2*NFR*200];
-  reg [18:0] all_ttl [0:2*NFR*200];
+  reg [24:0] all_ttl [0:2*NFR*200];
   always @(posedge clk) begin
     if (led[0] && !run_prev) begin
       $display("[TB] running (fire #%0d) at %0t", fire_n, $time);
@@ -297,7 +322,7 @@ module tb_t_ff;
       begin
         bh[fire_n*NFR*T_FRAME + ti] <= da_bias_y; chh[fire_n*NFR*T_FRAME + ti] <= cooling;
         all_bus[fire_n*NFR*T_FRAME + ti] <= {da_bias_z,da_bias_x,da_bias_y,da_dipole};
-        all_ttl[fire_n*NFR*T_FRAME + ti] <= {pgc_1D,bias,probe_shutter,repump_shutter,cooling_shutter,address_w,microwave,emCCD,UV,trap,grey_cooling,coil,trig,state_pre,pushout,probe,repump,cooling_pgc,cooling};
+        all_ttl[fire_n*NFR*T_FRAME + ti] <= {pgc_1D_freq_switch,push_freq_switch,sweep_trig,cooling_pgc,single_cooling_shutter,push_shutter,pgc_1D,bias,probe_shutter,repump_shutter,cooling_shutter,address_w,microwave,emCCD,UV,trap,grey_cooling,coil,trig,state_pre,pushout,probe,repump,shutter_420,cooling};
       end
     run_prev <= led[0];
   end

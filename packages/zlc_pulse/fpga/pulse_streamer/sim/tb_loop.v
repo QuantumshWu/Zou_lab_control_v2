@@ -1,4 +1,5 @@
 `timescale 1ns/1ps
+`include "zlc_geometry.vh"
 // Finite-bracket LOOP test with a non-zero loop start.  The preamble and tail
 // must each play once while the bracketed body plays exactly loop_count times --
 // on the TTL outputs AND on a DAC bus whose three hold segments give the
@@ -7,16 +8,16 @@
 // 0 put the preamble's code on the DAC for one tick of every replay), and the
 // tail's code must land on the very tick of the tail's TTL edge.
 module tb_loop;
-  localparam integer CH=62, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10, NE=8;
+  localparam integer CH=`ZLC_NUM_DELAY_CH, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10, NE=8;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
-  reg [12:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
+  reg [11:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
   reg        bus_prog_we = 1'b0;
   reg [5:0]  bus_prog_addr = 6'd0;
   reg [TW-1:0] bus_prog_start_tick = 32'd0, bus_prog_stop_tick = 32'd0;
   reg [BW-1:0] bus_prog_value = 10'd0;
   reg [BUSC*7-1:0] bus_counts = {BUSC*7{1'b0}};
   localparam [BW-1:0] DAC_PRE = 10'd100, DAC_BODY = 10'd200, DAC_TAIL = 10'd300;
-  wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [63:0] mrd;
+  wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [31:0] mrd;
   wire [CH-1:0] edge_mask_rdata = mrd[CH-1:0];
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
@@ -42,7 +43,7 @@ module tb_loop;
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks({CH*DTW{1'b0}}),
     .out(out),.bus_out(bus_out),.running(running),.done(done));
   integer i;
-  task pa; input t; input [12:0] a; input [31:0] d; begin
+  task pa; input t; input [11:0] a; input [31:0] d; begin
     @(posedge clk); wt<=t; wm<=~t; we<=4'hF; wa<=a; wd<=d;
     @(posedge clk); @(posedge clk); wt<=0; wm<=0; we<=0; @(posedge clk); end
   endtask
@@ -54,12 +55,12 @@ module tb_loop;
   initial begin
     // bit0=preamble, bit11=loop body, bit1=post-loop tail.
     for (i=0;i<NE;i=i+1) begin ticks[i]=i*100; masks[i]=0; end
-    masks[0]=62'h1; masks[1]=0;
-    masks[2]=62'h800; masks[3]=0; masks[4]=0;
-    masks[5]=62'h2; masks[6]=0; masks[7]=0;
+    masks[0]=32'h1; masks[1]=0;
+    masks[2]=32'h800; masks[3]=0; masks[4]=0;
+    masks[5]=32'h2; masks[6]=0; masks[7]=0;
     reset=1; start=0;
     for (i=0;i<NE;i=i+1) pa(1'b1, i, ticks[i]);
-    for (i=0;i<NE;i=i+1) begin pa(1'b0, 2*i, masks[i]); pa(1'b0, 2*i+1, 32'd0); end
+    for (i=0;i<NE;i=i+1) pa(1'b0, i, masks[i]);
     // bus 0: preamble / body / tail codes on the same edges as the TTL periods.
     prog_hold(6'd0, 32'd0,   ticks[2], DAC_PRE);
     prog_hold(6'd1, ticks[2], ticks[5], DAC_BODY);

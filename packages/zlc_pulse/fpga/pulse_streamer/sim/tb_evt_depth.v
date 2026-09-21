@@ -1,55 +1,55 @@
 `timescale 1ns/1ps
-// EVENT-FIFO DEPTH BOUNDARY on the real engine: with EVT_DEPTH=16,
-//   * a burst of EXACTLY 16 toggles inside one delay window is delayed
-//     tick-exactly (the FIFO full-at-16 boundary must not corrupt anything);
-//   * a burst of 18 toggles exceeds capacity and MUST set sticky overflow.
+// EVENT-FIFO DEPTH BOUNDARY on the real engine: with deployed EVT_DEPTH=32,
+//   * a burst of EXACTLY 32 toggles inside one delay window is delayed
+//     tick-exactly (the FIFO full-at-32 boundary must not corrupt anything);
+//   * a burst of 34 toggles exceeds capacity and MUST set sticky overflow.
 // The exact-depth lane remains tick-exact; the overflowing lane may drop data,
 // but that corruption can no longer be silent.
-// bit0 carries the 16-toggle burst, bit1 the 18-toggle burst; both delayed by
+// bit0 carries the 32-toggle burst, bit1 the 34-toggle burst; both delayed by
 // d=200 so the whole burst is in flight at once.
 module tb_evt_depth;
   localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
-  localparam integer NE=21;
+  localparam integer NE=37;
   localparam integer NT=1200;
   localparam integer D=200;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
-  // toggle ticks 10,12,...: bit0 toggles at the first 16, bit1 at all 18.
-  reg [TW-1:0] etick [0:31]; reg [CH-1:0] emask [0:31];
+  // toggle ticks 10,12,...: bit0 toggles at the first 32, bit1 at all 34.
+  reg [TW-1:0] etick [0:63]; reg [CH-1:0] emask [0:63];
   integer i; reg b0; reg b1;
   initial begin
     etick[0]=0; emask[0]=8'h00;
     b0=0; b1=0;
-    for (i=0; i<18; i=i+1) begin
+    for (i=0; i<34; i=i+1) begin
       b1 = ~b1;
-      if (i<16) b0 = ~b0;
+      if (i<32) b0 = ~b0;
       etick[1+i] = 10 + 2*i;
       emask[1+i] = {6'b0, b1, b0};
     end
-    etick[19]=500; emask[19]=8'h00;   // frame end (all off)
-    etick[20]=501; emask[20]=8'h00;   // final off edge
-    for (i=21; i<32; i=i+1) begin etick[i]=0; emask[i]=0; end
+    etick[35]=500; emask[35]=8'h00;   // frame end (all off)
+    etick[36]=501; emask[36]=8'h00;   // final off edge
+    for (i=37; i<64; i=i+1) begin etick[i]=0; emask[i]=0; end
   end
 
   wire [EAW-1:0] edge_raddr;
   reg [TW-1:0] tp[0:2]; reg [CH-1:0] mp[0:2];
   always @(posedge clk) begin
-    tp[0]<=etick[edge_raddr[4:0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
-    mp[0]<=emask[edge_raddr[4:0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
+    tp[0]<=etick[edge_raddr[5:0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
+    mp[0]<=emask[edge_raddr[5:0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
   end
   wire [TW-1:0] edge_tick_rdata = tp[2];
   wire [CH-1:0] edge_mask_rdata = mp[2];
 
   localparam integer TDW = 32;
   wire [CH*TDW-1:0] delay_ticks_w;
-  assign delay_ticks_w[0*TDW +: TDW] = D;       // 16-toggle burst, exactly depth
-  assign delay_ticks_w[1*TDW +: TDW] = D;       // 18-toggle burst, overflow by 2
+  assign delay_ticks_w[0*TDW +: TDW] = D;       // 32-toggle burst, exactly depth
+  assign delay_ticks_w[1*TDW +: TDW] = D;       // 34-toggle burst, overflow by 2
   assign delay_ticks_w[CH*TDW-1: 2*TDW] = {(CH-2)*TDW{1'b0}};
 
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done, overflow, physical_active; wire [31:0] scan_cursor; wire underflow;
-  zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .EVT_DEPTH(16)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd21),.run_repeat_count(32'd1),
+  zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
+    .clk(clk),.reset(reset),.start(start),.prog_count(13'd37),.run_repeat_count(32'd1),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd501),.loop_end_coeffs({NS*CW{1'b0}}),
     .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
@@ -73,7 +73,7 @@ module tb_evt_depth;
   end
 
   // oracle: history of the undelayed stream + per-cycle asserts.
-  // ch0 (16 toggles = depth): out0[t] == in0[t-D] EXACTLY.
+  // ch0 (32 toggles = depth): out0[t] == in0[t-D] EXACTLY.
   // ch1 intentionally overflows; its waveform is invalid once overflow is set.
   reg [CH-1:0] hist [0:NT];
   integer t = -1; integer errs0 = 0; integer started = 0;

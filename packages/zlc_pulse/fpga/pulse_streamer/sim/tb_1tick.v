@@ -1,12 +1,13 @@
 `timescale 1ns/1ps
+`include "zlc_geometry.vh"
 // 1-tick back-to-back stress: edges at consecutive ticks with ALTERNATING masks, so every
 // 20 ns edge must be visible on its own cycle.  Verifies FIFO_DEPTH/PIPE still sustains the
 // design's headline 1-tick capability AFTER the pend-depth fix.
 module tb_1tick;
-  localparam integer CH=62, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10, NE=20;
+  localparam integer CH=`ZLC_NUM_DELAY_CH, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10, NE=20;
   reg clk=0, reset=0, start=0; reg [12:0] prog_count=NE; always #10 clk=~clk;
-  reg [12:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
-  wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [63:0] mrd;
+  reg [11:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
+  wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [31:0] mrd;
   wire [CH-1:0] edge_mask_rdata = mrd[CH-1:0];
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
@@ -31,12 +32,12 @@ module tb_1tick;
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks({CH*DTW{1'b0}}),
     .out(out),.bus_out(bus_out),.running(running),.done(done));
   integer i;
-  task pa; input t; input [12:0] a; input [31:0] d; begin
+  task pa; input t; input [11:0] a; input [31:0] d; begin
     @(posedge clk); wt<=t; wm<=~t; we<=4'hF; wa<=a; wd<=d;
     @(posedge clk); @(posedge clk); wt<=0; wm<=0; we<=0; @(posedge clk); end
   endtask
-  task pe; input [12:0] a; input [31:0] t; input [31:0] m; begin
-    pa(1'b1, a, t); pa(1'b0, 2*a, m); pa(1'b0, 2*a+1'b1, 32'd0);
+  task pe; input [11:0] a; input [31:0] t; input [31:0] m; begin
+    pa(1'b1, a, t); pa(1'b0, a, m);
   end endtask
   task short_case; input [12:0] count; begin
     reset=1; start=0; prog_count=count;
@@ -46,15 +47,15 @@ module tb_1tick;
     @(negedge clk); reset=0; start=1;
     // reset/start each cross the engine's two-flop synchronizer.
     repeat (3) @(posedge clk); #1;
-    if (!running || out !== 62'h1) $fatal(1, "short frame edge0 mismatch: count=%0d out=%h", count, out);
+    if (!running || out !== 32'h1) $fatal(1, "short frame edge0 mismatch: count=%0d out=%h", count, out);
     @(negedge clk); start=0;
     @(posedge clk); #1;
     if (count==2) begin
-      if (out !== 62'h0) $fatal(1, "1-tick terminal mask mismatch: %h", out);
+      if (out !== 32'h0) $fatal(1, "1-tick terminal mask mismatch: %h", out);
     end else begin
-      if (out !== 62'h2) $fatal(1, "2-tick middle mask mismatch: %h", out);
+      if (out !== 32'h2) $fatal(1, "2-tick middle mask mismatch: %h", out);
       @(posedge clk); #1;
-      if (out !== 62'h0) $fatal(1, "2-tick terminal mask mismatch: %h", out);
+      if (out !== 32'h0) $fatal(1, "2-tick terminal mask mismatch: %h", out);
     end
     repeat (8) @(posedge clk); #1;
     if (!done || running || underflow || out !== {CH{1'b0}})
@@ -66,19 +67,19 @@ module tb_1tick;
   end endtask
   reg dense_phase=0;
   // Record the tick at which each dense-stress edge's mask appears.
-  integer tcount=0; reg [CH-1:0] op=62'hx; integer seen=0; integer bad=0; integer exp_t;
+  integer tcount=0; reg [CH-1:0] op=32'hx; integer seen=0; integer bad=0; integer exp_t;
   integer dbg=0;
   initial begin
     short_case(13'd2);
     short_case(13'd3);
     // e0..e9 at ticks 0..9 (1-tick back-to-back), then a gap, then e10..e19 at 100..109
-    for (i=0;i<10;i=i+1)  begin ticks[i]=i;       masks[i]=(i[0])?62'h001:62'h002; end
-    for (i=10;i<20;i=i+1) begin ticks[i]=90+i;    masks[i]=(i[0])?62'h001:62'h002; end
+    for (i=0;i<10;i=i+1)  begin ticks[i]=i;       masks[i]=(i[0])?32'h001:32'h002; end
+    for (i=10;i<20;i=i+1) begin ticks[i]=90+i;    masks[i]=(i[0])?32'h001:32'h002; end
     reset=1; start=0; prog_count=NE;
     for (i=0;i<NE;i=i+1) pa(1'b1, i, ticks[i]);
-    for (i=0;i<NE;i=i+1) begin pa(1'b0, 2*i, masks[i]); pa(1'b0, 2*i+1, 32'd0); end
+    for (i=0;i<NE;i=i+1) pa(1'b0, i, masks[i]);
     repeat (200) @(posedge clk);
-    tcount=0; seen=0; bad=0; dbg=0; op=62'hx; dense_phase=1;
+    tcount=0; seen=0; bad=0; dbg=0; op=32'hx; dense_phase=1;
     @(negedge clk); reset=0; start=1; @(negedge clk); start=0;
   end
   always @(posedge clk) if (dense_phase && running && dbg<16) begin

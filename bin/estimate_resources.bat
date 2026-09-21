@@ -14,7 +14,7 @@ call "%~f0" --inner %*
 set "ZLC_STATUS=%ERRORLEVEL%"
 echo.
 if "%ZLC_STATUS%"=="0" (
-  echo ZLC resource estimate: the configured part HAS enough resources.
+  echo ZLC resource estimate: within the configured budget. Build and timing still require verification.
 ) else if "%ZLC_STATUS%"=="1" (
   echo ZLC resource estimate: INSUFFICIENT -- see the OVER BUDGET lines above.
 ) else (

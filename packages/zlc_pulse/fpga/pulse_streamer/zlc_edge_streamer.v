@@ -46,7 +46,7 @@
 module zlc_edge_streamer #(
     // Geometry defaults are macros from the generated zlc_geometry.vh (config-derived); the top
     // overrides them at the instance.  SCAN_COUNT_WIDTH is an intrinsic 32-bit counter width.
-    parameter integer CHANNEL_COUNT = `ZLC_CHANNEL_COUNT,
+    parameter integer CHANNEL_COUNT = `ZLC_NUM_DELAY_CH,
     parameter integer EDGE_ADDR_WIDTH = `ZLC_EDGE_ADDR_WIDTH,
     parameter integer SCAN_ADDR_WIDTH = `ZLC_SCAN_ADDR_WIDTH,   // = clog2(2*BANK_SIZE)
     parameter integer SCAN_COUNT_WIDTH = 32,    // unique-row count/cursor width; independent of bank depth
@@ -85,19 +85,7 @@ module zlc_edge_streamer #(
     // FIFO holding its RESOLVED edge/ramp segments in flight for the delayed re-player, so the
     // depth scales with SEGMENTS IN FLIGHT (host-validated <= BUS_EVT_DEPTH), NOT value-changes.
     parameter integer BUS_EVT_DEPTH = `ZLC_BUS_EVT_FIFO_DEPTH,
-    parameter integer GTIME_WIDTH = 48,
-    // Event-FIFO COMPACTION.  Only channels that can carry a TTL delay (the real
-    // outputs -- NOT the bus-member bits, whose pins are driven by bus_out and whose
-    // engine `out` bit is always 0) get an EVT_DEPTH-deep event FIFO.  At depth 256 a
-    // FIFO for every one of CHANNEL_COUNT=62 bits would need 62*256*49b ~ 760 Kb of
-    // distributed RAM (the part has 400 Kb), so the top instantiates only NUM_DELAY_CH
-    // FIFOs and slot s serves channel DELAY_CH_MAP[s*DELAY_CH_IDX_W +: DELAY_CH_IDX_W].
-    // Default (DELAY_COMPACT=0): one FIFO per channel, slot == channel -- standalone /
-    // testbench use, where the distributed-RAM cap is irrelevant.
-    parameter integer DELAY_COMPACT = 0,
-    parameter integer NUM_DELAY_CH = CHANNEL_COUNT,
-    parameter integer DELAY_CH_IDX_W = 6,                 // bits/slot in the map (>= clog2(CHANNEL_COUNT))
-    parameter [NUM_DELAY_CH*DELAY_CH_IDX_W-1:0] DELAY_CH_MAP = {(NUM_DELAY_CH*DELAY_CH_IDX_W){1'b0}}
+    parameter integer GTIME_WIDTH = 48
 )(
     input  wire clk,
     input  wire reset,
@@ -429,15 +417,13 @@ module zlc_edge_streamer #(
     // inside any d-window.
     reg [GTIME_WIDTH-1:0] g_time = {GTIME_WIDTH{1'b0}};         // free-running ticks since FIRE
     reg [CHANNEL_COUNT-1:0] prev_undelayed = {CHANNEL_COUNT{1'b0}};
-    wire [NUM_DELAY_CH-1:0] evt_fifo_busy;
-    wire [NUM_DELAY_CH-1:0] evt_fifo_overflow;
+    wire [CHANNEL_COUNT-1:0] evt_fifo_busy;
+    wire [CHANNEL_COUNT-1:0] evt_fifo_overflow;
     wire [BUS_COUNT-1:0] bus_delay_busy;
     wire [BUS_COUNT-1:0] bus_delay_overflow;
     wire delay_runtime_busy = |evt_fifo_busy | |bus_delay_busy;
-    // Event FIFOs are stored by DELAY SLOT (0..NUM_DELAY_CH-1), not by channel: slot s
-    // serves channel evt_ch_of(s).  Only pin-driving channels get a slot, so the deep
-    // (EVT_DEPTH) distributed RAM is not paid for the bus-member bits.
-    // Each slot is its OWN 2D distributed-RAM FIFO, instantiated in the g_evtfifo generate
+    // One event FIFO per TTL channel; DAC data and clocks never enter this engine mask.
+    // Each channel has its OWN 2D distributed-RAM FIFO, instantiated in g_evtfifo
     // loop near the runtime block below.  A single 3D reg array (evt_mem[slot][depth]) does
     // NOT infer as distributed RAM here: every slot has an INDEPENDENT wr/rd pointer (a single
     // shared write pointer would let it infer), so Vivado's 3D-RAM inference bails and
@@ -446,35 +432,7 @@ module zlc_edge_streamer #(
     // dual-port LUTRAM (1 sync write @wr + 1 async read @rd).
     localparam integer EVT_ADDR = $clog2(EVT_DEPTH);
     localparam integer BEVT_ADDR = $clog2(BUS_EVT_DEPTH);   // per-bus segment FIFO address width
-    // Each slot drives ONLY its one owned channel bit (obit << evt_ch_of(slot)); evt_out is
-    // their OR, so un-served channels read 0 (the un-driven / before-first-event level).
-    wire [CHANNEL_COUNT-1:0] evt_out_contrib [0:NUM_DELAY_CH-1];
-    reg  [CHANNEL_COUNT-1:0] evt_out;                          // scheduled (delayed) levels, by channel
-    integer evt_ob;
-    always @(*) begin
-        evt_out = {CHANNEL_COUNT{1'b0}};
-        for (evt_ob = 0; evt_ob < NUM_DELAY_CH; evt_ob = evt_ob + 1)
-            evt_out = evt_out | evt_out_contrib[evt_ob];
-    end
-    // slot s -> channel: identity when not compacted, else the packed map.
-    function integer evt_ch_of;
-        input integer s;
-        begin
-            evt_ch_of = (DELAY_COMPACT != 0)
-                ? DELAY_CH_MAP[s*DELAY_CH_IDX_W +: DELAY_CH_IDX_W]
-                : s;
-        end
-    endfunction
-    // Channels served by a FIFO (1 = delay-eligible).  Used to GATE the delay merge so a
-    // stray delay on a non-eligible channel (a host bug) plays the channel UNDELAYED
-    // instead of sticking it at the un-driven evt_out (0).  Elaboration-time constant.
-    reg [CHANNEL_COUNT-1:0] evt_eligible_mask;
-    integer em_s;
-    initial begin
-        evt_eligible_mask = {CHANNEL_COUNT{1'b0}};
-        for (em_s = 0; em_s < NUM_DELAY_CH; em_s = em_s + 1)
-            evt_eligible_mask[evt_ch_of(em_s)] = 1'b1;
-    end
+    wire [CHANNEL_COUNT-1:0] evt_out;             // scheduled levels, one owned bit per FIFO
     integer del_i;
 
     reg reset_meta = 1'b0, reset_sync = 1'b0;
@@ -514,7 +472,7 @@ module zlc_edge_streamer #(
         delayed_mask = {CHANNEL_COUNT{1'b0}};
         delayed_out  = {CHANNEL_COUNT{1'b0}};
         for (del_m = 0; del_m < CHANNEL_COUNT; del_m = del_m + 1) begin
-            if (del_ch_ticks[del_m] != {TTL_DELAY_WIDTH{1'b0}} && evt_eligible_mask[del_m]) begin
+            if (del_ch_ticks[del_m] != {TTL_DELAY_WIDTH{1'b0}}) begin
                 delayed_mask[del_m] = 1'b1;
                 // d == 1: a single register IS a 1-tick delay (the event queue cannot
                 // pop an entry the same cycle it is pushed).  d >= 2: the scheduled
@@ -1545,31 +1503,27 @@ module zlc_edge_streamer #(
             prev_undelayed <= state_mask;
         end
     end
-    // One independent FIFO per delay slot.  Each is its own 2D distributed-RAM (sync write @wr,
+    // One independent FIFO per TTL channel. Each is its own 2D distributed-RAM (sync write @wr,
     // async read @rd) so the 226k-FF 3D fallback is gone; behaviour is bit-identical to the old
     // shared loop (xsim tb_delay_sched / tb_delay_compact).
     genvar gevs;
     generate
-    for (gevs = 0; gevs < NUM_DELAY_CH; gevs = gevs + 1) begin : g_evtfifo
-        localparam integer GEVC = (DELAY_COMPACT != 0)
-            ? DELAY_CH_MAP[gevs*DELAY_CH_IDX_W +: DELAY_CH_IDX_W]
-            : gevs;                                            // channel this slot serves (constant)
+    for (gevs = 0; gevs < CHANNEL_COUNT; gevs = gevs + 1) begin : g_evtfifo
         (* ram_style = "distributed" *) reg [GTIME_WIDTH:0] fifo [0:EVT_DEPTH-1];
         reg [EVT_ADDR-1:0] wr  = {EVT_ADDR{1'b0}};
         reg [EVT_ADDR-1:0] rd  = {EVT_ADDR{1'b0}};
         reg [EVT_ADDR:0]   cnt = {(EVT_ADDR+1){1'b0}};
         reg                obit = 1'b0;                        // this channel's scheduled (delayed) level
         reg pushf, popf;
-        wire want_push = (state_mask[GEVC] != prev_undelayed[GEVC])
-                         && (del_ch_ticks[GEVC] > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1});
+        wire want_push = (state_mask[gevs] != prev_undelayed[gevs])
+                         && (del_ch_ticks[gevs] > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1});
         wire [GTIME_WIDTH:0] headw = fifo[rd];                 // async-read FIFO head (LUTRAM read port)
         wire want_pop = (cnt != {(EVT_ADDR+1){1'b0}})
                         && (headw[GTIME_WIDTH:1] == g_time);
         assign evt_fifo_busy[gevs] = (cnt != {(EVT_ADDR+1){1'b0}}) || obit;
         assign evt_fifo_overflow[gevs] = want_push
                                           && (cnt == EVT_DEPTH[EVT_ADDR:0]) && !want_pop;
-        // obit -> bit GEVC; un-served channels contribute 0 (GEVC is a per-instance constant)
-        assign evt_out_contrib[gevs] = {{(CHANNEL_COUNT-1){1'b0}}, obit} << GEVC;
+        assign evt_out[gevs] = obit;
         always @(posedge clk) begin
             if (reset_sync) begin
                 wr   <= {EVT_ADDR{1'b0}};
@@ -1583,8 +1537,8 @@ module zlc_edge_streamer #(
                     // zero-EXTEND the 32b delay to the 48b time base (an out-of-range
                     // part-select here would X-poison the entry and kill the compare)
                     fifo[wr] <= {
-                        g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, del_ch_ticks[GEVC]} - 1'b1,
-                        state_mask[GEVC] };
+                        g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, del_ch_ticks[gevs]} - 1'b1,
+                        state_mask[gevs] };
                     wr <= wr + 1'b1;
                 end
                 if (popf) begin

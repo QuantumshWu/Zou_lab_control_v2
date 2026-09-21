@@ -1,15 +1,16 @@
 `timescale 1ns/1ps
+`include "zlc_geometry.vh"
 // DEFINITIVE: real zlc_edge_streamer + REAL tick & mask IP BRAMs (true synthesized latency),
 // preloaded with the user's EXACT uploaded edge table (scaled /500), then FIRE and watch emCCD.
 module tb_real_engine;
-  localparam integer CH=62, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10;
+  localparam integer CH=`ZLC_NUM_DELAY_CH, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;   // 50MHz
 
-  reg [12:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wen_t=0, wen_m=0;
+  reg [11:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wen_t=0, wen_m=0;
   wire [EAW-1:0] edge_raddr;
   wire [TW-1:0]  edge_tick_rdata;
-  wire [63:0]    edge_mask_rdata64;
-  wire [CH-1:0]  edge_mask_rdata = edge_mask_rdata64[CH-1:0];
+  wire [31:0]    edge_mask_rdata32;
+  wire [CH-1:0]  edge_mask_rdata = edge_mask_rdata32[CH-1:0];
   wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
 
@@ -18,7 +19,7 @@ module tb_real_engine;
     .clkb(clk),.enb(1'b1),.web(4'b0),.addrb(edge_raddr),.dinb(32'b0),.doutb(edge_tick_rdata));
   blk_mem_gen_edge_mask u_mask(
     .clka(clk),.ena(wen_m),.wea(we),.addra(wa),.dina(wd),.douta(),
-    .clkb(clk),.enb(1'b1),.web(4'b0),.addrb(edge_raddr),.dinb(32'b0),.doutb(edge_mask_rdata64));
+    .clkb(clk),.enb(1'b1),.web(4'b0),.addrb(edge_raddr),.dinb(32'b0),.doutb(edge_mask_rdata32));
 
   zlc_edge_streamer #(.CHANNEL_COUNT(CH)) dut (
     .clk(clk),.reset(reset),.start(start),
@@ -43,7 +44,7 @@ module tb_real_engine;
   reg [31:0] ticks [0:9]; reg [31:0] masks [0:9];
 
   task pa_write;
-    input tgt; input [12:0] a; input [31:0] d;
+    input tgt; input [11:0] a; input [31:0] d;
     begin
       @(posedge clk); wen_t<=tgt; wen_m<=~tgt; we<=4'hF; wa<=a; wd<=d;
       @(posedge clk); @(posedge clk); wen_t<=0; wen_m<=0; we<=4'h0; @(posedge clk);
@@ -57,7 +58,7 @@ module tb_real_engine;
     masks[5]='h200; masks[6]='ha00; masks[7]='h208; masks[8]=0; masks[9]=0;
     reset=1; start=0; wen_t=0; wen_m=0; we=0;
     for (i=0;i<10;i=i+1) pa_write(1'b1, i, ticks[i]);
-    for (i=0;i<10;i=i+1) begin pa_write(1'b0, 2*i, masks[i]); pa_write(1'b0, 2*i+1, 32'd0); end
+    for (i=0;i<10;i=i+1) pa_write(1'b0, i, masks[i]);
     repeat (200) @(posedge clk);
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end

@@ -21,7 +21,7 @@
 //             + SLOT_COUNT + CURSOR(read-back) + BANK_READY(host-written)
 //     R_TICK  edge tick BRAM   (32b/edge)   ]
 //     R_COEFF edge coeff BRAM  (64b/edge)    } 3 PARALLEL edge BRAMs, read in
-//     R_MASK  edge mask BRAM   (62b/edge)   ]  lockstep on edge_raddr -> whole
+//     R_MASK  TTL mask BRAM    (32b/edge)   ]  lockstep on edge_raddr -> whole
 //                                              edge per access, no width padding
 //     R_SCAN  scan BRAM (128b slot vector/point), 2*BANK_SIZE deep (ping-pong)
 //     R_BUS   bus-image BRAM; the mini-loader copies it into the engine bus LUTRAM
@@ -76,12 +76,13 @@ module zlc_pulse_streamer_top #(
     input  wire uart_rx,
     output wire uart_tx,
     output wire [1:0] led,
-    output wire cooling, output wire cooling_pgc, output wire repump, output wire probe,
+    output wire cooling, output wire shutter_420, output wire repump, output wire probe,
     output wire pushout, output wire state_pre, output wire trig, output wire coil,
     output wire grey_cooling, output wire trap, output wire UV, output wire emCCD,
     output wire microwave, output wire address,
-    output wire GND1, output wire pgc_1D, output wire GND5, output wire GND6, output wire GND7,
-    output wire GND8, output wire GND9, output wire GND10, output wire GND11,
+    output wire GND1, output wire pgc_1D, output wire push_shutter, output wire single_cooling_shutter,
+    output wire cooling_pgc, output wire sweep_trig, output wire push_freq_switch,
+    output wire pgc_1D_freq_switch, output wire GND11,
     output wire cooling_shutter, output wire GND12, output wire repump_shutter, output wire GND13,
     output wire probe_shutter, output wire GND14, output wire bias, output wire GND15,
     output wire [9:0] da_dipole, output wire da_clk0,
@@ -90,16 +91,18 @@ module zlc_pulse_streamer_top #(
     output wire [9:0] da_bias_z, output wire da_clk3
 );
 
+    // Physical lane identity includes DAC data and clocks. Edge state does not.
+    localparam integer TTL_CHANNEL_COUNT = CHANNEL_COUNT - BUS_COUNT * (BUS_WIDTH + 1);
     localparam integer COEFF_BITS = NUM_SLOTS * COEFF_WIDTH;     // 64
     localparam integer SLOT_BITS = NUM_SLOTS * TICK_WIDTH;       // 128
     // Port-B widths DERIVED from the geometry (== image.build_ip_sizes): coeff/mask 32b-word-padded,
     // scan is the full slot vector.  Never a bare literal, so a num_slots/channel_count change
     // resizes the edge-BRAM ports (and the tcl IP widths, which come from the same build_ip_sizes).
     localparam integer COEFF_PORTB_BITS = ((COEFF_BITS + 31) / 32) * 32;   // 64
-    localparam integer MASK_PORTB_BITS = ((CHANNEL_COUNT + 31) / 32) * 32; // 64 (62 padded)
+    localparam integer MASK_PORTB_BITS = ((TTL_CHANNEL_COUNT + 31) / 32) * 32;
     localparam integer SCAN_PORTB_BITS = SLOT_BITS;             // 128 = 4x32
     localparam integer COEFF_WORDS = COEFF_PORTB_BITS / 32;      // 2
-    localparam integer MASK_WORDS = MASK_PORTB_BITS / 32;        // 2
+    localparam integer MASK_WORDS = MASK_PORTB_BITS / 32;
     localparam integer SCAN_WORDS = SCAN_PORTB_BITS / 32;        // 4
     localparam integer MAX_EDGES = (1 << EDGE_ADDR_WIDTH);
     localparam integer SCAN_DEPTH = 2 * BANK_SIZE;
@@ -121,7 +124,7 @@ module zlc_pulse_streamer_top #(
     // the event-scheduler delay in ticks.  128 words of headroom regardless of channel count
     // so the layout is stable across configs.
     localparam integer R_DELAY_BASE  = R_BUS_BASE   + BUS_ROWS * BUS_WORDS;
-    localparam integer R_DELAY_WORDS = `ZLC_DELAY_REG_WORDS;   // = image.delay_region_words (>= CHANNEL_COUNT + BUS_COUNT)
+    localparam integer R_DELAY_WORDS = `ZLC_DELAY_REG_WORDS;   // >= TTL_CHANNEL_COUNT + BUS_COUNT
     localparam integer R_TOTAL_WORDS = R_DELAY_BASE + R_DELAY_WORDS;
 
     // CTRL regfile word offsets (== host.image.CtrlWords).
@@ -144,16 +147,13 @@ module zlc_pulse_streamer_top #(
     localparam integer C_BANK0_CHUNK = 17;  // host -> engine: sweep chunk resident in bank 0
     localparam integer C_BANK1_CHUNK = 18;  // host -> engine: sweep chunk resident in bank 1
     localparam integer C_SCAN_REPEAT_COUNT = 19;
-    // --- per-channel CLK mask: bit b drives channel b's PIN from the FPGA clk
-    // (== host.image.CtrlWords.CLK_ENABLE).  Sits right after the command words: there are NO
-    // dense delay-tick CTRL words any more (TTL+DAC delays live in the R_DELAY region).
-    localparam integer CLK_ENABLE_WORDS = (CHANNEL_COUNT + 31) / 32;            // 2
-    localparam integer C_CLK_ENABLE = C_SCAN_REPEAT_COUNT + 1;                  // 20: per-channel clk mask (2 words: 20..21)
+    // One enable bit per DAC latch clock, not per physical lane.
+    localparam integer C_CLK_ENABLE = C_SCAN_REPEAT_COUNT + 1;                  // 20, low BUS_COUNT bits
     localparam integer C_COMMAND_ID = 22, C_ACK_ID = 23, C_ACK_STATUS = 24, C_ACK_CURSOR = 25;
     reg [31:0] ack_id = 0, ack_status = 0, ack_cursor = 0;
 
     // engine outputs
-    wire [CHANNEL_COUNT-1:0] out;
+    wire [TTL_CHANNEL_COUNT-1:0] out;
     wire [BUS_COUNT*BUS_WIDTH-1:0] zlc_bus_out;
     wire zlc_running, zlc_done, zlc_underflow, zlc_overflow, zlc_physical_active;
     wire [SCAN_COUNT_WIDTH-1:0] zlc_cursor;
@@ -162,21 +162,19 @@ module zlc_pulse_streamer_top #(
     // --- delays: BOTH TTL channels AND DAC buses use the 32b/word R_DELAY register region,
     // driving the per-signal event scheduler (long delays; see zlc_edge_streamer).
     localparam integer TTL_DELAY_WIDTH = 32;
-    // R_DELAY carries ONE 32-bit word per delay-eligible signal: the CHANNEL_COUNT TTL channels
+    // R_DELAY carries ONE 32-bit word per delay-eligible signal: the TTL channels
     // first, then the BUS_COUNT per-bus DAC delays.  TTL and DAC delays share the SAME 32-bit
     // range and the SAME event-scheduler mechanism, so a negative TTL delay's global shift G can
     // reach the buses with no range mismatch.  (There are no dense delay-tick CTRL words: the
     // CTRL block is the 20 command words 0..19 then the clk mask -- nothing delay-related.)
-    localparam integer DELAY_REG_COUNT = CHANNEL_COUNT + BUS_COUNT;
+    localparam integer DELAY_REG_COUNT = TTL_CHANNEL_COUNT + BUS_COUNT;
     reg  [31:0] delay_reg [0:DELAY_REG_COUNT-1];
     integer dri;
     initial for (dri = 0; dri < DELAY_REG_COUNT; dri = dri + 1) delay_reg[dri] = 32'b0;
-    wire [CHANNEL_COUNT*TTL_DELAY_WIDTH-1:0] delay_ticks_w;
+    wire [TTL_CHANNEL_COUNT*TTL_DELAY_WIDTH-1:0] delay_ticks_w;
     wire [BUS_COUNT*TTL_DELAY_WIDTH-1:0] bus_delay_ticks_w;
 
-    // --- per-channel CLK mask + muxed output: a channel wired to clk outputs the FPGA
-    // clk on its pin (PHASE-INVERTED, see below); otherwise it outputs the engine bit.
-    // out_final feeds the pin map.
+    // TTLs, DAC data and DAC clocks have separate physical output owners.
     //
     // DAC LATCH PHASE (critical -- do NOT change back to plain `clk`): the clk pins are
     // the parallel-DAC latch strobes (da_clk0..3, wired here via the GUI clk button).  The
@@ -191,9 +189,9 @@ module zlc_pulse_streamer_top #(
     // the RTL launch/latch ordering; actual board-level setup/hold margin remains
     // an instrumented hardware-acceptance item because the DAC I/O delays are not
     // specified by this repository.
-    wire [CLK_ENABLE_WORDS*32-1:0] clk_enable_pack;
-    wire [CHANNEL_COUNT-1:0] clk_en;
-    wire [CHANNEL_COUNT-1:0] out_final;
+    wire [BUS_COUNT-1:0] bus_clk_enable;
+    wire [BUS_COUNT-1:0] bus_clk_final;
+    wire [TTL_CHANNEL_COUNT-1:0] out_final = eng_reset ? {TTL_CHANNEL_COUNT{1'b0}} : out;
     localparam [BUS_WIDTH-1:0] BUS_SAFE_CODE = {1'b1, {(BUS_WIDTH-1){1'b0}}};
     wire [BUS_COUNT*BUS_WIDTH-1:0] bus_safe_pack = {BUS_COUNT{BUS_SAFE_CODE}};
     wire [BUS_COUNT*BUS_WIDTH-1:0] bus_out_final =
@@ -280,26 +278,16 @@ module zlc_pulse_streamer_top #(
     // order: word j supplies bits [32*j +: 32]); slice the engine input widths from the LSBs
     // (the upper pad bits of the last word are 0 from the host).
     genvar dw;
+    assign bus_clk_enable = ctrl_reg[C_CLK_ENABLE][BUS_COUNT-1:0];
     generate
-        for (dw = 0; dw < CHANNEL_COUNT; dw = dw + 1) begin : zlc_delay_reg_pack_gen
+        for (dw = 0; dw < TTL_CHANNEL_COUNT; dw = dw + 1) begin : zlc_delay_reg_pack_gen
             assign delay_ticks_w[dw*TTL_DELAY_WIDTH +: TTL_DELAY_WIDTH] = delay_reg[dw];
         end
         // per-bus DAC delays ride the SAME R_DELAY region, just after the channels.
         for (dw = 0; dw < BUS_COUNT; dw = dw + 1) begin : zlc_bus_delay_reg_pack_gen
-            assign bus_delay_ticks_w[dw*TTL_DELAY_WIDTH +: TTL_DELAY_WIDTH] = delay_reg[CHANNEL_COUNT + dw];
+            assign bus_delay_ticks_w[dw*TTL_DELAY_WIDTH +: TTL_DELAY_WIDTH] = delay_reg[TTL_CHANNEL_COUNT + dw];
         end
     endgenerate
-
-    // Assemble the per-channel clk mask from its CTRL words, then mux the strobe onto each
-    // clk pin.  The strobe is ~clk (clk FALLING edge) so the DAC latches the parallel word
-    // at the centre of its data eye -- see the DAC LATCH PHASE note above.
-    genvar cw;
-    generate
-        for (cw = 0; cw < CLK_ENABLE_WORDS; cw = cw + 1) begin : zlc_clk_enable_pack_gen
-            assign clk_enable_pack[cw*32 +: 32] = ctrl_reg[C_CLK_ENABLE + cw];
-        end
-    endgenerate
-    assign clk_en = clk_enable_pack[CHANNEL_COUNT-1:0];
 
     // PARKING THE DACs ON SAFE (do NOT remove this window).
     //
@@ -338,11 +326,9 @@ module zlc_pulse_streamer_top #(
 
     genvar cmx;
     generate
-        for (cmx = 0; cmx < CHANNEL_COUNT; cmx = cmx + 1) begin : zlc_clk_mux_gen
-            assign out_final[cmx] = zlc_safe_latching
-                ? (clk_en[cmx] ? ~clk : 1'b0)
-                : (eng_reset ? 1'b0
-                    : ((zlc_physical_active && clk_en[cmx]) ? ~clk : out[cmx]));
+        for (cmx = 0; cmx < BUS_COUNT; cmx = cmx + 1) begin : zlc_bus_clock_gen
+            assign bus_clk_final[cmx] = bus_clk_enable[cmx]
+                && (zlc_safe_latching || (!eng_reset && zlc_physical_active)) ? ~clk : 1'b0;
         end
     endgenerate
 
@@ -404,7 +390,7 @@ module zlc_pulse_streamer_top #(
         end
     endfunction
 
-    // --- 3 PARALLEL edge BRAMs (tick 32b, coeff 64b, mask 62/64b) -------------
+    // --- 3 PARALLEL edge BRAMs (tick 32b, coeff 64b, TTL mask 32b) -------------
     // Forced READ_LATENCY_B = 2 by the build tcl; engine RD_LAT must match.
     wire [TICK_WIDTH-1:0]      edge_tick_rdata;
     wire [COEFF_PORTB_BITS-1:0] edge_coeff_rdata_w;
@@ -433,10 +419,10 @@ module zlc_pulse_streamer_top #(
     // --- EDGE BRAM READ ALIGNMENT (resolved; do NOT re-add a tick register) ---------
     // The three edge BRAMs (tick / coeff / mask) are read in lockstep on edge_raddr.
     // It is TEMPTING to think the SYMMETRIC tick (32b/32b) is faster than the ASYMMETRIC
-    // coeff/mask (32b write / 64b read) and therefore needs a +1 register to "align".  It
-    // does NOT: each port B is symmetric WITHIN ITSELF (tick 32/32, coeff/mask 64/64), so
-    // all three read at the SAME latency (measured = 2 cycles on this part; verified in
-    // xsim against the ACTUAL synthesised blk_mem_gen IP netlists).
+    // coeff (32b write / 64b read) and therefore needs a +1 register to "align".  It
+    // does NOT: port B reads its configured width (tick/mask 32b, coeff 64b), and the
+    // three memories use the same registered-read configuration. The prior wider-mask
+    // layout was measured at 2 cycles in xsim against its generated blk_mem_gen IPs.
     // The real zlc_edge_streamer driven by these real BRAM IPs plays the uploaded edge
     // table CORRECTLY end-to-end (tb_real_engine.v: two 20 ms emCCD pulses).  Adding a +1
     // tick register to "align" a skew that does NOT exist instead CREATES a tick>mask skew
@@ -686,30 +672,9 @@ module zlc_pulse_streamer_top #(
         end
     end
 
-    // --- delay-channel map DERIVED from the config header (not a hand-written literal) --------
-    // The board lays the real TTL outputs FIRST, so the delay-eligible set is the contiguous leading
-    // NUM_DELAY_CH channels (image.num_delay_ch) and the slot->channel map is the identity.  Deriving
-    // NUM_DELAY_CH / DELAY_CH_IDX_W / the map from zlc_geometry.vh (vs the old {17..0} literal) closes
-    // a fingerprint-invisible blind spot: a channel_count/bus_count/bus_width change moves the count
-    // AND its map TOGETHER, so a rebuilt bitstream can never orphan a delay-eligible channel while the
-    // connect fingerprint reads green.  Byte-identical to the old literal at the shipped geometry
-    // (18 entries, {17..0}); pinned by test_all_geometry_params_config_matches_rtl_defaults.
-    localparam integer DLY_NUM  = `ZLC_NUM_DELAY_CH;
-    localparam integer DLY_IDXW = `ZLC_DELAY_CH_IDX_W;
-    function [DLY_NUM*DLY_IDXW-1:0] zlc_delay_identity_map;
-        input dummy;
-        integer i;
-        begin
-            zlc_delay_identity_map = {(DLY_NUM*DLY_IDXW){1'b0}};
-            for (i = 0; i < DLY_NUM; i = i + 1)
-                zlc_delay_identity_map[i*DLY_IDXW +: DLY_IDXW] = i[DLY_IDXW-1:0];
-        end
-    endfunction
-    localparam [DLY_NUM*DLY_IDXW-1:0] DLY_MAP = zlc_delay_identity_map(1'b0);
-
     // --- the FINAL edge-table engine ------------------------------------------
     zlc_edge_streamer #(
-        .CHANNEL_COUNT(CHANNEL_COUNT), .EDGE_ADDR_WIDTH(EDGE_ADDR_WIDTH),
+        .CHANNEL_COUNT(TTL_CHANNEL_COUNT), .EDGE_ADDR_WIDTH(EDGE_ADDR_WIDTH),
         .SCAN_ADDR_WIDTH(SCAN_ADDR_WIDTH), .SCAN_COUNT_WIDTH(SCAN_COUNT_WIDTH), .BANK_SIZE(BANK_SIZE),
         .TICK_WIDTH(TICK_WIDTH), .NUM_SLOTS(NUM_SLOTS), .COEFF_WIDTH(COEFF_WIDTH), .COEFF_FRAC_BITS(COEFF_FRAC_BITS),
         .BUS_COUNT(BUS_COUNT), .BUS_INDEX_WIDTH(BUS_INDEX_WIDTH), .BUS_WIDTH(BUS_WIDTH),
@@ -719,14 +684,6 @@ module zlc_pulse_streamer_top #(
         // validator rejects programs that would overflow this depth.
         .EVT_DEPTH(EVT_FIFO_DEPTH),
         .BUS_EVT_DEPTH(BUS_EVT_FIFO_DEPTH),
-        // Event FIFOs are COMPACTED to the delay-eligible channels (the real TTL outputs): the
-        // bus-member bits (pins driven by bus_out) and the da_clk pins are NOT delay targets, so they
-        // get no FIFO -- this is what keeps the deep EVT_DEPTH event RAM inside the 400 Kb
-        // distributed-RAM budget.  The count + slot->channel map are DERIVED from the config header
-        // (identity of the leading DLY_NUM channels; see the localparams above) so they can never
-        // drift from image.num_delay_ch.  The host must never place a delay on channel >= DLY_NUM.
-        .DELAY_COMPACT(1), .NUM_DELAY_CH(DLY_NUM), .DELAY_CH_IDX_W(DLY_IDXW),
-        .DELAY_CH_MAP(DLY_MAP),
         // RD_LAT = the configured edge-BRAM latency.  The registered address plus
         // generated memory/core output stages make issue->data RD_LAT+2 cycles;
         // FIFO_DEPTH=RD_LAT+3 owns the resident head and all tracked reads.
@@ -745,7 +702,7 @@ module zlc_pulse_streamer_top #(
         .edge_raddr(edge_raddr),
         .edge_tick_rdata(edge_tick_rdata),
         .edge_coeff_rdata(edge_coeff_rdata_w[COEFF_BITS-1:0]),
-        .edge_mask_rdata(edge_mask_rdata_w[CHANNEL_COUNT-1:0]),
+        .edge_mask_rdata(edge_mask_rdata_w[TTL_CHANNEL_COUNT-1:0]),
         .scan_raddr(scan_raddr), .scan_rdata(scan_rdata_w),
         .bank_ready(ctrl_reg[C_BANK_READY][1:0]),
         .bank_chunk0(ctrl_reg[C_BANK0_CHUNK][SCAN_COUNT_WIDTH-1:0]),
@@ -808,11 +765,10 @@ module zlc_pulse_streamer_top #(
         .bram_wrdata_a(bram_dina), .bram_rddata_a(bram_douta)
     );
 
-    // ---- LEDs + 62-pin board map (identical to the validated board XDC) -------
+    // ---- LEDs + physical board map (identical to the validated board XDC) -----
     assign led[0] = zlc_running;
     assign led[1] = |out;
-    // out_final = the clk-muxed engine output (a channel marked clk shows the FPGA clk).
-    assign cooling = out_final[0]; assign cooling_pgc = out_final[1]; assign repump = out_final[2]; assign probe = out_final[3];
+    assign cooling = out_final[0]; assign shutter_420 = out_final[1]; assign repump = out_final[2]; assign probe = out_final[3];
     assign pushout = out_final[4]; assign state_pre = out_final[5]; assign trig = out_final[6]; assign coil = out_final[7];
     assign grey_cooling = out_final[8]; assign trap = out_final[9]; assign UV = out_final[10]; assign emCCD = out_final[11];
     assign microwave = out_final[12]; assign address = out_final[13];
@@ -823,28 +779,30 @@ module zlc_pulse_streamer_top #(
     assign da_dipole[4] = bus_out_final[4]; assign da_dipole[5] = bus_out_final[5];
     assign da_dipole[6] = bus_out_final[6]; assign da_dipole[7] = bus_out_final[7];
     assign da_dipole[8] = bus_out_final[8]; assign da_dipole[9] = bus_out_final[9];
-    assign da_clk0 = out_final[29];
+    assign da_clk0 = bus_clk_final[0];
     assign da_bias_y[0] = bus_out_final[10]; assign da_bias_y[1] = bus_out_final[11];
     assign da_bias_y[2] = bus_out_final[12]; assign da_bias_y[3] = bus_out_final[13];
     assign da_bias_y[4] = bus_out_final[14]; assign da_bias_y[5] = bus_out_final[15];
     assign da_bias_y[6] = bus_out_final[16]; assign da_bias_y[7] = bus_out_final[17];
     assign da_bias_y[8] = bus_out_final[18]; assign da_bias_y[9] = bus_out_final[19];
-    assign da_clk1 = out_final[40];
+    assign da_clk1 = bus_clk_final[1];
     assign da_bias_x[0] = bus_out_final[20]; assign da_bias_x[1] = bus_out_final[21];
     assign da_bias_x[2] = bus_out_final[22]; assign da_bias_x[3] = bus_out_final[23];
     assign da_bias_x[4] = bus_out_final[24]; assign da_bias_x[5] = bus_out_final[25];
     assign da_bias_x[6] = bus_out_final[26]; assign da_bias_x[7] = bus_out_final[27];
     assign da_bias_x[8] = bus_out_final[28]; assign da_bias_x[9] = bus_out_final[29];
-    assign da_clk2 = out_final[51];
+    assign da_clk2 = bus_clk_final[2];
     assign da_bias_z[0] = bus_out_final[30]; assign da_bias_z[1] = bus_out_final[31];
     assign da_bias_z[2] = bus_out_final[32]; assign da_bias_z[3] = bus_out_final[33];
     assign da_bias_z[4] = bus_out_final[34]; assign da_bias_z[5] = bus_out_final[35];
     assign da_bias_z[6] = bus_out_final[36]; assign da_bias_z[7] = bus_out_final[37];
     assign da_bias_z[8] = bus_out_final[38]; assign da_bias_z[9] = bus_out_final[39];
-    assign da_clk3 = out_final[62];
+    assign da_clk3 = bus_clk_final[3];
     assign pgc_1D = out_final[18];
-    assign GND1 = 1'b0; assign GND5 = 1'b0; assign GND6 = 1'b0;
-    assign GND7 = 1'b0; assign GND8 = 1'b0; assign GND9 = 1'b0; assign GND10 = 1'b0;
+    assign push_shutter = out_final[19]; assign single_cooling_shutter = out_final[20];
+    assign cooling_pgc = out_final[21]; assign sweep_trig = out_final[22];
+    assign push_freq_switch = out_final[23]; assign pgc_1D_freq_switch = out_final[24];
+    assign GND1 = 1'b0;
     assign GND11 = 1'b0; assign GND12 = 1'b0; assign GND13 = 1'b0; assign GND14 = 1'b0;
     assign GND15 = 1'b0;
 endmodule
