@@ -1268,10 +1268,20 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             self.setCursorPosition(0)
 
     def _normalize_visible_number(self, *_args) -> None:
-        if (self._normalizing or self.isReadOnly() or not self.isEnabled()
-                or not self.isVisible() or not self._numeric_validator):
+        if self._normalizing or not self._numeric_validator:
             return
-        if self.width() <= 1:
+        if _args and self._normalization_timer is not None:
+            self._normalization_timer.stop()
+        if self.isReadOnly() or not self.isEnabled():
+            # Width belongs to an editor, not to a read-only projection.
+            # Drop any old display-fit refusal; re-entering the editable state
+            # below re-evaluates the same text against the then-current width.
+            self.setProperty("numericError", "")
+            self._numeric_layout_key = None
+            if self._normalization_timer is not None:
+                self._normalization_timer.stop()
+            return
+        if not self.isVisible() or self.width() <= 1:
             return
         if _args:
             text = self.text()
@@ -1315,11 +1325,15 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._normalizing = True
         try:
             if text != self.text():
-                super().setText(text)
+                # A width-only rewrite is passive normalization.  Emitting
+                # textChanged here made Form/Device Control treat a resize as
+                # a user edit before valueNormalized could identify it.
+                with signals_blocked(self):
+                    super().setText(text)
         finally:
             self._normalizing = False
         self._numeric_layout_key = (self.text(), self.width(), *key[2:])
-        if rounded != requested_number:
+        if rounded != requested_number and not _args:
             self._queue_number_notification()
 
     def _queue_number_notification(self) -> None:
@@ -1344,7 +1358,12 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
-        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+        if event.type() in (
+            QtCore.QEvent.FontChange,
+            QtCore.QEvent.StyleChange,
+            QtCore.QEvent.EnabledChange,
+            QtCore.QEvent.ReadOnlyChange,
+        ):
             if hasattr(self, "_numeric_layout_key"):
                 self._numeric_layout_key = None
                 self._normalize_visible_number()
@@ -4712,10 +4731,11 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
 
     def _visible_integer(self, value: int, low: int, high: int) -> int:
-        if self._number_geometry is None:
-            return min(high, max(low, value))
+        bounded = min(high, max(low, value))
+        if self._number_geometry is None or self.isReadOnly() or not self.isEnabled():
+            return bounded
         number, _text, _width = _visible_decimal(
-            Decimal(value), Decimal(low), Decimal(high), True,
+            Decimal(bounded), Decimal(low), Decimal(high), True,
             _numeric_text_width(self.lineEdit()), self.lineEdit().fontMetrics(),
         )
         return int(number)
@@ -4736,7 +4756,8 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
     def _deliver_normalization(self) -> None:
         if self._normalization_pending:
             self._normalization_pending = False
-            self.valueNormalized.emit()
+            if self.isEnabled() and not self.isReadOnly():
+                self.valueNormalized.emit()
 
     def setValue(self, value: int) -> None:  # noqa: N802
         try:
@@ -4832,7 +4853,18 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
-        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+        if event.type() in (
+            QtCore.QEvent.FontChange,
+            QtCore.QEvent.StyleChange,
+            QtCore.QEvent.EnabledChange,
+            QtCore.QEvent.ReadOnlyChange,
+        ):
+            self._number_geometry = None
+            if self.isReadOnly() or not self.isEnabled():
+                self.setProperty("numericError", "")
+                self._normalization_pending = False
+                self.lineEdit().setText(super().textFromValue(self.value()))
+                self.lineEdit().setCursorPosition(0)
             self._update_number_geometry()
 
     def _update_number_geometry(self) -> None:
@@ -5251,14 +5283,15 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         if number == self._value and self._display_text:
             return number
         shown = self._shown_from_value(number)
-        if self._number_metrics is None or self._text_width <= 0:
-            self._display_text = format(shown.normalize() + Decimal(0), "f")
+        if (self.isReadOnly() or not self.isEnabled()
+                or self._number_metrics is None or self._text_width <= 0):
+            # This is a projection of another owner's value.  Keep exact
+            # text for Qt readback/copy and let QLineEdit handle overflow.
+            self._display_text = format_quantity(shown, "1")
             return number
         low, high = self._shown_bound(self._low), self._shown_bound(self._high)
         if low is not None and high is not None and low > high:
             low, high = high, low
-        if self.isReadOnly() or not self.isEnabled():
-            low = high = shown
         rounded, text, required = _visible_decimal(
             shown, low, high, self.decimals() == 0, self._text_width, self._number_metrics,
         )
@@ -5501,7 +5534,19 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
-        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+        if event.type() in (
+            QtCore.QEvent.FontChange,
+            QtCore.QEvent.StyleChange,
+            QtCore.QEvent.EnabledChange,
+            QtCore.QEvent.ReadOnlyChange,
+        ):
+            if hasattr(self, "_display_text"):
+                self._display_text = ""
+                if self.isReadOnly() or not self.isEnabled():
+                    with signals_blocked(self):
+                        self._commit(self._value)
+                    self._normalization_pending = False
+                    self.lineEdit().setCursorPosition(0)
             self._update_number_geometry()
 
     def _update_number_geometry(self) -> None:

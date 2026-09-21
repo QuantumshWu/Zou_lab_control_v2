@@ -466,6 +466,32 @@ box.stepBy(1)
 QtTest.QTest.qWait(120)
 assert desired and applied == [desired[-1]], (desired, applied)
 numeric.close(); app.processEvents()
+
+# Optional numbers use FluentLineEdit; its passive resize must reach the same
+# Desired-only channel even when Live Apply is enabled.
+optional_spec = FormSpec((FormFieldProps('gain', 'float', 'Gain', allow_blank=True,
+                                       minimum=0.0, maximum=100.0),))
+optional = DeviceControlView(optional_spec, {'fields': {'gain': {
+    'current': 2.0, 'desired': 12.12345678901234, 'editable': True,
+    'live_apply': True, 'live_enabled': True, 'apply_enabled': True,
+}}})
+edit = optional.form.widget_for('gain')
+edit.setFixedWidth(600)
+optional.show(); app.processEvents()
+desired.clear(); applied.clear()
+optional.field_desired_changed.connect(lambda key, value, unit: desired.append(value))
+optional.field_apply_requested.connect(lambda key, value, unit: applied.append(value))
+edit.setFixedWidth(80)
+QtTest.QTest.qWait(120)
+assert desired and desired[-1] == optional.form.read_value('gain'), desired
+assert applied == [], applied
+desired.clear(); applied.clear()
+edit.setFocus(); edit.selectAll()
+app.clipboard().setText('23.987654321098')
+QtTest.QTest.keyClick(edit, QtCore.Qt.Key_V, QtCore.Qt.ControlModifier)
+QtTest.QTest.qWait(120)
+assert desired and applied == [desired[-1]], (desired, applied)
+optional.close(); app.processEvents()
 """
     )
 
