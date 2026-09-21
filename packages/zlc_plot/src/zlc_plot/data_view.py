@@ -1187,13 +1187,15 @@ class DataView:
                     else moved_usable
                 )
 
-                def mean_of_squares(plane: Any, offset: float) -> Any:
+                def centred_moments(
+                    plane: Any, offsets: NDArray[np.float64]
+                ) -> tuple[Any, Any]:
                     array = np.asarray(plane)
                     from . import _raster_kernels as kernels
 
-                    sums = kernels.masked_centred_square_sums(
+                    sums = kernels.masked_centred_moment_sums(
                         array.reshape(array.shape[0], -1, 1),
-                        offset,
+                        np.asarray(offsets, dtype=np.float64).reshape(-1),
                         (
                             None
                             if marks is None
@@ -1201,17 +1203,28 @@ class DataView:
                         ),
                     )
                     if sums is None:
-                        reduced, _ = _masked_leading_reduce(
-                            np.square(np.asarray(array, dtype=np.float64) - offset),
+                        delta = (
+                            np.asarray(array, dtype=np.float64)
+                            - np.asarray(offsets, dtype=np.float64)
+                        )
+                        first, _ = _masked_leading_reduce(
+                            delta,
                             moved_usable,
                             Reduction.MEAN,
                         )
-                        return reduced
+                        np.square(delta, out=delta)
+                        second, _ = _masked_leading_reduce(
+                            delta, moved_usable, Reduction.MEAN
+                        )
+                        return first, second
                     with np.errstate(invalid="ignore", divide="ignore"):
-                        return np.where(
-                            counts > 0,
-                            sums.reshape(values.shape) / counts,
-                            np.nan,
+                        return tuple(
+                            np.where(
+                                counts > 0,
+                                moment.reshape(values.shape) / counts,
+                                np.nan,
+                            )
+                            for moment in sums
                         )
 
                 sem = _sem_of_mean(
@@ -1219,7 +1232,7 @@ class DataView:
                     counts,
                     moved,
                     moved_sigma,
-                    mean_of_squares,
+                    centred_moments,
                 )
 
         for axis, order in enumerate(orders):
@@ -1324,50 +1337,34 @@ class DataView:
         if uncertainty:
             shape = (*group_sizes, nx)
             means = np.asarray(values, dtype=np.float64).reshape(shape)
-            flat_means = means.reshape((-1, nx))
-            references = np.asarray(
-                [_sem_reference(row) for row in flat_means],
-                dtype=np.float64,
-            )
-            offsets = np.broadcast_to(
-                references[:, None], flat_means.shape
-            ).reshape(-1)
             domain_sizes = tuple(int(domain.size) for domain in domains)
-            squared = _axis_kernel_aggregate(
-                self._samples.value.canonical,
-                self._samples.valid_mask,
-                axis_codes,
-                dimensions,
-                domain_sizes,
-                Reduction.SUM,
-                offsets=offsets,
-            )
-            if squared is None:
-                return None
-            square_sums = squared[0].reshape(shape)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                mean_squares = square_sums / counts
-            sigma_squares = None
-            if self._samples.sigma is not None:
-                propagated = _axis_kernel_aggregate(
-                    self._samples.sigma,
+
+            def centred_moments(
+                plane: Any, offsets: NDArray[np.float64]
+            ) -> tuple[Any, Any] | None:
+                reduced = _axis_kernel_aggregate(
+                    np.asarray(plane),
                     self._samples.valid_mask,
                     axis_codes,
                     dimensions,
                     domain_sizes,
                     Reduction.SUM,
-                    offsets=np.zeros(offsets.shape, dtype=np.float64),
+                    offsets=np.asarray(offsets, dtype=np.float64).reshape(-1),
                 )
-                if propagated is None:
+                if reduced is None:
                     return None
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    sigma_squares = propagated[0].reshape(shape) / counts
-            sem = _sem_from_moments(
-                means - offsets.reshape(shape),
-                mean_squares,
+                first, second, _moment_counts, _presence = reduced
+                return first.reshape(shape), second.reshape(shape)
+
+            sem = _sem_of_mean(
+                means,
                 counts,
-                sigma_squares,
+                self._samples.value.canonical,
+                self._samples.sigma,
+                centred_moments,
             )
+            if sem is None:
+                return None
         return CurveData(
             revision=self._samples.revision,
             generation=self._samples.generation,
@@ -2106,6 +2103,17 @@ class DataView:
                     plane = np.take(plane, order, axis=1 + position)
             return plane.reshape(rows, combos)
 
+        def from_code_order(plane: NDArray[Any]) -> NDArray[Any]:
+            """Undo ``code_ordered`` for bucket centres used by the tensor."""
+
+            restored = np.asarray(plane).reshape((rows, *group_sizes))
+            for position, order in enumerate(group_orders):
+                if order is not None:
+                    restored = np.take(
+                        restored, np.argsort(order), axis=1 + position
+                    )
+            return np.transpose(restored, np.argsort(permutation))
+
         counts_pg = code_ordered(counts_pg)
         moments_pg = code_ordered(moments_pg)
 
@@ -2157,53 +2165,80 @@ class DataView:
         sem_flat = None
         if uncertainty:
             # Per (row, group) first, then folded by the same combined row
-            # key as the means: one kernel, two stages, and einsum fuses the
-            # square into the sum so no copy of the tensor is materialised.
-            letters = "abcdefghijklmnopqrstuvwxyz"[: values.ndim]
-            output = "".join(
-                letters[axis]
-                for axis in range(values.ndim)
-                if axis == row_dimension or axis in kept_dims
-            )
+            # key as the means.  The compiled pass reads every sample once
+            # and accumulates both centred moments about its FINAL bucket's
+            # own mean; the small residue is then folded as before.
+            safe_fold_codes = np.maximum(fold_codes, 0)
 
-            def mean_of_squares(plane: Any, offset: float) -> Any:
+            def centred_moments(
+                plane: Any, offsets: NDArray[np.float64]
+            ) -> tuple[Any, Any]:
                 plane = np.asarray(plane, dtype=np.float64)
-                per_group = _centred_square_sums(
+                bucket_offsets = np.asarray(offsets, dtype=np.float64).reshape(-1)
+                per_group_offsets = from_code_order(
+                    bucket_offsets[safe_fold_codes].reshape(rows, combos)
+                )
+                per_group = _centred_moment_sums(
                     plane,
-                    offset,
+                    per_group_offsets,
                     None if all_valid else usable,
                     remaining,
                     shape,
                 )
-                if per_group is None and all_valid:
-                    centred = plane - offset
-                    per_group = np.einsum(
-                        f"{letters},{letters}->{output}", centred, centred
+                if per_group is None:
+                    centre_shape = tuple(
+                        int(shape[axis]) if axis in remaining else 1
+                        for axis in range(values.ndim)
                     )
-                elif per_group is None:
-                    per_group = np.sum(
-                        np.square(plane - offset),
-                        axis=reduce_axes,
-                        where=usable,
-                        dtype=np.float64,
+                    delta = plane - per_group_offsets.reshape(centre_shape)
+                    if all_valid:
+                        first = np.sum(
+                            delta, axis=reduce_axes, dtype=np.float64
+                        )
+                    else:
+                        first = np.sum(
+                            delta,
+                            axis=reduce_axes,
+                            where=usable,
+                            dtype=np.float64,
+                        )
+                    np.square(delta, out=delta)
+                    if all_valid:
+                        second = np.sum(
+                            delta, axis=reduce_axes, dtype=np.float64
+                        )
+                    else:
+                        second = np.sum(
+                            delta,
+                            axis=reduce_axes,
+                            where=usable,
+                            dtype=np.float64,
+                        )
+                    per_group = first, second
+                folded = []
+                for moment in per_group:
+                    total, _ = _aggregate_by_codes(
+                        code_ordered(moment).reshape(-1),
+                        np.ones(fold_codes.shape, dtype=np.bool_),
+                        fold_codes,
+                        buckets,
+                        Reduction.SUM,
                     )
-                folded, _ = _aggregate_by_codes(
-                    code_ordered(per_group).reshape(-1),
-                    np.ones(fold_codes.shape, dtype=np.bool_),
-                    fold_codes,
-                    buckets,
-                    Reduction.SUM,
-                )
+                    folded.append(total)
                 with np.errstate(invalid="ignore", divide="ignore"):
-                    return np.where(counts > 0, folded / counts, np.nan)
+                    return tuple(
+                        np.where(counts > 0, moment / counts, np.nan)
+                        for moment in folded
+                    )
 
             sem_flat = _sem_of_mean(
                 np.asarray(y_flat, np.float64),
                 counts,
                 as_double,
                 self._samples.sigma,
-                mean_of_squares,
+                centred_moments,
             )
+            assert sem_flat is not None
 
         x_canonical = np.asarray(x_domain.canonical)
         return _FactoredPlanes(
@@ -2374,26 +2409,25 @@ class DataView:
             )
             sem = None
             if uncertainty:
-                # Same kernel over the squares (see _dense_curve_data).
-                def mean_of_squares(plane: Any, offset: float) -> Any:
-                    reduced, _ = _aggregate_by_codes(
-                        np.square(
-                            np.asarray(plane, dtype=np.float64) - offset
-                        ),
+                def centred_moments(
+                    plane: Any, offsets: NDArray[np.float64]
+                ) -> tuple[Any, Any]:
+                    return _centred_moments_by_codes(
+                        plane,
+                        offsets,
                         usable,
                         x_domain.codes,
                         x_domain.size,
-                        Reduction.MEAN,
                     )
-                    return reduced
 
                 sem = _sem_of_mean(
                     np.asarray(y, np.float64),
                     counts,
                     group_values,
                     self._flat_sigma_at(group_positions),
-                    mean_of_squares,
+                    centred_moments,
                 )
+                assert sem is not None
             y_display = self._samples.value.canonical_unit.convert_value_to(
                 y, self._samples.value.display_unit
             )
@@ -3426,23 +3460,30 @@ class DataView:
                     else int(np.count_nonzero(finite))
                 )
 
-                def mean_of_squares(plane: Any, offset: float) -> Any:
+                def centred_moments(
+                    plane: Any, offsets: NDArray[np.float64]
+                ) -> tuple[Any, Any]:
                     if not count:
-                        return np.asarray([np.nan])
-                    total = _centred_square_sum(
+                        empty = np.asarray([np.nan])
+                        return empty, empty
+                    first, second = _centred_moment_totals(
                         np.asarray(plane).reshape(-1),
-                        offset,
+                        float(np.asarray(offsets).reshape(-1)[0]),
                         None if hole_free else finite,
                     )
-                    return np.asarray([total / count])
+                    return (
+                        np.asarray([first / count]),
+                        np.asarray([second / count]),
+                    )
 
                 sem = _sem_of_mean(
                     np.asarray([value], dtype=np.float64),
                     np.asarray([count], dtype=np.int64),
                     pooled,
                     self._pooled_sigma(),
-                    mean_of_squares,
+                    centred_moments,
                 )
+                assert sem is not None
             return RollingHistory(
                 revision=self._samples.revision,
                 generation=self._samples.generation,
@@ -3470,23 +3511,25 @@ class DataView:
         )
         sem = None
         if uncertainty:
-            def mean_of_squares(plane: Any, offset: float) -> Any:
-                reduced, _ = _aggregate_by_codes(
-                    np.square(np.asarray(plane, dtype=np.float64) - offset),
+            def centred_moments(
+                plane: Any, offsets: NDArray[np.float64]
+            ) -> tuple[Any, Any]:
+                return _centred_moments_by_codes(
+                    plane,
+                    offsets,
                     usable,
                     codes,
                     domain_size,
-                    Reduction.MEAN,
                 )
-                return reduced
 
             sem = _sem_of_mean(
                 np.asarray(values, np.float64),
                 counts,
                 group_values,
                 self._flat_sigma_at(positions),
-                mean_of_squares,
+                centred_moments,
             )
+            assert sem is not None
         valid = (counts > 0) & np.isfinite(values)
         return RollingHistory(
             revision=self._samples.revision,
@@ -3580,19 +3623,23 @@ class DataView:
         counts = np.asarray(counts).reshape(repeats, domain_size)
         sem = None
         if uncertainty and aggregation is Reduction.MEAN:
-            # The band's standard error is a SECOND full pass -- a float64
-            # copy of every value, squared, then reduced again.  The panel
-            # paid it on every revision whether or not the band was drawn.
-            def mean_of_squares(plane: Any, offset: float) -> Any:
-                reduced, _ = _aggregate_by_codes(
-                    np.square(np.asarray(plane, dtype=np.float64) - offset),
+            def centred_moments(
+                plane: Any, offsets: NDArray[np.float64]
+            ) -> tuple[Any, Any]:
+                first, second = _centred_moments_by_codes(
+                    plane,
+                    offsets,
                     usable,
                     combined,
                     bucket_count,
-                    Reduction.MEAN,
                 )
-                return np.asarray(reduced, dtype=np.float64).reshape(
-                    repeats, domain_size
+                return (
+                    np.asarray(first, dtype=np.float64).reshape(
+                        repeats, domain_size
+                    ),
+                    np.asarray(second, dtype=np.float64).reshape(
+                        repeats, domain_size
+                    ),
                 )
 
             sem = _sem_of_mean(
@@ -3600,8 +3647,9 @@ class DataView:
                 counts,
                 position_values,
                 self._flat_sigma_at(positions),
-                mean_of_squares,
+                centred_moments,
             )
+            assert sem is not None
         valid = (counts > 0) & np.isfinite(values)
         return RollingHistory(
             revision=self._samples.revision,
@@ -3679,27 +3727,49 @@ class DataView:
         reduced = np.where(counts > 0, reduced, np.nan)
         sem = None
         if uncertainty and aggregation is Reduction.MEAN:
-            # ``np.square`` on the whole cube materialises a second copy of
-            # every value in the history -- sixteen megabytes on a
-            # two-million-sample pool -- before reducing it.  einsum sums the
-            # products in one pass, and over the SAME masked values, so the
-            # moment it feeds is identical.
-            leading_usable = np.moveaxis(usable_cube, -1, 0)
+            pool = int(value_cube.shape[-1])
+            marks = (
+                None
+                if _stride_zero_all_true(usable_cube)
+                else usable_cube.reshape(1, repeats * group_count, pool)
+            )
 
-            def mean_of_squares(plane: Any, offset: float) -> Any:
-                leading = np.moveaxis(
-                    cube(np.asarray(plane, dtype=np.float64)), -1, 0
+            def centred_moments(
+                plane: Any, offsets: NDArray[np.float64]
+            ) -> tuple[Any, Any]:
+                from . import _raster_kernels as kernels
+
+                shaped = cube(np.asarray(plane, dtype=np.float64)).reshape(
+                    1, repeats * group_count, pool
                 )
-                # Invalid entries become the offset so the shift below
-                # leaves them at zero -- one temporary, not two.
-                masked = np.where(leading_usable, leading, offset)
-                masked -= offset
-                squared_sum = np.einsum("i...,i...->...", masked, masked)
-                return np.divide(
-                    squared_sum,
-                    counts,
-                    out=np.zeros_like(squared_sum, dtype=np.float64),
-                    where=counts > 0,
+                sums = kernels.masked_centred_moment_sums(
+                    shaped,
+                    np.asarray(offsets, dtype=np.float64).reshape(-1),
+                    marks,
+                )
+                if sums is None:
+                    leading = np.moveaxis(
+                        cube(np.asarray(plane, dtype=np.float64)), -1, 0
+                    )
+                    leading_usable = np.moveaxis(usable_cube, -1, 0)
+                    delta = np.where(
+                        leading_usable,
+                        leading,
+                        np.asarray(offsets, dtype=np.float64),
+                    )
+                    delta -= np.asarray(offsets, dtype=np.float64)
+                    first_sum = np.sum(delta, axis=0, dtype=np.float64)
+                    np.square(delta, out=delta)
+                    second_sum = np.sum(delta, axis=0, dtype=np.float64)
+                    sums = first_sum, second_sum
+                return tuple(
+                    np.divide(
+                        moment.reshape(counts.shape),
+                        counts,
+                        out=np.full(counts.shape, np.nan, dtype=np.float64),
+                        where=counts > 0,
+                    )
+                    for moment in sums
                 )
 
             sem = _sem_of_mean(
@@ -3707,8 +3777,9 @@ class DataView:
                 counts,
                 values,
                 self._samples.sigma,
-                mean_of_squares,
+                centred_moments,
             )
+            assert sem is not None
         valid = (counts > 0) & np.isfinite(reduced)
         return RollingHistory(
             revision=self._samples.revision,
@@ -3764,16 +3835,23 @@ class DataView:
         counts = np.asarray(counts).reshape(history_count, domain_size)
         sem = None
         if uncertainty and aggregation is Reduction.MEAN:
-            def mean_of_squares(plane: Any, offset: float) -> Any:
-                reduced, _ = _aggregate_by_codes(
-                    np.square(np.asarray(plane, dtype=np.float64) - offset),
+            def centred_moments(
+                plane: Any, offsets: NDArray[np.float64]
+            ) -> tuple[Any, Any]:
+                first, second = _centred_moments_by_codes(
+                    plane,
+                    offsets,
                     usable,
                     combined,
                     bucket_count,
-                    Reduction.MEAN,
                 )
-                return np.asarray(reduced, dtype=np.float64).reshape(
-                    history_count, domain_size
+                return (
+                    np.asarray(first, dtype=np.float64).reshape(
+                        history_count, domain_size
+                    ),
+                    np.asarray(second, dtype=np.float64).reshape(
+                        history_count, domain_size
+                    ),
                 )
 
             sem = _sem_of_mean(
@@ -3781,8 +3859,9 @@ class DataView:
                 counts,
                 position_values,
                 self._flat_sigma_at(positions),
-                mean_of_squares,
+                centred_moments,
             )
+            assert sem is not None
         valid = (counts > 0) & np.isfinite(values)
         return RollingHistory(
             revision=self._samples.revision,
@@ -4780,7 +4859,16 @@ def _axis_kernel_aggregate(
     aggregation: Reduction,
     *,
     offsets: NDArray[np.float64] | None = None,
-) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.bool_]] | None:
+) -> (
+    tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.bool_]]
+    | tuple[
+        NDArray[np.float64],
+        NDArray[np.float64],
+        NDArray[np.int64],
+        NDArray[np.bool_],
+    ]
+    | None
+):
     """Compiled exact-order aggregation from axis-sized code vectors."""
 
     from . import _raster_kernels as kernels
@@ -4819,6 +4907,9 @@ def _axis_kernel_aggregate(
     )
     bucket_count = math.prod(domain_sizes)
     out = np.empty(bucket_count, dtype=np.float64)
+    second = np.empty(
+        bucket_count if offsets is not None else 1, dtype=np.float64
+    )
     counts = np.empty(bucket_count, dtype=np.int64)
     presence = np.empty(bucket_count, dtype=np.bool_)
     kernels.aggregate_axis_codes(
@@ -4839,9 +4930,12 @@ def _axis_kernel_aggregate(
             else kernels.readable(np.asarray(offsets, dtype=np.float64))
         ),
         out,
+        second,
         counts,
         presence,
     )
+    if offsets is not None:
+        return out, second, counts, presence
     return out, counts, presence
 
 
@@ -5082,45 +5176,18 @@ def _axis_coordinate_labels(
     )
 
 
-#: How many samples are enough to find a value near the data.
-_SEM_REFERENCE_SAMPLE = 4096
-
-
-def _sem_reference(mean: NDArray[np.float64]) -> float:
-    """A value near the samples, to square about instead of zero.
-
-    The standard error does not depend on where the origin is, but the way
-    it is computed does: ``E[x^2] - mean^2`` subtracts two numbers that are
-    equal to as many digits as the offset exceeds the spread.  A fitted
-    resonance centre at 6.834 GHz with a kilohertz scatter loses six of
-    sixteen digits that way -- 2.2 per cent of the variance over eight
-    samples, measured -- and the clip at zero then hides what is left.
-
-    Every caller has already reduced the mean by the time it reduces the
-    squares, so the reference costs one pass over the bucket means.
-    """
-
-    array = np.asarray(mean, dtype=np.float64).reshape(-1)
-    if array.size > _SEM_REFERENCE_SAMPLE:
-        # A reference only has to be NEAR the data; reading all of a camera
-        # tensor to find one would cost more than the sem it protects.
-        array = array[:: max(1, array.size // _SEM_REFERENCE_SAMPLE)]
-    finite = array[np.isfinite(array)]
-    return float(finite.mean()) if finite.size else 0.0
-
-
 #: How many samples one centring pass shifts at a time.  Small enough that
 #: the scratch buffer is a rounding error against a megapixel pool, large
 #: enough that the per-block overhead disappears into the arithmetic.
 _CENTRING_BLOCK = 1 << 17
 
 
-def _centred_square_sum(
+def _centred_moment_totals(
     flat: NDArray[Any],
     offset: float,
     where: NDArray[np.bool_] | None = None,
-) -> float:
-    """Sum of ``(x - offset)**2`` without materialising ``x - offset``.
+) -> tuple[float, float]:
+    """Sums of ``d`` and ``d**2`` without materialising all of ``d``.
 
     The whole-revision pool is the one place where that copy is a real
     cost: it is every sample of the revision, and the rolling path has a
@@ -5129,33 +5196,38 @@ def _centred_square_sum(
     keeps both the conditioning and the budget.
     """
 
-    total = 0.0
+    first = 0.0
+    second = 0.0
     size = int(flat.size)
     if size == 0:
-        return total
+        return first, second
     scratch = np.empty(min(_CENTRING_BLOCK, size), dtype=np.float64)
     for start in range(0, size, _CENTRING_BLOCK):
         stop = min(start + _CENTRING_BLOCK, size)
         piece = scratch[: stop - start]
         np.subtract(flat[start:stop], offset, out=piece)
         if where is None:
-            total += float(np.dot(piece, piece))
+            first += float(np.sum(piece, dtype=np.float64))
+            second += float(np.dot(piece, piece))
         else:
-            np.square(piece, out=piece)
-            total += float(
+            first += float(
                 np.sum(piece, where=where[start:stop], dtype=np.float64)
             )
-    return total
+            np.square(piece, out=piece)
+            second += float(
+                np.sum(piece, where=where[start:stop], dtype=np.float64)
+            )
+    return first, second
 
 
-def _centred_square_sums(
+def _centred_moment_sums(
     plane: Any,
-    offset: float,
+    offsets: Any,
     usable: Any | None,
     kept: list[int],
     shape: tuple[int, ...],
 ) -> Any:
-    """Per kept position, the sum of squares about ``offset``, or None.
+    """Per kept position, sums of ``d`` and ``d**2``, or ``None``.
 
     THE KEPT AXES ARE ONE BLOCK OR THEY ARE NOTHING.  A reduction that
     keeps axis 1 and a group axis keeps a run of adjacent axes whenever a
@@ -5202,14 +5274,40 @@ def _centred_square_sums(
         marks = candidate.reshape(outer, keep, inner)
     from . import _raster_kernels as kernels
 
-    summed = kernels.masked_centred_square_sums(
-        array.reshape(outer, keep, inner), float(offset), marks
+    centres = np.asarray(offsets, dtype=np.float64)
+    if centres.shape != kept_shape:
+        return None
+    summed = kernels.masked_centred_moment_sums(
+        array.reshape(outer, keep, inner), centres.reshape(-1), marks
     )
     if summed is None:
         return None
     # Back to the CALLER'S kept axes: the span may carry size-1 padding
     # axes that exist in the layout but not in the caller's vocabulary.
-    return summed.reshape(kept_shape)
+    return tuple(moment.reshape(kept_shape) for moment in summed)
+
+
+def _centred_moments_by_codes(
+    plane: Any,
+    offsets: NDArray[np.float64],
+    usable: NDArray[np.bool_],
+    codes: NDArray[np.int64],
+    bucket_count: int,
+) -> tuple[NDArray[Any], NDArray[Any]]:
+    """Centred first and second bucket moments for an irregular mapping."""
+
+    selected = np.asarray(plane, dtype=np.float64).reshape(-1)
+    bucket_codes = np.asarray(codes, dtype=np.int64).reshape(-1)
+    centres = np.asarray(offsets, dtype=np.float64).reshape(-1)
+    delta = selected - centres[np.maximum(bucket_codes, 0)]
+    first, _ = _aggregate_by_codes(
+        delta, usable, bucket_codes, bucket_count, Reduction.MEAN
+    )
+    np.square(delta, out=delta)
+    second, _ = _aggregate_by_codes(
+        delta, usable, bucket_codes, bucket_count, Reduction.MEAN
+    )
+    return first, second
 
 
 def _sem_of_mean(
@@ -5217,30 +5315,35 @@ def _sem_of_mean(
     counts: NDArray[np.int64],
     samples: NDArray[Any],
     sigma: NDArray[Any] | None,
-    mean_of_squares: Callable[[Any, float], Any],
-) -> NDArray[np.float64]:
+    centred_moments: Callable[
+        [Any, NDArray[np.float64]], tuple[Any, Any] | None
+    ],
+) -> NDArray[np.float64] | None:
     """The standard error of a mean, formed the ONE way this repo forms it.
 
     Every plot kind that draws a band arrives here.  What differs between
     them is only how a bucket is summed -- a strided tensor reduction, a
-    bincount over codes, an einsum, a dot -- so that is all a caller brings:
-    ``mean_of_squares(plane, offset)`` returns, per bucket, the mean of
-    ``(plane - offset)**2`` over exactly the samples that formed the mean.
+    bincount over codes, an einsum, a dot -- so that is all a caller brings.
+    ``centred_moments(plane, offsets)`` returns, per bucket, both ``E[d]``
+    and ``E[d**2]`` over exactly the samples that formed the mean, where
+    every bucket uses its own first-pass mean as ``offset``.
 
     What does NOT differ, and therefore lives here:
 
-      * the squares are taken about a reference near the data, because
-        ``E[x^2] - mean^2`` about zero subtracts two nearly equal numbers
-        and a resonance centre at 6.834 GHz loses six of sixteen digits;
+      * every bucket is centred on its own mean.  One scalar reference for
+        a whole series still loses a small bucket's spread when another
+        bucket is many orders of magnitude away;
+
+      * the centred first moment is measured, not assumed zero.  The
+        first-pass mean is rounded, so the stable identity is
+        ``E[d**2] - E[d]**2``;
 
       * the samples' own sigma is offered to the estimator, which uses it
         only where the scatter cannot speak.  A sigma is already a
         difference about zero, so it is squared about zero -- passing the
         value reference there would be a category error.
 
-    Written out at each call site instead, this rule had already drifted:
-    two of the eight sites still squared about zero, and none of the eight
-    passed the sigma at all.
+    One public owner keeps all projection paths on that same two-pass rule.
     """
 
     if sigma is None and not np.any(counts > 1):
@@ -5252,15 +5355,23 @@ def _sem_of_mean(
         # construction, paid on every drawn frame.
         sem = np.full(np.shape(means), np.nan, dtype=np.float64)
         return sem
-    reference = _sem_reference(means)
-    mean_square = np.asarray(mean_of_squares(samples, reference), dtype=np.float64)
-    mean_sigma_square = (
-        None
-        if sigma is None
-        else np.asarray(mean_of_squares(sigma, 0.0), dtype=np.float64)
-    )
+    centres = np.asarray(means, dtype=np.float64)
+    moments = centred_moments(samples, centres)
+    if moments is None:
+        return None
+    first, second = moments
+    mean_delta = np.asarray(first, dtype=np.float64)
+    mean_delta_square = np.asarray(second, dtype=np.float64)
+    mean_sigma_square = None
+    if sigma is not None:
+        sigma_moments = centred_moments(
+            sigma, np.zeros(np.shape(centres), dtype=np.float64)
+        )
+        if sigma_moments is None:
+            return None
+        mean_sigma_square = np.asarray(sigma_moments[1], dtype=np.float64)
     return _sem_from_moments(
-        means - reference, mean_square, counts, mean_sigma_square
+        mean_delta, mean_delta_square, counts, mean_sigma_square
     )
 
 

@@ -85,9 +85,14 @@ def _separation(
         bright = signals[selected & occupied[:, site], site]
         if dark.size < 3 or bright.size < 3:
             continue
-        width = float(
-            np.sqrt(0.5 * (dark.std(ddof=1) ** 2 + bright.std(ddof=1) ** 2))
-        )
+        # Standard deviation is translation invariant.  Move each population
+        # onto one of its actual samples before NumPy forms its mean: equal
+        # non-binary values then become exact zeros instead of leaving a tiny
+        # positive width that turns an ordinary level difference into an
+        # enormous separation.
+        dark_width = float(np.std(dark - dark[0], ddof=1))
+        bright_width = float(np.std(bright - bright[0], ddof=1))
+        width = float(np.sqrt(0.5 * (dark_width**2 + bright_width**2)))
         if width > 0.0:
             separation[site] = float(bright.mean() - dark.mean()) / width
     return separation

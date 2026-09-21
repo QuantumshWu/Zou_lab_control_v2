@@ -8,8 +8,9 @@ gone before the clip at zero hides what is left.  Measured over eight
 samples the variance came out 2.2 per cent wrong, and the error grows with
 the ratio -- a linewidth on an absolute optical frequency would be noise.
 
-The standard error does not depend on where the origin is, so the fix is to
-put the origin near the data.  These pin that it is there.
+The standard error does not depend on where the origin is, so the second pass
+centres every bucket on that bucket's own first-pass mean and measures both
+centred moments.  These pin that rule across the public projection routes.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 
 from data_factory import (
+    axis,
     make_dataset_schema,
     make_snapshot,
     mapped_domain_from_columns,
@@ -24,7 +26,14 @@ from data_factory import (
 )
 
 from zlc_data import OwnedSnapshot
-from zlc_plot import AxisRef, CurvePlot, PlotSession
+from zlc_plot import (
+    AxisRef,
+    CurvePlot,
+    FacetGridPlot,
+    PlotSession,
+    Reduction,
+)
+from zlc_plot.data_view import DataView
 
 def _resonance_snapshot(
     *, centre: float, scatter: float, repeats: int = 8, points: int = 5
@@ -78,13 +87,148 @@ def test_the_answer_does_not_depend_on_where_zero_is() -> None:
     far, _ = _drawn_sem(6.834e9, scatter)
     np.testing.assert_allclose(near, far, rtol=1e-9)
 
+
+def test_each_projection_centres_every_bucket_on_its_own_mean() -> None:
+    """Far-apart buckets retain the small spread each one actually has."""
+
+    offsets = np.asarray([-2.0, -1.0, 1.0, 2.0]) * 1e-3
+    centres = np.asarray([0.0, 1.0e6])
+    x = AxisRef.point("x")
+
+    def wanted(samples: np.ndarray, axis: int = 0) -> np.ndarray:
+        return np.std(samples, axis=axis, ddof=1) / np.sqrt(samples.shape[axis])
+
+    # Dense tensor and the position-based generic oracle over the same data.
+    dense_schema = make_dataset_schema(
+        repeat_domain(size=offsets.size),
+        mapped_domain_from_columns({"x": [0.0, 1.0]}),
+        dtype=np.float64,
+    )
+    dense_values = centres[None, :] + offsets[:, None]
+    dense_view = DataView(make_snapshot(dense_schema, dense_values, revision=0))
+    expected = wanted(dense_values)
+    dense = dense_view._dense_data_curve(x, (), Reduction.MEAN, True)
+    assert dense is not None
+    np.testing.assert_allclose(dense.series[0].sem, expected, rtol=1e-10)
+    generic = dense_view._curve_from_positions(
+        x, dense_view._all_positions(), (), Reduction.MEAN, True
+    )
+    np.testing.assert_allclose(generic.series[0].sem, expected, rtol=1e-10)
+
+    # Mapped rows exercise both the factored fold and axis-code kernel.
+    mapped_schema = make_dataset_schema(
+        repeat_domain(size=offsets.size),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 0.0, 1.0]}),
+        dtype=np.float64,
+    )
+    mapped_values = np.asarray([0.0, 1.0e6, 0.0, 1.0e6])[None, :]
+    mapped_values = mapped_values + offsets[:, None]
+    mapped_view = DataView(make_snapshot(mapped_schema, mapped_values, revision=0))
+    mapped_expected = np.asarray([
+        wanted(mapped_values[:, [0, 2]].reshape(-1), axis=0),
+        wanted(mapped_values[:, [1, 3]].reshape(-1), axis=0),
+    ])
+    factored = mapped_view._factored_curve(x, (), Reduction.MEAN, True)
+    assert factored is not None
+    np.testing.assert_allclose(
+        factored.series[0].sem, mapped_expected, rtol=1e-10
+    )
+    axis_kernel = mapped_view._curve_from_axes(
+        x, (), Reduction.MEAN, uncertainty=True
+    )
+    assert axis_kernel is not None
+    np.testing.assert_allclose(
+        axis_kernel.series[0].sem, mapped_expected, rtol=1e-10
+    )
+
+    # Rolling's regular tensor and irregular repeat routes use the same rule.
+    sites = np.asarray([-1.0, 0.0, 1.0]) * 1e-3
+    rolling_values = (
+        centres[None, :, None]
+        + offsets[:, None, None]
+        + sites[None, None, :]
+    )
+    rolling_schema = make_dataset_schema(
+        repeat_domain(size=offsets.size),
+        mapped_domain_from_columns({"x": [0.0, 1.0]}),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0]),),
+        dtype=np.float64,
+    )
+    rolling = DataView(
+        make_snapshot(rolling_schema, rolling_values, revision=0)
+    ).rolling_history(group=x, uncertainty=True)
+    rolling_expected = np.std(rolling_values, axis=2, ddof=1) / np.sqrt(
+        sites.size
+    )
+    np.testing.assert_allclose(rolling.sem, rolling_expected, rtol=1e-10)
+
+    irregular_values = np.repeat(rolling_values, 2, axis=1)
+    irregular_schema = make_dataset_schema(
+        repeat_domain(size=offsets.size),
+        mapped_domain_from_columns({"x": [0.0, 0.0, 1.0, 1.0]}),
+        cell_axes=(axis("site", values=[0.0, 1.0, 2.0]),),
+        dtype=np.float64,
+    )
+    irregular = DataView(
+        make_snapshot(irregular_schema, irregular_values, revision=0)
+    ).rolling_history(group=x, uncertainty=True)
+    irregular_expected = np.stack(
+        [
+            np.std(irregular_values[:, :2, :], axis=(1, 2), ddof=1),
+            np.std(irregular_values[:, 2:, :], axis=(1, 2), ddof=1),
+        ],
+        axis=1,
+    ) / np.sqrt(6.0)
+    np.testing.assert_allclose(irregular.sem, irregular_expected, rtol=1e-10)
+
+    # Facet retains its cell and x axes in one dense reduction.
+    facet_values = dense_values[:, :, None] + np.asarray([0.0, 0.5])[None, None, :]
+    facet_schema = make_dataset_schema(
+        repeat_domain(size=offsets.size),
+        mapped_domain_from_columns({"x": [0.0, 1.0]}),
+        cell_axes=(axis("facet", values=[0.0, 1.0]),),
+        dtype=np.float64,
+    )
+    facet = DataView(
+        make_snapshot(facet_schema, facet_values, revision=0)
+    ).facet(
+        FacetGridPlot(AxisRef.cell_data("facet"), CurvePlot(x)),
+        uncertainty=True,
+    )
+    for index, cell in enumerate(facet.cells):
+        np.testing.assert_allclose(
+            cell.payload.series[0].sem,
+            wanted(facet_values[:, :, index]),
+            rtol=1e-10,
+        )
+
+
+def test_far_apart_constant_buckets_have_exactly_zero_sem() -> None:
+    repeats = 12
+    values = np.broadcast_to(np.asarray([0.0, 1.0e6]), (repeats, 2)).copy()
+    schema = make_dataset_schema(
+        repeat_domain(size=repeats),
+        mapped_domain_from_columns({"x": [0.0, 1.0]}),
+        dtype=np.float64,
+    )
+    view = DataView(make_snapshot(schema, values, revision=0))
+    dense = view._dense_data_curve(
+        AxisRef.point("x"), (), Reduction.MEAN, True
+    )
+    assert dense is not None
+    np.testing.assert_array_equal(dense.series[0].sem, np.zeros(2))
+    generic = view._curve_from_positions(
+        AxisRef.point("x"), view._all_positions(), (), Reduction.MEAN, True
+    )
+    np.testing.assert_array_equal(generic.series[0].sem, np.zeros(2))
+
 def test_a_constant_bucket_does_not_turn_one_roundoff_bit_into_a_sem() -> None:
     """A one-ulp moment residual is numerical zero, not extreme confidence.
 
-    Curve moments share one nearby reference across buckets.  A bucket whose
-    samples are all zero can therefore subtract two equal non-binary squares;
-    if their last bit rounds in opposite directions, clipping only negative
-    residuals leaves a fake positive SEM near 1e-9.
+    Even centred moments can subtract two equal non-binary squares when the
+    first-pass mean rounded away from a constant sample.  If their last bit
+    rounds in opposite directions, clipping only negative residuals leaves a
+    fake positive SEM near 1e-9.
     """
 
     from zlc_plot.data_view import _sem_from_moments

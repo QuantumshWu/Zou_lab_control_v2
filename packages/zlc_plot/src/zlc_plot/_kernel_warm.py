@@ -590,6 +590,7 @@ def representative_work(
     _render(
         _mixed_snapshot(repeats=8, points=8, sites=8),
         RollingPlot(group=AxisRef.cell_data("site")),
+        {"trailing": 4, "uncertainty": True},
     )
     # The fused value+count leading reduction exists only for a genuinely
     # holey, C-laid-out floating tensor; an all-valid curve takes NumPy's

@@ -157,6 +157,21 @@ def test_sparse_logical_axes_reduce_without_densifying_or_averaging_means() -> N
         assert result.values[0, index, 0] == pytest.approx(samples.mean())
     std = source.std(("cycle", "a", "b", "site"))
     assert std.values.item() == pytest.approx(values[valid].std())
+    constant_values = np.empty((100, 1, 2), dtype=np.float64)
+    constant_values[..., 0] = 0.0
+    constant_values[..., 1] = 0.4328961258925487
+    constant_std = _operand(constant_values).std("cycle")
+    np.testing.assert_array_equal(constant_std.values, 0.0)
+    local_spread = np.empty((20, 1, 2), dtype=np.float64)
+    alternating = 1.0e-3 * np.tile((-1.0, 1.0), 10)
+    local_spread[:, 0, 0] = alternating
+    local_spread[:, 0, 1] = 1.0e6 + alternating
+    local_std = _operand(local_spread).std("cycle")
+    np.testing.assert_allclose(
+        local_std.values,
+        local_spread.std(axis=0)[None, ...],
+        rtol=1.0e-13,
+    )
     selected = source.isel(a=1)
     assert selected.shape == (2, 3, 2)
     assert tuple(axis.name for axis in selected.schema.point_domain.axes) == ("b",)
