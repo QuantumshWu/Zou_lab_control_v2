@@ -314,8 +314,8 @@ def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
         ).result(timeout=5.0)
         viewport = session.viewport
         assert viewport is not None
-        assert viewport.x.low == 2.0 and viewport.x.high == 6.0
-        assert viewport.y.low == 0.5 and viewport.y.high == 4.5
+        assert viewport[0].low == 2.0 and viewport[0].high == 6.0
+        assert viewport[1].low == 0.5 and viewport[1].high == 4.5
 
         zoomed = host.front
         session.remove_selector(SelectorKind.AREA)

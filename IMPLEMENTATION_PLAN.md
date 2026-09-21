@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Indexed history布局删除逐坐标Python读取、结果构造时的重复计数、以及事件映射先全量装箱再截取；共用既有批量坐标接口，规则/裁剪窗口的公开布局不变。前后计时仅记ignored报告，不把布局函数耗时当作全链帧率。
+
 - 实屏定位并修复deadline遗漏：新publication于上次staging后99ms已到时仍严格等待100ms，由原Scheduler给剩余时间、同一个Qt timer在原deadline兑现，不再等下一shot。bench复用正式计时入口，source观测改为非变异读取。原直接用例先红后绿，最终实屏逐次核对deadline兑现及严格rate cap，窗口和进程已关闭；逐帧原始证据仅留ignored research。
 
 - 数据/历史投影收口：整体snapshot唯一schema/ref，内部仅不可变三plane与数值布局，不逐记录恢复public snapshot。显式整数组与Plot共用DataBlock原始打包，sigma仍按需；缩小窗口和关闭history清理不再适用的carry。传输依赖改为整数列，新增planes共享类型/单元描述成批编码，接收由原串行owner按序安装；删除重复查找表及child身份补偿缓存。源schema形状/大小只首次计算。真实Qt验证Fate、Frozen与保存精确数据，窗口及进程已关闭；具体性能和剩余必要成本仅记ignored报告，不宣称硬件极限。合并保留同期master的局部方差/Chan-Welford、显示及设备修改。
@@ -36,7 +38,7 @@
 
 - 分组显示收口：Curve/Rolling/Histogram使用同一低饱和series palette与源坐标序号，Histogram共享bin edges、逐组Counts/Density/Cumulative，保留原有无描边矩形bin，删除额外step轮廓；hover/lock只改变bin透明度并直接从bin几何命中。Hover/lock/wheel复用现有交互，Rolling meter随锁组即时更新且同色，不改变Card尺寸。误差棒改为每bar一个工字形并集、单次alpha；不同bar独立混色，Native/Agg/导出同一端点与style，删除三artist旧路。
 - Histogram Group的fit、classifier、Figure及Runtime参数发布完整贯通；sample_axes取代仅一个sample axis的旧字段，Facet×Group保留真实轴，空分布invalid。Single/Facet/Focus fit绘制复用同一topology表；锁组仅换显示/阈值目标，不重新求解。Series交互先接受状态再经原OVERLAY路径呈现一次，删除先compose再记账的旁路；classifier信息和组名共用原Threshold文字，legend未实施。
-- Tick label删除端点内移/alignment状态与半gap虚拟边界；在现有chrome重排时按真实text/data框判断，只缩字号、到下限接受重叠。修复全局rcParams使已接受字号回弹，以及导出换DPI后的漏排版；普通图/侧栏/Facet/Focus/保存共用同一owner。真实Qt截图核对-400/-200/0/200锚点、Group下拉切换、hover/lock/wheel、meter及带fit的保存重开；验收窗口均关闭，截图/探针留ignored research。
+- 刻度按用户裁决收敛为`6.5/3.25 pt`：删除×0.8阶梯和空间比例缩字，最终跨轴碰撞先交回共享SmartOffset locator尝试较稀合法lattice，保持至少两个刻度与精确offset；只在无可行组合时用compact。实际Curve的X=-2…11、Y从0开始由旧3.328pt改为X=[0,5,10]且两轴6.5pt；双原点所有lattice仍撞时为3.25pt。Facet同步同几何axes的locator与native marks；显式名字不裁。DPR3同一viewport变更的tick规划隔离最终中位1.725→1.700ms（基本持平），20次未变draw均0次重规划；不把此局部分项作为全链提速。最终聚焦156项通过。公共Fit/selector显示联动同时让可见Fit文字隐藏同轴ROI坐标文本，clear后恢复，框/handles/crosshair/selection数据不变。
 
 - Layout恢复统一按当前定义读取交集、补默认、忽略不存在的字段；Logic与rows列、设备/资源输入、Panel/Display/Interaction/Fit沿现有声明，不保留废弃buffer字段的特判，也不猜旧轴。当前字段的类型/数值、必需身份、未知model及运行时Plot API仍严格，未完成业务草稿可Load后在Start校验。直接恢复用例通过；正式Console点击Load读取用户原layout，两个Measurement与两个Panel恢复、旧buffer字段不再进入草稿，原文件未改、窗口关闭。
 - Hold沿FieldVM.editable整块禁用并灰显数值与Slot，已开popup关闭；模式Combo继续可用，切回Edge/Ramp恢复编辑。Config使用用户选定C色#D1E8E1。Edit页Config文件按钮复用Clock/Scan/Repeat两列，显示basename、tooltip保留全路径，受限FluentButton仅绘制时省略长文本。正式Pulse按钮操作与截图通过，无错误或遗留窗口。
@@ -316,6 +318,7 @@
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
   `DisplayDescription`判断当前pixels、能力与交互。Selector/viewport observation携exact Dataset
   generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。
+- 轴范围根修：viewport由完整矩形改为同一owner内的逐轴可选范围；X-only手势不再锁Y，显式Y limits/mode只撤回Y覆盖。完整target重放与真实参数编辑沿现有parameter_updates区分，拒绝仍原子回滚。Render/Fit/Figure/Live/Edit共同消费该状态，不新增图种分支或历史兼容owner。
 - 大轴Scope不再受256项popup上限控制：Plot description携惰性真实coordinate domain，Setting/Edit
   共用的Fluent cycle choice只显示一个Scope action，focused wheel写回原有tagged scope fate；1024坐标
   轴的popup仍只有普通fate加一行Scope，未聚焦滚轮不改值。

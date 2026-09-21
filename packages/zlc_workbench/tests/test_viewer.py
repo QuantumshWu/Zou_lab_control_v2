@@ -2163,7 +2163,7 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
             },
         ),
     )
-    viewport = RectangleRange(
+    viewport = (
         NumericRange(-2.0, 2.0),
         NumericRange(0.0, 40.0),
     )

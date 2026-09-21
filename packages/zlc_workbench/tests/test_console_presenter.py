@@ -6688,8 +6688,7 @@ def test_the_operator_viewport_survives_a_same_geometry_run(
     # measures is that the rectangle SURVIVES the run, whatever it is.
     before = panel.host.describe_display().result(timeout=10).value.viewport
     assert before is not None
-    assert (float(before.x.low), float(before.x.high)) == (29.5, 60.5)
-    assert (float(before.y.low), float(before.y.high)) == (19.5, 50.5)
+    assert before == (NumericRange(29.5, 60.5), NumericRange(19.5, 50.5))
 
     _one_shot(session, producer="cm")
     _settle_panel_hosts(
@@ -6704,14 +6703,41 @@ def test_the_operator_viewport_survives_a_same_geometry_run(
         timeout=10
     ).value.viewport
     assert viewport is not None
-    assert (float(viewport.x.low), float(viewport.x.high)) == (
-        float(before.x.low),
-        float(before.x.high),
+    assert viewport == before
+
+    # A display edit accepted through Edit's configure transaction must also
+    # retire the old Y override in Workbench's replay memory and the live host.
+    rolling = presenter.add_panel(node.signal_key("frames"), snap, kind="rolling")
+    _settle_panel_hosts(
+        presenter,
+        lambda: rolling.host is not None and rolling.accepted_surface is not None
+        and rolling.selections is not None,
     )
-    assert (float(viewport.y.low), float(viewport.y.high)) == (
-        float(before.y.low),
-        float(before.y.high),
+    x_override = NumericRange(-9.0, 0.0)
+    rolling.host.set_viewport(x_override, NumericRange(30.0, 40.0)).result(timeout=10)
+    _settle_panel_hosts(
+        presenter,
+        lambda: rolling.interaction_viewport is not None
+        and rolling.interaction_viewport[1] == (x_override, NumericRange(30.0, 40.0)),
     )
+    assert presenter.edit_panel(rolling.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: rolling.editor_host is not None and rolling.editor_configuration is None,
+    )
+    accepted = rolling.editor_host.configure(parameters={
+        "relim_mode": "fixed", "y_min": -20.0, "y_max": 20.0,
+    }).result(timeout=10).value
+    assert accepted.viewport == (x_override, None)
+    _settle_panel_hosts(
+        presenter,
+        lambda: rolling.interaction_viewport is not None
+        and rolling.interaction_viewport[1] == (x_override, None),
+    )
+    live = rolling.host.describe_display().result(timeout=10).value
+    assert live.viewport == (x_override, None)
+    assert live.display_state["relim_mode"] == "fixed"
+    assert (live.display_state["y_min"], live.display_state["y_max"]) == (-20.0, 20.0)
 
 
 def test_a_gesture_survives_a_shot_landing_mid_drag(presenter, session) -> None:

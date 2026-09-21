@@ -196,6 +196,20 @@ def test_frames_facet_cells_share_tick_marks_and_gate_labels() -> None:
     session = PlotSession(_frames_snapshot(), _FRAMES_SPEC, size="8x8")
     try:
         _assert_shared_marks_boundary_labels(session)
+        renderer = session._renderer
+        for axis in renderer.axes["facet_cell"]:
+            if axis.get_visible():
+                axis.set_xlim(-2.0, 11.0)
+                axis.set_ylim(0.0, 11.0)
+        renderer.draw()
+        for stroke in renderer._artists["facet:chrome_marks"]:
+            if stroke.kind != "marks":
+                continue
+            _transform, xs, ys = stroke.placement
+            horizontal = len(set(xs)) > 1
+            actual = stroke.axes.get_xticks() if horizontal else stroke.axes.get_yticks()
+            assert list(actual) == list(xs if horizontal else ys)
+        _assert_shared_marks_boundary_labels(session)
     finally:
         session.close()
 
@@ -287,7 +301,7 @@ def test_overview_cell_ticks_have_one_owner_across_frames(monkeypatch) -> None:
             axis.set_ylim(30.0, -5.0)
         renderer.draw()
         consistent()
-        assert cells[0].yaxis.get_major_locator().drawn_pt > 3.0
+        assert cells[0].yaxis.get_major_locator().drawn_pt in (6.5, 3.25)
         session.focus_facet(0)
         session.show_facet_overview()
         consistent()
@@ -295,7 +309,7 @@ def test_overview_cell_ticks_have_one_owner_across_frames(monkeypatch) -> None:
         consistent()
         # Restored ±500 endpoints have a real X/Y text collision at the
         # bottom-left corner; larger data boxes do not move those anchors.
-        assert renderer.axes["facet_cell"][0].yaxis.get_major_locator().drawn_pt >= 3.0
+        assert renderer.axes["facet_cell"][0].yaxis.get_major_locator().drawn_pt in (6.5, 3.25)
         refreshed = []
         original = renderer._refresh_facet_cell_chrome
 

@@ -275,6 +275,7 @@ Node new chunk
   Viewport identity还包含Dataset schema fingerprint、accepted spec、display coordinate units和
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
+- Navigation viewport按X/Y分别记录可选范围；未操作的轴为None，继续由已有自动/Fixed参数决定。只缩放或平移X不得捕获当时Y。显式轴limits/mode编辑在同一Plot配置事务中撤回该轴旧navigation覆盖，保留另一轴；重放完整相同target不算重新编辑。普通Image的square/pixel-grid约束仍由原几何owner统一解析。Renderer、Fit、Live/Edit镜像及Figure读同一逐轴状态，不以完整矩形的旧Y覆盖新设置；真实Area selector仍必须是完整数据坐标矩形。
 - TaskConsole与FigureViewer的显示执行固定为三个进程、一个Plot真相源：B是Qt主进程并继续拥有
   Runtime、Logic、device client、PanelState、SelectionBridge、LiveBoard与same-shot accept；A只承载
   全部Monitor card的`RasterPlotHost -> PlotSession -> DataView/Fit/Render/Compose`；C承载Panel Edit、
@@ -300,13 +301,14 @@ Node new chunk
 - 3D height场景的刻度字符串只规划一次，真实字体宽高与tick/pad像素纳入同一scene fit的对称inset，再应用operator camera zoom；不靠固定几何百分比猜文字空间，不改outer Axes，不取消clip。Raster、id_plane与chrome读取同一scale/centre，orbit不因label位置换边而呼吸；主动zoom造成viewport裁剪仍是原行为。
 - Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Single、Facet overview和Focus的每个cell必须经过同一个kind preparation/render owner；Focus只选择同一个accepted cell并换layout/viewport，不重新解释数据、fit或annotation。Facet overview及steady Curve/Image/Fit/SEM保留native raster快路，但native与Agg只允许消费同一份prepared cell state；native拒绝必须整帧回到已准备好的公共draw path或保留上一完整front，不得出现partial/blank cells，也不得靠一次pointer materialization才能恢复。
 - 存储分块不能变成逐块Python调度。公共归约直接读取一次typed布局，必要时一次打包计算scratch并批量调用原数值入口；不为每个块创建DataView/统计对象或调用一次kernel，不按大小或Plot kind另选特殊路线。无归约的结构identity可以借视图；真实交错布局必须保持FIRST及极值平局的全局顺序。只计算实际请求的统计，Plot结果不携无消费者的中间counts。
+- Indexed history布局统一通过AxisSpec.coordinate_values批量读取已规范坐标，保留原整数/顺序/时间映射校验；每shot行数只在同一parser确定一次，结果对象不再次bincount。事件映射先判定全部轴是否重复，再只将最终保留的映射转成元组，不先装箱整窗后丢弃；不按设备、数据大小或Plot kind分流。
 - 同一次Plot输入的新增依赖沿现有input-token图按依赖顺序批量序列化，共用一次消息和传输allocation；不能每个存储块一条消息/一个共享内存映射。接收后每个数值plane仍独立拥有不可变bytes，单个小块不能钉住整批传输内存；引用释放同样批量发送，不新增第二份history或transport数据owner。
 - 原始数值打包只由DataBlock.packed_planes处理布局、compact mask及按需sigma，不做finite过滤或统计；Plot复用该方法后再计算，完整物化仅在有空位时一次scatter到canonical范围。不得再为保存、Processor整数组读取或Plot各留一套逐块拼装。无归约的dense单块借同一数组；未请求sigma不能因共用入口而被计算。
 - Indexed Rolling的既有归约结果只按持有中的不可变plane身份、真实布局及计算配置复用；旧结果整批搬运，新/改变的输入整批计算。缓存只在当前表示能消费时继承，完成复用后丢弃未消费的旧packed carry；缩小/关闭history不得因全部统计命中而钉住旧窗口。当前DataView只持当前source或本次复用所需的前一source，不链接全部revision。中心化SEM保持原统计定义，不改grouped/ungrouped trailing权重。
 - FacetGrid的facet role可为空；为空不是semantic vacancy，也不允许UI或renderer伪造Dataset轴，而是唯一一个完整cell，标题为`Facet 1`。同一cell kind的projection、fit、selector、Focus和Figure grammar仍走普通Facet路径；给真实轴Facet fate后才扩为多cell。
 - Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。每根SEM误差棒以stem与两cap的几何并集为一个工字形，subpixel coverage之后只应用一次alpha；不同误差棒仍独立混色，不能按整数display column合并为min/max envelope。Native、Agg与导出读取同一端点与屏幕尺度style。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。
-- Tick label保持默认对应tick的锚点，不得为防重叠向内移或改变alignment。碰撞判断使用最终实际text/data-frame几何，cell间空白可容纳label，不以虚构cell文字边界限制。计数侧分布已声明可选的零刻度若参与跨轴碰撞，应在缩字前由同一locator省略，保留高端值；布局变宽后重新选择，不永久隐藏。其余必需刻度只可缩字号，达到可读下限后接受重叠；Single、side axes、Facet与Focus共用此规则，稳定布局不重复规划。
+- Tick label字号只有normal `6.5 pt`与compact `3.25 pt`，删除逐级×0.8和剩余空间比例缩字。保持对应tick的锚点/alignment；公共locator先在原字号选择可行数字刻度，最终真实text/data-frame/标题碰撞时先尝试更稀的合法lattice与formatter，再在确实无解时切compact；同轴至少两个数值刻度，不单独隐藏Text制造marks/导出分歧。可选计数侧栏zero优先由同一locator省略，色条两端和显式coordinate names不裁。Facet等价axes共同采用最终lattice，改变刻度时同步其native marks；布局变宽后可恢复刻度/字号，稳定布局不重复规划。3.25 pt仍拥挤时接受重叠，不移动锚点、不引入其它字号。
 - Facet overview在最终实际cell几何上共同安排标题header和刻度gutter，同方向刻度与cell标题分别使用统一字号；像素取整不得让相同cell跨不同字号档，标题不得借用刻度空间。只在已有chrome布局签名变化时重新定价，复用同一文字度量/placement缓存，稳态数据更新不跑额外碰撞扫描；Focus仍用单图预算，屏幕与导出消费同一chrome。
 - 刻度重新规划不等于全部静态背景失效：动态侧分布/色条范围变化仍由其原绘制层处理，坐标范围、layout和显式style的原owner继续负责失效；跨轴规划只为实际变化的字号补充对应轴失效，不因动态侧栏变化重画未变主图背景。
 - Color-limit drag的每个accepted move是一个原子preview transaction：先更新candidate与native/Agg共享clim authority，再compose一次并发布该front；不得先发布旧颜色front，再在独立cadence分支recolor，release只负责提交最终DisplayState而不是第一次显示颜色变化。

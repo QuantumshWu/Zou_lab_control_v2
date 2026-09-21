@@ -103,6 +103,8 @@ from .selectors import (
     CrosshairPoint,
     NumericRange,
     RectangleRange,
+    Viewport,
+    normalize_viewport,
     _SelectorController,
     SelectorKind,
     SelectorSnapshot,
@@ -202,7 +204,7 @@ class DisplayDescription:
     #: show it and keep it when Auto is switched off.
     automatic_values: Mapping[str, object]
     limits: RectangleRange
-    viewport: RectangleRange | None
+    viewport: Viewport | None
     semantics: SemanticDescription
     selection_subject: SelectionSubject
     selectors: tuple[SelectorState, ...]
@@ -291,8 +293,7 @@ class DisplayDescription:
         )
         if not isinstance(self.limits, RectangleRange):
             raise TypeError("display description limits must be RectangleRange")
-        if self.viewport is not None and not isinstance(self.viewport, RectangleRange):
-            raise TypeError("display description viewport must be RectangleRange or None")
+        object.__setattr__(self, "viewport", normalize_viewport(self.viewport))
 
 
 
@@ -387,8 +388,8 @@ class SelectionEvent:
 class ViewportEvent:
     """One viewport change tied to the exact projection it was measured on."""
 
-    canonical: RectangleRange
-    display: RectangleRange | None
+    canonical: Viewport | None
+    display: Viewport | None
     subject: SelectionSubject
     data_revision: int
     data_generation: str | None
@@ -548,7 +549,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             tuple[int, str, int | None], tuple[float, ...]
         ] = {}
         self._fit_batch_revision = 0
-        self._viewport: RectangleRange | None = None
+        self._viewport: Viewport | None = None
         self._focused_facet_index: int | None = (
             0 if isinstance(spec, FacetGridPlot) else None
         )
@@ -1320,10 +1321,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         view_limits = None
         if viewport is not None:
-            axes_x = self._viewport_x_to_axes(viewport.x)
+            axes_x = (
+                None if viewport[0] is None else self._viewport_x_to_axes(viewport[0])
+            )
             view_limits = (
-                (axes_x.low, axes_x.high),
-                self._viewport_y_to_axes(viewport.y),
+                None if axes_x is None else (axes_x.low, axes_x.high),
+                None if viewport[1] is None else self._viewport_y_to_axes(viewport[1]),
             )
         display_classifier_thresholds, classifier_labels = (
             self._classifier_frame_labels()
@@ -1642,7 +1645,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         classifier_thresholds: object = _UNSET,
         selectors: Sequence[SelectorState] | object = _UNSET,
         selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
-        viewport: RectangleRange | None | object = _UNSET,
+        viewport: Viewport | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
         interaction: Mapping[str, object] | None = None,
         presentation: Mapping[str, object] | None = None,
@@ -1674,7 +1677,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         classifier_thresholds: object = _UNSET,
         selectors: Sequence[SelectorState] | object = _UNSET,
         selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
-        viewport: RectangleRange | None | object = _UNSET,
+        viewport: Viewport | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
         interaction: Mapping[str, object] | None = None,
         presentation: Mapping[str, object] | None = None,
@@ -1721,10 +1724,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if classifier_thresholds is _UNSET
             else normalize_classifier_threshold_targets(classifier_thresholds)
         )
-        if viewport is not _UNSET and viewport is not None and not isinstance(
-            viewport, RectangleRange
-        ):
-            raise TypeError("viewport must be RectangleRange, None, or omitted")
+        if viewport is not _UNSET:
+            viewport = normalize_viewport(viewport)
         if facet_focus is not _UNSET and facet_focus is not None:
             if isinstance(facet_focus, bool) or not isinstance(facet_focus, int):
                 raise TypeError("facet_focus must be an integer, None, or omitted")
@@ -1868,6 +1869,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                                 emit_change=False,
                             )
                 if viewport is not _UNSET:
+                    if parameter_updates is not None:
+                        viewport = self._viewport_after_limit_edit(viewport, parameter_updates)
                     self._set_viewport_state(viewport, emit_change=False)
                 if fit is not _UNSET:
                     self._configure_fit_target(
@@ -1911,6 +1914,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if display_events:
             changed = frozenset().union(*(item.changed_names for item in display_events))
             self._notify_display(replace(display_events[-1], changed_names=changed))
+        if self._viewport != previous_state["_viewport"]:
+            self._notify_viewport()
         for event in fit_events:
             self._notify_fit(event)
 
@@ -2008,9 +2013,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
             self._notify_display(state)
         else:
+            authored = parameter_updates
+            if authored is None:
+                # configure describes a target; restating accepted limits is
+                # not another operator edit and must not retire navigation.
+                authored = {
+                    name: value for name, value in display_values.items()
+                    if name not in self.display_state.values
+                    or self.display_state[name] != value
+                }
             self._set_configuration_values(
                 display_values,
-                authored_values=parameter_updates,
+                authored_values=authored,
                 size=_UNSET if size is None else size,
                 image_overlay=image_overlay,
                 classifier_thresholds=classifier_thresholds,
@@ -2270,6 +2284,23 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         return self._set_configuration_values(values)
 
+    def _viewport_after_limit_edit(
+        self, viewport: Viewport | None, authored: Mapping[str, object],
+    ) -> Viewport | None:
+        """Authored coordinate limits replace navigation on that axis only."""
+        if viewport is None:
+            return None
+        ranges = list(viewport)
+        for mode, low, high in limit_pairs():
+            if low not in self._parameter_schema or not (
+                authored.keys() & {mode, low, high}
+            ):
+                continue
+            for index, coordinate in enumerate(("x", "y")):
+                if low == f"{coordinate}_min":
+                    ranges[index] = None
+        return normalize_viewport(tuple(ranges))
+
     def _set_configuration_values(
         self,
         values: Mapping[str, object],
@@ -2351,6 +2382,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 parameter_effects = self._parameter_schema.effects_for(
                     accepted_changes
                 ) if accepted_changes else RenderEffect.NONE
+                selected_viewport = self._viewport_after_limit_edit(self._viewport, authored)
+                viewport_changed = selected_viewport != self._viewport
                 selected_size = (
                     self.surface_plan.preset
                     if size is _UNSET
@@ -2391,6 +2424,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         )
                     )
                 effects = parameter_effects
+                if viewport_changed:
+                    effects |= (
+                        RenderEffect.AXIS_TRANSFORM | RenderEffect.FIT_SELECTION
+                        | RenderEffect.OVERLAY
+                    )
                 if size_changed:
                     effects |= RenderEffect.LAYOUT
                 if overlay_changed:
@@ -2408,7 +2446,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     parameter_effects & RenderEffect.VIEW_PROJECTION
                 )
                 canonical_viewport = (
-                    self._projected._viewport_in_canonical()
+                    self._viewport_after_limit_edit(
+                        self._projected._viewport_in_canonical(), authored
+                    )
                     if unit_affecting
                     and self._viewport is not None
                     and self._view is not None
@@ -2457,10 +2497,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 layout_attempted = False
                 try:
                     changed = accepted_changes
+                    self._viewport = selected_viewport
                     if (
                         isinstance(self._spec, PulseTimelinePlot)
                         and "x_display_unit" in changed
                         and self._viewport is not None
+                        and self._viewport[0] is not None
                     ):
                         assert isinstance(self._projection.data, PulseTimelineData)
                         old_factor, _old_unit = pulse_time_scale(
@@ -2472,15 +2514,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             state.values.get("x_display_unit"),
                         )
                         source_x = NumericRange(
-                            self._viewport.x.low / old_factor,
-                            self._viewport.x.high / old_factor,
+                            self._viewport[0].low / old_factor,
+                            self._viewport[0].high / old_factor,
                         )
-                        self._viewport = RectangleRange(
+                        self._viewport = (
                             NumericRange(
                                 source_x.low * new_factor,
                                 source_x.high * new_factor,
                             ),
-                            self._viewport.y,
+                            self._viewport[1],
                         )
                     unit_projection_changed = bool(
                         effects & RenderEffect.VIEW_PROJECTION
@@ -2595,6 +2637,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._commit_fit_actions(fit_cancel.set)
         if accepted_changes and self.display_state is state:
             self._notify_display(replace(self.display_state, changed_names=accepted_changes))
+        if self._viewport != previous_values[0]:
+            self._notify_viewport()
         return self.display_state
 
     def _prepare_replacement(
@@ -3142,34 +3186,26 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             {"relim_mode": mode, "color_min": None, "color_max": None}
         )
 
-    def set_x_limits(self, low: float, high: float) -> RectangleRange:
+    def set_x_limits(self, low: float, high: float) -> Viewport:
         """Set the visible x range in the current display unit."""
 
-        selected_x = NumericRange(float(low), float(high))
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-            current = self._current_display_limits()
-        return self.set_viewport(selected_x, current.y)
+        return self.set_view_limits(x=NumericRange(float(low), float(high)))
 
     def set_view_limits(
         self,
         *,
         x: tuple[float, float] | NumericRange | None = None,
         y: tuple[float, float] | NumericRange | None = None,
-    ) -> RectangleRange:
+    ) -> Viewport | None:
         """Set either or both visible ranges in current display units."""
 
-        with self._render_lock:
-            with self._lock:
-                self._assert_open()
-            current = self._current_display_limits()
+        current = self._viewport or (None, None)
 
         def selected_range(
             value: tuple[float, float] | NumericRange | None,
-            fallback: NumericRange,
+            fallback: NumericRange | None,
             name: str,
-        ) -> NumericRange:
+        ) -> NumericRange | None:
             if value is None:
                 return fallback
             if isinstance(value, NumericRange):
@@ -3181,8 +3217,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             return NumericRange(float(low_value), float(high_value))
 
         return self.set_viewport(
-            selected_range(x, current.x, "x"),
-            selected_range(y, current.y, "y"),
+            selected_range(x, current[0], "x"),
+            selected_range(y, current[1], "y"),
         )
 
     def update_data(
@@ -4286,20 +4322,20 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return tuple(result)
 
 
-    def _viewport_from_canonical(self, viewport: RectangleRange) -> RectangleRange:
-        return RectangleRange(
-            self._projected._canonical_range_to_display(
-                viewport.x, self._projected._x_selector_source()
+    def _viewport_from_canonical(self, viewport: Viewport) -> Viewport:
+        return (
+            None if viewport[0] is None else self._projected._canonical_range_to_display(
+                viewport[0], self._projected._x_selector_source()
             ),
-            viewport.y
-            if self._projected._is_histogram_plot()
+            viewport[1]
+            if viewport[1] is None or self._projected._is_histogram_plot()
             else self._projected._canonical_range_to_display(
-                viewport.y, self._projected._y_ref_or_value()
+                viewport[1], self._projected._y_ref_or_value()
             ),
         )
 
     @property
-    def viewport(self) -> RectangleRange | None:
+    def viewport(self) -> Viewport | None:
         """Current explicit display-space zoom/pan region, if the user set one."""
 
         with self._lock:
@@ -4312,20 +4348,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
     def set_viewport(
         self,
-        x: NumericRange,
-        y: NumericRange,
+        x: NumericRange | None,
+        y: NumericRange | None,
         *,
         emit_change: bool = True,
-    ) -> RectangleRange:
-        if not isinstance(x, NumericRange) or not isinstance(y, NumericRange):
-            raise TypeError("viewport x and y must be NumericRange")
-        selected = RectangleRange(x, y)
+    ) -> Viewport | None:
+        selected = normalize_viewport((x, y))
         self._set_viewport_state(selected, emit_change=emit_change)
-        return selected
+        return self._viewport
 
     def _image_viewport_on_pixel_grid(
-        self, selected: RectangleRange | None
-    ) -> RectangleRange | None:
+        self, selected: Viewport | None
+    ) -> Viewport | None:
         """An image viewport is a WHOLE number of source pixels.
 
         A wheel notch contracts the view around its centre, and the front the
@@ -4349,6 +4383,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         if selected is None or not isinstance(semantic_spec(self._spec), ImagePlot):
             return selected
+        # Square image navigation couples both axes geometrically. Resolve
+        # the omitted axis from the current frame before the existing snap.
+        if any(span is None for span in selected):
+            current = self._current_display_limits()
+            selected = (selected[0] or current.x, selected[1] or current.y)
         payload = self._payload
         cells = tuple(getattr(payload, "cells", ()))
         if cells:
@@ -4356,7 +4395,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
             return selected
         axes_values = (getattr(payload, "x", None), getattr(payload, "y", None))
-        spans = (selected.x, selected.y)
+        spans = selected
         pitches: list[float] = []
         origins: list[float] = []
         counts: list[int] = []
@@ -4418,18 +4457,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )), scales[index])))
             for index in range(2)
         ]
-        return RectangleRange(snapped[0], snapped[1])
+        return (snapped[0], snapped[1])
 
     def _set_viewport_state(
         self,
-        selected: RectangleRange | None,
+        selected: Viewport | None,
         *,
         emit_change: bool = True,
     ) -> bool:
         """Commit viewport and fit authority only after their frame draws."""
 
-        if selected is not None and not isinstance(selected, RectangleRange):
-            raise TypeError("selected must be RectangleRange or None")
+        selected = normalize_viewport(selected)
         selected = self._image_viewport_on_pixel_grid(selected)
         with self._render_lock:
             with self._lock:
@@ -4464,10 +4502,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._commit_fit_actions(fit_cancel.set)
         if not emit_change:
             return True
-        display = selected
-        canonical = self._area_display_to_canonical(
-            self._current_display_limits() if display is None else display
-        )
+        self._notify_viewport()
+        return True
+
+    def _notify_viewport(self) -> None:
+        if self._configuration_effects is not None:
+            return
+        display = self._viewport
+        canonical = None if display is None else self._projected._viewport_in_canonical()
         subject = self._selection_subject()
         with self._lock:
             callbacks = tuple(self._viewport_callbacks)
@@ -4481,7 +4523,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self.data_generation,
             ),
         )
-        return True
 
     def reset_viewport(self, *, emit_change: bool = True) -> None:
         self._set_viewport_state(None, emit_change=emit_change)

@@ -1,9 +1,8 @@
 """One numeric tick ladder, without changing Matplotlib's label anchors.
 
-The locator chooses ticks and readable font sizes. Labels may use empty space
-outside their axes; real figure edges and neighboring text can reduce the
-font, but never move a label away from its tick. At the readable size floor,
-overlap is preferable to moving or silently dropping an already chosen label.
+The locator chooses ticks at the normal or compact font tier. Final layout
+first tries a sparser numeric lattice against neighboring text, then the
+compact tier. Labels stay on their tick anchors; explicit names are preserved.
 """
 
 from __future__ import annotations
@@ -30,10 +29,7 @@ import numpy as np
 #: How small a tick label may be shrunk before crowding is preferred to
 #: illegibility.  Below this a number is a smudge, and two smudges apart say
 #: less than two touching digits.
-MIN_TICK_LABEL_PT = 3.0
-
-#: Each rung of the size ladder draws the labels this much smaller.
-_SHRINK = 0.8
+MIN_TICK_LABEL_PT = 3.25
 
 #: Where the compact offset text is written -- BOTH its parts, the common
 #: scale and the common constant, which modify the same labels and so belong
@@ -216,7 +212,7 @@ _EMPTY = _Placement((), (), MIN_TICK_LABEL_PT)
 
 
 class _MeasuredLocator(ticker.Locator):
-    """The ladder, once: fit -> clear -> fewer -> smaller -> touch.
+    """The two tiers, once: fewer numeric ticks, compact font, then touch.
 
     A subclass only says which candidates an axis has, in tiers from the
     most preferred spelling to the least, each tier from fewest labels to
@@ -234,7 +230,7 @@ class _MeasuredLocator(ticker.Locator):
         self,
         *,
         max_ticks: int = 8,
-        label_pt: float = 10.0,
+        label_pt: float = 6.5,
         measure: "Callable[[str, float], tuple[float, float]] | None" = None,
     ) -> None:
         super().__init__()
@@ -242,8 +238,8 @@ class _MeasuredLocator(ticker.Locator):
             raise ValueError("max_ticks must be a positive integer")
         if measure is not None and not callable(measure):
             raise TypeError("measure must be callable or None")
-        if not float(label_pt) > 0.0:
-            raise ValueError("label_pt must be positive")
+        if float(label_pt) not in (6.5, MIN_TICK_LABEL_PT):
+            raise ValueError("tick label_pt must be 6.5 or 3.25")
         self.max_ticks = max(int(max_ticks), 2)
         #: How a label is measured, and at what size it is drawn.  Given
         #: these, the locator spends the axis's ACTUAL extent on the labels
@@ -305,10 +301,8 @@ class _MeasuredLocator(ticker.Locator):
         return [(float(value) - low) / (high - low) * extent for value in mapped[2:]]
 
     def _size_ladder(self) -> list[float]:
-        sizes = [self.label_pt]
-        while sizes[-1] > MIN_TICK_LABEL_PT:
-            sizes.append(max(MIN_TICK_LABEL_PT, sizes[-1] * _SHRINK))
-        return sizes
+        return ([self.label_pt, MIN_TICK_LABEL_PT]
+                if self.label_pt > MIN_TICK_LABEL_PT else [self.label_pt])
 
     # --------------------------------------------------------------- judge
 
@@ -331,8 +325,8 @@ class _MeasuredLocator(ticker.Locator):
         """This candidate at this size, placed -- or None if it cannot be.
 
         Labels keep their ordinary tick anchor. Neighbors on this axis stay
-        one digit apart; figure-edge and cross-cell crowding only resize them
-        after this shared numeric placement has been selected.
+        one digit apart; final figure/cross-axis layout may ask for a sparser
+        lattice before choosing the compact font tier.
         """
 
         ticks, texts = candidate.ticks, candidate.texts
@@ -380,9 +374,9 @@ class _MeasuredLocator(ticker.Locator):
         """Walk the ladder over these candidates and return what is drawn.
 
         ``tiers`` run from the most preferred spelling to the least; within a
-        tier the candidates run from fewest labels to most.  At the drawn
-        size the finest admissible candidate wins; below it, fewer labels
-        cost nothing, so each smaller size takes the coarsest that fits.
+        tier the candidates run from fewest labels to most. At either size,
+        the finest admissible candidate wins. Try every spelling at normal
+        size before allowing the compact size.
         """
 
         sizes = self._size_ladder()
@@ -394,19 +388,15 @@ class _MeasuredLocator(ticker.Locator):
             ]
             for tier in tiers
         ]
-        for ranked in ranked_tiers:
-            chosen = None
-            for candidate in ranked:
-                placement = self._judge(lower, upper, candidate, sizes[0])
-                if placement is not None:
-                    chosen = placement
-            if chosen is not None:
-                return chosen
-            for size in sizes[1:]:
+        for size in sizes:
+            for ranked in ranked_tiers:
+                chosen = None
                 for candidate in ranked:
                     placement = self._judge(lower, upper, candidate, size)
                     if placement is not None:
-                        return placement
+                        chosen = placement
+                if chosen is not None:
+                    return chosen
         # Nothing fits its room at the readable floor: the axis says what it
         # can.  The most preferred spelling, the fewest labels, as small as
         # is still readable, touching if they must. Do not move or drop a
@@ -432,18 +422,7 @@ class _MeasuredLocator(ticker.Locator):
             texts = tuple(reversed(texts))
         self.ticks = ticks
         self.texts = texts
-        size = placement.size_pt
-        geometry = self._geometry()
-        if geometry is not None and ticks:
-            extent, before, after, _across, horizontal = geometry
-            positions = self._positions(*self.axis.get_view_interval(), ticks, extent)
-            for text, position in zip(texts, positions):
-                length = (self.measure(text, placement.size_pt)[0] if horizontal
-                          else _label_line_pt(placement.size_pt))
-                room = 2.0 * max(0.0, min(position + before, extent + after - position))
-                if length > room:
-                    size = min(size, max(MIN_TICK_LABEL_PT, placement.size_pt * room / length))
-        self._apply_drawn_size(size)
+        self._apply_drawn_size(placement.size_pt)
 
     def _apply_drawn_size(self, size_pt: float) -> None:
         """Draw the labels at the size this layout was priced at.
@@ -629,7 +608,7 @@ class SmartOffsetLocator(_MeasuredLocator):
         steps: Sequence[int] = (1, 2, 5),
         max_ticks: int = 8,
         oom: int = 3,
-        label_pt: float = 10.0,
+        label_pt: float = 6.5,
         measure: "Callable[[str, float], tuple[float, float]] | None" = None,
     ) -> None:
         super().__init__(max_ticks=max_ticks, label_pt=label_pt, measure=measure)
@@ -796,15 +775,36 @@ class SmartOffsetLocator(_MeasuredLocator):
             self._shared_key(vmin, vmax, (self.steps, self.oom), geometry),
             lambda: self._unit(lower, upper),
         )
+        self.adopt_layout(placement, reverse=vmin > vmax, cache_key=cache_key)
+        self._settled = None if placement.payload is None else placement.payload[:2]
+        return self.ticks
+
+    def layout_candidates(self) -> list[_Placement]:
+        """Sparser numeric choices at the current size for final text layout.
+
+        This refines the locator's answer, never hides Text while leaving
+        marks/exports on another answer.  The ordinary placement cache keeps
+        the unconstrained answer so a later layout can recover its density.
+        """
+        lower, upper = sorted(map(float, self.axis.get_view_interval()))
+        candidates = (self._decades(lower, upper) if self._logarithmic() else [])
+        candidates += self._lattice(lower, upper)
+        return [placed for candidate in sorted(candidates, key=lambda item: -len(item.ticks))
+                if len(candidate.ticks) < len(self.ticks)
+                if (placed := self._judge(lower, upper, candidate, self.drawn_pt)) is not None]
+
+    def adopt_layout(
+        self, placement: _Placement, *, reverse: bool = False,
+        cache_key: tuple[object, ...] | None = None,
+    ) -> None:
+        """Accept final ticks and their exact formatter operands together."""
         payload = placement.payload
         if payload is None:
-            self._settled = None
             self.step, self.m, self.k, self.C_int, self.C_exp = 1, 0, 0, 0, 0
             self.C = 0.0
             self.n_array = []
         else:
             step, decade, indices, offset_int, exponent, scale, label_decade = payload
-            self._settled = (step, decade)
             self.step = step
             self.m = label_decade
             self.k = scale
@@ -812,11 +812,17 @@ class SmartOffsetLocator(_MeasuredLocator):
             self.C_exp = exponent
             self.C = float(Decimal(offset_int).scaleb(exponent))
             self.n_array = list(indices)
-            if vmin > vmax:
+            if reverse:
                 self.n_array.reverse()
-        self._store(placement, vmin > vmax)
-        self._tick_cache_key = cache_key
-        return self.ticks
+        self._store(placement, reverse)
+        if cache_key is not None:
+            self._tick_cache_key = cache_key
+        elif self.axis is not None:
+            # An unlabelled grid cell may have reused another cell's marks
+            # without asking its own locator yet. Its next read must consume
+            # this final answer too, rather than reselect the dense lattice.
+            vmin, vmax = self.axis.get_view_interval()
+            self._tick_cache_key = (*self._cache_key(vmin, vmax, self._geometry()), self.steps, self.oom)
 
     def _lay_out(
         self,
@@ -1300,8 +1306,8 @@ def apply_named_ticks(
     if which not in {"x", "y"}:
         raise ValueError("which must be 'x' or 'y'")
     size_pt = float(label_pt)
-    if not size_pt > 0.0:
-        raise ValueError("label_pt must be positive")
+    if size_pt not in (6.5, MIN_TICK_LABEL_PT):
+        raise ValueError("tick label_pt must be 6.5 or 3.25")
     ticks = tuple(float(value) for value in positions)
     texts = tuple(str(name) for name in names)
     if len(ticks) != len(texts):

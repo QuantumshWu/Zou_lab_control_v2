@@ -56,7 +56,7 @@ def test_curve_fit_selection_prefers_area_then_x_range_then_viewport_then_all() 
         RectangleRange(NumericRange(1, 4), NumericRange(2.5, 4.5)),
     )
     x_range = SelectorState(SelectorKind.X_RANGE, NumericRange(2, 4))
-    viewport = RectangleRange(NumericRange(1, 3), NumericRange(-100, 100))
+    viewport = (NumericRange(1, 3), None)
     model = FitEngine().registry.get("gaussian_offset")
 
     selected = _projection(spec, selectors=(area, x_range), viewport=viewport).fit_selection(model)

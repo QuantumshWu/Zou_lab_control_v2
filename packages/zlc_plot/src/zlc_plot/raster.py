@@ -35,7 +35,7 @@ from .front import (
 )
 from .selectors import (
     NumericRange,
-    RectangleRange,
+    Viewport,
     SelectorKind,
     SelectorState,
 )
@@ -1335,7 +1335,7 @@ class RasterPlotHost:
         classifier_thresholds: object = _UNSET,
         selectors: Sequence[SelectorState] | object = _UNSET,
         selector_updates: Mapping[SelectorKind, SelectorState | None] | object = _UNSET,
-        viewport: RectangleRange | None | object = _UNSET,
+        viewport: Viewport | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
         interaction: Mapping[str, object] | None = None,
         presentation: Mapping[str, object] | None = None,
@@ -1592,7 +1592,7 @@ class RasterPlotHost:
         self,
         low: float,
         high: float,
-    ) -> Future[RasterOperation[RectangleRange]]:
+    ) -> Future[RasterOperation[Viewport]]:
         return self._dispatch_session(
             lambda: self._require_session().set_x_limits(low, high),
             _mode=_DispatchMode.PUBLISH,
@@ -1604,7 +1604,7 @@ class RasterPlotHost:
         *,
         x: tuple[float, float] | NumericRange | None = None,
         y: tuple[float, float] | NumericRange | None = None,
-    ) -> Future[RasterOperation[RectangleRange]]:
+    ) -> Future[RasterOperation[Viewport | None]]:
         return self._dispatch_session(
             lambda: self._require_session().set_view_limits(x=x, y=y),
             _mode=_DispatchMode.PUBLISH,
@@ -2019,11 +2019,11 @@ class RasterPlotHost:
 
     def set_viewport(
         self,
-        x: NumericRange,
-        y: NumericRange,
+        x: NumericRange | None,
+        y: NumericRange | None,
         *,
         emit_change: bool = True,
-    ) -> Future[RasterOperation[RectangleRange]]:
+    ) -> Future[RasterOperation[Viewport | None]]:
         """Set visible ranges in the current display units."""
 
         return self._dispatch_session(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -91,7 +91,8 @@ class IndexedHistoryLayout:
     cells: np.ndarray
     #: Rows owned by each shot; cropped records need not have equal lengths.
     row_codes: np.ndarray
-    inner_count: int | None = field(init=False)
+    #: Uniform rows per shot, already determined by the layout parser.
+    inner_count: int | None
     #: What does not change as the window slides -- the Repeat, Cell and
     #: value contracts plus the event's Point geometry -- and so
     #: what two windows of one history must share.
@@ -112,8 +113,6 @@ class IndexedHistoryLayout:
         object.__setattr__(self, "row_codes", immutable_array(
             codes, dtype=np.dtype("<i8"), shape=codes.shape,
         ))
-        counts = np.bincount(codes, minlength=cells.size)
-        object.__setattr__(self, "inner_count", int(counts[0]) if np.all(counts == counts[0]) else None)
         if self.times is not None:
             times = np.asarray(self.times, dtype=np.float64)
             if times.shape != cells.shape:
@@ -170,9 +169,7 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         return None
     if primary.role != PRIMARY_INDEX:
         raise ValueError("the primary-index coordinate must carry the primary-index role")
-    offsets = np.asarray(
-        tuple(primary.coordinate_at(index) for index in range(primary.size))
-    )
+    offsets = np.asarray(primary.coordinate_values())
     if (
         offsets.ndim != 1
         or offsets.size == 0
@@ -215,7 +212,7 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         if not np.array_equal(point_domain.codes(SHOT_TIME_AXIS_ID), primary_codes):
             raise ValueError("shot time is one coordinate per shot, on the primary index's rows")
         times = np.asarray(
-            tuple(time_axis.coordinate_at(index) for index in range(time_axis.size)),
+            time_axis.coordinate_values(),
             dtype=np.float64,
         )
     event_axes = tuple(
@@ -226,21 +223,25 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         (axis.axis_id, axis.name, axis.role, axis.unit, axis.coordinate_frame)
         for axis in point_domain.axes if axis.role == SAMPLE_TIME
     )
-    event_codes: list[tuple[int, ...]] = []
+    event_codes: list[np.ndarray] = []
     repeated = uniform
     for axis in event_axes:
         codes = point_domain.codes(axis.axis_id)
         if uniform and shots > 1:
             rows = codes.reshape(shots, inner_count)
             repeated = repeated and bool(np.all(rows[1:] == rows[0]))
-        event_codes.append(tuple(codes.tolist()))
+        event_codes.append(codes)
     event_domain = (
         (inner_count if repeated else point_domain.size,), event_axes,
-        tuple(codes[:inner_count] if repeated else codes for codes in event_codes),
+        tuple(
+            tuple((codes[:inner_count] if repeated else codes).tolist())
+            for codes in event_codes
+        ),
     )
     layout = IndexedHistoryLayout(
         cells,
         primary_codes,
+        inner_count if uniform else None,
         (
             schema.repeat_domain,
             schema.cell_domain,
