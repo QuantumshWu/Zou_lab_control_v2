@@ -87,7 +87,7 @@ from zlc_ui import (
 
 from .device_use import DeviceClaim, DeviceLease, DeviceUseBusy, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse, write_pulse
-from zlc_ui import schedule_item_order
+from zlc_ui import bracket_post_key, schedule_item_order
 
 
 _LOG = logging.getLogger(__name__)
@@ -112,12 +112,16 @@ __all__ = [
 _TIME_UNITS = TIME_UNIT_CHOICES
 
 
+def _bracket_vms(sequence: PulseSequence) -> tuple[BracketVM, ...]:
+    return tuple(
+        BracketVM(b.bracket_id, b.start_period_id, b.end_period_id, b.count)
+        for b in sequence.brackets
+    )
+
+
 def _sequence_item_order(sequence: PulseSequence) -> tuple[tuple[str, str], ...]:
-    bracket = sequence.bracket
     return schedule_item_order(
-        tuple(period.period_id for period in sequence.periods),
-        None if bracket is None else bracket.start_period_id,
-        None if bracket is None else bracket.end_period_id,
+        tuple(period.period_id for period in sequence.periods), _bracket_vms(sequence),
     )
 
 
@@ -517,7 +521,6 @@ def project_schedule(
         _nanoseconds(period.duration, period.unit)
         for period in (() if sequence is None else sequence.periods)
     )
-    bracket = None if sequence is None else sequence.bracket
     slots = () if sequence is None else sequence.scan_bindings
     return ScheduleVM(
         document_generation=int(generation),
@@ -541,15 +544,7 @@ def project_schedule(
         ports=ports,
         periods=periods,
         analog_mode_choices=ANALOG_MODE_ROWS,
-        bracket=(
-            None
-            if bracket is None
-            else BracketVM(
-                bracket.start_period_id,
-                bracket.end_period_id,
-                bracket.count,
-            )
-        ),
+        brackets=() if sequence is None else _bracket_vms(sequence),
         run_repeats=0 if sequence is None else sequence.run_repeats,
         # Every output the board can delay gets a row whether or not a pulse is
         # open, because the row IS the board telling the operator that output
@@ -759,7 +754,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     other way is a drawing of something else.
     """
 
-    sequence.require_nonempty_bracket()
+    sequence.require_nonempty_brackets()
     from zlc_plot import (
         PulseAnalogTrace,
         PulseBlock,
@@ -857,25 +852,19 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     # inside the timeline, while Run starts the complete pulse again without
     # advancing the scan point.
     markers: list[Any] = []
-    ids = [period.period_id for period in sequence.periods]
-    if sequence.bracket is not None:
-        try:
-            first = ids.index(sequence.bracket.start_period_id)
-            last = ids.index(sequence.bracket.end_period_id)
-        except ValueError:
-            first = last = None
-        if first is not None and last is not None:
-            stop = starts[last] + _nanoseconds(
-                sequence.periods[last].duration, sequence.periods[last].unit
-            ) * 1e-9
-            # A LABEL, which is what the marker takes.  Passing the count
-            # itself raised TypeError inside the primitive, so a bracketed
-            # pulse could not be previewed at all.
-            markers.append(
-                PulseLoopMarker(
-                    starts[first], stop, f"Bracket ×{sequence.bracket.count}"
-                )
-            )
+    # Innermost first: the renderer draws each later marker one step further
+    # out, and the model keeps its brackets outermost first.
+    for bracket, (first, stop_gap) in reversed(
+        tuple(zip(sequence.brackets, sequence.bracket_bounds))
+    ):
+        last = stop_gap - 1
+        stop = starts[last] + _nanoseconds(
+            sequence.periods[last].duration, sequence.periods[last].unit
+        ) * 1e-9
+        # A LABEL, which is what the marker takes.  Passing the count
+        # itself raised TypeError inside the primitive, so a bracketed
+        # pulse could not be previewed at all.
+        markers.append(PulseLoopMarker(starts[first], stop, f"Bracket ×{bracket.count}"))
     run_label = (
         RUN_FOREVER_LABEL
         if sequence.run_repeats == 0
@@ -1191,6 +1180,8 @@ class PulseEditorPresenter:
         view.reorder_items_requested.connect(self._guarded(self.reorder_items))
         view.remove_period_requested.connect(self._guarded(self.remove_period))
         view.bracket_committed.connect(self._guarded(self.set_bracket))
+        view.bracket_add_requested.connect(self._guarded(self.add_bracket))
+        view.bracket_remove_requested.connect(self._guarded(self.remove_bracket))
         view.run_repeats_committed.connect(self._guarded(self.set_run_repeats))
         view.visible_ports_committed.connect(self._guarded(self.set_visible_ports))
         view.fill_port_requested.connect(self._guarded(self.fill_port))
@@ -1671,23 +1662,27 @@ class PulseEditorPresenter:
             self._warn("a sequence needs at least one period")
             return
         items = tuple(tuple(item) for item in order)
-        bracket = self.sequence.bracket
         expected = {("period", key) for key in by_id}
-        if bracket is not None:
-            expected.update((("bracket", "start"), ("bracket", "end")))
+        for bracket in self.sequence.brackets:
+            expected.update((
+                ("bracket", bracket_post_key(bracket.bracket_id, "start")),
+                ("bracket", bracket_post_key(bracket.bracket_id, "end")),
+            ))
         if len(items) != len(expected) or set(items) != expected:
             raise ValueError("schedule order must contain each current item exactly once")
-        if bracket is not None:
-            start = items.index(("bracket", "start"))
-            end = items.index(("bracket", "end"))
+        brackets = []
+        for bracket in self.sequence.brackets:
+            start = items.index(("bracket", bracket_post_key(bracket.bracket_id, "start")))
+            end = items.index(("bracket", bracket_post_key(bracket.bracket_id, "end")))
             if end < start:
-                self._warn("bracket end precedes bracket start")
+                self._warn(f"bracket {bracket.bracket_id} end precedes its start")
                 return
             first = next((key for kind, key in items[start + 1:] if kind == "period"), None)
             last = next((key for kind, key in reversed(items[:end]) if kind == "period"), None)
-            bracket = PulseBracket(first, last, bracket.count)
+            brackets.append(PulseBracket(bracket.bracket_id, first, last, bracket.count))
         self._apply(self._rebuilt(
-            periods=tuple(by_id[key] for kind, key in items if kind == "period"), bracket=bracket,
+            periods=tuple(by_id[key] for kind, key in items if kind == "period"),
+            brackets=tuple(brackets),
         ))
 
     def remove_period(self, period_id: str) -> None:
@@ -1695,22 +1690,48 @@ class PulseEditorPresenter:
         order = tuple(item for item in _sequence_item_order(self.sequence) if item != ("period", period_id))
         self._apply_item_order(order, periods=periods)
 
-    def set_bracket(self, start: object, end: object, count: int) -> None:
-        """Bracket these periods, or clear the bracket.
+    def set_bracket(self, bracket_id: str, start: object, end: object, count: int) -> None:
+        """Move one bracket's inclusive anchors, or recount it.
 
-        Explicit deletion clears the bracket. One missing neighbour instead
-        locates an empty bracket at the first or last timeline gap.
+        One missing neighbour locates an empty bracket at the first or last
+        timeline gap.  Only explicit removal takes a bracket away.
         """
 
-        if (start is None and end is None) or int(count) == 0:
-            self._apply(self._rebuilt(bracket=None))
-            return
-        self._apply(
-            self._rebuilt(
-                bracket=PulseBracket(None if start is None else str(start),
-                                     None if end is None else str(end), int(count))
-            )
+        replaced = PulseBracket(
+            str(bracket_id),
+            None if start is None else str(start),
+            None if end is None else str(end),
+            int(count),
         )
+        self._apply(self._rebuilt(brackets=tuple(
+            replaced if bracket.bracket_id == replaced.bracket_id else bracket
+            for bracket in self.sequence.brackets
+        )))
+
+    def add_bracket(self, start: object, end: object, count: int) -> None:
+        """A new bracket around these periods; nested or disjoint, the model decides."""
+
+        if self.sequence is None:
+            return
+        bracket_id = _unique_id(
+            tuple(bracket.bracket_id for bracket in self.sequence.brackets), "bracket",
+        )
+        self._apply(self._rebuilt(brackets=self.sequence.brackets + (
+            PulseBracket(
+                bracket_id,
+                None if start is None else str(start),
+                None if end is None else str(end),
+                int(count),
+            ),
+        )))
+
+    def remove_bracket(self, bracket_id: str) -> None:
+        if self.sequence is None:
+            return
+        self._apply(self._rebuilt(brackets=tuple(
+            bracket for bracket in self.sequence.brackets
+            if bracket.bracket_id != str(bracket_id)
+        )))
 
     def set_run_repeats(self, repeats: int) -> None:
         """Persist complete-Pulse runs per scan point; zero means infinite."""
@@ -1845,12 +1866,7 @@ class PulseEditorPresenter:
             )
         return config["params"], config["clock_hz"]
 
-    def compile(
-        self,
-        sequence: Any = None,
-        *,
-        slot_tick_scales: Sequence[int] | None = None,
-    ) -> tuple[Any, Any]:
+    def compile(self, sequence: Any = None) -> tuple[Any, Any]:
         """The sequence as the board would receive it, and the program.
 
         Compiled against the DEPLOYED board's geometry, not against defaults:
@@ -1867,22 +1883,12 @@ class PulseEditorPresenter:
         sequence = sequence if sequence is not None else self.sequence
         if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
-        sequence.require_nonempty_bracket()
+        sequence.require_nonempty_brackets()
         geometry, clock_hz = self._compiler_target()
         sequencer = self.sequencer
         if sequencer is not None:
-            return sequencer.compile_pulse(
-                sequence,
-                geometry,
-                clock_hz,
-                slot_tick_scales=slot_tick_scales,
-            )
-        return sequence, compile_sequence(
-            sequence,
-            geometry,
-            clock_hz,
-            slot_tick_scales=slot_tick_scales,
-        )
+            return sequencer.compile_pulse(sequence, geometry, clock_hz)
+        return sequence, compile_sequence(sequence, geometry, clock_hz)
 
     def connect_to(self, mode: str, endpoint: str) -> bool:
         """Attach this editor to a sequencer, or say why it could not.
@@ -2233,7 +2239,7 @@ class PulseEditorPresenter:
             periods=periods,
             bindings=bindings,
             delays=delays,
-            bracket=current.bracket,
+            brackets=current.brackets,
             run_repeats=current.run_repeats,
         )
         state_changes: dict[str, Any] = {"sequence": candidate}
@@ -2393,11 +2399,7 @@ class PulseEditorPresenter:
                 tuple(value for value in row)
                 for row in scan_rows_from_wire(
                     wire_rows,
-                    scan_columns_for(
-                        source,
-                        program.slot_tick_scales,
-                        params=self._compiler_target()[0],
-                    ),
+                    scan_columns_for(source, params=self._compiler_target()[0]),
                 )
             )
         if wire_rows:
@@ -2432,40 +2434,22 @@ class PulseEditorPresenter:
     def _prepare_execution(self) -> tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int]:
         """Compile every local fact before attempting to acquire the device."""
 
-        source, rows, sweeps, slot_tick_scales = self._execution_request()
-        source, program = self.compile(source, slot_tick_scales=slot_tick_scales)
+        source, rows, sweeps = self._execution_request()
+        source, program = self.compile(source)
         return source, program, rows, sweeps
 
     def _execution_request(
         self,
-    ) -> tuple[
-        PulseSequence,
-        tuple[tuple[int, ...], ...],
-        int,
-        tuple[int, ...],
-    ]:
+    ) -> tuple[PulseSequence, tuple[tuple[int, ...], ...], int]:
         source = self._execution_sequence()
         scan_armed = self._scan_armed()
-        if scan_armed:
-            _effective, slot_tick_scales, rows = self._prepared_scan(source)
-        else:
-            rows = ()
-            slot_tick_scales = ()
-        return (
-            source,
-            rows,
-            self._state.scan_repeats if scan_armed else 1,
-            slot_tick_scales,
-        )
+        rows = self._prepared_scan(source)[1] if scan_armed else ()
+        return source, rows, self._state.scan_repeats if scan_armed else 1
 
     def _prepared_scan(
         self,
         source: PulseSequence,
-    ) -> tuple[
-        tuple[tuple[float, ...], ...],
-        tuple[int, ...],
-        tuple[tuple[int, ...], ...],
-    ]:
+    ) -> tuple[tuple[tuple[float, ...], ...], tuple[tuple[int, ...], ...]]:
         """One quantized table shared by Run, Hold, digest and readback."""
 
         from zlc_pulse import prepare_scan_application
@@ -2502,11 +2486,7 @@ class PulseEditorPresenter:
             return
         from zlc_pulse import scan_columns_for, scan_rows_from_wire
 
-        columns = scan_columns_for(
-            source,
-            program.slot_tick_scales,
-            params=self._compiler_target()[0],
-        )
+        columns = scan_columns_for(source, params=self._compiler_target()[0])
         self._applied_scan = (
             str(digest),
             tuple(column.name for column in columns),
@@ -2572,7 +2552,7 @@ class PulseEditorPresenter:
             return
         authored_revision = self.revision
         try:
-            source, rows, sweeps, slot_tick_scales = self._execution_request()
+            source, rows, sweeps = self._execution_request()
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
             return
@@ -2588,10 +2568,7 @@ class PulseEditorPresenter:
             error: BaseException | None = None
             try:
                 if operation == self._device_operation:
-                    loaded, program = self.compile(
-                        source,
-                        slot_tick_scales=slot_tick_scales,
-                    )
+                    loaded, program = self.compile(source)
                 if program is not None:
                     error = self._drive_program(
                         sequencer,
@@ -3029,11 +3006,8 @@ class PulseEditorPresenter:
             return ""
         if self._digest_revision != self.revision:
             try:
-                source, _rows, _sweeps, scales = self._execution_request()
-                self._digest = self.compile(
-                    self._effective_sequence(source),
-                    slot_tick_scales=scales,
-                )[1].digest
+                source, _rows, _sweeps = self._execution_request()
+                self._digest = self.compile(self._effective_sequence(source))[1].digest
             except Exception:
                 # A pulse that does not compile is not one any board can be
                 # holding, which is the honest answer to the question asked.
@@ -3889,7 +3863,7 @@ class PulseEditorPresenter:
             # kept playing.  So resolve the row into the document and load a
             # plain pulse, which is the state the board is designed to hold.
             source = resolve_api_parameters(self.sequence)
-            effective_rows, _scales, _wire = self._prepared_scan(source)
+            effective_rows, _wire = self._prepared_scan(source)
         except Exception as error:
             held = self._clamp_scan_point(point, count)
             self._held_point = held
@@ -4593,7 +4567,7 @@ class PulseEditorPresenter:
     def _check_bracket(self) -> bool:
         try:
             if self.sequence is not None:
-                self.sequence.require_nonempty_bracket()
+                self.sequence.require_nonempty_brackets()
         except ValueError as error:
             self._warn(str(error))
             return False

@@ -37,6 +37,7 @@ from .models import (
     PeriodVM,
     PortRowVM,
     BracketVM,
+    bracket_post_key,
     ScheduleVM,
 )
 
@@ -611,9 +612,14 @@ class BracketPost(FluentGroupBox):
 
     count_committed = QtCore.pyqtSignal(int)
 
-    def __init__(self, kind: str, *, count: int = 2, minimum: int = 2, parent=None) -> None:
+    def __init__(
+        self, bracket_id: str, kind: str, *, count: int = 2, minimum: int = 2, parent=None,
+    ) -> None:
         super().__init__("", parent)
+        self.bracket_id = str(bracket_id)
         self.kind = str(kind)
+        #: The item key this post answers to in the strip's order.
+        self.key = bracket_post_key(self.bracket_id, self.kind)
         width = px(BRACKET_WIDTH, minimum=60)
         self.setFixedWidth(width)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
@@ -633,7 +639,7 @@ class BracketPost(FluentGroupBox):
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
-        self.setToolTip("Drag to move this bracket boundary")
+        self.setToolTip(f"Bracket {self.bracket_id}: drag to move this boundary")
         self.count_spin = fluent_count_box(minimum=int(minimum))
         self.count_spin.setValue(float(count))
         self.count_spin.setFixedSize(width - 2 * px(7), row_height())
@@ -655,14 +661,55 @@ class BracketPost(FluentGroupBox):
         column.addStretch(1)
 
 
+def bracket_spans_of(order: list[tuple[str, str]]) -> dict[str, tuple[int, int]] | None:
+    """Each bracket's (start gap, end gap) in a visual order, or None when it is not well formed.
+
+    Not well formed: a post before its own partner, or two brackets that
+    overlap without one lying inside the other.  An empty bracket lies inside
+    another only when its gap is strictly inside -- the model's rule, so what
+    the strip refuses while dragging is what the document would refuse.
+    """
+
+    positions: dict[str, dict[str, int]] = {}
+    gaps: dict[str, dict[str, int]] = {}
+    periods_before = 0
+    for index, (kind, key) in enumerate(order):
+        if kind == "period":
+            periods_before += 1
+            continue
+        bracket_id, _colon, side = key.rpartition(":")
+        positions.setdefault(bracket_id, {})[side] = index
+        gaps.setdefault(bracket_id, {})[side] = periods_before
+    spans: dict[str, tuple[int, int]] = {}
+    for bracket_id, sides in positions.items():
+        if set(sides) != {"start", "end"} or sides["end"] < sides["start"]:
+            return None
+        spans[bracket_id] = (gaps[bracket_id]["start"], gaps[bracket_id]["end"])
+
+    def contains(outer: tuple[int, int], inner: tuple[int, int]) -> bool:
+        if not (outer[0] <= inner[0] and inner[1] <= outer[1]):
+            return False
+        return inner[0] < inner[1] or outer[0] < inner[0] < outer[1]
+
+    listed = tuple(spans.values())
+    for index, first in enumerate(listed):
+        for second in listed[index + 1:]:
+            disjoint = first[1] <= second[0] or second[1] <= first[0]
+            if not (disjoint or contains(first, second) or contains(second, first)):
+                return None
+    return spans
+
+
 class PulseDragContainer(QtWidgets.QWidget):
     """Horizontal card strip whose drag releases are proposal-only."""
 
     period_clicked = QtCore.pyqtSignal(str)
+    #: The clicked post's key (``"<bracket id>:start"`` / ``":end"``).
     bracket_clicked = QtCore.pyqtSignal(str)
     gap_clicked = QtCore.pyqtSignal(int)
     reorder_items_requested = QtCore.pyqtSignal(object)
-    bracket_count_committed = QtCore.pyqtSignal(int)
+    #: (bracket id, count) from that bracket's end post.
+    bracket_count_committed = QtCore.pyqtSignal(str, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -692,7 +739,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     def set_items(
         self,
         cards: tuple[PeriodCard, ...],
-        bracket: BracketVM | None,
+        brackets: tuple[BracketVM, ...],
         *,
         order: tuple[tuple[str, str], ...],
         minimum_bracket: int = 2,
@@ -700,20 +747,30 @@ class PulseDragContainer(QtWidgets.QWidget):
         previous = self.items()
         self._cards = tuple(cards)
         widgets = {("period", card.period_id): card for card in cards}
-        if bracket is not None:
-            if not self._posts:
-                start = BracketPost("start", minimum=minimum_bracket)
-                end = BracketPost("end", count=bracket.count, minimum=minimum_bracket)
-                end.count_committed.connect(self.bracket_count_committed)
-                self._posts = (start, end)
-            for post in self._posts:
-                widgets[("bracket", post.kind)] = post
+        # One start and one end post per bracket, kept across re-projections
+        # by their key so a post being dragged or edited is the same widget.
+        existing = {post.key: post for post in self._posts}
+        posts: list[BracketPost] = []
+        for bracket in brackets:
+            for side in ("start", "end"):
+                key = bracket_post_key(bracket.bracket_id, side)
+                post = existing.get(key)
+                if post is None:
+                    post = BracketPost(
+                        bracket.bracket_id, side, count=bracket.count, minimum=minimum_bracket,
+                    )
+                    if side == "end":
+                        post.count_committed.connect(
+                            lambda count, bracket_id=bracket.bracket_id:
+                                self.bracket_count_committed.emit(bracket_id, int(count))
+                        )
+                posts.append(post)
+                widgets[("bracket", key)] = post
                 with signals_blocked(post.count_spin):
                     post.count_spin.setMinimum(minimum_bracket)
                     if not being_edited(post.count_spin):
                         post.count_spin.setValue(float(bracket.count))
-        else:
-            self._posts = ()
+        self._posts = tuple(posts)
         desired = tuple(widgets[key] for key in order)
         for widget in previous:
             if widget not in desired:
@@ -734,7 +791,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         if card is not None and not any(item.period_id == card for item in self._cards):
             card = None
         post = self._selected_post
-        if post is not None and not any(item.kind == post for item in self._posts):
+        if post is not None and not any(item.key == post for item in self._posts):
             post = None
         gap = self._selected_gap
         if gap is not None and gap > len(order):
@@ -782,7 +839,7 @@ class PulseDragContainer(QtWidgets.QWidget):
 
     @staticmethod
     def _item_key(item: QtWidgets.QWidget) -> tuple[str, str]:
-        return ("period", item.period_id) if isinstance(item, PeriodCard) else ("bracket", item.kind)
+        return ("period", item.period_id) if isinstance(item, PeriodCard) else ("bracket", item.key)
 
     def items(self) -> tuple[QtWidgets.QWidget, ...]:
         return tuple(self.layout_main.itemAt(index).widget() for index in range(self.layout_main.count()))
@@ -799,7 +856,7 @@ class PulseDragContainer(QtWidgets.QWidget):
 
     # ------------------------------------------------------- where edits land
     def selection(self) -> tuple[str | None, str | None, int | None]:
-        """(period id, bracket post kind, gap position).  At most one is set."""
+        """(period id, bracket post key, gap position).  At most one is set."""
 
         return self._selected_card, self._selected_post, self._selected_gap
 
@@ -841,7 +898,7 @@ class PulseDragContainer(QtWidgets.QWidget):
                 ACCENT if widget.period_id == self._selected_card else None
             )
         for widget in self._posts:
-            widget.set_outline(ACCENT if widget.kind == self._selected_post else None)
+            widget.set_outline(ACCENT if widget.key == self._selected_post else None)
         if self._selected_gap is None:
             self._indicator.hide()
         else:
@@ -917,11 +974,11 @@ class PulseDragContainer(QtWidgets.QWidget):
             return None
         order.pop(here)
         order.insert(gap - int(here < gap), key)
-        if self._posts:
-            # Empty brackets remain editable; only crossing the posts is not
-            # an ordered pair of boundaries. Execution validates the content.
-            if order.index(("bracket", "end")) < order.index(("bracket", "start")):
-                return None
+        # Empty brackets remain editable; only crossing a post's own partner or
+        # making two brackets overlap without one inside the other is refused
+        # while dragging.  Execution validates the content.
+        if bracket_spans_of(order) is None:
+            return None
         return tuple(order)
 
     def dragMoveEvent(self, event):  # noqa: N802 - Qt name
@@ -1028,7 +1085,11 @@ class PulseScheduleView(QtWidgets.QWidget):
     insert_period_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
     remove_period_requested = QtCore.pyqtSignal(str)
-    bracket_committed = QtCore.pyqtSignal(object, object, int)
+    #: (bracket id, start period id, end period id, count): move or recount one bracket.
+    bracket_committed = QtCore.pyqtSignal(str, object, object, int)
+    #: (start period id, end period id, count): a new bracket; the presenter names it.
+    bracket_add_requested = QtCore.pyqtSignal(object, object, int)
+    bracket_remove_requested = QtCore.pyqtSignal(str)
     run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
     fill_port_requested = QtCore.pyqtSignal(str)
@@ -1294,7 +1355,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.load_button.clicked.connect(self.load_requested)
         self.add_button.clicked.connect(lambda: self.insert_period_requested.emit(self._selected_before_item()))
         self.remove_button.clicked.connect(self._request_remove_period)
-        self.bracket_button.clicked.connect(self._request_toggle_bracket)
+        self.bracket_button.clicked.connect(self._request_add_bracket)
         self.collapse_button.clicked.connect(self._toggle_left_panels)
         self.add_port_button.clicked.connect(self._request_add_port)
         self.hide_off_button.clicked.connect(self._request_hide_off_ports)
@@ -1320,10 +1381,19 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._reconcile(vm)
         return True
 
-    def _commit_bracket_count(self, count: int) -> None:
-        bracket = self._schedule.bracket
+    def _commit_bracket_count(self, bracket_id: str, count: int) -> None:
+        bracket = self._bracket(bracket_id)
         if bracket is not None:
-            self.bracket_committed.emit(bracket.start_period_id, bracket.end_period_id, count)
+            self.bracket_committed.emit(
+                bracket.bracket_id, bracket.start_period_id, bracket.end_period_id, count,
+            )
+
+    def _bracket(self, bracket_id: str) -> BracketVM | None:
+        if self._schedule is None:
+            return None
+        return next(
+            (item for item in self._schedule.brackets if item.bracket_id == bracket_id), None,
+        )
 
     @staticmethod
     def _visible_delay_rows(vm: ScheduleVM) -> tuple[DelayRowVM, ...]:
@@ -1381,7 +1451,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._cards = desired
         self.drag_container.set_items(
             tuple(desired[p.period_id] for p in vm.periods),
-            vm.bracket,
+            vm.brackets,
             order=vm.item_order,
             minimum_bracket=vm.min_bracket_count,
         )
@@ -1390,9 +1460,6 @@ class PulseScheduleView(QtWidgets.QWidget):
                 self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
         self.channel_panel.run_repeats_spin.setEnabled(bool(vm.periods))
         self._rebuild_hidden_ports(vm)
-        self.bracket_button.setText(
-            "Del Bracket" if vm.bracket is not None else "Add Bracket"
-        )
         # A renamed port or a different set of delay rows changes how wide the
         # operator columns want to be, and the pane's cached hint is just as
         # stale for that as it is for Collapse.
@@ -1603,12 +1670,12 @@ class PulseScheduleView(QtWidgets.QWidget):
             card=None if current == str(period_id) else str(period_id)
         )
 
-    def _bracket_clicked(self, kind: str) -> None:
+    def _bracket_clicked(self, key: str) -> None:
         """Same rule as a period's, because it is the same kind of act."""
 
         _card, current, _gap = self.drag_container.selection()
         self.drag_container.show_selection(
-            post=None if current == str(kind) else str(kind)
+            post=None if current == str(key) else str(key)
         )
 
     def _gap_clicked(self, position: int) -> None:
@@ -1636,25 +1703,47 @@ class PulseScheduleView(QtWidgets.QWidget):
             return
         card, post, _gap = self.drag_container.selection()
         if post is not None:
-            self.bracket_committed.emit(None, None, 0)
+            self.bracket_remove_requested.emit(post.rpartition(":")[0])
             return
         target = card if card is not None else self._schedule.periods[-1].period_id
         self.remove_period_requested.emit(target)
 
-    def _request_toggle_bracket(self) -> None:
-        """Bracket the whole pulse, or take the bracket off."""
+    def _request_add_bracket(self) -> None:
+        """A new bracket around whatever is picked: a period, a bracket, a gap, or all.
 
-        if self._schedule is None:
+        Around a selected bracket it is the enclosing loop -- that is how
+        brackets nest.  In a selected gap it is empty, to be filled by
+        dragging periods in.  With nothing picked it frames the whole pulse.
+        """
+
+        if self._schedule is None or not self._schedule.periods:
             return
-        if self._schedule.bracket is not None:
-            self.bracket_committed.emit(None, None, 0)
+        periods = self._schedule.periods
+        card, post, gap = self.drag_container.selection()
+        count = self._schedule.default_bracket_count
+        if card is not None:
+            self.bracket_add_requested.emit(card, card, count)
             return
-        if not self._schedule.periods:
+        if post is not None:
+            bracket = self._bracket(post.rpartition(":")[0])
+            if bracket is not None:
+                self.bracket_add_requested.emit(
+                    bracket.start_period_id, bracket.end_period_id, count,
+                )
+                return
+        if gap is not None:
+            ids = tuple(period.period_id for period in periods)
+            periods_before = sum(
+                kind == "period" for kind, _key in self._schedule.item_order[:gap]
+            )
+            self.bracket_add_requested.emit(
+                ids[periods_before] if periods_before < len(ids) else None,
+                ids[periods_before - 1] if periods_before > 0 else None,
+                count,
+            )
             return
-        self.bracket_committed.emit(
-            self._schedule.periods[0].period_id,
-            self._schedule.periods[-1].period_id,
-            self._schedule.default_bracket_count,
+        self.bracket_add_requested.emit(
+            periods[0].period_id, periods[-1].period_id, count,
         )
 
     def _request_add_port(self) -> None:
@@ -1741,5 +1830,5 @@ class PulseScheduleView(QtWidgets.QWidget):
 
 __all__ = [
     "ChannelNamesPanel", "ChannelPanel", "PeriodCard", "PulseDragContainer",
-    "PulseScheduleView", "BracketPost",
+    "PulseScheduleView", "BracketPost", "bracket_spans_of",
 ]

@@ -1251,7 +1251,7 @@ def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
             ),
         )
         program = compile_sequence(slotted, board.geometry, board.clock_hz)
-        rows = ((-16,), (24,))
+        rows = ((496,), (536,))
         streamer.load(program, source=slotted, rows=rows)
         seen_rows: list[tuple[int, ...]] = []
         original_fire = world.fire

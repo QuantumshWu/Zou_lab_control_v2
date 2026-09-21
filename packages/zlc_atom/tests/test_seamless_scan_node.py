@@ -541,23 +541,13 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
     )
 
     program = long_bench._loaded_program
-    assert program.slot_tick_scales == (2,)
-    coefficient = (1 << program.scan_coeff_frac_bits) * 2
-    assert {
-        abs(value)
-        for row in program.tick_slot_coeffs
-        for value in row
-        if value
-    } == {coefficient}, "the compiled affine program did not apply scale 2"
+    assert program.duration_slots.count(1) == 1, "one row reads its duration from slot 1"
 
     wire = tuple(
         tuple(int(value) for value in row)
         for row in long_bench.scan_tables[0]
     )
-    columns = scan_columns_for(
-        long_bench.loaded_sources[0],
-        program.slot_tick_scales,
-    )
+    columns = scan_columns_for(long_bench.loaded_sources[0])
     played = tuple(
         (float(value) - columns[0].wire_offset) / columns[0].wire_scale
         for value, in wire
@@ -570,7 +560,6 @@ def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> Non
                 if axis.axis_id.value == f"scan.duration:{period_id}") == "MOT.duration"
     assert _point_axis_values(schema, f"duration:{period_id}") == pytest.approx(played)
     run_record = declared_records[-1]
-    assert run_record["slot_tick_scales"] == [2]
     assert run_record["named_devices"] == {"sequencer": "sequencer"}
     sequencer = run_record["device_snapshots"]["sequencer"]["description"]
     assert sequencer["clock_hz"] > 0.0
@@ -600,9 +589,9 @@ def test_an_authored_whole_bracket_stays_independent_of_run_repeats() -> None:
     template = _template_sequence()
     template = replace(
         template,
-        bracket=PulseBracket(
-            template.periods[0].period_id, template.periods[-1].period_id, 2
-        ),
+        brackets=(PulseBracket(
+            "whole", template.periods[0].period_id, template.periods[-1].period_id, 2
+        ),),
     )
     kept, bench = _scripted_run(
         values=(-256.0, 256.0),
@@ -625,9 +614,9 @@ def test_a_partial_bracket_and_multiple_run_repeats_are_independent() -> None:
     template = _template_sequence()
     partial = replace(
         template,
-        bracket=PulseBracket(
-            template.periods[0].period_id, template.periods[1].period_id, 2
-        ),
+        brackets=(PulseBracket(
+            "part", template.periods[0].period_id, template.periods[1].period_id, 2
+        ),),
     )
 
     kept, bench = _scripted_run(

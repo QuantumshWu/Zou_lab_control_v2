@@ -147,9 +147,7 @@ def sequencer_archive_snapshot(
             "digest": str(program.digest),
             "clock_hz": float(program.clock_hz),
             "duration_seconds": float(program.duration_seconds),
-            "loop_start_index": int(program.loop_start_index),
-            "loop_end_tick": int(program.loop_end_tick),
-            "loop_count": int(program.loop_count),
+            "loops": [[int(value) for value in loop] for loop in program.loops],
             "rows": [[int(value) for value in row] for row in rows],
         }
         if run_repeats is not None:
@@ -234,12 +232,8 @@ class SequencerDevice:
         sequence: PulseSequence,
         geom: StreamerParams,
         clock_hz: float,
-        *,
-        slot_tick_scales: Sequence[int] | None = None,
     ) -> tuple[PulseSequence, CompiledProgram]:
-        return self.streamer.compile_pulse(
-            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
-        )
+        return self.streamer.compile_pulse(sequence, geom, clock_hz)
 
     @property
     def config_source(self) -> str:

@@ -25,21 +25,60 @@ VALIDATOR_FLOAT = "float"
 VALIDATOR_KINDS = (VALIDATOR_NONE, VALIDATOR_INT, VALIDATOR_FLOAT)
 
 
+def bracket_gap_bounds(
+    period_ids: tuple[str, ...], start: str | None, end: str | None,
+) -> tuple[int, int]:
+    """Half-open period gaps of one bracket's inclusive endpoints.
+
+    A missing start anchor means "after the last period" and a missing end
+    anchor "before the first", so an empty bracket can sit at either edge of
+    the timeline; equal gaps are an empty bracket.
+    """
+
+    return (
+        len(period_ids) if start is None else period_ids.index(start),
+        0 if end is None else period_ids.index(end) + 1,
+    )
+
+
+def bracket_post_key(bracket_id: str, side: str) -> str:
+    """The item key of one bracket post: ``"<bracket id>:start"`` or ``":end"``."""
+
+    return f"{bracket_id}:{side}"
+
+
 def schedule_item_order(
-    period_ids: tuple[str, ...], start: str | None = None, end: str | None = None,
+    period_ids: tuple[str, ...], brackets: tuple["BracketVM", ...] = (),
 ) -> tuple[tuple[str, str], ...]:
-    """Derive visual items from inclusive period endpoints; store no timeline."""
+    """Derive visual items from each bracket's inclusive endpoints; store no timeline.
+
+    ``brackets`` is outermost first, the order the model keeps them in.  At a
+    gap the posts read inside-out: the ends of brackets closing there
+    (innermost first), then any empty bracket sitting in the gap (its start
+    then its end), then the starts of brackets opening there (outermost
+    first).  An empty bracket at another bracket's boundary gap is therefore
+    drawn beside it, never inside it -- the same rule the model decides
+    nesting by, so the picture and the loops agree.
+    """
+
+    bounds = tuple(
+        bracket_gap_bounds(period_ids, bracket.start_period_id, bracket.end_period_id)
+        for bracket in brackets
+    )
     items = []
-    first = len(period_ids) if start is None else period_ids.index(start)
-    stop = 0 if end is None else period_ids.index(end) + 1
-    bracket = start is not None or end is not None
-    for index in range(len(period_ids) + 1):
-        if bracket and index == first:
-            items.append(("bracket", "start"))
-        if bracket and index == stop:
-            items.append(("bracket", "end"))
-        if index < len(period_ids):
-            items.append(("period", period_ids[index]))
+    for gap in range(len(period_ids) + 1):
+        for bracket, (first, stop) in reversed(tuple(zip(brackets, bounds))):
+            if stop == gap and first < stop:
+                items.append(("bracket", bracket_post_key(bracket.bracket_id, "end")))
+        for bracket, (first, stop) in zip(brackets, bounds):
+            if first == stop == gap:
+                items.append(("bracket", bracket_post_key(bracket.bracket_id, "start")))
+                items.append(("bracket", bracket_post_key(bracket.bracket_id, "end")))
+        for bracket, (first, stop) in zip(brackets, bounds):
+            if first == gap and first < stop:
+                items.append(("bracket", bracket_post_key(bracket.bracket_id, "start")))
+        if gap < len(period_ids):
+            items.append(("period", period_ids[gap]))
     return tuple(items)
 
 
@@ -93,6 +132,7 @@ class PeriodVM:
 
 @dataclass(frozen=True)
 class BracketVM:
+    bracket_id: str
     start_period_id: str | None
     end_period_id: str | None
     count: int
@@ -186,7 +226,8 @@ class ScheduleVM:
     ports: tuple[PortRowVM, ...]
     periods: tuple[PeriodVM, ...]
     analog_mode_choices: tuple[FormChoice, ...] = ()
-    bracket: BracketVM | None = None
+    #: Outermost first, as the model keeps them.
+    brackets: tuple[BracketVM, ...] = ()
     run_repeats: int = 0
     delay_rows: tuple[DelayRowVM, ...] = ()
     scan_summary_text: str = ""
@@ -196,9 +237,7 @@ class ScheduleVM:
     @property
     def item_order(self) -> tuple[tuple[str, str], ...]:
         return schedule_item_order(
-            tuple(period.period_id for period in self.periods),
-            None if self.bracket is None else self.bracket.start_period_id,
-            None if self.bracket is None else self.bracket.end_period_id,
+            tuple(period.period_id for period in self.periods), self.brackets,
         )
 
     def __post_init__(self) -> None:
@@ -281,6 +320,8 @@ __all__ = [
     "BracketVM",
     "ScanPageRecord",
     "ScheduleVM",
+    "bracket_gap_bounds",
+    "bracket_post_key",
     "schedule_item_order",
     "TargetPortRecord",
     "TargetWidthRule",

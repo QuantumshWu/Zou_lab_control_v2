@@ -409,21 +409,18 @@ class SeamlessScanMeasurement:
         shots = self.shots_per_point
         if columns:
             slot_rows = self._slot_ordered_rows(inner_rows, columns)
-            effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
+            effective_slot_rows, wire = prepare_scan_application(
                 streamed, slot_rows, params=board.geometry,
             )
             effective_inner = self._plan_ordered_rows(effective_slot_rows, columns)
         else:
             # One fixed Pulse per host point. No columns go on the wire: an
             # unslotted program uses ordinary Run repeats, not a dummy table.
-            effective_inner, slot_tick_scales, wire = inner_rows, (), ()
+            effective_inner, wire = inner_rows, ()
         # Prepare once from the authored fields; the device applies saved
         # Config values at LOAD/Fire and supplies the initial execution record.
         streamed, program = self.sequencer.compile_pulse(
-            streamed,
-            board.geometry,
-            board.clock_hz,
-            slot_tick_scales=slot_tick_scales,
+            streamed, board.geometry, board.clock_hz,
         )
         outer_rows = tuple(
             itertools.product(*(axis.values for axis in self.outer_axes))
@@ -448,11 +445,7 @@ class SeamlessScanMeasurement:
                 (*self.outer_ports, *self.board_ports),
             )
         )
-        run_record = self.run_record(
-            effective_rows=effective_rows,
-            slot_tick_scales=slot_tick_scales,
-            board=board,
-        )
+        run_record = self.run_record(effective_rows=effective_rows, board=board)
         self._last_run_record = dict(run_record)
         writer = ScanDatasetWriter(
             effective_rows,
@@ -552,7 +545,6 @@ class SeamlessScanMeasurement:
         self,
         *,
         effective_rows: Sequence[Sequence[float]],
-        slot_tick_scales: Sequence[int],
         board: object,
     ) -> dict[str, object]:
         """The plan and initial device facts, completed after the first Fire."""
@@ -619,7 +611,6 @@ class SeamlessScanMeasurement:
             "scan_repeats": self.repeats,
             "run_repeats": self.shots_per_point,
             "acquisition_logic": self.acquisition_logic or None,
-            "slot_tick_scales": list(slot_tick_scales),
         }
 
     @property

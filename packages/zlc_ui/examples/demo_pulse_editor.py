@@ -139,7 +139,7 @@ def fake_schedule() -> ScheduleVM:
             FormChoice("Ramp", "ramp"),
             FormChoice("Hold", "hold"),
         ),
-        bracket=None,
+        brackets=(),
         run_repeats=0,
         delay_rows=(
             DelayRowVM("ch00", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
@@ -249,6 +249,8 @@ def populate(editor) -> None:
         (schedule.binding_committed, "binding_committed"),
         (schedule.reorder_items_requested, "reorder_items_requested"),
         (schedule.bracket_committed, "bracket_committed"),
+        (schedule.bracket_add_requested, "bracket_add_requested"),
+        (schedule.bracket_remove_requested, "bracket_remove_requested"),
         (schedule.run_repeats_committed, "run_repeats_committed"),
         (schedule.visible_ports_committed, "visible_ports_committed"),
         (scan.scan_hold_requested, "scan_hold_requested"),

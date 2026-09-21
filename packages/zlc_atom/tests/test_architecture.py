@@ -152,10 +152,8 @@ class _RecordingSequencer:
     def config_values(self) -> dict:
         return self.sequencer.config_values()
 
-    def compile_pulse(self, sequence, geom, clock_hz, *, slot_tick_scales=None):
-        return self.sequencer.compile_pulse(
-            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
-        )
+    def compile_pulse(self, sequence, geom, clock_hz):
+        return self.sequencer.compile_pulse(sequence, geom, clock_hz)
 
     @property
     def config_source(self) -> str:

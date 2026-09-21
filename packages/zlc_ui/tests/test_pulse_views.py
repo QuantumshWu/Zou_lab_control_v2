@@ -622,14 +622,14 @@ view.set_schedule(ScheduleVM(
     delay_rows=tuple(
         DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
     ),
-    bracket=BracketVM('p0', 'p0', 4),
+    brackets=(BracketVM('b', 'p0', 'p0', 4),),
 ))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}
 strip = view.drag_container
 timeline = strip.items()
 posts = strip._posts
-strip.show_selection(post='end')
+strip.show_selection(post='b:end')
 layout_moves = []
 original_take = strip.layout_main.takeAt
 strip.layout_main.takeAt = lambda index: (layout_moves.append(index), original_take(index))[1]
@@ -640,7 +640,7 @@ assert retired_delay.isHidden(), "retired rows must disappear before deferred de
 app.processEvents()
 assert strip.items() == timeline and strip._posts == posts
 assert not layout_moves, 'hiding a port detached the unchanged timeline'
-assert strip.selection() == (None, 'end', None)
+assert strip.selection() == (None, 'b:end', None)
 assert set(view.channel_panel._rows) == {"d0", "d2"}, "a hidden port keeps no delay row"
 assert set(view._cards["p0"].port_rows) == {"d0", "d2"}, "and the card agrees"
 
@@ -695,8 +695,8 @@ from zlc_ui.pulse._layout import panel_top_height
 """ + _schedule_source() + r'''
 app = ensure_qt_app(["repeat-art"])
 
-start = BracketPost("start", minimum=2)
-end = BracketPost("end", count=4, minimum=2)
+start = BracketPost("b", "start", minimum=2)
+end = BracketPost("b", "end", count=4, minimum=2)
 for post in (start, end):
     assert post.title() == "", "an untitled column, like the cards it frames"
     assert post.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
@@ -717,7 +717,7 @@ assert end.count_spin.text() == "4"
 
 # In the strip, the posts stand beside cards of the same build.
 view = PulseScheduleView(); view.set_schedule(vm); view.show(); app.processEvents()
-view.bracket_committed.emit("p1", "p2", 3)
+view.bracket_committed.emit("b", "p1", "p2", 3)
 
 # One physical period has a non-zero span and may be repeated.  The model and
 # compiler accept start == end; the button must not invent a two-card rule.
@@ -731,7 +731,7 @@ one = replace(
 assert view.set_schedule(one)
 requested = []
 feedback = []
-view.bracket_committed.connect(lambda *payload: requested.append(payload))
+view.bracket_add_requested.connect(lambda *payload: requested.append(payload))
 view.feedback_requested.connect(feedback.append)
 view.bracket_button.click()
 assert requested == [("p1", "p1", one.default_bracket_count)]
@@ -762,7 +762,7 @@ view = PulseScheduleView()
 bracketed = replace(
     vm,
     revision=3,
-    bracket=BracketVM("p1", "p1", 4),
+    brackets=(BracketVM("b", "p1", "p1", 4),),
     run_repeats=(1 << 32) - 1,
 )
 assert view.set_schedule(bracketed)
@@ -814,13 +814,13 @@ schedule_module.QtGui.QDrag = real_drag
 assert len(started) == 1
 import json
 assert started[0].data.hasFormat(strip.ITEM_MIME)
-assert json.loads(bytes(started[0].data.data(strip.ITEM_MIME))) == ["bracket", "start"]
+assert json.loads(bytes(started[0].data.data(strip.ITEM_MIME))) == ["bracket", "b:start"]
 
 orders = []
 view.reorder_items_requested.connect(orders.append)
 def drop(kind, x):
     data = QtCore.QMimeData()
-    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("bracket", kind)).encode("utf-8")))
+    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("bracket", f"b:{kind}")).encode("utf-8")))
     event = QtGui.QDropEvent(
         QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
         QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
@@ -830,23 +830,23 @@ def drop(kind, x):
 
 cards = strip.pulse_cards()
 assert drop("end", strip.items()[-1].geometry().right() + 40)
-assert orders == [(("bracket", "start"), ("period", "p1"), ("period", "p2"), ("bracket", "end"))]
+assert orders == [(("bracket", "b:start"), ("period", "p1"), ("period", "p2"), ("bracket", "b:end"))]
 assert bracket_requests == [], "drag proposes item order, not a second endpoint update"
-assert view._schedule.bracket == bracketed.bracket, "a drop is proposal-only"
+assert view._schedule.brackets == bracketed.brackets, "a drop is proposal-only"
 
 # Re-project the accepted span, then move its left post to the first gap.
 orders.clear()
 right_only = replace(
     bracketed,
     revision=4,
-    bracket=BracketVM("p2", "p2", 4),
+    brackets=(BracketVM("b", "p2", "p2", 4),),
 )
 assert view.set_schedule(right_only)
 app.processEvents()
 cards = strip.pulse_cards()
 assert drop("start", strip.items()[0].geometry().left())
-assert orders == [(("bracket", "start"), ("period", "p1"), ("period", "p2"), ("bracket", "end"))]
-assert view._schedule.bracket == right_only.bracket
+assert orders == [(("bracket", "b:start"), ("period", "p1"), ("period", "p2"), ("bracket", "b:end"))]
+assert view._schedule.brackets == right_only.brackets
 
 # A post cannot cross its partner; an illegal gap commits nothing.
 orders.clear()
@@ -854,13 +854,13 @@ assert not drop("start", strip.items()[-1].geometry().right() + 40)
 assert orders == [] and bracket_requests == []
 end_post = next(post for post in strip._posts if post.kind == 'end')
 end_post.count_spin.setValue(7)
-assert bracket_requests == [('p2', 'p2', 7)], 'retained post used stale bracket anchors'
-empty = replace(right_only, revision=5, bracket=BracketVM('p2', 'p1', 7))
+assert bracket_requests == [('b', 'p2', 'p2', 7)], 'retained post used stale bracket anchors'
+empty = replace(right_only, revision=5, brackets=(BracketVM('b', 'p2', 'p1', 7),))
 assert view.set_schedule(empty)
 app.processEvents()
 assert end_post in strip._posts and start_post in strip._posts
 keys = tuple(strip._item_key(item) for item in strip.items())
-assert keys.index(('bracket', 'end')) == keys.index(('bracket', 'start')) + 1
+assert keys.index(('bracket', 'b:end')) == keys.index(('bracket', 'b:start')) + 1
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
@@ -1145,7 +1145,7 @@ from zlc_ui.pulse import BracketVM, PulseScheduleView
 """ + _schedule_source() + r'''
 app = ensure_qt_app(["drag-symmetry"])
 view = PulseScheduleView()
-assert view.set_schedule(replace(vm, revision=3, bracket=BracketVM("p1", "p1", 4)))
+assert view.set_schedule(replace(vm, revision=3, brackets=(BracketVM("b", "p1", "p1", 4),)))
 view.show(); app.processEvents()
 strip = view.drag_container
 cards = strip.pulse_cards()
@@ -1166,7 +1166,7 @@ on_itself = cards[0].geometry().center().x()
 elsewhere = cards[-1].geometry().right() + 40
 
 card = ("period", "p1")
-post = ("bracket", "end")
+post = ("bracket", "b:end")
 
 # A move that would change nothing is refused WHILE dragging, not after.
 assert hover(card, on_itself) == (False, False)
@@ -1195,9 +1195,9 @@ def drop(key, x):
 assert drop(card, on_itself) is False and moves == []
 assert drop(post, end_post.geometry().center().x()) is False and moves == []
 assert drop(card, elsewhere) is True
-assert moves == [(("bracket", "start"), ("bracket", "end"), ("period", "p2"), card)]
+assert moves == [(("bracket", "b:start"), ("bracket", "b:end"), ("period", "p2"), card)]
 assert drop(post, elsewhere) is True
-assert moves[-1] == (("bracket", "start"), card, ("period", "p2"), post)
+assert moves[-1] == (("bracket", "b:start"), card, ("period", "p2"), post)
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -1226,7 +1226,7 @@ from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
 """ + _schedule_source() + r'''
 app = ensure_qt_app(["click-symmetry"])
 view = PulseScheduleView()
-assert view.set_schedule(replace(vm, revision=3, bracket=BracketVM("p1", "p2", 4)))
+assert view.set_schedule(replace(vm, revision=3, brackets=(BracketVM("b", "p1", "p2", 4),)))
 view.show(); app.processEvents()
 strip = view.drag_container
 cards = strip.pulse_cards()
@@ -1254,7 +1254,7 @@ assert outlined() == {"p1"}, outlined()
 # Clicking a post marks the post -- and takes the mark off the card, because
 # at most one thing is what the next edit acts on.
 click(posts["end"])
-assert strip.selection() == (None, "end", None), strip.selection()
+assert strip.selection() == (None, "b:end", None), strip.selection()
 assert outlined() == {"post:end"}, outlined()
 
 # Clicking the marked one again clears it, exactly as a card does.

@@ -88,6 +88,8 @@ class _ScheduleView:
         "reorder_items_requested",
         "remove_period_requested",
         "bracket_committed",
+        "bracket_add_requested",
+        "bracket_remove_requested",
         "run_repeats_committed",
         "visible_ports_committed",
         "fill_port_requested",
@@ -356,6 +358,7 @@ class _EditorView:
         "analog_committed", "delay_committed", "binding_committed",
         "insert_period_requested", "reorder_items_requested",
         "remove_period_requested", "bracket_committed",
+        "bracket_add_requested", "bracket_remove_requested",
         "run_repeats_committed",
         "visible_ports_committed", "fill_port_requested", "clear_port_requested",
         "feedback_requested", "connection_requested", "device_label_changed", "fire_requested",
@@ -723,22 +726,22 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
     # The posts, not the endpoint cards, decide bracket membership. Four
     # visually distinct boundary gaps must remain distinguishable at Add.
     from zlc_pulse import PulseBracket
-    from zlc_ui.pulse.models import schedule_item_order
+    from zlc_ui.pulse.models import BracketVM, schedule_item_order
 
     ids = tuple(period.period_id for period in after)
-    presenter.set_bracket(ids[1], ids[2], 3)
+    presenter.add_bracket(ids[1], ids[2], 3)
     baseline = presenter.sequence
-    order = schedule_item_order(ids, ids[1], ids[2])
+    order = schedule_item_order(ids, (BracketVM("bracket1", ids[1], ids[2], 3),))
     assert presenter.view.schedule_view.schedule.item_order == order
     for before_item, included in (
-        (("bracket", "start"), False), (("period", ids[1]), True),
-        (("bracket", "end"), True), (("period", ids[3]), False),
+        (("bracket", "bracket1:start"), False), (("period", ids[1]), True),
+        (("bracket", "bracket1:end"), True), (("period", ids[3]), False),
     ):
         presenter._apply(baseline)
         presenter.insert_period(before_item)
         current = [period.period_id for period in presenter.sequence.periods]
         added = next(key for key in current if key not in ids)
-        bracket = presenter.sequence.bracket
+        bracket, = presenter.sequence.brackets
         members = current[current.index(bracket.start_period_id):current.index(bracket.end_period_id) + 1]
         assert (added in members) is included
         assert bracket.count == 3
@@ -756,18 +759,19 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
         presenter.view.reorder_items_requested.emit(tuple(changed))
         assert tuple(period.period_id for period in presenter.sequence.periods) == tuple(
             key for kind, key in changed if kind == "period")
-        assert presenter.sequence.bracket == PulseBracket(remaining, remaining, 3)
+        assert presenter.sequence.brackets == (PulseBracket("bracket1", remaining, remaining, 3),)
         assert presenter.sequence.run_repeats == baseline.run_repeats
 
     presenter._apply(baseline)
     presenter.remove_period(ids[1])
-    assert presenter.sequence.bracket == PulseBracket(ids[2], ids[2], 3)
+    assert presenter.sequence.brackets == (PulseBracket("bracket1", ids[2], ids[2], 3),)
     presenter.remove_period(ids[2])
-    assert presenter.sequence.bracket == PulseBracket(ids[3], ids[0], 3)
-    assert presenter.sequence.bracket_bounds == (1, 1)
-    presenter.insert_period(("bracket", "end"))
-    presenter.sequence.require_nonempty_bracket()
-    assert presenter.sequence.bracket.start_period_id == presenter.sequence.bracket.end_period_id
+    assert presenter.sequence.brackets == (PulseBracket("bracket1", ids[3], ids[0], 3),)
+    assert presenter.sequence.bracket_bounds == ((1, 1),)
+    presenter.insert_period(("bracket", "bracket1:end"))
+    presenter.sequence.require_nonempty_brackets()
+    bracket, = presenter.sequence.brackets
+    assert bracket.start_period_id == bracket.end_period_id
     assert not presenter.view.warnings
     with pytest.raises(TypeError, match="schedule item tuple"):
         presenter.insert_period(ids[0])
@@ -859,7 +863,7 @@ def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
     assert all(value == 0 for value in blank.periods[0].states)
     assert blank.periods[0].analog_steps == ()
     assert blank.scan_bindings == blank.api_bindings == blank.delays == ()
-    assert blank.bracket is None
+    assert blank.brackets == ()
     assert presenter._state.scan_source == ""
     assert presenter._state.scan_rows == ()
     assert presenter._state.scan_source_dirty is False
@@ -918,7 +922,7 @@ def test_a_timeline_can_be_drawn_for_a_pulse_with_nothing_high(sequence) -> None
             for period in sequence.periods
         ),
         bindings=(),
-        bracket=None,
+        brackets=(),
     )
     data = timeline_of(quiet)
     assert data.channels and not data.blocks
@@ -1480,7 +1484,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
     described = _board_description()
     exact = replace(
         described,
-        geometry=replace(described.geometry, coeff_frac_bits=3),
+        geometry=replace(described.geometry, max_rows=256),
     )
     board = _Watched(description=exact)
     from zlc_workbench.device_use import DeviceUseCoordinator
@@ -1509,7 +1513,7 @@ def test_an_injected_sequencer_is_not_closed_by_the_editor(sequence) -> None:
     with pytest.raises(RuntimeError, match="experiment session owns"):
         presenter.connect_to("given", "")
     presenter.set_binding('duration', sequence.periods[0].period_id, None, True, 'default')
-    assert presenter.compile()[1].scan_coeff_frac_bits == 3
+    assert presenter.compile()[1].geometry_fingerprint == exact.layout_fingerprint
     assert presenter.fire() is True
     presenter.close()
     assert board.closed is False
@@ -2741,19 +2745,17 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     period_id = sequence.periods[3].period_id
     presenter.view.duration_committed.emit(period_id, 1.0, "s")
     presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
-    # The authored duration is long and its span needs a two-tick slot scale.
-    # The board receives signed deltas around the one-second base, while Sync
-    # must report the exact values those deltas play rather than the
-    # unquantized requests.
+    # A whole-second span still fits the row counter at one-tick resolution.
+    # The board receives absolute tick counts, while Sync must report the
+    # exact values those ticks play rather than the unquantized requests.
     _run_scan(
         presenter.view,
         "import numpy as np\n"
-        "scan_table = np.array([0.50000002, 1.0, 1.49999998]).reshape(-1, 1)\n"
+        "scan_table = np.array([0.500000004, 1.0, 1.499999996]).reshape(-1, 1)\n"
     )
 
     assert presenter.fire() is True
-    assert board._applied.program.slot_tick_scales == (2,)
-    assert uploaded == [((-12_500_000,), (0,), (12_500_000,))]
+    assert uploaded == [((25_000_000,), (50_000_000,), (75_000_000,))]
     assert presenter.sync_from_sequencer() is True
     assert presenter._state.scan_rows == ((0.5,), (1.0,), (1.5,))
 
@@ -3065,12 +3067,12 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_p
         assert vm.min_bracket_count == MINIMUM_BRACKET_COUNT
 
         first, last = vm.periods[0].period_id, vm.periods[-1].period_id
-        presenter.set_bracket(first, last, vm.default_bracket_count)
-        bracket = presenter.sequence.bracket
-        assert bracket is not None and bracket.count == MINIMUM_BRACKET_COUNT
+        presenter.add_bracket(first, last, vm.default_bracket_count)
+        bracket, = presenter.sequence.brackets
+        assert bracket.count == MINIMUM_BRACKET_COUNT
 
-        presenter.set_bracket(None, None, 0)
-        assert presenter.sequence.bracket is None
+        presenter.remove_bracket(bracket.bracket_id)
+        assert presenter.sequence.brackets == ()
     finally:
         presenter.close()
 
@@ -3083,18 +3085,18 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_p
     ids = tuple(period.period_id for period in sequence.periods)
     try:
         for start, end, gap in ((ids[0], None, 0), (ids[1], ids[0], 1), (None, ids[-1], len(ids))):
-            presenter._apply(replace(sequence, bracket=PulseBracket(start, end, 3)))
-            presenter.set_bracket(start, end, 5)  # Count editing cannot delete an edge-empty span.
+            presenter._apply(replace(sequence, brackets=(PulseBracket("b", start, end, 3),)))
+            presenter.set_bracket("b", start, end, 5)  # Count editing cannot delete an edge-empty span.
             current = presenter.sequence
-            assert current.bracket_bounds == (gap, gap) and current.bracket.count == 5
+            assert current.bracket_bounds == ((gap, gap),) and current.brackets[0].count == 5
             with pytest.raises(ValueError, match="bracket loops at least"):
-                presenter.set_bracket(start, end, 1)
+                presenter.set_bracket("b", start, end, 1)
             assert presenter.sequence is current
             order = view.schedule_view.schedule.item_order
-            assert order.index(("bracket", "end")) == order.index(("bracket", "start")) + 1
+            assert order.index(("bracket", "b:end")) == order.index(("bracket", "b:start")) + 1
             assert view.warnings == [], "ordinary empty-bracket editing raised a modal warning"
             with pytest.raises(ValueError) as refusal:
-                current.require_nonempty_bracket()
+                current.require_nonempty_brackets()
             message = str(refusal.value)
             board.events.clear()
             baseline, path = presenter._saved_state, presenter.path
@@ -3105,12 +3107,12 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_p
             assert view.warnings == [message] * 4
             assert board.events == [] and asked == [] and not target.exists()
             assert presenter.sequence is current and presenter._saved_state is baseline and presenter.path == path
-            with pytest.raises(ValueError, match="bracket is empty"):
+            with pytest.raises(ValueError, match="is empty"):
                 timeline_of(current)
             view.warnings.clear()
-            presenter.insert_period(("bracket", "end"))
-            presenter.sequence.require_nonempty_bracket()
-            assert presenter.compile()[1].loop_count == 5
+            presenter.insert_period(("bracket", "b:end"))
+            presenter.sequence.require_nonempty_brackets()
+            assert presenter.compile()[1].loops[0][2] == 5
             assert presenter.sequence.run_repeats == sequence.run_repeats
         assert presenter.save_pulse() == str(target) and target.exists()
     finally:
@@ -3124,7 +3126,7 @@ def test_a_bracket_of_one_is_refused_by_the_model_itself(sequence) -> None:
     from zlc_pulse import PulseBracket
 
     with _pytest.raises(ValueError, match="bracket loops at least"):
-        PulseBracket(sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
+        PulseBracket("b", sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
 
 
 def test_a_timeline_names_its_periods_over_their_spans(sequence) -> None:
@@ -3174,7 +3176,7 @@ def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> 
         ]
 
         # A bracket over everything is still the inner loop; both are shown.
-        presenter.set_bracket(ids[0], ids[-1], 3)
+        presenter.add_bracket(ids[0], ids[-1], 3)
         whole = timeline_of(presenter.sequence)
         assert [marker.label for marker in whole.loop_markers] == [
             "Bracket ×3",
@@ -3183,7 +3185,7 @@ def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> 
         assert all((marker.start, marker.stop) == (0.0, total) for marker in whole.loop_markers)
 
         # A finite Run value changes only its marker, not the bracket.
-        presenter.set_bracket(ids[1], ids[2], 5)
+        presenter.set_bracket("bracket1", ids[1], ids[2], 5)
         presenter.set_run_repeats(7)
         part = timeline_of(presenter.sequence)
         assert [marker.label for marker in part.loop_markers] == [
@@ -3193,6 +3195,15 @@ def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> 
         inner, outer = part.loop_markers
         assert 0.0 < inner.start and inner.stop < total
         assert (outer.start, outer.stop) == (0.0, total)
+
+        # A second bracket inside the first is drawn inside it: innermost first.
+        presenter.add_bracket(ids[2], ids[2], 2)
+        nested = timeline_of(presenter.sequence)
+        assert [marker.label for marker in nested.loop_markers] == [
+            "Bracket ×2", "Bracket ×5", "Run ×7",
+        ]
+        innermost, middle, _outer = nested.loop_markers
+        assert middle.start <= innermost.start and innermost.stop <= middle.stop
     finally:
         presenter.close()
 
@@ -3387,7 +3398,7 @@ def test_new_pulse_replaces_the_whole_editor_state_in_one_candidate(
         assert presenter.path == ""
         assert presenter.sequence.name == "untitled"
         assert presenter.sequence.run_repeats == 0
-        assert presenter.sequence.bracket is None
+        assert presenter.sequence.brackets == ()
         assert presenter._state.scan_source == ""
         assert presenter._state.scan_rows == ()
         assert presenter._state.scan_source_dirty is False
@@ -3413,11 +3424,11 @@ def test_brackets_never_choose_the_outer_execution_count(sequence) -> None:
         assert presenter.sequence.run_repeats == 4
         assert view.schedule_view.schedule.run_repeats == 4
 
-        presenter.set_bracket(ids[0], ids[-1], 3)
+        presenter.add_bracket(ids[0], ids[-1], 3)
         assert presenter.fire() is True
         assert board.events == ["load", "fire"], board.events
         assert (board._run_repeats, board._scan_repeats) == (4, 1)
-        assert presenter.compile()[1].loop_count == 3
+        assert presenter.compile()[1].loops == ((0, len(ids) - 1, 3),)
         assert view.schedule_view.control_state[1] is True
         view.run_repeats_committed.emit(5)
         assert view.schedule_view.control_state[1] is False
@@ -3425,7 +3436,7 @@ def test_brackets_never_choose_the_outer_execution_count(sequence) -> None:
 
         # A bracket over PART has the same outer execution meaning.
         board.events.clear()
-        presenter.set_bracket(ids[1], ids[2], 5)
+        presenter.set_bracket("bracket1", ids[1], ids[2], 5)
         assert presenter.fire() is True
         assert board.events == ["safe", "load", "fire"], board.events
         assert (board._run_repeats, board._scan_repeats) == (4, 1)
@@ -3609,10 +3620,9 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
     _run_scan(
         view,
         "import numpy as np\n"
-        "scan_table = np.array([0.50000002, 1.0, 1.49999998]).reshape(-1, 1)\n"
+        "scan_table = np.array([0.500000004, 1.0, 1.499999996]).reshape(-1, 1)\n"
     )
     assert presenter.fire() is True
-    assert board._applied.program.slot_tick_scales == (2,)
 
     board.events.clear()
     view.scan_hold_requested.emit()

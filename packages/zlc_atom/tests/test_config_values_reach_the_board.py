@@ -91,7 +91,7 @@ def test_the_archive_carries_the_program_and_the_pulse_that_played() -> None:
         played = snapshot["program"]
         assert played["digest"] == program.digest
         assert played["duration_seconds"] == pytest.approx(program.duration_seconds)
-        assert played["loop_count"] == program.loop_count
+        assert played["loops"] == [list(loop) for loop in program.loops]
         assert played["rows"] == [[1, 2], [3, 4]]
         assert (played["run_repeats"], played["scan_repeats"]) == (5, 2)
         document = snapshot["pulse"]

@@ -219,10 +219,8 @@ class ScriptedScanBench:
     def config_values(self) -> dict:
         return self._sequencer.config_values()
 
-    def compile_pulse(self, sequence, geom, clock_hz, *, slot_tick_scales=None):
-        return self._sequencer.compile_pulse(
-            sequence, geom, clock_hz, slot_tick_scales=slot_tick_scales
-        )
+    def compile_pulse(self, sequence, geom, clock_hz):
+        return self._sequencer.compile_pulse(sequence, geom, clock_hz)
 
     @property
     def config_source(self) -> str:
@@ -236,7 +234,7 @@ class ScriptedScanBench:
         rows: object = (),
     ) -> None:
         self.loads += 1
-        self.loaded_loop_counts.append(int(getattr(prog, "loop_count")))
+        self.loaded_loop_counts.append(int(prog.loops[0][2]) if prog.loops else 1)
         self.loaded_sources.append(source)
         self._loaded_program = prog
         normalized = tuple(tuple(row) for row in rows)

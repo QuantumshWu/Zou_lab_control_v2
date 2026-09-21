@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from zlc_pulse.compile import CompiledProgram, evaluate_affine_tick
+from zlc_pulse.compile import CompiledProgram
 from zlc_pulse.schedule import (
     run_duration_seconds,
     trigger_windows_by_channel,
@@ -1054,87 +1054,46 @@ def _dac_values_at_tick(
     table: np.ndarray | None,
     tick: int,
 ) -> dict[str, int]:
-    """Project the compiled DAC buses at one physical playback tick."""
+    """Project the compiled DAC buses at one physical playback tick.
+
+    The board applies a row's action when the row is entered: an edge takes
+    its code on that tick, a ramp climbs from the carried level to its code
+    over the row, ``held + floor(k * delta / span)`` on the k-th tick.
+    """
 
     point = () if table is None else tuple(int(value) for value in table.reshape(-1))
     delays = {
         int(item.bus_index): int(item.delay_ticks)
         for item in program.bus_delays
     }
+    durations = program.resolved_durations(point)
+    visits = program.frame_visits(point)
+    actions: dict[int, dict[int, object]] = {}
+    for action in program.bus_actions:
+        actions.setdefault(int(action.row), {})[int(action.bus_index)] = action
     values: dict[str, int] = {}
     for bus_index, bus_name in enumerate(program.bus_names):
         safe = int(program.bus_safe_values[bus_index])
         phase = int(tick) - delays.get(bus_index, 0)
         code = safe
         if phase >= 0:
-            segments = [
-                segment
-                for segment in program.bus_segments
-                if int(segment.bus_index) == bus_index
-            ]
-
-            def effective(base: int, coefficients: tuple[int, ...]) -> int:
-                return evaluate_affine_tick(
-                    int(base),
-                    coefficients,
-                    point,
-                    program.scan_coeff_frac_bits,
-                )
-
-            def endpoint(selector: int, literal: int) -> int:
-                return int(point[selector - 1]) if selector else int(literal)
-
-            segments.sort(
-                key=lambda segment: effective(
-                    segment.start_tick,
-                    segment.start_tick_coeffs,
-                )
-            )
-            chosen = None
-            ramp_start = safe
-            for segment in segments:
-                start = effective(
-                    segment.start_tick,
-                    segment.start_tick_coeffs,
-                )
-                if start < phase or start == 0:
-                    if chosen is not None:
-                        selector = int(chosen.stop_value_select)
-                        ramp_start = endpoint(selector, chosen.stop_value)
-                    chosen = segment
-                else:
+            held = safe
+            for row, start in visits:
+                if start > phase:
                     break
-            if chosen is not None:
-                start = effective(
-                    chosen.start_tick,
-                    chosen.start_tick_coeffs,
-                )
-                stop = effective(
-                    chosen.stop_tick,
-                    chosen.stop_tick_coeffs,
-                )
-                selector = int(chosen.stop_value_select)
-                target = endpoint(selector, chosen.stop_value)
-                start_selector = int(chosen.value_select)
-                if start_selector:
-                    ramp_start = endpoint(start_selector, chosen.start_value)
-                if chosen.mode == "ramp" and stop > start:
-                    if phase <= start:
-                        code = ramp_start
-                    elif phase > stop:
-                        code = target
-                    else:
-                        span = stop - start
-                        distance = abs(target - ramp_start)
-                        elapsed = (phase - 1) - start
-                        moved = elapsed * distance // span
-                        code = (
-                            ramp_start + moved
-                            if target >= ramp_start
-                            else ramp_start - moved
-                        )
+                action = actions.get(row, {}).get(bus_index)
+                if action is None:
+                    continue
+                target = program.resolved_bus_value(action, point)
+                span = int(durations[row])
+                elapsed = phase - start
+                if action.mode == "ramp" and span > 0 and elapsed < span:
+                    distance = abs(target - held)
+                    moved = elapsed * distance // span
+                    code = held + moved if target >= held else held - moved
                 else:
                     code = target
+                held = target
         values[bus_name] = code - safe
     return values
 
@@ -1145,10 +1104,15 @@ def _final_dac_values(
 ) -> dict[str, int]:
     point = () if table is None else tuple(int(value) for value in table.reshape(-1))
     values = {name: 0 for name in program.bus_names}
-    for segment in program.bus_segments:
-        selector = segment.stop_value_select or segment.value_select
-        code = point[selector - 1] if selector else segment.stop_value
-        values[segment.bus_name] = int(code) - int(program.bus_safe_values[segment.bus_index])
+    latest: dict[int, object] = {}
+    for action in program.bus_actions:
+        latest[int(action.bus_index)] = max(
+            (latest.get(int(action.bus_index)), action),
+            key=lambda item: -1 if item is None else int(item.row),
+        )
+    for bus_index, action in latest.items():
+        code = program.resolved_bus_value(action, point)
+        values[action.bus_name] = int(code) - int(program.bus_safe_values[bus_index])
     return values
 
 
