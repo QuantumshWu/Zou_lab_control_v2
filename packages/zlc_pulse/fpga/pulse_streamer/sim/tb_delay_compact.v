@@ -4,31 +4,34 @@
 // Channel ch gets ch ticks of delay: zero/one-tick bypasses and all six new pins,
 // including bit 24, must preserve every edge across repeated frames.
 module tb_delay_compact;
-  localparam integer CH=`ZLC_NUM_DELAY_CH, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
-  localparam integer NE=8;
+  localparam integer CH=`ZLC_NUM_DELAY_CH, RAW=`ZLC_ROW_ADDR_WIDTH, TW=32, NS=1;
+  localparam integer SSW=`ZLC_SLOT_SEL_WIDTH, BUSC=`ZLC_BUS_COUNT, BW=`ZLC_BUS_WIDTH;
+  localparam integer ML=`ZLC_MAX_LOOPS, LIW=`ZLC_LOOP_INDEX_WIDTH, DTW=32;
+  localparam integer ABITS=2+SSW+BW, RBITS=TW+SSW+CH+BUSC*ABITS;
+  localparam integer NE=7;
   localparam integer NT=6000;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
-  reg [TW-1:0] etick [0:NE-1]; reg [CH-1:0] emask [0:NE-1];
-  initial begin
-    etick[0]=0;    emask[0]={CH{1'b1}};   // all on
-    etick[1]=5;    emask[1]=0;
-    etick[2]=6;    emask[2]={CH{1'b1}};   // 1-tick later back on (stress)
-    etick[3]=7;    emask[3]=0;
-    etick[4]=100;  emask[4]={CH{1'b1}};
-    etick[5]=160;  emask[5]=0;
-    etick[6]=2000; emask[6]={CH{1'b1}};
-    etick[7]=2400; emask[7]=0;   // frame ends at 2400
-  end
+  function [RBITS-1:0] row_of;
+    input [TW-1:0] dur; input [CH-1:0] mask;
+    begin row_of = {{(BUSC*ABITS){1'b0}}, mask, {SSW{1'b0}}, dur}; end
+  endfunction
 
-  wire [EAW-1:0] edge_raddr;
-  reg [TW-1:0] tp[0:2]; reg [CH-1:0] mp[0:2];
-  always @(posedge clk) begin
-    tp[0]<=etick[edge_raddr[2:0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
-    mp[0]<=emask[edge_raddr[2:0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
+  reg [RBITS-1:0] rowmem [0:7];
+  initial begin
+    rowmem[0]=row_of(32'd5,    {CH{1'b1}});   // all on
+    rowmem[1]=row_of(32'd1,    {CH{1'b0}});
+    rowmem[2]=row_of(32'd1,    {CH{1'b1}});   // 1-tick pulse (stress)
+    rowmem[3]=row_of(32'd93,   {CH{1'b0}});
+    rowmem[4]=row_of(32'd60,   {CH{1'b1}});
+    rowmem[5]=row_of(32'd1840, {CH{1'b0}});
+    rowmem[6]=row_of(32'd400,  {CH{1'b1}});   // frame ends at 2400
+    rowmem[7]=0;
   end
-  wire [TW-1:0] edge_tick_rdata = tp[2];
-  wire [CH-1:0] edge_mask_rdata = mp[2];
+  wire [RAW-1:0] row_raddr;
+  reg [RBITS-1:0] rp[0:2];
+  always @(posedge clk) begin rp[0]<=rowmem[row_raddr[2:0]]; rp[1]<=rp[0]; rp[2]<=rp[1]; end
+  wire [RBITS-1:0] row_rdata = rp[2];
 
   localparam integer TDW = 32;
   wire [CH*TDW-1:0] delay_ticks_w;
@@ -37,30 +40,23 @@ module tb_delay_compact;
     assign delay_ticks_w[ch*TDW +: TDW] = ch;
   end endgenerate
 
-  wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
+  wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
-  zlc_edge_streamer #(
-    .CHANNEL_COUNT(CH), .NUM_SLOTS(NS)
-  ) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.run_repeat_count(32'd0),
-    .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd2400),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
-    .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
-    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
+  zlc_period_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
+    .clk(clk),.reset(reset),.start(start),.prog_count(NE[RAW:0]),.run_repeat_count(32'd0),
+    .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
+    .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
+    .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),
+    .row_raddr(row_raddr),.row_rdata(row_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),
     .bank_ready(2'b11),.bank_chunk0(32'd0),.bank_chunk1(32'd0),
     .scan_cursor(scan_cursor),.underflow(underflow),
-    .bus_prog_we(1'b0),.bus_prog_bus(2'd0),.bus_prog_addr(6'd0),.bus_prog_start_tick(32'd0),
-    .bus_prog_stop_tick(32'd0),.bus_prog_start_tick_coeffs({NS*CW{1'b0}}),
-    .bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),.bus_prog_start_value(10'd0),
-    .bus_prog_stop_value(10'd0),.bus_prog_mode(2'd0),.bus_prog_value_select(3'd0),
-    .bus_prog_stop_value_select(3'd0),.bus_counts({BUSC*7{1'b0}}),
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks(delay_ticks_w),
     .out(out),.bus_out(bus_out),.running(running),.done(done));
 
   initial begin
     reset=1; start=0;
-    repeat (140) @(posedge clk);         // complete at least two 12-step ARM passes
+    repeat (200) @(posedge clk);         // complete at least two arm flush/refill passes
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
 

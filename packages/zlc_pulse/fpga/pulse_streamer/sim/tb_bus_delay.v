@@ -1,24 +1,31 @@
 `timescale 1ns/1ps
-// PER-BUS segment-scheduler DAC delay on the REAL engine.  Program one
-// HOLD segment (value 1023) on buses 0..2 so each undelayed bus value steps SAFE(512)->1023 at
+// PER-BUS action-scheduler DAC delay on the REAL engine.  One row of 2400 ticks
+// carries an EDGE to 1023 on buses 0..2, so each undelayed bus value steps SAFE(512)->1023 at
 // FIRE, with per-bus delays d0=5, d1=0 (passthrough), d2=1 (the register path).  ORACLE: record
 // the engine's UNDELAYED dut.bus_value_active[b] every cycle and assert the delayed pin output
 // bus_out[b] == value[t-d_b], holding the SAFE mid-code (512) before t == d_b.
 module tb_bus_delay;
-  localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, BUSC=4, BW=10, TDW=32;
+  localparam integer CH=8, RAW=`ZLC_ROW_ADDR_WIDTH, TW=32, NS=1, SSW=`ZLC_SLOT_SEL_WIDTH;
+  localparam integer BUSC=4, BW=10, ML=`ZLC_MAX_LOOPS, LIW=`ZLC_LOOP_INDEX_WIDTH, TDW=32;
+  localparam integer ABITS=2+SSW+BW, RBITS=TW+SSW+CH+BUSC*ABITS;
   localparam integer NT=3000;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
-  reg [TW-1:0] etick [0:1]; reg [CH-1:0] emask [0:1];
-  initial begin etick[0]=0; emask[0]=8'h00; etick[1]=2400; emask[1]=8'h00; end
-  wire [EAW-1:0] edge_raddr;
-  reg [TW-1:0] tp[0:2]; reg [CH-1:0] mp[0:2];
-  always @(posedge clk) begin
-    tp[0]<=etick[edge_raddr[0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
-    mp[0]<=emask[edge_raddr[0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
+  function [ABITS-1:0] act;
+    input [1:0] mode; input [SSW-1:0] sel; input [BW-1:0] v;
+    begin act = {mode, sel, v}; end
+  endfunction
+
+  reg [RBITS-1:0] rowmem [0:1];
+  initial begin
+    rowmem[0] = {act(2'd0, 0, 0), act(2'd1, 0, 10'd1023), act(2'd1, 0, 10'd1023), act(2'd1, 0, 10'd1023),
+                 8'h00, {SSW{1'b0}}, 32'd2400};
+    rowmem[1] = 0;
   end
-  wire [TW-1:0] edge_tick_rdata = tp[2];
-  wire [CH-1:0] edge_mask_rdata = mp[2];
+  wire [RAW-1:0] row_raddr;
+  reg [RBITS-1:0] rp[0:2];
+  always @(posedge clk) begin rp[0]<=rowmem[row_raddr[0]]; rp[1]<=rp[0]; rp[2]<=rp[1]; end
+  wire [RBITS-1:0] row_rdata = rp[2];
 
   // per-bus delays (32b): bus0=5, bus1=0, bus2=1, bus3=0
   wire [BUSC*TDW-1:0] bus_delay_ticks_w;
@@ -27,52 +34,23 @@ module tb_bus_delay;
   assign bus_delay_ticks_w[2*TDW +: TDW] = 32'd1;
   assign bus_delay_ticks_w[3*TDW +: TDW] = 32'd0;
 
-  // bus segment program inputs (driven during the reset hold, the load phase)
-  reg                bus_prog_we = 1'b0;
-  reg [1:0]          bus_prog_bus = 2'd0;
-  reg [5:0]          bus_prog_addr = 6'd0;
-  reg [TW-1:0]       bus_prog_start_tick = 32'd0, bus_prog_stop_tick = 32'd0;
-  reg [BW-1:0]       bus_prog_start_value = 10'd0, bus_prog_stop_value = 10'd0;
-  reg [1:0]          bus_prog_mode = 2'd0;
-  reg [BUSC*7-1:0]   bus_counts = {BUSC*7{1'b0}};
-
-  wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
+  wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
-  zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd2),.run_repeat_count(32'd0),
-    .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd2400),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
-    .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
-    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
+  zlc_period_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW)) dut (
+    .clk(clk),.reset(reset),.start(start),.prog_count(1),.run_repeat_count(32'd0),
+    .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
+    .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
+    .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),
+    .row_raddr(row_raddr),.row_rdata(row_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),
     .bank_ready(2'b11),.bank_chunk0(32'd0),.bank_chunk1(32'd0),
     .scan_cursor(scan_cursor),.underflow(underflow),
-    .bus_prog_we(bus_prog_we),.bus_prog_bus(bus_prog_bus),.bus_prog_addr(bus_prog_addr),
-    .bus_prog_start_tick(bus_prog_start_tick),.bus_prog_stop_tick(bus_prog_stop_tick),
-    .bus_prog_start_tick_coeffs({NS*CW{1'b0}}),.bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),
-    .bus_prog_start_value(bus_prog_start_value),.bus_prog_stop_value(bus_prog_stop_value),
-    .bus_prog_mode(bus_prog_mode),.bus_prog_value_select(3'd0),.bus_prog_stop_value_select(3'd0),
-    .bus_counts(bus_counts),
     .bus_delay_ticks(bus_delay_ticks_w),.delay_ticks({CH*TDW{1'b0}}),
     .out(out),.bus_out(bus_out),.running(running),.done(done));
 
-  task prog_seg(input [1:0] b);   // one HOLD segment, value 1023, whole frame
-    begin
-      @(posedge clk);
-      bus_prog_bus=b; bus_prog_addr=6'd0; bus_prog_start_tick=32'd0; bus_prog_stop_tick=32'd2400;
-      bus_prog_start_value=10'd1023; bus_prog_stop_value=10'd1023; bus_prog_mode=2'd0;
-      bus_prog_we = ~bus_prog_we;   // edge -> latch
-      @(posedge clk); @(posedge clk);
-    end
-  endtask
-
-  integer bi;
   initial begin
     reset=1; start=0;
-    repeat (20) @(posedge clk);          // let reset_sync settle high
-    prog_seg(2'd0); prog_seg(2'd1); prog_seg(2'd2);
-    for (bi=0; bi<3; bi=bi+1) bus_counts[bi*7 +: 7] = 7'd1;   // 1 segment each
-    repeat (140) @(posedge clk);         // complete at least two 12-step ARM passes
+    repeat (200) @(posedge clk);         // complete at least two arm flush/refill passes
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
 
@@ -102,6 +80,7 @@ module tb_bus_delay;
   initial begin
     wait(reset==1); wait(reset==0);
     repeat (NT) @(posedge clk);
+    if (hist0[100] !== 10'd1023) $fatal(1, "the undelayed bus never stepped to 1023");
     $display("==== bus delay: %0d cycles checked, %0d mismatches ====", t, errs);
     $display("%s", (errs==0 && t > 1000) ? "BUS-DELAY-OK" : "**FAIL**");
     $finish;

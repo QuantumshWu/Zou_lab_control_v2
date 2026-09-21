@@ -1,30 +1,29 @@
 `timescale 1ns / 1ps
 // SINGLE GEOMETRY SOURCE: every parameter default below comes from zlc_geometry.vh, which is
-// AUTO-GENERATED from fpga/board_config/streamer_config.json by image.emit_geometry_vh during a
+// AUTO-GENERATED from fpga/board_config/streamer_config.json by wire.emit_geometry_vh during a
 // separately approved recovery build.  Normal experiment startup never regenerates or programs
 // hardware; no .v carries a hand-typed geometry literal or LAYOUT_FINGERPRINT.
 `include "zlc_geometry.vh"
 // =============================================================================
-// zlc_pulse_streamer_top -- FINAL board top for the affine edge-table streamer.
+// zlc_pulse_streamer_top -- FINAL board top for the period-table streamer.
 //
-// One clean design (no variants).  JTAG-to-AXI control; edge + scan tables in
-// BLOCK RAM, bus tables in LUTRAM inside the engine.  Reaches 4096 edges + 4096
-// bank-local scan slots at one time.  The host preloads two chunks and its sole
+// One clean design (no variants).  JTAG-to-AXI control; the period-table rows
+// and the scan window live in BLOCK RAM, the loop table and the per-signal
+// delays in registers.  The host preloads two scan chunks and its sole
 // observer refills released banks through the frozen mailbox while this FPGA
 // remains the owner of every scan-point transition.
 //
 // Control path (all behind ONE proven axi_bram_ctrl, so AXI handshakes are the
 // vendor IP -- only a SIMPLE combinational write decoder is custom):
 //   jtag_axi_0 -> axi_bram_ctrl_0 -> {bram_addr_a, bram_we_a, ...} -> decoder,
-//   by word-address region (bases == host.image.region_bases, single source):
-//     R_CTRL  regfile: scalars + COMMAND/STATUS mailbox + bus_counts + BANK_SIZE
+//   by word-address region (bases == host.wire.region_bases, single source):
+//     R_CTRL  regfile: scalars + COMMAND/STATUS mailbox + LOOP_TABLE_COUNT + BANK_SIZE
 //             + SLOT_COUNT + CURSOR(read-back) + BANK_READY(host-written)
-//     R_TICK  edge tick BRAM   (32b/edge)   ]
-//     R_COEFF edge coeff BRAM  (64b/edge)    } 3 PARALLEL edge BRAMs, read in
-//     R_MASK  TTL mask BRAM    (32b/edge)   ]  lockstep on edge_raddr -> whole
-//                                              edge per access, no width padding
-//     R_SCAN  scan BRAM (128b slot vector/point), 2*BANK_SIZE deep (ping-pong)
-//     R_BUS   bus-image BRAM; the mini-loader copies it into the engine bus LUTRAM
+//     R_ROWS  period-row BRAM: ROW_WORDS 32-bit words per row on port A, one
+//             whole row (ROW_PORTB_BITS) per engine read on port B
+//     R_SCAN  scan BRAM (one slot vector per point), 2*BANK_SIZE deep (ping-pong)
+//     R_LOOP  loop-table registers: two words per entry (first|last<<16, count)
+//     R_DELAY per-signal delay registers (TTL channels, then DAC buses)
 //
 // SCAN BANKS: the engine plays scan point 0..N-1 through two banks and exposes
 // scan_cursor plus BANK_READY/BANK*_CHUNK.  Prepare loads the first two chunks;
@@ -32,41 +31,37 @@
 // timing.  A late or missing chunk holds the engine and raises UNDERFLOW, which
 // invalidates the run.
 //
-// 1-TICK: the build tcl forces the 3 edge BRAMs to READ_LATENCY_B = 2 so the
-// engine's RD_LAT=2 prefetch pipeline is deterministic and back-to-back 20 ns
-// edges play one per clock (see zlc_edge_streamer.v and the xsim benches).
+// 1-TICK: the build tcl forces both BRAMs to READ_LATENCY_B = 2 so the engine's
+// RD_LAT=2 prefetch pipeline is deterministic and back-to-back 20 ns rows play
+// one per clock (see zlc_period_streamer.v and the xsim benches).
 //
-// Geometry localparams are computed by the SAME formulas as host.image.region_bases
-// (locked by test_final_top_regions_match_image); the create-project tcl derives
-// the BRAM IP geometry from host.image too.
-//
-// *** Structurally complete; physical deployment still requires the automated
-// RTL and on-board evidence defined by the product architecture. ***
+// Geometry localparams are computed by the SAME formulas as host.wire.region_bases
+// (locked by the wire tests); the create-project tcl derives the BRAM IP geometry
+// from host.wire too.
 // =============================================================================
 
 module zlc_pulse_streamer_top #(
     // Geometry defaults are macros from the generated zlc_geometry.vh (config-derived) -- see the
     // header include above; SCAN_COUNT_WIDTH is an intrinsic 32-bit counter width, not a config knob.
     parameter integer CHANNEL_COUNT = `ZLC_CHANNEL_COUNT,
-    parameter integer EDGE_ADDR_WIDTH = `ZLC_EDGE_ADDR_WIDTH,
+    parameter integer ROW_ADDR_WIDTH = `ZLC_ROW_ADDR_WIDTH,
+    parameter integer ROW_WORDS = `ZLC_ROW_WORDS,             // image words per row (power of two)
     parameter integer BANK_SIZE = `ZLC_BANK_SIZE,           // power of two; scan ping-pong bank
-    parameter integer SCAN_ADDR_WIDTH = `ZLC_SCAN_ADDR_WIDTH, // = clog2(2*BANK_SIZE), image.scan_addr_width
+    parameter integer SCAN_ADDR_WIDTH = `ZLC_SCAN_ADDR_WIDTH, // = clog2(2*BANK_SIZE), wire.scan_addr_width
     parameter integer SCAN_COUNT_WIDTH = 32,                // unique-row count/cursor width; independent of bank depth
     parameter integer TICK_WIDTH = `ZLC_TICK_WIDTH,
     parameter integer NUM_SLOTS = `ZLC_NUM_SLOTS,
-    parameter integer COEFF_WIDTH = `ZLC_COEFF_WIDTH,
-    parameter integer COEFF_FRAC_BITS = `ZLC_COEFF_FRAC_BITS,
+    parameter integer SLOT_SEL_WIDTH = `ZLC_SLOT_SEL_WIDTH,
     parameter integer BUS_COUNT = `ZLC_BUS_COUNT,
-    parameter integer BUS_INDEX_WIDTH = `ZLC_BUS_INDEX_WIDTH, // = clog2(BUS_COUNT), image.bus_index_width
     parameter integer BUS_WIDTH = `ZLC_BUS_WIDTH,
-    parameter integer BUS_SEG_ADDR_WIDTH = `ZLC_BUS_SEG_ADDR_WIDTH,
-    parameter integer BUS_SEL_WIDTH = `ZLC_BUS_SEL_WIDTH,
+    parameter integer MAX_LOOPS = `ZLC_MAX_LOOPS,
+    parameter integer LOOP_INDEX_WIDTH = `ZLC_LOOP_INDEX_WIDTH,
+    parameter integer LOOP_DEPTH = `ZLC_LOOP_DEPTH,
     parameter integer EVT_FIFO_DEPTH = `ZLC_EVT_FIFO_DEPTH,     // TTL delay event FIFO depth (per channel)
-    parameter integer BUS_EVT_FIFO_DEPTH = `ZLC_BUS_EVT_FIFO_DEPTH, // per-BUS segment FIFO depth
-    // Host<->bitstream compatibility fingerprint exposed on CTRL word 63 -- image.build_fingerprint of
+    parameter integer BUS_EVT_FIFO_DEPTH = `ZLC_BUS_EVT_FIFO_DEPTH, // per-BUS action FIFO depth
+    // Host<->bitstream compatibility fingerprint exposed on CTRL word 63 -- wire.build_fingerprint of
     // THIS build's geometry (all StreamerParams geometry fields folded with LAYOUT_STRUCT_VERSION).  The
-    // macro carries the config-derived value; the host connect-check verifies it (build_fingerprint is
-    // the single source, folded into the header by image.emit_geometry_vh).
+    // macro carries the config-derived value; the host connect-check verifies it.
     parameter integer LAYOUT_FINGERPRINT = `ZLC_LAYOUT_FINGERPRINT
 )(
     input  wire clk,
@@ -91,55 +86,42 @@ module zlc_pulse_streamer_top #(
     output wire [9:0] da_bias_z, output wire da_clk3
 );
 
-    // Physical lane identity includes DAC data and clocks. Edge state does not.
+    // Physical lane identity includes DAC data and clocks. Row masks do not.
     localparam integer TTL_CHANNEL_COUNT = CHANNEL_COUNT - BUS_COUNT * (BUS_WIDTH + 1);
-    localparam integer COEFF_BITS = NUM_SLOTS * COEFF_WIDTH;     // 64
     localparam integer SLOT_BITS = NUM_SLOTS * TICK_WIDTH;       // 128
-    // Port-B widths DERIVED from the geometry (== image.build_ip_sizes): coeff/mask 32b-word-padded,
-    // scan is the full slot vector.  Never a bare literal, so a num_slots/channel_count change
-    // resizes the edge-BRAM ports (and the tcl IP widths, which come from the same build_ip_sizes).
-    localparam integer COEFF_PORTB_BITS = ((COEFF_BITS + 31) / 32) * 32;   // 64
-    localparam integer MASK_PORTB_BITS = ((TTL_CHANNEL_COUNT + 31) / 32) * 32;
-    localparam integer SCAN_PORTB_BITS = SLOT_BITS;             // 128 = 4x32
-    localparam integer COEFF_WORDS = COEFF_PORTB_BITS / 32;      // 2
-    localparam integer MASK_WORDS = MASK_PORTB_BITS / 32;
+    // Port-B widths DERIVED from the geometry (== wire.build_ip_sizes): the row port is the
+    // row's words, the scan port the full slot vector.  Never a bare literal.
+    localparam integer ROW_PORTB_BITS = ROW_WORDS * 32;          // 128
+    localparam integer SCAN_PORTB_BITS = SLOT_BITS;              // 128 = 4x32
     localparam integer SCAN_WORDS = SCAN_PORTB_BITS / 32;        // 4
-    localparam integer MAX_EDGES = (1 << EDGE_ADDR_WIDTH);
+    localparam integer MAX_ROWS = (1 << ROW_ADDR_WIDTH);
     localparam integer SCAN_DEPTH = 2 * BANK_SIZE;
-    localparam integer MAX_BUS_SEGMENTS = (1 << BUS_SEG_ADDR_WIDTH);
-    localparam integer BUS_ROWS = BUS_COUNT * MAX_BUS_SEGMENTS;
-    localparam integer BUS_WORDS = 2 + 2 * ((COEFF_BITS + 31) / 32) + 1;   // 7
+    localparam integer LOOP_WORDS = 2;                           // == wire.StreamerParams.loop_words
+    // The engine's row vector (== wire.StreamerParams.row_bits); the BRAM port pads it to ROW_PORTB_BITS.
+    localparam integer BUS_ACTION_BITS = 2 + SLOT_SEL_WIDTH + BUS_WIDTH;
+    localparam integer ROW_BITS = TICK_WIDTH + SLOT_SEL_WIDTH + TTL_CHANNEL_COUNT + BUS_COUNT * BUS_ACTION_BITS;
 
-    // --- word-address region bases (== host.image.region_bases) ---------------
-    // Per-signal OUTPUT delays live in the R_DELAY register region (one 32-bit word each), NOT
-    // in CTRL and NOT in a BRAM image, so the last region before R_DELAY is the bus image.
+    // --- word-address region bases (== host.wire.region_bases) ---------------
     localparam integer R_CTRL_BASE = 0;
     localparam integer R_CTRL_WORDS = 64;
-    localparam integer R_TICK_BASE  = R_CTRL_BASE + R_CTRL_WORDS;
-    localparam integer R_COEFF_BASE = R_TICK_BASE  + MAX_EDGES * 1;
-    localparam integer R_MASK_BASE  = R_COEFF_BASE + MAX_EDGES * COEFF_WORDS;
-    localparam integer R_SCAN_BASE  = R_MASK_BASE  + MAX_EDGES * MASK_WORDS;
-    localparam integer R_BUS_BASE   = R_SCAN_BASE  + SCAN_DEPTH * SCAN_WORDS;
+    localparam integer R_ROWS_BASE  = R_CTRL_BASE + R_CTRL_WORDS;
+    localparam integer R_SCAN_BASE  = R_ROWS_BASE + MAX_ROWS * ROW_WORDS;
+    localparam integer R_LOOP_BASE  = R_SCAN_BASE + SCAN_DEPTH * SCAN_WORDS;
     // DELAY register region: ONE 32-bit word per delay-eligible signal (channels then buses),
     // the event-scheduler delay in ticks.  128 words of headroom regardless of channel count
     // so the layout is stable across configs.
-    localparam integer R_DELAY_BASE  = R_BUS_BASE   + BUS_ROWS * BUS_WORDS;
+    localparam integer R_DELAY_BASE  = R_LOOP_BASE + MAX_LOOPS * LOOP_WORDS;
     localparam integer R_DELAY_WORDS = `ZLC_DELAY_REG_WORDS;   // >= TTL_CHANNEL_COUNT + BUS_COUNT
     localparam integer R_TOTAL_WORDS = R_DELAY_BASE + R_DELAY_WORDS;
 
-    // CTRL regfile word offsets (== host.image.CtrlWords).
+    // CTRL regfile word offsets (== host.wire.CtrlWords).
     localparam integer C_COMMAND = 1;   // bit0 LOAD bit1 FIRE bit2 RESET bit3 SAFE
     localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ENGINE_ERROR bit4 UNDERFLOW bit5 LINK_ERROR
     localparam integer C_PROG_COUNT = 3;
     localparam integer C_SCAN_COUNT = 4;
     localparam integer C_SCAN_ENABLE = 5;
     localparam integer C_RUN_REPEAT_COUNT = 6;
-    localparam integer C_LOOP_START = 7;
-    localparam integer C_LOOP_COUNT = 8;
-    localparam integer C_LOOP_END_TICK = 9;
-    localparam integer C_LOOP_END_LO = 10;
-    localparam integer C_LOOP_END_HI = 11;
-    localparam integer C_BUS_COUNTS = 12;
+    localparam integer C_LOOP_TABLE_COUNT = 7;
     localparam integer C_BANK_SIZE = 13;
     localparam integer C_SLOT_COUNT = 14;
     localparam integer C_CURSOR = 15;       // engine -> host (cumulative row-visit ordinal)
@@ -160,19 +142,27 @@ module zlc_pulse_streamer_top #(
     reg eng_reset = 1'b1, eng_start = 1'b0;
 
     // --- delays: BOTH TTL channels AND DAC buses use the 32b/word R_DELAY register region,
-    // driving the per-signal event scheduler (long delays; see zlc_edge_streamer).
+    // driving the per-signal event scheduler (long delays; see zlc_period_streamer).
     localparam integer TTL_DELAY_WIDTH = 32;
-    // R_DELAY carries ONE 32-bit word per delay-eligible signal: the TTL channels
-    // first, then the BUS_COUNT per-bus DAC delays.  TTL and DAC delays share the SAME 32-bit
-    // range and the SAME event-scheduler mechanism, so a negative TTL delay's global shift G can
-    // reach the buses with no range mismatch.  (There are no dense delay-tick CTRL words: the
-    // CTRL block is the 20 command words 0..19 then the clk mask -- nothing delay-related.)
     localparam integer DELAY_REG_COUNT = TTL_CHANNEL_COUNT + BUS_COUNT;
     reg  [31:0] delay_reg [0:DELAY_REG_COUNT-1];
     integer dri;
     initial for (dri = 0; dri < DELAY_REG_COUNT; dri = dri + 1) delay_reg[dri] = 32'b0;
     wire [TTL_CHANNEL_COUNT*TTL_DELAY_WIDTH-1:0] delay_ticks_w;
     wire [BUS_COUNT*TTL_DELAY_WIDTH-1:0] bus_delay_ticks_w;
+
+    // --- loop table: registers written through R_LOOP (word 0 = first | last << 16, word 1 = count)
+    reg [ROW_ADDR_WIDTH-1:0] loop_first_reg [0:MAX_LOOPS-1];
+    reg [ROW_ADDR_WIDTH-1:0] loop_last_reg [0:MAX_LOOPS-1];
+    reg [31:0] loop_count_reg [0:MAX_LOOPS-1];
+    integer lri;
+    initial for (lri = 0; lri < MAX_LOOPS; lri = lri + 1) begin
+        loop_first_reg[lri] = {ROW_ADDR_WIDTH{1'b0}}; loop_last_reg[lri] = {ROW_ADDR_WIDTH{1'b0}};
+        loop_count_reg[lri] = 32'b0;
+    end
+    wire [MAX_LOOPS*ROW_ADDR_WIDTH-1:0] loop_first_w;
+    wire [MAX_LOOPS*ROW_ADDR_WIDTH-1:0] loop_last_w;
+    wire [MAX_LOOPS*32-1:0] loop_count_w;
 
     // TTLs, DAC data and DAC clocks have separate physical output owners.
     //
@@ -255,18 +245,14 @@ module zlc_pulse_streamer_top #(
     wire        wr        = |wea_mux;
 
     // region selects (combinational decode of the word address)
-    wire sel_ctrl  = (word_addr >= R_CTRL_BASE)  && (word_addr < R_TICK_BASE);
-    wire sel_tick  = (word_addr >= R_TICK_BASE)  && (word_addr < R_COEFF_BASE);
-    wire sel_coeff = (word_addr >= R_COEFF_BASE) && (word_addr < R_MASK_BASE);
-    wire sel_mask  = (word_addr >= R_MASK_BASE)  && (word_addr < R_SCAN_BASE);
-    wire sel_scan  = (word_addr >= R_SCAN_BASE)  && (word_addr < R_BUS_BASE);
-    wire sel_bus   = (word_addr >= R_BUS_BASE)   && (word_addr < R_DELAY_BASE);
+    wire sel_ctrl  = (word_addr >= R_CTRL_BASE)  && (word_addr < R_ROWS_BASE);
+    wire sel_rows  = (word_addr >= R_ROWS_BASE)  && (word_addr < R_SCAN_BASE);
+    wire sel_scan  = (word_addr >= R_SCAN_BASE)  && (word_addr < R_LOOP_BASE);
+    wire sel_loop  = (word_addr >= R_LOOP_BASE)  && (word_addr < R_DELAY_BASE);
     wire sel_delay = (word_addr >= R_DELAY_BASE) && (word_addr < R_TOTAL_WORDS);
-    wire [29:0] tick_word_off  = word_addr - R_TICK_BASE[29:0];
-    wire [29:0] coeff_word_off = word_addr - R_COEFF_BASE[29:0];
-    wire [29:0] mask_word_off  = word_addr - R_MASK_BASE[29:0];
+    wire [29:0] rows_word_off  = word_addr - R_ROWS_BASE[29:0];
     wire [29:0] scan_word_off  = word_addr - R_SCAN_BASE[29:0];
-    wire [29:0] bus_word_off   = word_addr - R_BUS_BASE[29:0];
+    wire [29:0] loop_word_off  = word_addr - R_LOOP_BASE[29:0];
     wire [29:0] delay_word_off = word_addr - R_DELAY_BASE[29:0];
 
     // --- CTRL regfile ---------------------------------------------------------
@@ -274,9 +260,7 @@ module zlc_pulse_streamer_top #(
     integer ci;
     initial begin for (ci = 0; ci < R_CTRL_WORDS; ci = ci + 1) ctrl_reg[ci] = 32'b0; end
 
-    // assemble the DENSE delay-tick busses from consecutive CTRL words (little-endian word
-    // order: word j supplies bits [32*j +: 32]); slice the engine input widths from the LSBs
-    // (the upper pad bits of the last word are 0 from the host).
+    // assemble the DENSE delay-tick busses and the loop table from their registers
     genvar dw;
     assign bus_clk_enable = ctrl_reg[C_CLK_ENABLE][BUS_COUNT-1:0];
     generate
@@ -286,6 +270,11 @@ module zlc_pulse_streamer_top #(
         // per-bus DAC delays ride the SAME R_DELAY region, just after the channels.
         for (dw = 0; dw < BUS_COUNT; dw = dw + 1) begin : zlc_bus_delay_reg_pack_gen
             assign bus_delay_ticks_w[dw*TTL_DELAY_WIDTH +: TTL_DELAY_WIDTH] = delay_reg[TTL_CHANNEL_COUNT + dw];
+        end
+        for (dw = 0; dw < MAX_LOOPS; dw = dw + 1) begin : zlc_loop_pack_gen
+            assign loop_first_w[dw*ROW_ADDR_WIDTH +: ROW_ADDR_WIDTH] = loop_first_reg[dw];
+            assign loop_last_w[dw*ROW_ADDR_WIDTH +: ROW_ADDR_WIDTH] = loop_last_reg[dw];
+            assign loop_count_w[dw*32 +: 32] = loop_count_reg[dw];
         end
     endgenerate
 
@@ -344,22 +333,27 @@ module zlc_pulse_streamer_top #(
         end
         if (ena_mux && wr && sel_delay && (delay_word_off < DELAY_REG_COUNT))
             delay_reg[delay_word_off[6:0]] <= wdata_mux;
+        if (ena_mux && wr && sel_loop && (loop_word_off < MAX_LOOPS * LOOP_WORDS)) begin
+            if (loop_word_off[0]) begin
+                loop_count_reg[loop_word_off[LOOP_INDEX_WIDTH:1]] <= wdata_mux;
+            end else begin
+                loop_first_reg[loop_word_off[LOOP_INDEX_WIDTH:1]] <= wdata_mux[ROW_ADDR_WIDTH-1:0];
+                loop_last_reg[loop_word_off[LOOP_INDEX_WIDTH:1]] <= wdata_mux[16 +: ROW_ADDR_WIDTH];
+            end
+        end
         if (ldr_status_we) ctrl_reg[C_STATUS] <= ldr_status_val;
         ctrl_reg[C_CURSOR] <= zlc_cursor;        // engine cursor visible to host
     end
 
     // --- read mux back to AXI -------------------------------------------------
     // CTRL word 63 reads back the GEOMETRY FINGERPRINT (LAYOUT_FINGERPRINT = ZLC_LAYOUT_FINGERPRINT
-    // from the generated zlc_geometry.vh = this build's image.build_fingerprint; writes land in
-    // ctrl_reg[63] but are never read back).  The host
-    // (build_fingerprint of ITS OWN config) verifies it BEFORE writing anything layout-dependent, so a
-    // host packing for one geometry can NEVER silently mis-drive a bitstream built for another --
-    // whether the register STRUCTURE moved (e.g. CLK_ENABLE 46->20 put the clk mask in dead words) or
-    // any GEOMETRY field drifted (e.g. bus_seg_addr_width 6->5 shifted R_DELAY down 896 words, wrecking
-    // every DAC-scan value + delay).  An OLD bitstream returns its own (different) fingerprint or
-    // ctrl_reg[63]=0 here, so a mismatched host refuses it with a clear "rebuild" error.
+    // from the generated zlc_geometry.vh = this build's wire.build_fingerprint; writes land in
+    // ctrl_reg[63] but are never read back).  The host (build_fingerprint of ITS OWN config)
+    // verifies it BEFORE writing anything layout-dependent, so a host packing for one geometry can
+    // NEVER silently mis-drive a bitstream built for another.  An OLD bitstream returns its own
+    // (different) fingerprint or ctrl_reg[63]=0 here, so a mismatched host refuses it.
     localparam integer C_LAYOUT_ID = 63;
-    localparam [31:0] ZLC_LAYOUT_ID = LAYOUT_FINGERPRINT[31:0];   // geometry fingerprint (image.build_fingerprint)
+    localparam [31:0] ZLC_LAYOUT_ID = LAYOUT_FINGERPRINT[31:0];   // geometry fingerprint (wire.build_fingerprint)
     always @(*) begin
         if (sel_ctrl) bram_douta = (word_addr[5:0] == C_LAYOUT_ID[5:0])
                                    ? ZLC_LAYOUT_ID : command_readback(word_addr[5:0], ctrl_reg[word_addr[5:0]], ack_id, ack_status, ack_cursor);
@@ -370,10 +364,7 @@ module zlc_pulse_streamer_top #(
     // readback).  MUST NOT be registered: the bridge sets u_rd_word with a NON-BLOCKING assign in D_READ
     // (so u_rd_word is valid only in the NEXT state, D_RLAT) and latches u_rd_data into wbuf THAT SAME
     // D_RLAT cycle.  A registered tap adds a second cycle of latency, so the bridge would capture the
-    // PREVIOUS word's value -> every UART read (STATUS/CURSOR/LAYOUT_ID/self-test) returns stale data
-    // (observed on hardware: LAYOUT_ID read back 0 instead of the fingerprint, auto rejected the UART link).
-    // Combinational makes u_rd_data = f(u_rd_word) valid the moment u_rd_word is, matching the bridge's
-    // single-cycle D_READ->D_RLAT handshake.  (Latched into wbuf on the D_RLAT clock edge -> no glitch.)
+    // PREVIOUS word's value -> every UART read returns stale data (observed on hardware).
     always @(*)
         u_rd_data = (u_rd_word == C_LAYOUT_ID[5:0]) ? ZLC_LAYOUT_ID : command_readback(u_rd_word, ctrl_reg[u_rd_word], ack_id, ack_status, ack_cursor);
 
@@ -390,44 +381,16 @@ module zlc_pulse_streamer_top #(
         end
     endfunction
 
-    // --- 3 PARALLEL edge BRAMs (tick 32b, coeff 64b, TTL mask 32b) -------------
+    // --- ROW BRAM (port A 32b write, port B one whole row; MAX_ROWS deep) ---------
     // Forced READ_LATENCY_B = 2 by the build tcl; engine RD_LAT must match.
-    wire [TICK_WIDTH-1:0]      edge_tick_rdata;
-    wire [COEFF_PORTB_BITS-1:0] edge_coeff_rdata_w;
-    wire [MASK_PORTB_BITS-1:0]  edge_mask_rdata_w;
-    wire [EDGE_ADDR_WIDTH-1:0] edge_raddr;
-
-    blk_mem_gen_edge_tick zlc_edge_tick_i (
-        .clka(axi_clk), .ena(ena_mux && sel_tick), .wea(wea_mux),
-        .addra(tick_word_off[EDGE_ADDR_WIDTH-1:0]), .dina(wdata_mux), .douta(),
-        .clkb(axi_clk), .enb(1'b1), .web(4'b0),
-        .addrb(edge_raddr), .dinb(32'b0), .doutb(edge_tick_rdata)
+    wire [ROW_PORTB_BITS-1:0] row_rdata_w;
+    wire [ROW_ADDR_WIDTH-1:0] row_raddr;
+    blk_mem_gen_rows zlc_rows_i (
+        .clka(axi_clk), .ena(ena_mux && sel_rows), .wea(wea_mux),
+        .addra(rows_word_off[($clog2(MAX_ROWS*ROW_WORDS))-1:0]), .dina(wdata_mux), .douta(),
+        .clkb(axi_clk), .enb(1'b1), .web({(ROW_PORTB_BITS/8){1'b0}}),
+        .addrb(row_raddr), .dinb({ROW_PORTB_BITS{1'b0}}), .doutb(row_rdata_w)
     );
-    blk_mem_gen_edge_coeff zlc_edge_coeff_i (
-        .clka(axi_clk), .ena(ena_mux && sel_coeff), .wea(wea_mux),
-        .addra(coeff_word_off[($clog2(MAX_EDGES*COEFF_WORDS))-1:0]), .dina(wdata_mux), .douta(),
-        .clkb(axi_clk), .enb(1'b1), .web({(COEFF_PORTB_BITS/8){1'b0}}),
-        .addrb(edge_raddr), .dinb({COEFF_PORTB_BITS{1'b0}}), .doutb(edge_coeff_rdata_w)
-    );
-    blk_mem_gen_edge_mask zlc_edge_mask_i (
-        .clka(axi_clk), .ena(ena_mux && sel_mask), .wea(wea_mux),
-        .addra(mask_word_off[($clog2(MAX_EDGES*MASK_WORDS))-1:0]), .dina(wdata_mux), .douta(),
-        .clkb(axi_clk), .enb(1'b1), .web({(MASK_PORTB_BITS/8){1'b0}}),
-        .addrb(edge_raddr), .dinb({MASK_PORTB_BITS{1'b0}}), .doutb(edge_mask_rdata_w)
-    );
-
-    // --- EDGE BRAM READ ALIGNMENT (resolved; do NOT re-add a tick register) ---------
-    // The three edge BRAMs (tick / coeff / mask) are read in lockstep on edge_raddr.
-    // It is TEMPTING to think the SYMMETRIC tick (32b/32b) is faster than the ASYMMETRIC
-    // coeff (32b write / 64b read) and therefore needs a +1 register to "align".  It
-    // does NOT: port B reads its configured width (tick/mask 32b, coeff 64b), and the
-    // three memories use the same registered-read configuration. The prior wider-mask
-    // layout was measured at 2 cycles in xsim against its generated blk_mem_gen IPs.
-    // The real zlc_edge_streamer driven by these real BRAM IPs plays the uploaded edge
-    // table CORRECTLY end-to-end (tb_real_engine.v: two 20 ms emCCD pulses).  Adding a +1
-    // tick register to "align" a skew that does NOT exist instead CREATES a tick>mask skew
-    // that corrupts streamed edges in sim (pulse 2 collapses to a 1-tick glitch).
-    // Feed the tick read straight to the engine, exactly like coeff/mask below.
 
     // --- SCAN BRAM (port A 32b write, port B 128b read; 2*BANK_SIZE deep) ------
     wire [SCAN_PORTB_BITS-1:0] scan_rdata_w;
@@ -439,32 +402,19 @@ module zlc_pulse_streamer_top #(
         .addrb(scan_raddr), .dinb({SCAN_PORTB_BITS{1'b0}}), .doutb(scan_rdata_w)
     );
 
-    // --- BUS image BRAM (32b TDP; the mini-loader reads it into bus LUTRAM) ----
-    wire [31:0] bus_img_doutb;
-    reg  [($clog2(BUS_ROWS*BUS_WORDS))-1:0] bus_img_raddr;
-    blk_mem_gen_busimg zlc_bus_img_i (
-        .clka(axi_clk), .ena(ena_mux && sel_bus), .wea(wea_mux),
-        .addra(bus_word_off[($clog2(BUS_ROWS*BUS_WORDS))-1:0]), .dina(wdata_mux), .douta(),
-        .clkb(axi_clk), .enb(1'b1), .web(4'b0),
-        .addrb(bus_img_raddr), .dinb(32'b0), .doutb(bus_img_doutb)
-    );
-
-    // --- control / bus mini-loader FSM ----------------------------------------
-    // On LOAD: hold engine reset, copy the bus image (R_BUS) into the engine bus LUTRAM via
-    // bus_prog_*, then acknowledge LOADED. FIRE resets only runtime and reuses
-    // resident LUTRAM; SAFE can interrupt any loader state and preserves a
-    // fully loaded program. Edge/scan are
-    // NOT copied (the engine reads those BRAMs directly); the LITERAL delay line takes its delays
-    // straight from the dense CTRL words (no image to copy).  Bus rows are 7 words = [start_tick,
-    // stop_tick, sc_lo, sc_hi, ec_lo, ec_hi, flags] (host.image).  Rising-edge-detected commands.
+    // --- control FSM ---------------------------------------------------------
+    // LOAD marks the uploaded image resident and acknowledges LOADED: the engine reads
+    // the row and scan BRAMs and the loop/delay registers directly, so there is nothing
+    // to copy.  FIRE resets only runtime, lets the engine's arm refill its prefetch from
+    // the resident image, and starts it.  SAFE can interrupt any state and preserves a
+    // fully loaded program.  Rising-edge-detected commands.
     localparam CMD_LOAD = 4'b0001, CMD_FIRE = 4'b0010, CMD_RESET = 4'b0100, CMD_SAFE = 4'b1000;
-    // STATUS bit map MUST match host.image: LOADED=1 RUNNING=2 DONE=4
+    // STATUS bit map MUST match host.wire: LOADED=1 RUNNING=2 DONE=4
     // ENGINE_ERROR=8 UNDERFLOW=16 LINK_ERROR=32.  Underflow is bit4 (NOT bit3) so a transient
     // streaming STALL is never confused with the host's fatal ERROR bit.
     localparam [4:0] ST_LOADED = 5'd1, ST_RUNNING = 5'd2, ST_DONE = 5'd4,
                      ST_ERROR = 5'd8, ST_UNDERFLOW = 5'd16;
     localparam [5:0] ST_LINK_ERROR = 6'd32;
-    localparam integer CNT_W = BUS_SEG_ADDR_WIDTH + 1;
 
     reg protocol_error = 1'b0;
     // FSM-owned "engine is in its RUNNING/DONE-tracking phase" flag.  The DONE/
@@ -472,40 +422,22 @@ module zlc_pulse_streamer_top #(
     // block writes back one cycle late): a command clears it atomically here, so a
     // SAFE/RESET/LOAD cannot be bounced back to RUNNING by a stale-STATUS re-read.
     reg status_running = 1'b0;
-    reg bus_prog_we = 1'b0;
-    reg [BUS_INDEX_WIDTH-1:0] bus_prog_bus = {BUS_INDEX_WIDTH{1'b0}};
-    reg [BUS_SEG_ADDR_WIDTH-1:0] bus_prog_addr = {BUS_SEG_ADDR_WIDTH{1'b0}};
-    reg [TICK_WIDTH-1:0] bus_prog_start_tick = {TICK_WIDTH{1'b0}};
-    reg [TICK_WIDTH-1:0] bus_prog_stop_tick = {TICK_WIDTH{1'b0}};
-    reg [COEFF_BITS-1:0] bus_prog_start_tick_coeffs = {COEFF_BITS{1'b0}};
-    reg [COEFF_BITS-1:0] bus_prog_stop_tick_coeffs = {COEFF_BITS{1'b0}};
-    reg [BUS_WIDTH-1:0] bus_prog_start_value = {BUS_WIDTH{1'b0}};
-    reg [BUS_WIDTH-1:0] bus_prog_stop_value = {BUS_WIDTH{1'b0}};
-    reg [1:0] bus_prog_mode = 2'b0;
-    reg [BUS_SEL_WIDTH-1:0] bus_prog_value_select = {BUS_SEL_WIDTH{1'b0}};
-    reg [BUS_SEL_WIDTH-1:0] bus_prog_stop_value_select = {BUS_SEL_WIDTH{1'b0}};
 
-    localparam [3:0] L_IDLE=0, L_RD=1, L_CAP=2, L_EMIT=3, L_NEXT=4, L_FIRE=5, L_RUN=6,
-                     L_SAFE=7, L_ARM=8, L_START_ACK=9;
-    // A resident Fire still gives the engine one complete shadow-read sweep
-    // after resetting runtime.  These are fabric clocks, not a host polling gap.
-    localparam integer ENGINE_ARM_SETTLE = 4;
-    localparam integer ENGINE_ARM_CYCLES = 12 * (ENGINE_ARM_SETTLE + 1) + 4;
+    localparam [3:0] L_IDLE=0, L_LOAD=1, L_FIRE=5, L_SAFE=7, L_ARM=8, L_START_ACK=9;
+    // A Fire holds the engine in reset long enough for its arm to flush and refill
+    // its prefetch FIFOs from the resident image at least once (the engine flushes
+    // every 2^ARM_PERIOD_BITS clocks and refills within FIFO_DEPTH + RD_LAT + 2).
+    // These are fabric clocks, not a host polling gap.
+    localparam integer ENGINE_ARM_PERIOD = 64;
+    localparam integer ENGINE_ARM_CYCLES = 2 * ENGINE_ARM_PERIOD + 16;
     reg [3:0] lstate = L_IDLE;
     reg resident_valid = 1'b0;
     reg pending_command = 1'b0, pending_uart = 1'b0, ack_valid = 1'b0;
     reg [31:0] pending_id = 0;
     reg [7:0] pending_seq = 0;
     reg [7:0] command_wait = 0;
-    reg [2:0] wi;                       // word index within a bus row
-    reg [31:0] cap [0:6];
-    reg [BUS_INDEX_WIDTH:0] bcur;       // current bus
-    reg [BUS_SEG_ADDR_WIDTH:0] baddr;   // segment within bus
-    reg [BUS_SEG_ADDR_WIDTH:0] bcnt;    // count for current bus
-    reg [1:0] settle;
     reg [3:0] cmd_seen;
-    integer ic;
-    initial begin for (ic=0; ic<7; ic=ic+1) cap[ic]=32'b0; wi=0; bcur=0; baddr=0; bcnt=0; settle=0; cmd_seen=0; bus_img_raddr=0; end
+    initial begin cmd_seen=0; end
 
     wire [3:0] cmd_now = ctrl_reg[C_COMMAND][3:0];
     wire [3:0] cmd_edge = cmd_now & ~cmd_seen;
@@ -526,13 +458,6 @@ module zlc_pulse_streamer_top #(
         end
     endtask
 
-    function [CNT_W-1:0] bus_count_of; input integer b; begin
-        bus_count_of = ctrl_reg[C_BUS_COUNTS][b*CNT_W +: CNT_W]; end endfunction
-    function [($clog2(BUS_ROWS*BUS_WORDS))-1:0] R_relbus;
-        input integer b; input integer a;
-        begin R_relbus = (b * MAX_BUS_SEGMENTS + a) * BUS_WORDS; end
-    endfunction
-
     always @(posedge clk) begin
         ldr_status_we <= 1'b0;
         eng_start <= 1'b0;
@@ -543,10 +468,10 @@ module zlc_pulse_streamer_top #(
             // An ACK may be lost; the same execution ID never executes twice.
             if (u_cmd_valid) begin u_cmd_reply_seq <= u_cmd_seq; u_cmd_reply_valid <= 1'b1; end
         end else if (command_request && pending_command && command_id == pending_id) begin
-            // A retry while LOAD is pending observes its original completion.
+            // A retry while a command is pending observes its original completion.
             if (u_cmd_valid) begin pending_seq <= u_cmd_seq; pending_uart <= 1'b1; end
         end else if (command_request && (command_code == CMD_SAFE || command_code == CMD_RESET)) begin
-            // SAFE wins in every loader state, before any further row commit.
+            // SAFE wins in every state.
             eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
             pending_id <= command_id; pending_seq <= u_cmd_seq; pending_uart <= u_cmd_valid;
             pending_command <= 1'b1; command_wait <= 8'd4; lstate <= L_SAFE;
@@ -557,7 +482,7 @@ module zlc_pulse_streamer_top #(
             if (command_code == CMD_LOAD) begin
                 eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
                 resident_valid <= 1'b0;
-                bcur <= 0; baddr <= 0; bcnt <= bus_count_of(0); wi <= 0; lstate <= L_NEXT;
+                command_wait <= 8'd4; lstate <= L_LOAD;
             end else if (command_code == CMD_FIRE && resident_valid && !status_running && ctrl_reg[C_PROG_COUNT] != 0) begin
                 eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
                 command_wait <= ENGINE_ARM_CYCLES; lstate <= L_ARM;
@@ -576,61 +501,18 @@ module zlc_pulse_streamer_top #(
                 complete_command(0, 0); lstate <= L_IDLE;
             end
         end
+        L_LOAD: begin
+            // The image is already in the BRAMs/registers; a few clocks let the last
+            // host write settle, then the program is resident.
+            if (command_wait != 0) command_wait <= command_wait - 1'b1;
+            else begin
+                ldr_status_we <= 1'b1; ldr_status_val <= {27'b0, ST_LOADED}; resident_valid <= 1'b1;
+                complete_command({27'b0, ST_LOADED}, 0); lstate <= L_IDLE;
+            end
+        end
         L_ARM: begin
             if (command_wait != 0) command_wait <= command_wait - 1'b1;
             else lstate <= L_FIRE;
-        end
-        L_NEXT: begin
-            wi <= 0;
-            if (baddr >= bcnt) begin
-                if (bcur == BUS_COUNT-1) begin
-                    // bus image done -> LOADED.  The LITERAL delay line needs no image copy
-                    // (its delays ride the dense CTRL words, latched by the engine at FIRE).
-                    ldr_status_we <= 1'b1; ldr_status_val <= {27'b0, ST_LOADED}; resident_valid <= 1'b1;
-                    complete_command({27'b0, ST_LOADED}, 0); lstate <= L_IDLE;
-                end else begin
-                    bcur <= bcur + 1'b1; baddr <= 0; bcnt <= bus_count_of(bcur + 1'b1); lstate <= L_NEXT;
-                end
-            end else begin
-                bus_img_raddr <= R_relbus(bcur, baddr);
-                settle <= 2'd2; lstate <= L_RD;
-            end
-        end
-        L_RD: begin
-            bus_img_raddr <= R_relbus(bcur, baddr) + wi;
-            settle <= 2'd2; lstate <= L_CAP;
-        end
-        L_CAP: begin
-            if (settle == 0) begin
-                cap[wi] <= bus_img_doutb;
-                if (wi == BUS_WORDS-1) lstate <= L_EMIT;
-                else begin wi <= wi + 1'b1; lstate <= L_RD; end
-            end else settle <= settle - 1'b1;
-        end
-        L_EMIT: begin
-            bus_prog_bus <= bcur[BUS_INDEX_WIDTH-1:0];
-            bus_prog_addr <= baddr[BUS_SEG_ADDR_WIDTH-1:0];
-            bus_prog_start_tick <= cap[0]; bus_prog_stop_tick <= cap[1];
-            // PARAMETERIZATION GUARD: this 2-word coeff assembly assumes COEFF_BITS == 64
-            // (NUM_SLOTS=4 x COEFF_WIDTH=16).  Any other geometry silently truncates the
-            // high coeffs (cap[] words are 32b) -- the host (image.check_rtl_assumptions)
-            // REJECTS such configs at pack time; fix this assembly before changing NUM_SLOTS.
-            bus_prog_start_tick_coeffs <= {cap[3][COEFF_BITS-33:0], cap[2]};
-            bus_prog_stop_tick_coeffs <= {cap[5][COEFF_BITS-33:0], cap[4]};
-            bus_prog_start_value <= cap[6][BUS_WIDTH-1:0];
-            bus_prog_stop_value <= cap[6][2*BUS_WIDTH-1:BUS_WIDTH];
-            // PARAMETERIZATION GUARD: the flags word packs 2*BUS_WIDTH + 2 + 2*BUS_SEL_WIDTH
-            // bits into ONE 32b cap word (28 bits at the shipped 10/3 widths).  Wider buses /
-            // selects would overflow it -- also rejected host-side at pack time.
-            bus_prog_mode <= cap[6][2*BUS_WIDTH+1:2*BUS_WIDTH];
-            bus_prog_value_select <= cap[6][2*BUS_WIDTH+2+BUS_SEL_WIDTH-1:2*BUS_WIDTH+2];
-            bus_prog_stop_value_select <= cap[6][2*BUS_WIDTH+2+2*BUS_SEL_WIDTH-1:2*BUS_WIDTH+2+BUS_SEL_WIDTH];
-            bus_prog_we <= ~bus_prog_we;          // toggle commits a segment write
-            baddr <= baddr + 1'b1;
-            settle <= 2'd2; lstate <= L_RUN;
-        end
-        L_RUN: begin
-            if (settle == 0) lstate <= L_NEXT; else settle <= settle - 1'b1;
         end
         L_FIRE: begin
             eng_reset <= 1'b0;
@@ -672,50 +554,36 @@ module zlc_pulse_streamer_top #(
         end
     end
 
-    // --- the FINAL edge-table engine ------------------------------------------
-    zlc_edge_streamer #(
-        .CHANNEL_COUNT(TTL_CHANNEL_COUNT), .EDGE_ADDR_WIDTH(EDGE_ADDR_WIDTH),
+    // --- the FINAL period-table engine ------------------------------------------
+    zlc_period_streamer #(
+        .CHANNEL_COUNT(TTL_CHANNEL_COUNT), .ROW_ADDR_WIDTH(ROW_ADDR_WIDTH),
         .SCAN_ADDR_WIDTH(SCAN_ADDR_WIDTH), .SCAN_COUNT_WIDTH(SCAN_COUNT_WIDTH), .BANK_SIZE(BANK_SIZE),
-        .TICK_WIDTH(TICK_WIDTH), .NUM_SLOTS(NUM_SLOTS), .COEFF_WIDTH(COEFF_WIDTH), .COEFF_FRAC_BITS(COEFF_FRAC_BITS),
-        .BUS_COUNT(BUS_COUNT), .BUS_INDEX_WIDTH(BUS_INDEX_WIDTH), .BUS_WIDTH(BUS_WIDTH),
-        .BUS_SEG_ADDR_WIDTH(BUS_SEG_ADDR_WIDTH), .BUS_SEL_WIDTH(BUS_SEL_WIDTH),
+        .TICK_WIDTH(TICK_WIDTH), .NUM_SLOTS(NUM_SLOTS), .SLOT_SEL_WIDTH(SLOT_SEL_WIDTH),
+        .BUS_COUNT(BUS_COUNT), .BUS_WIDTH(BUS_WIDTH),
+        .MAX_LOOPS(MAX_LOOPS), .LOOP_INDEX_WIDTH(LOOP_INDEX_WIDTH), .LOOP_DEPTH(LOOP_DEPTH),
         // EVT_DEPTH = per-channel delay event FIFO depth (in-flight edges).  MUST match
         // evt_fifo_depth in fpga/board_config/streamer_config.json -- the host
         // validator rejects programs that would overflow this depth.
         .EVT_DEPTH(EVT_FIFO_DEPTH),
         .BUS_EVT_DEPTH(BUS_EVT_FIFO_DEPTH),
-        // RD_LAT = the configured edge-BRAM latency.  The registered address plus
-        // generated memory/core output stages make issue->data RD_LAT+2 cycles;
-        // FIFO_DEPTH=RD_LAT+3 owns the resident head and all tracked reads.
-        .RD_LAT(2), .FIFO_DEPTH(5), .ARM_SETTLE(ENGINE_ARM_SETTLE)
+        // RD_LAT = the configured BRAM latency.  The registered address plus
+        // generated memory/core output stages make issue->data RD_LAT+2 cycles.
+        .RD_LAT(2), .ARM_PERIOD_BITS(6)
     ) zlc_engine_i (
         .clk(axi_clk), .reset(eng_reset), .start(eng_start),
-        .prog_count(ctrl_reg[C_PROG_COUNT][EDGE_ADDR_WIDTH:0]),
+        .prog_count(ctrl_reg[C_PROG_COUNT][ROW_ADDR_WIDTH:0]),
         .run_repeat_count(ctrl_reg[C_RUN_REPEAT_COUNT]),
-        .loop_start_addr(ctrl_reg[C_LOOP_START][EDGE_ADDR_WIDTH-1:0]),
-        .loop_end_tick(ctrl_reg[C_LOOP_END_TICK][TICK_WIDTH-1:0]),
-        .loop_end_coeffs({ctrl_reg[C_LOOP_END_HI][COEFF_BITS-33:0], ctrl_reg[C_LOOP_END_LO]}),
-        .loop_count(ctrl_reg[C_LOOP_COUNT]),
         .scan_enable(ctrl_reg[C_SCAN_ENABLE][0]),
         .scan_count(ctrl_reg[C_SCAN_COUNT][SCAN_COUNT_WIDTH-1:0]),
         .scan_repeat_count(ctrl_reg[C_SCAN_REPEAT_COUNT]),
-        .edge_raddr(edge_raddr),
-        .edge_tick_rdata(edge_tick_rdata),
-        .edge_coeff_rdata(edge_coeff_rdata_w[COEFF_BITS-1:0]),
-        .edge_mask_rdata(edge_mask_rdata_w[TTL_CHANNEL_COUNT-1:0]),
+        .loop_table_count(ctrl_reg[C_LOOP_TABLE_COUNT][LOOP_INDEX_WIDTH:0]),
+        .loop_first_flat(loop_first_w), .loop_last_flat(loop_last_w), .loop_count_flat(loop_count_w),
+        .row_raddr(row_raddr), .row_rdata(row_rdata_w[ROW_BITS-1:0]),
         .scan_raddr(scan_raddr), .scan_rdata(scan_rdata_w),
         .bank_ready(ctrl_reg[C_BANK_READY][1:0]),
         .bank_chunk0(ctrl_reg[C_BANK0_CHUNK][SCAN_COUNT_WIDTH-1:0]),
         .bank_chunk1(ctrl_reg[C_BANK1_CHUNK][SCAN_COUNT_WIDTH-1:0]),
         .scan_cursor(zlc_cursor), .underflow(zlc_underflow),
-        .bus_prog_we(bus_prog_we), .bus_prog_bus(bus_prog_bus), .bus_prog_addr(bus_prog_addr),
-        .bus_prog_start_tick(bus_prog_start_tick), .bus_prog_stop_tick(bus_prog_stop_tick),
-        .bus_prog_start_tick_coeffs(bus_prog_start_tick_coeffs),
-        .bus_prog_stop_tick_coeffs(bus_prog_stop_tick_coeffs),
-        .bus_prog_start_value(bus_prog_start_value), .bus_prog_stop_value(bus_prog_stop_value),
-        .bus_prog_mode(bus_prog_mode), .bus_prog_value_select(bus_prog_value_select),
-        .bus_prog_stop_value_select(bus_prog_stop_value_select),
-        .bus_counts(ctrl_reg[C_BUS_COUNTS][BUS_COUNT*(BUS_SEG_ADDR_WIDTH+1)-1:0]),
         // OUTPUT delay event scheduler -- per-channel / per-bus delay tick counts (the engine
         // queues each output's toggles against g_time and pops them d ticks later).
         .bus_delay_ticks(bus_delay_ticks_w),

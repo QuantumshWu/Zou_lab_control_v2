@@ -10,25 +10,28 @@ hardware acceptance remains the runbook in `fpga\README.md`.
 
 ## Files
 
-- `zlc_edge_streamer.v`: the engine. A global edge table held in three parallel
-  block RAMs (tick 32b / coeff 64b / TTL mask 32b, forced `READ_LATENCY_B=2`), a
-  depth-`FIFO_DEPTH` (=`RD_LAT`+3=5) continuous edge prefetch that hides the BRAM
-  latency so back-to-back 1-tick (20 ns) edges fire one per clock, a 2-bank
-  continuous cyclic ping-pong scan window (`BANK_SIZE`=2048, 4096 bank-local
-  resident slots at one time) for autonomous streamed scans, the affine effective-tick MAC + analog-bus
-  DAC engine, and the output delays -- per-channel (TTL) event-scheduler FIFOs +
-  per-bus (DAC) segment-descriptor FIFOs (`out[t]=in[t-d]`, popped against a
-  free-running 48-bit `g_time`).
+- `zlc_period_streamer.v`: the engine. A PERIOD TABLE held in one block RAM
+  (one 128-bit row per authored period: duration or duration slot, TTL levels,
+  one DAC action per bus; forced `READ_LATENCY_B=2`), a loop table of nested
+  brackets (`MAX_LOOPS` entries, `LOOP_DEPTH` levels) followed by a stack
+  walker, a depth-`FIFO_DEPTH` (=`RD_LAT`+4=6) continuous row prefetch that
+  hides the BRAM latency so back-to-back 1-tick (20 ns) rows play one per
+  clock, a scan-point prefetcher over the 2-bank continuous cyclic ping-pong
+  window (`BANK_SIZE`=2048) for autonomous streamed scans, the Bresenham
+  DAC ramp stepper, and the output delays -- per-channel (TTL)
+  event-scheduler FIFOs + per-bus (DAC) action-descriptor FIFOs
+  (`out[t]=in[t-d]`, popped against a free-running 48-bit `g_time`).
 - `zlc_pulse_streamer_top.v`: top wrapper. Region-decoded BRAMs behind an
-  `axi_bram_ctrl` (edge tables + scan window + bus image) plus a CTRL
+  `axi_bram_ctrl` (row table + scan window) plus register regions (the loop
+  table, the per-channel/per-bus DELAY words) and a CTRL
   register file (the COMMAND/STATUS mailbox, the resident-bank `CURSOR`/`BANK_READY`/
-  `BANK*_CHUNK` handshake, the per-channel/per-bus DELAY words, the CLK_ENABLE
+  `BANK*_CHUNK` handshake, the CLK_ENABLE
   mask, and the hardwired `LAYOUT_ID` readback word used by the host
   register-layout handshake), driving the engine and the board output pins /
-  four 10-bit DAC buses.  A mini-loader copies the bus image into the engine
-  LUTRAM at LOAD.
-- `create_project.tcl`: create project (jtag_axi + axi_bram_ctrl + 5 BRAMs),
-  `zlc_force_latency2` forces the edge BRAMs to `READ_LATENCY_B=2`, synth,
+  four 10-bit DAC buses.  LOAD only marks the uploaded image resident; the
+  engine reads every table directly.
+- `create_project.tcl`: create project (jtag_axi + axi_bram_ctrl + 2 BRAMs),
+  `zlc_force_latency2` forces both BRAMs to `READ_LATENCY_B=2`, synth,
   implement, write bitstream + probes.
 - `program_fpga.tcl`: program the device with the generated `.bit`/`.ltx`.
 - `diagnose_hw_target.tcl`: non-destructive hardware-target diagnostic.
@@ -48,8 +51,8 @@ Target FPGA is the Artix-7 35T `xc7a35tfgg484-2`. The default board XDC is
 indices own lane identity; XDC and top-level ports are unordered validated
 projections. The bitstream is fixed; every
 `On Pulse` packs a fresh program image and uploads it over the server's
-transport into `axi_bram_ctrl`, then drives the CTRL mailbox. One edge row means "at this
-absolute FPGA tick, set all outputs to this mask".
+transport into `axi_bram_ctrl`, then drives the CTRL mailbox. One row means "hold these outputs for this
+many ticks, then enter the next row"; brackets are loop-table entries.
 
 The server's `auto` backend selects the transport: it enumerates COM ports,
 tries USB VID/PID descriptors first, and takes a UART only after the word-63
@@ -59,40 +62,35 @@ and RTL rejects zero/oversize counts and address overflow before commit. Both
 are trusted-laboratory transports rather than an authentication or
 authorization boundary.
 
-Scans use named slots: each edge row stores a base tick plus `NUM_SLOTS`
-fixed-point coefficients, and the FPGA computes
-`effective_tick = base + (sum_j coeff_j * slot_j) >>> COEFF_FRAC_BITS` while
-iterating the scan-point table. The scan window is a 2-bank ping-pong. Prepare
-uploads the first two chunks before FIRE; during the run the sole host observer
-uses `BANK_READY` and `BANK*_CHUNK` to refill each released bank. The FPGA clocks
-scan points autonomously, while the host only transfers chunks. A late or
-missing refill produces `UNDERFLOW`, and the run is rejected. Analog buses upload through a separate
-LUTRAM segment table (`bus_id, start_tick, stop_tick, start_value, stop_value,
-mode`, plus dual `value_select` for scanned endpoints) so a ramp costs one
-segment, not hundreds of TTL edge rows.
+Scans use named slots: a scan point is one vector of `NUM_SLOTS` 32-bit
+values, and a row reads its duration (a tick count) or a DAC action reads its
+code from the slot its selector names.  The scan window is a 2-bank
+ping-pong.  Prepare uploads the first two chunks before FIRE; during the run
+the sole host observer uses `BANK_READY` and `BANK*_CHUNK` to refill each
+released bank.  The FPGA clocks scan points autonomously through its own
+scan-point prefetcher, while the host only transfers chunks.  A late or
+missing refill produces `UNDERFLOW`, and the run is rejected.  Analog buses
+need no separate table: every row carries one action per bus (hold, edge to
+a code, or ramp from the carried level to a code over the row's whole
+duration), so a ramp costs nothing beyond the row it belongs to.
 
-The edge FIFO still supports adjacent 1-tick edges, and a finite one-shot may
-end after only 1 or 2 ticks.  The registered affine boundary cache is scheduled
-two clocks before a seam.  Therefore every complete Pulse execution which has
-a successor needs at least 3 ticks after its final restart; a two-pass
-`PulseBracket` needs its single boundary at or after absolute tick 3, and three
-or more passes need at least a 3-tick bracket span.  The host validates only the
-rows that actually cross such a seam before FIRE/LOAD, rather than allowing a
-stale boundary cache to cross the seam or misreporting the deterministic
-scheduling error as a scan-refill underflow.
+One-tick rows are ordinary rows, at the start, the end or a seam of a Pulse:
+the row prefetch keeps `FIFO_DEPTH` rows resident, the loop walker and the
+scan-point prefetcher run ahead of the executor, and a seam (bracket rewind,
+Run repeat, scan point or sweep wrap) costs no tick.  The host therefore has
+no seam-margin rule to validate; it validates only capacity (rows, loops,
+loop depth, delayed events in flight).
 
 Expansion profile: `CHANNEL_COUNT=69` physical pins, 25 TTL control bits,
-`NUM_SLOTS=4`, `MAX_EDGES=4096`, `BANK_SIZE=2048` (4096 bank-local resident rows),
-`TICK_WIDTH=32`, `COEFF_WIDTH=16`, `COEFF_FRAC_BITS=8`, `RD_LAT=2`, `FIFO_DEPTH=5`,
+`NUM_SLOTS=4`, `MAX_ROWS=512`, `MAX_LOOPS=8`, `LOOP_DEPTH=4`, `BANK_SIZE=2048`
+(4096 bank-local resident rows), `TICK_WIDTH=32`, `RD_LAT=2`, `FIFO_DEPTH=6`,
 `EVT_FIFO_DEPTH=32`, `BUS_EVT_FIFO_DEPTH=64`, `CLOCK_HZ=50 MHz` (20 ns tick).
-The previous 63-lane build's 2026-09-11 routed report used 20050/20800 LUTs,
-14806/41600 registers, 76/90 DSPs and 41/50 BRAM tiles, with setup WNS +0.116 ns.
-The updated estimator gives 19778 LUTs and 37 BRAM tiles. The new ABI's actual
-2026-09-21 Vivado 2019.1 build-only result is 19645 LUTs (94.45%), 14590 registers
-(35.07%), 76 DSPs and 37 BRAM tiles. Routed setup WNS is +0.170 ns and hold
-slack +0.036 ns; all 12 bus-skew constraints pass. The generated 32-bit mask IP
-also passes the existing full-top replay/SAFE oracle. No hardware was connected
-or programmed; experimental pin/timing acceptance remains required. Migration
+The affine edge-table build (2026-09-21, 4096 edges) used 19645/20800 LUTs,
+14590/41600 registers, 76/90 DSPs and 37/50 BRAM tiles.  The period-table
+engine drops the twelve affine evaluators, the bus segment LUTRAM and the
+bus-image loader; its routed numbers are recorded in `wire.estimate_resources`
+and `test_fpga_assets` after each build-only run.  No hardware was connected
+or programmed; experimental pin/timing acceptance remains required.  Migration
 itself never builds or programs a bitstream.
 
 ## CTRL Register-File Mailbox
@@ -103,13 +101,12 @@ over `axi_bram_ctrl`. The mailbox words (see `zlc_pulse.wire.CtrlWords`):
 ```text
 COMMAND     host -> top   rising-edge LOAD(1) / FIRE(2) / RESET(4) / SAFE(8)
 STATUS      top -> host   LOADED(1) / RUNNING(2) / DONE(4) / ENGINE_ERROR(8) / UNDERFLOW(16) / LINK_ERROR(32)
-PROG_COUNT                number of edge rows
+PROG_COUNT                number of period rows
 SCAN_COUNT                unique scan rows N in one table sweep
 SCAN_ENABLE
 RUN_REPEAT_COUNT          complete Pulse executions per row; 0 = infinite
 SCAN_REPEAT_COUNT         complete table sweeps; 0 = infinite
-LOOP_START / LOOP_COUNT / LOOP_END_TICK / LOOP_END_LO / LOOP_END_HI
-BUS_COUNTS                packed per-bus segment counts
+LOOP_TABLE_COUNT          loop-table entries in use (nested brackets, outermost first)
 BANK_SIZE / SLOT_COUNT
 CURSOR      top -> host   cumulative row-visit ordinal; unchanged by Run repeats
                           current table row is CURSOR modulo SCAN_COUNT
@@ -120,7 +117,9 @@ LAYOUT_ID   top -> host   hardwired register-layout ID (word 63); the host refus
                           to drive a bitstream whose layout differs from its own
 ```
 
-Per-channel TTL delays and per-bus DA delays upload through the dedicated
+Period rows upload through the ROWS region (`ROW_WORDS` words per row), the
+loop table through the LOOP region (`first | last << 16`, then the count, per
+entry), and per-channel TTL delays and per-bus DA delays through the dedicated
 DELAY register region (one 32-bit word per channel and per bus; see
 `zlc_pulse.wire.region_bases`).
 

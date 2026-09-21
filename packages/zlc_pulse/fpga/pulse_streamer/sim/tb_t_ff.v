@@ -1,13 +1,13 @@
 `timescale 1ns/1ps
 `include "zlc_geometry.vh"
-// FULL-CHAIN first-frame test: the REAL zlc_pulse_streamer_top + REAL engine + the FIVE REAL
-// blk_mem_gen IPs, with a frozen current-layout host word image (9 periods,
-// da_bias_y = edge -192(code320)@P0, edge 388(code900)@P1, HOLD after; one
-// frame = 116 ticks).  Replays the host
+// FULL-CHAIN first-frame test: the REAL zlc_pulse_streamer_top + REAL engine + the TWO REAL
+// blk_mem_gen IPs, with a frozen current-layout host word image (9 periods, 116 ticks,
+// da_bias_y = edge -192(code320)@P0, edge 388(code900)@P1, HOLD after; regenerated from
+// the host packer -- see sim/README.md).  Replays the host
 // flow twice: one upload/LOAD then resident FIRE after SAFE.  Also interrupts a
 // pending LOAD and retries a FIRE with the same execution ID (lost ACK).
-// This covers everything an engine-only TB bypasses: ctrl regfile, mini-loader, command
-// sequencing, clk mux, pin map.
+// This covers everything an engine-only TB bypasses: ctrl regfile, loop/delay registers,
+// command sequencing, clk mux, pin map.
 
 // ---- fake JTAG master: tied off ----
 module jtag_axi_0(
@@ -106,7 +106,7 @@ module axi_bram_ctrl_0(
     begin
       cmd(32'd8);                       // CMD_SAFE
       upload;
-      // SAFE must preempt the active mini-loader, not wait behind it.
+      // SAFE must preempt a pending LOAD, not wait behind it.
       issue_cmd(32'd1);
       cmd(32'd8);
       cmd(32'd1);                       // CMD_LOAD
@@ -133,29 +133,14 @@ endmodule
 // IP-free black boxes for the pin-boundary test below.  The test forces
 // the engine-side signals and checks the real top-level pin equations; BRAM
 // behaviour is deliberately outside this small SAFE-gate proof.
-module blk_mem_gen_edge_tick(
-  input clka, input ena, input [3:0] wea, input [11:0] addra, input [31:0] dina, output [31:0] douta,
-  input clkb, input enb, input [3:0] web, input [11:0] addrb, input [31:0] dinb, output [31:0] doutb);
-  assign douta=0; assign doutb=0;
-endmodule
-module blk_mem_gen_edge_coeff(
-  input clka, input ena, input [3:0] wea, input [12:0] addra, input [31:0] dina, output [31:0] douta,
-  input clkb, input enb, input [7:0] web, input [11:0] addrb, input [63:0] dinb, output [63:0] doutb);
-  assign douta=0; assign doutb=0;
-endmodule
-module blk_mem_gen_edge_mask(
-  input clka, input ena, input [3:0] wea, input [11:0] addra, input [31:0] dina, output [31:0] douta,
-  input clkb, input enb, input [3:0] web, input [11:0] addrb, input [31:0] dinb, output [31:0] doutb);
+module blk_mem_gen_rows(
+  input clka, input ena, input [3:0] wea, input [10:0] addra, input [31:0] dina, output [31:0] douta,
+  input clkb, input enb, input [15:0] web, input [8:0] addrb, input [127:0] dinb, output [127:0] doutb);
   assign douta=0; assign doutb=0;
 endmodule
 module blk_mem_gen_scan(
   input clka, input ena, input [3:0] wea, input [13:0] addra, input [31:0] dina, output [31:0] douta,
   input clkb, input enb, input [15:0] web, input [11:0] addrb, input [127:0] dinb, output [127:0] doutb);
-  assign douta=0; assign doutb=0;
-endmodule
-module blk_mem_gen_busimg(
-  input clka, input ena, input [3:0] wea, input [10:0] addra, input [31:0] dina, output [31:0] douta,
-  input clkb, input enb, input [3:0] web, input [10:0] addrb, input [31:0] dinb, output [31:0] doutb);
   assign douta=0; assign doutb=0;
 endmodule
 
@@ -284,11 +269,10 @@ module tb_t_ff;
   wire [9:0] da_dipole, da_bias_y, da_bias_x, da_bias_z;
   wire da_clk0, da_clk1, da_clk2, da_clk3;
 
-  // The top's BANK_SIZE default (2048) == streamer_config.json == the real bitstream's
-  // geometry (geom.tcl) == the committed replay_t.vh layout.  A
-  // mismatched override here would land the bus image in the scan region -- the loader
-  // would copy zeros and ALL DA output would be silently wrong (we demonstrated exactly
-  // that with a deliberate 512-vs-2048 skew).
+  // The top's geometry defaults == streamer_config.json == the real bitstream's
+  // geometry (geom.tcl) == the committed replay_t.vh layout.  A mismatched override
+  // here would land the scan/loop/delay words in the wrong region and ALL output
+  // would be silently wrong.
   zlc_pulse_streamer_top dut (
     .clk(clk), .led(led), .uart_rx(1'b1),
     .cooling(cooling), .shutter_420(shutter_420), .repump(repump), .probe(probe),

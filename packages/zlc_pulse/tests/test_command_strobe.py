@@ -29,13 +29,13 @@ _BOARD_TARGET = pulse_target_from_xdc()
     (
         (
             "tb_delay_sched",
-            ("zlc_edge_streamer.v", "sim/tb_delay_sched.v"),
+            ("zlc_period_streamer.v", "sim/tb_delay_sched.v"),
             (),
             "DELAY-SCHED-PHYSICAL-DONE-OK",
         ),
         (
             "tb_evt_depth",
-            ("zlc_edge_streamer.v", "sim/tb_evt_depth.v"),
+            ("zlc_period_streamer.v", "sim/tb_evt_depth.v"),
             (),
             "EVT-DEPTH-STICKY-OVERFLOW-OK",
         ),
@@ -49,7 +49,7 @@ _BOARD_TARGET = pulse_target_from_xdc()
             "tb_safe_gate",
             (
                 "zlc_uart_bridge.v",
-                "zlc_edge_streamer.v",
+                "zlc_period_streamer.v",
                 "zlc_pulse_streamer_top.v",
                 "sim/tb_t_ff.v",
             ),
@@ -118,11 +118,10 @@ def test_vivado_rtl_matrix_requires_each_numeric_oracle(tmp_path: Path) -> None:
         pytest.skip("Vivado xsim matrix not executed: xvlog/xelab/xsim are unavailable")
 
     ip_root = RTL_DIR.parent / "build/ps/ps.srcs/sources_1/ip"
-    common = ip_root / "blk_mem_gen_edge_tick/simulation/blk_mem_gen_v8_4.v"
-    tick = ip_root / "blk_mem_gen_edge_tick/sim/blk_mem_gen_edge_tick.v"
-    mask = ip_root / "blk_mem_gen_edge_mask/sim/blk_mem_gen_edge_mask.v"
-    if any(not path.is_file() for path in (common, tick, mask)):
-        pytest.skip("Vivado xsim matrix not executed: generated edge-BRAM models are absent")
+    common = ip_root / "blk_mem_gen_rows/simulation/blk_mem_gen_v8_4.v"
+    rows = ip_root / "blk_mem_gen_rows/sim/blk_mem_gen_rows.v"
+    if any(not path.is_file() for path in (common, rows)):
+        pytest.skip("Vivado xsim matrix not executed: the generated row-BRAM model is absent")
 
     engine_markers = {
         "tb_1tick": "ONE-TICK-OK",
@@ -144,10 +143,9 @@ def test_vivado_rtl_matrix_requires_each_numeric_oracle(tmp_path: Path) -> None:
     compile_result = subprocess.run(
         [
             str(tools["xvlog"]),
-            str(RTL_DIR / "zlc_edge_streamer.v"),
+            str(RTL_DIR / "zlc_period_streamer.v"),
             str(common),
-            str(tick),
-            str(mask),
+            str(rows),
             *[str(RTL_DIR / "sim" / f"{name}.v") for name in engine_markers],
             str(RTL_DIR / "zlc_uart_bridge.v"),
             str(RTL_DIR / "tb_uart_pipeline.v"),

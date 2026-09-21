@@ -1,33 +1,26 @@
-# Build the FINAL affine edge-table pulse streamer (zlc_pulse_streamer_top +
-# zlc_edge_streamer): BRAM edge/scan tables + 1-tick FIFO prefetch + 2-bank
+# Build the FINAL period-table pulse streamer (zlc_pulse_streamer_top +
+# zlc_period_streamer): BRAM row/scan tables + 1-tick FIFO prefetch + 2-bank
 # streaming scan, JTAG-to-AXI control.  ONE clean build (no variants).
 #
-# Frozen 35T geometry: 4096 edges + two bank_size=2048 scan banks (4096
+# Frozen 35T geometry: 512 period rows + two bank_size=2048 scan banks (4096
 # bank-local slots at one time).  The host preloads the first two chunks and its
 # sole observer refills each released bank through the frozen mailbox; total N
 # is not limited by the two-bank window, and the FPGA remains the timing owner.
 #
-# *** The engine + control FSM have bounded Python model contracts
-# (including reference comparisons at read latency 1/2/3, streamed refill/stall,
-# and delay cases).  The multi-BRAM AXI integration has optional xsim benches,
-# but no tracked automatic xsim runner, and still needs on-board evidence.  IP
-# property names are version-specific: each is set defensively (zlc_try warns,
-# does not abort); the real CONFIG.* are dumped -- grep "ZLC IPDUMP"/"ZLC
-# TRY-FAIL".  CRITICAL: the 3 edge BRAMs are forced to READ_LATENCY_B = 2 (both
-# port-B output registers) so the engine's RD_LAT=2 prefetch is deterministic;
-# the dump MUST show latency 2 or 1-tick playback will be off-by-cycles. ***
+# *** IP property names are version-specific: each is set defensively (zlc_try
+# warns, does not abort); the real CONFIG.* are dumped -- grep "ZLC IPDUMP"/"ZLC
+# TRY-FAIL".  CRITICAL: both BRAMs are forced to READ_LATENCY_B = 2 (both port-B
+# output registers) so the engine's RD_LAT=2 prefetch is deterministic; the dump
+# MUST show latency 2 or 1-tick playback will be off-by-cycles. ***
 #
-# Geometry MUST match zlc_pulse_streamer_top.v localparams AND host.image:
-#   EDGE_ADDR_WIDTH=12 (4096 edges):
-#     tick  BRAM 32b/32b  depth 4096
-#     coeff BRAM 32b(A)/64b(B)  port-A depth 8192, port-B depth 4096
-#     mask  BRAM 32b(A)/32b(B)  port-A depth 4096, port-B depth 4096 (25 TTL)
+# Geometry MUST match zlc_pulse_streamer_top.v localparams AND host.wire:
+#   ROW_ADDR_WIDTH=9 (512 rows), ROW_WORDS=4:
+#     rows  BRAM 32b(A)/128b(B)  port-A depth 2048, port-B depth 512
 #   BANK_SIZE=2048 -> scan depth 2*2048=4096:
 #     scan  BRAM 32b(A)/128b(B) port-A depth 16384, port-B depth 4096
-#   bus image 256*7=1792 words (bus_rows = bus_count*2^bus_seg_addr_width = 4*64); CTRL 64 -> axi_bram depth 65536.
-#   The OUTPUT delay is a per-signal EVENT SCHEDULER: per-channel (TTL) event FIFOs + per-bus (DAC) segment FIFOs in
-#   distributed RAM inferred inside the engine (ram_style="distributed", +0 RAMB36).  Each delay
-#   value is one 32-bit word in the R_DELAY register region -- NO delay BRAM, NO delay CTRL words.
+#   loop table 8*2 words + delays 128 words are registers; CTRL 64 -> axi_bram depth 32768.
+#   The OUTPUT delay is a per-signal EVENT SCHEDULER: per-channel (TTL) event FIFOs + per-bus (DAC)
+#   action FIFOs in distributed RAM inferred inside the engine (ram_style="distributed", +0 RAMB36).
 
 set script_dir [file normalize [file dirname [info script]]]
 proc env_or {name default} {
@@ -100,19 +93,17 @@ if {![file isfile $zlc_geom_tcl]} { error "Generated geometry Tcl not found: $zl
 puts "ZLC geometry from config: $zlc_geom_tcl"
 source $zlc_geom_tcl
 foreach required {
-    zlc_edge_addr_width zlc_bank_size zlc_coeff_portb_bits
-    zlc_mask_portb_bits zlc_scan_portb_bits zlc_busimg_depth zlc_axi_bram_depth
+    zlc_row_addr_width zlc_row_portb_bits zlc_bank_size zlc_scan_portb_bits zlc_axi_bram_depth
 } {
     if {![info exists $required]} { error "Generated geometry Tcl omitted $required" }
 }
 # Derived sizes (recomputed from the base vars, whatever their source).
 set zlc_scan_depth [expr {2 * $zlc_bank_size}]
-set zlc_max_edges [expr {1 << $zlc_edge_addr_width}]
-set zlc_coeff_porta_depth [expr {$zlc_max_edges * ($zlc_coeff_portb_bits / 32)}]
-set zlc_mask_porta_depth  [expr {$zlc_max_edges * ($zlc_mask_portb_bits / 32)}]
-set zlc_scan_porta_depth  [expr {$zlc_scan_depth * ($zlc_scan_portb_bits / 32)}]
+set zlc_max_rows [expr {1 << $zlc_row_addr_width}]
+set zlc_row_porta_depth  [expr {$zlc_max_rows * ($zlc_row_portb_bits / 32)}]
+set zlc_scan_porta_depth [expr {$zlc_scan_depth * ($zlc_scan_portb_bits / 32)}]
 
-puts "ZLC create_project: max_edges=$zlc_max_edges bank_size=$zlc_bank_size"
+puts "ZLC create_project: max_rows=$zlc_max_rows bank_size=$zlc_bank_size"
 puts "ZLC create_project project_dir: $project_dir"
 
 proc zlc_require_run_complete {run_name expected_status} {
@@ -132,9 +123,9 @@ proc zlc_dump_ip {ip} {
     }
     puts "ZLC IPDUMP ===== end $ip ====="
 }
-# force port-B read latency 2 (deterministic) on an edge BRAM, then HARD-VERIFY it
+# force port-B read latency 2 (deterministic) on a table BRAM, then HARD-VERIFY it
 # took effect.  The engine's 1-tick prefetch is tuned to RD_LAT=2: if a future Vivado
-# renames these CONFIG properties the set would silently no-op and every edge would
+# renames these CONFIG properties the set would silently no-op and every row would
 # land a cycle early ON HARDWARE with no error anywhere -- so a failed set OR a
 # failed read-back must kill the BUILD, not the experiment.
 proc zlc_force_latency2 {ip} {
@@ -143,13 +134,13 @@ proc zlc_force_latency2 {ip} {
     foreach prop {CONFIG.Register_PortB_Output_of_Memory_Primitives CONFIG.Register_PortB_Output_of_Memory_Core} {
         if {[catch {set got [get_property $prop [get_ips $ip]]} zlc_e]} {
             error "ZLC LATENCY-CHECK FAILED: cannot read $prop on $ip ($zlc_e).\
- This Vivado version may have renamed the property; the edge prefetch REQUIRES port-B\
+ This Vivado version may have renamed the property; the row prefetch REQUIRES port-B\
  read latency 2 (see zlc_pulse_streamer_top.v RD_LAT notes). Fix the property name in\
  zlc_force_latency2 before building -- do NOT ship a bitstream without this check."
         }
         if {![string is true -strict [string tolower $got]]} {
             error "ZLC LATENCY-CHECK FAILED: $prop on $ip is '$got' (expected true).\
- Port-B read latency would be 1 and every edge would fire a cycle early on hardware."
+ Port-B read latency would be 1 and every row would start a cycle early on hardware."
         }
     }
     puts "ZLC LATENCY-CHECK OK: $ip port-B output registers (primitives+core) = true (RD_LAT=2)"
@@ -191,7 +182,7 @@ file mkdir [file dirname $project_dir]
 create_project $project_name $project_dir -part $part -force
 set_property target_language Verilog [current_project]
 
-read_verilog [file join $script_dir zlc_edge_streamer.v]
+read_verilog [file join $script_dir zlc_period_streamer.v]
 read_verilog [file join $script_dir zlc_uart_bridge.v]
 read_verilog [file join $script_dir zlc_pulse_streamer_top.v]
 read_xdc $xdc_path
@@ -218,7 +209,7 @@ zlc_try "jtag ADDR=32" {set_property CONFIG.M_AXI_ADDR_WIDTH {32} [get_ips jtag_
 zlc_dump_ip jtag_axi_0
 generate_target all [get_ips jtag_axi_0]
 
-# --- AXI BRAM controller (single; the top decodes its BRAM port to 5 BRAMs) ---
+# --- AXI BRAM controller (single; the top decodes its BRAM port to 2 BRAMs + registers) ---
 create_ip -name axi_bram_ctrl -vendor xilinx.com -library ip -module_name axi_bram_ctrl_0
 zlc_try "bramc DATA=32"      {set_property CONFIG.DATA_WIDTH {32} [get_ips axi_bram_ctrl_0]}
 zlc_try "bramc SINGLE_PORT"  {set_property CONFIG.SINGLE_PORT_BRAM {1} [get_ips axi_bram_ctrl_0]}
@@ -235,59 +226,23 @@ if {[get_property CONFIG.MEM_DEPTH [get_ips axi_bram_ctrl_0]] != $zlc_axi_bram_d
 zlc_dump_ip axi_bram_ctrl_0
 generate_target all [get_ips axi_bram_ctrl_0]
 
-# --- EDGE TICK BRAM: symmetric 32b TDP, depth 4096, forced port-B latency 2 ----
-create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_edge_tick
-zlc_try "tick TDP"      {set_property CONFIG.Memory_Type {True_Dual_Port_RAM} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick ByteWE"   {set_property CONFIG.Use_Byte_Write_Enable {true} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick ByteSize8" {set_property CONFIG.Byte_Size {8} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick WWA=32"   {set_property CONFIG.Write_Width_A {32} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick RWA=32"   {set_property CONFIG.Read_Width_A {32} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick WDA"      {set_property CONFIG.Write_Depth_A $zlc_max_edges [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick WWB=32"   {set_property CONFIG.Write_Width_B {32} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick RWB=32"   {set_property CONFIG.Read_Width_B {32} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick ENA"      {set_property CONFIG.Enable_A {Use_ENA_Pin} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick ENB"      {set_property CONFIG.Enable_B {Use_ENB_Pin} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick noRSTA"   {set_property CONFIG.Use_RSTA_Pin {false} [get_ips blk_mem_gen_edge_tick]}
-zlc_try "tick noRSTB"   {set_property CONFIG.Use_RSTB_Pin {false} [get_ips blk_mem_gen_edge_tick]}
-zlc_force_latency2 blk_mem_gen_edge_tick
-zlc_dump_ip blk_mem_gen_edge_tick
-generate_target all [get_ips blk_mem_gen_edge_tick]
-
-# --- EDGE COEFF BRAM: asymmetric 32b(A)/64b(B), forced port-B latency 2 --------
-create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_edge_coeff
-zlc_try "coeff TDP"     {set_property CONFIG.Memory_Type {True_Dual_Port_RAM} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff ByteWE"  {set_property CONFIG.Use_Byte_Write_Enable {true} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff ByteSize8" {set_property CONFIG.Byte_Size {8} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff WWA=32"  {set_property CONFIG.Write_Width_A {32} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff RWA=32"  {set_property CONFIG.Read_Width_A {32} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff WDA"     {set_property CONFIG.Write_Depth_A $zlc_coeff_porta_depth [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff WWB=64"  {set_property CONFIG.Write_Width_B $zlc_coeff_portb_bits [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff RWB=64"  {set_property CONFIG.Read_Width_B $zlc_coeff_portb_bits [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff ENA"     {set_property CONFIG.Enable_A {Use_ENA_Pin} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff ENB"     {set_property CONFIG.Enable_B {Use_ENB_Pin} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff noRSTA"  {set_property CONFIG.Use_RSTA_Pin {false} [get_ips blk_mem_gen_edge_coeff]}
-zlc_try "coeff noRSTB"  {set_property CONFIG.Use_RSTB_Pin {false} [get_ips blk_mem_gen_edge_coeff]}
-zlc_force_latency2 blk_mem_gen_edge_coeff
-zlc_dump_ip blk_mem_gen_edge_coeff
-generate_target all [get_ips blk_mem_gen_edge_coeff]
-
-# --- TTL MASK BRAM: 32b(A)/geometry-padded TTL bits(B), port-B latency 2 -------
-create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_edge_mask
-zlc_try "mask TDP"      {set_property CONFIG.Memory_Type {True_Dual_Port_RAM} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask ByteWE"   {set_property CONFIG.Use_Byte_Write_Enable {true} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask ByteSize8" {set_property CONFIG.Byte_Size {8} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask WWA=32"   {set_property CONFIG.Write_Width_A {32} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask RWA=32"   {set_property CONFIG.Read_Width_A {32} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask WDA"      {set_property CONFIG.Write_Depth_A $zlc_mask_porta_depth [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask WWB"      {set_property CONFIG.Write_Width_B $zlc_mask_portb_bits [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask RWB"      {set_property CONFIG.Read_Width_B $zlc_mask_portb_bits [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask ENA"      {set_property CONFIG.Enable_A {Use_ENA_Pin} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask ENB"      {set_property CONFIG.Enable_B {Use_ENB_Pin} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask noRSTA"   {set_property CONFIG.Use_RSTA_Pin {false} [get_ips blk_mem_gen_edge_mask]}
-zlc_try "mask noRSTB"   {set_property CONFIG.Use_RSTB_Pin {false} [get_ips blk_mem_gen_edge_mask]}
-zlc_force_latency2 blk_mem_gen_edge_mask
-zlc_dump_ip blk_mem_gen_edge_mask
-generate_target all [get_ips blk_mem_gen_edge_mask]
+# --- ROW BRAM: asymmetric 32b(A)/ROW_PORTB_BITS(B), MAX_ROWS deep, forced port-B latency 2 ----
+create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_rows
+zlc_try "rows TDP"      {set_property CONFIG.Memory_Type {True_Dual_Port_RAM} [get_ips blk_mem_gen_rows]}
+zlc_try "rows ByteWE"   {set_property CONFIG.Use_Byte_Write_Enable {true} [get_ips blk_mem_gen_rows]}
+zlc_try "rows ByteSize8" {set_property CONFIG.Byte_Size {8} [get_ips blk_mem_gen_rows]}
+zlc_try "rows WWA=32"   {set_property CONFIG.Write_Width_A {32} [get_ips blk_mem_gen_rows]}
+zlc_try "rows RWA=32"   {set_property CONFIG.Read_Width_A {32} [get_ips blk_mem_gen_rows]}
+zlc_try "rows WDA"      {set_property CONFIG.Write_Depth_A $zlc_row_porta_depth [get_ips blk_mem_gen_rows]}
+zlc_try "rows WWB"      {set_property CONFIG.Write_Width_B $zlc_row_portb_bits [get_ips blk_mem_gen_rows]}
+zlc_try "rows RWB"      {set_property CONFIG.Read_Width_B $zlc_row_portb_bits [get_ips blk_mem_gen_rows]}
+zlc_try "rows ENA"      {set_property CONFIG.Enable_A {Use_ENA_Pin} [get_ips blk_mem_gen_rows]}
+zlc_try "rows ENB"      {set_property CONFIG.Enable_B {Use_ENB_Pin} [get_ips blk_mem_gen_rows]}
+zlc_try "rows noRSTA"   {set_property CONFIG.Use_RSTA_Pin {false} [get_ips blk_mem_gen_rows]}
+zlc_try "rows noRSTB"   {set_property CONFIG.Use_RSTB_Pin {false} [get_ips blk_mem_gen_rows]}
+zlc_force_latency2 blk_mem_gen_rows
+zlc_dump_ip blk_mem_gen_rows
+generate_target all [get_ips blk_mem_gen_rows]
 
 # --- SCAN BRAM: asymmetric 32b(A)/128b(B), 2*BANK_SIZE deep -------------------
 create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_scan
@@ -307,25 +262,10 @@ zlc_force_latency2 blk_mem_gen_scan
 zlc_dump_ip blk_mem_gen_scan
 generate_target all [get_ips blk_mem_gen_scan]
 
-# --- BUS image BRAM: symmetric 32b TDP (A=AXI write, B=mini-loader read) ------
-create_ip -name blk_mem_gen -vendor xilinx.com -library ip -module_name blk_mem_gen_busimg
-zlc_try "busimg TDP"    {set_property CONFIG.Memory_Type {True_Dual_Port_RAM} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg ByteWE" {set_property CONFIG.Use_Byte_Write_Enable {true} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg ByteSize8" {set_property CONFIG.Byte_Size {8} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg WWA=32" {set_property CONFIG.Write_Width_A {32} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg WDA" {set_property CONFIG.Write_Depth_A $zlc_busimg_depth [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg ENA"    {set_property CONFIG.Enable_A {Use_ENA_Pin} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg ENB"    {set_property CONFIG.Enable_B {Use_ENB_Pin} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg noRSTA" {set_property CONFIG.Use_RSTA_Pin {false} [get_ips blk_mem_gen_busimg]}
-zlc_try "busimg noRSTB" {set_property CONFIG.Use_RSTB_Pin {false} [get_ips blk_mem_gen_busimg]}
-zlc_dump_ip blk_mem_gen_busimg
-generate_target all [get_ips blk_mem_gen_busimg]
-
-# NOTE: the OUTPUT delay event scheduler (per-channel TTL event FIFOs + per-bus DAC segment FIFOs) is
-# inferred distributed-RAM / LUTRAM inside zlc_edge_streamer (ram_style="distributed", +0
-# RAMB36, +0 DSP).  Each delay value is one 32-bit R_DELAY register word latched at FIRE --
-# there is NO delay image BRAM and NO mini-loader to build (only 5 BRAMs: 3 edge + scan
-# + bus image).
+# NOTE: the OUTPUT delay event scheduler (per-channel TTL event FIFOs + per-bus DAC action FIFOs) is
+# inferred distributed-RAM / LUTRAM inside zlc_period_streamer (ram_style="distributed", +0
+# RAMB36, +0 DSP).  Each delay value and each loop-table entry is a register word in its own
+# region -- there is NO delay/loop BRAM and NO loader to build (only 2 BRAMs: rows + scan).
 
 update_compile_order -fileset sources_1
 launch_runs synth_1 -jobs 4

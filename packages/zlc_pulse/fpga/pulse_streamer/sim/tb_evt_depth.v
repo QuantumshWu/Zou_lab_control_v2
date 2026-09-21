@@ -8,37 +8,38 @@
 // bit0 carries the 32-toggle burst, bit1 the 34-toggle burst; both delayed by
 // d=200 so the whole burst is in flight at once.
 module tb_evt_depth;
-  localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
+  localparam integer CH=8, RAW=`ZLC_ROW_ADDR_WIDTH, TW=32, NS=1, SSW=`ZLC_SLOT_SEL_WIDTH;
+  localparam integer BUSC=4, BW=10, ML=`ZLC_MAX_LOOPS, LIW=`ZLC_LOOP_INDEX_WIDTH, DTW=32;
+  localparam integer ABITS=2+SSW+BW, RBITS=TW+SSW+CH+BUSC*ABITS;
   localparam integer NE=37;
   localparam integer NT=1200;
   localparam integer D=200;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
+  function [RBITS-1:0] row_of;
+    input [TW-1:0] dur; input [CH-1:0] mask;
+    begin row_of = {{(BUSC*ABITS){1'b0}}, mask, {SSW{1'b0}}, dur}; end
+  endfunction
+
   // toggle ticks 10,12,...: bit0 toggles at the first 32, bit1 at all 34.
-  reg [TW-1:0] etick [0:63]; reg [CH-1:0] emask [0:63];
+  reg [RBITS-1:0] rowmem [0:63];
   integer i; reg b0; reg b1;
   initial begin
-    etick[0]=0; emask[0]=8'h00;
+    for (i=0; i<64; i=i+1) rowmem[i]=0;
+    rowmem[0]=row_of(32'd10, 8'h00);
     b0=0; b1=0;
     for (i=0; i<34; i=i+1) begin
       b1 = ~b1;
       if (i<32) b0 = ~b0;
-      etick[1+i] = 10 + 2*i;
-      emask[1+i] = {6'b0, b1, b0};
+      rowmem[1+i] = row_of(32'd2, {6'b0, b1, b0});   // toggle at 10 + 2*i
     end
-    etick[35]=500; emask[35]=8'h00;   // frame end (all off)
-    etick[36]=501; emask[36]=8'h00;   // final off edge
-    for (i=37; i<64; i=i+1) begin etick[i]=0; emask[i]=0; end
+    rowmem[35]=row_of(32'd422, 8'h00);   // 78 .. 500 all off
+    rowmem[36]=row_of(32'd1, 8'h00);     // 500 .. 501: frame end
   end
-
-  wire [EAW-1:0] edge_raddr;
-  reg [TW-1:0] tp[0:2]; reg [CH-1:0] mp[0:2];
-  always @(posedge clk) begin
-    tp[0]<=etick[edge_raddr[5:0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
-    mp[0]<=emask[edge_raddr[5:0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
-  end
-  wire [TW-1:0] edge_tick_rdata = tp[2];
-  wire [CH-1:0] edge_mask_rdata = mp[2];
+  wire [RAW-1:0] row_raddr;
+  reg [RBITS-1:0] rp[0:2];
+  always @(posedge clk) begin rp[0]<=rowmem[row_raddr[5:0]]; rp[1]<=rp[0]; rp[2]<=rp[1]; end
+  wire [RBITS-1:0] row_rdata = rp[2];
 
   localparam integer TDW = 32;
   wire [CH*TDW-1:0] delay_ticks_w;
@@ -46,22 +47,17 @@ module tb_evt_depth;
   assign delay_ticks_w[1*TDW +: TDW] = D;       // 34-toggle burst, overflow by 2
   assign delay_ticks_w[CH*TDW-1: 2*TDW] = {(CH-2)*TDW{1'b0}};
 
-  wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
+  wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done, overflow, physical_active; wire [31:0] scan_cursor; wire underflow;
-  zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd37),.run_repeat_count(32'd1),
-    .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd501),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
-    .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
-    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
+  zlc_period_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
+    .clk(clk),.reset(reset),.start(start),.prog_count(NE[RAW:0]),.run_repeat_count(32'd1),
+    .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
+    .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
+    .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),
+    .row_raddr(row_raddr),.row_rdata(row_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),
     .bank_ready(2'b11),.bank_chunk0(32'd0),.bank_chunk1(32'd0),
     .scan_cursor(scan_cursor),.underflow(underflow),
-    .bus_prog_we(1'b0),.bus_prog_bus(2'd0),.bus_prog_addr(6'd0),.bus_prog_start_tick(32'd0),
-    .bus_prog_stop_tick(32'd0),.bus_prog_start_tick_coeffs({NS*CW{1'b0}}),
-    .bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),.bus_prog_start_value(10'd0),
-    .bus_prog_stop_value(10'd0),.bus_prog_mode(2'd0),.bus_prog_value_select(3'd0),
-    .bus_prog_stop_value_select(3'd0),.bus_counts({BUSC*7{1'b0}}),
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks(delay_ticks_w),
     .out(out),.bus_out(bus_out),.running(running),.done(done),
     .overflow(overflow),.physical_active(physical_active));
@@ -107,9 +103,9 @@ module tb_evt_depth;
       end
       begin
         repeat (NT) @(posedge clk);
-        $fatal(1, "timeout waiting for overflow run DONE (running=%b draining=%b busy=%b time=%0d final=%0d edge=%0d cnt0=%0d cnt1=%0d out=%h)",
+        $fatal(1, "timeout waiting for overflow run DONE (running=%b draining=%b busy=%b frame_tick=%0d left=%0d cnt0=%0d cnt1=%0d out=%h)",
                running, dut.draining, dut.delay_runtime_busy,
-               dut.time_count, dut.final_tick, dut.edge_index,
+               dut.frame_tick, dut.left,
                dut.g_evtfifo[0].cnt, dut.g_evtfifo[1].cnt, out);
       end
     join

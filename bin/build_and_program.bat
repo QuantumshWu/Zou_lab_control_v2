@@ -110,7 +110,7 @@ if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
   exit /b 0
 )
 
-echo ZLC FPGA pulse streamer: build FINAL bitstream (1-tick FIFO prefetch + autonomous scan, JTAG-to-AXI)
+echo ZLC FPGA pulse streamer: build FINAL bitstream (period table + nested loops + autonomous scan, JTAG-to-AXI)
 call :zlc_run_tcl "!ZLC_CREATE_TCL!"
 if errorlevel 1 exit /b 1
 call :zlc_save_src_hash
@@ -126,7 +126,7 @@ exit /b %ERRORLEVEL%
 
 :zlc_help
 echo Build/program the FINAL ZLC FPGA pulse streamer (one clean design, no variants).
-echo Control path: JTAG-to-AXI master -^> AXI BRAM controller -^> edge/scan BRAMs + bus loader.
+echo Control path: JTAG-to-AXI master -^> AXI BRAM controller -^> row/scan BRAMs + loop/delay registers.
 echo Engine: 1-tick (20 ns) FIFO prefetch + streamed autonomous ping-pong scan.
 echo.
 echo Usage:
@@ -164,8 +164,8 @@ exit /b 0
 set "ZLC_DEFAULT_XDC=%PULSE_ROOT%\fpga\board_config\board.xdc"
 if not defined ZLC_PS_XDC set "ZLC_PS_XDC=%ZLC_DEFAULT_XDC%"
 set "ZLC_SELECTED_XDC=%ZLC_PS_XDC%"
-if not exist "%STREAMER_DIR%\zlc_edge_streamer.v" (
-  echo ERROR: missing FINAL engine HDL: %STREAMER_DIR%\zlc_edge_streamer.v
+if not exist "%STREAMER_DIR%\zlc_period_streamer.v" (
+  echo ERROR: missing FINAL engine HDL: %STREAMER_DIR%\zlc_period_streamer.v
   exit /b 2
 )
 if not exist "%STREAMER_DIR%\zlc_pulse_streamer_top.v" (
@@ -176,7 +176,7 @@ if not exist "%STREAMER_DIR%\create_project.tcl" (
   echo ERROR: missing FINAL build Tcl: %STREAMER_DIR%\create_project.tcl
   exit /b 2
 )
-findstr /C:"zlc_edge_streamer.v" "%STREAMER_DIR%\create_project.tcl" >nul || (
+findstr /C:"zlc_period_streamer.v" "%STREAMER_DIR%\create_project.tcl" >nul || (
   echo ERROR: create_project.tcl does not read the FINAL engine HDL.
   exit /b 2
 )
@@ -184,7 +184,7 @@ findstr /C:"module zlc_pulse_streamer_top" "%STREAMER_DIR%\zlc_pulse_streamer_to
   echo ERROR: FINAL top module name is wrong.
   exit /b 2
 )
-findstr /C:"module zlc_edge_streamer" "%STREAMER_DIR%\zlc_edge_streamer.v" >nul || (
+findstr /C:"module zlc_period_streamer" "%STREAMER_DIR%\zlc_period_streamer.v" >nul || (
   echo ERROR: FINAL engine module name is wrong.
   exit /b 2
 )
@@ -196,12 +196,12 @@ findstr /C:"create_ip -name axi_bram_ctrl" "%STREAMER_DIR%\create_project.tcl" >
   echo ERROR: create_project.tcl does not create the AXI BRAM controller IP.
   exit /b 2
 )
-findstr /C:"blk_mem_gen_edge_tick" "%STREAMER_DIR%\create_project.tcl" >nul || (
-  echo ERROR: create_project.tcl does not create the 3 parallel edge BRAMs.
+findstr /C:"blk_mem_gen_rows" "%STREAMER_DIR%\create_project.tcl" >nul || (
+  echo ERROR: create_project.tcl does not create the period-row BRAM.
   exit /b 2
 )
 findstr /C:"zlc_force_latency2" "%STREAMER_DIR%\create_project.tcl" >nul || (
-  echo ERROR: create_project.tcl does not force the edge-BRAM read latency to 2.
+  echo ERROR: create_project.tcl does not force the BRAM read latency to 2.
   exit /b 2
 )
 if not exist "!ZLC_SELECTED_XDC!" (
@@ -217,7 +217,7 @@ findstr /C:"<PIN_CH" "!ZLC_SELECTED_XDC!" >nul && (
   echo ERROR: selected XDC still contains PIN_CH placeholders: !ZLC_SELECTED_XDC!
   exit /b 2
 )
-echo ZLC FINAL source contract: geometry from streamer_config.json, UART/JTAG-to-AXI, forced edge latency 2
+echo ZLC FINAL source contract: geometry from streamer_config.json, UART/JTAG-to-AXI, forced BRAM latency 2
 echo ZLC FINAL XDC: !ZLC_SELECTED_XDC!
 exit /b 0
 
@@ -349,7 +349,7 @@ if not "!ZLC_VIVADO_VERSION_STATUS!"=="0" (
   del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
   exit /b 1
 )
-%ZLC_PY_CMD% -c "import hashlib,os,sys;r,part,top,tool=sys.argv[1:5];paths=sys.argv[5:];missing=[p for p in paths if not p or not os.path.isfile(p)];assert not missing,'missing bitstream input(s): '+repr(missing);h=hashlib.sha256();h.update(b'tool\0');h.update(open(tool,'rb').read());h.update(b'part\0'+part.encode());h.update(b'top\0'+top.encode());[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode()),h.update(b'\0'),h.update(open(p,'rb').read())) for p in paths];print(h.hexdigest())" "%ZLC_HOME%" "%ZLC_PS_FPGA_PART%" "%ZLC_TOP%" "%ZLC_VIVADO_ID_TMP%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "!ZLC_SELECTED_XDC!" "%PULSE_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
+%ZLC_PY_CMD% -c "import hashlib,os,sys;r,part,top,tool=sys.argv[1:5];paths=sys.argv[5:];missing=[p for p in paths if not p or not os.path.isfile(p)];assert not missing,'missing bitstream input(s): '+repr(missing);h=hashlib.sha256();h.update(b'tool\0');h.update(open(tool,'rb').read());h.update(b'part\0'+part.encode());h.update(b'top\0'+top.encode());[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode()),h.update(b'\0'),h.update(open(p,'rb').read())) for p in paths];print(h.hexdigest())" "%ZLC_HOME%" "%ZLC_PS_FPGA_PART%" "%ZLC_TOP%" "%ZLC_VIVADO_ID_TMP%" "%STREAMER_DIR%\zlc_period_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "!ZLC_SELECTED_XDC!" "%PULSE_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
 set "ZLC_HASH_STATUS=%ERRORLEVEL%"
 del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
 if not "%ZLC_HASH_STATUS%"=="0" (

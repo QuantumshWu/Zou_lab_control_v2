@@ -1,66 +1,64 @@
 `timescale 1ns/1ps
-// Real zlc_edge_streamer driven through all three repeat layers and a STREAMED scan with a small BANK_SIZE so
-// K = ceil(N/BANK_SIZE) > 2 (here BANK_SIZE=4, N=10 -> K=3, ODD: the case that used to gap).
+// Real zlc_period_streamer driven through all three repeat layers and a STREAMED scan with a small
+// BANK_SIZE so K = ceil(N/BANK_SIZE) > 2 (here BANK_SIZE=4, N=10 -> K=3, ODD: the case that used to gap).
 // A behavioral CYCLIC host-refill model feeds chunks 0,1,..,K-1,0,1,.. one-ahead into the
 // alternating ping-pong bank (bank = monotonic_chunk % 2), exactly matching the engine's
-// scan_bank_base parity.  A 3x whole-timeline PulseBracket sits inside 2 Run repeats per row,
+// bank parity.  A 3x whole-timeline PulseBracket sits inside 2 Run repeats per row,
 // and the ten-row table runs for 3 Scan repeats.  Asserts the exact N*M*S nesting,
 // row-only CURSOR motion, finite DONE, and no underflow at either seam.
 module tb_scan_wrap;
-  localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
+  localparam integer CH=8, RAW=`ZLC_ROW_ADDR_WIDTH, TW=32, NS=1, SSW=`ZLC_SLOT_SEL_WIDTH;
+  localparam integer BUSC=4, BW=10, ML=`ZLC_MAX_LOOPS, LIW=`ZLC_LOOP_INDEX_WIDTH, DTW=32;
+  localparam integer ABITS=2+SSW+BW, RBITS=TW+SSW+CH+BUSC*ABITS;
   localparam integer BANK_SIZE=4, SAW=3;          // SAW = clog2(BANK_SIZE)+1 = 3 (2 banks x 4)
   localparam integer NPTS=10;                      // K = ceil(10/4) = 3 (odd)
   localparam integer KCH=(NPTS+BANK_SIZE-1)/BANK_SIZE;
   localparam integer BRACKET_REPEATS=3, RUN_REPEATS=2, SCAN_REPEATS=3;
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
-  // --- edge program: 2 edges/point, e0@tick0 (bit0=1), e1@tick10 (off); frame=10 ticks ---
-  reg [TW-1:0] etick [0:3]; reg [CH-1:0] emask [0:3];
-  initial begin etick[0]=0; emask[0]=8'h1; etick[1]=10; emask[1]=8'h0; etick[2]=0; etick[3]=0; emask[2]=0; emask[3]=0; end
+  function [RBITS-1:0] row_of;
+    input [TW-1:0] dur; input [CH-1:0] mask;
+    begin row_of = {{(BUSC*ABITS){1'b0}}, mask, {SSW{1'b0}}, dur}; end
+  endfunction
 
-  wire [EAW-1:0] edge_raddr; wire [SAW-1:0] scan_raddr;
-  wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out; wire running, done;
-  wire [TW-1:0] scan_cursor_w; wire underflow;
-  // edge reads (behavioral, aligned latency 2 like the real IPs)
-  reg [TW-1:0] etpipe[0:2]; reg [CH-1:0] empipe[0:2];
-  always @(posedge clk) begin
-    etpipe[0]<=etick[edge_raddr[1:0]]; etpipe[1]<=etpipe[0]; etpipe[2]<=etpipe[1];
-    empipe[0]<=emask[edge_raddr[1:0]]; empipe[1]<=empipe[0]; empipe[2]<=empipe[1];
-  end
-  wire [TW-1:0] edge_tick_rdata = etpipe[1];
-  wire [CH-1:0] edge_mask_rdata = empipe[1];
+  // --- period table: row 0 = bit0 high for 5 ticks, row 1 = low for 5 ticks; bracket rows 0..1 x3 ---
+  reg [RBITS-1:0] rowmem [0:3];
+  initial begin rowmem[0]=row_of(32'd5, 8'h1); rowmem[1]=row_of(32'd5, 8'h0); rowmem[2]=0; rowmem[3]=0; end
+  wire [RAW-1:0] row_raddr;
+  reg [RBITS-1:0] rp[0:2];
+  always @(posedge clk) begin rp[0]<=rowmem[row_raddr[1:0]]; rp[1]<=rp[0]; rp[2]<=rp[1]; end
+  wire [RBITS-1:0] row_rdata = rp[2];
+  reg [ML*RAW-1:0] loop_first = {ML*RAW{1'b0}};
+  reg [ML*RAW-1:0] loop_last = {ML*RAW{1'b0}};
+  reg [ML*32-1:0] loop_count = {ML*32{1'b0}};
 
-  // --- behavioral 2-bank scan memory (NS*TW per entry); host writes it; engine reads w/ lat 2 ---
+  // --- behavioral 2-bank scan memory (NS*TW per entry); host writes it; engine reads w/ lat RD_LAT+2 ---
   reg [NS*TW-1:0] scanmem [0:2*BANK_SIZE-1];
+  wire [SAW-1:0] scan_raddr;
   reg [NS*TW-1:0] spipe[0:2];
   always @(posedge clk) begin spipe[0]<=scanmem[scan_raddr]; spipe[1]<=spipe[0]; spipe[2]<=spipe[1]; end
-  wire [NS*TW-1:0] scan_rdata = spipe[1];
+  wire [NS*TW-1:0] scan_rdata = spipe[2];
 
   reg [1:0] bank_ready; reg [TW-1:0] bank_chunk0, bank_chunk1;
+  wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out; wire running, done;
+  wire [TW-1:0] scan_cursor_w; wire underflow;
 
-  zlc_edge_streamer #(.CHANNEL_COUNT(CH),.SCAN_ADDR_WIDTH(SAW),.BANK_SIZE(BANK_SIZE),
-                      .NUM_SLOTS(NS)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd2),.run_repeat_count(RUN_REPEATS[31:0]),
-    .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd10),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(BRACKET_REPEATS[31:0]),
+  zlc_period_streamer #(.CHANNEL_COUNT(CH),.SCAN_ADDR_WIDTH(SAW),.BANK_SIZE(BANK_SIZE),
+                        .NUM_SLOTS(NS)) dut (
+    .clk(clk),.reset(reset),.start(start),.prog_count(2),.run_repeat_count(RUN_REPEATS[31:0]),
     .scan_enable(1'b1),.scan_count(NPTS[31:0]),.scan_repeat_count(SCAN_REPEATS[31:0]),
-    .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
-    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
+    .loop_table_count(1),.loop_first_flat(loop_first),.loop_last_flat(loop_last),.loop_count_flat(loop_count),
+    .row_raddr(row_raddr),.row_rdata(row_rdata),
     .scan_raddr(scan_raddr),.scan_rdata(scan_rdata),
     .bank_ready(bank_ready),.bank_chunk0(bank_chunk0),.bank_chunk1(bank_chunk1),
     .scan_cursor(scan_cursor_w),.underflow(underflow),
-    .bus_prog_we(1'b0),.bus_prog_bus(2'd0),.bus_prog_addr(6'd0),.bus_prog_start_tick(32'd0),
-    .bus_prog_stop_tick(32'd0),.bus_prog_start_tick_coeffs({NS*CW{1'b0}}),
-    .bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),.bus_prog_start_value(10'd0),
-    .bus_prog_stop_value(10'd0),.bus_prog_mode(2'd0),.bus_prog_value_select(3'd0),
-    .bus_prog_stop_value_select(3'd0),.bus_counts({BUSC*7{1'b0}}),
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks({CH*DTW{1'b0}}),
     .out(out),.bus_out(bus_out),.running(running),.done(done));
 
   // --- behavioral CYCLIC host refill model ---------------------------------------------------
   // scanmem entry for (bank,offset) holds the slot vector (= the point index it represents).
   // chunk c (data) = points [c*BANK_SIZE .. ); host loads chunk (mono mod K) into bank (mono%2)
-  // one-ahead, with REFILL_LAT cycles of write latency.  base = (#wraps * K) parity.
+  // one-ahead, with REFILL_LAT cycles of write latency.
   localparam integer REFILL_LAT=6;
   integer load_at;         // cycle when the in-flight load completes
   integer load_bank, load_chunk;
@@ -80,6 +78,7 @@ module tb_scan_wrap;
   reg [NS*TW-1:0] body_slots [0:511]; integer nbodies;
 
   initial begin
+    loop_first[0 +: RAW] = 0; loop_last[0 +: RAW] = 1; loop_count[0 +: 32] = BRACKET_REPEATS;
     reset=1; start=0; bank_ready=2'b00; bank_chunk0=0; bank_chunk1=0;
     // preload monotonic chunk 0 -> bank0, chunk1 -> bank1 (base=0)
     load_chunk_into(0,0); bank_chunk0=0;
@@ -117,11 +116,11 @@ module tb_scan_wrap;
     end
   end
 
-  // record the slot the engine latches each new point + watch for wrap stalls
-  reg [NS*TW-1:0] slot_prev; integer started=0;
+  // record the slot the engine plays at each body (a rise of bit 0) + watch for wrap stalls
+  reg [NS*TW-1:0] slot_prev; integer started=0; reg out_prev=0;
   always @(posedge clk) begin
     if (running) begin
-      if (dut.time_count==1 && out[0]) begin
+      if (out[0] && !out_prev) begin
         body_slots[nbodies]<=dut.slot_active;
         nbodies<=nbodies+1;
       end
@@ -132,12 +131,13 @@ module tb_scan_wrap;
       // a stall at the wrap shows as underflow asserting; count it (after warmup)
       if (underflow && cyc>100) stalls_after_warmup<=stalls_after_warmup+1;
     end
+    out_prev <= out[0] & running;
   end
 
   integer i; integer bad; integer timeout_cycles;
   initial begin
     wait(reset==1); wait(reset==0);
-    for (timeout_cycles=0; timeout_cycles<5000 && done!=1'b1; timeout_cycles=timeout_cycles+1)
+    for (timeout_cycles=0; timeout_cycles<8000 && done!=1'b1; timeout_cycles=timeout_cycles+1)
       @(posedge clk);
     if (done!=1'b1) begin
       $display("**FAIL** three-layer scan did not reach finite DONE");

@@ -52,7 +52,7 @@ DEPLOYMENT_ASSETS = (
     "fpga/pulse_streamer/sim/tb_t_ff.v",
     "fpga/pulse_streamer/tb_uart_pipeline.v",
     "fpga/pulse_streamer/tb_uart_read_tap.v",
-    "fpga/pulse_streamer/zlc_edge_streamer.v",
+    "fpga/pulse_streamer/zlc_period_streamer.v",
     "fpga/pulse_streamer/zlc_pulse_streamer_top.v",
     "fpga/pulse_streamer/zlc_uart_bridge.v",
 )
@@ -265,7 +265,7 @@ def test_clock_and_safe_pin_boundary_are_explicit() -> None:
 
 
 def test_public_done_waits_for_the_physical_tail_and_errors_are_sticky() -> None:
-    engine = (ROOT / "fpga/pulse_streamer/zlc_edge_streamer.v").read_text(
+    engine = (ROOT / "fpga/pulse_streamer/zlc_period_streamer.v").read_text(
         encoding="utf-8"
     )
     top = (ROOT / "fpga/pulse_streamer/zlc_pulse_streamer_top.v").read_text(
@@ -282,7 +282,10 @@ def test_public_done_waits_for_the_physical_tail_and_errors_are_sticky() -> None
     assert "overflow <= 1'b1" in engine
     assert "zlc_overflow ? {1'b0, ST_ERROR}" in top
     assert "protocol_error ? ST_LINK_ERROR" in top
-    assert "bank_ready[0] && bank_chunk0 == 0" in engine
+    # A scan point is fetched only from a bank the host marked ready with that
+    # chunk, and a seam that needs a point not yet resident holds with UNDERFLOW.
+    assert "bank_ready[b] && ((b ? bank_chunk1 : bank_chunk0) == (idx >> BANK_BITS))" in engine
+    assert "vf_nv == {FIFO_CNT_W{1'b0}}" in engine
 
 
 def test_uart_decoder_releases_truncated_frames_and_rejects_bounds() -> None:

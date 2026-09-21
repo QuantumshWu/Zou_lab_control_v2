@@ -15,7 +15,7 @@ document is a second source of truth.
   defect or design mismatch; it is not part of normal experiment startup.
 - `pulse_server`: start the thin length-prefixed-JSON pulse server. It owns
   one `zlc_pulse.PulseStreamer` on the FPGA machine before accepting clients.
-- `pulse_streamer/`: frozen HDL (`zlc_edge_streamer.v`,
+- `pulse_streamer/`: frozen HDL (`zlc_period_streamer.v`,
   `zlc_pulse_streamer_top.v`), Vivado Tcl, and simulation testbenches. The
   Python image/capacity projection is `zlc_pulse.fpga`.
 - Generated Vivado projects and server state default to `fpga\build`. The
@@ -84,8 +84,8 @@ action builds and programs; use explicit `--build-only` to generate reports and
 a bitstream without connecting to hardware. Flash remains a separate action.
 
 Default clock is 50 MHz (20 ns tick); the minimal pulse width and resolution are
-1 tick. The qualified deployment has 4096 edge rows and two 2048-point scan
-banks, so 4096 bank-local scan slots are resident at one time. A run may contain
+1 tick. The qualified deployment has 512 period rows, 8 nested loops and two
+2048-point scan banks, so 4096 bank-local scan slots are resident at one time. A run may contain
 more points: preparation preloads the first two chunks, then the sole host
 observer refills each released bank through `BANK_READY` / `BANK*_CHUNK`. The
 FPGA still clocks every point autonomously; the host moves chunks, never drives

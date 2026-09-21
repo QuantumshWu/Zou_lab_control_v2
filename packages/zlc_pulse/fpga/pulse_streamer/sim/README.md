@@ -14,28 +14,34 @@ code zero after `$fatal`.
 The maintained benches are self-contained except where explicitly noted:
 
 - `tb_1tick.v`, `tb_gapsweep.v`, and `tb_loop.v` cover
-  exact 1/2-tick finite one-shots, dense edge prefetch, gap-dependent
-  complete-Pulse Run repeats, and a non-zero-start finite `PulseBracket` with
-  distinct preamble/body/tail.
-- `tb_scan_wrap.v` covers PulseBracket, per-row Run repeats, finite Scan repeats,
-  a streamed three-chunk table, cumulative row cursor, and cyclic two-bank wrap.
+  exact 1/2-row finite one-shots, dense one-tick rows around a prefetch
+  bubble, gap-dependent complete-Pulse Run repeats, and a non-zero-start
+  finite nested bracket (outer x3 with an inner x2) with distinct
+  preamble/body/tail on TTL and DAC.
+- `tb_scan_wrap.v` covers a whole-timeline bracket, per-row Run repeats, finite
+  Scan repeats, a streamed three-chunk table, cumulative row cursor, and the
+  cyclic two-bank wrap through the scan-point prefetcher.
 - `tb_delay_sched.v`, `tb_delay_compact.v`, `tb_evt_depth.v`, and
-  `tb_bus_delay.v` cover the current 32-bit TTL event and DAC segment delay
+  `tb_bus_delay.v` cover the current 32-bit TTL event and DAC action delay
   schedulers.
-- `tb_ramp_scan.v` and `tb_da_ttl_align.v` cover DAC ramps, affine boundary
-  cache ownership (including late-bank recovery), and TTL/DAC alignment.
-- `tb_real_engine.v` uses the generated edge BRAM simulation models.
+- `tb_ramp_scan.v` and `tb_da_ttl_align.v` cover slot-targeted DAC ramps
+  (gentle and steep Bresenham), a late bank held with UNDERFLOW and resumed,
+  and TTL/DAC alignment.
+- `tb_real_engine.v` uses the generated row BRAM simulation model.
 - `../tb_uart_pipeline.v` and `../tb_uart_read_tap.v` require exact write
   commit counts/address order while covering pipelining, watchdog/bounds,
   last-word delivery, readback, and the layout identifier.
 - `tb_t_ff.v` is the retained full-top consecutive-FIRE regression. Its
   committed `replay_t.vh` and `replay_t_frame.vh` are a literal current-layout
-  host image; the bench checks that repeated runs produce identical first
-  frames through the CTRL decoder, bus loader, engine, and output mapping.
+  host image (the 9-period, 116-tick Pulse described in the bench header,
+  packed by `zlc_pulse.wire.pack_program` and written as one `wr(...)` line
+  per sparse word; regenerate them the same way after any layout change); the
+  bench checks that repeated runs produce identical first frames through the
+  CTRL decoder, loop/delay registers, engine, and output mapping.
 
-The former captured-session replay (`tb_full_top.v`/`replay_image.vh`) was
-removed because it encoded an obsolete register map and had no current
-generator. A stale historical trace is not valid deployment evidence.
+The engine benches other than `tb_real_engine.v` model the row and scan BRAMs
+behaviorally (a registered address plus three pipeline stages, the RD_LAT+2
+issue-to-data latency of the generated IP), so they run without a build.
 
 ## Running a bench
 
@@ -46,14 +52,8 @@ from this directory, for example:
 
 ```sh
 VIV=/c/Xilinx/Vivado/2019.1/bin
-IPT=../../build/ps/ps.srcs/sources_1/ip/blk_mem_gen_edge_tick
-IPM=../../build/ps/ps.srcs/sources_1/ip/blk_mem_gen_edge_mask
-"$VIV/xvlog" ../zlc_edge_streamer.v \
-  "$IPT/sim/blk_mem_gen_edge_tick.v" \
-  "$IPT/simulation/blk_mem_gen_v8_4.v" \
-  "$IPM/sim/blk_mem_gen_edge_mask.v" \
-  "$IPM/simulation/blk_mem_gen_v8_4.v" \
-  tb_real_engine.v
+IPR=../../build/ps/ps.srcs/sources_1/ip/blk_mem_gen_rows
+"$VIV/xvlog" ../zlc_period_streamer.v   "$IPR/sim/blk_mem_gen_rows.v"   "$IPR/simulation/blk_mem_gen_v8_4.v"   tb_real_engine.v
 "$VIV/xelab" work.tb_real_engine -s sreal
 "$VIV/xsim" sreal -runall
 ```

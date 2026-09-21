@@ -1,37 +1,39 @@
 `timescale 1ns/1ps
 // TTL EVENT-SCHEDULER delay verification on the REAL engine: channels with delays
-// {0, 1, 2, 7, 1000} ticks and a finite dense-toggle program (incl. 1-tick edges),
-// with behavioral aligned-latency edge BRAMs.  ORACLE: record the engine's
+// {0, 1, 2, 7, 1000} ticks and a finite dense-toggle program (incl. 1-tick rows),
+// with a behavioral aligned-latency row memory.  ORACLE: record the engine's
 // UNDELAYED stream (dut.state_mask) every cycle and assert out[t] == in[t-d] for
 // every delayed channel on every cycle (0 before t=d), including the physical tail.
 module tb_delay_sched;
-  localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, DTW=32, BUSC=4, BW=10;
-  localparam integer NE=8;
+  localparam integer CH=8, RAW=`ZLC_ROW_ADDR_WIDTH, TW=32, NS=1, SSW=`ZLC_SLOT_SEL_WIDTH;
+  localparam integer BUSC=4, BW=10, ML=`ZLC_MAX_LOOPS, LIW=`ZLC_LOOP_INDEX_WIDTH, DTW=32;
+  localparam integer ABITS=2+SSW+BW, RBITS=TW+SSW+CH+BUSC*ABITS;
+  localparam integer NE=7;
   localparam integer NT=12000;          // > 3 frames + the 1000-tick delayed tail
   reg clk=0, reset=0, start=0; always #10 clk=~clk;
 
-  // edges: dense toggles on bits 0..4 (all channels share the same waveform so each
-  // delayed channel can be checked against the same undelayed reference bit).
-  reg [TW-1:0] etick [0:NE-1]; reg [CH-1:0] emask [0:NE-1];
-  initial begin
-    etick[0]=0;    emask[0]=8'h1F;   // all five test channels ON at t=0
-    etick[1]=5;    emask[1]=8'h00;   // off
-    etick[2]=6;    emask[2]=8'h1F;   // 1-tick later back ON (stress)
-    etick[3]=7;    emask[3]=8'h00;   // 1-tick pulse off
-    etick[4]=100;  emask[4]=8'h1F;
-    etick[5]=160;  emask[5]=8'h00;
-    etick[6]=2000; emask[6]=8'h1F;
-    etick[7]=2400; emask[7]=8'h00;   // frame ends at 2400 (loop_end)
-  end
+  function [RBITS-1:0] row_of;
+    input [TW-1:0] dur; input [CH-1:0] mask;
+    begin row_of = {{(BUSC*ABITS){1'b0}}, mask, {SSW{1'b0}}, dur}; end
+  endfunction
 
-  wire [EAW-1:0] edge_raddr;
-  reg [TW-1:0] tp[0:2]; reg [CH-1:0] mp[0:2];
-  always @(posedge clk) begin
-    tp[0]<=etick[edge_raddr[2:0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
-    mp[0]<=emask[edge_raddr[2:0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
+  // rows: dense toggles on bits 0..4 (all channels share the same waveform so each
+  // delayed channel can be checked against the same undelayed reference bit).
+  reg [RBITS-1:0] rowmem [0:7];
+  initial begin
+    rowmem[0]=row_of(32'd5,    8'h1F);   // all five test channels ON at t=0
+    rowmem[1]=row_of(32'd1,    8'h00);   // off for one tick
+    rowmem[2]=row_of(32'd1,    8'h1F);   // 1-tick pulse (stress)
+    rowmem[3]=row_of(32'd93,   8'h00);
+    rowmem[4]=row_of(32'd60,   8'h1F);
+    rowmem[5]=row_of(32'd1840, 8'h00);
+    rowmem[6]=row_of(32'd400,  8'h1F);   // frame ends at 2400
+    rowmem[7]=0;
   end
-  wire [TW-1:0] edge_tick_rdata = tp[2];
-  wire [CH-1:0] edge_mask_rdata = mp[2];
+  wire [RAW-1:0] row_raddr;
+  reg [RBITS-1:0] rp[0:2];
+  always @(posedge clk) begin rp[0]<=rowmem[row_raddr[2:0]]; rp[1]<=rp[0]; rp[2]<=rp[1]; end
+  wire [RBITS-1:0] row_rdata = rp[2];
 
   // per-channel delays: ch0 d=0, ch1 d=1, ch2 d=2, ch3 d=7, ch4 d=1000 (32b fields)
   localparam integer TDW = 32;
@@ -43,22 +45,17 @@ module tb_delay_sched;
   assign delay_ticks_w[4*TDW +: TDW] = 32'd1000;
   assign delay_ticks_w[CH*TDW-1: 5*TDW] = {(CH-5)*TDW{1'b0}};
 
-  wire [11:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
+  wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done, overflow, physical_active; wire [31:0] scan_cursor; wire underflow;
-  zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.run_repeat_count(32'd1),
-    .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd2400),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
-    .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
-    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
+  zlc_period_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS)) dut (
+    .clk(clk),.reset(reset),.start(start),.prog_count(NE[RAW:0]),.run_repeat_count(32'd1),
+    .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
+    .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
+    .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),
+    .row_raddr(row_raddr),.row_rdata(row_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),
     .bank_ready(2'b11),.bank_chunk0(32'd0),.bank_chunk1(32'd0),
     .scan_cursor(scan_cursor),.underflow(underflow),
-    .bus_prog_we(1'b0),.bus_prog_bus(2'd0),.bus_prog_addr(6'd0),.bus_prog_start_tick(32'd0),
-    .bus_prog_stop_tick(32'd0),.bus_prog_start_tick_coeffs({NS*CW{1'b0}}),
-    .bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),.bus_prog_start_value(10'd0),
-    .bus_prog_stop_value(10'd0),.bus_prog_mode(2'd0),.bus_prog_value_select(3'd0),
-    .bus_prog_stop_value_select(3'd0),.bus_counts({BUSC*7{1'b0}}),
     .bus_delay_ticks({BUSC*DTW{1'b0}}),.delay_ticks(delay_ticks_w),
     .out(out),.bus_out(bus_out),.running(running),.done(done),
     .overflow(overflow),.physical_active(physical_active));
