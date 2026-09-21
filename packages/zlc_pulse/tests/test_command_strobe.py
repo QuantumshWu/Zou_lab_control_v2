@@ -143,6 +143,8 @@ def test_vivado_rtl_matrix_requires_each_numeric_oracle(tmp_path: Path) -> None:
     compile_result = subprocess.run(
         [
             str(tools["xvlog"]),
+            "-i",
+            str(RTL_DIR),
             str(RTL_DIR / "zlc_period_streamer.v"),
             str(common),
             str(rows),

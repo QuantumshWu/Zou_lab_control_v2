@@ -52,10 +52,23 @@ from this directory, for example:
 
 ```sh
 VIV=/c/Xilinx/Vivado/2019.1/bin
-IPR=../../build/ps/ps.srcs/sources_1/ip/blk_mem_gen_rows
-"$VIV/xvlog" ../zlc_period_streamer.v   "$IPR/sim/blk_mem_gen_rows.v"   "$IPR/simulation/blk_mem_gen_v8_4.v"   tb_real_engine.v
+IPR=../../build/ps/ps.srcs/sources_1/ip
+"$VIV/xvlog" -i .. ../zlc_period_streamer.v   "$IPR/blk_mem_gen_rows/sim/blk_mem_gen_rows.v"   "$IPR/blk_mem_gen_rows/simulation/blk_mem_gen_v8_4.v"   tb_real_engine.v
 "$VIV/xelab" work.tb_real_engine -s sreal
 "$VIV/xsim" sreal -runall
+```
+
+Every bench `include`s `../zlc_geometry.vh`, so `xvlog` needs `-i ..` (the
+directory of the RTL) whatever the working directory is.  The full-top bench
+uses `$isunknown` and therefore compiles in SystemVerilog mode; with the
+generated IP models it replays the frozen host image through the real BRAMs,
+and with `-d ZLC_IVERILOG` its IP-free `tb_safe_gate` proves the SAFE pin gate:
+
+```sh
+"$VIV/xvlog" -sv -i .. ../zlc_uart_bridge.v ../zlc_period_streamer.v ../zlc_pulse_streamer_top.v   "$IPR/blk_mem_gen_rows/simulation/blk_mem_gen_v8_4.v" "$IPR/blk_mem_gen_rows/sim/blk_mem_gen_rows.v"   "$IPR/blk_mem_gen_scan/sim/blk_mem_gen_scan.v" tb_t_ff.v
+"$VIV/xelab" work.tb_t_ff -s stff && "$VIV/xsim" stff -runall      # T-FF-OK, RESIDENT-REPLAY-SAFE-INTERRUPT-DEDUP-OK
+"$VIV/xvlog" -sv -d ZLC_IVERILOG -i .. ../zlc_uart_bridge.v ../zlc_period_streamer.v ../zlc_pulse_streamer_top.v tb_t_ff.v
+"$VIV/xelab" work.tb_safe_gate -s sgate && "$VIV/xsim" sgate -runall  # TOP-SAFE-PIN-GATE-OK
 ```
 
 This particular `tb_real_engine.v` example prints seven diagnostic emCCD pulse
