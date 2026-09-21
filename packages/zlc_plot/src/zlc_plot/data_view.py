@@ -682,14 +682,14 @@ _FREQUENCY_LEVEL_LIMIT = 1 << 18
 class _WindowFrequency:
     """Counts and the immutable planes/ranges that actually contributed.
 
-    The snapshot holds each plane identity alive. Entries retain its segment
-    index and selected local Point interval, including repeated occurrences
-    of the same plane. No previous DataView or packed window is retained.
+    The snapshot holds each plane identity alive. Entries are sorted numeric
+    (identity, local start, local stop, segment index) rows; repeated planes
+    remain repeated contributions. No previous DataView or packed window is retained.
     """
 
     snapshot: OwnedSnapshot
     window: int
-    entries: dict[int, list[tuple[int, int, int]]]
+    entries: NDArray[np.intp]
     offset: int
     counts: NDArray[np.int64]
 
@@ -3131,25 +3131,23 @@ class DataView:
         first = layout.window_rows(window).start
         segments = block.segments if block.values is None else (block.as_segment(),)
         origins = block.segment_origins if block.values is None else np.zeros((1, 2), dtype=np.int64)
-        entries: dict[int, list[tuple[int, int, int]]] = {}
-        for index, (planes, origin) in enumerate(zip(segments, origins)):
-            stop = int(planes[0].shape[1])
-            start = max(0, first - int(origin[1]))
-            if start < stop:
-                entries.setdefault(id(planes), []).append((index, start, stop))
-        for ranges in entries.values():
-            ranges.sort(key=lambda item: item[1])
+        extents = block.segment_shapes if block.values is None else np.asarray([block.values.shape[:2]])
+        identities = np.fromiter(map(id, segments), dtype=np.intp, count=len(segments))
+        starts = np.maximum(0, first - origins[:, 1])
+        indices = np.flatnonzero(starts < extents[:, 1])
+        entries = np.column_stack((identities[indices], starts[indices], extents[indices, 1], indices))
+        entries = entries[np.lexsort((entries[:, 1], entries[:, 0]))]
+        entries.setflags(write=False)
         counted = None
         if (
             carry is not None
             and carry.snapshot.ref.stream_generation == snapshot.ref.stream_generation
             and carry.snapshot.block.schema.cell_domain == self._schema.cell_domain
             and carry.snapshot.block.schema.value_schema == self._schema.value_schema
-            and (not entries or carry.entries.keys() & entries.keys())
         ):
             counted = self._advance_frequency(carry, entries)
         if counted is None:
-            counted = self._count_frequency(snapshot, [item for ranges in entries.values() for item in ranges])
+            counted = self._count_frequency(snapshot, entries[:, (3, 1, 2)])
         # Frequency updates use raw changed planes directly; an inherited
         # packed window was not consumed and must not keep its old source.
         self._packed_carry = None
@@ -3162,15 +3160,16 @@ class DataView:
         return offset, counts
 
     def _count_frequency(
-        self, snapshot: OwnedSnapshot, ranges: list[tuple[int, int, int]],
+        self, snapshot: OwnedSnapshot, ranges: NDArray[np.intp],
+        *, full_dtype: bool = True,
     ) -> tuple[int, NDArray[np.int64]] | None:
         """Count selected raw ranges in one batch, without sigma or hole fill."""
         block = snapshot.block
         schema = block.schema
-        if not ranges:
+        if not len(ranges):
             selected = np.empty(0, dtype=schema.value_schema.dtype)
         else:
-            selection = np.asarray([item[0] for item in ranges], dtype=np.intp)
+            selection = ranges[:, 0]
             values, mask, _sigma, _rows, order = block.packed_planes(selection=selection)
             components = schema.value_schema.validity_contract.component_axis_ids
             if len(ranges) == 1:
@@ -3189,8 +3188,7 @@ class DataView:
                 if not isinstance(mask, bool):
                     mask = mask.reshape((-1, *(axis.size for axis in schema.cell_domain.axes
                                               if axis.axis_id in components)))
-                starts = np.asarray([item[1] for item in ranges])
-                stops = np.asarray([item[2] for item in ranges])
+                starts, stops = ranges[:, 1], ranges[:, 2]
                 if bool(np.all(starts == 0) and np.all(stops == extents[:, 1])):
                     row_mask = True
                 else:
@@ -3208,7 +3206,7 @@ class DataView:
                                                    for axis in schema.cell_domain.axes)))
             valid = valid if row_mask is True else np.asarray(valid) & row_mask
             selected = values.reshape(-1) if valid is True else values[np.broadcast_to(valid, values.shape)]
-        span = _frequency_span(schema.value_schema.dtype, selected)
+        span = _frequency_span(schema.value_schema.dtype, selected, full_dtype=full_dtype)
         if span is None:
             return None
         offset, size = span
@@ -3218,28 +3216,39 @@ class DataView:
 
     def _advance_frequency(
         self, carry: _WindowFrequency,
-        entries: dict[int, list[tuple[int, int, int]]],
+        entries: NDArray[np.intp],
     ) -> tuple[int, NDArray[np.int64]] | None:
         """Match held immutable contributions, then count each changed batch."""
-        leaving, arriving = [], []
-        for identity in carry.entries.keys() | entries.keys():
-            previous, current = carry.entries.get(identity, ()), entries.get(identity, ())
-            common = min(len(previous), len(current))
-            for old, new in zip(previous[:common], current[:common]):
-                if old[1] < new[1]:
-                    leaving.append((old[0], old[1], new[1]))
-                elif new[1] < old[1]:
-                    arriving.append((new[0], new[1], old[1]))
-            leaving.extend(previous[common:])
-            arriving.extend(current[common:])
-        if not leaving and not arriving:
+        if not len(entries):
+            return carry.offset, np.zeros_like(carry.counts)
+        previous = carry.entries
+        if not len(previous):
+            return None
+        identities = entries[:, 0]
+        positions = np.arange(len(entries), dtype=np.intp)
+        first = np.r_[True, identities[1:] != identities[:-1]]
+        occurrence = positions - np.maximum.accumulate(np.where(first, positions, 0))
+        old_positions = np.searchsorted(previous[:, 0], identities) + occurrence
+        matched = old_positions < len(previous)
+        matched[matched] = previous[old_positions[matched], 0] == identities[matched]
+        if not bool(matched.any()):
+            return None
+        kept = np.zeros(len(previous), dtype=bool)
+        kept[old_positions[matched]] = True
+        old, current = previous[old_positions[matched]], entries[matched]
+        removed, added = old[:, 1] < current[:, 1], current[:, 1] < old[:, 1]
+        leaving = np.concatenate((previous[~kept][:, (3, 1, 2)],
+            np.column_stack((old[removed, 3], old[removed, 1], current[removed, 1]))))
+        arriving = np.concatenate((entries[~matched][:, (3, 1, 2)],
+            np.column_stack((current[added, 3], current[added, 1], old[added, 1]))))
+        if not len(leaving) and not len(arriving):
             return carry.offset, carry.counts
         offset = carry.offset
         table = carry.counts.copy()
         for snapshot, ranges, sign in ((carry.snapshot, leaving, -1), (self._snapshot, arriving, 1)):
-            if not ranges:
+            if not len(ranges):
                 continue
-            counted = self._count_frequency(snapshot, ranges)
+            counted = self._count_frequency(snapshot, ranges, full_dtype=False)
             if counted is None:
                 return None
             delta_offset, delta = counted
@@ -3252,7 +3261,11 @@ class DataView:
                 grown = np.zeros(stop - start, dtype=np.int64)
                 grown[offset - start:offset - start + table.size] = table
                 table, offset = grown, start
-            table[delta_offset - offset:delta_offset - offset + delta.size] += sign * delta
+            destination = table[delta_offset - offset:delta_offset - offset + delta.size]
+            if sign > 0:
+                destination += delta
+            else:
+                destination -= delta
         return offset, table
 
     def histogram_from_frequency(
@@ -3847,8 +3860,12 @@ class DataView:
 
         if (values is None) != (valid is None):
             raise ValueError("histogram pool values and validity must appear together")
-        selected = self.samples.value.canonical if values is None else values
-        usable = self.samples.valid_mask if valid is None else valid
+        if values is None:
+            window = (self._history_layout.shot_count if self._history_layout is not None
+                      else schema_repeat_count(self._schema))
+            plan = self._histogram_plan((), tuple(reduce_axes), aggregation, window)
+            return plan.values, plan.valid
+        selected, usable = values, valid
         if reduce_axes:
             selected, usable = self._collapse_axes(
                 selected, usable, reduce_axes, aggregation
@@ -3878,10 +3895,21 @@ class DataView:
         remembered = self._histogram_cache
         if remembered is not None and remembered[0] == key:
             return remembered[1]
-        values = self.samples.value.canonical
-        shape = values.shape
-        valid = (self.history_validity(window)
-                 if self.has_primary_index or window > 1 else self.samples.valid_mask)
+        values, valid, _sigma, rows = self._segment_arrays(sigma=False)
+        shape = schema_shape(self._schema)
+        if self._history_layout is not None:
+            kept_rows = self._history_layout.window_rows(window)
+            dimension, start, stop = 1, kept_rows.start, kept_rows.stop
+        elif window > 1:
+            dimension, start, stop = 0, max(0, shape[0] - window), shape[0]
+        else:
+            dimension, start, stop = 0, 0, shape[0]
+        if start or stop != shape[dimension]:
+            indices = np.arange(shape[dimension]) if rows is None else rows[dimension]
+            spread = [1] * values.ndim
+            spread[dimension if rows is None else 0] = indices.size
+            window_mask = ((indices >= start) & (indices < stop)).reshape(spread)
+            valid = window_mask if _stride_zero_all_true(valid) else valid & window_mask
         dimensions, coordinates = self._reduction_plan(reduced)
         domains = []
         for ref in groups:
@@ -3889,10 +3917,16 @@ class DataView:
             domain = self._domain(ref)
             domains.append((dimension, domain))
         keys = tuple(product(*(domain.values for _, domain in domains))) if groups else ((),)
-        if coordinates:
+        if reduced:
             buckets = self._reduction_buckets(dimensions, coordinates)
+            codes = buckets.codes
+            axes = buckets.axes
+            if rows is not None:
+                codes = tuple(code[rows[axis]] if axis < 2 else code
+                              for code, axis in zip(codes, axes))
+                axes = tuple(0 if axis < 2 else axis - 1 for axis in axes)
             values, counts, _presence = _axis_aggregate(
-                values, valid, buckets.codes, buckets.axes, buckets.shape, aggregation,
+                values, valid, codes, axes, buckets.shape, aggregation,
             )
             valid = np.asarray(counts) > 0
             combined = np.zeros(buckets.count, dtype=np.int64)
@@ -3908,18 +3942,22 @@ class DataView:
                 combined = combined * len(domain.values) + codes[buckets.axis_index(dimension)]
             code_axis = 0
         else:
-            if reduced:
-                values, valid = self._collapse_axes(values, valid, reduced, aggregation)
-            kept = tuple(axis for axis in range(len(shape)) if axis not in dimensions)
             if groups:
-                first = min(kept.index(dimension) for dimension, _domain in domains)
-                code_axis = max(kept.index(dimension) for dimension, _domain in domains)
+                placed = []
+                for dimension, domain in domains:
+                    codes = domain.codes
+                    if rows is not None:
+                        codes = codes[rows[dimension]] if dimension < 2 else codes
+                        dimension = 0 if dimension < 2 else dimension - 1
+                    placed.append((dimension, codes))
+                first = min(dimension for dimension, _codes in placed)
+                code_axis = max(dimension for dimension, _codes in placed)
                 code_shape = values.shape[first:code_axis + 1]
                 combined = np.zeros(code_shape, dtype=np.int64)
-                for dimension, domain in domains:
+                for (dimension, codes), (_source_dimension, domain) in zip(placed, domains):
                     spread = [1] * len(code_shape)
-                    spread[kept.index(dimension) - first] = -1
-                    combined = combined * len(domain.values) + np.asarray(domain.codes).reshape(spread)
+                    spread[dimension - first] = -1
+                    combined = combined * len(domain.values) + np.asarray(codes).reshape(spread)
                 combined = combined.reshape(-1)
             else:
                 combined, code_axis = np.zeros(1, dtype=np.int64), 0
@@ -4430,18 +4468,21 @@ def _counts_from_frequency(
     return counts
 
 
-def _frequency_span(dtype: np.dtype, selected: NDArray[Any]) -> tuple[int, int] | None:
+def _frequency_span(
+    dtype: np.dtype, selected: NDArray[Any], *, full_dtype: bool = True,
+) -> tuple[int, int] | None:
     """``(offset, size)`` of the table one integer pool is counted into.
 
     A dtype of two bytes or fewer gets its whole range, so the table never
     has to grow whatever a later shot brings; a wider one gets the span the
-    pool actually uses, while that stays within the limit.
+    pool actually uses, while that stays within the limit. An incremental
+    delta needs only its occupied span, not another full dtype-sized table.
     """
 
     if dtype.kind not in "iu":
         return None
     info = np.iinfo(dtype)
-    if dtype.itemsize <= 2:
+    if full_dtype and dtype.itemsize <= 2:
         return int(info.min), int(info.max) - int(info.min) + 1
     if not selected.size:
         return 0, 1
@@ -4625,7 +4666,8 @@ def _axis_kernel_aggregate(
     }
     operation = 5 if offsets is not None else operations.get(aggregation)
     source = np.asarray(values)
-    if operation is None or not kernels.engaged() or source.dtype.kind == "c":
+    if (operation is None or not kernels.engaged() or source.dtype.kind == "c"
+            or source.dtype == np.dtype(np.float16)):
         return None
     maximum = max((code.size for code in codes), default=0)
     table = np.full((len(codes), maximum), -1, dtype=np.int64)

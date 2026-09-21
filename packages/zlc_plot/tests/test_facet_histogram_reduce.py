@@ -303,7 +303,7 @@ def test_a_reduced_point_axis_groups_the_rows_inside_each_cell() -> None:
         np.testing.assert_allclose(np.sort(pools[frame]), np.sort(mine.reshape(-1)))
 
 
-def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
+def test_both_reduction_routes_agree_on_a_reduction_they_share(monkeypatch) -> None:
     """Reducing the repeat axis is expressible either way; they must match."""
 
     from zlc_plot.data_view import _axis_aggregate
@@ -313,7 +313,7 @@ def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
     view = _two_column_view(values)
     refs = (AxisRef.repeat("repeat"),)
 
-    # The route the plan takes: a ufunc over the array axis.
+    # Explicit caller-owned arrays use the ordinary tensor reduction.
     valid = np.ones(values.shape, dtype=bool)
     quick, present = view._collapse_axes(values, valid, refs, Reduction.MEAN)
 
@@ -328,3 +328,47 @@ def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
         quick[present], scattered.reshape(buckets.shape)[counts.reshape(buckets.shape) > 0]
     )
     np.testing.assert_allclose(scattered.reshape(buckets.shape), values.mean(axis=0))
+
+    # The same plan must read a partial, interleaved carrier without filling
+    # its holes or asking for the sample sigma a Histogram never consumes.
+    values[..., 0] = 0.0
+    values[0, 0, 0] = -0.0
+    values[2, 2, 1] = np.nan
+    source = _two_column_view(values)._snapshot
+    source = OwnedSnapshot(source.ref, source.block.replacing(sigma=np.full(values.shape, .25)))
+    selected = ((3, 4), (0, 0), (2, 2), (1, 0))  # Deliberately not storage order.
+    planes = tuple((source.block.values[r:r + 1, p:p + 1], True,
+                    source.block.sigma[r:r + 1, p:p + 1]) for r, p in selected)
+    block = DataBlock._from_owned_segments(
+        source.ref.block_id, source.ref.revision, source.block.schema, planes,
+        origins=np.asarray(selected), shapes=np.ones((len(selected), 2), dtype=np.int64),
+    )
+    sparse = OwnedSnapshot(source.ref, block)
+    dense = sparse.materialize()
+    def refuse_sigma(*_args, **_kwargs):
+        raise AssertionError("Histogram requested unconsumed sigma")
+    monkeypatch.setattr(DataBlock, "_pack_sigma", refuse_sigma)
+    frame, site = AxisRef.point("p.frame"), AxisRef.cell_data("v.site")
+    detuning = AxisRef.point("p.detuning")
+    edges = np.linspace(-1.0, 100.0, 102)
+    # Facet+Group shares the raw path; Repeat and mapped Point reductions
+    # exercise both leading coordinates collapsing onto the packed row axis.
+    for reduced in ((), refs, (detuning,), (*refs, detuning)):
+        for reduction in ((Reduction.MEAN,) if not reduced else
+                          (Reduction.MEAN, Reduction.SUM, Reduction.MIN, Reduction.MAX, Reduction.FIRST)):
+            for window in (1, 2):
+                spec = FacetGridPlot(facet=frame, cell=HistogramPlot(
+                    group=site, reduced=reduced, reduction=reduction,
+                ))
+                observed_view, expected_view = DataView(sparse), DataView(dense)
+                actual = observed_view.facet(spec, bins=edges, window=window)
+                expected = expected_view.facet(spec, bins=edges, window=window)
+                assert len(actual.cells) == len(expected.cells) == 2
+                for left, right in zip(actual.cells, expected.cells):
+                    np.testing.assert_array_equal(left.payload.counts, right.payload.counts)
+                    assert left.payload.group_keys == right.payload.group_keys
+                assert not actual.cells[1].payload.counts.any(), "the absent frame remains an empty cell"
+                assert observed_view._samples is None and expected_view._samples is None
+                if reduction is Reduction.FIRST and reduced == (*refs, detuning) and window == 1:
+                    pool, valid = observed_view.histogram_pool(reduce_axes=reduced, aggregation=reduction)
+                    assert np.signbit(pool[valid][0]), "FIRST keeps the first physical -0.0"

@@ -240,6 +240,20 @@ def test_an_unchanged_snapshot_shares_the_table_and_no_provenance_means_no_table
         _assert_exact(view, scoped, 3)
         previous = view
 
+    # One immutable two-row plane can occur twice. A changing window also
+    # cuts inside it: match occurrences and subtract just the changed rows.
+    repeated_schema = _schema((-3, -2, -1, 0))
+    planes = plain.block.as_segment()
+    block = DataBlock._from_owned_segments(
+        BlockId("repeated"), plain.ref.revision, repeated_schema, (planes, planes),
+        origins=np.asarray(((0, 0), (0, 2))), shapes=np.asarray(((1, 2), (1, 2))),
+        window=IndexedWindow(0, 3, -1),
+    )
+    repeated = type(plain)(block.ref(plain.ref.stream_generation), block)
+    view = DataView(repeated)
+    for window in (4, 3, 2, 1, 4):
+        _assert_exact(view, repeated, window)
+
 
 def test_a_wide_integer_table_grows_with_its_values_and_gives_up_past_the_limit() -> None:
     from zlc_plot import data_view as module
