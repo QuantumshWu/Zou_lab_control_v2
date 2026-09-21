@@ -10,7 +10,9 @@
 
 ## 1. 当前实施范围
 
-- 当前worktree已实现数据/历史投影整改：坐标与codes保持不可变结构、内部传输脱离文件codec并按输入依赖图批量提交、Runtime保留数据块及精确来源引用，公共投影直接消费轴结构。删除逐块计算、无消费者统计及旧位置投影；保留必要tensor数学优化和明确NumPy参考实现。真实Qt验证Fate切换history维持40、Frozen期间Live推进且保存读回ref/values一致，窗口已关闭。性能证据在ignored research；连续波形明显改善，但大量小记录的首次身份恢复及传输仍有较旧dense更高的成本，不宣称全面性能无退化或已达硬件极限。本轮不合并master。
+- 实屏定位并修复deadline遗漏：新publication于上次staging后99ms已到时仍严格等待100ms，由原Scheduler给剩余时间、同一个Qt timer在原deadline兑现，不再等下一shot。bench复用正式计时入口，source观测改为非变异读取。原直接用例先红后绿，最终实屏逐次核对deadline兑现及严格rate cap，窗口和进程已关闭；逐帧原始证据仅留ignored research。
+
+- 当前worktree继续收口数据/历史投影：整体snapshot唯一schema/ref，内部仅不可变三plane与数值布局，不逐记录恢复public snapshot。显式整数组与Plot共用DataBlock原始打包，sigma仍按需；缩小窗口和关闭history清理不再适用的carry。传输依赖改为整数列，新增planes共享类型/单元描述成批编码，接收由原串行owner按序安装；删除重复查找表及child身份补偿缓存。源schema形状/大小只首次计算。真实Qt再次验证Fate、Frozen与保存精确数据，窗口及进程已关闭；首次恢复已消除上一阶段退化，具体性能和剩余必要成本仅记ignored报告，不宣称硬件极限。本轮不合并master。
 
 - group[0]恢复原灰色#808080：删除分组跳过公共色表首槽的偏移，未分组曲线及Curve/Rolling/Histogram、Facet和meter共用同一源序号映射。未修改title/ticks/axis-title的布局逻辑。
 

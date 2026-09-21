@@ -75,25 +75,6 @@ class DatasetRevisionRef:
         digest_text(self.schema_fingerprint, "schema_fingerprint")
         if not isinstance(self.revision, DatasetRevision):
             raise TypeError("revision must be DatasetRevision")
-        object.__setattr__(self, "_identity", (self.block_id.value, self.stream_generation.value,
-                                               self.schema_fingerprint, self.revision.value))
-
-    @property
-    def identity(self) -> tuple[str, str, str, int]:
-        """The immutable scalar key, shared by repeated identity lookups."""
-        return self._identity
-
-    def __hash__(self) -> int:
-        cached = self.__dict__.get("_hash")
-        if cached is None:
-            cached = hash(self._identity)
-            object.__setattr__(self, "_hash", cached)
-        return cached
-
-    def __reduce__(self):
-        # Python hash salts belong to the current process, not the identity
-        # transported to another process or saved by a caller.
-        return type(self), (self.block_id, self.stream_generation, self.schema_fingerprint, self.revision)
 
 
 @dataclass(frozen=True)
@@ -147,10 +128,11 @@ class DataBlock:
     #: block.  Read by a consumer that would otherwise recount the whole
     #: window every shot to learn what one shot changed.
     window: IndexedWindow | None = None
-    segments: tuple["OwnedSnapshot", ...] = ()
+    segments: tuple[tuple[np.ndarray, bool | np.ndarray, np.ndarray | None], ...] = ()
     segment_origins: np.ndarray | None = None
     segment_shapes: np.ndarray | None = None
     _materialized: "DataBlock | None" = field(default=None, init=False, repr=False)
+    _segment: tuple | None = field(default=None, init=False, repr=False)
     __hash__ = None
 
     def __post_init__(self) -> None:
@@ -167,20 +149,33 @@ class DataBlock:
                                       else self.segment_origins, dtype=np.dtype("<i8"), shape=layout_shape)
             sizes = immutable_array(np.empty((0, 2), dtype=np.int64) if self.segment_shapes is None
                                     else self.segment_shapes, dtype=np.dtype("<i8"), shape=layout_shape)
-            for index, snapshot in enumerate(segments):
-                if not isinstance(snapshot, OwnedSnapshot):
-                    raise TypeError("a data segment must hold an OwnedSnapshot")
+            components = self.schema.value_schema.validity_contract.component_axis_ids
+            component_shape = tuple(axis.size for axis in self.schema.cell_domain.axes
+                                    if axis.axis_id in components)
+            owned = []
+            for index, segment in enumerate(segments):
+                if not isinstance(segment, tuple) or len(segment) != 3:
+                    raise TypeError("a data segment must contain values, compact mask and sigma")
                 origin = origins[index]
-                if np.any(origin < 0):
+                extent = sizes[index]
+                if np.any(origin < 0) or np.any(extent < 1):
                     raise ValueError("segment origin must be a nonnegative Repeat/Point pair")
-                source = snapshot.block.schema
-                if tuple(sizes[index]) != source.physical_shape[:2]:
-                    raise ValueError("segment shape differs from its source")
-                if source.value_schema != self.schema.value_schema or source.physical_shape[2:] != shape[2:]:
-                    raise ValueError("segment values and cell geometry differ from the containing dataset")
-                if any(origin[index] + source.physical_shape[index] > shape[index] for index in (0, 1)):
+                if np.any(origin + extent > shape[:2]):
                     raise ValueError("segment exceeds the containing dataset")
-            object.__setattr__(self, "segments", segments)
+                segment_shape = (*map(int, extent), *shape[2:])
+                values, mask, sigma = segment
+                values = immutable_array(values, dtype=self.schema.value_schema.dtype, shape=segment_shape)
+                if isinstance(mask, (bool, np.bool_)):
+                    mask = bool(mask)
+                else:
+                    mask = immutable_array(mask, dtype=np.dtype(bool), shape=(*map(int, extent), *component_shape))
+                if sigma is not None:
+                    sigma = immutable_array(sigma, dtype=np.dtype("<f8"), shape=segment_shape)
+                    if np.any(np.isfinite(sigma) & (sigma < 0)):
+                        raise ValueError("sample sigma must be non-negative")
+                owned.append(segment if all(new is old for new, old in zip((values, mask, sigma), segment))
+                             else (values, mask, sigma))
+            object.__setattr__(self, "segments", tuple(owned))
             object.__setattr__(self, "segment_origins", origins)
             object.__setattr__(self, "segment_shapes", sizes)
             if not isinstance(self.validity, Invalid) or self.sigma is not None:
@@ -227,28 +222,118 @@ class DataBlock:
         if self._materialized is not None:
             return self._materialized
         schema = self.schema
-        values = np.zeros(schema.physical_shape, dtype=schema.value_schema.dtype)
-        mask = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
-        sigma = None
-        for origin, snapshot in zip(self.segment_origins, self.segments, strict=True):
-            block = snapshot.block.materialize()
-            shape = block.schema.physical_shape
-            leading = tuple(slice(start, start + size) for start, size in zip(origin, shape[:2]))
-            values[leading] = block.values
-            mask[leading] = dataset_validity_storage(block.validity, block.schema)
-            if block.sigma is not None:
-                if sigma is None:
-                    sigma = np.full(schema.physical_shape, np.nan, dtype=np.float64)
-                sigma[leading] = block.sigma
+        values, mask, sigma, rows, _order = self.packed_planes(sigma=True)
+        if rows is not None:
+            whole_values = np.zeros(schema.physical_shape, dtype=values.dtype)
+            whole_mask = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
+            whole_values[rows], whole_mask[rows] = values, mask
+            if sigma is not None:
+                whole_sigma = np.full(schema.physical_shape, np.nan, dtype=np.float64)
+                whole_sigma[rows] = sigma
+                sigma = whole_sigma
+            values, mask = whole_values, whole_mask
+        validity = VALID if mask is True else INVALID if mask is False else compact_dataset_validity(mask, schema)
         result = DataBlock(self.block_id, self.revision, values,
-                           compact_dataset_validity(mask, schema), schema, sigma, self.window)
+                           validity, schema, sigma, self.window)
         object.__setattr__(self, "_materialized", result)
         return result
+
+    def packed_planes(self, *, selection: np.ndarray | None = None, sigma: bool = False) -> tuple:
+        """Pack acquired physical cells in global order, without filling holes.
+
+        This is layout work only: values, compact validity and optional sigma
+        keep their raw meaning. Callers own finite filtering and statistics.
+        """
+        if self.values is not None:
+            values, mask, errors = self.as_segment()
+            return values, mask, errors if sigma else None, None, None
+        segments = self.segments if selection is None else tuple(self.segments[int(i)] for i in selection)
+        origins, extents = self.segment_origins, self.segment_shapes
+        if selection is not None:
+            origins, extents = origins[selection], extents[selection]
+        shape = self.schema.physical_shape
+        cell_shape = shape[2:]
+        row_counts = extents[:, 0] * extents[:, 1]
+        stops = np.cumsum(row_counts)
+        starts = stops - row_counts
+        count = int(stops[-1]) if stops.size else 0
+        complete = (count == shape[0] * shape[1]
+                    and np.array_equal(origins[:, 0] * shape[1] + origins[:, 1], starts)
+                    and bool(np.all((extents[:, 0] - 1) * shape[1] + extents[:, 1] == row_counts)))
+        arrays = [segment[0] for segment in segments]
+        if len(arrays) == 1:
+            values = arrays[0].reshape((count, *cell_shape))
+        elif arrays:
+            axis = 0 if bool(np.all(extents[:, 1] == extents[0, 1])) else None
+            values = np.concatenate(arrays, axis=axis).reshape((count, *cell_shape))
+        else:
+            values = np.empty((0, *cell_shape), dtype=self.schema.value_schema.dtype)
+        rows = order = None
+        if complete:
+            values = values.reshape(shape)
+        else:
+            owners = np.repeat(np.arange(len(segments)), row_counts)
+            local = np.arange(count) - starts[owners]
+            repeat = origins[owners, 0] + local // extents[owners, 1]
+            point = origins[owners, 1] + local % extents[owners, 1]
+            linear = repeat * shape[1] + point
+            if bool(np.any(linear[1:] < linear[:-1])):
+                order = np.argsort(linear, kind="stable")
+                values = values[order]
+                repeat, point = repeat[order], point[order]
+            rows = repeat, point
+        if all(segment[1] is True for segment in segments):
+            mask = True
+        elif all(segment[1] is False for segment in segments):
+            mask = False
+        else:
+            components = self.schema.value_schema.validity_contract.component_axis_ids
+            component_shape = tuple(axis.size for axis in self.schema.cell_domain.axes if axis.axis_id in components)
+            masks = [np.broadcast_to(mark, (int(n), *component_shape)) if isinstance(mark, bool)
+                     else mark.reshape((int(n), *component_shape))
+                     for (_values, mark, _sigma), n in zip(segments, row_counts)]
+            mask = np.concatenate(masks, axis=0)
+            if order is not None:
+                mask = mask[order]
+            if complete:
+                mask = mask.reshape((*shape[:2], *component_shape))
+            mask.setflags(write=False)
+        values.setflags(write=False)
+        errors = self._pack_sigma(values.shape, selection=selection, order=order) if sigma else None
+        return values, mask, errors, rows, order
+
+    def _pack_sigma(self, shape: tuple[int, ...], *, selection: np.ndarray | None = None,
+                    order: np.ndarray | None = None) -> np.ndarray | None:
+        """Pack only requested sample errors using the already resolved order."""
+        if self.values is not None:
+            return self.sigma
+        segments = self.segments if selection is None else tuple(self.segments[int(i)] for i in selection)
+        if not any(segment[2] is not None for segment in segments):
+            return None
+        arrays = [errors if errors is not None else np.broadcast_to(np.asarray(np.nan), plane.shape)
+                  for plane, _mark, errors in segments]
+        errors = arrays[0].reshape(shape) if len(arrays) == 1 else np.concatenate(arrays, axis=None)
+        if order is not None:
+            errors = errors.reshape((-1, *self.schema.physical_shape[2:]))[order]
+        errors = errors.reshape(shape)
+        errors.setflags(write=False)
+        return errors
+
+    def as_segment(self) -> tuple[np.ndarray, bool | np.ndarray, np.ndarray | None]:
+        """The immutable planes of an actual array, cached once for its lifetime."""
+        if self.values is None:
+            raise ValueError("materialize a segmented block before requesting one segment")
+        if self._segment is None:
+            mask = (True if isinstance(self.validity, Valid) else False if isinstance(self.validity, Invalid)
+                    else dataset_validity_storage(self.validity, self.schema))
+            object.__setattr__(self, "_segment", (self.values, mask, self.sigma))
+        return self._segment
 
     @classmethod
     def _from_owned_segments(
         cls, block_id: BlockId, revision: DatasetRevision, schema: DatasetSchema,
-        segments: tuple["OwnedSnapshot", ...], *, origins: np.ndarray, shapes: np.ndarray,
+        segments: tuple[tuple[np.ndarray, bool | np.ndarray, np.ndarray | None], ...],
+        *, origins: np.ndarray, shapes: np.ndarray,
         window: IndexedWindow | None = None,
     ) -> "DataBlock":
         """Reuse placements already admitted by Runtime or the shared cutter.
@@ -336,11 +421,18 @@ class OwnedSnapshot:
         """
         block = self.block
         if block.values is None:
-            segments = tuple(child.compact() for child in block.segments)
+            segments = []
+            for planes in block.segments:
+                values, mask, sigma = planes
+                values = compact_immutable_array(values)
+                mask = mask if isinstance(mask, bool) else compact_immutable_array(mask)
+                sigma = None if sigma is None else compact_immutable_array(sigma)
+                segments.append(planes if all(new is old for new, old in zip((values, mask, sigma), planes))
+                                else (values, mask, sigma))
             if all(new is old for new, old in zip(segments, block.segments, strict=True)):
                 return self
             return OwnedSnapshot(self.ref, DataBlock._from_owned_segments(
-                block.block_id, block.revision, block.schema, segments,
+                block.block_id, block.revision, block.schema, tuple(segments),
                 origins=block.segment_origins, shapes=block.segment_shapes, window=block.window))
         values = compact_immutable_array(block.values)
         sigma = None if block.sigma is None else compact_immutable_array(block.sigma)

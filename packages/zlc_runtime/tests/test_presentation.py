@@ -808,13 +808,26 @@ def test_a_publication_wake_shows_a_panel_past_its_deadline_without_a_beat() -> 
 
     # No beat happens at all from here on: only the publication wakes.
     now[0] = 99_000_000
+    assert scheduler.pending_delay_ms() is None
     plane.front = _front("camera/frame", sequence=2)
     scheduler.stage_owed()
     assert len(port.updates) == 1
+    # The timer must return at the remaining deadline, not 100 ms later.
+    assert scheduler.pending_delay_ms() == 1
 
     now[0] = 100_000_000
     scheduler.stage_owed()
     assert len(port.updates) == 2
+    plane.front = _front("camera/frame", sequence=3)
+    now[0] = 101_000_000
+    assert scheduler.pending_delay_ms() is None  # the surface is busy
+    port.futures[1].set_result("second")
+    arbiter.drain(lambda _panel_id: port)
+    assert scheduler.pending_delay_ms() == 99
+    now[0] = 199_000_000
+    assert scheduler.pending_delay_ms() == 1
+    scheduler.close()
+    assert scheduler.pending_delay_ms() is None
 
 
 def test_due_coherent_component_stages_on_its_completion_wake() -> None:

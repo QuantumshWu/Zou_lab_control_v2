@@ -473,6 +473,29 @@ def test_trailing_only_uses_this_panels_window_even_when_more_is_retained() -> N
                 np.testing.assert_allclose(session._projection._payload.series[0].y.canonical, y)
                 own.resize(history_window_requirement(mean, {"window": 10, "trailing": 50}))
                 assert own.window == 10
+                if retained == 10:
+                    from zlc_plot.data_view import DataView
+
+                    previous = session._projection._view
+                    assert previous._rolling_carry is not None
+                    previous._segment_arrays()
+                    own.resize(1)
+                    latest = plane.current_dataset("rolling/value")
+                    assert indexed_history_layout(latest.block.schema).shot_count == 1
+                    current = DataView(latest, inherit_domains_from=previous)
+                    history = current.rolling_history(uncertainty=previous._rolling_carry[0][2])
+                    np.testing.assert_array_equal(history.values, [[19.0]])
+                    assert current._rolling_carry[-1] is current._snapshot
+                    assert len(current._snapshot.block.segments) == 1
+                    assert current._packed_carry is None
+                    assert current._packed_segments is None  # All statistics were reused.
+                    current._segment_arrays()
+                    own.close()
+                    latest = plane.current_dataset("rolling/value")
+                    assert indexed_history_layout(latest.block.schema) is None
+                    current = DataView(latest, inherit_domains_from=current)
+                    assert current._rolling_carry is None
+                    assert current._packed_carry is None
             finally:
                 session.close()
             other.close()

@@ -121,14 +121,18 @@ class ProductBeat:
         self._QtCore = QtCore
         self.interval_ms = int(presenter.board.base_interval_ms)
         self._timer = None
-        if drive_timer:
-            self._timer = QtCore.QTimer()
-            self._timer.setInterval(self.interval_ms)
-            self._timer.timeout.connect(presenter.beat)
+        self._presenter = presenter
+        self._drive_timer = drive_timer
 
     def __enter__(self) -> "ProductBeat":
-        if self._timer is not None:
-            self._timer.start()
+        if self._drive_timer:
+            from zlc_workbench.board import attach_qt
+
+            self._timer = attach_qt(
+                self._presenter.beat,
+                interval_ms=self.interval_ms,
+                board=self._presenter.board,
+            )
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -138,37 +142,59 @@ class ProductBeat:
     def run(self, seconds: float, tick=None) -> float:
         """Let the console run for a wall-clock window; return what elapsed.
 
-        ``tick`` is called on every pass so a front counter can SEE the
-        frames.  Polling only at the end reports one frame for a window that
-        drew fifty, which is what a bench that forgot this said.
+        ``tick`` observes after Qt has processed events, before it sleeps.
+        The GUI runs its ordinary event loop throughout the measurement.
         """
 
         started = time.perf_counter()
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            self._app.processEvents(self._QtCore.QEventLoop.AllEvents, 20)
-            if tick is not None:
-                tick()
-            time.sleep(0.001)
+        self.run_until(lambda: False, seconds, tick=tick)
         return time.perf_counter() - started
 
     def run_until(self, predicate, timeout: float, tick=None) -> bool:
         """Drive the console until a predicate holds, or time runs out.
 
-        Same pacing as :meth:`run`, because there is only one rate at which
-        this console is driven and a bench that has two of them is a bench
-        that measures whichever one it happened to be in.
+        Observe each completed Qt event batch without a polling timer. The
+        one-shot bounds this wait; the product timer still owns refresh.
         """
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self._app.processEvents(self._QtCore.QEventLoop.AllEvents, 20)
-            if tick is not None:
-                tick()
-            if predicate():
-                return True
-            time.sleep(0.001)
-        return False
+        from math import ceil
+
+        if timeout <= 0:
+            return False
+        loop = self._QtCore.QEventLoop()
+        end = self._QtCore.QTimer()
+        end.setSingleShot(True)
+        end.setTimerType(self._QtCore.Qt.PreciseTimer)
+        end.timeout.connect(loop.quit)
+        dispatcher = self._QtCore.QAbstractEventDispatcher.instance()
+        ready = False
+        errors = []
+
+        def observe() -> None:
+            nonlocal ready
+            try:
+                if tick is not None:
+                    tick()
+                ready = bool(predicate())
+            except BaseException as error:
+                # Let the caller handle the same exception as before; it
+                # must not escape through a Qt signal and abort the process.
+                errors.append(error)
+            if ready or errors:
+                loop.quit()
+
+        dispatcher.aboutToBlock.connect(observe)
+        try:
+            end.start(ceil(timeout * 1000))
+            observe()
+            if not ready and not errors:
+                loop.exec_()
+        finally:
+            end.stop()
+            dispatcher.aboutToBlock.disconnect(observe)
+        if errors:
+            raise errors[0]
+        return ready
 
 
 # --------------------------------------------------------------- producer
@@ -216,10 +242,10 @@ class SourceRate:
     def revision(self):
         """This signal's current revision, or None while it has published none."""
 
-        value = self._session.signal_plane.freeze().value(self._name)
-        snapshot = getattr(value, "snapshot", value)
-        ref = getattr(snapshot, "ref", None)
-        return None if ref is None else int(ref.revision.value)
+        publication = self._session.signal_plane.latest_publication(self._name)
+        if publication is None:
+            return None
+        return int(publication.value(self._name).snapshot.ref.revision.value)
 
 
 # --------------------------------------------------------------- gestures

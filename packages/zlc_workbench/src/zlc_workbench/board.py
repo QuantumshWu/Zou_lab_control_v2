@@ -112,6 +112,7 @@ class LiveBoard:
             raise TypeError("live board requires publication subscription")
         self._closed = False
         self._closing = False
+        self._rearm_deadline: Callable[[], None] | None = None
         self._projection_lock = Lock()
         self._projection_futures: set[object] = set()
         # Canonical run assembly and companion projection happen before a
@@ -249,6 +250,8 @@ class LiveBoard:
         # turn, instead of waiting for another 100 ms beat.
         if admit_new:
             self._scheduler.stage_owed()
+            if self._rearm_deadline is not None:
+                self._rearm_deadline()
 
     def _resolve(self, panel_id: str) -> Any | None:
         for port in self._ports():
@@ -271,6 +274,7 @@ class LiveBoard:
             self._closing = True
             pending = tuple(self._projection_futures)
         if first:
+            self._rearm_deadline = None
             self._unsubscribe_publications()
             self._scheduler.close()
             self._arbiter.close()
@@ -343,7 +347,9 @@ def _guarded_slot(
     return guarded
 
 
-def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
+def attach_qt(
+    beat: Callable[[], None], *, interval_ms: int, board: LiveBoard | None = None
+) -> Any:
     """Drive one beat from a Qt event loop.
 
     It takes the beat rather than the board, and that is the whole point.  This
@@ -368,7 +374,30 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     timer = QtCore.QTimer()
     timer.setTimerType(QtCore.Qt.PreciseTimer)
     timer.setInterval(interval)
-    timer.timeout.connect(_guarded_slot(beat, "beat"))
+    guarded = _guarded_slot(beat, "beat")
+    timer_ref = ref(timer)
+
+    def tick() -> None:
+        # A deadline wake borrows this same timer. Resume the ordinary
+        # lifecycle cadence unless this turn finds another pending deadline.
+        current = timer_ref()
+        if current is None:
+            return
+        if current.interval() != interval:
+            current.setInterval(interval)
+        guarded()
+
+    if board is not None:
+        def rearm() -> None:
+            current = timer_ref()
+            if current is None or not current.isActive():
+                return
+            remaining = board._scheduler.pending_delay_ms()
+            if remaining is not None and remaining < current.remainingTime():
+                current.start(remaining)
+
+        board._rearm_deadline = rearm
+    timer.timeout.connect(tick)
     timer.start()
     return timer
 

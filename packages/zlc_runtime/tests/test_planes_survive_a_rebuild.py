@@ -86,6 +86,7 @@ def _finite_run(schema, chunks, read_after):
             )})
             if sequence in read_after:
                 views[sequence] = plane.current_dataset("scan/value")
+        plane.latest_publication("scan/value").value("scan/value").snapshot.block.as_segment()
         _, tap = plane.follow_publications("scan/value")
         plane.seal_committed(node)
         plane.retire(node)
@@ -93,6 +94,7 @@ def _finite_run(schema, chunks, read_after):
             for snapshot, _origin in chunks:
                 replayed = tap.next(0).value("scan/value").snapshot
                 np.testing.assert_array_equal(replayed.block.values, snapshot.block.values)
+                np.testing.assert_array_equal(replayed.block.as_segment()[0], snapshot.block.values)
                 np.testing.assert_equal(replayed.block.sigma, snapshot.block.sigma)
         finally:
             tap.close()
@@ -124,6 +126,7 @@ def test_indexed_history_keeps_each_shots_stated_error() -> None:
             None,
         )
     )
+    built = built.materialize()
     assert built.block.sigma is not None
     np.testing.assert_allclose(
         np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2, 0.3)
@@ -153,7 +156,7 @@ def test_an_index_nobody_published_has_an_unknown_error_not_a_zero_one() -> None
             None,
         )
     )
-    sigma = np.asarray(built.block.sigma).reshape(-1)
+    sigma = np.asarray(built.materialize().block.sigma).reshape(-1)
     assert sigma[0] == pytest.approx(0.1)
     assert np.isnan(sigma[1])
     assert sigma[2] == pytest.approx(0.3)
@@ -181,7 +184,7 @@ def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
             None,
         )
     )
-    assert built.block.sigma is None
+    assert built.materialize().block.sigma is None
 
 
 def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:

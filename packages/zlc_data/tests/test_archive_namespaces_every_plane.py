@@ -84,7 +84,7 @@ def test_a_saved_figure_opens_again_when_its_dataset_states_an_error() -> None:
     source = OwnedSnapshot(source.ref, source.block.replacing(
         validity=CellValidity(np.asarray([[True, False, True, True]]))))
     segmented = DataBlock(source.ref.block_id, source.ref.revision, None, INVALID,
-                          source.block.schema, segments=(source,),
+                          source.block.schema, segments=(source.block.as_segment(),),
                           segment_origins=np.asarray([[0, 0]], dtype=np.int64),
                           segment_shapes=np.asarray([source.block.schema.physical_shape[:2]], dtype=np.int64))
     for snapshot in (source, OwnedSnapshot(source.ref, segmented)):

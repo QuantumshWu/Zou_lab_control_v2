@@ -219,14 +219,30 @@ def test_equal_device_pixel_ratio_reuses_the_current_front() -> None:
         host.close(timeout=10)
 
 
+@pytest.mark.parametrize("segmented", (False, True))
 def test_render_process_preserves_host_front_events_and_pixel_leases(
-    tmp_path: Path,
+    tmp_path: Path, segmented: bool,
 ) -> None:
     """The process boundary is invisible to one ordinary raster consumer."""
 
     from zlc_plot import RenderProcess
 
-    snapshots = _fit_curve_series("render-process-contract", offset=0.1)
+    source = _fit_curve_series("render-process-contract", offset=0.1)
+
+    def snapshots(*args, **kwargs):
+        result = source(*args, **kwargs)
+        if not segmented:
+            return result
+        from zlc_data import DataBlock
+
+        block = DataBlock._from_owned_segments(
+            result.ref.block_id, result.ref.revision, result.block.schema,
+            (result.block.as_segment(),), origins=np.asarray([[0, 0]], dtype=np.int64),
+            shapes=np.asarray([result.block.values.shape[:2]], dtype=np.int64),
+        )
+        return OwnedSnapshot(result.ref, block)
+
+    input_kinds = {"axis", "domain", "schema", "snapshot"} | ({"planes"} if segmented else set())
     snapshot = snapshots(0, center=0.2)
     local = RasterPlotHost.from_plot(
         snapshot,
@@ -259,7 +275,7 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
             remote, peer = (pending.result(timeout=30) for pending in builds)
         first = remote.wait_for_front(timeout=30)
         peer.wait_for_front(timeout=30)
-        assert set(service._input_kinds.values()) == {"axis", "domain", "schema", "snapshot"}
+        assert set(service._input_kinds.values()) == input_kinds
         first_uploads = len(uploads)
         assert peer.close(timeout=30)
         peer = None
@@ -295,10 +311,13 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
             current = snapshots(revision, center=0.2 + 0.02 * revision)
             remote.update_data(current).result(timeout=30)
         np.testing.assert_array_equal(retained, retained_pixels)
-        assert set(service._input_kinds.values()) == {"axis", "domain", "schema", "snapshot"}
+        assert set(service._input_kinds.values()) == input_kinds
         assert set(service._input_refcounts.values()) == {1}
         assert len(uploads) == first_uploads + 5  # structure once, then only new values
-        assert all(sizes == (snapshot.block.values.nbytes,) for _nbytes, sizes in uploads[first_uploads:])
+        numeric_bytes = source(0).block.values.nbytes
+        expected_sizes = ((8, 16, numeric_bytes, 1, 1, 8, 16, 16)
+                          if segmented else (numeric_bytes, 0))
+        assert all(sizes == expected_sizes for _nbytes, sizes in uploads[first_uploads:])
         cycle = remote.describe_display().result(timeout=30).value.semantics.fields
         for field in cycle:
             choices = field.cycle_choices
@@ -542,7 +561,7 @@ def test_an_owned_input_keeps_the_producer_s_indexed_window() -> None:
     restored = _owned_input((
         "snapshot", (_INPUT_REF, 1), source.ref, source.block.values,
         source.block.validity, source.block.sigma, source.block.window,
-        (), None, None,
+        np.empty(0, dtype=np.int64), None, None,
     ), {1: installed})
     assert restored.block.window == source.block.window
     assert restored.block.window is not None

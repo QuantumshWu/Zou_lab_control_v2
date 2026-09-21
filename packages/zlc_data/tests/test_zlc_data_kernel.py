@@ -111,6 +111,15 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
     )
     assert np.shares_memory(block.values, transposed)
     assert is_intrinsically_immutable_array(block.values)
+    planes = block.as_segment()
+    assert block.as_segment() is planes
+    assert block.replacing(block_id=BlockId("restamped"), revision=DatasetRevision(1)).as_segment() is planes
+    for field_name, value in (
+        ("values", np.zeros_like(block.values)),
+        ("validity", CellValidity(np.asarray([[False]]))),
+        ("sigma", np.ones(block.values.shape, dtype=np.float64)),
+    ):
+        assert block.replacing(**{field_name: value}).as_segment() is not planes
     snapshot = OwnedSnapshot(block.ref(StreamGenerationId("retention")), block)
     retained = snapshot.compact()
     assert retained.ref == snapshot.ref and retained.block.schema is schema

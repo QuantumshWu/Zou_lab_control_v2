@@ -185,46 +185,31 @@ def _retained_array(data: bytes, shape: tuple, dtype) -> np.ndarray:
     return np.ndarray(shape, dtype=dtype, buffer=data)
 
 
-def _retained_snapshot(
-    template: DataBlock,
-    revision: int,
-    generation: StreamGenerationId,
-    chunk: tuple,
-    facts: tuple,
-    *,
-    block_id: BlockId | None = None,
-) -> OwnedSnapshot:
+def _retained_planes(
+    chunk: tuple, schema: DatasetSchema, facts: tuple,
+) -> tuple[np.ndarray, bool | np.ndarray, np.ndarray | None]:
     """Rehydrate committed bytes using their already-validated event contract.
 
     Exact replay and a finite display range read the same retained planes.
     Neither is a new producer admission or a reason to rescan sample sigma.
     """
-    schema = template.schema
     values, sigma = (facts[6], chunk[0]) if schema.value_schema.dtype == np.bool_ else chunk
     validity = facts[7]
     shape = schema.physical_shape
     values = _retained_array(values, shape, schema.value_schema.dtype)
-    if type(validity) is bool:
-        validity = VALID if validity else INVALID
-    elif facts[5] is None:
-        validity = CellValidity(_retained_array(validity, shape[:2], np.bool_))
-    else:
-        axes = tuple(schema.cell_domain.axes[index] for index in facts[5])
-        validity = DatasetComponentValidity(
-            tuple(axis.axis_id for axis in axes),
-            _retained_array(validity, shape[:2] + tuple(axis.size for axis in axes), np.bool_),
+    if type(validity) is not bool:
+        positions = facts[5] or ()
+        axes = tuple(schema.cell_domain.axes[index] for index in positions)
+        validity = _retained_array(validity, shape[:2] + tuple(axis.size for axis in axes), np.bool_)
+        components = schema.value_schema.validity_contract.component_axis_ids
+        compact_shape = shape[:2] + tuple(
+            axis.size if index in positions else 1
+            for index, axis in enumerate(schema.cell_domain.axes) if axis.axis_id in components
         )
+        storage_shape = shape[:2] + tuple(axis.size for axis in schema.cell_domain.axes if axis.axis_id in components)
+        validity = np.broadcast_to(validity.reshape(compact_shape), storage_shape)
     sigma = None if sigma is None else _retained_array(sigma, shape, np.float64)
-    block = template.replacing(
-        block_id=template.block_id if block_id is None else block_id,
-        revision=DatasetRevision(revision),
-    )
-    for name, value in (
-        ("values", values), ("validity", validity), ("sigma", sigma),
-        ("window", None if facts[4] is None else IndexedWindow(*facts[4])),
-    ):
-        object.__setattr__(block, name, value)
-    return OwnedSnapshot(block.ref(generation), block)
+    return values, validity, sigma
 
 
 @runtime_checkable
@@ -888,11 +873,11 @@ def _materialize_indexed_dataset(
     basis = materialization.basis
     segments = {}
     if basis is not None:
-        for origin, snapshot in zip(basis.snapshot.block.segment_origins, basis.snapshot.block.segments, strict=True):
+        for origin, planes in zip(basis.snapshot.block.segment_origins, basis.snapshot.block.segments, strict=True):
             index = basis.start + origin[1] // point_count
             if start <= index <= latest_index:
-                segments[index] = snapshot
-    segments.update((index, snapshot) for index, snapshot in materialization.appended
+                segments[index] = planes
+    segments.update((index, snapshot.block.as_segment()) for index, snapshot in materialization.appended
                     if start <= index <= latest_index)
     ordered = sorted(segments)
     origins = np.zeros((len(ordered), 2), dtype=np.int64)
@@ -2146,7 +2131,7 @@ class SignalDataPlane:
         sequence: int,
     ) -> tuple[
         DatasetSchema,
-        DataBlock,
+        DatasetSchema,
         StreamGenerationId,
         tuple[bytes | None, ...],
         tuple[bytearray, array, int, int],
@@ -2170,23 +2155,19 @@ class SignalDataPlane:
         stride = 1 + int(state.published_schemas[signal_name].value_schema.dtype != np.bool_)
         chunks = tuple(planes[floor * stride:sequence * stride])
         packed_facts = (facts, offsets, floor, sequence)
-        template = state.publication.value(signal_name).snapshot.block
-        return schema, template, state.generation, chunks, packed_facts, basis
+        return schema, state.published_schemas[signal_name], state.generation, chunks, packed_facts, basis
 
     @staticmethod
     def _materialize_dataset(
         signal_name: str,
         sequence: int,
         schema: DatasetSchema,
-        event_template: DataBlock,
+        event_schema: DatasetSchema,
         generation: StreamGenerationId,
         chunks: tuple[bytes | None, ...],
         packed_facts: tuple[bytearray, array, int, int],
         basis: _MaterializedFinite | None,
     ) -> OwnedSnapshot:
-        event_schema = event_template.schema
-        event_block_id = BlockId(f"{signal_name}.event")
-
         def placements():
             records, offsets, floor, stop = packed_facts
             stride = 1 + int(event_schema.value_schema.dtype != np.bool_)
@@ -2196,11 +2177,7 @@ class SignalDataPlane:
                 facts = marshal.loads(records[offsets[sequence]:offsets[sequence + 1]])
                 chunk = chunks[index * stride:(index + 1) * stride]
                 repeat_origin, point_origin = facts[0]
-                snapshot = _retained_snapshot(
-                    event_template, sequence + 1, generation, chunk, facts,
-                    block_id=event_block_id,
-                )
-                yield (repeat_origin, point_origin), snapshot
+                yield (repeat_origin, point_origin), _retained_planes(chunk, event_schema, facts)
 
         added = tuple(placements())
         segments = () if basis is None else basis.snapshot.block.segments
@@ -3657,7 +3634,25 @@ class SignalDataPlane:
             facts = marshal.loads(packed_facts[offsets[sequence - 1]:offsets[sequence]])
             origin, primary_index, repeat_counts, shot_time = facts[:4]
             written = sequence * schema.repeat_domain.size * schema.point_domain.size
-            snapshot = _retained_snapshot(templates[name], sequence, generation, chunk, facts)
+            planes = _retained_planes(chunk, schema, facts)
+            values, mask, sigma = planes
+            if isinstance(mask, bool):
+                validity = VALID if mask else INVALID
+            else:
+                axes = () if facts[5] is None else tuple(schema.cell_domain.axes[index].axis_id for index in facts[5])
+                components = schema.value_schema.validity_contract.component_axis_ids
+                compact = mask[(slice(None), slice(None), *(
+                    slice(None) if axis_id in axes else 0 for axis_id in components
+                ))]
+                validity = CellValidity(compact) if facts[5] is None else DatasetComponentValidity(axes, compact)
+            block = templates[name].replacing(revision=DatasetRevision(sequence))
+            for field_name, field_value in (
+                ("values", values), ("validity", validity), ("sigma", sigma),
+                ("window", None if facts[4] is None else IndexedWindow(*facts[4])),
+                ("_segment", planes),
+            ):
+                object.__setattr__(block, field_name, field_value)
+            snapshot = OwnedSnapshot(block.ref(generation), block)
             canonical = canonicals[name]
             signals[name] = SignalValue._from_owned_records(
                 name, snapshot, DatasetCoverage(written, canonical.repeat_domain.size * canonical.point_domain.size),

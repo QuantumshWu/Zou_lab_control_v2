@@ -257,6 +257,7 @@ def create_window(
     window.presenter.timer = attach_qt(
         window.presenter._guarded(window.presenter.beat),
         interval_ms=panel_presenter.board.base_interval_ms,
+        board=panel_presenter.board,
     )
     if path is not None:
         window.presenter._guarded(window.presenter.open)(str(path))

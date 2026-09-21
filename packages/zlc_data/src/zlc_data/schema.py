@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from math import prod
 from typing import Any
 
@@ -176,7 +177,7 @@ class DomainSpec:
             codes if isinstance(codes, range) else tuple(codes) for codes in self.axis_codes
         ), self.axis_code_repeats))
 
-    @property
+    @cached_property
     def size(self) -> int:
         return prod(self.shape)
 
@@ -444,13 +445,16 @@ class DatasetSchema:
         object.__setattr__(self, "_axis_catalog", None)
         object.__setattr__(self, "_indexed_layout", None)
 
-    @property
+    @cached_property
     def physical_shape(self) -> tuple[int, ...]:
         return (
             *self.repeat_domain.shape,
             *self.point_domain.shape,
             *self.cell_domain.shape,
         )
+
+    def __reduce__(self):
+        return DatasetSchema, (self.repeat_domain, self.point_domain, self.cell_domain, self.value_schema)
 
     @property
     def fingerprint(self) -> str:

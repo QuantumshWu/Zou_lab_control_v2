@@ -9,7 +9,7 @@ one for Edit/export work.
 
 from __future__ import annotations
 
-from collections import ChainMap, deque
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 import ctypes
@@ -18,7 +18,6 @@ import multiprocessing
 from multiprocessing.connection import Connection
 from multiprocessing.shared_memory import SharedMemory
 import os
-from operator import attrgetter
 from pathlib import Path
 import pickle
 from queue import Empty, Queue
@@ -1963,10 +1962,14 @@ class RenderProcess:
 
     @staticmethod
     def _input_key(value: object) -> object:
+        if isinstance(value, tuple):
+            # A storage plane bundle has no independent scientific snapshot
+            # identity. Its immutable owner is retained with this token.
+            return id(value)
         import zlc_data
 
         if isinstance(value, zlc_data.OwnedSnapshot):
-            return value.ref.identity
+            return "snapshot", value.ref
         if isinstance(value, (zlc_data.AxisSpec, zlc_data.DomainSpec, zlc_data.DatasetSchema)):
             kind = "axis" if isinstance(value, zlc_data.AxisSpec) else "domain" if isinstance(value, zlc_data.DomainSpec) else "schema"
             return kind, id(value)
@@ -2074,7 +2077,8 @@ class RenderProcess:
                     snapshot_document = (
                         "snapshot", schema_ref, snapshot.ref, block.values,
                         block.validity, block.sigma, block.window,
-                        references(block.segments, children, key=attrgetter("ref.identity")),
+                        references(block.segments, children, key=id,
+                                   plane_schema=block.schema, plane_shapes=block.segment_shapes),
                         block.segment_origins, block.segment_shapes,
                     )
                 document = snapshot_document if isinstance(value, OwnedSnapshot) else (
@@ -2084,26 +2088,89 @@ class RenderProcess:
             entries.append((local, child_key, value, tuple(children), document))
             return _INPUT_REF, local
 
-        def references(values: tuple, dependencies: set[int], *, key=self._input_key) -> tuple:
+        def references(
+            values: tuple, dependencies: set[int], *, key=self._input_key,
+            plane_schema=None, plane_shapes=None,
+        ) -> np.ndarray:
             # A collection's already-published dependencies need one lookup
             # and hold batch, not a recursive serializer/lock per old entry.
             keys = tuple(map(key, values))
             with self._lock:
-                tokens = tuple(map(self._input_tokens.get, keys))
+                tokens = list(map(self._input_tokens.get, keys))
                 added = set(tokens).difference(dependencies, (None,))
                 for token in added:
                     self._input_refcounts[token] += 1
                 held.extend(added)
                 dependencies.update(added)
-            return tuple((_INPUT_REF, token) if token is not None else reference(value, dependencies)
-                         for value, token in zip(values, tokens))
+            # A homogeneous dependency column needs handles, not N Python
+            # (tag, handle) wrappers. Only uninstalled values enter Python's
+            # serializer; list.index scans already-known handles in C.
+            missing = []
+            start = 0
+            while True:
+                try:
+                    index = tokens.index(None, start)
+                except ValueError:
+                    break
+                missing.append(index)
+                start = index + 1
+            if plane_schema is None:
+                for index in missing:
+                    tokens[index] = reference(values[index], dependencies)[1]
+            elif missing:
+                # Plane bundles are leaves with a shared dtype/cell contract.
+                # Register their identities together and encode columnar
+                # metadata, rather than invoking a serializer per record.
+                fresh = {}
+                for index in missing:
+                    if keys[index] not in pending:
+                        fresh.setdefault(keys[index], index)
+                with self._lock:
+                    first = self._input_serial + 1
+                    self._input_serial += len(fresh)
+                fresh_indices = tuple(fresh.values())
+                first_entry = len(entries)
+                for offset, (child_key, index) in enumerate(fresh.items()):
+                    local = first + offset
+                    pending[child_key] = local
+                    counts[local] = 0
+                    entries.append((local, child_key, values[index], (), None))
+                for index in missing:
+                    local = pending[keys[index]]
+                    if local not in dependencies:
+                        counts[local] += 1
+                        dependencies.add(local)
+                    tokens[index] = local
+                if fresh_indices:
+                    parts = tuple(values[index] for index in fresh_indices)
+
+                    def buffer(array):
+                        return pickle.PickleBuffer(array if array.flags.c_contiguous else array.tobytes(order="C"))
+
+                    masks = np.fromiter((2 if not isinstance(part[1], bool) else int(part[1])
+                                         for part in parts), dtype=np.uint8, count=len(parts))
+                    sigmas = np.fromiter((part[2] is not None for part in parts),
+                                          dtype=np.bool_, count=len(parts))
+                    components = plane_schema.value_schema.validity_contract.component_axis_ids
+                    metadata = (plane_schema.value_schema.dtype, plane_schema.cell_domain.shape,
+                                tuple(axis.size for axis in plane_schema.cell_domain.axes if axis.axis_id in components))
+                    document = (
+                        "planes", np.arange(first, first + len(parts), dtype=np.int64), metadata,
+                        plane_shapes[np.asarray(fresh_indices, dtype=np.intp)],
+                        tuple(buffer(part[0]) for part in parts), masks,
+                        tuple(buffer(part[1]) for part in parts if not isinstance(part[1], bool)),
+                        sigmas, tuple(buffer(part[2]) for part in parts if part[2] is not None),
+                    )
+                    token, child_key, owner, children, _ = entries[first_entry]
+                    entries[first_entry] = token, child_key, owner, children, document
+            return np.asarray(tokens, dtype=np.int64)
 
         try:
             result = reference(value, set())
             # Dependencies precede their consumer. Pickle's shared memo also
             # avoids repeatedly encoding common identity/schema fields.
             payload = pickle.dumps(
-                tuple((entry[0], entry[4]) for entry in entries),
+                tuple((entry[0], entry[4]) for entry in entries if entry[4] is not None),
                 protocol=5, buffer_callback=buffers.append,
             )
             total = sum(item.raw().nbytes for item in buffers)
@@ -2173,7 +2240,7 @@ class RenderProcess:
                 self._input_keys[child] = child_key
                 self._input_identity_owners[child] = owner
                 self._input_dependencies[child] = dependencies
-                self._input_kinds[child] = "snapshot" if isinstance(owner, OwnedSnapshot) else str(child_key[0])
+                self._input_kinds[child] = "planes" if isinstance(owner, tuple) else str(child_key[0])
                 self._input_refcounts[child] = counts[child]
             self._input_uploads[token] = tuple(shared)
             used.add(token)
@@ -2920,6 +2987,22 @@ def _discard_shared(memory: SharedMemory) -> None:
 def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
     """Move an IPC-backed PlotInput onto ordinary immutable child storage."""
 
+    kind = value[0]
+    if kind == "planes":
+        _kind, tokens, metadata, shapes, buffers, masks, mask_buffers, sigmas, sigma_buffers = value
+        dtype, cell_shape, component_shape = metadata
+        mask_buffers, sigma_buffers = iter(mask_buffers), iter(sigma_buffers)
+        restored = {}
+        for token, leading, source, mask_kind, has_sigma in zip(
+            tokens.tolist(), shapes.tolist(), buffers, masks.tolist(), sigmas.tolist(), strict=True,
+        ):
+            shape = (*leading, *cell_shape)
+            values = np.ndarray(shape, dtype=dtype, buffer=source)
+            mask = (bool(mask_kind) if mask_kind < 2 else
+                    np.ndarray((*leading, *component_shape), dtype=np.bool_, buffer=next(mask_buffers)))
+            sigma = None if not has_sigma else np.ndarray(shape, dtype="<f8", buffer=next(sigma_buffers))
+            restored[token] = values, mask, sigma
+        return restored
     from zlc_data import (
         AxisSpec,
         CellValidity,
@@ -2931,12 +3014,11 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
     )
     from .primitives import ImagePointOverlay
 
-    kind = value[0]
     if kind == "axis":
         return AxisSpec(*value[1:])
     if kind == "domain":
         _kind, shape, axes, codes, repeats = value
-        return DomainSpec(shape, tuple(_resolve_inputs(axis, inputs) for axis in axes), codes, repeats)
+        return DomainSpec(shape, tuple(map(inputs.__getitem__, axes.tolist())), codes, repeats)
     if kind == "schema":
         _kind, repeat, point, cell, values, fingerprint = value
         schema = DatasetSchema(*(_resolve_inputs(domain, inputs) for domain in (repeat, point, cell)), values)
@@ -2950,7 +3032,7 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
         if values is None:
             return OwnedSnapshot(ref, DataBlock._from_owned_segments(
                 ref.block_id, ref.revision, schema,
-                tuple(_resolve_inputs(child, inputs) for child in segments),
+                tuple(map(inputs.__getitem__, segments.tolist())),
                 origins=origins, shapes=shapes, window=window,
             ))
         if isinstance(validity, CellValidity):
@@ -2996,8 +3078,8 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
 def _load_input(
     payload: bytes,
     descriptors: Sequence[tuple[str, int, int]],
-    inputs: Mapping[int, object],
-) -> dict[int, object]:
+    inputs: dict[int, object],
+) -> None:
     buffers: list[memoryview] = []
     mappings: dict[str, SharedMemory] = {}
     try:
@@ -3014,11 +3096,16 @@ def _load_input(
                 exported.release()
             buffers.append(memoryview(owned))
         loaded = pickle.loads(payload, buffers=buffers)
-        added: dict[int, object] = {}
-        available = ChainMap(added, inputs)
+        # The service loop owns this dictionary and finishes one input
+        # command before resolving the next request. Dependencies can be
+        # installed directly in order; no layered per-reference lookup or
+        # duplicate table is needed. Malformed input terminates the service.
         for token, document in loaded:
-            added[int(token)] = _owned_input(document, available)
-        return added
+            restored = _owned_input(document, inputs)
+            if document[0] == "planes":
+                inputs.update(restored)
+            else:
+                inputs[int(token)] = restored
     finally:
         # DataBlock either retained the immutable bytes backing or copied an
         # incompatible layout.  These temporary view objects own no OS handle.
@@ -3635,7 +3722,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
             kind = message[0]
             if kind == "input":
                 token, payload, descriptors = message[1:]
-                inputs.update(_load_input(payload, descriptors, inputs))
+                _load_input(payload, descriptors, inputs)
                 send(("input-ack", int(token)))
                 continue
             if kind == "release-front":

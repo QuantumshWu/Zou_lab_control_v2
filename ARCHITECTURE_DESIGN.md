@@ -65,6 +65,7 @@
 - 三域标题不会因为domain没有具名axis就消失：该域数量显示1、轴名显示“—”，不虚构axis；普通数值/有效性计数规则不变。Manual editor和Panel共用同一格式化函数。
 - 同一run/content revision不可代表不同内容；EventRef只表达causal publication，不代替content identity。
 - Runtime保留的不可变数据可按原提交块组成精确快照；窗口/有限范围不是必须复制的整张数组。块引用与只读数值origin/shape矩阵共同描述一个布局，不另存tuple-origin副本，也不让每个消费者逐块重解schema。读取范围、坐标、validity和sigma属于同一快照，连续数组仅由确实需要它的消费者显式物化。Fate、Scope、Group、Facet与Reduction变化只重新投影已有快照，不释放或重建科学history lease。
+- 存储块不等于公开科学snapshot。整体视图只有一份schema/ref；内部每块仅持不可变values、紧凑bool mask（或统一True/False）、可选sigma及共同的typed placement。来源/回放记录仍由Runtime唯一保留，显式请求某条event时才恢复该条public snapshot；不能为了显示一个范围给每条记录重复构造schema/ref/DataBlock。增量计算与传输可以按持有中的不可变plane身份复用，但必须连同裁剪布局核对；旧身份的owner必须持有到本次复用结束，不能用悬空id猜相同数据。
 - Axis坐标与Domain映射各只有一份不可变数值表示；坐标内容在Axis首次创建校验，Domain只核关系与映射。连续记录时间可用明确的record origins与sample offsets表示，不展开Python逐样本坐标或另建通用表达式系统。内部传输复用typed结构及既有input token，不通过文件codec反复编码/解码；文件边界仍严格验证。
 - 临时restriction可以借用不可变parent的strided view；Runtime接纳长期保留的publication时，values、validity和sigma只能保留各自声明范围的紧凑bytes，不因小ROI的base引用钉住整个父图。恰好自有连续bytes直接复用；需要压紧的复制在Plane锁外完成，不按数据大小、设备或Plot kind设置阈值。
 
@@ -256,6 +257,7 @@ Node new chunk
 - 显示用图像块平均统一float64累加、除完整有效样本数后才转换到输出dtype；NumPy参考与compiled采用同一数学，不为保留整数图像旧的float32中间舍入另建sum kernel或2^24分流。Histogram单组与Facet使用同一分箱kernel及真实边界修正规则，普通分布只是一组内部输出，不向Dataset伪造axis。入口统一的性能代价单独量化，不能当作提速。
 
 - Display cadence按同一HarmonicClock的真实单调时间跨deadline判定；Qt延迟/合并回调时只欠一次最新呈现，不按回调次数再等待若干逻辑拍，也不补画已错过的帧。Pause、容量与same-shot接纳规则不变。
+- 新数据已到但尚差少量时间才允许呈现时，原Scheduler从上次staging的同一deadline给出剩余时间，Qt owner重排现有同一个timer到期唤醒；不宽松提前接纳、不另建clock或高频轮询。无新数据、surface忙、Pause和关闭不安排这次deadline wake。
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
 - 长期绘图服务不能用全局gc.freeze或提高回收阈值来永久保留正在使用的Figure。随viewport/time变化的共享刻度placement缓存有明确工作集上限；Host关闭释放其输入与结构依赖，已退休的共享像素segment在最后读者释放后解除映射，不积累空闲旧名字。进程可复用编译代码与有界缓存，但科学窗口固定时资源保留不得随运行时长无界增长。
@@ -298,7 +300,8 @@ Node new chunk
 - Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Single、Facet overview和Focus的每个cell必须经过同一个kind preparation/render owner；Focus只选择同一个accepted cell并换layout/viewport，不重新解释数据、fit或annotation。Facet overview及steady Curve/Image/Fit/SEM保留native raster快路，但native与Agg只允许消费同一份prepared cell state；native拒绝必须整帧回到已准备好的公共draw path或保留上一完整front，不得出现partial/blank cells，也不得靠一次pointer materialization才能恢复。
 - 存储分块不能变成逐块Python调度。公共归约直接读取一次typed布局，必要时一次打包计算scratch并批量调用原数值入口；不为每个块创建DataView/统计对象或调用一次kernel，不按大小或Plot kind另选特殊路线。无归约的结构identity可以借视图；真实交错布局必须保持FIRST及极值平局的全局顺序。只计算实际请求的统计，Plot结果不携无消费者的中间counts。
 - 同一次Plot输入的新增依赖沿现有input-token图按依赖顺序批量序列化，共用一次消息和传输allocation；不能每个存储块一条消息/一个共享内存映射。接收后每个数值plane仍独立拥有不可变bytes，单个小块不能钉住整批传输内存；引用释放同样批量发送，不新增第二份history或transport数据owner。
-- Indexed Rolling的既有归约结果只按精确child身份和计算配置复用；旧结果整批搬运，新/改变的输入整批计算，不能逐旧series重新生成键或复制。缓存仍附着当前DataView及其保留范围，不是第二份raw history。中心化SEM保持原统计定义，以独立精度证据评估浮点合并顺序；不能偷偷改变grouped/ungrouped trailing权重。
+- 原始数值打包只由DataBlock.packed_planes处理布局、compact mask及按需sigma，不做finite过滤或统计；Plot复用该方法后再计算，完整物化仅在有空位时一次scatter到canonical范围。不得再为保存、Processor整数组读取或Plot各留一套逐块拼装。无归约的dense单块借同一数组；未请求sigma不能因共用入口而被计算。
+- Indexed Rolling的既有归约结果只按持有中的不可变plane身份、真实布局及计算配置复用；旧结果整批搬运，新/改变的输入整批计算。缓存只在当前表示能消费时继承，完成复用后丢弃未消费的旧packed carry；缩小/关闭history不得因全部统计命中而钉住旧窗口。当前DataView只持当前source或本次复用所需的前一source，不链接全部revision。中心化SEM保持原统计定义，不改grouped/ungrouped trailing权重。
 - FacetGrid的facet role可为空；为空不是semantic vacancy，也不允许UI或renderer伪造Dataset轴，而是唯一一个完整cell，标题为`Facet 1`。同一cell kind的projection、fit、selector、Focus和Figure grammar仍走普通Facet路径；给真实轴Facet fate后才扩为多cell。
 - Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。每根SEM误差棒以stem与两cap的几何并集为一个工字形，subpixel coverage之后只应用一次alpha；不同误差棒仍独立混色，不能按整数display column合并为min/max envelope。Native、Agg与导出读取同一端点与屏幕尺度style。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。

@@ -1116,6 +1116,29 @@ class BoardScheduler:
                 self._mark_staged(SurfaceBatchArbiter._panel_id(port), elapsed)
         return front
 
+    def pending_delay_ms(self) -> int | None:
+        """Next existing deadline for new data waiting on an idle surface."""
+
+        if self._closed:
+            return None
+        elapsed = self._clock.elapsed_ms()
+        delays = []
+        for port in self._ports():
+            panel_id = SurfaceBatchArbiter._panel_id(port)
+            staged = self._staged_ms.get(panel_id)
+            if staged is None or port.surface_busy:
+                continue
+            remaining = staged + port.display_interval_ms - elapsed
+            if remaining <= 0:
+                continue
+            presented = self._presented_front_refs(port)
+            for name in SurfaceBatchArbiter._front_signals(port):
+                latest = self._plane.latest_publication(name)
+                if latest is not None and latest.event_ref not in presented:
+                    delays.append(remaining)
+                    break
+        return min(delays, default=None)
+
     def _mark_staged(self, panel_id: str, elapsed_ms: int) -> None:
         """Start this panel's interval again, and clear its debt.
 

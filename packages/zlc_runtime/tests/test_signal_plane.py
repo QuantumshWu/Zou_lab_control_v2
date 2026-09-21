@@ -1317,7 +1317,7 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         plane.close()
 
 
-@pytest.mark.parametrize("operation", ["_retained_snapshot", "_merge_event_records"])
+@pytest.mark.parametrize("operation", ["_retained_planes", "_merge_event_records"])
 def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation) -> None:
     import zlc_runtime.plane as plane_module
 

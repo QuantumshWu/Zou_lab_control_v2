@@ -24,11 +24,13 @@ from zlc_data.snapshot_projection import (
     materialize_derived_dataset,
     restrict_snapshot,
 )
-from zlc_data.validity import VALID, ValidityContract
+from zlc_data.validity import INVALID, VALID, ValidityContract
 from zlc_data.value import (
     BlockId,
+    DataBlock,
     DatasetRevision,
     DatasetRevisionRef,
+    OwnedSnapshot,
     StreamGenerationId,
     owned_snapshot_from_arrays,
 )
@@ -163,6 +165,7 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
         values,
         7,
         validity=validity,
+        sigma=values.astype(np.float64) + 0.25,
         block_id="projection-source",
         stream_generation="projection-generation",
     )
@@ -198,6 +201,21 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
     np.testing.assert_array_equal(
         projected.expanded_validity(), validity[1:3, 0:2, 1:4]
     )
+    planes = source.block.as_segment()
+    segmented_block = DataBlock(
+        source.ref.block_id, source.ref.revision, None, INVALID, schema,
+        segments=(planes,), segment_origins=np.asarray([[0, 0]], dtype=np.int64),
+        segment_shapes=np.asarray([[3, 3]], dtype=np.int64),
+    )
+    segmented = OwnedSnapshot(source.ref, segmented_block)
+    unchanged = restrict_snapshot(segmented, reference_for=_reference_for("unchanged"))
+    assert unchanged.block.segments[0] is planes
+    cropped = restrict_snapshot(segmented, selection, reference_for=_reference_for("projection-result"))
+    assert cropped.block.segments[0] is not planes
+    actual = cropped.materialize()
+    np.testing.assert_array_equal(actual.block.values, projected.block.values)
+    np.testing.assert_array_equal(actual.expanded_validity(), projected.expanded_validity())
+    np.testing.assert_array_equal(actual.block.sigma, projected.block.sigma)
 
 
 def _indexed_schema(offsets: tuple[int, ...]) -> DatasetSchema:

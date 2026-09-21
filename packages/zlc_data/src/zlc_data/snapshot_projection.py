@@ -679,32 +679,31 @@ def restrict_snapshot(
             return tuple(int(value - start) for value in numbers[left:right]), int(left)
 
         segments, origins, sizes = [], [], []
-        for origin, child in zip(snapshot.block.segment_origins, snapshot.block.segments, strict=True):
-            child_schema = child.block.schema
-            repeats, repeat_origin = overlap(repeat_indices, origin[0], child_schema.repeat_domain.size)
-            points, point_origin = overlap(point_indices, origin[1], child_schema.point_domain.size)
+        for origin, extent, planes in zip(snapshot.block.segment_origins, snapshot.block.segment_shapes,
+                                          snapshot.block.segments, strict=True):
+            repeats, repeat_origin = overlap(repeat_indices, origin[0], extent[0])
+            points, point_origin = overlap(point_indices, origin[1], extent[1])
             if not repeats or not points:
                 continue
-            if (_keeps_everything(repeats, child_schema.repeat_domain.size)
-                    and _keeps_everything(points, child_schema.point_domain.size)
+            if (_keeps_everything(repeats, extent[0])
+                    and _keeps_everything(points, extent[1])
                     and all(_keeps_everything(data_indices[axis.axis_id], axis.size)
-                            for axis in child_schema.cell_domain.axes)):
-                selected_child = child
+                            for axis in schema.cell_domain.axes)):
+                selected = planes
             else:
-                block = child.block.materialize()
-                child_shape = restricted_schema(child_schema, repeats, points, data_indices)
-                child_values = restricted_values(block.values, child_schema, repeats, points, data_indices)
-                child_mask = take_indices(dataset_validity_storage(block.validity, child_schema), repeats, axis=0)
-                child_mask = take_indices(child_mask, points, axis=1)
-                for position, axis_id in enumerate(child_schema.value_schema.validity_contract.component_axis_ids):
-                    child_mask = take_indices(child_mask, data_indices[axis_id], axis=2 + position)
-                child_sigma = None if block.sigma is None else restricted_values(
-                    block.sigma, child_schema, repeats, points, data_indices)
-                child_ref = replace(child.ref, schema_fingerprint=child_shape.fingerprint)
-                selected_child = OwnedSnapshot(child_ref, DataBlock(
-                    child_ref.block_id, child_ref.revision, child_values,
-                    compact_dataset_validity(child_mask, child_shape), child_shape, child_sigma))
-            segments.append(selected_child)
+                values, mask, sigma = planes
+                values = restricted_values(values, schema, repeats, points, data_indices)
+                values = immutable_array(values, dtype=schema.value_schema.dtype, shape=values.shape)
+                if not isinstance(mask, bool):
+                    mask = take_indices(take_indices(mask, repeats, axis=0), points, axis=1)
+                    for position, axis_id in enumerate(schema.value_schema.validity_contract.component_axis_ids):
+                        mask = take_indices(mask, data_indices[axis_id], axis=2 + position)
+                    mask = immutable_array(mask, dtype=np.dtype(bool), shape=mask.shape)
+                if sigma is not None:
+                    sigma = restricted_values(sigma, schema, repeats, points, data_indices)
+                    sigma = immutable_array(sigma, dtype=np.dtype("<f8"), shape=sigma.shape)
+                selected = values, mask, sigma
+            segments.append(selected)
             origins.append((repeat_origin, point_origin))
             sizes.append((len(repeats), len(points)))
         reference = reference_for(derived)

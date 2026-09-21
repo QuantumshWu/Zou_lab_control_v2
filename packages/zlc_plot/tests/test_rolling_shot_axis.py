@@ -192,7 +192,8 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
     ) for start in (0, 2))
     segmented = OwnedSnapshot(snapshot.ref, replace(
         snapshot.block, values=None, validity=INVALID,
-        segments=children, segment_origins=np.asarray(((0, 0), (0, 2)), dtype=np.int64),
+        segments=tuple(child.block.as_segment() for child in children),
+        segment_origins=np.asarray(((0, 0), (0, 2)), dtype=np.int64),
         segment_shapes=np.asarray(((1, 2), (1, 2)), dtype=np.int64),
     ))
     from zlc_plot import _raster_kernels as kernels
@@ -225,6 +226,7 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
             np.testing.assert_array_equal(repeated.values, actual.values)
             assert inherited._samples is None
             assert inherited._rolling_carry[1] == segmented_view._rolling_carry[1]
+            assert inherited._rolling_carry[-1] is segmented
             assert segmented.block._materialized is None
     grouped = DataView(segmented)
     grouped.rolling_history(group=AxisRef.point("category"))
@@ -288,6 +290,39 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
                 group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
             )
         np.testing.assert_array_equal(result.sem[1], [2.0] * 3)
+
+    # Flat storage carries only declared component masks and sample sigma;
+    # the mixed singleton bucket still uses the producer's sigma, not SEM=0.
+    from zlc_data import AxisId, ValidityContract
+
+    component_schema = replace(indexed_schema, value_schema=replace(
+        indexed_schema.value_schema,
+        validity_contract=ValidityContract.components(AxisId("site")),
+    ))
+    component_valid = indexed_valid.copy()
+    component_valid[:, 2, 1] = False
+    component = make_snapshot(component_schema, indexed_values, revision=10,
+                              validity=component_valid, sigma=np.full(indexed_values.shape, 2.0))
+    component_children = tuple(make_snapshot(
+        replace(child_schema, value_schema=component_schema.value_schema),
+        indexed_values[:, start:start + 2], revision=start,
+        validity=component_valid[:, start:start + 2],
+        sigma=np.full((1, 2, 3), 2.0),
+    ).block.as_segment() for start in (0, 2))
+    component_flat = OwnedSnapshot(component.ref, replace(
+        component.block, values=None, validity=INVALID, sigma=None,
+        segments=component_children, segment_origins=segmented.block.segment_origins,
+        segment_shapes=segmented.block.segment_shapes,
+    ))
+    flat_view = DataView(component_flat)
+    actual = flat_view.rolling_history(group=AxisRef.cell_data("site"))
+    expected = DataView(component).rolling_history(group=AxisRef.cell_data("site"))
+    np.testing.assert_array_equal(actual.counts, expected.counts)
+    np.testing.assert_array_equal(actual.values, expected.values)
+    np.testing.assert_array_equal(actual.sem, expected.sem)
+    np.testing.assert_array_equal(flat_view.samples.valid_mask, component_valid)
+    assert actual.sem[1, 1] == 2.0
+    assert component_flat.block._materialized is None
 
     repeat = DataView(_snapshot(0, repeats=3)).rolling_history()
     np.testing.assert_allclose(

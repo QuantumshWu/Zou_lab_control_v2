@@ -20,15 +20,12 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from zlc_data import (
-    CellValidity,
     CoordinateScalar,
     BlockId,
     DatasetRevisionRef,
     DatasetSchema,
     LATEST_COORDINATE,
     OwnedSnapshot,
-    Valid,
-    Invalid,
     canonical_coordinate_scalar,
 )
 from zlc_data.snapshot_projection import (
@@ -797,7 +794,8 @@ class DataView:
         if isinstance(inherit_domains_from, DataView):
             self._frequency_carry = inherit_domains_from._frequency_carry
             if (
-                inherit_domains_from._axis_display_units == overrides
+                self._history_layout is not None and snapshot.block.values is None
+                and inherit_domains_from._axis_display_units == overrides
                 and inherit_domains_from._unit_registry is registry
                 and inherit_domains_from._unit_registry_revision == registry.revision
             ):
@@ -2591,10 +2589,8 @@ class DataView:
     def _segment_arrays(self, *, sigma: bool = False, selection: Any = None) -> tuple:
         """One numeric scratch for this view, independent of storage block count."""
         cached = self._packed_segments if selection is None else None
-        blocks = None
         source_block = self._snapshot.block
-        segments = (source_block.segments if selection is None else
-                    tuple(source_block.segments[int(index)] for index in selection))
+        segments = source_block.segments
         carry, self._packed_carry = self._packed_carry, None
         if cached is None and selection is None and carry is not None:
             old_snapshot, prepared = carry
@@ -2621,7 +2617,7 @@ class DataView:
             )
             if reusable:
                 tail_values, tail_valid, tail_sigma, tail_rows = self._segment_arrays(
-                    sigma=sigma, selection=np.arange(retained, len(segments)),
+                    sigma=sigma and prepared[5], selection=np.arange(retained, len(segments)),
                 )
                 old_values = prepared[0].reshape((-1, *cell_shape))
                 old_valid = prepared[1].reshape(old_values.shape)
@@ -2665,97 +2661,26 @@ class DataView:
                         array.setflags(write=False)
                 cached = values, valid, errors, row_indices, None, sigma_read
         if cached is None:
-            blocks = [child.block if child.block.values is not None else child.block.materialize()
-                      for child in segments]
-            shape = schema_shape(self._schema)
-            cell_shape = shape[2:]
-            origins = source_block.segment_origins
-            extents = source_block.segment_shapes
-            if selection is not None:
-                origins, extents = origins[selection], extents[selection]
-            row_counts = extents[:, 0] * extents[:, 1]
-            stops = np.cumsum(row_counts)
-            starts = stops - row_counts
-            rows = int(stops[-1]) if stops.size else 0
-            global_starts = origins[:, 0] * shape[1] + origins[:, 1]
-            spans = (extents[:, 0] - 1) * shape[1] + extents[:, 1]
-            complete = (rows == shape[0] * shape[1]
-                        and np.array_equal(global_starts, starts)
-                        and bool(np.all(spans == row_counts)))
-            arrays = [block.values for block in blocks]
-            if len(arrays) == 1:
-                values = arrays[0].reshape((rows, *cell_shape))
-            elif arrays:
-                # Concatenate tensor rows directly when their trailing shape
-                # agrees; axis=None would make an unused flattened view of
-                # every input before performing the same copy.
-                axis = 0 if bool(np.all(extents[:, 1] == extents[0, 1])) else None
-                values = np.concatenate(arrays, axis=axis).reshape((rows, *cell_shape))
-            else:
-                values = np.empty((0, *cell_shape), dtype=self._schema.value_schema.dtype)
-            order = None
-            row_indices = None
-            if complete:
-                values = values.reshape(shape)
-            else:
-                owners = np.repeat(np.arange(len(blocks)), row_counts)
-                local = np.arange(rows) - starts[owners]
-                repeat = origins[owners, 0] + local // extents[owners, 1]
-                point = origins[owners, 1] + local % extents[owners, 1]
-                linear = repeat * shape[1] + point
-                if bool(np.any(linear[1:] < linear[:-1])):
-                    order = np.argsort(linear, kind="stable")
-                    values = values[order]
-                    repeat, point = repeat[order], point[order]
-                row_indices = repeat, point
-            if all(isinstance(block.validity, Valid) for block in blocks):
-                valid = np.broadcast_to(np.asarray(True), values.shape)
-            elif all(isinstance(block.validity, Invalid) for block in blocks):
-                valid = np.broadcast_to(np.asarray(False), values.shape)
+            values, mask, errors, row_indices, order = source_block.packed_planes(
+                selection=selection, sigma=sigma,
+            )
+            if isinstance(mask, bool):
+                valid = np.broadcast_to(np.asarray(mask), values.shape)
             else:
                 components = self._schema.value_schema.validity_contract.component_axis_ids
-                component_axes = tuple(axis for axis in self._schema.cell_domain.axes
-                                       if axis.axis_id in components)
-                component_shape = tuple(axis.size for axis in component_axes)
-                masks = []
-                for block, count in zip(blocks, row_counts):
-                    mark = block.validity
-                    if isinstance(mark, (Valid, Invalid)):
-                        compact = np.asarray(isinstance(mark, Valid))
-                    else:
-                        axis_ids = () if isinstance(mark, CellValidity) else mark.axis_ids
-                        compact = mark.mask.reshape((int(count), *(
-                            axis.size if axis.axis_id in axis_ids else 1
-                            for axis in component_axes)))
-                    masks.append(np.broadcast_to(compact, (int(count), *component_shape)))
-                compact = np.concatenate(masks, axis=0)
-                if order is not None:
-                    compact = compact[order]
-                spread = [*shape[:2]] if complete else [rows]
-                spread.extend(axis.size if axis.axis_id in components else 1
-                              for axis in self._schema.cell_domain.axes)
-                valid = np.broadcast_to(compact.reshape(spread), values.shape)
+                leading = values.shape[:2] if row_indices is None else values.shape[:1]
+                spread = (*leading, *(axis.size if axis.axis_id in components else 1
+                                     for axis in self._schema.cell_domain.axes))
+                valid = np.broadcast_to(mask.reshape(spread), values.shape)
             if values.dtype.kind not in "biu":
                 finite = np.isfinite(values)
                 if not bool(finite.all()):
                     valid = finite if _stride_zero_all_true(valid) else valid & finite
-            values.setflags(write=False)
             valid.setflags(write=False)
-            cached = (values, valid, None, row_indices, order, False)
+            cached = values, valid, errors, row_indices, order, sigma
         values, valid, errors, row_indices, order, sigma_read = cached
         if sigma and not sigma_read:
-            if blocks is None:
-                blocks = [child.block if child.block.values is not None else child.block.materialize()
-                          for child in segments]
-            if any(block.sigma is not None for block in blocks):
-                arrays = [block.sigma if block.sigma is not None else
-                          np.broadcast_to(np.asarray(np.nan), block.values.shape)
-                          for block in blocks]
-                errors = np.concatenate(arrays, axis=None)
-                if order is not None:
-                    errors = errors.reshape((-1, *schema_shape(self._schema)[2:]))[order]
-                errors = errors.reshape(values.shape)
-                errors.setflags(write=False)
+            errors = source_block._pack_sigma(values.shape, selection=selection, order=order)
             cached = values, valid, errors, row_indices, order, True
         if selection is None:
             self._packed_segments = cached
@@ -3705,11 +3630,11 @@ class DataView:
     def _indexed_segment_history(
         self, group: AxisRef | None, aggregation: Reduction, uncertainty: bool,
     ) -> RollingHistory | None:
-        """Carry accepted rows by exact source ref; compute changed rows as one batch."""
+        """Carry rows by immutable plane identity; compute changes as one batch."""
         layout = self._history_layout
         assert layout is not None
         block = self._snapshot.block
-        origins, extents, children = block.segment_origins, block.segment_shapes, block.segments
+        origins, extents, segments = block.segment_origins, block.segment_shapes, block.segments
         row_codes = layout.codes()
         if (bool(np.any(origins[:, 0] != 0)) or bool(np.any(extents[:, 0] != 1))
                 or bool(np.any(extents[:, 1] < 1))):
@@ -3717,7 +3642,7 @@ class DataView:
             return None
         shots = row_codes[origins[:, 1]]
         if (not np.array_equal(shots, row_codes[origins[:, 1] + extents[:, 1] - 1])
-                or np.unique(shots).size != len(children)):
+                or np.unique(shots).size != len(segments)):
             self._rolling_carry = None
             return None
         group_codes, group_dimension = None, None
@@ -3737,13 +3662,12 @@ class DataView:
         old_history = carried[2] if reusable else None
         old_rows, old_points, matched, pending = [], [], [], []
         retained = {}
-        for index, child in enumerate(children):
-            ref = child.ref
-            # The complete existing ref identity, without recursively hashing
-            # four nested dataclass wrappers for every retained row.
-            ref_key = ref.identity
-            retained[ref_key] = (int(shots[index]), int(origins[index, 1]))
-            old = previous.get(ref_key)
+        for index, segment in enumerate(segments):
+            # The carried snapshot holds these tuples alive until matching is
+            # complete. IDs cannot be recycled; there is no child ref/schema.
+            identity = id(segment)
+            retained[identity] = (int(shots[index]), int(origins[index, 1]))
+            old = previous.get(identity)
             if old is None:
                 pending.append(index)
             else:
@@ -3826,7 +3750,10 @@ class DataView:
             snapshot_revision(self._snapshot), snapshot_generation(self._snapshot),
             values, valid, counts, keys, layout.cells, layout.times, sem,
         )
-        self._rolling_carry = query, retained, result, group_dimension, group_codes
+        # Reused statistics may need no raw packing at all. Do not leave an
+        # unconsumed previous raw window pinned after accepting this result.
+        self._packed_carry = None
+        self._rolling_carry = query, retained, result, group_dimension, group_codes, self._snapshot
         return result
 
     def _history_from_axes(

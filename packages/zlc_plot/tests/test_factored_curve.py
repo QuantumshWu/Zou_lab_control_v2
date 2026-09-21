@@ -396,17 +396,18 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
 
     snapshot = _snapshot(holes=holes, seed=19)
     view = DataView(snapshot)
-    segments = tuple(restrict_snapshot(
+    children = tuple(restrict_snapshot(
         snapshot, repeat_rows=range(repeat, repeat + 1),
         reference_for=lambda schema: replace(
             snapshot.ref, block_id=BlockId(f"{snapshot.ref.block_id.value}:repeat:{repeat}"),
             schema_fingerprint=schema.fingerprint,
         ),
     ) for repeat in range(snapshot.block.schema.repeat_domain.size))
+    segments = tuple(child.block.as_segment() for child in children)
     segmented = OwnedSnapshot(snapshot.ref, replace(
         snapshot.block, values=None, validity=INVALID, sigma=None, segments=segments,
         segment_origins=np.column_stack((np.arange(len(segments)), np.zeros(len(segments), dtype=np.int64))),
-        segment_shapes=np.asarray([child.block.schema.physical_shape[:2] for child in segments], dtype=np.int64),
+        segment_shapes=np.asarray([plane.shape[:2] for plane, _mask, _sigma in segments], dtype=np.int64),
     ))
     for x, groups in (
         (AxisRef.cell_data("frame"), (AxisRef.point("ay"),)),
@@ -430,9 +431,9 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
         _assert_same(inherited.curve(x, group_by=groups, aggregation=aggregation), slow)
         assert inherited._packed_carry is None
         replacement = make_snapshot(
-            segments[0].block.schema, segments[0].block.values + 1000, revision=2,
-            validity=DataView(segments[0]).samples.valid_mask,
-        )
+            children[0].block.schema, segments[0][0] + 1000, revision=2,
+            validity=DataView(children[0]).samples.valid_mask,
+        ).block.as_segment()
         changed = OwnedSnapshot(segmented.ref, replace(
             segmented.block, segments=(replacement, *segments[1:]),
         ))
@@ -463,6 +464,15 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
                                             reduce_axes=reduced, aggregation=aggregation)
             np.testing.assert_array_equal(actual.counts, expected.counts)
         assert current.block._materialized is None
+    from zlc_plot import CurvePlot, FacetGridPlot
+
+    spec = FacetGridPlot(AxisRef.point("ax"), CurvePlot(
+        AxisRef.cell_data("frame"), group=AxisRef.cell_data("site"), reduction=aggregation,
+    ))
+    actual, expected = DataView(segmented).facet(spec), _numpy_projection(view, "facet", spec)
+    for left, right in zip(actual.cells, expected.cells, strict=True):
+        assert left.label == right.label
+        _assert_same(left.payload, right.payload)
 
 def test_configurations_the_path_does_not_own_fall_through() -> None:
     view = DataView(_snapshot(seed=3))

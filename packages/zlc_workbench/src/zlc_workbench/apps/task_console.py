@@ -452,6 +452,7 @@ class ExperimentGuiFlow:
             timer = attach_qt(
                 self._beat,
                 interval_ms=_beat_interval_ms(presenter),
+                board=presenter.board,
             )
             console.presenter = presenter
             console.session = session
@@ -1555,7 +1556,7 @@ def create_window(
     # The presenter's beat, not the board's: the board is one step of it, and
     # the cadence is the display clock's one wall-time base.
     timer = attach_qt(
-        presenter.beat, interval_ms=_beat_interval_ms(presenter)
+        presenter.beat, interval_ms=_beat_interval_ms(presenter), board=presenter.board
     )
     run_session_close, close_session_worker = attach_qt_worker(
         "zlc-console-session-close"
