@@ -490,18 +490,14 @@
 
 ## 4. 仍有效的FPGA build/timing证据
 
-以下证据来自2026-09-03在当前三层repeat tree上强制执行的Vivado 2019.1纯build，不代替实验板验收：
+当前设计是周期表引擎（ABI `LAYOUT_STRUCT_VERSION=8`、默认几何fingerprint `0x5AD5A6A0`）。2026-09-21用户授权后，在fieldmon worktree由正式`build_and_program.bat --build-only`完成Vivado 2019.1纯build（xc7a35tfgg484-2），不代替实验板验收：
 
-2026-09-21用户授权后，在独立ttl25 worktree由正式`build_and_program.bat --build-only`完成新扩展ABI `0x5A94F3B6`的Vivado 2019.1 build：19645/20800 LUT（94.45%）、14590/41600 FF（35.07%）、76/90 DSP、37/50 BRAM；setup WNS+0.170ns/TNS0，hold+0.036ns/THS0，12条bus-skew全部MET（最差实际skew0.811ns）。无critical warning/error，bitstream SHA256 `66160133406786698DE8461E341961A5B806DA4026677E04A2F5A32041B58672`。报告和构建receipt在该worktree的ignored `packages/zlc_pulse/fpga/build/ps`；未连接、program或flash实验板。
-
-2026-09-21只读核对本机实际2026-09-11 routed报告及synth参数：63物理lane、19TTL、两类FIFO64、fingerprint 0x5A59C160；LUT20050/20800（96.39%）、FF14806/41600（35.59%）、DSP76/90、BRAM41/50，WNS+0.116ns、WHS+0.036ns。实际FIFO映射每TTL17个RAM64M、每DAC74个RAM64M，用于本次估算器校准；新25TTL版本仍无routed结果。
-
-- Vivado 2019.1 fresh project完成全部IP、top synth、place/route、reports和bitstream。
-- Routed setup WNS `+0.193 ns`、TNS `0`；hold WHS `+0.036 ns`、THS `0`；全部约束MET。
-- 12条bus-skew全部MET，0 violated，最差实际skew `0.905 ns`、slack `+19.095 ns`。
-- 资源：19632/20800 Slice LUT（94.38%）、14138/41600 FF（33.99%）、76/90 DSP（84.44%）、41/50 Block RAM tile（40 RAMB36 + 2 RAMB18，82.00%）。
-- 新register layout fingerprint：`0x5A86511A`；Bitstream SHA256：`FD7BDF79A8865A6961BA536275AF070BA84D74B24B479248D2FDC2CA62D5656C`。
-- Engine/UART oracle、full-top FIRE和SAFE pin gate的已有结果仍是build/simulation evidence。
+- 资源：16204/20800 Slice LUT（77.90%，其中LUTRAM 1947）、10936/41600 FF（26.29%）、8/90 DSP、23/50 Block RAM tile（22 RAMB36 + 2 RAMB18：行表2、scan窗16、JTAG-AXI/debug hub/UART 5）。
+- 时序：routed setup WNS `+2.346 ns`、TNS 0；hold WHS `+0.036 ns`、THS 0；全部约束MET；12条bus-skew全部MET，最差实际skew `0.983 ns`。无critical warning/error。
+- Bitstream SHA256 `66E34D1CE3950061BF407435A297DE860381133D6DA8A4505A16C2C42660C236`（1419668字节）；报告和构建receipt在该worktree的ignored `packages/zlc_pulse/fpga/build/ps`。未连接、program或flash实验板。
+- 同一RTL的第一版（链式loop栈走表、延迟重放器自带除法器、寄存器移位FIFO）需要20985 LUT放不下，且走表是85级44.8 ns的路径；现版本按栈层并行求值、描述符推入即带最终step/rem、4路共用一个倒数ROM、LUTRAM环FIFO。对比上一代边沿表引擎的build（2026-09-21 ttl25：19645 LUT 94.45%、76 DSP、37 BRAM、WNS +0.170 ns），周期表省下约3400 LUT与68 DSP，setup余量从0.17 ns升到2.35 ns。
+- `wire.estimate_resources`的固定项按此routed报告校准（engine_logic_luts 14052、engine_ff 10936、几何外BRAM +5、DSP = 2×bus）；估算器不是新几何完成布线或硬件验收的证明。
+- Engine/UART oracle（12个xsim bench，含嵌套4层、同起止行的1-tick loop）、full-top FIRE（tb_t_ff，真blk_mem_gen模型）与SAFE pin gate（tb_safe_gate）在同一RTL上通过，是build/simulation evidence。
 
 ## 5. 明确未执行的实验机验收
 

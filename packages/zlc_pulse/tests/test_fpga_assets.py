@@ -195,10 +195,10 @@ def test_frozen_35t_estimate_is_the_calibrated_period_table_model() -> None:
         config["params"], part=config["fpga_part"], target_pct=config["target_pct"]
     )
     assert frozen["lut"] == {
-        "used": 11408,
+        "used": 16204,
         "budget": 20384,
         "total": 20800,
-        "pct": 54.8,
+        "pct": 77.9,
         "ok": True,
     }
     at_default = estimate_resources(config["params"], part=config["fpga_part"])
@@ -206,10 +206,10 @@ def test_frozen_35t_estimate_is_the_calibrated_period_table_model() -> None:
     assert at_default["lut"]["budget"] == 18720
 
     # One 128-bit x 512 row BRAM (2 tiles), the two 2048-point scan banks
-    # (16 tiles) and the routed top's three tiles outside the geometry memories.
-    assert frozen["ramb36"]["used"] == 21
-    assert frozen["ff"]["used"] == 9000
-    assert frozen["dsp"]["used"] == 16
+    # (16 tiles) and the routed top's five tiles outside the geometry memories.
+    assert frozen["ramb36"]["used"] == 23
+    assert frozen["ff"]["used"] == 10936
+    assert frozen["dsp"]["used"] == 8
 
     planning = solve_capacity("xc7a50t")
     assert planning.all_within_budget()
@@ -226,9 +226,9 @@ def test_frozen_35t_estimate_is_the_calibrated_period_table_model() -> None:
 
 def test_capacity_search_uses_the_estimators_fixed_ramb36_cost() -> None:
     # 4096 rows of 128 bits are 16 tiles; with the 16-tile scan window and
-    # the routed +3 they need 35.  At 34 the one estimator authority must
-    # choose the next 2048-row geometry (8 + 16 + 3 = 27) instead.
-    part = FpgaPartProfile("boundary", 34, 100000, 100000, 1000, 100000)
+    # the routed +5 they need 37.  At 36 the one estimator authority must
+    # choose the next 2048-row geometry (8 + 16 + 5 = 29) instead.
+    part = FpgaPartProfile("boundary", 36, 100000, 100000, 1000, 100000)
     solved = solve_capacity(
         part,
         target_pct=100,
@@ -238,8 +238,8 @@ def test_capacity_search_uses_the_estimators_fixed_ramb36_cost() -> None:
         engine_dsp=0,
     )
     assert solved.params.max_rows == 2048
-    assert solved.ramb36_used == 27
-    assert solved.ramb36_budget == 34
+    assert solved.ramb36_used == 29
+    assert solved.ramb36_budget == 36
     assert solved.all_within_budget()
     assert solved.resource_report == estimate_resources(
         solved.params,

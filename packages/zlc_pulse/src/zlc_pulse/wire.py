@@ -605,8 +605,8 @@ def _scan_ramb(bank_size: int, p: StreamerParams) -> int:
     return _ramb36(p.slot_bits, 2 * bank_size)
 
 def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFAULT_TARGET_PCT,
-                       engine_logic_luts: int = 9000,
-                       engine_ff: int = 9000, engine_dsp: int | None = None) -> dict:
+                       engine_logic_luts: int = 14052,
+                       engine_ff: int = 10936, engine_dsp: int | None = None) -> dict:
     """Resource usage of a CONCRETE ``StreamerParams`` vs a part, per axis.
 
     This is the single accounting model shared by :func:`solve_capacity` (which
@@ -615,16 +615,19 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
     ``{"ramb36"|"lut"|"ff"|"dsp": {"used","budget","total","pct","ok"}}``.
 
     ``engine_logic_luts`` and ``engine_ff`` are the fixed remainder of the
-    routed period-table engine after the scheduler estimates below; both are
-    calibrated from a routed report (see ``test_fpga_assets``).  FIFO depth
-    uses actual primitive width, not an ideal bits/64 ratio."""
+    routed design (engine, top, UART bridge and the JTAG-AXI IPs) after the
+    scheduler estimates below; both are calibrated from the 2026-09-21 routed
+    period-table build on the xc7a35t (16204 LUT, 10936 FF; see
+    ``test_fpga_assets``).  FIFO depth uses actual primitive width, not an
+    ideal bits/64 ratio."""
     check_rtl_assumptions(params)
     prof = part_profile(part)
     pct = _resource_target_pct(target_pct)
-    # The routed top consumes three BRAM36-equivalent tiles outside the
-    # geometry memories.  Report the conservative integer ceiling used by
-    # the capacity solver.
-    ramb36_used = _row_ramb(params.max_rows, params) + _scan_ramb(params.bank_size, params) + 3
+    # The routed top consumes five BRAM36-equivalent tiles outside the
+    # geometry memories (four RAMB36 and two RAMB18: the JTAG-AXI master, its
+    # debug hub and the UART bridge).  Report the conservative integer ceiling
+    # used by the capacity solver.
+    ramb36_used = _row_ramb(params.max_rows, params) + _scan_ramb(params.bank_size, params) + 5
     # TTL EVENT SCHEDULER: an EVT_DEPTH x 49b LUTRAM event FIFO,
     # a 48b equality comparator (~14) and push/pop control (~6) per channel.
     # The FIFOs are COMPACTED to the channels that can carry a delay -- only channels
@@ -681,7 +684,7 @@ def solve_capacity(part, *, channel_count: int = StreamerParams.channel_count, n
                    bus_width: int = 10, max_loops: int = 8, loop_depth: int = 4,
                    target_pct: float = DEFAULT_TARGET_PCT, bank_size: int = 2048,
                    max_rows_cap: int = 16384,
-                   engine_logic_luts: int = 9000, engine_ff: int = 9000, engine_dsp: int | None = None) -> SolvedCapacity:
+                   engine_logic_luts: int = 14052, engine_ff: int = 10936, engine_dsp: int | None = None) -> SolvedCapacity:
     """Maximise max_rows while every resource stays within ``target_pct``.
 
     Scan storage is the two-bank resident window, whose depth controls refill
