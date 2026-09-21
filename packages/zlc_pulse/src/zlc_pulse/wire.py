@@ -645,23 +645,24 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFA
     # DAC delay is instruction-level: one FIFO of resolved action descriptors per bus, followed
     # by one delayed ramp re-player.  This mirrors zlc_period_streamer.g_busseg exactly; storage
     # scales with actions in flight, not with DA bits or ramp value changes.  SEG_W is the RTL
-    # descriptor: two 48-bit global times, two BUS_WIDTH values, one TICK_WIDTH denominator, two
-    # BUS_WIDTH+1 step/remainder fields, and three flags.
+    # descriptor: one 48-bit emit time, the TICK_WIDTH span, two BUS_WIDTH values, two
+    # BUS_WIDTH+1 step/remainder fields, and two flags.
     bus_segment_bits = (
-        2 * 48
-        + 2 * params.bus_width
+        48
         + params.tick_width
+        + 2 * params.bus_width
         + 2 * (params.bus_width + 1)
-        + 3
+        + 2
     )
     bus_sched_luts = params.bus_count * (
         20 + fifo_ram_luts(bus_evt_depth, bus_segment_bits)
     )
     delay_lutram = ttl_sched_luts + bus_sched_luts
-    # DSP: two exact reciprocal products in each of the live + delayed ramp
-    # players (4 DSPs per bus).  The period table has no affine evaluators.
+    # DSP: the two exact reciprocal products of each bus's live divmod; the
+    # delayed re-player replays the resolved descriptor without one.  The
+    # period table has no affine evaluators.
     if engine_dsp is None:
-        engine_dsp = 4 * params.bus_count
+        engine_dsp = 2 * params.bus_count
 
     def res(used, total):
         b = int(total * pct / 100.0)

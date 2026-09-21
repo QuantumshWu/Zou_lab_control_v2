@@ -14,7 +14,7 @@ hardware acceptance remains the runbook in `fpga\README.md`.
   (one 128-bit row per authored period: duration or duration slot, TTL levels,
   one DAC action per bus; forced `READ_LATENCY_B=2`), a loop table of nested
   brackets (`MAX_LOOPS` entries, `LOOP_DEPTH` levels) followed by a stack
-  walker, a depth-`FIFO_DEPTH` (=`RD_LAT`+4=6) continuous row prefetch that
+  walker, a depth-`FIFO_DEPTH` (=8, a LUTRAM ring) continuous row prefetch that
   hides the BRAM latency so back-to-back 1-tick (20 ns) rows play one per
   clock, a scan-point prefetcher over the 2-bank continuous cyclic ping-pong
   window (`BANK_SIZE`=2048) for autonomous streamed scans, the Bresenham
@@ -83,7 +83,7 @@ loop depth, delayed events in flight).
 
 Expansion profile: `CHANNEL_COUNT=69` physical pins, 25 TTL control bits,
 `NUM_SLOTS=4`, `MAX_ROWS=512`, `MAX_LOOPS=8`, `LOOP_DEPTH=4`, `BANK_SIZE=2048`
-(4096 bank-local resident rows), `TICK_WIDTH=32`, `RD_LAT=2`, `FIFO_DEPTH=6`,
+(4096 bank-local resident rows), `TICK_WIDTH=32`, `RD_LAT=2`, `FIFO_DEPTH=8`,
 `EVT_FIFO_DEPTH=32`, `BUS_EVT_FIFO_DEPTH=64`, `CLOCK_HZ=50 MHz` (20 ns tick).
 The affine edge-table build (2026-09-21, 4096 edges) used 19645/20800 LUTs,
 14590/41600 registers, 76/90 DSPs and 37/50 BRAM tiles.  The period-table

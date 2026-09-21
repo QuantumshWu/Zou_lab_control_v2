@@ -19,6 +19,9 @@
 //   * the ROW WALKER issues row reads in play order.  It follows the loop table
 //     with a small stack (LOOP_DEPTH levels) and wraps to row 0 after the last
 //     row, tagging that read FRAME_START.  Rows land in a FIFO_DEPTH-deep FIFO.
+//     Every stack level is evaluated in parallel each issue (which entries start
+//     here, which levels end here, which of those still has iterations left), so
+//     a row that opens and closes several nested brackets costs one clock.
 //   * the SCAN PREFETCHER reads scan-point slot vectors in point order through
 //     the two-bank ping-pong window (bank = chunk parity ^ base, base flips by
 //     the chunk-count parity at every wrap) into a VF_DEPTH-deep vector FIFO,
@@ -31,7 +34,8 @@
 //     and every row -- one tick long or a minute long -- plays gaplessly.
 // Neither prefetcher depends on the executor's timing: a one-tick row simply
 // pops one FIFO entry per clock, and the read pipeline (RD_LAT+2 clocks) is
-// covered by FIFO_DEPTH = RD_LAT + 4 resident entries.
+// covered by the FIFO_DEPTH resident entries (LUTRAM rings; FIFO_DEPTH is a
+// power of two so their pointers wrap for free).
 //
 // While reset is held (LOAD/SAFE) both prefetchers are flushed and refilled
 // every 2^ARM_PERIOD_BITS clocks, so at FIRE they hold the program the host
@@ -69,8 +73,9 @@ module zlc_period_streamer #(
     parameter integer BUS_SAFE_VALUE = (1 << (BUS_WIDTH - 1)),
     parameter integer RD_LAT = 2,               // row/scan BRAM read latency (forced by the build)
     // The generated IP model exposes data RD_LAT+2 cycles after issue: registered
-    // address plus the configured memory/core output stages.
-    parameter integer FIFO_DEPTH = RD_LAT + 4,
+    // address plus the configured memory/core output stages.  FIFO_DEPTH must be a
+    // power of two (ring pointers) and at least RD_LAT + 4 (pipeline coverage).
+    parameter integer FIFO_DEPTH = 8,
     parameter integer ARM_PERIOD_BITS = 6,      // flush+refill every 2^N clocks while reset holds
     // ----- TTL EVENT-SCHEDULER delay geometry ------------------------------------------
     // TTL channel delays are NOT bounded by a fixed delay-line depth: each channel schedules its
@@ -159,6 +164,7 @@ module zlc_period_streamer #(
     localparam integer PIPE = RD_LAT + 2;      // issue -> data-valid latency measured with real IP model
     localparam integer VF_DEPTH = FIFO_DEPTH;  // scan vectors resident ahead of the executor
     localparam integer FIFO_CNT_W = $clog2(FIFO_DEPTH + 1);
+    localparam integer FIFO_PTR_W = $clog2(FIFO_DEPTH);
 
     // ----- executor state -----------------------------------------------------
     reg [CHANNEL_COUNT-1:0] state_mask = {CHANNEL_COUNT{1'b0}};
@@ -173,9 +179,13 @@ module zlc_period_streamer #(
     reg [31:0] scans_remaining = 32'd1;
 
     // ----- row prefetch (walker + FIFO) ---------------------------------------
-    reg [ROW_BITS-1:0] rf_row [0:FIFO_DEPTH-1];
-    reg rf_fs [0:FIFO_DEPTH-1];                   // FRAME_START tag per entry
+    // A LUTRAM ring: rows land at rf_wr, the executor reads the head at rf_rd.
+    (* ram_style = "distributed" *) reg [ROW_BITS:0] rf_mem [0:FIFO_DEPTH-1];   // {FRAME_START, row}
+    reg [FIFO_PTR_W-1:0] rf_rd = {FIFO_PTR_W{1'b0}}, rf_wr = {FIFO_PTR_W{1'b0}};
     reg [FIFO_CNT_W-1:0] rf_nv = {FIFO_CNT_W{1'b0}};
+    wire [ROW_BITS:0] rf_head = rf_mem[rf_rd];
+    wire [ROW_BITS-1:0] rf_head_row = rf_head[ROW_BITS-1:0];
+    wire rf_head_fs = rf_head[ROW_BITS];
     reg [PIPE-1:0] pend = {PIPE{1'b0}};           // in-flight row reads, one bit per pipeline stage
     reg [PIPE-1:0] pend_fs = {PIPE{1'b0}};        // their FRAME_START tags
     reg [ROW_ADDR_WIDTH:0] fetch_row = {(ROW_ADDR_WIDTH+1){1'b0}};   // next row to issue
@@ -186,8 +196,10 @@ module zlc_period_streamer #(
     reg [LOOP_DEPTH*32-1:0] stk_rem = {(LOOP_DEPTH*32){1'b0}};
 
     // ----- scan prefetch (point walker + vector FIFO) -------------------------
-    reg [SLOT_BITS-1:0] vf_vec [0:VF_DEPTH-1];
+    (* ram_style = "distributed" *) reg [SLOT_BITS-1:0] vf_mem [0:VF_DEPTH-1];
+    reg [FIFO_PTR_W-1:0] vf_rd = {FIFO_PTR_W{1'b0}}, vf_wr = {FIFO_PTR_W{1'b0}};
     reg [FIFO_CNT_W-1:0] vf_nv = {FIFO_CNT_W{1'b0}};
+    wire [SLOT_BITS-1:0] vf_head = vf_mem[vf_rd];
     reg [PIPE-1:0] vpend = {PIPE{1'b0}};
     reg [SCAN_COUNT_WIDTH-1:0] pf_point = {SCAN_COUNT_WIDTH{1'b0}};   // next point to issue
     reg pf_base = 1'b0;                                              // bank parity of the sweep being fetched
@@ -239,8 +251,15 @@ module zlc_period_streamer #(
     //
     // over that complete input domain: the reciprocal error is < delta/S and
     // delta*span < S, so it cannot cross the next integer boundary.  The
-    // remainder is then delta - quotient*span.  Vivado maps each read port to a
-    // compact distributed ROM and the two products to DSP48s.
+    // remainder is then delta - quotient*span.  Vivado maps the read port to a
+    // compact distributed ROM and the two products per bus to DSP48s.
+    //
+    // ONE lookup serves every bus and the delayed re-players too: a steep ramp's
+    // divmod runs on the first stepping tick of its row, every ramp entered on a
+    // tick shares that row's span, and the descriptor a delayed bus captures is
+    // completed with the same quotient/remainder as it is pushed.  The magic of
+    // the row entered LAST cycle is therefore the magic every divmod needs; it is
+    // registered at the row load (ramp_magic_q).
     localparam integer RAMP_RECIP_BITS = 2 * BUS_WIDTH;
     localparam integer RAMP_RECIP_SIZE = (1 << BUS_WIDTH);
     localparam integer RAMP_RECIP_SCALE = (1 << RAMP_RECIP_BITS);
@@ -251,22 +270,55 @@ module zlc_period_streamer #(
         for (ramp_recip_i = 1; ramp_recip_i < RAMP_RECIP_SIZE; ramp_recip_i = ramp_recip_i + 1)
             ramp_reciprocal[ramp_recip_i] = (RAMP_RECIP_SCALE + ramp_recip_i - 1) / ramp_recip_i;
     end
+    reg [RAMP_RECIP_BITS:0] ramp_magic_q = {(RAMP_RECIP_BITS+1){1'b0}};
+
+    // Quotient + remainder of delta/span for a STEEP ramp.  The reciprocal-ROM
+    // identity above is exact for every legal BUS_WIDTH-bit operand; this is not
+    // a fixed-point approximation.  Gentle ramps skip the divider entirely
+    // (step=0, rem=delta, the historic 0/1-step-per-tick behaviour).
+    function [2*BUS_WIDTH+1:0] zlc_bus_ramp_divmod;
+        input [BUS_WIDTH:0] num;
+        input [BUS_WIDTH:0] den;
+        input [RAMP_RECIP_BITS:0] magic;
+        (* use_dsp = "yes" *) reg [BUS_WIDTH+RAMP_RECIP_BITS:0] scaled_num;
+        reg [BUS_WIDTH:0] q;
+        (* use_dsp = "yes" *) reg [2*BUS_WIDTH:0] scaled_den;
+        reg [BUS_WIDTH:0] r;
+        begin
+            scaled_num = num[BUS_WIDTH-1:0] * magic;
+            q = scaled_num[BUS_WIDTH+RAMP_RECIP_BITS:RAMP_RECIP_BITS];
+            scaled_den = q * den[BUS_WIDTH-1:0];
+            r = num - scaled_den[BUS_WIDTH:0];
+            zlc_bus_ramp_divmod = {q, r};
+        end
+    endfunction
+    // Every bus's deferred divmod, from REGISTERED operands (rem parks d, denom the span)
+    // and the shared magic: read by the live stepper on the divmod tick and by the
+    // descriptor push of the same tick.
+    wire [2*BUS_WIDTH+1:0] bus_qr_w [0:BUS_COUNT-1];
+    genvar gqr;
+    generate
+    for (gqr = 0; gqr < BUS_COUNT; gqr = gqr + 1) begin : g_qr
+        assign bus_qr_w[gqr] = zlc_bus_ramp_divmod(bus_ramp_rem[gqr], bus_ramp_denom[gqr][BUS_WIDTH:0], ramp_magic_q);
+    end
+    endgenerate
 
     // ----- per-bus ACTION-DESCRIPTOR delay capture (raised by zlc_bus_apply_action) --------------
     // DAC delay is INSTRUCTION-LEVEL: each RESOLVED action the engine applies is captured as ONE
     // descriptor and RE-RUN d ticks later by a per-bus delayed player (g_busseg below), so buffer
     // depth = actions-in-flight, INDEPENDENT of ramp density.  The descriptor is in the DELAYED
-    // time base (emit = g_time + d = the action's shifted start; rstop = emit + span).
+    // time base (emit = g_time + d = the action's shifted start) and carries the ramp RESOLVED:
+    // a steep ramp's step/remainder are taken from the shared divmod as the descriptor is
+    // pushed (one tick after the apply, the divmod tick), so the re-player has no divider.
     reg                   bus_seg_push  [0:BUS_COUNT-1];   // 1-cycle strobe: bus i applied an action
     reg [GTIME_WIDTH-1:0] bus_seg_emit  [0:BUS_COUNT-1];   // g_time+d at apply (delayed base)
-    reg [GTIME_WIDTH-1:0] bus_seg_rstop [0:BUS_COUNT-1];   // ramp end in the delayed base (emit + span)
     reg [BUS_WIDTH-1:0]   bus_seg_vstart[0:BUS_COUNT-1];   // carried resolved start value
     reg [BUS_WIDTH-1:0]   bus_seg_target[0:BUS_COUNT-1];   // resolved stop value
-    reg [TICK_WIDTH-1:0]  bus_seg_denom [0:BUS_COUNT-1];   // ramp span
-    reg [BUS_WIDTH:0]     bus_seg_step  [0:BUS_COUNT-1];   // Bresenham base step
-    reg [BUS_WIDTH:0]     bus_seg_rem   [0:BUS_COUNT-1];   // Bresenham remainder
+    reg [TICK_WIDTH-1:0]  bus_seg_denom [0:BUS_COUNT-1];   // ramp span (its length and its Bresenham denominator)
+    reg [BUS_WIDTH:0]     bus_seg_step  [0:BUS_COUNT-1];   // Bresenham base step (gentle: 0)
+    reg [BUS_WIDTH:0]     bus_seg_rem   [0:BUS_COUNT-1];   // Bresenham remainder (gentle: d)
     reg                   bus_seg_up    [0:BUS_COUNT-1];   // ramp direction
-    reg                   bus_seg_steep [0:BUS_COUNT-1];   // deferred d/span divmod pending
+    reg                   bus_seg_steep [0:BUS_COUNT-1];   // push takes step/rem from the divmod instead
     reg                   bus_seg_isramp[0:BUS_COUNT-1];   // ramp vs edge/hold
     integer bus_seg_i0;
     initial for (bus_seg_i0 = 0; bus_seg_i0 < BUS_COUNT; bus_seg_i0 = bus_seg_i0 + 1) bus_seg_push[bus_seg_i0] = 1'b0;
@@ -328,8 +380,8 @@ module zlc_period_streamer #(
     assign out = (state_mask & ~delayed_mask) | delayed_out;
 
     // ----- per-bus ACTION-DESCRIPTOR OUTPUT delay (g_busseg) -- INSTRUCTION LEVEL ----------------
-    // bus_out[t] = bus_value_active[t - d_bus].  The re-player's ramp math is a copy of the live
-    // stepper (deferred steep divmod + Bresenham carry + saturate), fed the same descriptor on the
+    // bus_out[t] = bus_value_active[t - d_bus].  The re-player is the live stepper's Bresenham
+    // carry + saturate, fed the RESOLVED descriptor (step/remainder already split) on the
     // free-running g_time base, so its output IS the live output shifted by d, by construction.
     // Before its first descriptor emits the bus holds BUS_SAFE_VALUE (mid code = 0 V); g_time keeps
     // advancing while draining so the last d ticks drain (done-tail).  d==0 -> passthrough;
@@ -337,15 +389,13 @@ module zlc_period_streamer #(
     // duration and the next action on the bus arrives no earlier than the ramp's end, so the
     // descriptor needs no frame-boundary freeze.
     localparam integer O_ISRAMP = 0;
-    localparam integer O_STEEP  = O_ISRAMP + 1;
-    localparam integer O_UP     = O_STEEP  + 1;
+    localparam integer O_UP     = O_ISRAMP + 1;
     localparam integer O_REM    = O_UP     + 1;
     localparam integer O_STEP   = O_REM    + (BUS_WIDTH + 1);
-    localparam integer O_DENOM  = O_STEP   + (BUS_WIDTH + 1);
-    localparam integer O_TGT    = O_DENOM  + TICK_WIDTH;
+    localparam integer O_SPAN   = O_STEP   + (BUS_WIDTH + 1);
+    localparam integer O_TGT    = O_SPAN   + TICK_WIDTH;
     localparam integer O_VST    = O_TGT    + BUS_WIDTH;
-    localparam integer O_RSTOP  = O_VST    + BUS_WIDTH;
-    localparam integer O_EMIT   = O_RSTOP  + GTIME_WIDTH;
+    localparam integer O_EMIT   = O_VST    + BUS_WIDTH;
     localparam integer SEG_W    = O_EMIT   + GTIME_WIDTH;
     genvar gbs;
     generate
@@ -355,31 +405,31 @@ module zlc_period_streamer #(
         reg [BEVT_ADDR-1:0] swr = {BEVT_ADDR{1'b0}};
         reg [BEVT_ADDR-1:0] srd = {BEVT_ADDR{1'b0}};
         reg [BEVT_ADDR:0]   scnt = {(BEVT_ADDR+1){1'b0}};
-        // delayed re-player registers (a copy of the live bus ramp stepper, on the g_time base)
+        // delayed re-player registers (the live bus ramp stepper, on the g_time base)
         reg [BUS_WIDTH-1:0] dval  = BUS_SAFE_VALUE[BUS_WIDTH-1:0];   // delayed output (d>=2)
         reg [BUS_WIDTH-1:0] dprev = BUS_SAFE_VALUE[BUS_WIDTH-1:0];   // one-tick register (d==1)
-        reg dstarted = 1'b0, dramp = 1'b0, dup = 1'b0, dsteep = 1'b0;
-        reg [GTIME_WIDTH-1:0] demit = {GTIME_WIDTH{1'b0}}, drstop = {GTIME_WIDTH{1'b0}};
+        reg dstarted = 1'b0, dramp = 1'b0, dup = 1'b0;
         reg [BUS_WIDTH-1:0] dtarget = {BUS_WIDTH{1'b0}};
-        reg [TICK_WIDTH-1:0] ddenom = {TICK_WIDTH{1'b0}};
+        reg [TICK_WIDTH-1:0] ddenom = {TICK_WIDTH{1'b0}};             // the ramp's span
+        reg [TICK_WIDTH-1:0] dleft = {TICK_WIDTH{1'b0}};              // stepping ticks left
         reg [BUS_WIDTH:0] dstep = {(BUS_WIDTH+1){1'b0}}, drem = {(BUS_WIDTH+1){1'b0}};
         reg [TICK_WIDTH+BUS_WIDTH:0] daccum = {(TICK_WIDTH+BUS_WIDTH+1){1'b0}};
         reg [TICK_WIDTH+BUS_WIDTH:0] daccum_next;
         reg [BUS_WIDTH:0] dinc, dv_next;
-        reg [2*BUS_WIDTH+1:0] dqr;
         reg dpushf, dpopf;
         wire [TTL_DELAY_WIDTH-1:0] dbus = del_bus_ticks[gbs];
         wire [SEG_W-1:0] shead = sfifo[srd];                        // async-read FIFO head (LUTRAM)
         wire [GTIME_WIDTH-1:0] h_emit  = shead[O_EMIT  +: GTIME_WIDTH];
-        wire [GTIME_WIDTH-1:0] h_rstop = shead[O_RSTOP +: GTIME_WIDTH];
         wire [BUS_WIDTH-1:0]   h_vst   = shead[O_VST   +: BUS_WIDTH];
         wire [BUS_WIDTH-1:0]   h_tgt   = shead[O_TGT   +: BUS_WIDTH];
-        wire [TICK_WIDTH-1:0]  h_denom = shead[O_DENOM +: TICK_WIDTH];
+        wire [TICK_WIDTH-1:0]  h_span  = shead[O_SPAN  +: TICK_WIDTH];
         wire [BUS_WIDTH:0]     h_step  = shead[O_STEP  +: (BUS_WIDTH+1)];
         wire [BUS_WIDTH:0]     h_rem   = shead[O_REM   +: (BUS_WIDTH+1)];
         wire                   h_up    = shead[O_UP];
-        wire                   h_steep = shead[O_STEEP];
         wire                   h_ramp  = shead[O_ISRAMP];
+        // the pushed descriptor: a steep ramp is completed with the divmod of this very tick
+        wire [BUS_WIDTH:0] push_step = bus_seg_steep[gbs] ? bus_qr_w[gbs][2*BUS_WIDTH+1:BUS_WIDTH+1] : bus_seg_step[gbs];
+        wire [BUS_WIDTH:0] push_rem  = bus_seg_steep[gbs] ? bus_qr_w[gbs][BUS_WIDTH:0] : bus_seg_rem[gbs];
         wire bus_want_pop = (scnt != {(BEVT_ADDR+1){1'b0}}) && (h_emit == g_time);
         assign bus_out[gbs*BUS_WIDTH +: BUS_WIDTH] =
             (dbus == {TTL_DELAY_WIDTH{1'b0}})                    ? bus_value_active[gbs] :   // d==0
@@ -403,37 +453,30 @@ module zlc_period_streamer #(
                 dpushf = bus_seg_push[gbs]
                          && ((scnt != BUS_EVT_DEPTH[BEVT_ADDR:0]) || dpopf);
                 if (dpushf) begin
-                    sfifo[swr] <= { bus_seg_emit[gbs], bus_seg_rstop[gbs],
-                                    bus_seg_vstart[gbs], bus_seg_target[gbs], bus_seg_denom[gbs],
-                                    bus_seg_step[gbs], bus_seg_rem[gbs], bus_seg_up[gbs],
-                                    bus_seg_steep[gbs], bus_seg_isramp[gbs] };
+                    sfifo[swr] <= { bus_seg_emit[gbs], bus_seg_vstart[gbs], bus_seg_target[gbs],
+                                    bus_seg_denom[gbs], push_step, push_rem,
+                                    bus_seg_up[gbs], bus_seg_isramp[gbs] };
                     swr <= swr + 1'b1;
                 end
                 if (dpopf) begin
                     // emit this descriptor: load the re-player (value shows NEXT tick => out[t]=in[t-d])
                     dval <= h_vst; dstarted <= 1'b1; dramp <= h_ramp;
-                    demit <= h_emit; drstop <= h_rstop; dtarget <= h_tgt;
-                    ddenom <= h_denom; dstep <= h_step; drem <= h_rem; dup <= h_up; dsteep <= h_steep;
+                    dtarget <= h_tgt; ddenom <= h_span; dleft <= h_span;
+                    dstep <= h_step; drem <= h_rem; dup <= h_up;
                     daccum <= {(TICK_WIDTH+BUS_WIDTH+1){1'b0}};
                     srd <= srd + 1'b1;
                 end else if (dstarted && dramp) begin
-                    // step exactly like the live stepper (deferred steep divmod + Bresenham
-                    // carry + saturate at target); land on the target at rstop.
-                    if (g_time >= drstop) begin
+                    // step exactly like the live stepper: count the span down, Bresenham carry,
+                    // saturate at the target, and land on it on the last tick.
+                    if (dleft == {{(TICK_WIDTH-1){1'b0}}, 1'b1}) begin
                         dval <= dtarget; dramp <= 1'b0; daccum <= {(TICK_WIDTH+BUS_WIDTH+1){1'b0}};
-                    end else if (g_time > demit && ddenom != {TICK_WIDTH{1'b0}}) begin
-                        if (dsteep) begin
-                            dqr = zlc_bus_ramp_divmod(drem, ddenom[BUS_WIDTH:0]);
-                            dstep <= dqr[2*BUS_WIDTH+1:BUS_WIDTH+1]; drem <= dqr[BUS_WIDTH:0];
-                            dsteep <= 1'b0; daccum <= {{(TICK_WIDTH){1'b0}}, dqr[BUS_WIDTH:0]};
-                            dinc = dqr[2*BUS_WIDTH+1:BUS_WIDTH+1];
+                    end else begin
+                        dleft <= dleft - 1'b1;
+                        daccum_next = daccum + drem;
+                        if (daccum_next >= ddenom) begin
+                            daccum <= daccum_next - ddenom; dinc = dstep + 1'b1;
                         end else begin
-                            daccum_next = daccum + drem;
-                            if (daccum_next >= ddenom) begin
-                                daccum <= daccum_next - ddenom; dinc = dstep + 1'b1;
-                            end else begin
-                                daccum <= daccum_next; dinc = dstep;
-                            end
+                            daccum <= daccum_next; dinc = dstep;
                         end
                         if (dinc != {(BUS_WIDTH+1){1'b0}}) begin
                             if (dup) begin
@@ -569,7 +612,6 @@ module zlc_period_streamer #(
                 if (del_bus_ticks[i] > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1}) begin
                     bus_seg_push[i]   <= 1'b1;
                     bus_seg_emit[i]   <= g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, del_bus_ticks[i]};
-                    bus_seg_rstop[i]  <= {GTIME_WIDTH{1'b0}};
                     bus_seg_vstart[i] <= BUS_SAFE_VALUE[BUS_WIDTH-1:0];   bus_seg_target[i] <= BUS_SAFE_VALUE[BUS_WIDTH-1:0];
                     bus_seg_denom[i]  <= {TICK_WIDTH{1'b0}};    bus_seg_step[i] <= {(BUS_WIDTH+1){1'b0}};
                     bus_seg_rem[i]    <= {(BUS_WIDTH+1){1'b0}}; bus_seg_steep[i] <= 1'b0;
@@ -587,27 +629,6 @@ module zlc_period_streamer #(
         end
     endtask
 
-    // Quotient + remainder of delta/span for a STEEP ramp.  The reciprocal-ROM
-    // identity above is exact for every legal BUS_WIDTH-bit operand; this is not
-    // a fixed-point approximation.  Gentle ramps skip the divider entirely
-    // (step=0, rem=delta, the historic 0/1-step-per-tick behaviour).
-    function [2*BUS_WIDTH+1:0] zlc_bus_ramp_divmod;
-        input [BUS_WIDTH:0] num;
-        input [BUS_WIDTH:0] den;
-        reg [RAMP_RECIP_BITS:0] magic;
-        (* use_dsp = "yes" *) reg [BUS_WIDTH+RAMP_RECIP_BITS:0] scaled_num;
-        reg [BUS_WIDTH:0] q;
-        (* use_dsp = "yes" *) reg [2*BUS_WIDTH:0] scaled_den;
-        reg [BUS_WIDTH:0] r;
-        begin
-            magic = ramp_reciprocal[den[BUS_WIDTH-1:0]];
-            scaled_num = num[BUS_WIDTH-1:0] * magic;
-            q = scaled_num[BUS_WIDTH+RAMP_RECIP_BITS:RAMP_RECIP_BITS];
-            scaled_den = q * den[BUS_WIDTH-1:0];
-            r = num - scaled_den[BUS_WIDTH:0];
-            zlc_bus_ramp_divmod = {q, r};
-        end
-    endfunction
 
     // Apply one row's action to bus i as the row is entered.  A ramp starts from the
     // level the bus holds when the row is entered -- the target of a ramp still
@@ -650,12 +671,10 @@ module zlc_period_streamer #(
                     bus_ramp_target[i] <= vstop; bus_ramp_denom[i] <= span;
                     bus_ramp_accum[i] <= {(TICK_WIDTH+BUS_WIDTH+1){1'b0}};
                     if (dly_bus > {{(TTL_DELAY_WIDTH-1){1'b0}}, 1'b1}) begin
-                        // capture the RESOLVED ramp for the delayed re-player, in the delayed g_time base:
-                        // emit = g_time + d (== the shifted row start); rstop = emit + span.
+                        // capture the ramp for the delayed re-player, in the delayed g_time base:
+                        // emit = g_time + d (== the shifted row start); it lasts span ticks.
                         bus_seg_push[i]   <= 1'b1;
                         bus_seg_emit[i]   <= g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus};
-                        bus_seg_rstop[i]  <= g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus}
-                                             + {{(GTIME_WIDTH-TICK_WIDTH){1'b0}}, span};
                         bus_seg_vstart[i] <= vstart;   bus_seg_target[i] <= vstop;
                         bus_seg_denom[i]  <= span;      bus_seg_step[i]   <= {(BUS_WIDTH+1){1'b0}};
                         bus_seg_rem[i]    <= d;         bus_seg_steep[i]  <= (span < d);
@@ -669,7 +688,6 @@ module zlc_period_streamer #(
                         // capture an edge: a constant value, no ramp
                         bus_seg_push[i]   <= 1'b1;
                         bus_seg_emit[i]   <= g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus};
-                        bus_seg_rstop[i]  <= {GTIME_WIDTH{1'b0}};
                         bus_seg_vstart[i] <= vstop;   bus_seg_target[i] <= vstop;
                         bus_seg_denom[i]  <= {TICK_WIDTH{1'b0}};    bus_seg_step[i] <= {(BUS_WIDTH+1){1'b0}};
                         bus_seg_rem[i]    <= {(BUS_WIDTH+1){1'b0}}; bus_seg_steep[i] <= 1'b0;
@@ -699,7 +717,7 @@ module zlc_period_streamer #(
                             // into step + remainder from REGISTERED operands.  accum is
                             // still 0 and rem < span by construction, so this tick can
                             // never carry: inc is exactly the new step.
-                            bus_qr = zlc_bus_ramp_divmod(bus_ramp_rem[i], bus_ramp_denom[i][BUS_WIDTH:0]);
+                            bus_qr = bus_qr_w[i];
                             bus_ramp_step[i] <= bus_qr[2*BUS_WIDTH+1:BUS_WIDTH+1];
                             bus_ramp_rem[i] <= bus_qr[BUS_WIDTH:0];
                             bus_ramp_steep[i] <= 1'b0;
@@ -745,25 +763,18 @@ module zlc_period_streamer #(
             span = resolved_duration(r, slot_vec);
             state_mask <= row_mask_of(r);
             left <= span;
+            ramp_magic_q <= ramp_reciprocal[span[BUS_WIDTH-1:0]];   // a steep ramp's span is < 2^BUS_WIDTH
             for (i = 0; i < BUS_COUNT; i = i + 1)
                 zlc_bus_apply_action(i, row_action_of(r, i), slot_vec, span);
         end
     endtask
 
-    // ---- one FIFO pop: shift the row FIFO down ----
+    // ---- one FIFO pop: the ring head moves on ----
     task zlc_row_fifo_pop;
-        integer k;
-        begin
-            for (k = 0; k < FIFO_DEPTH-1; k = k + 1) begin
-                rf_row[k] <= rf_row[k+1]; rf_fs[k] <= rf_fs[k+1];
-            end
-        end
+        begin rf_rd <= rf_rd + 1'b1; end
     endtask
     task zlc_vec_fifo_pop;
-        integer k;
-        begin
-            for (k = 0; k < VF_DEPTH-1; k = k + 1) vf_vec[k] <= vf_vec[k+1];
-        end
+        begin vf_rd <= vf_rd + 1'b1; end
     endtask
 
     // ----- executor + prefetchers ---------------------------------------------
@@ -773,15 +784,15 @@ module zlc_period_streamer #(
     reg row_issue, vec_issue, row_landed, vec_landed;
     reg [SLOT_BITS-1:0] load_slots;
     integer pk, ik;
-    // walker temporaries
-    reg [$clog2(LOOP_DEPTH+1)-1:0] wn;
-    reg [LOOP_INDEX_WIDTH:0] wnl;
-    reg [LOOP_DEPTH*LOOP_INDEX_WIDTH-1:0] widx;
-    reg [LOOP_DEPTH*32-1:0] wrem;
-    reg wpush_stop, wrewind;
+    // walker temporaries: one issue looks at every stack level in parallel
     reg [ROW_ADDR_WIDTH-1:0] wrow;
-    reg [LOOP_INDEX_WIDTH-1:0] wtop_idx;
-    reg [31:0] wtop_rem;
+    reg [LOOP_DEPTH-1:0] w_hit, w_new, w_fin, w_rew;
+    reg [$clog2(LOOP_DEPTH+1)-1:0] w_nstart, w_ntop, w_nfin, w_rewlvl;
+    reg w_rewind;
+    reg [LOOP_INDEX_WIDTH:0] w_cand;
+    reg [LOOP_INDEX_WIDTH-1:0] w_idx [0:LOOP_DEPTH-1];
+    reg [31:0] w_rem [0:LOOP_DEPTH-1];
+    integer wl;
     reg draining = 1'b0;       // logical program ended; physical delayed tail still owns pins
     reg [1:0] drain_settle = 2'd0; // covers one-tick TTL/DAC registers before DONE
     assign physical_active = running || draining;
@@ -841,11 +852,11 @@ module zlc_period_streamer #(
                 end else begin
                     running <= 1'b1;
                     if (scan_active_at_start) begin
-                        load_slots = vf_vec[0]; slot_active <= vf_vec[0]; vec_pop = 1'b1;
+                        load_slots = vf_head; slot_active <= vf_head; vec_pop = 1'b1;
                     end else begin
                         load_slots = {SLOT_BITS{1'b0}}; slot_active <= {SLOT_BITS{1'b0}};
                     end
-                    zlc_load_row(rf_row[0], load_slots); row_pop = 1'b1;
+                    zlc_load_row(rf_head_row, load_slots); row_pop = 1'b1;
                 end
             end else if (running) begin
                 zlc_bus_step_ramps();
@@ -854,13 +865,13 @@ module zlc_period_streamer #(
                     left <= left - 1'b1;
                 end else if (rf_nv == {FIFO_CNT_W{1'b0}}) begin
                     underflow <= 1'b1;           // the next row is not resident: hold (cannot happen)
-                end else if (!rf_fs[0]) begin
-                    zlc_load_row(rf_row[0], slot_active); row_pop = 1'b1;
+                end else if (!rf_head_fs) begin
+                    zlc_load_row(rf_head_row, slot_active); row_pop = 1'b1;
                 end else if (run_repeats_again) begin
                     // another Pulse on the same point
                     if (runs_remaining != 32'd0) runs_remaining <= runs_remaining - 1'b1;
                     frame_tick <= {TICK_WIDTH{1'b0}};
-                    zlc_load_row(rf_row[0], slot_active); row_pop = 1'b1;
+                    zlc_load_row(rf_head_row, slot_active); row_pop = 1'b1;
                 end else if (scan_point_after_current) begin
                     if (vf_nv == {FIFO_CNT_W{1'b0}}) begin
                         underflow <= 1'b1;       // STALL: the next point's bank is not (yet) resident
@@ -869,8 +880,8 @@ module zlc_period_streamer #(
                         scan_cursor <= scan_cursor + 1'b1;
                         runs_remaining <= run_repeat_count_active;
                         frame_tick <= {TICK_WIDTH{1'b0}};
-                        load_slots = vf_vec[0]; slot_active <= vf_vec[0]; vec_pop = 1'b1;
-                        zlc_load_row(rf_row[0], load_slots); row_pop = 1'b1;
+                        load_slots = vf_head; slot_active <= vf_head; vec_pop = 1'b1;
+                        zlc_load_row(rf_head_row, load_slots); row_pop = 1'b1;
                     end
                 end else if (scan_sweeps_again) begin
                     // CYCLIC re-sweep: point 0 of the next sweep is just the next vector the
@@ -884,9 +895,9 @@ module zlc_period_streamer #(
                         runs_remaining <= run_repeat_count_active;
                         frame_tick <= {TICK_WIDTH{1'b0}};
                         if (scan_enable_active) begin
-                            load_slots = vf_vec[0]; slot_active <= vf_vec[0]; vec_pop = 1'b1;
+                            load_slots = vf_head; slot_active <= vf_head; vec_pop = 1'b1;
                         end
-                        zlc_load_row(rf_row[0], load_slots); row_pop = 1'b1;
+                        zlc_load_row(rf_head_row, load_slots); row_pop = 1'b1;
                     end
                 end else begin
                     running <= 1'b0; done <= 1'b0; draining <= 1'b1; drain_settle <= 2'd2;
@@ -915,13 +926,14 @@ module zlc_period_streamer #(
         for (pk = 0; pk < PIPE; pk = pk + 1) rf_inflight = rf_inflight + {{(FIFO_CNT_W-1){1'b0}}, pend[pk]};
         if (flush) begin
             rf_nv <= {FIFO_CNT_W{1'b0}}; pend <= {PIPE{1'b0}}; pend_fs <= {PIPE{1'b0}};
+            rf_rd <= {FIFO_PTR_W{1'b0}}; rf_wr <= {FIFO_PTR_W{1'b0}};
             fetch_row <= {(ROW_ADDR_WIDTH+1){1'b0}}; fetch_fs <= 1'b1;
             next_loop <= {(LOOP_INDEX_WIDTH+1){1'b0}}; stk_n <= 0;
             row_raddr <= {ROW_ADDR_WIDTH{1'b0}};
         end else begin
             if (row_landed) begin
-                rf_row[rf_after_pop] <= row_rdata[ROW_BITS-1:0];
-                rf_fs[rf_after_pop] <= pend_fs[PIPE-1];
+                rf_mem[rf_wr] <= {pend_fs[PIPE-1], row_rdata[ROW_BITS-1:0]};
+                rf_wr <= rf_wr + 1'b1;
                 rf_nv <= rf_after_pop + 1'b1;
             end else begin
                 rf_nv <= rf_after_pop;
@@ -936,48 +948,58 @@ module zlc_period_streamer #(
                 row_raddr <= fetch_row[ROW_ADDR_WIDTH-1:0];
                 // ---- the loop walker: where the row after fetch_row is ----
                 wrow = fetch_row[ROW_ADDR_WIDTH-1:0];
-                wn = stk_n; wnl = next_loop; widx = stk_idx; wrem = stk_rem;
-                // push every table entry that starts here (they are consecutive: the host
-                // stores the table outermost first, start ascending)
-                wpush_stop = 1'b0;
-                for (ik = 0; ik < LOOP_DEPTH; ik = ik + 1) begin
-                    if (!wpush_stop && wnl < loop_table_count && wn < LOOP_DEPTH
-                            && loop_first_of(wnl) == wrow) begin
-                        widx[wn*LOOP_INDEX_WIDTH +: LOOP_INDEX_WIDTH] = wnl[LOOP_INDEX_WIDTH-1:0];
-                        wrem[wn*32 +: 32] = loop_count_of(wnl);
-                        wn = wn + 1'b1; wnl = wnl + 1'b1;
-                    end else begin
-                        wpush_stop = 1'b1;
-                    end
+                // (1) the table entries starting here are the next ones in table order (the host
+                //     stores loops outermost first, start ascending); push each that has a level
+                for (wl = 0; wl < LOOP_DEPTH; wl = wl + 1) begin
+                    w_cand = next_loop + wl;
+                    w_hit[wl] = (w_cand < loop_table_count) && ((stk_n + wl) < LOOP_DEPTH)
+                                && (loop_first_of(w_cand) == wrow);
                 end
-                // rewind or pop every loop that ends here, innermost first
-                wrewind = 1'b0;
-                for (ik = 0; ik < LOOP_DEPTH; ik = ik + 1) begin
-                    if (!wrewind && wn != 0) begin
-                        wtop_idx = widx[(wn-1)*LOOP_INDEX_WIDTH +: LOOP_INDEX_WIDTH];
-                        wtop_rem = wrem[(wn-1)*32 +: 32];
-                        if (loop_last_of(wtop_idx) == wrow) begin
-                            if (wtop_rem > 32'd1) begin
-                                wrewind = 1'b1;
-                                wrem[(wn-1)*32 +: 32] = wtop_rem - 1'b1;
-                                wnl = {1'b0, wtop_idx} + 1'b1;
-                                fetch_row <= {1'b0, loop_first_of(wtop_idx)};
-                            end else begin
-                                wn = wn - 1'b1;
-                            end
-                        end
-                    end
+                w_nstart = 0;
+                for (wl = 0; wl < LOOP_DEPTH; wl = wl + 1)
+                    if (w_nstart == wl && w_hit[wl]) w_nstart = wl + 1;   // leading hits only
+                w_ntop = stk_n + w_nstart;
+                // (2) the stack after those pushes, level by level: kept entries stay, pushed ones
+                //     take their table entry with its full count.  The loops ending here are the
+                //     innermost active ones, i.e. the top levels: one on its last iteration is
+                //     finished, one with iterations left rewinds.
+                for (wl = 0; wl < LOOP_DEPTH; wl = wl + 1) begin
+                    w_new[wl] = (wl >= stk_n) && (wl < w_ntop);
+                    w_cand = next_loop + (wl - stk_n);
+                    w_idx[wl] = w_new[wl] ? w_cand[LOOP_INDEX_WIDTH-1:0]
+                                          : stk_idx[wl*LOOP_INDEX_WIDTH +: LOOP_INDEX_WIDTH];
+                    w_rem[wl] = w_new[wl] ? loop_count_of(w_idx[wl]) : stk_rem[wl*32 +: 32];
+                    w_fin[wl] = (wl < w_ntop) && (loop_last_of(w_idx[wl]) == wrow) && (w_rem[wl] <= 32'd1);
+                    w_rew[wl] = (wl < w_ntop) && (loop_last_of(w_idx[wl]) == wrow) && (w_rem[wl] > 32'd1);
                 end
-                if (wrewind) begin
+                // (3) pop the finished loops from the top down; the first ending loop below them
+                //     that still has iterations left rewinds to its first row
+                w_nfin = 0;
+                for (wl = LOOP_DEPTH - 1; wl >= 0; wl = wl - 1)
+                    if ((wl + 1 + w_nfin) == w_ntop && w_fin[wl]) w_nfin = w_nfin + 1;
+                w_rewlvl = w_ntop - w_nfin - 1;
+                w_rewind = (w_nfin < w_ntop) && w_rew[w_rewlvl];
+                if (w_rewind) begin
+                    fetch_row <= {1'b0, loop_first_of(w_idx[w_rewlvl])};
                     fetch_fs <= 1'b0;
-                    stk_n <= wn; stk_idx <= widx; stk_rem <= wrem; next_loop <= wnl;
+                    next_loop <= {1'b0, w_idx[w_rewlvl]} + 1'b1;
+                    stk_n <= w_ntop - w_nfin;
                 end else if ((fetch_row + 1'b1) >= prog_count) begin
                     // wrap: the next read starts a new frame with an empty stack
                     fetch_row <= {(ROW_ADDR_WIDTH+1){1'b0}}; fetch_fs <= 1'b1;
                     stk_n <= 0; next_loop <= {(LOOP_INDEX_WIDTH+1){1'b0}};
                 end else begin
                     fetch_row <= fetch_row + 1'b1; fetch_fs <= 1'b0;
-                    stk_n <= wn; stk_idx <= widx; stk_rem <= wrem; next_loop <= wnl;
+                    next_loop <= next_loop + w_nstart;
+                    stk_n <= w_ntop - w_nfin;
+                end
+                // pushed levels take their entry; the rewinding level counts one iteration down
+                // (a one-row loop is pushed and rewound in the same issue); popped levels need
+                // no clearing, stk_n bounds the stack
+                for (wl = 0; wl < LOOP_DEPTH; wl = wl + 1) begin
+                    if (w_new[wl]) stk_idx[wl*LOOP_INDEX_WIDTH +: LOOP_INDEX_WIDTH] <= w_idx[wl];
+                    if (w_rewind && wl == w_rewlvl) stk_rem[wl*32 +: 32] <= w_rem[wl] - 1'b1;
+                    else if (w_new[wl]) stk_rem[wl*32 +: 32] <= w_rem[wl];
                 end
             end
         end
@@ -990,11 +1012,13 @@ module zlc_period_streamer #(
         for (pk = 0; pk < PIPE; pk = pk + 1) vf_inflight = vf_inflight + {{(FIFO_CNT_W-1){1'b0}}, vpend[pk]};
         if (flush) begin
             vf_nv <= {FIFO_CNT_W{1'b0}}; vpend <= {PIPE{1'b0}};
+            vf_rd <= {FIFO_PTR_W{1'b0}}; vf_wr <= {FIFO_PTR_W{1'b0}};
             pf_point <= {SCAN_COUNT_WIDTH{1'b0}}; pf_base <= 1'b0;
             scan_raddr <= {SCAN_ADDR_WIDTH{1'b0}};
         end else begin
             if (vec_landed) begin
-                vf_vec[vf_after_pop] <= scan_rdata;
+                vf_mem[vf_wr] <= scan_rdata;
+                vf_wr <= vf_wr + 1'b1;
                 vf_nv <= vf_after_pop + 1'b1;
             end else begin
                 vf_nv <= vf_after_pop;
