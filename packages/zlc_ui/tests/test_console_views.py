@@ -1624,6 +1624,20 @@ plan['axes'][0]['values'] = [4, 5, 6]
 handle.set_panel_producer_projection('panel-1', dict(linked_scan, form_values={'plan': json.dumps(plan)}))
 assert scan_readout._rows[0] is row and row.start_spin.value() == 4 and row.stop_spin.value() == 6
 assert scan_readout._port_read_request is None
+# A selection writes canonical float endpoints before any editable Logic view
+# chooses their visible precision.  This linked producer is deliberately
+# disabled/read-only: its width must affect only the spelling, never turn the
+# producer's valid number into a transient business error.
+selected = (142.1234567890123, 153.12345678395613, 164.1234567789)
+plan['axes'][0]['values'] = list(selected)
+handle.set_panel_producer_projection('panel-1', dict(linked_scan, form_values={'plan': json.dumps(plan)}))
+assert not row.start_spin.property('numericError') and not row.stop_spin.property('numericError')
+assert 'numeric' not in row.custom_label.text().lower(), row.custom_label.text()
+app.processEvents()
+assert row.start_spin.value() == selected[0] and row.stop_spin.value() == selected[-1]
+assert not row.start_spin.property('numericError')
+assert not row.stop_spin.property('numericError')
+assert 'numeric' not in row.custom_label.text().lower(), row.custom_label.text()
 handle.set_panel_producer_projection('panel-1', {})
 assert not editor._producer_contributions and not editor.producer_form.spec.keys
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)

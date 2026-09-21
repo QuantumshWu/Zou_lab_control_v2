@@ -286,6 +286,47 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
             assert float(plain.text()) == 0.005
         finally:
             plain.close()
+
+        passive = FluentLineEdit("123.456789123456")
+        passive.set_numeric_validator("float", bottom=-1e6, top=1e6)
+        passive.resize(150, 32)
+        passive.show()
+        app.processEvents()
+        changed, passive_normalized = [], []
+        passive.textChanged.connect(changed.append)
+        passive.valueNormalized.connect(
+            lambda: passive_normalized.append(passive.text())
+        )
+        passive.resize(70, 32)
+        app.processEvents()
+        assert passive_normalized and not changed, (
+            "a resize was reported as a user edit",
+            changed,
+            passive_normalized,
+        )
+
+        narrow = "1.23456789012345"
+        passive.set_numeric_validator(
+            "float",
+            bottom=float(narrow),
+            top=1.23456789012346,
+        )
+        passive.setText(narrow)
+        passive.resize(48, 32)
+        app.processEvents()
+        assert passive.property("numericError")
+        passive.hide()
+        passive.setEnabled(False)
+        app.processEvents()
+        assert not passive.property("numericError")
+        passive.setEnabled(True)
+        passive.show()
+        app.processEvents()
+        assert passive.property("numericError"), (
+            "re-entering editable mode did not restore real validation"
+        )
+        passive.close()
+
         from zlc_ui.fluent import FluentSpinBox
         integer = FluentSpinBox()
         integer.setFixedWidth(80)
@@ -304,6 +345,76 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
             assert not integer.property("numericError")
         finally:
             integer.close()
+
+        # Read-only projections keep the exact text and canonical number;
+        # their pixel width is not an authoring rule.
+        # The editable cases above still reject a genuinely unrepresentable
+        # value and never retain a hidden authored digit.
+        readonly = type(box)()
+        readonly.resize(76, 32)
+        readonly.show()
+        app.processEvents()
+        exact = 142.1234567890123
+        readonly.setEnabled(False)
+        assert readonly.setRange(-1e12, 1e12, value=exact, unit="mVpp")
+        assert readonly.value() == exact
+        assert Decimal(readonly.text()) == readonly.decimalValue()
+        assert not readonly.property("numericError")
+        readonly.setReadOnly(True)
+        readonly.setEnabled(True)
+        other_exact = 153.12345678395613
+        assert readonly.setRange(-1e12, 1e12, value=other_exact, unit="mVpp")
+        assert readonly.value() == other_exact
+        assert readonly.text() and not readonly.property("numericError")
+        assert readonly.setRange(0, 1e12, value=123456789.123456, unit="Hz")
+        readonly.setShownUnit("MHz")
+        assert readonly.value() == 123456789.123456
+        assert 100 < float(readonly.text()) < 1000
+        readonly.interpretText()
+        assert readonly.value() == 123456789.123456
+        readonly.close()
+
+        readonly_integer = FluentSpinBox()
+        integer_normalized = []
+        readonly_integer.valueNormalized.connect(lambda: integer_normalized.append(True))
+        readonly_integer.setFixedWidth(60)
+        readonly_integer.show()
+        app.processEvents()
+        readonly_integer.setEnabled(False)
+        readonly_integer.setRange(1_000_000_000, 2_000_000_000)
+        readonly_integer.setValue(1_500_000_000)
+        assert readonly_integer.value() == 1_500_000_000
+        assert readonly_integer.text()
+        assert not readonly_integer.property("numericError")
+        app.processEvents()
+        assert not integer_normalized, "a read-only projection wrote normalization back"
+        readonly_integer.close()
+
+        # Hidden tabs still carry readable form values: changing editability
+        # must clear stale width errors before Show, for both spin types.
+        for control, bounds in (
+            (type(box)(), (1.23456789012345, 1.23456789012346)),
+            (FluentSpinBox(), (1_000_000_000, 2_000_000_000)),
+        ):
+            control.resize(60, 32)
+            control.show()
+            app.processEvents()
+            control.setRange(*bounds)
+            app.processEvents()
+            assert control.property("numericError")
+            for method, locked, unlocked in (
+                (control.setEnabled, False, True),
+                (control.setReadOnly, True, False),
+            ):
+                control.hide()
+                method(locked)
+                assert not control.property("numericError")
+                assert float(control.text()) == control.value()
+                method(unlocked)
+                control.show()
+                app.processEvents()
+                assert control.property("numericError")
+            control.close()
     finally:
         box.close()
         app.processEvents()
