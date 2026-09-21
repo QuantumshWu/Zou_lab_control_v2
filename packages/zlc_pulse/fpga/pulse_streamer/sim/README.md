@@ -17,7 +17,9 @@ The maintained benches are self-contained except where explicitly noted:
   exact 1/2-row finite one-shots, dense one-tick rows around a prefetch
   bubble, gap-dependent complete-Pulse Run repeats, and a non-zero-start
   finite nested bracket (outer x3 with an inner x2) with distinct
-  preamble/body/tail on TTL and DAC.
+  preamble/body/tail on TTL and DAC, then one-tick rows through four nested
+  brackets that share start rows and end rows (every tick's mask against the
+  hand-expanded play order).
 - `tb_scan_wrap.v` covers a whole-timeline bracket, per-row Run repeats, finite
   Scan repeats, a streamed three-chunk table, cumulative row cursor, and the
   cyclic two-bank wrap through the scan-point prefetcher.
