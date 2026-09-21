@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 数据开销第二轮收口：Domain共享紧凑映射、历史布局不展开完整行列；Plot直接建立一维坐标域并共享相同单位数值，删除全样本代表位置及重复域缓存；Histogram按真实immutable贡献增量计数，退出统计时释放旧carry。Plane新窗口坐标走批量输入，exact deferred记录共享，数值续读不生成弃用时间列表。数值/映射/Frozen与原有直接用例验证保持，实屏及隔离性能证据只留ignored research，尚不宣称全部性能工作结束。
+
 - Indexed history布局删除逐坐标Python读取、结果构造时的重复计数、以及事件映射先全量装箱再截取；共用既有批量坐标接口，规则/裁剪窗口的公开布局不变。前后计时仅记ignored报告，不把布局函数耗时当作全链帧率。
 
 - 实屏定位并修复deadline遗漏：新publication于上次staging后99ms已到时仍严格等待100ms，由原Scheduler给剩余时间、同一个Qt timer在原deadline兑现，不再等下一shot。bench复用正式计时入口，source观测改为非变异读取。原直接用例先红后绿，最终实屏逐次核对deadline兑现及严格rate cap，窗口和进程已关闭；逐帧原始证据仅留ignored research。

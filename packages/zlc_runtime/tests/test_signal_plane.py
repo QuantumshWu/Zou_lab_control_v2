@@ -769,6 +769,11 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
             },
         )["epoch-camera/frame"]
         first_publication = plane.latest_publication("epoch-camera/frame")
+        first_snapshot, first_deferred = plane.current_dataset_view("epoch-camera/frame", defer_record=True)
+        assert callable(first_deferred)
+        assert plane.current_dataset_view("epoch-camera/frame", defer_record=True) == (first_snapshot, first_deferred)
+        assert plane.current_dataset_view("epoch-camera/counts", defer_record=True)[1] is first_deferred
+        assert merge_calls == []
         _, first_record = plane.current_dataset_view("epoch-camera/frame")
         assert plane.current_dataset_view("epoch-camera/counts")[1] is first_record
         assert merge_calls == [1]
@@ -796,6 +801,11 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         assert publication is not None
         prepared = plane.current_dataset("epoch-camera/frame")
         assert merge_calls == [1]
+        deferred_snapshot, prefix_deferred = plane.current_dataset_view("epoch-camera/frame", defer_record=True)
+        assert deferred_snapshot is prepared
+        assert callable(prefix_deferred) and prefix_deferred is not first_deferred
+        assert plane.current_dataset_view("epoch-camera/counts", defer_record=True)[1] is prefix_deferred
+        assert merge_calls == [1]
         _snapshot, prefix_record = plane.current_dataset_view(
             "epoch-camera/frame",
             publication,
@@ -818,6 +828,8 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         assert tuple(old_record["record_timing"]["camera"]) == ("0",)
         assert old_snapshot.expanded_validity()[:, 0, 0].tolist() == [True, False]
         assert plane.current_dataset_view("epoch-camera/frame")[1] is prefix_record
+        assert first_deferred() == first_record
+        assert prefix_deferred() == prefix_record
     finally:
         plane.close()
 

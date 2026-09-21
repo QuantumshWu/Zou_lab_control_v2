@@ -787,8 +787,8 @@ def _restamp_snapshot(
 
 def _indexed_schema(
     event_schema: DatasetSchema,
-    indices: tuple[int, ...],
-    times: tuple[float, ...] | None,
+    indices: np.ndarray,
+    times: np.ndarray | None,
 ) -> DatasetSchema:
     point_count = event_schema.point_domain.size
     if any(
@@ -866,8 +866,8 @@ def _materialize_indexed_dataset(
     schema = materialization.schema
     if schema is None:
         schema = _indexed_schema(
-            event_schema, tuple(range(start - latest_index, 1)),
-            None if materialization.times is None else _row_times(materialization.times),
+            event_schema, np.arange(start - latest_index, 1, dtype=np.int64),
+            None if materialization.times is None else np.asarray(_row_times(materialization.times), dtype=np.float64),
         )
     point_count = event_schema.point_domain.size
     basis = materialization.basis
@@ -1132,7 +1132,8 @@ def _indexed_materialization_input(
     stamped = next(iter(events.values()))[3] is not None
     row_times: list[float | None] = []
     append_from = start if basis is None else basis.latest + 1
-    for index in range(start, primary_index + 1):
+    # Without times or provenance, the basis already owns every earlier row.
+    for index in range(start if stamped or include_record else append_from, primary_index + 1):
         held = events.get(index)
         if index == primary_index:
             current = held is not None and held[0] == sequence
@@ -2726,7 +2727,8 @@ class SignalDataPlane:
                 # Keep their latest prepared answers in this existing cache.
                 seed = max((
                     item for item in state.materialized.values()
-                    if isinstance(item.record, Mapping) and item.record_sequence <= sequence
+                    if (isinstance(item.record, Mapping) and item.record_sequence <= sequence)
+                    or (defer_record and item.record is not None and item.record_sequence == sequence)
                 ), key=lambda item: item.record_sequence, default=None)
                 if seed is not None:
                     materialized_record, record_sequence = seed.record, seed.record_sequence

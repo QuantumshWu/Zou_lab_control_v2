@@ -496,10 +496,6 @@ def test_the_public_curve_entry_uses_the_lattice_path(monkeypatch) -> None:
     view.curve(AxisRef.point("ax"), group_by=(AxisRef.cell_data("site"),))
     assert calls == [True]
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("a tensor curve allocated generic positions")
-
-    monkeypatch.setattr(DataView, "_all_positions", forbidden)
     view.curve(
         AxisRef.cell_data("frame"), group_by=(AxisRef.cell_data("site"),)
     )

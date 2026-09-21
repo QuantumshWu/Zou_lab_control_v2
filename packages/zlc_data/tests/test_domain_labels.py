@@ -126,7 +126,24 @@ def test_domain_labels_round_trip_through_the_codec() -> None:
         ((3, 2), (3, 2), (1, 4)),
     )
     expected = np.tile(np.repeat(np.arange(2), 3), 2)
-    assert mapped.code_base(record.axis_id) == range(2)
+    assert mapped.code_mapping(record.axis_id) == (range(2), 3, 2)
+    rows = np.asarray((11, 0, 7, 4, 4), dtype=np.int64)
+    selected = mapped.codes(record_time.axis_id, rows)
+    np.testing.assert_array_equal(selected, expected[rows])
+    np.testing.assert_array_equal(mapped.codes(record.axis_id, rows[:0]), expected[:0])
+    with pytest.raises(ValueError):
+        selected.setflags(write=True)
+    with pytest.raises(IndexError):
+        mapped.codes(record.axis_id, np.asarray((-1,)))
+    with pytest.raises(IndexError):
+        mapped.codes(record.axis_id, np.asarray((12,)))
+    with pytest.raises(TypeError):
+        mapped.codes(record.axis_id, np.asarray((0.5,)))
+    dense = DomainSpec((2, 3), (record, domain.axes[0]))
+    np.testing.assert_array_equal(dense.codes(PAIR, np.asarray((2, 0))), (2, 0))
+    assert dense.code_at(PAIR, 2) == 2
+    with pytest.raises(IndexError):
+        dense.codes(PAIR, np.asarray((3,)))
     np.testing.assert_array_equal(mapped.codes(record.axis_id), expected)
     np.testing.assert_array_equal([mapped.code_at(record.axis_id, row) for row in range(12)], expected)
     np.testing.assert_array_equal(mapped.codes(PAIR), np.tile(np.arange(3), 4))

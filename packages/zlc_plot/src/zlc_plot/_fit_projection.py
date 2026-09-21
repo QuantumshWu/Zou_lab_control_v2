@@ -918,6 +918,8 @@ class FitProjection:
             return
         if self._view is None:
             raise RuntimeError("dataset payload projection requires a DataView")
+        if not isinstance(self._spec, HistogramPlot):
+            self._view._frequency_carry = None
         handler_for(self._spec).build_payload(self, self._view, self.display_state)
 
     def _rolling_payload(
@@ -1063,11 +1065,12 @@ class FitProjection:
         """
 
         count = int(state["bin_count"])
-        samples = view.samples
+        canonical_unit = schema_value_unit(view._schema, view._unit_registry)
+        display_unit = view._value_display_unit
         if frequency is not None:
             if binned_values is not None:
                 raise ValueError("a frequency table describes the whole binned pool")
-            canonical = np.asarray(samples.value.canonical)
+            integral = True
             offset, table = frequency
             occupied = np.flatnonzero(table)
             has_values = bool(occupied.size)
@@ -1075,14 +1078,16 @@ class FitProjection:
                 data_low = float(offset + int(occupied[0]))
                 data_high = float(offset + int(occupied[-1]))
         elif binned_values is None:
+            samples = view.samples
             canonical = np.asarray(samples.value.canonical)
             valid = np.asarray(samples.valid_mask, dtype=bool)
+            integral = canonical.dtype.kind in "biu"
         else:
             if binned_valid is None:
                 raise ValueError("binned validity is required with binned values")
             canonical = np.asarray(binned_values)
             valid = np.asarray(binned_valid, dtype=bool)
-        integral = canonical.dtype.kind in "biu"
+            integral = canonical.dtype.kind in "biu"
         if frequency is not None:
             pass
         elif integral:
@@ -1190,9 +1195,9 @@ class FitProjection:
                 if value is None:
                     return fallback
                 return float(
-                    samples.value.display_unit.convert_value_to(
+                    display_unit.convert_value_to(
                         np.asarray(float(value), dtype=float),
-                        samples.value.canonical_unit,
+                        canonical_unit,
                     )
                 )
 
@@ -1231,9 +1236,9 @@ class FitProjection:
             self._histogram_projection = previous
         assert previous is not None
         return np.asarray(
-            samples.value.canonical_unit.convert_value_to(
+            canonical_unit.convert_value_to(
                 previous.edges,
-                samples.value.display_unit,
+                display_unit,
             ),
             dtype=float,
         )
@@ -1604,10 +1609,7 @@ class FitProjection:
             unit = coordinate.canonical_unit.symbol
             labels = None
             if original.coordinate_labels is not None:
-                dimension = int(self._view._resolve(ref).dimension)
-                shape = self._view.samples.shape
-                positions = np.arange(shape[dimension], dtype=np.int64) * math.prod(shape[dimension + 1:])
-                source_values = self._view._domain(ref, positions).values
+                source_values = self._view._domain(ref).values
                 by_value = {value.canonical: original.coordinate_labels[value.index] for value in source_values}
                 labels = tuple(by_value[value] for value in values)
             projected.append((ref.domain.value, replace(

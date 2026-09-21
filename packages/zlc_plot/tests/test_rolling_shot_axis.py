@@ -342,7 +342,7 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
     def no_projection(_view):
         raise AssertionError("invalid rolling axes reached numeric projection")
 
-    monkeypatch.setattr(DataView, "_all_positions", no_projection)
+    monkeypatch.setattr(DataView, "samples", property(no_projection))
     for view, record in (
         (DataView(snapshot), AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)),
         (DataView(_snapshot(0, repeats=3)), AxisRef.repeat("repeat")),

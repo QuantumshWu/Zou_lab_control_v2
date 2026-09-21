@@ -99,7 +99,7 @@ def test_the_mask_is_built_once_per_view_however_many_projections_ask() -> None:
 
 def test_a_labelled_point_axis_names_each_distinct_value_from_its_first_row() -> None:
     view = _history(3)
-    domain = view._domain(AxisRef.point("frame"), view._all_positions())
+    domain = view._domain(AxisRef.point("frame"))
     assert [value.canonical for value in domain.values] == [0, 1]
     assert [value.label for value in domain.values] == ["frame=before", "frame=after"]
 

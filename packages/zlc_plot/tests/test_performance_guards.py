@@ -152,14 +152,14 @@ def test_facet_cell_count_never_materializes_a_declared_domain(monkeypatch) -> N
     cell = ImagePlot(AxisRef.cell_data("sx"), AxisRef.cell_data("sy"))
 
     element_passes: list[object] = []
-    original = DataView._all_positions
+    original = DataView.samples.fget
 
     def spy(self):
         element_passes.append(True)
         return original(self)
 
     # DataView instances are slotted; spy at the class seam instead.
-    monkeypatch.setattr(DataView, "_all_positions", spy)
+    monkeypatch.setattr(DataView, "samples", property(spy))
 
     assert view.facet_cell_count(
         FacetGridPlot(AxisRef.point("bias"), cell)
@@ -172,27 +172,20 @@ def test_facet_cell_count_never_materializes_a_declared_domain(monkeypatch) -> N
     )
     assert element_passes == []
 
-def test_flat_planes_materialize_lazily_and_exactly_once() -> None:
-    """Grouping flattens only broadcast axis codes, then reuses them.
-
-    Axis resolution itself must NOT materialize the full-shape planes: the
-    dense image path never groups, and eagerly copying full coordinate planes
-    per resolved axis once cost ~150 ms per 2048^2 live frame.
-    """
+def test_axis_domains_reuse_codes_without_full_sample_planes() -> None:
+    """Grouping reads one code per carrier coordinate, never per sample."""
 
     snapshot = _scan_snapshot(points=80, sites=12)
     view = DataView(snapshot)
     ref = AxisRef.cell_data("site")
     view._resolve(ref)
-    assert view._flat_cache == {}
-    positions = np.arange(snapshot.block.values.size, dtype=np.int64)
-    view._domain(ref, positions)
-    indices = view._flat_cache[ref]
-    assert indices.ndim == 1
-    assert indices.flags.owndata
+    assert view._samples is None
+    domain = view._domain(ref)
+    assert domain.codes.shape == (12,)
+    assert not domain.codes.flags.writeable
     for _ in range(12):
-        view._domain(ref, positions)
-    assert view._flat_cache[ref] is indices
+        assert view._domain(ref) is domain
+    assert view._samples is None
 
 def test_full_dense_image_keeps_native_values_and_boolean_validity(
     monkeypatch,
@@ -322,9 +315,6 @@ def test_large_integer_histogram_uses_one_native_uniform_count(
         counts, checked_edges = np.histogram(values[valid], bins=edges)
         expected.append((snapshot, checked_edges, counts, peak_limit))
 
-    def forbidden_positions(_self):
-        raise AssertionError("full-box histogram allocated element positions")
-
     def forbidden_histogram(*_args, **_kwargs):
         raise AssertionError("aligned integer histogram entered the generic sorter")
 
@@ -336,7 +326,6 @@ def test_large_integer_histogram_uses_one_native_uniform_count(
         bincount_calls += 1
         return original_bincount(*args, **kwargs)
 
-    monkeypatch.setattr(DataView, "_all_positions", forbidden_positions)
     monkeypatch.setattr(data_view_module.np, "histogram", forbidden_histogram)
     monkeypatch.setattr(data_view_module.np, "bincount", observed_bincount)
     for index, (snapshot, edges, counts, peak_limit) in enumerate(expected, start=1):
@@ -429,10 +418,6 @@ def test_large_ungrouped_rolling_reuses_its_exact_valid_pool(
         Reduction.FIRST: lambda values: values[0],
     }
 
-    def forbidden_positions(_self):
-        raise AssertionError("ungrouped rolling allocated element positions")
-
-    monkeypatch.setattr(DataView, "_all_positions", forbidden_positions)
     for reduction, reducer in reducers.items():
         view = DataView(snapshot)
         tracemalloc.start()

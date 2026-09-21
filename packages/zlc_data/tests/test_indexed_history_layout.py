@@ -11,6 +11,7 @@ from zlc_data import (
     READOUT_EVENT,
     REPEAT,
     SITE,
+    SHOT_TIME,
     SAMPLE_TIME,
     AxisId,
     AxisSpec,
@@ -26,6 +27,7 @@ from zlc_data import (
 )
 from zlc_data.snapshot_projection import (
     PRIMARY_INDEX_AXIS_ID,
+    SHOT_TIME_AXIS_ID,
     indexed_history_layout,
     indexed_schemas_compatible,
     restrict_snapshot,
@@ -78,18 +80,25 @@ def _schema(
     )
 
 
-def test_the_layout_reads_shots_rows_and_the_repeating_event() -> None:
+@pytest.mark.parametrize("factored", (False, True))
+def test_the_layout_reads_shots_rows_and_the_repeating_event(factored) -> None:
     schema = _schema(
         (-3, -1, 0),
         (0, 0, 1, 1, 2, 2),
         frame_coordinates=(0, 1),
         frame_codes=(0, 1, 0, 1, 0, 1),
     )
+    if factored:
+        schema = replace(schema, point_domain=replace(
+            schema.point_domain, axis_codes=(range(3), range(2)),
+            axis_code_repeats=((2, 1), (1, 3)),
+        ))
     layout = indexed_history_layout(schema)
     assert layout is not None
     assert layout.cells.tolist() == [-3, -1, 0]
     assert layout.inner_count == 2
     assert layout.shot_count == 3 and layout.row_count == 6
+    assert layout.codes(np.asarray((5, 0, 2))).tolist() == [2, 0, 1]
     assert layout.codes().tolist() == [0, 0, 1, 1, 2, 2]
     assert layout.row_mask(1).tolist() == [False] * 4 + [True] * 2
     assert layout.row_mask(2).tolist() == [False] * 2 + [True] * 4
@@ -98,6 +107,22 @@ def test_the_layout_reads_shots_rows_and_the_repeating_event() -> None:
     with pytest.raises(ValueError):
         layout.cells.setflags(write=True)
     assert indexed_history_layout(schema) is layout
+    for alternate in (None, PRIMARY_INDEX_AXIS_ID):
+        time = AxisSpec(SHOT_TIME_AXIS_ID, "shot time", SHOT_TIME, 3, (0.1, 0.3, 0.4),
+                        coordinate_of=alternate)
+        point = schema.point_domain
+        stamped = replace(schema, point_domain=DomainSpec(
+            point.shape, (*point.axes, time), (*point.axis_codes, range(3)),
+            (*(point.axis_code_repeats or ((1, 1), (1, 1))), (2, 1)),
+        ))
+        timed = indexed_history_layout(stamped)
+        assert timed.event == layout.event
+        assert timed.times.tolist() == [0.1, 0.3, 0.4]
+        if alternate is None:
+            with pytest.raises(ValueError, match="primary index's rows"):
+                indexed_history_layout(replace(stamped, point_domain=replace(
+                    stamped.point_domain, axis_codes=(*point.axis_codes, range(2, -1, -1)),
+                )))
 
 
 def test_a_schema_without_a_shot_index_has_no_layout() -> None:
@@ -113,18 +138,27 @@ def test_a_schema_without_a_shot_index_has_no_layout() -> None:
 
 
 @pytest.mark.parametrize(
-    ("offsets", "codes", "reason"),
+    ("offsets", "codes", "repeats", "reason"),
     (
-        ((-1.5, 0.0), (0, 1), "integer"),
-        ((0, -1), (0, 1), "ordered"),
-        ((-1, 1), (0, 1), "latest offset 0"),
+        ((-1.5, 0.0), (0, 1), (1, 1), "integer"),
+        ((0, -1), (0, 1), (1, 1), "ordered"),
+        ((-1, 1), (0, 1), (1, 1), "latest offset 0"),
+        ((-2, -1, 0), range(0, 3, 2), (2, 1), "ordered contiguous"),
+        ((-1, 0), range(2), (2, 2), "ordered contiguous"),
+        ((-1, 0), (0, 1, 0, 1), (1, 1), "ordered contiguous"),
+        ((-1, 0), (0, 0), (1, 1), "ordered contiguous"),
     ),
 )
 def test_a_broken_shot_index_is_refused_not_read_leniently(
-    offsets, codes, reason
+    offsets, codes, repeats, reason
 ) -> None:
+    schema = _schema(offsets, codes)
+    schema = replace(schema, point_domain=replace(
+        schema.point_domain, shape=(len(codes) * repeats[0] * repeats[1],),
+        axis_codes=(codes,), axis_code_repeats=(repeats,),
+    ))
     with pytest.raises(ValueError, match=reason):
-        indexed_history_layout(_schema(offsets, codes))
+        indexed_history_layout(schema)
 
 
 def test_a_history_restricted_to_past_shots_keeps_their_coordinates() -> None:
@@ -180,6 +214,21 @@ def test_cropped_records_keep_their_actual_row_membership() -> None:
     assert layout.row_count == 3
     assert layout.codes().tolist() == [0, 0, 1]
     assert layout.row_mask(1).tolist() == [False, False, True]
+    schema = _schema((-1, 0), (0, 0, 1))
+    repeated = replace(schema, point_domain=replace(
+        schema.point_domain, shape=(6,), axis_code_repeats=((2, 1),),
+    ))
+    layout = indexed_history_layout(repeated)
+    assert layout.inner_count is None
+    assert layout.codes().tolist() == [0, 0, 0, 0, 1, 1]
+    assert layout.row_mask(1).tolist() == [False] * 4 + [True] * 2
+    single = _schema((0,), (0,))
+    single = replace(single, point_domain=replace(
+        single.point_domain, shape=(12,), axis_codes=(range(1),), axis_code_repeats=((3, 4),),
+    ))
+    layout = indexed_history_layout(single)
+    assert layout.inner_count == 12 and layout.row_mask(1).all()
+    assert layout.codes().tolist() == [0] * 12
 
     mislabelled = _schema((0,), (0,), primary_role=READOUT_EVENT)
     with pytest.raises(ValueError, match="primary-index role"):
@@ -217,6 +266,30 @@ def test_two_windows_of_one_history_are_compatible_and_two_events_are_not() -> N
         VALUE,
     )
     assert not indexed_schemas_compatible(short, plain)
+
+    # Compare the compact periodicity decision with the actual expanded
+    # event rows, including nonconstant periods that cross inner repeats.
+    for base, inner, outer, per_shot in (
+        (range(2), 1, 4, 2), ((0, 1, 0, 1), 2, 2, 4),
+        ((0, 0, 1, 1), 2, 1, 4), ((0, 1), 2, 3, 3),
+        ((0, 0), 2, 3, 3), (range(3), 2, 2, 3),
+    ):
+        expanded = np.tile(np.repeat(base, inner), outer)
+        shots = len(expanded) // per_shot
+        source = _schema(range(1 - shots, 1), np.repeat(np.arange(shots), per_shot),
+                         frame_coordinates=range(max(base) + 1), frame_codes=expanded)
+        compact = replace(source, point_domain=replace(
+            source.point_domain, axis_codes=(range(shots), base),
+            axis_code_repeats=((per_shot, 1), (inner, outer)),
+        ))
+        layout = indexed_history_layout(compact)
+        rows = expanded.reshape(shots, per_shot)
+        repeated = bool(np.all(rows == rows[0]))
+        expected = expanded[:per_shot] if repeated else expanded
+        assert layout.inner_count == per_shot
+        assert layout.event[3][0] == (len(expected),)
+        assert layout.event[3][2] == (tuple(expected),)
+        assert indexed_schemas_compatible(source, compact)
 
 
 def test_a_sliding_history_keeps_the_structure_it_advances_through() -> None:

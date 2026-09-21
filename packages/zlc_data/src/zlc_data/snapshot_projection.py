@@ -89,8 +89,8 @@ class IndexedHistoryLayout:
     #: Each shot's relative offset, oldest first; none is above 0.  Holes are
     #: legal: a shot the history never received is simply absent.
     cells: np.ndarray
-    #: Rows owned by each shot; cropped records need not have equal lengths.
-    row_codes: np.ndarray
+    #: Borrow the one mapping owner; cropped records need not have equal lengths.
+    point_domain: DomainSpec
     #: Uniform rows per shot, already determined by the layout parser.
     inner_count: int | None
     #: What does not change as the window slides -- the Repeat, Cell and
@@ -109,10 +109,6 @@ class IndexedHistoryLayout:
             shape=source.shape,
         )
         object.__setattr__(self, "cells", cells)
-        codes = np.asarray(self.row_codes, dtype=np.int64)
-        object.__setattr__(self, "row_codes", immutable_array(
-            codes, dtype=np.dtype("<i8"), shape=codes.shape,
-        ))
         if self.times is not None:
             times = np.asarray(self.times, dtype=np.float64)
             if times.shape != cells.shape:
@@ -127,18 +123,30 @@ class IndexedHistoryLayout:
 
     @property
     def row_count(self) -> int:
-        return int(self.row_codes.size)
+        return self.point_domain.size
 
-    def codes(self) -> np.ndarray:
-        """Each point row's shot position, oldest shot first."""
+    @property
+    def row_codes(self) -> np.ndarray:
+        return self.codes()
 
-        return self.row_codes
+    def codes(self, rows: np.ndarray | None = None) -> np.ndarray:
+        """Each requested point row's shot position, oldest shot first."""
+
+        return self.point_domain.codes(PRIMARY_INDEX_AXIS_ID, rows)
+
+    def window_rows(self, window: int) -> slice:
+        """The last ``window`` shots as a suffix of the physical Point rows."""
+        keep = min(max(int(window), 1), int(self.cells.size))
+        first = self.shot_count - keep
+        base, inner, _outer = self.point_domain.code_mapping(PRIMARY_INDEX_AXIS_ID)
+        start = first if isinstance(base, range) else int(np.searchsorted(base, first))
+        return slice(start * inner, self.row_count)
 
     def row_mask(self, window: int) -> np.ndarray:
         """Which point rows the last ``window`` shots occupy."""
-
-        keep = min(max(int(window), 1), int(self.cells.size))
-        return self.codes() >= int(self.cells.size) - keep
+        mask = np.zeros(self.row_count, dtype=np.bool_)
+        mask[self.window_rows(window)] = True
+        return mask
 
 
 def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None:
@@ -185,32 +193,43 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         raise ValueError(
             "relative primary-index coordinates are at most the latest offset 0"
         )
-    primary_codes = point_domain.codes(PRIMARY_INDEX_AXIS_ID)
-    code_steps = np.diff(primary_codes)
-    if (
-        int(primary_codes[0]) != 0
-        or int(primary_codes[-1]) != primary.size - 1
-        or bool(np.any((code_steps != 0) & (code_steps != 1)))
-    ):
-        raise ValueError("primary-index rows must form ordered contiguous cells")
-    starts = np.concatenate(([0], np.flatnonzero(code_steps > 0) + 1))
-    if not np.array_equal(primary_codes[starts], np.arange(primary.size)):
-        raise ValueError("primary-index rows must cover every retained cell")
-    counts = np.diff(np.concatenate((starts, [point_domain.size])))
-    inner_count = int(counts[0])
-    uniform = bool(np.all(counts == inner_count))
     shots = int(cells.size)
     # The shot-time axis is the shot index's twin: one coordinate per
     # shot, on the same rows, and no part of the event's own domain.
     time_axis = next(
         (axis for axis in point_domain.axes if axis.axis_id == SHOT_TIME_AXIS_ID), None
     )
+    counts = None
+    for axis in (primary,) if time_axis is None else (primary, time_axis):
+        if axis is not primary:
+            if axis.role != SHOT_TIME:
+                raise ValueError("the shot-time coordinate must carry the shot-time role")
+            if axis.coordinate_of == primary.axis_id:
+                # DomainSpec already requires and shares this exact mapping.
+                continue
+        base, inner, outer = point_domain.code_mapping(axis.axis_id)
+        ordered = (int(base[0]) == 0 and int(base[-1]) == shots - 1
+                   and (outer == 1 or shots == 1))
+        if isinstance(base, range):
+            ordered = ordered and (len(base) == 1 or base.step == 1)
+            row_counts = np.full(shots, point_domain.size if shots == 1 else inner, dtype=np.int64)
+        else:
+            code_steps = np.diff(base)
+            ordered = ordered and not bool(np.any((code_steps != 0) & (code_steps != 1)))
+            starts = np.concatenate(([0], np.flatnonzero(code_steps > 0) + 1, [len(base)]))
+            row_counts = np.diff(starts) * inner * outer
+        if not ordered or (axis is not primary and not np.array_equal(row_counts, counts)):
+            raise ValueError(
+                "primary-index rows must form ordered contiguous cells" if axis is primary else
+                "shot time is one coordinate per shot, on the primary index's rows"
+            )
+        if axis is primary:
+            counts = row_counts
+    assert counts is not None
+    inner_count = int(counts[0])
+    uniform = bool(np.all(counts == inner_count))
     times = None
     if time_axis is not None:
-        if time_axis.role != SHOT_TIME:
-            raise ValueError("the shot-time coordinate must carry the shot-time role")
-        if not np.array_equal(point_domain.codes(SHOT_TIME_AXIS_ID), primary_codes):
-            raise ValueError("shot time is one coordinate per shot, on the primary index's rows")
         times = np.asarray(
             time_axis.coordinate_values(),
             dtype=np.float64,
@@ -223,24 +242,36 @@ def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None
         (axis.axis_id, axis.name, axis.role, axis.unit, axis.coordinate_frame)
         for axis in point_domain.axes if axis.role == SAMPLE_TIME
     )
-    event_codes: list[np.ndarray] = []
     repeated = uniform
     for axis in event_axes:
-        codes = point_domain.codes(axis.axis_id)
-        if uniform and shots > 1:
-            rows = codes.reshape(shots, inner_count)
-            repeated = repeated and bool(np.all(rows[1:] == rows[0]))
-        event_codes.append(codes)
+        if not repeated or shots == 1:
+            break
+        base, inner, _outer = point_domain.code_mapping(axis.axis_id)
+        if inner_count % inner:
+            # A nonconstant mapping changes only at multiples of inner;
+            # shifting by one shot must preserve those boundaries.
+            repeated = (len(base) == 1 if isinstance(base, range) else
+                        bool(np.all(base == base[0])))
+        else:
+            shift = (inner_count // inner) % len(base)
+            if shift:
+                # The complete mapping is a tiled base. Its per-shot
+                # repetition is exactly invariance under this cyclic shift.
+                repeated = not isinstance(base, range) and (
+                    np.array_equal(base[:-shift], base[shift:])
+                    and np.array_equal(base[-shift:], base[:shift])
+                )
+    rows = np.arange(inner_count, dtype=np.int64) if repeated and shots > 1 and event_axes else None
     event_domain = (
         (inner_count if repeated else point_domain.size,), event_axes,
         tuple(
-            tuple((codes[:inner_count] if repeated else codes).tolist())
-            for codes in event_codes
+            tuple(point_domain.codes(axis.axis_id, rows).tolist())
+            for axis in event_axes
         ),
     )
     layout = IndexedHistoryLayout(
         cells,
-        primary_codes,
+        point_domain,
         inner_count if uniform else None,
         (
             schema.repeat_domain,

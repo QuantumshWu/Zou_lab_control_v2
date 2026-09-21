@@ -193,18 +193,38 @@ class DomainSpec:
                 return axis
         raise KeyError(axis_id)
 
-    def codes(self, axis_id: AxisId) -> np.ndarray:
-        """Read the complete code vector, expanding declared repetition once."""
+    def code_mapping(self, axis_id: AxisId) -> tuple[np.ndarray | range, int, int]:
+        """The stored codes and their declared inner/outer repetition."""
+
+        axis = self.axis(axis_id)
+        if self.axis_codes is None:
+            return range(axis.size), 1, 1
+        index = self.axes.index(axis)
+        inner, outer = (1, 1) if self.axis_code_repeats is None else self.axis_code_repeats[index]
+        return self.axis_codes[index], inner, outer
+
+    def codes(self, axis_id: AxisId, rows: np.ndarray | None = None) -> np.ndarray:
+        """Read requested rows, or expand and cache the complete vector once."""
 
         axis = self.axis(axis_id)
         if axis.coordinate_of is not None:
-            return self.codes(axis.coordinate_of)
+            return self.codes(axis.coordinate_of, rows)
         index = self.axes.index(axis)
-        cached = self._codes[index]
-        if cached is not None:
-            return cached
-        base = range(axis.size) if self.axis_codes is None else self.axis_codes[index]
-        inner, outer = (1, 1) if self.axis_code_repeats is None else self.axis_code_repeats[index]
+        if rows is None:
+            cached = self._codes[index]
+            if cached is not None:
+                return cached
+        base, inner, outer = self.code_mapping(axis_id)
+        if rows is not None:
+            rows = np.asarray(rows)
+            if not issubclass(rows.dtype.type, np.integer):
+                raise TypeError("domain rows must be integers")
+            if bool(np.any(rows < 0)) or bool(np.any(rows >= len(base) * inner * outer)):
+                raise IndexError("domain row is outside its physical dimension")
+            positions = (rows.astype(np.int64, copy=False) // inner) % len(base)
+            array = (base.start + positions * base.step if isinstance(base, range)
+                     else base[positions])
+            return immutable_array(array, dtype=np.dtype("<i8"), shape=array.shape)
         array = np.arange(base.start, base.stop, base.step, dtype="<i8") if isinstance(base, range) else base
         if inner != 1:
             array = np.repeat(array, inner)
@@ -217,23 +237,11 @@ class DomainSpec:
     def code_at(self, axis_id: AxisId, row: int) -> int:
         """Read one physical row's code directly from its declared mapping."""
 
-        axis = self.axis(axis_id)
+        base, inner, outer = self.code_mapping(axis_id)
         row = integer(row, "domain row", minimum=0)
-        extent = axis.size if self.axis_codes is None else self.size
-        if row >= extent:
+        if row >= len(base) * inner * outer:
             raise IndexError("domain row is outside its physical dimension")
-        if self.axis_codes is None:
-            return row
-        index = self.axes.index(axis)
-        base = self.axis_codes[index]
-        inner = 1 if self.axis_code_repeats is None else self.axis_code_repeats[index][0]
         return int(base[(row // inner) % len(base)])
-
-    def code_base(self, axis_id: AxisId) -> np.ndarray | range:
-        """The stored code vector before its declared inner/outer repetition."""
-
-        axis = self.axis(axis_id)
-        return range(axis.size) if self.axis_codes is None else self.axis_codes[self.axes.index(axis)]
 
     def coordinate_axis(self, axis_id: AxisId) -> AxisSpec:
         """The physical axis whose positions this coordinate names."""
