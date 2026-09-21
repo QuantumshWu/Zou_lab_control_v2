@@ -547,7 +547,7 @@ def test_no_module_keeps_its_own_copy_of_the_cache_path() -> None:
     )
 
 
-def test_the_centred_square_kernel_is_a_reduction_not_a_copy() -> None:
+def test_the_centred_moment_kernel_is_one_reduction_not_a_copy() -> None:
     """One compiled specialization serves every signal rank.
 
     The kept axes of a reduction are a BLOCK of the tensor, so the tensor
@@ -557,67 +557,96 @@ def test_the_centred_square_kernel_is_a_reduction_not_a_copy() -> None:
     compiled code, which is the only way a cache of compiled kernels is
     worth having.
 
-    THE REFERENCE IS THE EINSUM, not a second numpy spelling of the
-    kernel: without the compiled engine the helper declines and its one
-    caller takes the einsum path it always had.  So the assertions are
-    that it declines when it must, and that where it does answer the
-    answer is the einsum's to within a summation order -- which is all a
-    different order can ever promise.
+    The same pass accumulates both E[d] and E[d**2] about a different centre
+    for every kept position.  Without the compiled engine the helper declines
+    and its caller takes the NumPy path, so this pins both moments directly.
     """
 
-    from zlc_plot.data_view import _centred_square_sums
+    from zlc_plot.data_view import _centred_moment_sums
 
     rng = np.random.default_rng(4)
     shape = (7, 40, 3, 5)
-    letters = "abcd"
     plane = rng.normal(0.0, 1.0, shape)
-    offset = 0.37
     previous = kernels.ENGINE
     try:
+        offsets = np.linspace(-0.5, 0.5, shape[1])
         kernels.ENGINE = "numpy"
-        assert _centred_square_sums(plane, offset, None, [1], shape) is None
+        assert _centred_moment_sums(plane, offsets, None, [1], shape) is None
         kernels.ENGINE = "auto"
         if not kernels.engaged():
             pytest.skip("no compiled engine available")
         for kept in ([1], [0, 1], [1, 2]):
-            compiled = _centred_square_sums(plane, offset, None, kept, shape)
-            assert compiled is not None
-            centred = plane - offset
-            einsum = np.einsum(
-                f"{letters},{letters}->{''.join(letters[axis] for axis in kept)}",
-                centred,
-                centred,
+            kept_shape = tuple(shape[axis] for axis in kept)
+            offsets = np.linspace(
+                -0.5, 0.5, int(np.prod(kept_shape))
+            ).reshape(kept_shape)
+            compiled = _centred_moment_sums(
+                plane, offsets, None, kept, shape
             )
-            assert compiled.shape == einsum.shape
-            assert np.allclose(compiled, einsum, rtol=1e-12, atol=0.0)
+            assert compiled is not None
+            centre_shape = tuple(
+                shape[axis] if axis in kept else 1
+                for axis in range(len(shape))
+            )
+            centred = plane - offsets.reshape(centre_shape)
+            reduced_axes = tuple(
+                axis for axis in range(len(shape)) if axis not in kept
+            )
+            expected = (
+                np.sum(centred, axis=reduced_axes, dtype=np.float64),
+                np.sum(
+                    np.square(centred),
+                    axis=reduced_axes,
+                    dtype=np.float64,
+                ),
+            )
+            for actual, wanted in zip(compiled, expected, strict=True):
+                assert actual.shape == wanted.shape
+                assert np.allclose(actual, wanted, rtol=1e-12, atol=0.0)
 
         # Kept axes that are not one block have no three-dimensional view,
         # and the helper says so rather than copying to make one.
-        assert _centred_square_sums(plane, offset, None, [1, 3], shape) is None
+        assert (
+            _centred_moment_sums(
+                plane, np.zeros((shape[1], shape[3])), None, [1, 3], shape
+            )
+            is None
+        )
 
         # A non-contiguous plane is declined for the same reason: the
         # kernel takes C-contiguous input so one layout compiles, not two.
         assert (
-            _centred_square_sums(
-                np.asfortranarray(plane), offset, None, [1], shape
+            _centred_moment_sums(
+                np.asfortranarray(plane),
+                np.zeros(shape[1]),
+                None,
+                [1],
+                shape,
             )
             is None
         )
 
         marks = rng.random(shape) > 0.3
-        masked = _centred_square_sums(plane, offset, marks, [1], shape)
+        offsets = np.linspace(-0.5, 0.5, shape[1])
+        masked = _centred_moment_sums(plane, offsets, marks, [1], shape)
         assert masked is not None
-        assert np.allclose(
-            masked,
+        centred = plane - offsets.reshape(1, shape[1], 1, 1)
+        masked_expected = (
             np.sum(
-                np.square(plane - offset),
+                centred,
                 axis=(0, 2, 3),
                 where=marks,
                 dtype=np.float64,
             ),
-            rtol=1e-12,
-            atol=0.0,
+            np.sum(
+                np.square(centred),
+                axis=(0, 2, 3),
+                where=marks,
+                dtype=np.float64,
+            ),
         )
+        for actual, wanted in zip(masked, masked_expected, strict=True):
+            assert np.allclose(actual, wanted, rtol=1e-12, atol=0.0)
     finally:
         kernels.ENGINE = previous
 

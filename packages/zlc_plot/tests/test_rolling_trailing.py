@@ -108,6 +108,154 @@ def test_a_span_longer_than_the_run_is_the_running_mean() -> None:
     finally:
         session.close()
 
+
+def test_a_constant_trailing_window_has_exactly_zero_sem() -> None:
+    """Combining shot moments must not resurrect roundoff as uncertainty."""
+
+    def last_sem(shots: np.ndarray, trailing: int = 10) -> float:
+        session = PlotSession(
+            _shots(shots),
+            RollingPlot(reduction=Reduction.MEAN),
+            parameters={
+                "trailing": trailing,
+                "window": len(shots),
+                "uncertainty": True,
+            },
+        )
+        try:
+            return float(session._projection._payload.series[0].sem[-1])
+        finally:
+            session.close()
+
+    short = np.zeros((11, 3), dtype=np.float64)
+    short[0, 0] = 1.0
+    assert last_sem(short) == 0.0
+
+    # Distant whole-history prefixes used to lose enough bits that this late
+    # ten-shot constant window reported about 1e-7 instead of zero.
+    long = np.zeros((40_000, 3), dtype=np.float64)
+    long[:20_000] = 1.0
+    assert last_sem(long) == 0.0
+
+    very_long = np.full((100_000, 3), 6.834e9, dtype=np.float64)
+    assert last_sem(very_long, len(very_long)) == 0.0
+
+
+def test_trailing_keeps_real_tiny_spread_at_any_offset() -> None:
+    """Stability is not a data threshold: resolvable spread must survive."""
+
+    span = 10
+    pattern = np.resize(
+        np.asarray((-2.0, -1.0, 0.0, 1.0, 2.0)), (23, 3)
+    )
+    for offset, scale in (
+        (0.0, 16.0 * np.spacing(1.0)),
+        (0.4, 16.0 * np.spacing(0.4)),
+        (6.834e9, 16.0 * np.spacing(6.834e9)),
+    ):
+        shots = offset + scale * pattern
+        session = PlotSession(
+            _shots(shots),
+            RollingPlot(reduction=Reduction.MEAN),
+            parameters={"trailing": span, "uncertainty": True},
+        )
+        try:
+            actual = float(session._projection._payload.series[0].sem[-1])
+            pool = shots[-span:].reshape(-1)
+            expected = float(np.std(pool, ddof=1) / np.sqrt(pool.size))
+            assert actual > 0.0
+            np.testing.assert_allclose(actual, expected, rtol=5e-3)
+        finally:
+            session.close()
+
+
+def test_trailing_matches_a_random_brute_force_oracle() -> None:
+    from zlc_plot import _raster_kernels
+
+    rng = np.random.default_rng(20260921)
+    shots = rng.normal(size=(73, 7))
+    shots[rng.random(shots.shape) < 0.17] = np.nan
+    # Entire missing shots straddle the 9- and 31-shot block boundaries; the
+    # final missing shot leaves both block layouts with a partial tail.
+    shots[[8, 9, 10, 30, 31, 32, 72]] = np.nan
+    previous_engine = _raster_kernels.ENGINE
+    try:
+        for engine in ("numpy", "numba"):
+            _raster_kernels.ENGINE = engine
+            session = PlotSession(
+                _shots(shots),
+                RollingPlot(reduction=Reduction.MEAN),
+                parameters={"trailing": 2, "uncertainty": True},
+            )
+            try:
+                for span in (2, 9, 31, 200):
+                    session.set_parameter("trailing", span)
+                    series = session._projection._payload.series[0]
+                    expected_mean = []
+                    expected_sem = []
+                    for stop in range(1, len(shots) + 1):
+                        pool = shots[max(0, stop - span) : stop].reshape(-1)
+                        pool = pool[np.isfinite(pool)]
+                        expected_mean.append(
+                            float(np.mean(pool)) if pool.size else np.nan
+                        )
+                        expected_sem.append(
+                            float(np.std(pool, ddof=1) / np.sqrt(pool.size))
+                            if pool.size > 1
+                            else np.nan
+                        )
+                    np.testing.assert_allclose(
+                        series.y.canonical,
+                        expected_mean,
+                        rtol=3e-14,
+                        atol=3e-14,
+                        equal_nan=True,
+                    )
+                    np.testing.assert_allclose(
+                        series.sem,
+                        expected_sem,
+                        rtol=3e-14,
+                        atol=3e-14,
+                        equal_nan=True,
+                    )
+            finally:
+                session.close()
+    finally:
+        _raster_kernels.ENGINE = previous_engine
+
+
+def test_one_history_sample_keeps_its_stated_sigma_when_grouped_or_not() -> None:
+    values = np.asarray(((1.0, 2.0), (3.0, 4.0), (5.0, 6.0)))
+    validity = np.asarray(
+        ((False, False), (True, False), (False, False)), dtype=bool
+    )
+    sigma = np.full(values.shape, 0.25)
+    snapshot = make_snapshot(
+        _schema(2, repeats=3),
+        values,
+        revision=0,
+        validity=validity,
+        sigma=sigma,
+    )
+    for spec in (
+        RollingPlot(reduction=Reduction.MEAN),
+        RollingPlot(
+            group=AxisRef.point("site"), reduction=Reduction.MEAN
+        ),
+    ):
+        session = PlotSession(
+            snapshot,
+            spec,
+            parameters={"trailing": 3, "uncertainty": True},
+        )
+        try:
+            series = session._projection._payload.series[0]
+            assert series.y.canonical[-1] == 3.0
+            assert series.sem[-1] == 0.25
+        finally:
+            session.close()
+
+
 def test_the_default_span_of_one_is_each_shot_itself() -> None:
     """The default must not quietly redraw anybody's panel: one shot per
     point, exactly the trace drawn before this parameter existed."""

@@ -590,6 +590,7 @@ def representative_work(
     _render(
         _mixed_snapshot(repeats=8, points=8, sites=8),
         RollingPlot(group=AxisRef.cell_data("site")),
+        {"trailing": 4, "uncertainty": True},
     )
     for dtype in (np.float32, np.float64):
         # A floating ROI pooled into grouped shot means and a centred SEM

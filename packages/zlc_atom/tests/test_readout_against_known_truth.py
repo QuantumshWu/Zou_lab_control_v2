@@ -355,7 +355,11 @@ def test_no_model_is_recommended_when_none_read_a_site() -> None:
         TrapCalibration,
         _fit_readout_model,
     )
-    from zlc_atom.nodes.calibration.summary import readout_summary, summary_lines
+    from zlc_atom.nodes.calibration.summary import (
+        _separation,
+        readout_summary,
+        summary_lines,
+    )
 
     sites = SiteMap(("site_0000",), [[1.0, 1.0]], [True], [1.0])
     occupied = np.array([[False], [True]])
@@ -383,6 +387,20 @@ def test_no_model_is_recommended_when_none_read_a_site() -> None:
     assert summary["best_model"] is None
     assert summary["models"]["box"]["usable_sites"] == 0
     assert not any(line.startswith("*") for line in summary_lines(summary))
+
+    # A constant non-binary population is exactly spreadless.  Direct std on
+    # 0.1/0.2 left a one-bit positive width and reported ~3.7e15 separation.
+    constant_signals = np.asarray([[0.1], [0.1], [0.1], [0.2], [0.2], [0.2]])
+    constant_occupied = np.asarray(
+        [[False], [False], [False], [True], [True], [True]]
+    )
+    constant_separation = _separation(
+        constant_signals,
+        constant_occupied,
+        np.ones_like(constant_occupied),
+        np.asarray([True]),
+    )
+    assert np.isnan(constant_separation[0])
 
 
 def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
@@ -611,3 +629,12 @@ def test_the_two_state_fit_takes_the_likeliest_pair_whatever_their_widths() -> N
     assert overlapping.ok and not overlapping.decisive
     assert overlapping.dark_sigma > 1.5 and overlapping.bright_sigma > 1.5
     assert 94.0 < overlapping.threshold < 102.0
+
+    # There is no split in a constant sample.  The old ``std or 1.0`` made
+    # binary-friendly constants 0 and 1 into a fictitious pair one unit apart,
+    # while non-binary constants happened to retain roundoff and were refused.
+    for level in (0.0, 1.0, 0.1, 3.2):
+        constant = fit_bimodal(np.full(100, level))
+        assert not constant.ok
+        assert not constant.decisive
+        assert constant.threshold == level

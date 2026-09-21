@@ -5,12 +5,12 @@ is written against a three-verb link so the transport is the ONLY thing a
 test or a virtual bench has to stand in for -- the SCPI vocabulary, the
 read-back discipline and the bound checks are all exercised as shipped.
 
-Frequency is written and read in hertz; power's canonical unit is dBm.
-Connecting and explicit Refresh read the channel's unit, load, waveform,
-limits and values. Apply uses those bounded session facts, writes the
-selected quantity, and returns the instrument's actual readback. External
-front-panel changes are adopted by Refresh, not by probing the whole
-instrument before every scan point.
+Carrier and FSK hop frequencies are written and read in hertz; power's
+canonical unit is dBm. Connecting and explicit Refresh read the channel's
+unit, load, waveform, limits and values. Apply uses those bounded session
+facts, writes the selected quantity, and returns the instrument's actual
+readback. External front-panel changes are adopted by Refresh, not by probing
+the whole instrument before every scan point.
 
 Explicit selected-unit Apply uses ``tune_in_unit``: it selects the channel's
 native amplitude unit only when needed and writes volts directly. A raw
@@ -27,7 +27,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from zlc_atom.devices.rf.contract import POWER_FIELD, WINDOW_FIELDS, RfSourceBase, channel_field
+from zlc_atom.devices.rf.contract import (
+    FREQUENCY_FIELD,
+    POWER_FIELD,
+    WINDOW_FIELDS,
+    RfSourceBase,
+    TuneRefused,
+    channel_field,
+)
 from zlc_atom.devices import visa
 from zlc_atom.devices.visa import (
     PROBE_TIMEOUT_SECONDS,
@@ -63,6 +70,9 @@ class RigolDg4000Config:
 #: ch1 -> :SOURce1/:OUTPut1.  The channel NAMES are field-name prefixes
 #: (ch1_frequency), the numbers are SCPI's.
 _CHANNELS = ("ch1", "ch2")
+#: DG4000-specific output frequency used while ordinary FSK is active.  It is
+#: not part of the generic RF contract: a Lab Brick has no such register.
+_FSK_HOP_FREQUENCY_FIELD = "fsk_hop_frequency"
 #: The three amplitude units a DG4000 channel can be displaying.
 _DBM = "DBM"
 _VRMS = "VRMS"
@@ -174,6 +184,14 @@ class RigolDg4000RfSource(RfSourceBase):
             power_low_dbm=config.power_low_dbm,
             power_high_dbm=config.power_high_dbm,
         )
+        self._fsk_hop_limits: dict[
+            str, tuple[float, float] | None
+        ] = {channel: None for channel in self._channels}
+        for channel in self._channels:
+            self._routing[channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)] = (
+                channel,
+                _FSK_HOP_FREQUENCY_FIELD,
+            )
         self._link = link if link is not None else VisaScpiLink(
             config.resource, timeout_seconds=config.timeout_seconds
         )
@@ -185,6 +203,7 @@ class RigolDg4000RfSource(RfSourceBase):
             if not identity:
                 raise RuntimeError("the instrument answered *IDN? with nothing")
             self._attach(identity)
+            self._refresh_fsk_hop_values()
         except BaseException as error:
             try:
                 self._link.close()
@@ -204,15 +223,36 @@ class RigolDg4000RfSource(RfSourceBase):
         return f":OUTPut{channel[2:]}"
 
     # ------------------------------------------------------- transport verbs
+    def _invalidate_amplitude_after_frequency_change(self, channel: str) -> None:
+        """A carrier or hop change can make the standing amplitude untrue."""
+
+        self._current_values.pop(channel_field(channel, POWER_FIELD), None)
+        if channel in self._amplitudes:
+            self._amplitudes[channel].update(
+                current=None,
+                minimum=None,
+                maximum=None,
+            )
+        self._device_limits[channel] = (self._device_limits[channel][0], None)
+
     def _write_frequency(self, channel: str, value_hz: float) -> float:
         """Set and read the requested field, without unrelated queries."""
         source = self._source(channel)
-        self._current_values.pop(channel_field(channel, POWER_FIELD), None)
-        if channel in self._amplitudes:
-            self._amplitudes[channel].update(current=None, minimum=None, maximum=None)
-        self._device_limits[channel] = (self._device_limits[channel][0], None)
+        self._invalidate_amplitude_after_frequency_change(channel)
         self._link.write(f"{source}:FREQuency {value_hz:.17g}")
         return self._read_frequency(channel)
+
+    def _write_fsk_hop_frequency(
+        self, channel: str, value_hz: float
+    ) -> float:
+        """Set and read the FSK hop register without changing modulation mode."""
+
+        source = self._source(channel)
+        self._invalidate_amplitude_after_frequency_change(channel)
+        self._link.write(
+            f"{source}:MOD:FSKey:FREQuency {value_hz:.17g}"
+        )
+        return self._read_fsk_hop_frequency(channel)
 
     def _write_power(self, channel: str, value_dbm: float) -> float:
         held = self._amplitude_state(channel)
@@ -248,7 +288,195 @@ class RigolDg4000RfSource(RfSourceBase):
             for channel in self._channels:
                 frequency_limits, _power_limits = self._device_limits[channel]
                 self._device_limits[channel] = (frequency_limits, self._read_power_limits(channel))
+            values.update(self._refresh_fsk_hop_values())
             return values
+
+    def _fsk_hop_range(
+        self, channel: str
+    ) -> tuple[float, float] | None:
+        limits = self._fsk_hop_limits[channel]
+        if limits is None:
+            return None
+        return self._effective_range(
+            self._frequency_bounds,
+            limits,
+            name=channel_field(channel, _FSK_HOP_FREQUENCY_FIELD),
+            unit="Hz",
+        )
+
+    def _invalidate_fsk_hop_state(self) -> None:
+        for channel in self._channels:
+            self._current_values.pop(
+                channel_field(channel, _FSK_HOP_FREQUENCY_FIELD), None
+            )
+            self._fsk_hop_limits[channel] = None
+
+    def _read_fsk_hop_state(
+        self,
+        window: tuple[float | None, float | None],
+    ) -> tuple[dict[str, tuple[float, float]], dict[str, float]]:
+        """Read a complete two-channel answer before accepting any of it."""
+
+        limits_by_channel: dict[str, tuple[float, float]] = {}
+        values: dict[str, float] = {}
+        try:
+            for channel in self._channels:
+                name = channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)
+                limits = self._instrument_limits(
+                    self._read_fsk_hop_frequency_limits(channel),
+                    name=name,
+                    unit="Hz",
+                )
+                self._effective_range(
+                    window,
+                    limits,
+                    name=name,
+                    unit="Hz",
+                )
+                limits_by_channel[channel] = limits
+                values[name] = self._read_fsk_hop_frequency(channel)
+        except BaseException:
+            self._invalidate_fsk_hop_state()
+            raise
+        return limits_by_channel, values
+
+    def _refresh_fsk_hop_values(self) -> dict[str, float]:
+        """Read the two DG4000 hop registers and their waveform-dependent limits."""
+
+        limits, values = self._read_fsk_hop_state(self._frequency_bounds)
+        self._fsk_hop_limits.update(limits)
+        self._current_values.update(values)
+        return values
+
+    def tunable_fields(self) -> tuple[TunableField, ...]:
+        """The common RF fields plus each channel's DG4000 FSK hop register."""
+
+        with self._condition:
+            fields = []
+            by_carrier = {
+                channel_field(channel, FREQUENCY_FIELD): channel
+                for channel in self._channels
+            }
+            for field in super().tunable_fields():
+                fields.append(field)
+                channel = by_carrier.get(field.metadata.name)
+                if channel is None:
+                    continue
+                name = channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)
+                effective_range = self._fsk_hop_range(channel)
+                low, high = (
+                    (None, None)
+                    if effective_range is None
+                    else effective_range
+                )
+                fields.append(
+                    TunableField(
+                        metadata=AuthoringField(
+                            name,
+                            "float",
+                            f"{self._channel_label(channel)}FSK hop frequency",
+                            None,
+                            minimum=low,
+                            maximum=high,
+                            unit="Hz",
+                            description=(
+                                "The alternate output frequency used by FSK; "
+                                "setting it does not select or enable FSK."
+                            ),
+                        ),
+                        current=self._current_values.get(name),
+                        live_write=True,
+                        dependency_group=(name,),
+                        device_limits=self._fsk_hop_limits[channel],
+                    )
+                )
+            return tuple(fields)
+
+    def _tune_window(self, selected: str, value: object) -> float | None:
+        """The common frequency safety window also fences every FSK hop."""
+
+        if selected not in ("frequency_low", "frequency_high"):
+            return super()._tune_window(selected, value)
+        requested = self._optional_edge(value, name=selected)
+        with self._condition:
+            current_low, current_high = self._frequency_bounds
+            low, high = (
+                (requested, current_high)
+                if selected == "frequency_low"
+                else (current_low, requested)
+            )
+            if low is not None and high is not None and low >= high:
+                raise ValueError(
+                    f"{selected}={requested!r} would leave an empty window "
+                    f"[{low!r}, {high!r}]"
+                )
+            limits, values = self._read_fsk_hop_state((low, high))
+            for channel in self._channels:
+                name = channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)
+                current = values[name]
+                if (low is not None and current < low) or (
+                    high is not None and current > high
+                ):
+                    self._fsk_hop_limits.update(limits)
+                    self._current_values.update(values)
+                    raise ValueError(
+                        f"{selected}={requested!r} would strand {name} at "
+                        f"{current:g}; move the knob inside the new window first"
+                    )
+            self._fsk_hop_limits.update(limits)
+            self._current_values.update(values)
+            return super()._tune_window(selected, requested)
+
+    def _resolve_tune(
+        self, name: str, value: object, *, unit: str = ""
+    ) -> object:
+        selected = str(name)
+        routed = self._routing.get(selected)
+        if routed is None or routed[1] != _FSK_HOP_FREQUENCY_FIELD:
+            return super()._resolve_tune(selected, value, unit=unit)
+        channel = routed[0]
+        requested = float(value)
+        with self._condition:
+            effective_range = self._fsk_hop_range(channel)
+            if effective_range is None:
+                try:
+                    limits = self._instrument_limits(
+                        self._read_fsk_hop_frequency_limits(channel),
+                        name=selected,
+                        unit="Hz",
+                    )
+                    effective_range = self._effective_range(
+                        self._frequency_bounds,
+                        limits,
+                        name=selected,
+                        unit="Hz",
+                    )
+                except BaseException:
+                    self._current_values.pop(selected, None)
+                    self._fsk_hop_limits[channel] = None
+                    raise
+                self._fsk_hop_limits[channel] = limits
+            low, high = effective_range
+            if not low <= requested <= high:
+                raise ValueError(
+                    f"{selected} must lie in [{low!r}, {high!r}] Hz"
+                )
+            before = self._current_values.get(selected)
+            held = selected in self._current_values
+            self._current_values.pop(selected, None)
+            try:
+                effective = float(
+                    self._write_fsk_hop_frequency(channel, requested)
+                )
+            except TuneRefused:
+                if held:
+                    self._current_values[selected] = before
+                raise
+            self._current_values[selected] = effective
+            if effective != before:
+                self._settings_epoch += 1
+                self._condition.notify_all()
+            return effective
 
     @staticmethod
     def _amplitude_unit_parts(unit: str) -> tuple[str | None, float]:
@@ -412,6 +640,30 @@ class RigolDg4000RfSource(RfSourceBase):
 
     def _read_frequency(self, channel: str) -> float:
         return float(self._link.query(f"{self._source(channel)}:FREQuency?"))
+
+    def _read_fsk_hop_frequency(self, channel: str) -> float:
+        return float(
+            self._link.query(
+                f"{self._source(channel)}:MOD:FSKey:FREQuency?"
+            )
+        )
+
+    def _read_fsk_hop_frequency_limits(
+        self, channel: str
+    ) -> tuple[float, float]:
+        source = self._source(channel)
+        return (
+            float(
+                self._link.query(
+                    f"{source}:MOD:FSKey:FREQuency? MINimum"
+                )
+            ),
+            float(
+                self._link.query(
+                    f"{source}:MOD:FSKey:FREQuency? MAXimum"
+                )
+            ),
+        )
 
     def _read_frequency_limits(self, channel: str) -> tuple[float, float]:
         """The instrument's own range, asked of it: a DG4062 stops at 60 MHz

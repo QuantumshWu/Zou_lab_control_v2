@@ -95,6 +95,7 @@ class _AxisRow(QtWidgets.QWidget):
     """One axis with persistent Range/Values controls and one shared unit."""
 
     edited = QtCore.pyqtSignal()
+    normalized = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal(object)
     unit_change_requested = QtCore.pyqtSignal(object, object, str)
 
@@ -428,7 +429,7 @@ class _AxisRow(QtWidgets.QWidget):
                 )
         # Only the Range bank changes, even when Values is selected.  Its
         # independent text and the already running immutable plan are untouched.
-        self.edited.emit()
+        self.normalized.emit()
 
     @property
     def manual(self) -> bool:
@@ -543,7 +544,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # a row whose field is unchanged keeps its widget.
         self.values_form = FluentParameterForm(FormSpec(()))
         self.values_form.changed.connect(self._value_changed)
-        self.values_form.value_normalized.connect(self._value_changed)
+        self.values_form.value_normalized.connect(
+            lambda key: self._value_changed(key, normalized=True)
+        )
         column.addWidget(self.values_form)
         self.values_note = FluentLabel("")
         self.values_note.setWordWrap(True)
@@ -879,7 +882,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         except ValueError:
             return {}
 
-    def _value_changed(self, _key: str) -> None:
+    def _value_changed(self, _key: str, *, normalized: bool = False) -> None:
         """A value moved: the draft says so now.
 
         A timer used to wait for the wheel to stop, because every write
@@ -890,7 +893,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         if self._loading:
             return
-        self._emit_values()
+        self._emit_values(normalized=normalized)
 
     def _overrides(self) -> dict[str, float]:
         """Only what this run sets differently.
@@ -912,10 +915,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 overrides[name] = float(value)
         return overrides
 
-    def _emit_values(self) -> None:
+    def _emit_values(self, *, normalized: bool = False) -> None:
         self._values_text = api_overrides_to_authored(self._overrides())
         self._port_read_request = None
-        self.draft_changed.emit({"values": {"api_values": self._values_text}})
+        patch = {"values": {"api_values": self._values_text}}
+        if normalized:
+            patch["normalized"] = True
+        self.draft_changed.emit(patch)
         self._refresh_values_note(set())
 
     def _refresh_values_note(self, scanned: set[str]) -> None:
@@ -1024,6 +1030,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _build_row(self, axis: Mapping | None) -> _AxisRow:
         row = _AxisRow(self._ports, axis, self, device_labels=self._device_labels)
         row.edited.connect(self._emit_plan)
+        row.normalized.connect(lambda: self._emit_plan(normalized=True))
         row.unit_change_requested.connect(self._convert_axis_unit)
         row.remove_requested.connect(self._remove_row)
         return row
@@ -1031,6 +1038,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _build_manual_row(self, axis: Mapping | None) -> _ManualAxisRow:
         row = _ManualAxisRow(axis, self._default_manual_name(), self)
         row.edited.connect(self._emit_plan)
+        row.normalized.connect(lambda: self._emit_plan(normalized=True))
         row.remove_requested.connect(self._remove_row)
         return row
 
@@ -1079,7 +1087,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                         raise ValueError(str(error))
         return ScanPlan.from_tree({"axes": [row.input_entry() for row in self._rows]})
 
-    def _emit_plan(self) -> None:
+    def _emit_plan(self, *, normalized: bool = False) -> None:
         if self._loading:
             return
         for row in self._rows:
@@ -1100,7 +1108,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._port_read_request = None
         # The host's draft contract: a patch under "values", the same shape
         # the auto-generated form emits.
-        self.draft_changed.emit({"values": {"plan": self._plan_text}})
+        patch = {"values": {"plan": self._plan_text}}
+        if normalized:
+            patch["normalized"] = True
+        self.draft_changed.emit(patch)
         self._refresh_summary()
 
     def _refresh_summary(self) -> None:

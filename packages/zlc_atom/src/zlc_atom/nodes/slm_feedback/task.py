@@ -326,7 +326,16 @@ def _split_half_dispersion(
         return float("nan"), float("nan")
     first = np.log(odd[usable])
     second = np.log(even[usable])
-    products = (first - np.mean(first)) * (second - np.mean(second))
+    # Translation does not change covariance.  Anchor first so a truly
+    # constant half becomes exact zeros before taking its mean; subtracting
+    # the rounded mean of equal non-binary logarithms directly left identical
+    # 1e-16 residuals whose positive product made a uniform array look
+    # measurably non-uniform.
+    first -= float(first[0])
+    second -= float(second[0])
+    first -= np.mean(first)
+    second -= np.mean(second)
+    products = first * second
     variance = float(np.sum(products) / (count - 1))
     error = float(np.std(products, ddof=1) * np.sqrt(count) / (count - 1))
     return variance, error

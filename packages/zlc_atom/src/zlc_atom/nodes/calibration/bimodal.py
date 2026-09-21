@@ -329,7 +329,7 @@ def _split_start(
     low, high = values[values <= split], values[values > split]
     if low.size < 1 or high.size < 1:
         return None
-    spread = float(np.std(values)) or 1.0
+    spread = float(np.std(values))
     means = np.array([float(np.mean(low)), float(np.mean(high))])
     if means[1] <= means[0]:
         return None
@@ -416,13 +416,13 @@ class BimodalFit:
 def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> BimodalFit:
     """Fit the two readout states of one sample, whatever the sample looks like.
 
-    Two Gaussians are always what is fitted, because two states are always
-    what is there: a site either held an atom in that shot or it did not, and
-    a sample where the two are hard to tell apart is a sample with poor
-    separation, not a sample with one state.  So separation is reported, and
-    it never withholds the fit -- an operator who put a threshold classifier
-    on a site asked to see the two states, and "the peaks are close" is an
-    answer about the data, not a reason to show nothing.
+    Two Gaussians are fitted whenever the sample has a possible split, because
+    two states are what the readout measures: a site either held an atom in
+    that shot or it did not, and close peaks mean poor separation rather than
+    permission to hide the fit.  An exactly constant sample is the structural
+    exception: no observation lies on the other side of any cut, so it is
+    reported unseparated instead of inventing a numerical scale and a second
+    population.
 
     Cuts across the sample provide both hard-partition moment candidates and
     EM-refined candidates; the likeliest pair wins, less the cost on their
@@ -443,12 +443,15 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     split in two like any other sample, and the evidence is what says it
     did not; two populations that overlap at sixty shots are ``ok`` and not
     ``decisive``, and their crossing is still the best threshold there is.
-    Every number is returned either way.
     """
 
     samples = np.asarray(values, dtype=float).reshape(-1)
     samples = samples[np.isfinite(samples)]
-    if samples.size < 4:
+    # A constant sample has no cut that puts observations on both sides.
+    # This is an exact structural fact, not a small-spread policy: do not
+    # replace its zero spread with an invented unit and manufacture a second
+    # population one unit away.
+    if samples.size < 4 or not np.any(samples != samples[0]):
         split = _exact_otsu_threshold(samples) if samples.size else float("nan")
         return BimodalFit(
             threshold=split,
@@ -464,7 +467,7 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
             bic_gain=np.nan,
             ok=False,
         )
-    spread = float(np.std(samples)) or 1.0
+    spread = float(np.std(samples))
     sigma_min = max(0.01 * spread, _SIGMA_FLOOR)
     weight_min = min(
         0.25, max(float(min_component_fraction), 2.0 / float(samples.size))

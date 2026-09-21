@@ -190,18 +190,17 @@ class Operand(NDArrayOperatorsMixin):
         if operation in ("sum", "mean", "std", "min", "max") and source.dtype.kind == "b":
             raise TypeError("use count/any/all for boolean data")
         count = source.valid
-        total = squares = None
+        total = None
         if operation == "count":
             if source.dtype.kind == "b":
                 total = source.valid & source.values
         elif operation in ("all", "any"):
             total = np.where(source.valid, source.values, operation == "all")
         elif operation == "std":
-            center = (float(np.mean(source.values[source.valid], dtype=np.float64))
-                      if np.any(source.valid) else 0.0)
-            total = np.zeros(source.shape, dtype=np.float64)
-            np.subtract(source.values, center, out=total, where=source.valid, dtype=np.float64)
-            squares = np.square(total)
+            # The reduction plan below owns the output buckets.  Their local
+            # anchors are chosen only after that plan is known; using one
+            # global center loses small real spreads when bucket means differ.
+            pass
         else:
             fill = {"min": np.inf, "max": -np.inf}.get(operation, 0.0)
             total = np.full(source.shape, fill, dtype=np.float64)
@@ -209,6 +208,7 @@ class Operand(NDArrayOperatorsMixin):
         domains = list(source.domains)
         # Sums/counts pass through all domains before division: averaging group
         # averages would weight partially valid groups incorrectly.
+        plans = []
         for d, domain in enumerate(source.domains):
             if not any(a.axis_id in ids for a in domain.axes):
                 continue
@@ -225,29 +225,61 @@ class Operand(NDArrayOperatorsMixin):
                 else:
                     inverse = np.zeros(domain.size, np.int64)
                     domains[d] = DomainSpec((1,), (), ())
+                plans.append(("mapped", d, inverse, domains[d].size))
                 if total is not None:
                     total = _group_reduce(total, inverse, domains[d].size, d, operation)
                 count = _group_reduce(count, inverse, domains[d].size, d, "count")
-                if squares is not None:
-                    squares = _group_reduce(squares, inverse, domains[d].size, d, "sum")
             else:
                 positions = tuple(2+i for i,a in enumerate(domain.axes) if a.axis_id in ids)
+                kept_positions = tuple(
+                    i for i, a in enumerate(domain.axes) if a.axis_id not in ids
+                )
+                plans.append(("dense", positions, domain.shape, kept_positions))
                 reducer = getattr(np, operation) if operation in ("min", "max", "all", "any") else np.sum
                 if total is not None:
                     total = reducer(total, axis=positions)
                 count = np.sum(count, axis=positions)
-                if squares is not None:
-                    squares = np.sum(squares, axis=positions)
                 domains[d] = DomainSpec(tuple(a.size for a in kept), kept) if kept else SCALAR_DOMAIN
                 if not kept:
                     total = None if total is None else total[..., None]
                     count = count[..., None]
-                    squares = None if squares is None else squares[..., None]
         valid = count > 0
-        if operation in ("mean", "std"):
+        if operation == "std":
+            # Anchor every output bucket to one of its own stored samples.
+            # Both passes then operate on small local deltas, so constant data
+            # stays exactly constant and real sub-baseline spread survives.
+            flat_indexes = np.arange(source.values.size, dtype=np.int64).reshape(source.shape)
+            flat_indexes = np.where(source.valid, flat_indexes, source.values.size)
+            first = _apply_reduction_plans(flat_indexes, plans, "min")
+            anchors = np.zeros(count.shape, dtype=np.float64)
+            anchors[valid] = source.values.reshape(-1)[first[valid]]
+            expanded_anchor = _expand_reduction_plans(anchors, plans)
+            centered = np.zeros(source.shape, dtype=np.float64)
+            np.subtract(
+                source.values,
+                expanded_anchor,
+                out=centered,
+                where=source.valid,
+                dtype=np.float64,
+            )
+            local_mean = _apply_reduction_plans(centered, plans, "sum")
+            local_mean = np.divide(
+                local_mean,
+                count,
+                out=np.zeros(count.shape, dtype=np.float64),
+                where=valid,
+            )
+            centered -= _expand_reduction_plans(local_mean, plans)
+            np.copyto(centered, 0.0, where=~source.valid)
+            spread = _apply_reduction_plans(np.square(centered), plans, "sum")
+            total = np.sqrt(np.divide(
+                spread,
+                count,
+                out=np.full(count.shape, np.nan, dtype=np.float64),
+                where=valid,
+            ))
+        elif operation == "mean":
             total = np.divide(total, count, out=np.full(total.shape, np.nan), where=valid)
-            if squares is not None:
-                total = np.sqrt(np.maximum(0, np.divide(squares, count, out=np.zeros(total.shape), where=valid)-total**2))
         if operation == "count":
             total = (total if source.dtype.kind == "b" else count).astype(np.int64, copy=False)
         return Operand(_schema(domains, total.dtype, "1" if operation in ("count", "all", "any") else source.unit), total, valid)
@@ -306,14 +338,61 @@ class Operand(NDArrayOperatorsMixin):
 
 def _group_reduce(values, codes, count, axis, operation):
     source = np.moveaxis(values, axis, 0)
-    reducer, fill = {
-        "min": (np.minimum, np.inf), "max": (np.maximum, -np.inf),
-        "all": (np.logical_and, True), "any": (np.logical_or, False),
-    }.get(operation, (np.add, 0))
+    if operation == "min":
+        reducer = np.minimum
+        fill = np.iinfo(source.dtype).max if source.dtype.kind in "iu" else np.inf
+    elif operation == "max":
+        reducer = np.maximum
+        fill = np.iinfo(source.dtype).min if source.dtype.kind in "iu" else -np.inf
+    else:
+        reducer, fill = {
+            "all": (np.logical_and, True), "any": (np.logical_or, False),
+        }.get(operation, (np.add, 0))
     out = np.full((count, *source.shape[1:]), fill,
                   dtype=np.int64 if operation == "count" else source.dtype)
     reducer.at(out, codes, source)
     return np.moveaxis(out, 0, axis)
+
+
+def _apply_reduction_plans(values, plans, operation):
+    """Apply an already-resolved axis reduction without rebuilding its geometry."""
+    result = values
+    for plan in plans:
+        if plan[0] == "mapped":
+            _, axis, inverse, size = plan
+            result = _group_reduce(result, inverse, size, axis, operation)
+            continue
+        _, positions, _original_shape, kept_positions = plan
+        reducer = np.min if operation == "min" else np.sum
+        result = reducer(result, axis=positions)
+        if not kept_positions:
+            result = result[..., None]
+    return result
+
+
+def _expand_reduction_plans(values, plans):
+    """Broadcast one value per resolved output bucket back to source geometry."""
+    result = values
+    for plan in reversed(plans):
+        if plan[0] == "mapped":
+            _, axis, inverse, _size = plan
+            result = np.take(result, inverse, axis=axis)
+            continue
+        _, _positions, original_shape, kept_positions = plan
+        shape = list(result.shape[:2])
+        cursor = 2
+        kept = set(kept_positions)
+        for position in range(len(original_shape)):
+            if position in kept:
+                shape.append(result.shape[cursor])
+                cursor += 1
+            else:
+                shape.append(1)
+        result = np.broadcast_to(
+            result.reshape(tuple(shape)),
+            (*result.shape[:2], *original_shape),
+        )
+    return result
 
 
 def _same_geometry(left, right):

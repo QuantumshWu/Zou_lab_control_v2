@@ -38,7 +38,6 @@ from .data_view import (
     QuantityArray,
     RollingHistory,
     histogram_edges,
-    _sem_reference,
 )
 from .fit import (
     FitModelSpec,
@@ -87,21 +86,135 @@ class FitScope(str, Enum):
     ALL = "all"
 
 
-def _window_totals(totals: np.ndarray, span: int) -> np.ndarray:
-    """Running totals turned into totals over the last ``span`` entries.
+def _combine_moment_summaries(
+    left_n: np.ndarray,
+    left_mean: np.ndarray,
+    left_m2: np.ndarray,
+    left_single_sem_square: np.ndarray,
+    right_n: np.ndarray,
+    right_mean: np.ndarray,
+    right_m2: np.ndarray,
+    right_single_sem_square: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Combine independent ``(n, mean, M2)`` summaries without raw moments.
 
-    A prefix sum answers "everything up to here"; subtracting the prefix
-    that has left the window answers "the last span".  Before the window
-    has filled, the subtracted prefix is empty, so the early points are the
-    running totals -- the trace begins as everything it has and settles
-    into the window without a discontinuity.
+    ``single_sem_square`` is meaningful only when the summary contains one
+    sample.  It preserves that sample's stated uncertainty for the one case
+    where observed scatter cannot estimate an error; once two samples are
+    present, their scatter is the estimator and the value becomes NaN.
     """
 
-    if span >= totals.size:
-        return totals
-    shifted = np.zeros_like(totals)
-    shifted[span:] = totals[:-span]
-    return totals - shifted
+    count = left_n + right_n
+    left_present = left_n > 0
+    right_present = right_n > 0
+    both = left_present & right_present
+    mean = np.where(left_present, left_mean, right_mean)
+    m2 = np.where(left_present, left_m2, right_m2)
+    single_sem_square = np.where(
+        left_present, left_single_sem_square, right_single_sem_square
+    )
+    if np.any(both):
+        delta = right_mean[both] - left_mean[both]
+        total = count[both].astype(np.float64)
+        left_weight = left_n[both].astype(np.float64)
+        right_weight = right_n[both].astype(np.float64)
+        mean[both] = left_mean[both] + delta * right_weight / total
+        m2[both] = (
+            left_m2[both]
+            + right_m2[both]
+            + np.square(delta) * left_weight * right_weight / total
+        )
+    single_sem_square[count != 1] = np.nan
+    return count, mean, m2, single_sem_square
+
+
+def _window_moment_summaries(
+    shot_n: np.ndarray,
+    shot_mean: np.ndarray,
+    shot_m2: np.ndarray,
+    shot_single_sem_square: np.ndarray,
+    span: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """NumPy reference for the compiled span-block Chan scan."""
+
+    total = shot_n.size
+    width = min(span, total)
+    block_count = (total + width - 1) // width
+    padded = block_count * width
+    shot_counts = np.zeros(padded, dtype=np.int64)
+    shot_counts[:total] = shot_n
+    shot_means = np.zeros(padded, dtype=np.float64)
+    shot_means[:total] = shot_mean
+    shot_m2s = np.zeros(padded, dtype=np.float64)
+    shot_m2s[:total] = shot_m2
+    shot_sem_squares = np.full(padded, np.nan, dtype=np.float64)
+    shot_sem_squares[:total] = shot_single_sem_square
+    shot_counts = shot_counts.reshape(block_count, width)
+    shot_means = shot_means.reshape(block_count, width)
+    shot_m2s = shot_m2s.reshape(block_count, width)
+    shot_sem_squares = shot_sem_squares.reshape(block_count, width)
+
+    suffix_n = shot_counts.copy()
+    suffix_mean = shot_means.copy()
+    suffix_m2 = shot_m2s.copy()
+    suffix_single_sem_square = shot_sem_squares.copy()
+    for offset in range(width - 2, -1, -1):
+        (
+            suffix_n[:, offset],
+            suffix_mean[:, offset],
+            suffix_m2[:, offset],
+            suffix_single_sem_square[:, offset],
+        ) = _combine_moment_summaries(
+            shot_counts[:, offset],
+            shot_means[:, offset],
+            shot_m2s[:, offset],
+            shot_sem_squares[:, offset],
+            suffix_n[:, offset + 1],
+            suffix_mean[:, offset + 1],
+            suffix_m2[:, offset + 1],
+            suffix_single_sem_square[:, offset + 1],
+        )
+
+    for offset in range(1, width):
+        (
+            shot_counts[:, offset],
+            shot_means[:, offset],
+            shot_m2s[:, offset],
+            shot_sem_squares[:, offset],
+        ) = _combine_moment_summaries(
+            shot_counts[:, offset - 1],
+            shot_means[:, offset - 1],
+            shot_m2s[:, offset - 1],
+            shot_sem_squares[:, offset - 1],
+            shot_counts[:, offset],
+            shot_means[:, offset],
+            shot_m2s[:, offset],
+            shot_sem_squares[:, offset],
+        )
+
+    if block_count > 1 and width > 1:
+        (
+            shot_counts[1:, :-1],
+            shot_means[1:, :-1],
+            shot_m2s[1:, :-1],
+            shot_sem_squares[1:, :-1],
+        ) = _combine_moment_summaries(
+            suffix_n[:-1, 1:],
+            suffix_mean[:-1, 1:],
+            suffix_m2[:-1, 1:],
+            suffix_single_sem_square[:-1, 1:],
+            shot_counts[1:, :-1],
+            shot_means[1:, :-1],
+            shot_m2s[1:, :-1],
+            shot_sem_squares[1:, :-1],
+        )
+
+    return (
+        shot_counts.reshape(-1)[:total],
+        shot_means.reshape(-1)[:total],
+        shot_m2s.reshape(-1)[:total],
+        shot_sem_squares.reshape(-1)[:total],
+    )
 
 
 def _trailing_trace(
@@ -123,51 +236,62 @@ def _trailing_trace(
     of those shots happened to pool.
     """
 
-    values = np.asarray(history.values, dtype=float)[:, column]
+    total = len(history)
+    values = np.asarray(history.values, dtype=np.float64)[:, column]
     contributing = np.asarray(history.valid[:, column], dtype=bool)
+    sems = (
+        np.full(total, np.nan, dtype=np.float64)
+        if not uncertainty or history.sem is None
+        else np.asarray(history.sem, dtype=np.float64)[:, column]
+    )
     if history.group_keys[column] == ():
-        counts = np.asarray(history.counts, dtype=float)[:, column]
-        contributing = contributing & (counts > 0.0)
-        count = np.where(contributing, counts, 0.0)
+        counts = np.asarray(history.counts, dtype=np.int64)[:, column]
+        contributing = contributing & (counts > 0)
+        shot_n = np.where(contributing, counts, 0)
     else:
         # One per-key value per shot: for a per-site trace that IS the
-        # shot's one sample, so it has no spread of its own.
-        count = contributing.astype(float)
+        # shot's one sample.  Its own SEM is still meaningful when it is the
+        # only valid history sample in a trailing window.
+        shot_n = contributing.astype(np.int64)
 
-    # Square about the data, not about zero -- the same reason every bucket
-    # reduction does.  A shot counter's values are small; a fitted optical
-    # frequency's are not, and E[x^2] - mean^2 about zero would report a
-    # spread made entirely of rounding.
-    reference = _sem_reference(values[contributing])
-    centred = np.where(contributing, values - reference, 0.0)
-    sums = count * centred
-    running_n = _window_totals(np.cumsum(count), span)
-    running_sum = _window_totals(np.cumsum(sums), span)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        centred_mean = running_sum / running_n
-        mean = centred_mean + reference
+    shot_mean = np.where(contributing, values, 0.0)
+    shot_m2 = np.zeros(total, dtype=np.float64)
+    pooled = contributing & (shot_n > 1) & np.isfinite(sems)
+    shot_m2[pooled] = (
+        np.square(sems[pooled])
+        * shot_n[pooled]
+        * (shot_n[pooled] - 1)
+    )
+    shot_single_sem_square = np.full(total, np.nan, dtype=np.float64)
+    single = contributing & (shot_n == 1) & np.isfinite(sems)
+    shot_single_sem_square[single] = np.square(sems[single])
+
+    # A length-span window intersects at most two consecutive span-sized
+    # blocks.  The compiled owner performs their Chan/Welford prefix/suffix
+    # scan in O(history); the NumPy spelling is its exact reference/fallback.
+    from . import _raster_kernels as kernels
+
+    summaries = kernels.trailing_moment_windows(
+        shot_n, shot_mean, shot_m2, shot_single_sem_square, span
+    )
+    if summaries is None:
+        summaries = _window_moment_summaries(
+            shot_n, shot_mean, shot_m2, shot_single_sem_square, span
+        )
+    running_n, mean, running_m2, running_single_sem_square = summaries
     sem = None
     if uncertainty:
-        mean_square = centred * centred
-        # Preserve within-shot scatter only for a pool of raw samples.
-        # Grouped traces contribute one reduced value per shot.
-        if history.group_keys[column] == () and history.sem is not None:
-            sems = np.asarray(history.sem, dtype=float)[:, column]
-            stated = contributing & (count > 1.0) & np.isfinite(sems)
-            mean_square += np.where(
-                stated, np.where(stated, sems, 0.0) ** 2 * (count - 1.0), 0.0
-            )
-        squares = count * np.where(contributing, mean_square, 0.0)
-        running_squares = _window_totals(np.cumsum(squares), span)
+        variance = np.full(total, np.nan, dtype=np.float64)
+        observed = running_n > 1
+        variance[observed] = running_m2[observed] / (running_n[observed] - 1)
+        stated = (running_n == 1) & np.isfinite(running_single_sem_square)
+        variance[stated] = running_single_sem_square[stated]
         with np.errstate(invalid="ignore", divide="ignore"):
-            spread = np.clip(
-                running_squares / running_n - np.square(centred_mean), 0.0, None
-            )
-            sem = np.sqrt(spread / (running_n - 1.0))
-        sem[running_n < 2.0] = np.nan
-    valid = (running_n > 0.0) & np.isfinite(mean)
+            sem = np.sqrt(variance / running_n)
+    valid = (running_n > 0) & np.isfinite(mean)
     mean = np.where(valid, mean, np.nan)
     return mean, sem, valid
+
 
 def _broadcast_all_true(mask: np.ndarray) -> bool:
     """True for a stride-0 broadcast plane that is constant True."""

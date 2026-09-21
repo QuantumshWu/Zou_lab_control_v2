@@ -783,6 +783,12 @@ def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -
         np.ones(sites, bool),
     )
     assert uniform_variance <= uniform_error
+    exact_variance, exact_error = _split_half_dispersion(
+        np.full(sites, 3.2),
+        np.full(sites, 3.2),
+        np.ones(sites, bool),
+    )
+    assert (exact_variance, exact_error) == (0.0, 0.0)
     assert np.isnan(_split_half_dispersion(odd, even, np.zeros(sites, bool))[0])
     assert _expected_noise_ratio(np.full(sites, sigma), np.ones(sites, bool)) == pytest.approx(
         1.054, abs=0.006

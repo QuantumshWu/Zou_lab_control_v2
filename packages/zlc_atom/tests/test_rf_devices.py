@@ -46,6 +46,7 @@ class _ScpiInstrument:
         self.registers = {
             channel: {
                 "FREQ": 1000.0,
+                "FSK_HOP": 2000.0,
                 "VOLT": -30.0,
                 "OUT": "OFF",
                 "UNIT": "DBM",
@@ -84,7 +85,10 @@ class _ScpiInstrument:
         self.log.append(command)
         upper = command.upper()
         registers = self.registers[self._channel(command)]
-        if ":FREQUENCY " in upper:
+        if ":MOD:FSKEY:FREQUENCY " in upper:
+            registers["FSK_HOP"] = float(command.split()[-1])
+            registers["VOLT"] = min(registers["VOLT"], self._amplitude_cap(registers))
+        elif ":FREQUENCY " in upper:
             registers["FREQ"] = float(command.split()[-1])
             registers["VOLT"] = min(registers["VOLT"], self._amplitude_cap(registers))
         elif ":VOLTAGE:UNIT " in upper:
@@ -126,6 +130,12 @@ class _ScpiInstrument:
             return "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12"
         registers = self.registers[self._channel(command)]
         # The instrument's own limits, as a DG4162 answers them.
+        if ":MOD:FSKEY:FREQUENCY? MIN" in upper:
+            return "1.000000E-06"
+        if ":MOD:FSKEY:FREQUENCY? MAX" in upper:
+            return "1.600000E+08"
+        if ":MOD:FSKEY:FREQUENCY?" in upper:
+            return f"{registers['FSK_HOP']:.6E}"
         if ":FREQUENCY? MIN" in upper:
             return "1.000000E-06"
         if ":FREQUENCY? MAX" in upper:
@@ -163,9 +173,8 @@ def _rigol(**overrides) -> tuple[RigolDg4000RfSource, _ScpiInstrument]:
 def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
     """Channels are the device's own structure, never the operator's to manage.
 
-    One DG4162 is one card offering six knobs -- ch1/ch2 each with
-    frequency, power and output -- and tuning one channel must not move the
-    other.
+    One DG4162 is one card offering eight knobs -- ch1/ch2 each with carrier,
+    FSK hop, power and output -- and tuning one channel must not move the other.
     """
 
     source, instrument = _rigol()
@@ -173,9 +182,11 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
     names = [field.metadata.name for field in source.tunable_fields()]
     assert names == [
         "ch1_frequency",
+        "ch1_fsk_hop_frequency",
         "ch1_power",
         "ch1_output_enabled",
         "ch2_frequency",
+        "ch2_fsk_hop_frequency",
         "ch2_power",
         "ch2_output_enabled",
         "frequency_low",
@@ -185,16 +196,22 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
     ]
 
     assert source.tune("ch1_frequency", 80e6) == 80e6
+    assert source.tune("ch1_fsk_hop_frequency", 70e6) == 70e6
     assert source.tune("ch2_frequency", 5e6) == 5e6
+    assert source.tune("ch2_fsk_hop_frequency", 6e6) == 6e6
     assert instrument.registers["1"]["FREQ"] == 80e6
+    assert instrument.registers["1"]["FSK_HOP"] == 70e6
     assert instrument.registers["2"]["FREQ"] == 5e6
+    assert instrument.registers["2"]["FSK_HOP"] == 6e6
     assert source.tune("ch2_output_enabled", True) is True
     assert instrument.registers["1"]["OUT"] == "OFF", (
         "tuning one channel must not move the other"
     )
     values = source.tunable_values()
     assert values["ch1_frequency"] == 80e6
+    assert values["ch1_fsk_hop_frequency"] == 70e6
     assert values["ch2_frequency"] == 5e6
+    assert values["ch2_fsk_hop_frequency"] == 6e6
     assert values["ch2_output_enabled"] is True
 
 
@@ -206,6 +223,8 @@ def test_bounds_are_bench_policy_and_refuse_before_writing() -> None:
     }
     with pytest.raises(ValueError, match="ch2_frequency must lie in"):
         source.tune("ch2_frequency", 2e6)
+    with pytest.raises(ValueError, match="ch2_fsk_hop_frequency must lie in"):
+        source.tune("ch2_fsk_hop_frequency", 2e6)
     with pytest.raises(ValueError, match="ch1_power must lie in"):
         source.tune("ch1_power", 99.0)
     with pytest.raises(TypeError, match="ch1_output_enabled takes a bool"):
@@ -245,6 +264,13 @@ def test_only_an_effective_change_advances_the_settings_epoch() -> None:
         second["settings_epoch"] + 1
     )
 
+    before_hop = source.settings_provenance()
+    assert source.tune("ch1_fsk_hop_frequency", 3e6) == 3e6
+    after_hop = source.settings_provenance()
+    assert after_hop["settings_epoch"] == before_hop["settings_epoch"] + 1
+    assert source.tune("ch1_fsk_hop_frequency", 3e6) == 3e6
+    assert source.settings_provenance() == after_hop
+
     # The instrument's name is a label; the session is this connection.
     assert "DG4162" in source.identity
     assert "DG4162" not in str(second["device_session_id"])
@@ -267,14 +293,19 @@ def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     for channel in ("ch1", "ch2"):
         frequency = by_name[f"{channel}_frequency"].metadata
+        fsk_hop = by_name[f"{channel}_fsk_hop_frequency"].metadata
         assert (frequency.minimum, frequency.maximum) == (1e3, 160e6)
+        assert (fsk_hop.minimum, fsk_hop.maximum) == (1e3, 160e6)
         assert frequency.unit == "Hz"
+        assert fsk_hop.unit == "Hz"
         assert frequency.label.startswith(channel.upper())
+        assert fsk_hop.label == f"{channel.upper()} · FSK hop frequency"
         assert by_name[f"{channel}_power"].metadata.unit == "dBm"
         # The instrument's own limits ride beside the effective bounds, so
         # a panel can show which fence is the binding one: here the bench
         # authored the low edge and the instrument owns the high one.
         assert by_name[f"{channel}_frequency"].device_limits == (1e-6, 160e6)
+        assert by_name[f"{channel}_fsk_hop_frequency"].device_limits == (1e-6, 160e6)
         assert by_name[f"{channel}_power"].device_limits == (-60.0, 23.98)
         # The output switch is a control, not an axis: unbounded on purpose,
         # so scan_ports_for_devices never offers it.
@@ -282,6 +313,7 @@ def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
         assert output.metadata.minimum is None and output.metadata.maximum is None
         assert output.device_limits is None
         assert by_name[f"{channel}_frequency"].live_write
+        assert by_name[f"{channel}_fsk_hop_frequency"].live_write
     for name in ("frequency_low", "frequency_high", "power_low", "power_high"):
         assert by_name[name].device_limits is None, "a policy edge has no instrument limit"
     for field in by_name.values():
@@ -322,9 +354,11 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
 
     ports = {port.port.split(":")[-1]: port for port in scan_ports_for_devices({"rf": source})}
     assert set(ports) == {
-        "ch1_frequency", "ch1_power", "ch2_frequency", "ch2_power"
+        "ch1_frequency", "ch1_fsk_hop_frequency", "ch1_power",
+        "ch2_frequency", "ch2_fsk_hop_frequency", "ch2_power",
     }, "with no window, a knob is swept over the instrument's own range"
     assert (ports["ch1_frequency"].lo, ports["ch1_frequency"].hi) == (1e-6, 160e6)
+    assert (ports["ch1_fsk_hop_frequency"].lo, ports["ch1_fsk_hop_frequency"].hi) == (1e-6, 160e6)
     assert (ports["ch1_power"].lo, ports["ch1_power"].hi) == (-60.0, 23.98)
     assert not any("FREQuency " in command for command in instrument.log), (
         "omitting all policy edges must not move hardware at open"
@@ -342,7 +376,8 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     ports = scan_ports_for_devices({"rf": source})
     offered = {port.port.split(":")[-1] for port in ports}
     assert offered == {
-        "ch1_frequency", "ch1_power", "ch2_frequency", "ch2_power"
+        "ch1_frequency", "ch1_fsk_hop_frequency", "ch1_power",
+        "ch2_frequency", "ch2_fsk_hop_frequency", "ch2_power",
     }
 
     before = source.settings_provenance()["settings_epoch"]
@@ -371,6 +406,13 @@ def test_optional_window_is_one_init_and_control_policy() -> None:
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     assert by_name["ch1_frequency"].metadata.maximum == 80e6
     assert by_name["ch1_frequency"].device_limits == (1e-6, 160e6)
+    assert by_name["ch1_fsk_hop_frequency"].metadata.maximum == 80e6
+    assert by_name["ch1_fsk_hop_frequency"].device_limits == (1e-6, 160e6)
+
+    source.tune("ch1_fsk_hop_frequency", 50e6)
+    with pytest.raises(ValueError, match="strand ch1_fsk_hop_frequency at 5e"):
+        source.tune("frequency_high", 20e6)
+    source.tune("ch1_fsk_hop_frequency", 10e6)
 
     source.tune("ch1_frequency", 50e6)
     with pytest.raises(ValueError, match="strand ch1_frequency at 5e"):
@@ -606,7 +648,9 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
             assert instrument.registers["1"]["VOLT"] == original
             # A successful rollback write is not a confirmed readback.
             before_projection = len(instrument.log)
-            assert source.tunable_fields()[1].current is None
+            assert {
+                item.metadata.name: item for item in source.tunable_fields()
+            }[field].current is None
             assert source.read_tunable_in_unit(field, "mVpp").current is None
             assert len(instrument.log) == before_projection
             source.refresh_tunable_fields()
@@ -624,7 +668,9 @@ def test_selected_units_write_native_amplitude_and_restore_the_raw_pair() -> Non
         assert any("unit restore failed" in note for note in failure.value.__notes__)
         assert any("amplitude restore failed" in note for note in failure.value.__notes__)
         before_projection = len(instrument.log)
-        assert source.tunable_fields()[1].current is None
+        assert {
+            item.metadata.name: item for item in source.tunable_fields()
+        }[field].current is None
         assert source.read_tunable_in_unit(field, "mVpp").current is None
         assert len(instrument.log) == before_projection
         instrument.write = write
@@ -696,8 +742,8 @@ def test_peak_to_peak_volts_are_converted_only_for_a_sine() -> None:
     assert instrument.registers["1"]["VOLT"] == 0.632456, "a refusal wrote nothing"
 
 
-def test_frequency_apply_reads_only_frequency_and_invalidates_amplitude() -> None:
-    """Native amplitude limiting never undoes an authored frequency write."""
+def test_frequency_apply_reads_only_its_frequency_and_invalidates_amplitude() -> None:
+    """Carrier and FSK hop changes share the truthful frequency contract."""
 
     source, instrument = _rigol()
     assert source.tune("ch1_power", 20.0) == 20.0
@@ -715,7 +761,32 @@ def test_frequency_apply_reads_only_frequency_and_invalidates_amplitude() -> Non
     assert displayed.current is None and displayed.metadata.unit == "mVpp"
     assert len(instrument.log) == 2, "metadata and epoch do not query the instrument"
     source.refresh_tunable_fields()
-    assert source.tunable_fields()[1].current == 17.96
+    assert {
+        field.metadata.name: field for field in source.tunable_fields()
+    }["ch1_power"].current == 17.96
+
+    instrument.log.clear()
+    assert source.tune_in_unit(
+        "ch1_fsk_hop_frequency", 70000.0, "kHz"
+    ) == 70000.0
+    assert instrument.log == [
+        ":SOURce1:MOD:FSKey:FREQuency 70000000",
+        ":SOURce1:MOD:FSKey:FREQuency?",
+    ]
+    assert instrument.registers["1"]["FSK_HOP"] == 70e6
+    fields = {field.metadata.name: field for field in source.tunable_fields()}
+    assert fields["ch1_power"].current is None
+    assert fields["ch1_power"].device_limits is None
+
+    from zlc_atom.nodes.scan.devices import ScanDeviceKnobs
+
+    knobs = ScanDeviceKnobs({"rf": source})
+    assert knobs.move(
+        "device:rf:ch1_fsk_hop_frequency", 80000.0, "kHz"
+    ) == 80000.0
+    assert instrument.registers["1"]["FSK_HOP"] == 80e6
+    knobs.restore()
+    assert instrument.registers["1"]["FSK_HOP"] == 70e6
 
     # Under the cap a frequency write is an ordinary write, and the
     # amplitude stays where it was set.

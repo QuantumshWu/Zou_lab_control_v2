@@ -155,7 +155,28 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         row._show_values(ScanAxis(BIAS.port, (-2.0, 0.2, 3.0), "V"))
         assert row.axis().values == (-1.0, 0.2, 1.0)
         assert row.custom_label.text() == "custom values"
+
+        # A projected ROI is normalized after the synchronous reconcile has
+        # finished. It must not claim that the operator manually edited it.
+        app = ensure_qt_app()
+        editor.resize(850, 180)
+        editor.show()
+        for _ in range(8):
+            app.processEvents()
+        drafts = []
+        editor.draft_changed.connect(drafts.append)
+        editor.update_projection({"form_values": {"plan": json.dumps({"axes": [{
+            "port": "manual:power", "values": [142.1234567890123, 153.12345678395613, 164.1234567789],
+            "unit": "mVpp", "mode": "range", "value_text": "",
+        }]}), "api_values": ""}})
+        for _ in range(8):
+            app.processEvents()
+        assert drafts and all(patch.get("normalized") is True for patch in drafts)
+        drafts.clear()
+        editor._rows[0].points_spin.stepBy(1)
+        assert drafts and any(not patch.get("normalized", False) for patch in drafts)
     finally:
+        editor.close()
         editor.deleteLater()
 
 
@@ -463,6 +484,9 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
         assert form.unit_picker_for("duration:p0") is not None
         assert hold.shownUnit() == "µs", hold.shownUnit()
     assert "1 of 2 set for this run" in editor.values_note.text()
+    drafts.clear()
+    form.value_normalized.emit("duration:p0")
+    assert drafts and drafts[-1].get("normalized") is True
     editor.close()
     editor.deleteLater()
 

@@ -1151,6 +1151,8 @@ assert ('camera-1', {'values': {'repeat': 3}}) in patches
 assert ('camera-1', {'artifact_inputs': {'calibration_path': 'C:/data/manual.json'}}) in patches
 assert ('camera-1', {'source_signal': 'camera-1.frames'}) in patches
 assert ('camera-1', {'device_keys': {'camera': 'mot_camera'}}) in patches
+editor.form.widget_for('repeat').valueNormalized.emit()
+assert patches[-1] == ('camera-1', {'values': {'repeat': 3}, 'normalized': True})
 readout = editor._artifact_result_readouts['artifact_path']
 assert readout.isReadOnly()
 assert readout.text() == 'C:/data/calibration-2.json'

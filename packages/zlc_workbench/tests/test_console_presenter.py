@@ -7722,7 +7722,7 @@ def test_opening_edit_under_a_newer_shot_stages_one_host(
 
 
 def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_drew(
-    presenter, session
+    presenter, session, monkeypatch, request
 ) -> None:
     """The stored region is in the column's own unit, so the runtime finds it.
 
@@ -7735,7 +7735,12 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     metres and volts passed because those are base units.
     """
 
+    import json
+    from zlc_atom.nodes.scan import ScanAxis, ScanPlan
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+    from zlc_workbench.logic import stable_signal_key
+    from zlc_atom.nodes.scan.editor import ScanPlanEditor
+    from zlc_ui.qt import ensure_qt_app
     from zlc_data import (
         READOUT_EVENT,
         REPEAT,
@@ -7778,11 +7783,33 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     )
     values = np.zeros(canonical.physical_shape)
     values[0, :, :] = (0.5 + 0.4 * np.sin(durations / 3.0))[:, None]
-    declaration = DatasetOutputDeclaration("survival", "frame_survival.survival")
+    original_plan = json.dumps(ScanPlan((ScanAxis(
+        "pulse:param:t", tuple(float(value) for value in durations), "us",
+    ),)).to_tree())
+    node_id = presenter.add_logic("seamless_scan", values={"plan": original_plan})
+    app = ensure_qt_app(["scan-selection-restore"])
+    editor = ScanPlanEditor(device_ports=False)
+    request.addfinalizer(lambda: (editor.close(), editor.deleteLater(), app.processEvents()))
+    editor.resize(900, 200)
+    editor.show()
+    editor.draft_changed.connect(lambda patch: presenter._logic_draft_changed(node_id, patch))
+    refresh = presenter.refresh_logic_editor
+
+    def project_draft(changed_node):
+        result = refresh(changed_node)
+        if changed_node == node_id:
+            editor.update_projection({"form_values": presenter.logic[node_id].draft.values})
+        return result
+
+    monkeypatch.setattr(presenter, "refresh_logic_editor", project_draft)
+    project_draft(node_id)
+    app.processEvents()
+    signal = stable_signal_key(node_id, "scan")
+    declaration = DatasetOutputDeclaration("scan", "frame_survival.survival")
     node = SimpleNamespace(
-        instance_id="scan-us",
+        instance_id=node_id,
         dataset_output_declarations=(declaration,),
-        signal_key=lambda name: f"scan-us/{name}",
+        signal_key=lambda name: stable_signal_key(node_id, name),
     )
     plane = session.signal_plane
     plane.begin_generation(node)
@@ -7791,17 +7818,17 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     plane.commit_live(
         node,
         {
-            "survival": LiveDatasetOutput(
+            "scan": LiveDatasetOutput(
                 declaration, snapshot, DatasetCoverage(total, total),
                 canonical_schema=canonical, cell_origin=(0, 0),
             )
         },
     )
     binding = presenter.add_panel(
-        "scan-us/survival",
+        signal,
         snapshot,
         kind="curve",
-        initial_publication=plane.freeze().publication("scan-us/survival"),
+        initial_publication=plane.freeze().publication(signal),
     )
     _settle_panel_hosts(
         presenter,
@@ -7811,6 +7838,10 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     )
     assert str(binding.accepted_display.spec.x.axis_id) == "scan.t"
 
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(presenter, lambda: binding.editor_host is not None
+                        and binding.editor_configuration is None)
+
     _commit_area(binding.host)
     _settle_panel_hosts(presenter, lambda: binding.state.selector is not None)
     deadline = time.monotonic() + 5.0
@@ -7819,6 +7850,7 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
         time.sleep(0.005)
     for _ in range(40):
         presenter.beat()
+        app.processEvents()
         time.sleep(0.01)
 
     (drawn,) = binding.state.selector["ranges"]
@@ -7828,6 +7860,24 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     status, marked = presenter.view._cards[binding.panel_id].status
     assert not marked and "empty" not in status, status
     assert binding.port is None or binding.port.last_error is None
+    assert presenter.logic[node_id].draft.values["plan"] != original_plan
+    assert "plan" in presenter.logic[node_id].selection_restore, (
+        "rounding the selected range for display was mistaken for a manual edit"
+    )
+    assert binding.editor_host.selector_state(SelectorKind.AREA).result().value is not None
+    front = binding.host.wait_for_front(5)
+    axes = front.interaction.axes[0]
+    left, bottom, right, top = axes.bounds
+    for action in ("press", "release"):
+        binding.host.pointer_event(
+            action, left + .1 * (right - left), bottom + .1 * (top - bottom),
+            button=1, identity=front.identity, axes=axes, interaction=front.interaction,
+        ).result()
+    _settle_panel_hosts(presenter, lambda: not binding.state.selector
+                        and presenter.logic[node_id].draft.values["plan"] == original_plan)
+    _settle_panel_hosts(presenter, lambda: binding.editor_configuration is None)
+    assert not binding.host.describe_display().result().value.selectors
+    assert not binding.editor_host.describe_display().result().value.selectors
 
 
 def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:

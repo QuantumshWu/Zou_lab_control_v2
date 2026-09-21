@@ -214,6 +214,7 @@ def aggregate_axis_codes(
     operation,
     offsets,
     out,
+    out_second,
     counts,
     presence,
 ):
@@ -238,6 +239,8 @@ def aggregate_axis_codes(
             out[bucket] = -np.inf
         else:
             out[bucket] = 0.0
+        if operation == 5:
+            out_second[bucket] = 0.0
     axis_count = axis_sizes.size
     axis_index = np.zeros(axis_count, dtype=np.int64)
     axis_tick = np.zeros(axis_count, dtype=np.int64)
@@ -286,7 +289,8 @@ def aggregate_axis_codes(
                 out[bucket] = sample
         elif operation == 5:
             delta = sample - offsets[bucket]
-            out[bucket] += delta * delta
+            out[bucket] += delta
+            out_second[bucket] += delta * delta
         else:
             out[bucket] += sample
         counts[bucket] += 1
@@ -294,9 +298,16 @@ def aggregate_axis_codes(
         for bucket in range(bucket_count):
             if counts[bucket] > 0:
                 out[bucket] /= counts[bucket]
+    elif operation == 5:
+        for bucket in range(bucket_count):
+            if counts[bucket] > 0:
+                out[bucket] /= counts[bucket]
+                out_second[bucket] /= counts[bucket]
     for bucket in range(bucket_count):
         if counts[bucket] == 0:
             out[bucket] = np.nan
+            if operation == 5:
+                out_second[bucket] = np.nan
 
 
 def histogram_threads() -> int:
@@ -498,8 +509,10 @@ def finite_extrema(values, valid, use_valid, out):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def centred_square_sums(values, offset, valid, use_valid, out):
-    """Sum ``(x - offset)**2`` into one entry per kept position, in one pass.
+def centred_moment_sums(
+    values, offsets, valid, use_valid, first_out, second_out
+):
+    """Sum ``d`` and ``d**2`` per kept position in one pass.
 
     THE SHAPE IS ALWAYS THREE.  Whatever the signal's rank, the axes a
     reduction keeps are one block of it, so the tensor is (everything
@@ -507,7 +520,10 @@ def centred_square_sums(values, offset, valid, use_valid, out):
     other spelling: one compiled specialization serves a curve over point
     rows, a heatmap over two scan dimensions and a grouped band alike.
 
-    It replaces ``centred = plane - offset`` followed by an einsum.  The
+    Each kept position has its own offset: the mean of that output bucket.
+    The first centred moment must still be accumulated because a rounded
+    first-pass mean does not make ``sum(x - mean)`` exactly zero.  The pair
+    replaces ``centred = plane - offsets`` followed by two reductions.  The
     einsum did fuse the square into the sum, but the CENTRING still
     materialized a whole copy of the tensor first -- 15.6 MB and 4.77 ms of
     a 6.13 ms call on two million samples, where the einsum itself was
@@ -518,18 +534,24 @@ def centred_square_sums(values, offset, valid, use_valid, out):
 
     outer, keep, inner = values.shape
     for k in prange(keep):
-        total = np.float64(0.0)
+        first = np.float64(0.0)
+        second = np.float64(0.0)
+        offset = offsets[k]
         for o in range(outer):
             for i in range(inner):
                 if use_valid and not valid[o, k, i]:
                     continue
                 delta = np.float64(values[o, k, i]) - offset
-                total += delta * delta
-        out[k] = total
+                first += delta
+                second += delta * delta
+        first_out[k] = first
+        second_out[k] = second
 
 
-def masked_centred_square_sums(values: Any, offset: float, valid: Any) -> Any:
-    """Run :func:`centred_square_sums`, or ``None`` to defer to numpy."""
+def masked_centred_moment_sums(
+    values: Any, offsets: Any, valid: Any
+) -> Any:
+    """Run :func:`centred_moment_sums`, or ``None`` to defer to numpy."""
 
     if not engaged():
         return None
@@ -550,11 +572,172 @@ def masked_centred_square_sums(values: Any, offset: float, valid: Any) -> Any:
         marks = readable(marks)
     else:
         marks = readable(np.zeros((1, 1, 1), dtype=np.bool_))
-    out = np.empty(view.shape[1], dtype=np.float64)
+    centres = np.asarray(offsets, dtype=np.float64).reshape(-1)
+    if centres.shape != (view.shape[1],):
+        return None
+    first = np.empty(view.shape[1], dtype=np.float64)
+    second = np.empty(view.shape[1], dtype=np.float64)
     # The plane is an input like the mask: sealed, so a writable copy from
     # upstream and a published read-only snapshot are one signature.
-    centred_square_sums(readable(view), np.float64(offset), marks, use_valid, out)
-    return out
+    centred_moment_sums(
+        readable(view), readable(centres), marks, use_valid, first, second
+    )
+    return first, second
+
+
+@njit(cache=True, inline="always")
+def _combine_moment_summary(
+    left_n,
+    left_mean,
+    left_m2,
+    left_single_sem_square,
+    right_n,
+    right_mean,
+    right_m2,
+    right_single_sem_square,
+):
+    """Chan-combine two adjacent ``(n, mean, M2)`` summaries."""
+
+    if left_n == 0:
+        return right_n, right_mean, right_m2, right_single_sem_square
+    if right_n == 0:
+        return left_n, left_mean, left_m2, left_single_sem_square
+    count = left_n + right_n
+    delta = right_mean - left_mean
+    mean = left_mean + delta * right_n / count
+    m2 = (
+        left_m2
+        + right_m2
+        + delta * delta * left_n * right_n / count
+    )
+    return count, mean, m2, np.nan
+
+
+@njit(cache=True, nogil=True)
+def _trailing_moment_windows(
+    counts, means, m2s, single_sem_squares, span
+):
+    """Replace shot summaries by their trailing-window Chan summaries.
+
+    A span-sized block gets one forward prefix and one backward suffix.  A
+    window is then either its block prefix or the combination of exactly one
+    preceding suffix and one current prefix.  Each shot is visited a constant
+    number of times; no whole-history prefixes are subtracted and variance is
+    never recovered as ``Q - S**2/N``.
+
+    The four inputs are writable work planes owned by the caller and become
+    the output prefixes/windows.  Only four suffix planes are allocated, so
+    memory remains linear without keeping raw, prefix, suffix and output copies.
+    """
+
+    total = counts.size
+    width = min(span, total)
+    suffix_n = np.empty_like(counts)
+    suffix_mean = np.empty_like(means)
+    suffix_m2 = np.empty_like(m2s)
+    suffix_single_sem_square = np.empty_like(single_sem_squares)
+
+    for block_start in range(0, total, width):
+        block_stop = min(block_start + width, total)
+        count = 0
+        mean = 0.0
+        m2 = 0.0
+        single_sem_square = np.nan
+        for index in range(block_stop - 1, block_start - 1, -1):
+            count, mean, m2, single_sem_square = _combine_moment_summary(
+                counts[index],
+                means[index],
+                m2s[index],
+                single_sem_squares[index],
+                count,
+                mean,
+                m2,
+                single_sem_square,
+            )
+            suffix_n[index] = count
+            suffix_mean[index] = mean
+            suffix_m2[index] = m2
+            suffix_single_sem_square[index] = single_sem_square
+
+        count = 0
+        mean = 0.0
+        m2 = 0.0
+        single_sem_square = np.nan
+        for index in range(block_start, block_stop):
+            count, mean, m2, single_sem_square = _combine_moment_summary(
+                count,
+                mean,
+                m2,
+                single_sem_square,
+                counts[index],
+                means[index],
+                m2s[index],
+                single_sem_squares[index],
+            )
+            counts[index] = count
+            means[index] = mean
+            m2s[index] = m2
+            single_sem_squares[index] = single_sem_square
+
+    for block_start in range(width, total, width):
+        # A complete block's final prefix already contains exactly ``span``
+        # shots.  Every earlier position also needs the preceding block's
+        # suffix; a partial last block has no final-prefix exception.
+        block_stop = min(block_start + width - 1, total)
+        for index in range(block_start, block_stop):
+            left = index - width + 1
+            (
+                counts[index],
+                means[index],
+                m2s[index],
+                single_sem_squares[index],
+            ) = _combine_moment_summary(
+                suffix_n[left],
+                suffix_mean[left],
+                suffix_m2[left],
+                suffix_single_sem_square[left],
+                counts[index],
+                means[index],
+                m2s[index],
+                single_sem_squares[index],
+            )
+
+
+def trailing_moment_windows(
+    counts: Any,
+    means: Any,
+    m2s: Any,
+    single_sem_squares: Any,
+    span: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Run the trailing Chan kernel, or ``None`` for the NumPy reference."""
+
+    if not engaged():
+        return None
+    planes = tuple(
+        np.asarray(plane)
+        for plane in (counts, means, m2s, single_sem_squares)
+    )
+    if (
+        planes[0].dtype != np.dtype(np.int64)
+        or any(plane.dtype != np.dtype(np.float64) for plane in planes[1:])
+        or not planes[0].size
+        or any(
+            plane.ndim != 1
+            or plane.shape != planes[0].shape
+            or not plane.flags.c_contiguous
+            or not plane.flags.writeable
+            for plane in planes
+        )
+    ):
+        return None
+    width = int(span)
+    if width <= 0:
+        return None
+    # These are caller-owned work/output planes, not immutable inputs; keeping
+    # that contract explicit also gives the dispatcher one writable signature.
+    _trailing_moment_windows(*planes, width)
+    return planes
 
 
 def masked_finite_extrema(
