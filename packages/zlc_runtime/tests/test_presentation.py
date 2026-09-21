@@ -815,16 +815,28 @@ def test_a_publication_wake_shows_a_panel_past_its_deadline_without_a_beat() -> 
     # The timer must return at the remaining deadline, not 100 ms later.
     assert scheduler.pending_delay_ms() == 1
 
+    # The same decision can cross the deadline before Qt reads its delay.
+    # It still owes one wake. Reading its delay must not consume the decision.
+    scheduler.stage_owed()
     now[0] = 100_000_000
+    assert scheduler.pending_delay_ms() == 0
+    assert scheduler.pending_delay_ms() == 0
     scheduler.stage_owed()
     assert len(port.updates) == 2
+    assert scheduler.pending_delay_ms() is None
+    scheduler.stage_owed()
+    assert len(port.updates) == 2
+    assert scheduler.pending_delay_ms() is None
     plane.front = _front("camera/frame", sequence=3)
     now[0] = 101_000_000
+    scheduler.stage_owed()
     assert scheduler.pending_delay_ms() is None  # the surface is busy
     port.futures[1].set_result("second")
     arbiter.drain(lambda _panel_id: port)
+    scheduler.stage_owed()
     assert scheduler.pending_delay_ms() == 99
     now[0] = 199_000_000
+    scheduler.on_tick()
     assert scheduler.pending_delay_ms() == 1
     scheduler.close()
     assert scheduler.pending_delay_ms() is None

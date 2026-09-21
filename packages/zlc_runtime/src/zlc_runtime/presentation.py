@@ -608,6 +608,7 @@ class BoardScheduler:
         "_plane",
         "_ports",
         "_staged_ms",
+        "_pending_deadline_ms",
     )
 
     def __init__(
@@ -643,6 +644,8 @@ class BoardScheduler:
         # When each panel last staged, which is what its interval caps.  A
         # panel absent here has never staged and is due immediately.
         self._staged_ms: dict[str, int] = {}
+        # Output of the latest scheduling decision, in the same clock domain.
+        self._pending_deadline_ms: int | None = None
         self._closed = False
         self._last_front = SignalFront({})
 
@@ -811,6 +814,7 @@ class BoardScheduler:
 
         if self._closed:
             return self._last_front
+        self._pending_deadline_ms = None
         # The reader declares what it reads.  The port list IS the truth of
         # what the board shows, so the coherent-front request is projected
         # from it on every tick rather than book-kept beside every panel
@@ -954,6 +958,10 @@ class BoardScheduler:
                 and panel_id not in self._owed
                 and panel_id not in self._admission_owed
             ):
+                if front_refs is not None and publication is not None and not port.surface_busy:
+                    deadline = self._staged_ms[panel_id] + port.display_interval_ms
+                    if self._pending_deadline_ms is None or deadline < self._pending_deadline_ms:
+                        self._pending_deadline_ms = deadline
                 continue
             roots = candidate_roots.get(panel_id)
             if panel_id in blocked_surfaces:
@@ -1015,6 +1023,7 @@ class BoardScheduler:
 
         if self._closed:
             return self._last_front
+        self._pending_deadline_ms = None
         ports = self._stage_order(tuple(self._ports()))
         elapsed = self._clock.elapsed_ms()
         eligible = self._owed | (self._admission_owed if admit_new else set())
@@ -1117,27 +1126,11 @@ class BoardScheduler:
         return front
 
     def pending_delay_ms(self) -> int | None:
-        """Next existing deadline for new data waiting on an idle surface."""
+        """Remaining time for this pass's withheld data, without deciding again."""
 
-        if self._closed:
+        if self._pending_deadline_ms is None:
             return None
-        elapsed = self._clock.elapsed_ms()
-        delays = []
-        for port in self._ports():
-            panel_id = SurfaceBatchArbiter._panel_id(port)
-            staged = self._staged_ms.get(panel_id)
-            if staged is None or port.surface_busy:
-                continue
-            remaining = staged + port.display_interval_ms - elapsed
-            if remaining <= 0:
-                continue
-            presented = self._presented_front_refs(port)
-            for name in SurfaceBatchArbiter._front_signals(port):
-                latest = self._plane.latest_publication(name)
-                if latest is not None and latest.event_ref not in presented:
-                    delays.append(remaining)
-                    break
-        return min(delays, default=None)
+        return max(0, self._pending_deadline_ms - self._clock.elapsed_ms())
 
     def _mark_staged(self, panel_id: str, elapsed_ms: int) -> None:
         """Start this panel's interval again, and clear its debt.
@@ -1188,17 +1181,22 @@ class BoardScheduler:
             # the accept that frees it wakes the owner again.
             if getattr(port, "surface_busy"):
                 continue
-            if not self._clock.group_due(
+            staged = self._staged_ms.get(panel_id)
+            due = self._clock.group_due(
                 elapsed_ms,
                 getattr(port, "display_interval_ms"),
-                self._staged_ms.get(panel_id),
-            ):
-                continue
+                staged,
+            )
             presented = set(self._presented_front_refs(port))
             for name in SurfaceBatchArbiter._front_signals(port):
                 latest = self._plane.latest_publication(name)
                 if latest is not None and latest.event_ref not in presented:
-                    fresh.add(panel_id)
+                    if due:
+                        fresh.add(panel_id)
+                    else:
+                        deadline = self._staged_ms[panel_id] + port.display_interval_ms
+                        if self._pending_deadline_ms is None or deadline < self._pending_deadline_ms:
+                            self._pending_deadline_ms = deadline
                     break
         return fresh
 
@@ -1225,6 +1223,7 @@ class BoardScheduler:
         self._owed.clear()
         self._admission_owed.clear()
         self._staged_ms.clear()
+        self._pending_deadline_ms = None
         self._arbiter.close()
 
 
