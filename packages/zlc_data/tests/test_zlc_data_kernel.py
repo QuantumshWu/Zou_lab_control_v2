@@ -477,6 +477,33 @@ def test_numeric_coordinates_have_one_python_and_fingerprint_identity():
     assert large.coordinate_at(1) == 10**100 + 1
     assert hash(large) == hash(AxisSpec(AxisId("large"), "large", SCAN_POINT, 2, large.coordinates))
 
+    wide_unsigned = AxisSpec(AxisId("wide"), "wide", SCAN_POINT, 4,
+                             (2**53, 2**53 + 1, 2**63 + 1, 2**64 - 1))
+    float_large = AxisSpec(AxisId("float"), "float", SCAN_POINT, 3,
+                           np.asarray((0.5, float(2**53), float(2**63))))
+    unordered = AxisSpec(AxisId("unordered"), "unordered", SCAN_POINT, 3, (3, 1, 2))
+    unordered_float = AxisSpec(AxisId("unordered.float"), "unordered float", SCAN_POINT,
+                               4, (0.125, 10.5, -2.75, 1.25))
+    unordered_unsigned = AxisSpec(AxisId("unordered.unsigned"), "unordered unsigned", SCAN_POINT,
+                                  4, (2**63 + 1, 2**53 + 1, 2**64 - 1, 2**53))
+    text = AxisSpec(AxisId("text"), "text", SCAN_POINT, 2, ("dark", "bright"))
+    for original in (integers, fractional, precise, unsigned, signed_and_large,
+                     large, wide_unsigned, float_large, unordered, unordered_float,
+                     unordered_unsigned, text):
+        for coordinates in (original.coordinates, original.coordinates[::-1]):
+            selected = AxisSpec(original.axis_id, original.name, original.role,
+                                original.size, coordinates)
+            expected = {selected.coordinate_at(index): index for index in range(selected.size)}
+            before = hash(selected)
+            for query in (*expected, -1, 0, 0.5, 2**53 + 1, 2**63 - 1,
+                          2**64, 10**400, -10**400, None, "missing"):
+                assert selected.coordinate_position(query) == expected.get(query)
+            for invalid in (True, False, float("nan"), float("inf")):
+                assert selected.coordinate_position(invalid) is None
+            assert hash(selected) == before
+            if coordinates is original.coordinates:
+                assert selected == original
+
 
 def test_repeat_role_has_exactly_one_structural_owner():
     repeat = axis("repeat", REPEAT, 1)

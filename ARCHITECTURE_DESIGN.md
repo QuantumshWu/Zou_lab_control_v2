@@ -50,6 +50,7 @@
 - Validity的存储与组装只沿schema声明的component轴，不为整cell判决展开逐像素mask再压回；需要逐像素布尔视图的数值消费者才广播。裁剪保留未改变的不可变Axis/Domain身份，不重建无变化的坐标与codes。
 - Validity入口只接受明确bool contract，不做numeric truthiness转换。
 - Selection按AxisId和typed coordinate唯一解析；重名或不可唯一映射必须拒绝。
+- 数值坐标的精确定位由AxisSpec统一持有：有序数组只记方向，无序数组只记不可变排序索引；查询保持轴dtype并精确核对候选，不逐点装箱成Python字典。混合类型坐标保留原精确键语义。
 - Plot轴身份只用`AxisRef(domain, axis_id)`稳定key；label只用于显示，不进入
   semantic field identity。Scope在内存、PanelState与Figure recipe中都使用tagged
   `latest`或tagged typed coordinate value，文本坐标`"latest"`不得被当作控制字。

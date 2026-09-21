@@ -361,11 +361,11 @@ class AxisSpec:
         return canonical_coordinate_scalar(self.coordinates[index])
 
     def coordinate_position(self, coordinate: object) -> int | None:
-        """Return one coordinate's logical position without scanning the axis.
+        """Return one coordinate's exact logical position.
 
-        An implicit integer axis is arithmetic.  An explicit immutable axis
-        builds its hash lookup once and shares it with every semantic/UI
-        projection that refers to this ``AxisSpec``.
+        An implicit integer axis is arithmetic. Numeric arrays remember their
+        direction or sorted positions and use binary search; mixed coordinates
+        share their hash lookup with every semantic/UI projection.
         """
 
         try:
@@ -392,10 +392,44 @@ class AxisSpec:
                 return position if sample < len(times) and self.coordinate_at(position) == value else None
         positions = self._coordinate_positions
         if positions is None:
-            positions = {
-                self.coordinate_at(position): position for position in range(self.size)
-            }
+            if self.coordinate_origins is None and isinstance(self.coordinates, np.ndarray):
+                if bool(np.all(self.coordinates[1:] > self.coordinates[:-1])):
+                    positions = 1
+                elif bool(np.all(self.coordinates[1:] < self.coordinates[:-1])):
+                    positions = -1
+                else:
+                    indices = np.argsort(self.coordinates)
+                    positions = immutable_array(indices, dtype=indices.dtype, shape=indices.shape)
+            if positions is None:
+                positions = {
+                    self.coordinate_at(position): position for position in range(self.size)
+                }
             object.__setattr__(self, "_coordinate_positions", positions)
+        if isinstance(positions, (int, np.ndarray)):
+            if type(value) not in (int, float):
+                return None
+            coordinates = self.coordinates
+            if coordinates.dtype.kind in "iu":
+                bounds = np.iinfo(coordinates.dtype)
+                if type(value) is not int or not int(bounds.min) <= value <= int(bounds.max):
+                    return None
+            try:
+                # A Python int beside uint64 would promote searchsorted to
+                # float64 and lose positions above 2**53. Search in the axis's
+                # own dtype, then compare the candidate as exact Python values.
+                query = coordinates.dtype.type(value)
+            except OverflowError:
+                return None
+            sorter = positions if isinstance(positions, np.ndarray) else None
+            descending = sorter is None and positions < 0
+            ordered = coordinates[::-1] if descending else coordinates
+            position = int(np.searchsorted(ordered, query, sorter=sorter))
+            if position < self.size:
+                if sorter is not None:
+                    position = int(sorter[position])
+                elif descending:
+                    position = self.size - 1 - position
+            return position if 0 <= position < self.size and self.coordinate_at(position) == value else None
         return positions.get(value)
 
 
