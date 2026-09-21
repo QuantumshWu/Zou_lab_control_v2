@@ -1913,7 +1913,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         }
         axis = output.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "candidate"
-        assert axis.coordinates == (1, 2, 3, 4, 5, 6, 7)
+        assert tuple(axis.coordinate_values()) == (1, 2, 3, 4, 5, 6, 7)
         info, _arrays, _datasets = read_archive(tmp_path / "figures" / "uniformity_history.npz")
         assert set(
             info["sections"]["source"]["run_record"]["device_snapshots"]

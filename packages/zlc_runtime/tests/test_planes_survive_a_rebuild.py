@@ -202,7 +202,7 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
         (_shot(chunk_schema, 4.0, 0.1), (0, 0)),
         (_shot(chunk_schema, 5.0, 0.2), (1, 0)),
     )
-    built = _finite_run(run_schema, chunks, (2,))[2]
+    built = _finite_run(run_schema, chunks, (2,))[2].materialize()
     assert built.block.sigma is not None
     np.testing.assert_allclose(
         np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2)
@@ -263,9 +263,9 @@ def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
         (_shot(chunk_schema, 5.0, None), (1, 0)),
         (_shot(chunk_schema, 6.0, 0.3), (2, 0)),
     )
-    whole = _finite_run(run_schema, chunks, (3,))[3]
+    whole = _finite_run(run_schema, chunks, (3,))[3].materialize()
     views = _finite_run(run_schema, chunks, (2, 3))
-    prefix, extended = views[2], views[3]
+    prefix, extended = views[2].materialize(), views[3].materialize()
     assert prefix.block.values.reshape(-1).tolist() == [4.0, 5.0, 0.0]
     np.testing.assert_array_equal(
         np.asarray(extended.block.values), np.asarray(whole.block.values)
@@ -295,5 +295,5 @@ def test_a_run_that_states_no_error_gains_none_from_a_basis() -> None:
     )
     first = (_shot(chunk_schema, 4.0, None), (0, 0))
     second = (_shot(chunk_schema, 5.0, None), (1, 0))
-    extended = _finite_run(run_schema, (first, second), (1, 2))[2]
+    extended = _finite_run(run_schema, (first, second), (1, 2))[2].materialize()
     assert extended.block.sigma is None

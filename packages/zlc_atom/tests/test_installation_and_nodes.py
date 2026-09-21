@@ -536,7 +536,7 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         # shared between publications that describe the same thing.
         assert site_axis == result.calibration.site_map.site_axis
         assert site_axis.role is SITE
-        assert site_axis.coordinates == tuple(
+        assert tuple(site_axis.coordinate_values()) == tuple(
             range(1, result.calibration.n_sites + 1)
         )
         assert site_axis.coordinate_labels is None

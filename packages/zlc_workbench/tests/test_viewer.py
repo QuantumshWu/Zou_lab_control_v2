@@ -639,9 +639,9 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
         assert restored.block.values.shape == (2, 16, 1)
         assert restored.block.schema.value_schema.name == draft["name"]
         assert restored.block.values[0, 3, 0] == 7.25
-        assert restored.block.schema.repeat_domain.axes[-1].coordinates == (10, 20)
+        assert tuple(restored.block.schema.repeat_domain.axes[-1].coordinate_values()) == (10, 20)
         assert restored.block.schema.point_domain.axes[0].name == "detuning"
-        assert restored.block.schema.point_domain.axes[0].coordinates[8] == 8.5
+        assert restored.block.schema.point_domain.axes[0].coordinate_at(8) == 8.5
         lineage = info["sections"]["lineage"]
         assert lineage["root"] == lineage["nodes"][0]["id"]
         assert lineage["nodes"][0]["parents"] == []
@@ -968,9 +968,9 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     restored = viewer_module._manual_snapshot(draft)
 
     assert restored.block.schema.repeat_domain.shape == repeat_domain.shape
-    assert restored.block.schema.repeat_domain.axis_codes == repeat_domain.axis_codes
+    np.testing.assert_array_equal(restored.block.schema.repeat_domain.axis_codes, repeat_domain.axis_codes)
     assert restored.block.schema.point_domain.shape == point_domain.shape
-    assert restored.block.schema.point_domain.axis_codes == point_domain.axis_codes
+    np.testing.assert_array_equal(restored.block.schema.point_domain.axis_codes, point_domain.axis_codes)
     assert restored.block.schema.point_domain.axes[0].name == "detuning"
     assert restored.block.values.shape == source_values.shape
     expected = source_values.copy()
@@ -984,8 +984,8 @@ def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     )
     edited = viewer_module._manual_snapshot(draft)
     assert edited.block.schema.point_domain.axis(time.axis_id).coordinate_of == scan_x.axis_id
-    assert edited.block.schema.point_domain.axis(time.axis_id).coordinates == (0.15, 0.2, 0.5)
-    assert edited.block.schema.point_domain.axis(scan_x.axis_id).coordinates == scan_x.coordinates
+    assert tuple(edited.block.schema.point_domain.axis(time.axis_id).coordinate_values()) == (0.15, 0.2, 0.5)
+    assert tuple(edited.block.schema.point_domain.axis(scan_x.axis_id).coordinate_values()) == tuple(scan_x.coordinate_values())
     np.testing.assert_array_equal(edited.block.values, expected)
     with pytest.raises(ValueError, match="alternative coordinates"):
         viewer_module._edit_axis(

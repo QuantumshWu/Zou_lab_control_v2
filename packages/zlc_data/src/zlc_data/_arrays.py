@@ -88,3 +88,13 @@ def immutable_bool_array(values, *, shape: tuple[int, ...]) -> np.ndarray:
     if source.dtype != np.dtype(bool):
         raise TypeError(f"validity mask dtype must be bool, got {source.dtype}")
     return immutable_array(source, dtype=np.dtype(bool), shape=shape)
+
+
+def compact_immutable_array(source: np.ndarray) -> np.ndarray:
+    """Retain this plane, not unrelated bytes backing a transient slice."""
+    owner: object = source
+    while isinstance(owner, (np.ndarray, memoryview)):
+        owner = owner.base if isinstance(owner, np.ndarray) else owner.obj
+    if source.flags.c_contiguous and isinstance(owner, bytes) and len(owner) == source.nbytes:
+        return source
+    return np.ndarray(source.shape, dtype=source.dtype, buffer=source.tobytes(order="C"))

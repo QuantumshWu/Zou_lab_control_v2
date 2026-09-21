@@ -175,8 +175,8 @@ def test_first_is_the_first_value_and_not_the_largest() -> None:
     largest = view.histogram(
         bins=edges, reduce_axes=(AxisRef.repeat("repeat"),), aggregation=Reduction.MAX
     )
-    assert list(map(int, first.counts)) == [1, 0, 0]
-    assert list(map(int, largest.counts)) == [0, 0, 1]
+    np.testing.assert_array_equal(first.counts, [[1, 0, 0]])
+    np.testing.assert_array_equal(largest.counts, [[0, 0, 1]])
 
 
 def test_a_reduced_histogram_is_binned_over_its_own_values() -> None:

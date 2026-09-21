@@ -219,8 +219,8 @@ def scan_dataset_schema(
         (*source_schema.point_domain.axes, *scan_axes),
         (
             *(
-                codes * len(rows)
-                for codes in source_schema.point_domain.axis_codes
+                np.tile(source_schema.point_domain.codes(axis.axis_id), len(rows))
+                for axis in source_schema.point_domain.axes
             ),
             *(
                 tuple(

@@ -157,7 +157,8 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     finally:
         session.close()
 
-def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypatch) -> None:
+@pytest.mark.parametrize("dtype", (np.float32, np.float64))
+def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypatch, dtype) -> None:
     source = [-2, -2, 0, 0]
     indexed_schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -167,9 +168,9 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
             roles={"source index": PRIMARY_INDEX},
         ),
         cell_axes=(axis("site", values=[0.0, 1.0, 2.0]),),
-        dtype=np.float64,
+        dtype=dtype,
     )
-    indexed_values = np.arange(12.0).reshape(1, 4, 3)
+    indexed_values = np.arange(12, dtype=dtype).reshape(1, 4, 3)
     indexed_valid = np.ones(indexed_values.shape, dtype=np.bool_)
     indexed_valid[:, :2] = False
     snapshot = make_snapshot(
@@ -178,6 +179,76 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
         revision=9,
         validity=indexed_valid,
     )
+    from dataclasses import replace
+    from zlc_data import INVALID
+
+    child_schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"category": [0.0, 1.0]}),
+        cell_axes=indexed_schema.cell_domain.axes, dtype=dtype,
+    )
+    children = tuple(make_snapshot(
+        child_schema, indexed_values[:, start:start + 2], revision=start,
+        validity=indexed_valid[:, start:start + 2],
+    ) for start in (0, 2))
+    segmented = OwnedSnapshot(snapshot.ref, replace(
+        snapshot.block, values=None, validity=INVALID,
+        segments=children, segment_origins=np.asarray(((0, 0), (0, 2)), dtype=np.int64),
+        segment_shapes=np.asarray(((1, 2), (1, 2)), dtype=np.int64),
+    ))
+    from zlc_plot import _raster_kernels as kernels
+
+    # The same authored cells must survive both execution engines, including
+    # grouping on the record's point-row dimension and absent first-shot data.
+    for group in (None, AxisRef.cell_data("site"), AxisRef.point("category")):
+        for reduction in (Reduction.MEAN, Reduction.SUM, Reduction.MIN,
+                          Reduction.MAX, Reduction.FIRST):
+            answers = []
+            for engine in ("numpy", "auto"):
+                with monkeypatch.context() as active:
+                    active.setattr(kernels, "ENGINE", engine)
+                    answers.append(DataView(snapshot).rolling_history(
+                        group=group, aggregation=reduction,
+                    ))
+            expected, actual = answers
+            for name in ("values", "counts", "valid", "source_indices"):
+                np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name))
+            if reduction is Reduction.MEAN:
+                np.testing.assert_array_equal(actual.sem, expected.sem)
+            segmented_view = DataView(segmented)
+            actual = segmented_view.rolling_history(group=group, aggregation=reduction)
+            for name in ("values", "counts", "valid", "source_indices"):
+                np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name))
+            if reduction is Reduction.MEAN:
+                np.testing.assert_allclose(actual.sem, expected.sem, rtol=1e-14)
+            inherited = DataView(segmented, inherit_domains_from=segmented_view)
+            repeated = inherited.rolling_history(group=group, aggregation=reduction)
+            np.testing.assert_array_equal(repeated.values, actual.values)
+            assert inherited._samples is None
+            assert inherited._rolling_carry[1] == segmented_view._rolling_carry[1]
+            assert segmented.block._materialized is None
+    grouped = DataView(segmented)
+    grouped.rolling_history(group=AxisRef.point("category"))
+    point = indexed_schema.point_domain
+    flipped_schema = replace(indexed_schema, point_domain=replace(
+        point, axis_codes=(point.axis_codes[0], 1 - np.asarray(point.axis_codes[1])),
+    ))
+    flipped = OwnedSnapshot(
+        replace(segmented.ref, schema_fingerprint=flipped_schema.fingerprint),
+        replace(segmented.block, schema=flipped_schema),
+    )
+    changed = DataView(flipped, inherit_domains_from=grouped).rolling_history(group=AxisRef.point("category"))
+    np.testing.assert_array_equal(changed.values[1], [10.0, 7.0])
+    assert flipped.block._materialized is None
+    session = PlotSession(
+        segmented, RollingPlot(group=AxisRef.cell_data("site")),
+        parameters={"window": 3, "uncertainty": True},
+    )
+    try:
+        assert session._view._samples is None
+        assert segmented.block._materialized is None
+        np.testing.assert_array_equal(session._payload.series[0].y.canonical, [np.nan, 7.5])
+    finally:
+        session.close()
     history = DataView(snapshot).rolling_history(
         group=AxisRef.cell_data("site"), aggregation=Reduction.MEAN
     )
@@ -207,6 +278,16 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
     np.testing.assert_allclose(last.values[1], [9.0, 10.0, 11.0])
     np.testing.assert_array_equal(last.counts[1], [1] * 3)
     assert np.all(np.isnan(last.sem))
+
+    stated = make_snapshot(indexed_schema, indexed_values, revision=9,
+                           validity=indexed_valid, sigma=np.full(indexed_values.shape, 2.0))
+    for engine in ("numpy", "auto"):
+        with monkeypatch.context() as active:
+            active.setattr(kernels, "ENGINE", engine)
+            result = DataView(stated).rolling_history(
+                group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
+            )
+        np.testing.assert_array_equal(result.sem[1], [2.0] * 3)
 
     repeat = DataView(_snapshot(0, repeats=3)).rolling_history()
     np.testing.assert_allclose(

@@ -82,6 +82,8 @@ def test_scalar_has_the_canonical_length_one_carrier_axis():
 
 
 def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_copy():
+    from zlc_data import OwnedSnapshot, StreamGenerationId
+
     mutable = np.arange(12, dtype=np.uint16).reshape(3, 4)
     frozen = immutable_array(
         mutable,
@@ -109,6 +111,13 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
     )
     assert np.shares_memory(block.values, transposed)
     assert is_intrinsically_immutable_array(block.values)
+    snapshot = OwnedSnapshot(block.ref(StreamGenerationId("retention")), block)
+    retained = snapshot.compact()
+    assert retained.ref == snapshot.ref and retained.block.schema is schema
+    assert retained.block.values.flags.c_contiguous
+    np.testing.assert_array_equal(retained.block.values, block.values)
+    assert retained.compact() is retained
+    assert np.shares_memory(block.values, transposed)
 
     assert value_schema.name is None
     assert "name" not in dataset_schema_to_tree(schema)["value_schema"]
@@ -262,12 +271,11 @@ def test_domain_rejects_ambiguous_axis_coordinates_and_out_of_range_codes():
     repeat = axis("capture.repeat", REPEAT, 1)
     b_x = AxisSpec(AxisId("b.x"), "b.x", SCAN_POINT, 2, (0, 1))
     repeated = DomainSpec((2,), (b_x,), ((0, 0),))
-    assert repeated.axis_codes == ((0, 0),)
+    np.testing.assert_array_equal(repeated.axis_codes[0], (0, 0))
     with pytest.raises(ValueError, match="outside"):
         DomainSpec((2,), (b_x,), ((0, 2),))
-    ambiguous = AxisSpec(AxisId("ambiguous"), "ambiguous", SCAN_POINT, 2, (1, 1))
     with pytest.raises(ValueError, match="coordinates must be unique"):
-        DomainSpec((2,), (ambiguous,), ((0, 1),))
+        AxisSpec(AxisId("ambiguous"), "ambiguous", SCAN_POINT, 2, (1, 1))
     with pytest.raises(ValueError, match="named axis"):
         DatasetSchema(
             domain(repeat),
@@ -422,8 +430,11 @@ def test_numeric_coordinates_have_one_python_and_fingerprint_identity():
         (0, 1),
     )
     assert negative_zero == integers
-    assert negative_zero.coordinates == (0, 1)
-    assert all(type(value) is int for value in negative_zero.coordinates)
+    np.testing.assert_array_equal(negative_zero.coordinate_values(), (0, 1))
+    assert all(type(negative_zero.coordinate_at(index)) is int for index in range(2))
+    assert hash(negative_zero) == hash(integers)
+    with pytest.raises(ValueError):
+        negative_zero.coordinates.setflags(write=True)
 
     repeat = axis("repeat", REPEAT, 1)
     left = DatasetSchema(
@@ -444,7 +455,18 @@ def test_numeric_coordinates_have_one_python_and_fingerprint_identity():
     fractional = AxisSpec(
         AxisId("fraction"), "fraction", SCAN_POINT, 1, (Fraction(1, 2),)
     )
-    assert fractional.coordinates == (0.5,)
+    np.testing.assert_array_equal(fractional.coordinate_values(), (0.5,))
+    precise = AxisSpec(AxisId("precise"), "precise", SCAN_POINT, 2, (2**53 + 1, 0.5))
+    rounded = AxisSpec(AxisId("precise"), "precise", SCAN_POINT, 2, (float(2**53 + 1), 0.5))
+    assert precise != rounded
+    assert precise.coordinate_at(0) == 2**53 + 1
+    unsigned = AxisSpec(AxisId("unsigned"), "unsigned", SCAN_POINT, 2, (2**63 + 1, 2**64 - 1))
+    assert unsigned.coordinate_at(1) == 2**64 - 1
+    signed_and_large = AxisSpec(AxisId("mixed"), "mixed", SCAN_POINT, 2, (-1, 2**63 + 1))
+    assert signed_and_large.coordinate_at(1) == 2**63 + 1
+    large = AxisSpec(AxisId("large"), "large", SCAN_POINT, 2, (10**100, 10**100 + 1))
+    assert large.coordinate_at(1) == 10**100 + 1
+    assert hash(large) == hash(AxisSpec(AxisId("large"), "large", SCAN_POINT, 2, large.coordinates))
 
 
 def test_repeat_role_has_exactly_one_structural_owner():

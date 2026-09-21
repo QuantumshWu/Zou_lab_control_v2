@@ -280,9 +280,9 @@ def test_a_reduced_point_axis_groups_the_rows_inside_each_cell() -> None:
 
     Reducing "detuning" while facetting by "frame" cannot be a ufunc over an
     array axis: both coordinates live on the one point axis, so the surviving
-    point axis is a REGROUPING of its rows and the identity has to be built
-    per sample.  Whole-axis reductions take the cheaper route; this checks
-    the other one still answers, against a hand computation.
+    point axis is a REGROUPING of its rows, described by axis-sized codes.
+    Whole-axis reductions take the direct route; this checks the mapped
+    route against a hand computation.
     """
 
     repeats, rows, sites = 3, 6, 2  # frames {0,1} x detunings {0,1,2}
@@ -306,7 +306,7 @@ def test_a_reduced_point_axis_groups_the_rows_inside_each_cell() -> None:
 def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
     """Reducing the repeat axis is expressible either way; they must match."""
 
-    from zlc_plot.data_view import _aggregate_by_codes
+    from zlc_plot.data_view import _axis_aggregate
 
     repeats, rows, sites = 4, 6, 2
     values = np.arange(repeats * rows * sites, dtype=float).reshape(repeats, rows, sites)
@@ -318,16 +318,13 @@ def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
     quick, present = view._collapse_axes(values, valid, refs, Reduction.MEAN)
 
     # The route a point-axis reduction is forced to take, on the same
-    # reduction: one bucket identity per sample, scattered.
+    # reduction: compact codes per retained physical axis.
     dimensions, coordinates = view._reduction_plan(refs)
     buckets = view._reduction_buckets(dimensions, coordinates)
-    scattered, counts = _aggregate_by_codes(
-        values.reshape(-1),
-        np.ones(values.size, dtype=bool),
-        np.ascontiguousarray(buckets.codes).reshape(-1),
-        buckets.count,
-        Reduction.MEAN,
+    scattered, counts, _presence = _axis_aggregate(
+        values, valid, buckets.codes, buckets.axes, buckets.shape, Reduction.MEAN,
     )
     np.testing.assert_allclose(
         quick[present], scattered.reshape(buckets.shape)[counts.reshape(buckets.shape) > 0]
     )
+    np.testing.assert_allclose(scattered.reshape(buckets.shape), values.mean(axis=0))

@@ -189,7 +189,7 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
     assert site.coordinate_labels == ("A", "B")
     assert site.coordinate_frame == CoordinateFrameId("trap.array")
     x = projected_schema.cell_domain.axis(x_id)
-    assert x.coordinates == (11, 12, 13)
+    np.testing.assert_array_equal(x.coordinate_values(), (11, 12, 13))
     assert x.coordinate_labels == ("x11", "x12", "x13")
     assert x.unit == "px"
     assert x.coordinate_frame == camera_frame

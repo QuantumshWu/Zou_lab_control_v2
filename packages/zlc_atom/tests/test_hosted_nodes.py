@@ -274,7 +274,7 @@ def test_a_node_host_runs_a_camera_measurement_to_completion() -> None:
         frame_axis = schema.point_domain.axes[0]
         assert frame_axis.name == "frame"
         assert frame_axis.role == READOUT_EVENT
-        assert frame_axis.coordinates == tuple(range(windows))
+        assert tuple(frame_axis.coordinate_values()) == tuple(range(windows))
         frames = np.asarray(value.snapshot.block.values)
         assert frames.shape[:2] == (1, windows)
         record = publication.run_record

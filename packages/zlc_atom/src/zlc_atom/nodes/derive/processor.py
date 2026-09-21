@@ -55,7 +55,7 @@ class DeriveProcessor:
                 raise RuntimeError(f"input publication lost {name!r}")
             by_output[name] = value
         results = execute(self._programs, {
-            name: Operand(value.schema, value.values, value.snapshot.expanded_validity())
+            name: Operand(value.schema, value.snapshot.materialize().block.values, value.snapshot.expanded_validity())
             for name, value in by_output.items()
         })
         outputs = {}

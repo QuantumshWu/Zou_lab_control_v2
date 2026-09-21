@@ -422,7 +422,6 @@ def test_last_reduction_replays_the_same_scope_for_payload_and_selection(kind, h
         if hasattr(left, "series"):
             for a, b in zip(left.series, right.series, strict=True):
                 np.testing.assert_array_equal(a.valid, b.valid)
-                np.testing.assert_array_equal(a.counts, b.counts)
                 np.testing.assert_array_equal(a.sem, b.sem)
                 np.testing.assert_allclose(np.where(a.valid, a.y.canonical, np.nan), np.where(b.valid, b.y.canonical, np.nan))
         elif hasattr(left, "z"):

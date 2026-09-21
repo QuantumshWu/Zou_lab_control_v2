@@ -270,6 +270,7 @@ class OccupancyProcessor:
 
         if not isinstance(frames, OwnedSnapshot):
             raise TypeError("occupancy process requires zlc_data.OwnedSnapshot")
+        frames = frames.materialize()
         self._validate_images(frames)
         images = np.asarray(frames.block.values)
         repeats, points = images.shape[:2]

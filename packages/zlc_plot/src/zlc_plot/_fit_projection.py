@@ -23,6 +23,7 @@ from .data_contract import (
     resolve_axis,
     snapshot_generation,
     snapshot_revision,
+    schema_value_unit,
 )
 
 from ._pulse_time import pulse_time_scale
@@ -31,6 +32,7 @@ from .data_view import (
     AxisValue,
     CurveData,
     CurveSeries,
+    FacetData,
     HistogramData,
     ImageData,
     QuantityArray,
@@ -106,7 +108,9 @@ def _trailing_trace(
     history: RollingHistory,
     column: int,
     span: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    *,
+    uncertainty: bool,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Mean and standard error over ``span`` shots inside the panel's window.
 
     Ungrouped, each shot contributes everything it pooled (its stored
@@ -119,23 +123,16 @@ def _trailing_trace(
     of those shots happened to pool.
     """
 
-    total = len(history)
     values = np.asarray(history.values, dtype=float)[:, column]
     contributing = np.asarray(history.valid[:, column], dtype=bool)
     if history.group_keys[column] == ():
         counts = np.asarray(history.counts, dtype=float)[:, column]
         contributing = contributing & (counts > 0.0)
         count = np.where(contributing, counts, 0.0)
-        sems = (
-            np.full(total, np.nan)
-            if history.sem is None
-            else np.asarray(history.sem, dtype=float)[:, column]
-        )
     else:
         # One per-key value per shot: for a per-site trace that IS the
         # shot's one sample, so it has no spread of its own.
         count = contributing.astype(float)
-        sems = np.full(total, np.nan)
 
     # Square about the data, not about zero -- the same reason every bucket
     # reduction does.  A shot counter's values are small; a fitted optical
@@ -143,28 +140,31 @@ def _trailing_trace(
     # spread made entirely of rounding.
     reference = _sem_reference(values[contributing])
     centred = np.where(contributing, values - reference, 0.0)
-    mean_square = centred * centred
-    # sem = s / sqrt(count), and E[x^2] about the shot's own mean is
-    # mean^2 + s^2 (count - 1) / count.  Shifting the origin does not
-    # change a spread, so the same term rides the centred mean.
-    stated = contributing & (count > 1.0) & np.isfinite(sems)
-    mean_square = mean_square + np.where(
-        stated, np.where(stated, sems, 0.0) ** 2 * (count - 1.0), 0.0
-    )
-    n = np.where(contributing, count, 0.0)
-    sums = n * centred
-    squares = n * np.where(contributing, mean_square, 0.0)
-    running_n = _window_totals(np.cumsum(n), span)
+    sums = count * centred
+    running_n = _window_totals(np.cumsum(count), span)
     running_sum = _window_totals(np.cumsum(sums), span)
-    running_squares = _window_totals(np.cumsum(squares), span)
     with np.errstate(invalid="ignore", divide="ignore"):
         centred_mean = running_sum / running_n
-        spread = np.clip(
-            running_squares / running_n - np.square(centred_mean), 0.0, None
-        )
-        sem = np.sqrt(spread / (running_n - 1.0))
         mean = centred_mean + reference
-    sem[running_n < 2.0] = np.nan
+    sem = None
+    if uncertainty:
+        mean_square = centred * centred
+        # Preserve within-shot scatter only for a pool of raw samples.
+        # Grouped traces contribute one reduced value per shot.
+        if history.group_keys[column] == () and history.sem is not None:
+            sems = np.asarray(history.sem, dtype=float)[:, column]
+            stated = contributing & (count > 1.0) & np.isfinite(sems)
+            mean_square += np.where(
+                stated, np.where(stated, sems, 0.0) ** 2 * (count - 1.0), 0.0
+            )
+        squares = count * np.where(contributing, mean_square, 0.0)
+        running_squares = _window_totals(np.cumsum(squares), span)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            spread = np.clip(
+                running_squares / running_n - np.square(centred_mean), 0.0, None
+            )
+            sem = np.sqrt(spread / (running_n - 1.0))
+        sem[running_n < 2.0] = np.nan
     valid = (running_n > 0.0) & np.isfinite(mean)
     mean = np.where(valid, mean, np.nan)
     return mean, sem, valid
@@ -820,12 +820,6 @@ class FitProjection:
         # per-shot objects, no per-shot key lookup.
         values_plane = np.asarray(history.values, dtype=float)
         valid_plane = np.asarray(history.valid, dtype=bool)
-        masked_plane = np.where(valid_plane, values_plane, np.nan)
-        sem_plane = None
-        if history.sem is not None:
-            sem_plane = np.where(
-                valid_plane, np.asarray(history.sem, dtype=float), np.nan
-            )
         # Runtime supplies both coordinates: relative source index and actual
         # run-relative time. A window selects records without rebasing either.
         along = self._spec.x
@@ -848,9 +842,20 @@ class FitProjection:
                 f"history that stamps its shots, the shot-time axis; not {along!r}"
             )
         x_values = source_coordinates
-        unit = self._view.samples.value.display_unit
-        canonical_unit = self._view.samples.value.canonical_unit
-        display_plane = canonical_unit.convert_value_to(masked_plane, unit)
+        unit = self._view._value_display_unit
+        canonical_unit = schema_value_unit(self._view._schema, self._view._unit_registry)
+        value_label = self._view._schema.value_schema.name or "value"
+        if trailing == 1:
+            values_plane = np.where(valid_plane, values_plane, np.nan)
+            display_plane = canonical_unit.convert_value_to(values_plane, unit)
+            sem_plane = (
+                np.where(valid_plane, np.asarray(history.sem, dtype=float), np.nan)
+                if uncertainty and history.sem is not None else None
+            )
+            for plane in (values_plane, display_plane, sem_plane):
+                if plane is not None:
+                    plane.setflags(write=False)
+        x_values.setflags(write=False)
         x = QuantityArray(
             x_values,
             (x_values if along is None else x_unit.convert_value_to(
@@ -864,17 +869,18 @@ class FitProjection:
         for column, key in enumerate(keys):
             sem = None
             if trailing > 1:
-                canonical_values, running_sem, valid = _trailing_trace(
-                    history, column, trailing
+                canonical_values, sem, valid = _trailing_trace(
+                    history, column, trailing, uncertainty=uncertainty,
                 )
-                if uncertainty:
-                    sem = running_sem
                 display_values = canonical_unit.convert_value_to(
                     canonical_values, unit
                 )
+                for plane in (canonical_values, display_values, valid, sem):
+                    if plane is not None:
+                        plane.setflags(write=False)
             else:
                 valid = valid_plane[:, column]
-                canonical_values = masked_plane[:, column]
+                canonical_values = values_plane[:, column]
                 display_values = display_plane[:, column]
                 if uncertainty and sem_plane is not None:
                     # A history whose shots state no error has NO band --
@@ -886,9 +892,9 @@ class FitProjection:
                 display_values,
                 canonical_unit,
                 unit,
-                self._view.samples.value.label,
+                value_label,
             )
-            label = self._view.samples.value.label if not key else ", ".join(
+            label = value_label if not key else ", ".join(
                 item.label for item in key
             )
             series.append(
@@ -896,7 +902,6 @@ class FitProjection:
                     x=x,
                     y=y,
                     valid=valid,
-                    counts=valid.astype(np.int64),
                     sem=sem,
                     group_key=key,
                     label=label,
@@ -1138,6 +1143,8 @@ class FitProjection:
         Dataset axis and therefore never receives a synthetic AxisRef.
         """
 
+        if self._is_histogram_plot():
+            return np.asarray(self._view.samples.value.canonical)
         if isinstance(self._spec, RollingPlot):
             return self._rolling_sample_offsets()
         source = self._x_selector_source()
@@ -2497,6 +2504,17 @@ class FitProjection:
     def _value_quantity(self) -> Any:
         if self._view is None:
             raise TypeError("value access requires zlc_data.OwnedSnapshot")
+        # Units and labels belong to the accepted plotted quantity; a
+        # control/fit-description read must not materialize raw history.
+        payload = self._payload
+        if isinstance(payload, FacetData) and payload.cells:
+            payload = payload.cells[0].payload
+        if isinstance(payload, CurveData) and payload.series:
+            return payload.series[0].y
+        if isinstance(payload, ImageData):
+            return payload.z
+        if isinstance(payload, HistogramData):
+            return payload.edges
         return self._view.samples.value
 
     def _y_ref_or_value(self) -> AxisRef | Any:

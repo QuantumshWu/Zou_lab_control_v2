@@ -313,7 +313,7 @@ class ImagePointOverlay:
             raise ValueError(
                 f"overlay status must declare one complete point axis of {count} items"
             )
-        values = np.asarray(snapshot.block.values)
+        values = np.asarray(snapshot.materialize().block.values)
         if values.dtype != np.dtype(np.bool_) and values.dtype.kind not in "iuf":
             raise TypeError("overlay status values must be bool or real numeric")
         valid_values = values[snapshot.expanded_validity()]
@@ -374,7 +374,7 @@ class ImagePointOverlay:
         if not bool(np.any(acquired)):
             return None
         values = np.asarray(
-            self.status.block.values[repeat, point],
+            self.status.materialize().block.values[repeat, point],
             dtype=np.bool_,
         )
         return tuple(

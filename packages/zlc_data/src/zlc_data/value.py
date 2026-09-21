@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from copy import copy
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 import numpy as np
@@ -15,7 +15,7 @@ from .validation import (
     digest_text,
 )
 
-from ._arrays import immutable_array
+from ._arrays import immutable_array, compact_immutable_array
 from .axis import AxisId, AxisSpec, REPEAT
 from .schema import DatasetSchema, DomainSpec, ValueSchema
 from .validity import (
@@ -75,6 +75,25 @@ class DatasetRevisionRef:
         digest_text(self.schema_fingerprint, "schema_fingerprint")
         if not isinstance(self.revision, DatasetRevision):
             raise TypeError("revision must be DatasetRevision")
+        object.__setattr__(self, "_identity", (self.block_id.value, self.stream_generation.value,
+                                               self.schema_fingerprint, self.revision.value))
+
+    @property
+    def identity(self) -> tuple[str, str, str, int]:
+        """The immutable scalar key, shared by repeated identity lookups."""
+        return self._identity
+
+    def __hash__(self) -> int:
+        cached = self.__dict__.get("_hash")
+        if cached is None:
+            cached = hash(self._identity)
+            object.__setattr__(self, "_hash", cached)
+        return cached
+
+    def __reduce__(self):
+        # Python hash salts belong to the current process, not the identity
+        # transported to another process or saved by a caller.
+        return type(self), (self.block_id, self.stream_generation, self.schema_fingerprint, self.revision)
 
 
 @dataclass(frozen=True)
@@ -110,7 +129,7 @@ class IndexedWindow:
 class DataBlock:
     block_id: BlockId
     revision: DatasetRevision
-    values: np.ndarray
+    values: np.ndarray | None
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity
     schema: DatasetSchema
     #: The uncertainty OF THESE SAMPLES, one per value, or None.
@@ -128,12 +147,47 @@ class DataBlock:
     #: block.  Read by a consumer that would otherwise recount the whole
     #: window every shot to learn what one shot changed.
     window: IndexedWindow | None = None
+    segments: tuple["OwnedSnapshot", ...] = ()
+    segment_origins: np.ndarray | None = None
+    segment_shapes: np.ndarray | None = None
+    _materialized: "DataBlock | None" = field(default=None, init=False, repr=False)
     __hash__ = None
 
     def __post_init__(self) -> None:
         self._validate_identity()
         if not isinstance(self.schema, DatasetSchema):
             raise TypeError("schema must be DatasetSchema")
+        if self.window is not None and not isinstance(self.window, IndexedWindow):
+            raise TypeError("window must be IndexedWindow or None")
+        if self.values is None:
+            segments = tuple(self.segments)
+            shape = self.schema.physical_shape
+            layout_shape = (len(segments), 2)
+            origins = immutable_array(np.empty((0, 2), dtype=np.int64) if self.segment_origins is None
+                                      else self.segment_origins, dtype=np.dtype("<i8"), shape=layout_shape)
+            sizes = immutable_array(np.empty((0, 2), dtype=np.int64) if self.segment_shapes is None
+                                    else self.segment_shapes, dtype=np.dtype("<i8"), shape=layout_shape)
+            for index, snapshot in enumerate(segments):
+                if not isinstance(snapshot, OwnedSnapshot):
+                    raise TypeError("a data segment must hold an OwnedSnapshot")
+                origin = origins[index]
+                if np.any(origin < 0):
+                    raise ValueError("segment origin must be a nonnegative Repeat/Point pair")
+                source = snapshot.block.schema
+                if tuple(sizes[index]) != source.physical_shape[:2]:
+                    raise ValueError("segment shape differs from its source")
+                if source.value_schema != self.schema.value_schema or source.physical_shape[2:] != shape[2:]:
+                    raise ValueError("segment values and cell geometry differ from the containing dataset")
+                if any(origin[index] + source.physical_shape[index] > shape[index] for index in (0, 1)):
+                    raise ValueError("segment exceeds the containing dataset")
+            object.__setattr__(self, "segments", segments)
+            object.__setattr__(self, "segment_origins", origins)
+            object.__setattr__(self, "segment_shapes", sizes)
+            if not isinstance(self.validity, Invalid) or self.sigma is not None:
+                raise ValueError("segmented data carries validity and sigma in its source segments")
+            return
+        if self.segments or self.segment_origins is not None or self.segment_shapes is not None:
+            raise ValueError("a data block holds either an array or segments, not both")
         _validate_dataset_validity(self.validity, self.schema)
         array = immutable_array(
             self.values,
@@ -155,14 +209,59 @@ class DataBlock:
             if bool(np.any(finite & (sigma < 0.0))):
                 raise ValueError("sample sigma must be non-negative")
             object.__setattr__(self, "sigma", sigma)
-        if self.window is not None and not isinstance(self.window, IndexedWindow):
-            raise TypeError("window must be IndexedWindow or None")
 
     def _validate_identity(self) -> None:
         if not isinstance(self.block_id, BlockId):
             raise TypeError("block_id must be BlockId")
         if not isinstance(self.revision, DatasetRevision):
             raise TypeError("revision must be DatasetRevision")
+
+    def materialize(self) -> "DataBlock":
+        """Explicitly request contiguous planes; structured readers need not.
+
+        Source segments stay immutable. This one owned result is shared by
+        all consumers of the same exact snapshot, never updated in place.
+        """
+        if self.values is not None:
+            return self
+        if self._materialized is not None:
+            return self._materialized
+        schema = self.schema
+        values = np.zeros(schema.physical_shape, dtype=schema.value_schema.dtype)
+        mask = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
+        sigma = None
+        for origin, snapshot in zip(self.segment_origins, self.segments, strict=True):
+            block = snapshot.block.materialize()
+            shape = block.schema.physical_shape
+            leading = tuple(slice(start, start + size) for start, size in zip(origin, shape[:2]))
+            values[leading] = block.values
+            mask[leading] = dataset_validity_storage(block.validity, block.schema)
+            if block.sigma is not None:
+                if sigma is None:
+                    sigma = np.full(schema.physical_shape, np.nan, dtype=np.float64)
+                sigma[leading] = block.sigma
+        result = DataBlock(self.block_id, self.revision, values,
+                           compact_dataset_validity(mask, schema), schema, sigma, self.window)
+        object.__setattr__(self, "_materialized", result)
+        return result
+
+    @classmethod
+    def _from_owned_segments(
+        cls, block_id: BlockId, revision: DatasetRevision, schema: DatasetSchema,
+        segments: tuple["OwnedSnapshot", ...], *, origins: np.ndarray, shapes: np.ndarray,
+        window: IndexedWindow | None = None,
+    ) -> "DataBlock":
+        """Reuse placements already admitted by Runtime or the shared cutter.
+
+        The public constructor validates arbitrary placements. Advancing an
+        owned range does not revalidate every old immutable event again.
+        """
+        block = cls(block_id, revision, None, INVALID, schema, window=window)
+        object.__setattr__(block, "segments", segments)
+        layout_shape = (len(segments), 2)
+        object.__setattr__(block, "segment_origins", immutable_array(origins, dtype=np.dtype("<i8"), shape=layout_shape))
+        object.__setattr__(block, "segment_shapes", immutable_array(shapes, dtype=np.dtype("<i8"), shape=layout_shape))
+        return block
 
     def ref(self, stream_generation: StreamGenerationId) -> DatasetRevisionRef:
         return DatasetRevisionRef(
@@ -190,15 +289,19 @@ class DataBlock:
 
         if not changes:
             return self
-        if changes.keys() <= {"block_id", "revision"}:
+        if (changes.keys() <= {"block_id", "revision", "schema"}
+                and changes.get("schema", self.schema) == self.schema):
             # The content is already immutable and validated. Renaming it
             # cannot change sigma's sign or any other numerical property.
             # Copy the object, not a manually maintained list of its planes.
             result = copy(self)
             for name, value in changes.items():
                 object.__setattr__(result, name, value)
+            object.__setattr__(result, "_materialized", None)
             result._validate_identity()
             return result
+        if self.values is None:
+            return self.materialize().replacing(**changes)
         return dataclasses.replace(self, **changes)
 
 
@@ -218,19 +321,51 @@ class OwnedSnapshot:
     def expanded_validity(self) -> np.ndarray:
         """Return this snapshot's validity as a dense physical mask."""
 
-        return expand_dataset_validity(self.block.validity, self.block.schema)
+        block = self.block.materialize()
+        return expand_dataset_validity(block.validity, block.schema)
+
+    def materialize(self) -> "OwnedSnapshot":
+        block = self.block.materialize()
+        return self if block is self.block else OwnedSnapshot(self.ref, block)
+
+    def compact(self) -> "OwnedSnapshot":
+        """Own exactly the committed planes while keeping their data identity.
+
+        Restrictions may borrow a parent image for short computations. A
+        retained publication must not pin that unrelated parent allocation.
+        """
+        block = self.block
+        if block.values is None:
+            segments = tuple(child.compact() for child in block.segments)
+            if all(new is old for new, old in zip(segments, block.segments, strict=True)):
+                return self
+            return OwnedSnapshot(self.ref, DataBlock._from_owned_segments(
+                block.block_id, block.revision, block.schema, segments,
+                origins=block.segment_origins, shapes=block.segment_shapes, window=block.window))
+        values = compact_immutable_array(block.values)
+        sigma = None if block.sigma is None else compact_immutable_array(block.sigma)
+        validity = block.validity
+        if isinstance(validity, (CellValidity, DatasetComponentValidity)):
+            mask = compact_immutable_array(validity.mask)
+            if mask is not validity.mask:
+                validity = (CellValidity(mask) if isinstance(validity, CellValidity)
+                            else DatasetComponentValidity(validity.axis_ids, mask))
+        if values is block.values and sigma is block.sigma and validity is block.validity:
+            return self
+        return OwnedSnapshot(self.ref, block.replacing(values=values, validity=validity, sigma=sigma))
 
     def exactly_equals(self, other: object) -> bool:
         """Compare two snapshots by identity, schema, values, and validity."""
 
         if not isinstance(other, OwnedSnapshot):
             return False
+        if self.ref != other.ref or self.block.schema != other.block.schema:
+            return False
+        left, right = self.materialize(), other.materialize()
         return bool(
-            self.ref == other.ref
-            and self.block.schema == other.block.schema
-            and np.array_equal(self.block.values, other.block.values, equal_nan=True)
-            and np.array_equal(self.expanded_validity(), other.expanded_validity())
-            and _same_sigma(self.block.sigma, other.block.sigma)
+            np.array_equal(left.block.values, right.block.values, equal_nan=True)
+            and np.array_equal(left.expanded_validity(), right.expanded_validity())
+            and _same_sigma(left.block.sigma, right.block.sigma)
         )
 
 

@@ -308,7 +308,7 @@ def _wait_for_signal(plane, signal_name: str, revision: int):
 def _expanded_validity(snapshot) -> np.ndarray:
     """One derived block's per-cell validity, in the block's own shape."""
 
-    block = snapshot.block
+    block = snapshot.materialize().block
     return expand_dataset_validity(block.validity, block.schema)
 
 
@@ -729,7 +729,7 @@ def test_a_selection_over_the_canonical_prefix_carries_the_prefix_s_event_record
         region, record = plane.current_dataset_view(
             "@logic/provenance/roi_frame", publication
         )
-        assert region.block.values[:, 0, 0, 0].tolist() == [1.0, 2.0]
+        assert region.materialize().block.values[:, 0, 0, 0].tolist() == [1.0, 2.0]
         for carried in (record, publication.event_record):
             assert carried["device_settings"]["camera"]["epoch_ranges"] == (
                 (1, 2),
@@ -1282,11 +1282,11 @@ def test_a_region_cut_from_a_fitted_parameter_keeps_each_value_s_error() -> None
         )
         region = plane.current_dataset("@logic/cropped/roi_frame")
         np.testing.assert_array_equal(
-            region.block.values.reshape(-1), [1.0, np.nan]
+            region.materialize().block.values.reshape(-1), [1.0, np.nan]
         )
-        assert region.block.sigma is not None, "the errors were dropped"
+        assert region.materialize().block.sigma is not None, "the errors were dropped"
         np.testing.assert_array_equal(
-            region.block.sigma.reshape(-1), [0.1, np.nan]
+            region.materialize().block.sigma.reshape(-1), [0.1, np.nan]
         )
     finally:
         if cropped is not None:
@@ -1450,7 +1450,7 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
         assert width.snapshot.block.schema.value_schema.value_unit is None
         axis = center.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "x"
-        assert axis.coordinates == (10.0, 20.0, 35.0)
+        assert tuple(axis.coordinate_values()) == (10.0, 20.0, 35.0)
         assert axis.unit == "V"
 
         for name in ("center", "width"):
@@ -1485,7 +1485,7 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
         value = front.value("@logic/text/center")
         assert value is not None
         axis = value.snapshot.block.schema.point_domain.axes[0]
-        assert axis.coordinates == (0.0, 1.0, 2.0)
+        assert tuple(axis.coordinate_values()) == (0.0, 1.0, 2.0)
         assert axis.unit is None
         assert axis.coordinate_labels == ("red", "green", "blue")
     finally:
@@ -1534,7 +1534,7 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
         assert value is not None
         axis = value.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "x"
-        assert axis.coordinates == (42.0,)
+        assert tuple(axis.coordinate_values()) == (42.0,)
         assert float(value.snapshot.block.values.reshape(-1)[0]) == 4.0
         assert float(
             np.asarray(value.snapshot.block.sigma).reshape(-1)[0]
@@ -2286,7 +2286,7 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
         )
         axis = focused.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "frame"
-        assert axis.coordinates == (1.0,)
+        assert tuple(axis.coordinate_values()) == (1.0,)
     finally:
         _close(bridge, plane, source)
 
@@ -2342,7 +2342,7 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
         (axis,) = mean_schema.point_domain.axes
         assert axis.name == "frame"
         assert axis.role == READOUT_EVENT
-        assert axis.coordinates == (0.0, 1.0, 2.0)
+        assert tuple(axis.coordinate_values()) == (0.0, 1.0, 2.0)
         assert mean_schema.repeat_domain == frame_schema.repeat_domain
         assert mean_schema.cell_domain == SCALAR_DOMAIN
         assert mean_schema.value_schema.value_unit == "counts"
@@ -2529,7 +2529,7 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
         (axis,) = fit_schema.repeat_domain.axes
         assert axis.axis_id == AxisId("cycle")
         assert axis.size == 2
-        assert axis.coordinates == (0.0, 1.0)
+        assert tuple(axis.coordinate_values()) == (0.0, 1.0)
         assert fit_schema.point_domain.size == 1
         assert fit_schema.point_domain.axes == ()
         assert value.snapshot.block.values.shape == (2, 1, 1)

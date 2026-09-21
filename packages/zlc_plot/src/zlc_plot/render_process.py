@@ -9,7 +9,7 @@ one for Edit/export work.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import ChainMap, deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 import ctypes
@@ -18,6 +18,7 @@ import multiprocessing
 from multiprocessing.connection import Connection
 from multiprocessing.shared_memory import SharedMemory
 import os
+from operator import attrgetter
 from pathlib import Path
 import pickle
 from queue import Empty, Queue
@@ -1462,6 +1463,7 @@ class RenderProcess:
         # keep its identity owner alive with the token so Python cannot reuse
         # that id for different content before the token is retired.
         self._input_identity_owners: dict[int, object] = {}
+        self._input_dependencies: dict[int, tuple[int, ...]] = {}
         self._input_kinds: dict[int, str] = {}
         self._input_refcounts: dict[int, int] = {}
         self._host_inputs: dict[str, set[int]] = {}
@@ -1961,13 +1963,15 @@ class RenderProcess:
 
     @staticmethod
     def _input_key(value: object) -> object:
-        from zlc_data import DatasetSchema, OwnedSnapshot
+        import zlc_data
+
+        if isinstance(value, zlc_data.OwnedSnapshot):
+            return value.ref.identity
+        if isinstance(value, (zlc_data.AxisSpec, zlc_data.DomainSpec, zlc_data.DatasetSchema)):
+            kind = "axis" if isinstance(value, zlc_data.AxisSpec) else "domain" if isinstance(value, zlc_data.DomainSpec) else "schema"
+            return kind, id(value)
         from .primitives import ImagePointOverlay
 
-        if isinstance(value, OwnedSnapshot):
-            return "snapshot", value.ref
-        if isinstance(value, DatasetSchema):
-            return "schema", value.fingerprint
         if isinstance(value, ImagePointOverlay):
             return "overlay", id(value), value.revision
         raise TypeError(f"unsupported plot input {type(value).__name__}")
@@ -1984,17 +1988,11 @@ class RenderProcess:
     def _input_reference(
         self, value: object, used: set[int]
     ) -> tuple[str, int]:
-        """The token a request names this input by, uploading it once.
+        """Upload the missing immutable input graph as one transport batch.
 
-        A token is visible to other callers only once its ``input`` message
-        is in the outbox: publication and enqueueing happen under the one
-        lock, as one step.  Published first and uploaded after, a concurrent
-        Host's request that saw the token was enqueued ahead of the upload
-        it named, and the child refused it as an input released before use.
-        The serialization and the shared-memory copy -- the expensive part
-        -- run outside the lock, on a value nobody else can see yet; a
-        second caller that raced to the same input discards its own copy
-        and takes the published token.
+        Storage segments are dependencies, not messages or OS allocations.
+        Graph construction and numerical copying stay outside the lock;
+        enqueueing and making its tokens visible remain one atomic step.
         """
 
         key = self._input_key(value)
@@ -2004,16 +2002,15 @@ class RenderProcess:
                 return _INPUT_REF, token
             if self._closing or self._closed:
                 raise RuntimeError("render process is closing")
-        from zlc_data import DatasetSchema, OwnedSnapshot
-        from zlc_data.codec import dataset_schema_to_tree
-        # The data input owns one schema hold, independent of how many Hosts
-        # use that input. Revisions share the same existing input token; its
-        # last dependent input releases it through the ordinary refcount path.
-        dependencies: set[int] = set()
+        from zlc_data import AxisSpec, DomainSpec, DatasetSchema, OwnedSnapshot
+        pending: dict[object, int] = {}
+        entries: list[tuple[int, object, object, tuple[int, ...], object]] = []
+        counts: dict[int, int] = {}
+        held: list[int] = []
         buffers: list[pickle.PickleBuffer] = []
         released_buffers = 0
         shared: list[SharedMemory] = []
-        descriptors: list[tuple[str, int]] = []
+        descriptors: list[tuple[str, int, int]] = []
 
         def discard_blocks() -> None:
             # BACK ON THE FREE LIST, not destroyed.  The commonest way here
@@ -2032,42 +2029,103 @@ class RenderProcess:
                 )
             self._discard_input_blocks(spare)
 
-        try:
-            if isinstance(value, DatasetSchema):
-                document = ("schema", dataset_schema_to_tree(value))
+        def reference(value: object, dependencies: set[int]) -> tuple[str, int]:
+            child_key = self._input_key(value)
+            local = pending.get(child_key)
+            if local is not None:
+                if local not in dependencies:
+                    counts[local] += 1
+                    dependencies.add(local)
+                return _INPUT_REF, local
+            with self._lock:
+                was_used = len(dependencies)
+                existing = self._reuse_input_token(child_key, dependencies)
+                if existing is not None:
+                    if len(dependencies) != was_used:
+                        held.append(existing)
+                    return _INPUT_REF, existing
+                self._input_serial += 1
+                local = self._input_serial
+            pending[child_key] = local
+            counts[local] = 1
+            dependencies.add(local)
+            children: set[int] = set()
+            if isinstance(value, AxisSpec):
+                document = ("axis", value.axis_id, value.name, value.role, value.size,
+                            value.coordinates, value.unit, value.coordinate_frame,
+                            value.index_origin, value.coordinate_labels, value.coordinate_of,
+                            value.coordinate_origins)
+            elif isinstance(value, DomainSpec):
+                document = ("domain", value.shape,
+                            references(value.axes, children),
+                            value.axis_codes, value.axis_code_repeats)
+            elif isinstance(value, DatasetSchema):
+                document = ("schema",
+                            reference(value.repeat_domain, children),
+                            reference(value.point_domain, children),
+                            reference(value.cell_domain, children),
+                            value.value_schema, value.fingerprint)
             else:
                 snapshot = value if isinstance(value, OwnedSnapshot) else value.status
                 snapshot_document = None
                 if snapshot is not None:
-                    schema_ref = self._input_reference(snapshot.block.schema, dependencies)
+                    schema_ref = reference(snapshot.block.schema, children)
                     block = snapshot.block
                     snapshot_document = (
                         "snapshot", schema_ref, snapshot.ref, block.values,
                         block.validity, block.sigma, block.window,
+                        references(block.segments, children, key=attrgetter("ref.identity")),
+                        block.segment_origins, block.segment_shapes,
                     )
                 document = snapshot_document if isinstance(value, OwnedSnapshot) else (
                     "overlay", value.revision, value.coordinates, value.point_ids,
                     value.labels, value.static_statuses, snapshot_document,
                 )
+            entries.append((local, child_key, value, tuple(children), document))
+            return _INPUT_REF, local
+
+        def references(values: tuple, dependencies: set[int], *, key=self._input_key) -> tuple:
+            # A collection's already-published dependencies need one lookup
+            # and hold batch, not a recursive serializer/lock per old entry.
+            keys = tuple(map(key, values))
+            with self._lock:
+                tokens = tuple(map(self._input_tokens.get, keys))
+                added = set(tokens).difference(dependencies, (None,))
+                for token in added:
+                    self._input_refcounts[token] += 1
+                held.extend(added)
+                dependencies.update(added)
+            return tuple((_INPUT_REF, token) if token is not None else reference(value, dependencies)
+                         for value, token in zip(values, tokens))
+
+        try:
+            result = reference(value, set())
+            # Dependencies precede their consumer. Pickle's shared memo also
+            # avoids repeatedly encoding common identity/schema fields.
             payload = pickle.dumps(
-                document, protocol=5, buffer_callback=buffers.append
+                tuple((entry[0], entry[4]) for entry in entries),
+                protocol=5, buffer_callback=buffers.append,
             )
+            total = sum(item.raw().nbytes for item in buffers)
+            transport = self._take_input_block(total) if buffers else None
+            if transport is not None:
+                shared.append(transport)
+            offset = 0
             for item in buffers:
                 source = None
                 destination = None
                 try:
                     source = memoryview(item).cast("B")
                     nbytes = source.nbytes
-                    block = self._take_input_block(nbytes)
-                    shared.append(block)
                     # A DERIVED view, because releasing a SharedMemory's own
                     # ``buf`` kills it for good -- which did not matter while
                     # every block was destroyed after one use and is exactly
                     # what a block being filled a second time cannot survive.
-                    destination = memoryview(block.buf)
+                    destination = memoryview(transport.buf)
                     if nbytes:
-                        destination[:nbytes] = source
-                    descriptors.append((block.name, nbytes))
+                        destination[offset:offset + nbytes] = source
+                    descriptors.append((transport.name, offset, nbytes))
+                    offset += nbytes
                 finally:
                     if destination is not None:
                         destination.release()
@@ -2087,31 +2145,36 @@ class RenderProcess:
                     pass
             buffers.clear()
             discard_blocks()
-            self._release_inputs(tuple(dependencies))
+            self._release_inputs(held)
             raise
         with self._lock:
             token = self._reuse_input_token(key, used)
             if token is not None:
                 discard_blocks()
-                self._release_inputs(tuple(dependencies))
+                self._release_inputs(held)
                 return _INPUT_REF, token
             if self._closing or self._closed:
                 discard_blocks()
-                self._release_inputs(tuple(dependencies))
+                self._release_inputs(held)
                 raise RuntimeError("render process is closing")
-            self._input_serial += 1
-            token = self._input_serial
+            token = result[1]
             try:
                 self._send(("input", token, payload, tuple(descriptors)))
             except BaseException:
                 discard_blocks()
-                self._release_inputs(tuple(dependencies))
+                self._release_inputs(held)
                 raise
-            self._input_tokens[key] = token
-            self._input_keys[token] = key
-            self._input_identity_owners[token] = value
-            self._input_kinds[token] = str(key[0])
-            self._input_refcounts[token] = 1
+            for child, child_key, owner, dependencies, _document in entries:
+                # A sibling request may have uploaded an equal dependency
+                # while this batch was copied. Both immutable instances are
+                # valid; keep the already-published lookup and release this
+                # graph's own token through its ordinary dependency holds.
+                self._input_tokens.setdefault(child_key, child)
+                self._input_keys[child] = child_key
+                self._input_identity_owners[child] = owner
+                self._input_dependencies[child] = dependencies
+                self._input_kinds[child] = "snapshot" if isinstance(owner, OwnedSnapshot) else str(child_key[0])
+                self._input_refcounts[child] = counts[child]
             self._input_uploads[token] = tuple(shared)
             used.add(token)
         return _INPUT_REF, token
@@ -2144,13 +2207,11 @@ class RenderProcess:
                 self._input_refcounts[token] = self._input_refcounts.get(token, 0) + 1
 
     def _release_inputs(self, tokens: Sequence[int]) -> None:
-        from zlc_data import OwnedSnapshot
-        from .primitives import ImagePointOverlay
-
         dropped: list[int] = []
-        dependencies: list[int] = []
+        pending = list(tokens)
         with self._lock:
-            for token in tokens:
+            while pending:
+                token = pending.pop()
                 if token not in self._input_refcounts:
                     continue
                 count = self._input_refcounts[token] - 1
@@ -2159,25 +2220,17 @@ class RenderProcess:
                     continue
                 self._input_refcounts.pop(token, None)
                 key = self._input_keys.pop(token, None)
-                value = self._input_identity_owners.pop(token, None)
-                snapshot = value if isinstance(value, OwnedSnapshot) else (
-                    value.status if isinstance(value, ImagePointOverlay) else None
-                )
-                if snapshot is not None:
-                    schema_token = self._input_tokens.get(self._input_key(snapshot.block.schema))
-                    if schema_token is not None:
-                        dependencies.append(schema_token)
+                self._input_identity_owners.pop(token, None)
+                pending.extend(self._input_dependencies.pop(token, ()))
                 self._input_kinds.pop(token, None)
                 if key is not None and self._input_tokens.get(key) == token:
                     self._input_tokens.pop(key, None)
                 dropped.append(token)
-        for token in dropped:
+        if dropped:
             try:
-                self._send(("drop-input", token))
+                self._send(("drop-input", tuple(dropped)))
             except Exception:
                 pass
-        if dependencies:
-            self._release_inputs(dependencies)
 
     def _set_host_inputs(self, host_id: str, tokens: Sequence[int]) -> None:
         selected = set(map(int, tokens))
@@ -2579,6 +2632,13 @@ class RenderProcess:
             self._process.join(timeout=5.0)
         with self._lock:
             self._closed = not self._process.is_alive()
+            if self._closed:
+                self._input_identity_owners.clear()
+                self._input_dependencies.clear()
+                self._input_tokens.clear()
+                self._input_keys.clear()
+                self._input_kinds.clear()
+                self._input_refcounts.clear()
         # This generation's writer retires with its pipe, HERE, before a
         # restart replaces the outbox and writer handles: a writer left
         # blocked on the old queue could never be reached again, and it
@@ -2861,22 +2921,38 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
     """Move an IPC-backed PlotInput onto ordinary immutable child storage."""
 
     from zlc_data import (
+        AxisSpec,
         CellValidity,
         DataBlock,
+        DomainSpec,
+        DatasetSchema,
         DatasetComponentValidity,
         OwnedSnapshot,
     )
-    from zlc_data.codec import dataset_schema_from_tree
     from .primitives import ImagePointOverlay
 
     kind = value[0]
+    if kind == "axis":
+        return AxisSpec(*value[1:])
+    if kind == "domain":
+        _kind, shape, axes, codes, repeats = value
+        return DomainSpec(shape, tuple(_resolve_inputs(axis, inputs) for axis in axes), codes, repeats)
     if kind == "schema":
-        # Only public scientific fields cross the process boundary. Lazy
-        # coordinate/layout caches and their process-local sentinels do not.
-        return dataset_schema_from_tree(value[1])
+        _kind, repeat, point, cell, values, fingerprint = value
+        schema = DatasetSchema(*(_resolve_inputs(domain, inputs) for domain in (repeat, point, cell)), values)
+        # This trusted internal message names the already validated immutable
+        # public structure; private caches never cross the process boundary.
+        object.__setattr__(schema, "_fingerprint", fingerprint)
+        return schema
     if kind == "snapshot":
-        _kind, schema_ref, ref, values, validity, sigma, window = value
+        _kind, schema_ref, ref, values, validity, sigma, window, segments, origins, shapes = value
         schema = _resolve_inputs(schema_ref, inputs)
+        if values is None:
+            return OwnedSnapshot(ref, DataBlock._from_owned_segments(
+                ref.block_id, ref.revision, schema,
+                tuple(_resolve_inputs(child, inputs) for child in segments),
+                origins=origins, shapes=shapes, window=window,
+            ))
         if isinstance(validity, CellValidity):
             validity = CellValidity(np.asarray(validity.mask))
         elif isinstance(validity, DatasetComponentValidity):
@@ -2919,33 +2995,36 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
 
 def _load_input(
     payload: bytes,
-    descriptors: Sequence[tuple[str, int]],
+    descriptors: Sequence[tuple[str, int, int]],
     inputs: Mapping[int, object],
-) -> object:
+) -> dict[int, object]:
     buffers: list[memoryview] = []
+    mappings: dict[str, SharedMemory] = {}
     try:
-        for name, nbytes in descriptors:
-            block = _open_shared_memory(str(name))
+        for name, offset, nbytes in descriptors:
+            block = mappings.get(name)
+            if block is None:
+                block = mappings[name] = _open_shared_memory(str(name))
+            exported = block.buf[int(offset):int(offset) + int(nbytes)]
             try:
-                exported = block.buf[: int(nbytes)]
-                try:
-                    # Shared memory is only the transport.  The child takes
-                    # one bytes-backed immutable copy before constructing the
-                    # scientific value, so no OwnedSnapshot can outlive an
-                    # input mapping and SharedMemory.close never races an
-                    # exported NumPy pointer.
-                    owned = bytes(exported)
-                finally:
-                    exported.release()
+                # Each plane owns its own bytes after transport. Retaining
+                # one small segment must not pin the entire upload batch.
+                owned = bytes(exported)
             finally:
-                block.close()
+                exported.release()
             buffers.append(memoryview(owned))
         loaded = pickle.loads(payload, buffers=buffers)
-        return _owned_input(loaded, inputs)
+        added: dict[int, object] = {}
+        available = ChainMap(added, inputs)
+        for token, document in loaded:
+            added[int(token)] = _owned_input(document, available)
+        return added
     finally:
         # DataBlock either retained the immutable bytes backing or copied an
         # incompatible layout.  These temporary view objects own no OS handle.
         buffers.clear()
+        for block in mappings.values():
+            block.close()
 
 
 def _resolve_inputs(value: object, inputs: Mapping[int, object]) -> object:
@@ -3556,7 +3635,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
             kind = message[0]
             if kind == "input":
                 token, payload, descriptors = message[1:]
-                inputs[int(token)] = _load_input(payload, descriptors, inputs)
+                inputs.update(_load_input(payload, descriptors, inputs))
                 send(("input-ack", int(token)))
                 continue
             if kind == "release-front":
@@ -3564,7 +3643,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
                     fronts.release(str(message[1]), len(hosts) * FRONT_DEPTH)
                 continue
             if kind == "drop-input":
-                inputs.pop(int(message[1]), None)
+                for token in message[1]:
+                    inputs.pop(int(token), None)
                 continue
             if kind == "cancel":
                 answer = pending.get(int(message[1]))

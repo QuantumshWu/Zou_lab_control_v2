@@ -283,12 +283,12 @@ def resolve_selection_indices(
         if any(
             value is not None
             and (isinstance(value, (bool, str)) or not isinstance(value, Real))
-            for value in axis.coordinates
+            for value in axis.coordinate_values()
         ):
             raise TypeError(f"axis {axis.axis_id} coordinates are not entirely numeric")
         indices = tuple(
             index
-            for index, value in enumerate(axis.coordinates)
+            for index, value in enumerate(axis.coordinate_values())
             if value is not None and term.lower <= value <= term.upper
         )
     else:

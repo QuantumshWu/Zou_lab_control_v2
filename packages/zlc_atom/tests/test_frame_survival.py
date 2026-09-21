@@ -136,7 +136,7 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
     (pair_axis,) = schema.point_domain.axes
     assert pair_axis.axis_id == AxisId("fs.pair")
     assert pair_axis.role == READOUT_EVENT
-    assert pair_axis.coordinates == (0, 1, 2)
+    assert tuple(pair_axis.coordinate_values()) == (0, 1, 2)
     assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
     (site_axis,) = schema.cell_domain.axes
     assert site_axis.axis_id == AxisId("occupancy.site")
@@ -316,7 +316,7 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, 
         np.testing.assert_array_equal(terminal.snapshot.expanded_validity(), live.expanded_validity())
         output_domain = live.block.schema.point_domain
         assert output_domain.axes[1:] == source.block.schema.point_domain.axes[1:]
-        assert output_domain.axis_codes[1:] == tuple(
+        assert tuple(tuple(codes) for codes in output_domain.axis_codes[1:]) == tuple(
             tuple(code for code in codes[::frames] for _ in range(pair_count))
             for codes in source.block.schema.point_domain.axis_codes[1:]
         )
@@ -384,7 +384,6 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
         np.testing.assert_allclose(
             float(series.sem[entry]), binomial, rtol=1e-12
         )
-        assert int(series.counts[entry]) == count
 
 
 def test_monitor_source_translates_coverage_to_own_geometry() -> None:

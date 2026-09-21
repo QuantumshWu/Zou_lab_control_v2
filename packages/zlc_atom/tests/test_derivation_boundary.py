@@ -642,7 +642,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             (site_axis,) = value.schema.cell_domain.axes
             assert site_axis == calibration.site_map.site_axis, name
             assert site_axis.role is SITE
-            assert site_axis.coordinates == (1,)
+            assert tuple(site_axis.coordinate_values()) == (1,)
             # The ids identify sites to other records; the axis is read by
             # a person, and reads 1..n.
             assert site_axis.coordinate_labels is None

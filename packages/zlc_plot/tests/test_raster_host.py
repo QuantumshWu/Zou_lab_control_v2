@@ -238,7 +238,7 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
 
     def record_upload(message):
         if message[0] == "input":
-            uploads.append((len(message[2]), tuple(size for _name, size in message[3])))
+            uploads.append((len(message[2]), tuple(size for _name, _offset, size in message[3])))
         return send(message)
 
     service._send = record_upload
@@ -259,7 +259,8 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
             remote, peer = (pending.result(timeout=30) for pending in builds)
         first = remote.wait_for_front(timeout=30)
         peer.wait_for_front(timeout=30)
-        assert set(service._input_kinds.values()) == {"schema", "snapshot"}
+        assert set(service._input_kinds.values()) == {"axis", "domain", "schema", "snapshot"}
+        first_uploads = len(uploads)
         assert peer.close(timeout=30)
         peer = None
         assert remote.process_pid == service.pid
@@ -294,11 +295,10 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
             current = snapshots(revision, center=0.2 + 0.02 * revision)
             remote.update_data(current).result(timeout=30)
         np.testing.assert_array_equal(retained, retained_pixels)
-        assert {key[0] for key in service._input_tokens} == {"schema", "snapshot"}
+        assert set(service._input_kinds.values()) == {"axis", "domain", "schema", "snapshot"}
         assert set(service._input_refcounts.values()) == {1}
-        assert len(uploads) == 7  # one schema, six revisions
-        assert uploads[0][1] == ()  # public schema grammar, no private NumPy caches
-        assert all(sizes == (snapshot.block.values.nbytes,) for _nbytes, sizes in uploads[1:])
+        assert len(uploads) == first_uploads + 5  # structure once, then only new values
+        assert all(sizes == (snapshot.block.values.nbytes,) for _nbytes, sizes in uploads[first_uploads:])
         cycle = remote.describe_display().result(timeout=30).value.semantics.fields
         for field in cycle:
             choices = field.cycle_choices
@@ -489,14 +489,15 @@ def test_an_input_token_is_published_only_with_its_upload_enqueued() -> None:
         service._send = enqueue
         used: set[int] = set()
         kind, token = service._input_reference(snapshot, used)
-        assert len(enqueued) == 2 and all(kind == "input" for kind, _tokens in enqueued)
+        initial_uploads = len(enqueued)
+        assert initial_uploads == 1 and enqueued[0][0] == "input"
         assert key not in enqueued[-1][1]
         assert service._input_tokens[key] == token
         assert used == {token}
         # A second caller reuses the published token and uploads nothing.
         again = service._input_reference(snapshot, set())
         assert again == (kind, token)
-        assert len(enqueued) == 2
+        assert len(enqueued) == initial_uploads
         assert service._input_refcounts[token] == 2
     finally:
         del service._send
@@ -516,7 +517,6 @@ def test_an_owned_input_keeps_the_producer_s_indexed_window() -> None:
     from zlc_data import PRIMARY_INDEX, IndexedWindow, owned_snapshot_from_arrays
     from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
     from zlc_plot.render_process import _INPUT_REF, _owned_input
-    from zlc_data.codec import dataset_schema_to_tree
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -536,10 +536,13 @@ def test_an_owned_input_keeps_the_producer_s_indexed_window() -> None:
         stream_generation="roi",
         window=IndexedWindow(0, 2, 0),
     )
-    installed = _owned_input(("schema", dataset_schema_to_tree(schema)), {})
+    installed = _owned_input(("schema", (_INPUT_REF, 2), (_INPUT_REF, 3), (_INPUT_REF, 4),
+                              schema.value_schema, schema.fingerprint),
+                             {2: schema.repeat_domain, 3: schema.point_domain, 4: schema.cell_domain})
     restored = _owned_input((
         "snapshot", (_INPUT_REF, 1), source.ref, source.block.values,
         source.block.validity, source.block.sigma, source.block.window,
+        (), None, None,
     ), {1: installed})
     assert restored.block.window == source.block.window
     assert restored.block.window is not None

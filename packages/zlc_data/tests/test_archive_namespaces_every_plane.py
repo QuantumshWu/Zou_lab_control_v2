@@ -22,6 +22,7 @@ import numpy as np
 
 from zlc_data import (
     REPEAT,
+    INVALID,
     SCAN_POINT,
     AxisId,
     AxisSpec,
@@ -79,7 +80,18 @@ def _round_trip(arrays):
 def test_a_saved_figure_opens_again_when_its_dataset_states_an_error() -> None:
     """The writer produced files the reader refused; it no longer can."""
 
-    _round_trip({"data": _snapshot("data", 1.0)})
+    source = _snapshot("data", 1.0)
+    source = OwnedSnapshot(source.ref, source.block.replacing(
+        validity=CellValidity(np.asarray([[True, False, True, True]]))))
+    segmented = DataBlock(source.ref.block_id, source.ref.revision, None, INVALID,
+                          source.block.schema, segments=(source,),
+                          segment_origins=np.asarray([[0, 0]], dtype=np.int64),
+                          segment_shapes=np.asarray([source.block.schema.physical_shape[:2]], dtype=np.int64))
+    for snapshot in (source, OwnedSnapshot(source.ref, segmented)):
+        _info, members, restored = _round_trip({"data": snapshot})
+        assert "data.validity" in members and "data.sigma" in members
+        np.testing.assert_array_equal(restored["data"].block.values, source.block.values)
+        np.testing.assert_array_equal(restored["data"].expanded_validity(), source.expanded_validity())
 
 
 def test_two_datasets_that_both_state_errors_keep_their_own() -> None:

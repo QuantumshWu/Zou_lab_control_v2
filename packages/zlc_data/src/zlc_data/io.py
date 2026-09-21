@@ -116,6 +116,7 @@ def snapshot_manifest(
 
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("snapshot must be OwnedSnapshot")
+    snapshot = snapshot.materialize()
     if len({values_key, validity_key, sigma_key}) != 3:
         raise ValueError("values, validity and sigma need distinct array keys")
     arrays[values_key] = snapshot.block.values

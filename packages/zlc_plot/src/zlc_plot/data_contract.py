@@ -46,7 +46,7 @@ def snapshot_schema(snapshot: OwnedSnapshot) -> DatasetSchema:
 def snapshot_values(snapshot: OwnedSnapshot) -> NDArray[Any]:
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
-    return snapshot.block.values
+    return snapshot.block.materialize().values
 
 
 def snapshot_sigma(snapshot: OwnedSnapshot) -> NDArray[np.float64] | None:
@@ -61,7 +61,7 @@ def snapshot_sigma(snapshot: OwnedSnapshot) -> NDArray[np.float64] | None:
 
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
-    sigma = snapshot.block.sigma
+    sigma = snapshot.block.materialize().sigma
     return None if sigma is None else np.asarray(sigma, dtype=np.float64)
 
 
@@ -333,16 +333,11 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
         axis: AxisSpec,
         dimension_offset: int,
     ) -> ResolvedAxis:
-        coordinates: Sequence[Any] = (
-            axis.coordinates
-            if axis.coordinates is not None
-            else range(axis.index_origin, axis.index_origin + axis.size)
-        )
         return ResolvedAxis(
             axis.axis_id,
             axis.name,
             int(axis.size),
-            coordinates,
+            axis,
             dimension_offset + domain.physical_dimension(axis.axis_id),
             domain,
             axis.unit,

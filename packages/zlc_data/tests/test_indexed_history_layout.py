@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from zlc_data import (
     PRIMARY_INDEX,
     READOUT_EVENT,
     REPEAT,
     SITE,
+    SAMPLE_TIME,
     AxisId,
     AxisSpec,
     BlockId,
@@ -270,3 +272,18 @@ def test_a_sliding_history_keeps_the_structure_it_advances_through() -> None:
     assert (
         ordinary.structure_fingerprint != ordinary_deeper.structure_fingerprint
     )
+
+    factored = []
+    for count in (2, 3):
+        base = _schema(tuple(range(1 - count, 1)), np.repeat(np.arange(count), 3))
+        sample = AxisSpec(
+            AxisId("sample"), "sample time", SAMPLE_TIME, count * 3,
+            np.asarray((0.0, 0.1, 0.2)), unit="s", coordinate_origins=np.arange(count),
+        )
+        point = replace(
+            base.point_domain, axes=base.point_domain.axes + (sample,),
+            axis_codes=(range(count), range(count * 3)), axis_code_repeats=((3, 1), (1, 1)),
+        )
+        factored.append(replace(base, point_domain=point))
+    assert factored[0].fingerprint != factored[1].fingerprint
+    assert factored[0].structure_fingerprint == factored[1].structure_fingerprint

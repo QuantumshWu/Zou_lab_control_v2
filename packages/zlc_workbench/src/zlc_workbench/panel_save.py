@@ -105,7 +105,10 @@ def capture_run_chain(
     identities: dict[int, str | None] = {}
     nodes: dict[str, dict[str, object]] = {}
     run_records: dict[tuple[str, str], dict[str, object]] = {}
-    exact_records = {} if event_records is None else dict(event_records)
+    exact_records = {} if event_records is None else {
+        publication: record() if callable(record) else record
+        for publication, record in event_records.items()
+    }
     inherited_settings: list[object] = []
     inherited_source: dict[str, object] | None = None
     visiting: set[int] = set()

@@ -202,6 +202,12 @@ def write_figure_archive(
     if not isinstance(sections, dict):
         raise TypeError("figure sections must be a metadata dict")
 
+    # Persistence explicitly requests complete planes. Plan their actual
+    # namespace after this boundary, not from a segmented view's placeholder
+    # validity/sigma fields, or a mask created here escapes its dataset name.
+    arrays = {key: value.materialize() if isinstance(value, OwnedSnapshot) else value
+              for key, value in arrays.items()}
+
     owners: dict[str, str] = {}
     for key, value in arrays.items():
         if not isinstance(key, str) or not key:

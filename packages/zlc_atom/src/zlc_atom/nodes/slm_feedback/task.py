@@ -193,7 +193,7 @@ def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
         selection,
     )
     selected = restricted_values(
-        snapshot.block.values,
+        snapshot.materialize().block.values,
         snapshot.block.schema,
         repeat_indices,
         point_indices,

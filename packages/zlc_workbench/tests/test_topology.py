@@ -146,7 +146,7 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> N
         "frames  [(1 × 50) × (3 × 1) × (3)]"
     )
     scan_axis = description.schema.point_domain.axes[-1]
-    assert (scan_axis.name, scan_axis.size, scan_axis.coordinates, scan_axis.unit) == (
+    assert (scan_axis.name, scan_axis.size, tuple(scan_axis.coordinate_values()), scan_axis.unit) == (
         "power", 1, (135.0,), "mVpp",
     )
     assert row.producer == "cm"

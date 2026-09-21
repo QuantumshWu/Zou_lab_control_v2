@@ -26,6 +26,7 @@ from .selection import (
     take_indices,
 )
 from .validity import (
+    INVALID,
     CellValidity,
     DatasetComponentValidity,
     Invalid,
@@ -462,7 +463,14 @@ def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
             index_origin=axis.index_origin + indices.start,
             coordinate_labels=labels,
         )
-    coordinates = tuple(axis.coordinate_at(index) for index in indices)
+    if (axis.coordinate_origins is not None and isinstance(indices, range)
+            and indices.start % len(axis.coordinates) == 0
+            and indices.stop % len(axis.coordinates) == 0):
+        width = len(axis.coordinates)
+        return replace(axis, size=len(indices),
+                       coordinate_origins=axis.coordinate_origins[indices.start // width:indices.stop // width],
+                       coordinate_labels=labels)
+    coordinates = take_indices(np.asarray(axis.coordinate_values()), indices, axis=0)
     return AxisSpec(
         axis.axis_id,
         axis.name,
@@ -504,7 +512,7 @@ def _subset_mapped_domain(
         )
         remap = np.empty(axis.size, dtype=np.int64)
         remap[used] = np.arange(used.size, dtype=np.int64)
-        axis_codes.append(tuple(remap[selected].tolist()))
+        axis_codes.append(remap[selected])
     return DomainSpec((len(indices),), tuple(axes), tuple(axis_codes))
 
 
@@ -661,6 +669,50 @@ def restrict_snapshot(
         if not repeat_indices:
             raise EmptySelection("selected Repeat rows do not intersect repeat_rows")
     derived = restricted_schema(schema, repeat_indices, point_indices, data_indices)
+    if snapshot.block.values is None:
+        def overlap(selected, start, size):
+            if isinstance(selected, range):
+                low, high = max(selected.start, start), min(selected.stop, start + size)
+                return range(low - start, max(low, high) - start), low - selected.start
+            numbers = np.asarray(selected)
+            left, right = np.searchsorted(numbers, (start, start + size))
+            return tuple(int(value - start) for value in numbers[left:right]), int(left)
+
+        segments, origins, sizes = [], [], []
+        for origin, child in zip(snapshot.block.segment_origins, snapshot.block.segments, strict=True):
+            child_schema = child.block.schema
+            repeats, repeat_origin = overlap(repeat_indices, origin[0], child_schema.repeat_domain.size)
+            points, point_origin = overlap(point_indices, origin[1], child_schema.point_domain.size)
+            if not repeats or not points:
+                continue
+            if (_keeps_everything(repeats, child_schema.repeat_domain.size)
+                    and _keeps_everything(points, child_schema.point_domain.size)
+                    and all(_keeps_everything(data_indices[axis.axis_id], axis.size)
+                            for axis in child_schema.cell_domain.axes)):
+                selected_child = child
+            else:
+                block = child.block.materialize()
+                child_shape = restricted_schema(child_schema, repeats, points, data_indices)
+                child_values = restricted_values(block.values, child_schema, repeats, points, data_indices)
+                child_mask = take_indices(dataset_validity_storage(block.validity, child_schema), repeats, axis=0)
+                child_mask = take_indices(child_mask, points, axis=1)
+                for position, axis_id in enumerate(child_schema.value_schema.validity_contract.component_axis_ids):
+                    child_mask = take_indices(child_mask, data_indices[axis_id], axis=2 + position)
+                child_sigma = None if block.sigma is None else restricted_values(
+                    block.sigma, child_schema, repeats, points, data_indices)
+                child_ref = replace(child.ref, schema_fingerprint=child_shape.fingerprint)
+                selected_child = OwnedSnapshot(child_ref, DataBlock(
+                    child_ref.block_id, child_ref.revision, child_values,
+                    compact_dataset_validity(child_mask, child_shape), child_shape, child_sigma))
+            segments.append(selected_child)
+            origins.append((repeat_origin, point_origin))
+            sizes.append((len(repeats), len(points)))
+        reference = reference_for(derived)
+        return OwnedSnapshot(reference, DataBlock._from_owned_segments(
+            reference.block_id, reference.revision, derived,
+            window=snapshot.block.window, segments=tuple(segments),
+            origins=np.asarray(origins, dtype=np.int64).reshape(-1, 2),
+            shapes=np.asarray(sizes, dtype=np.int64).reshape(-1, 2)))
     values = restricted_values(
         snapshot.block.values, schema, repeat_indices, point_indices, data_indices
     )

@@ -996,6 +996,7 @@ class ConsolePresenter:
         return self.session.signal_plane.current_dataset_view(
             signal,
             publication,
+            defer_record=True,
         )
 
     def _invalidate_signal_presentations(
@@ -1304,6 +1305,7 @@ class ConsolePresenter:
         snapshot, event_record = self.session.signal_plane.current_dataset_view(
             overlay_signal,
             overlay_publication,
+            defer_record=True,
             indexed_history=window is not None,
             history_window=(
                 None if window is None else window.latest - window.start + 1

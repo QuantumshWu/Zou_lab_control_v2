@@ -2087,7 +2087,7 @@ class SelectionBridge:
                     )
                 indices = tuple(
                     index
-                    for index, value in enumerate(axis.coordinates)
+                    for index, value in enumerate(axis.coordinate_values())
                     if value == facet.value
                 )
                 if len(indices) != 1:
@@ -2156,6 +2156,7 @@ class SelectionBridge:
         whole bundle: the plane refuses siblings that disagree.
         """
 
+        source = source.materialize()
         source_schema = source.block.schema
         selection = self._build_selection(source_schema, state)
         if selection is None:

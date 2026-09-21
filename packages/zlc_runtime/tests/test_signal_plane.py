@@ -18,6 +18,7 @@ from zlc_data import (
     SCAN_POINT,
     SPATIAL_X,
     INVALID,
+    VALID,
     AxisId,
     AxisSpec,
     BlockId,
@@ -335,9 +336,9 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             AxisId("zlc_data.primary-index")
         )
         assert source_index.role == PRIMARY_INDEX
-        assert source_index.coordinates == (-2, -1, 0)
+        assert tuple(source_index.coordinate_values()) == (-2, -1, 0)
         np.testing.assert_allclose(
-            snapshot.block.values.reshape(-1),
+            snapshot.materialize().block.values.reshape(-1),
             (22.0, 0.0, 44.0),
         )
         np.testing.assert_array_equal(
@@ -371,8 +372,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             "indexed-derived/value", new_publication
         )
         assert old_view.block.schema == new_view.block.schema
-        np.testing.assert_allclose(old_view.block.values.reshape(-1)[-1], 44.0)
-        np.testing.assert_allclose(new_view.block.values.reshape(-1)[-1], 55.0)
+        np.testing.assert_allclose(old_view.materialize().block.values.reshape(-1)[-1], 44.0)
+        np.testing.assert_allclose(new_view.materialize().block.values.reshape(-1)[-1], 55.0)
         assert bool(old_view.expanded_validity().reshape(-1)[-1])
         assert bool(new_view.expanded_validity().reshape(-1)[-1])
         assert old_record["device_settings"]["camera"]["epoch_ranges"] == (
@@ -405,9 +406,9 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         trimmed, trimmed_record = plane.current_dataset_view(
             "indexed-derived/value"
         )
-        assert trimmed.block.schema.point_domain.axis(
+        assert tuple(trimmed.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
-        ).coordinates == (-1, 0)
+        ).coordinate_values()) == (-1, 0)
         assert trimmed_record["device_settings"]["camera"]["epoch_ranges"] == (
             (5, 5),
         )
@@ -497,7 +498,7 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
         primary = snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
         )
-        assert primary.coordinates == tuple(range(-99, 1))
+        assert tuple(primary.coordinate_values()) == tuple(range(-99, 1))
     finally:
         if history is not None:
             history.close()
@@ -555,7 +556,7 @@ def test_a_source_that_jumped_past_the_cached_window_leaves_legal_holes() -> Non
     )
     try:
         cached = plane.current_dataset("jump-derived/value")
-        assert cached.block.values.reshape(-1).tolist() == [1.0]
+        assert cached.materialize().block.values.reshape(-1).tolist() == [1.0]
         for index in range(2, 6):
             plane.commit_live(
                 source, {"frame": _latest(source_declaration, float(index))}
@@ -566,11 +567,11 @@ def test_a_source_that_jumped_past_the_cached_window_leaves_legal_holes() -> Non
             source_publication=plane.latest_publication("jump-source/frame"),
         )
         snapshot = plane.current_dataset("jump-derived/value")
-        assert snapshot.block.schema.point_domain.axis(
+        assert tuple(snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
-        ).coordinates == (-2, -1, 0)
+        ).coordinate_values()) == (-2, -1, 0)
         np.testing.assert_allclose(
-            snapshot.block.values.reshape(-1), (0.0, 0.0, 5.0)
+            snapshot.materialize().block.values.reshape(-1), (0.0, 0.0, 5.0)
         )
         np.testing.assert_array_equal(
             snapshot.expanded_validity().reshape(-1), (False, False, True)
@@ -618,12 +619,17 @@ def test_a_rolled_window_s_record_names_only_the_rows_it_kept() -> None:
                 )
                 if read_every_shot:
                     plane.current_dataset_view("roll-derived/value")
-            snapshot, record = plane.current_dataset_view("roll-derived/value")
-            assert snapshot.block.values.reshape(-1).tolist() == [3.0, 4.0]
-            records[read_every_shot] = record
+            snapshot, deferred = plane.current_dataset_view("roll-derived/value", defer_record=True)
+            assert snapshot.block.values is None
         finally:
             history.close()
             plane.close()
+        # The captured record belongs to this exact window, even after its
+        # source and lease are gone; it never re-queries a later publication.
+        assert snapshot.materialize().block.values.reshape(-1).tolist() == [3.0, 4.0]
+        record = deferred() if callable(deferred) else deferred
+        records[read_every_shot] = record
+        assert (deferred() if callable(deferred) else deferred) == record
     for record in records.values():
         assert record["device_settings"]["camera"]["epoch_ranges"] == ((3, 4),)
     assert records[True] == records[False]
@@ -822,20 +828,16 @@ def test_partial_current_has_invalid_future_and_overlap_is_rejected() -> None:
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
+        output = _finite(declaration, value=10.0, total=4, origin=0, written=1)
+        snapshot = output.snapshot
+        output = replace(output, snapshot=OwnedSnapshot(
+            snapshot.ref, snapshot.block.replacing(validity=VALID)))
         plane.commit_live(
             node,
-            {
-                "frame": _finite(
-                    declaration,
-                    value=10.0,
-                    total=4,
-                    origin=0,
-                    written=1,
-                )
-            },
+            {"frame": output},
         )
         current = plane.current_dataset("partial/frame")
-        assert current.block.values[:, 0, 0].tolist() == [10.0, 0.0, 0.0, 0.0]
+        assert current.materialize().block.values[:, 0, 0].tolist() == [10.0, 0.0, 0.0, 0.0]
         assert current.expanded_validity()[:, 0, 0].tolist() == [
             True,
             False,
@@ -884,7 +886,7 @@ def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_sto
         description = plane.describe_signals()[0]
         assert description.shape == (30, 1, 1)
         current = plane.current_dataset(description.name)
-        assert current.block.values.shape == (30, 1, 1)
+        assert current.block.schema.physical_shape == (30, 1, 1)
         assert current.expanded_validity()[:, 0, 0].tolist() == [
             True,
             *([False] * 29),
@@ -943,7 +945,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         )
         second = plane.current_dataset(description.name)
         assert plane.describe_signals() is directory, "new values do not rebuild the directory"
-        assert second.block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
+        assert second.materialize().block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
         assert second.expanded_validity()[0, :, 0].tolist() == [
             True,
             False,
@@ -1081,7 +1083,7 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
             )
             # A values-only consumer asks for the run without provenance.
             view = plane.current_dataset("grid-cost/scan")
-            assert view.block.values[0, point, 0] == float(point)
+            assert view.materialize().block.values[0, point, 0] == float(point)
         assert placed == [1, 1, 1, 1], placed
         assert merged == [], "snapshot-only reads must not build discarded event records"
         snapshot, record = plane.current_dataset_view("grid-cost/scan")
@@ -1091,7 +1093,7 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
         assert plane.current_dataset_view("grid-cost/scan")[1] is record
         assert merged == [4], "the same exact record is prepared once"
         np.testing.assert_allclose(
-            plane.current_dataset("grid-cost/scan").block.values[0, :, 0],
+            plane.current_dataset("grid-cost/scan").materialize().block.values[0, :, 0],
             (0.0, 1.0, 2.0, 3.0),
         )
     finally:
@@ -1139,14 +1141,14 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     node = _node("presentation-cache", declaration)
     calls = 0
-    real = plane_module.owned_snapshot_from_arrays
+    real = plane_module.SignalDataPlane._materialize_dataset
 
     def counted(*args, **kwargs):
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(plane_module, "owned_snapshot_from_arrays", counted)
+    monkeypatch.setattr(plane_module.SignalDataPlane, "_materialize_dataset", staticmethod(counted))
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
@@ -1197,7 +1199,7 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
 
         second = plane.current_dataset("presentation-cache/frame")
         assert calls == 2
-        assert second.block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
+        assert second.materialize().block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
         assert plane.seal_committed(node, cut_short=True)
         assert calls == 2
     finally:
@@ -1242,13 +1244,13 @@ def test_canonical_prefix_is_bound_to_its_publication_when_next_event_wins_race(
             first_publication,
         )
         latest = plane.current_dataset("publication-prefix/frame")
-        assert first.block.values[:, 0, 0].tolist() == [1.0, 0.0, 0.0]
+        assert first.materialize().block.values[:, 0, 0].tolist() == [1.0, 0.0, 0.0]
         assert first.expanded_validity()[:, 0, 0].tolist() == [
             True,
             False,
             False,
         ]
-        assert latest.block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
+        assert latest.materialize().block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
     finally:
         plane.close()
 
@@ -1259,14 +1261,14 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     node = _node("linear", declaration)
     calls = 0
-    real = plane_module.owned_snapshot_from_arrays
+    real = plane_module.SignalDataPlane._materialize_dataset
 
     def counted(*args, **kwargs):
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(plane_module, "owned_snapshot_from_arrays", counted)
+    monkeypatch.setattr(plane_module.SignalDataPlane, "_materialize_dataset", staticmethod(counted))
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
@@ -1315,7 +1317,7 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
         plane.close()
 
 
-@pytest.mark.parametrize("operation", ["owned_snapshot_from_arrays", "_merge_event_records"])
+@pytest.mark.parametrize("operation", ["_retained_snapshot", "_merge_event_records"])
 def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation) -> None:
     import zlc_runtime.plane as plane_module
 
@@ -1410,7 +1412,7 @@ def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> 
         del first
         gc.collect()
         assert first_ref is not None and first_ref() is None
-        assert plane.current_dataset("mixed/history").block.values[:, 0, 0].tolist() == [
+        assert plane.current_dataset("mixed/history").materialize().block.values[:, 0, 0].tolist() == [
             1.0,
             2.0,
         ]
@@ -1931,7 +1933,7 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         assert after.block.window.start == window.start
         assert after.block.window.latest == window.latest
         assert DatasetRevision(after.block.window.stable_since) == after.block.revision
-        assert float(after.block.values.reshape(-1)[-1]) == 60.0
+        assert float(after.materialize().block.values.reshape(-1)[-1]) == 60.0
     finally:
         if history is not None:
             history.close()
@@ -1975,7 +1977,7 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
         schema = snapshot.block.schema
         times = schema.point_domain.axis(SHOT_TIME_AXIS_ID)
         assert times.role == SHOT_TIME and times.unit == "s"
-        assert times.coordinates == (0.1, 0.25, 0.4)
+        assert tuple(times.coordinate_values()) == (0.1, 0.25, 0.4)
         assert np.array_equal(
             schema.point_domain.codes(SHOT_TIME_AXIS_ID),
             schema.point_domain.codes(PRIMARY_INDEX_AXIS_ID),
@@ -1983,7 +1985,7 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
         layout = indexed_history_layout(schema)
         assert layout is not None and layout.times is not None
         assert layout.times.tolist() == [0.1, 0.25, 0.4]
-        assert np.asarray(snapshot.block.values).reshape(-1).tolist() == [2.0, 3.0, 4.0]
+        assert np.asarray(snapshot.materialize().block.values).reshape(-1).tolist() == [2.0, 3.0, 4.0]
         with pytest.raises(ValueError, match="every shot"):
             plane.commit_live(
                 source,

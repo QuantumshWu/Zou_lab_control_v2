@@ -6,10 +6,10 @@ from typing import Any
 
 import numpy as np
 
-from ._tree import digest as _tree_digest, encode as _encode
-from .validation import canonical_text as _text, exact_mapping as _exact_map
+from ._tree import digest as _tree_digest
+from .validation import canonical_text as _text, exact_mapping as _exact_map, integer as _integer
 
-from .axis import PRIMARY_INDEX, AxisId, AxisRoleId, AxisSpec, CoordinateFrameId
+from .axis import PRIMARY_INDEX, AxisId, AxisRoleId, AxisSpec, CoordinateFrameId, canonical_coordinate_scalar
 from .schema import (
     DatasetSchema,
     DomainSpec,
@@ -63,19 +63,39 @@ def dataset_revision_ref_from_tree(tree: Any) -> DatasetRevisionRef:
         schema_fingerprint=data["schema_fingerprint"],
         revision=DatasetRevision(data["revision"]),
     )
-    if _encode(dataset_revision_ref_to_tree(value)) != _encode(tree):
-        raise ValueError("DatasetRevisionRef tree is typed but non-canonical")
     return value
 
 
-def axis_to_tree(axis: AxisSpec) -> dict[str, Any]:
+def _coordinate_tree(values: Any) -> list[Any]:
+    # AxisSpec already validated this immutable vector. JSON's canonical
+    # numeric spelling only needs integral floats changed to Python ints.
+    if isinstance(values, np.ndarray):
+        source = values.tolist()
+        return [int(value) if value.is_integer() else value for value in source] if values.dtype.kind == "f" else source
+    return list(values)
+
+
+def _read_coordinates(values: Any, field: str) -> list[Any] | None:
+    if values is None:
+        return None
+    if not isinstance(values, list):
+        raise ValueError(f"AxisSpec {field} must be a list or null")
+    for value in values:
+        scalar = value.item() if isinstance(value, np.generic) else value
+        normalized = canonical_coordinate_scalar(scalar)
+        if type(scalar) is not type(normalized) or scalar != normalized:
+            raise ValueError("AxisSpec tree is typed but non-canonical")
+    return values
+
+
+def axis_to_tree(axis: AxisSpec, *, structure: bool = False) -> dict[str, Any]:
     return {
         "schema": AXIS_SCHEMA,
         "axis_id": axis.axis_id.value,
         "name": axis.name,
         "role": axis.role.value,
         "size": axis.size,
-        "coordinates": None if axis.coordinates is None else list(axis.coordinates),
+        "coordinates": None if axis.coordinates is None else len(axis.coordinates) if structure else _coordinate_tree(axis.coordinates),
         "unit": axis.unit,
         "coordinate_frame": None
         if axis.coordinate_frame is None
@@ -83,8 +103,10 @@ def axis_to_tree(axis: AxisSpec) -> dict[str, Any]:
         "index_origin": axis.index_origin,
         "coordinate_labels": None
         if axis.coordinate_labels is None
-        else list(axis.coordinate_labels),
+        else len(axis.coordinate_labels) if structure else list(axis.coordinate_labels),
         **({"coordinate_of": axis.coordinate_of.value} if axis.coordinate_of is not None else {}),
+        **({"coordinate_origins": len(axis.coordinate_origins) if structure else _coordinate_tree(axis.coordinate_origins)}
+           if axis.coordinate_origins is not None else {}),
     }
 
 
@@ -102,12 +124,14 @@ def axis_from_tree(tree: Any) -> AxisSpec:
             "coordinate_frame",
             "index_origin",
             "coordinate_labels",
-        } | ({"coordinate_of"} if isinstance(tree, dict) and "coordinate_of" in tree else set()),
+        } | ({"coordinate_of"} if isinstance(tree, dict) and "coordinate_of" in tree else set())
+        | ({"coordinate_origins"} if isinstance(tree, dict) and "coordinate_origins" in tree else set()),
         AXIS_SCHEMA,
     )
-    coordinates = data["coordinates"]
-    if coordinates is not None and not isinstance(coordinates, list):
-        raise ValueError("AxisSpec coordinates must be a list or null")
+    coordinates = _read_coordinates(data["coordinates"], "coordinates")
+    origins = _read_coordinates(data.get("coordinate_origins"), "coordinate_origins")
+    if ("coordinate_of" in data and data["coordinate_of"] is None) or ("coordinate_origins" in data and origins is None):
+        raise ValueError("AxisSpec tree is typed but non-canonical")
     frame = data["coordinate_frame"]
     coordinate_labels = data["coordinate_labels"]
     if coordinate_labels is not None and not isinstance(coordinate_labels, list):
@@ -125,29 +149,48 @@ def axis_from_tree(tree: Any) -> AxisSpec:
         if coordinate_labels is None
         else tuple(coordinate_labels),
         coordinate_of=None if data.get("coordinate_of") is None else AxisId(data["coordinate_of"]),
+        coordinate_origins=origins,
     )
-    if _encode(axis_to_tree(axis)) != _encode(tree):
-        raise ValueError("AxisSpec tree is typed but non-canonical")
     return axis
 
 
-def domain_to_tree(domain: DomainSpec) -> dict[str, Any]:
+def domain_to_tree(domain: DomainSpec, *, structure: bool = False) -> dict[str, Any]:
     if not isinstance(domain, DomainSpec):
         raise TypeError("domain must be DomainSpec")
+    sliding = {axis.axis_id for axis in domain.axes if axis.role == PRIMARY_INDEX} if structure else set()
+    axes = []
+    for axis in domain.axes:
+        tree = axis_to_tree(axis, structure=structure)
+        if sliding and (axis.axis_id in sliding or axis.coordinate_of in sliding or axis.coordinate_origins is not None):
+            tree["size"] = tree["index_origin"] = "sliding"
+            if axis.coordinate_origins is None and tree["coordinates"] is not None:
+                tree["coordinates"] = "sliding"
+            if tree["coordinate_labels"] is not None:
+                tree["coordinate_labels"] = "sliding"
+            if axis.coordinate_origins is not None:
+                tree["coordinate_origins"] = "sliding"
+        axes.append(tree)
     return {
         "schema": DOMAIN_SCHEMA,
-        "shape": list(domain.shape),
-        "axes": [axis_to_tree(axis) for axis in domain.axes],
+        "shape": ["sliding" if sliding and (domain.axis_codes is not None or domain.axes[index].axis_id in sliding) else size
+                  for index, size in enumerate(domain.shape)],
+        "axes": axes,
         "axis_codes": None
         if domain.axis_codes is None
-        else [list(codes) for codes in domain.axis_codes],
+        else "sliding" if sliding else [
+            {"range": [codes.start, codes.stop, codes.step]} if isinstance(codes, range) else codes.tolist()
+            for codes in domain.axis_codes
+        ],
+        **({"axis_code_repeats": [list(pair) for pair in domain.axis_code_repeats]}
+           if domain.axis_code_repeats is not None and not sliding else {}),
     }
 
 
 def domain_from_tree(tree: Any) -> DomainSpec:
     data = _exact_map(
         tree,
-        {"schema", "shape", "axes", "axis_codes"},
+        {"schema", "shape", "axes", "axis_codes"}
+        | ({"axis_code_repeats"} if isinstance(tree, dict) and "axis_code_repeats" in tree else set()),
         DOMAIN_SCHEMA,
     )
     shape = data["shape"]
@@ -157,18 +200,42 @@ def domain_from_tree(tree: Any) -> DomainSpec:
         raise ValueError("DomainSpec shape must be a list")
     if not isinstance(axes, list):
         raise ValueError("DomainSpec axes must be a list")
-    if codes is not None and (
-        not isinstance(codes, list)
-        or any(not isinstance(item, list) for item in codes)
+    if codes is not None and not isinstance(codes, list):
+        raise ValueError("DomainSpec axis_codes must be a list or null")
+    mappings = None
+    if codes is not None:
+        mappings = []
+        for item in codes:
+            if isinstance(item, list):
+                mappings.append(tuple(item))
+            else:
+                entry = _exact_map(item, {"range"}, "DomainSpec axis range", discriminator=None)
+                parts = entry["range"]
+                if not isinstance(parts, list) or len(parts) != 3:
+                    raise ValueError("axis code range needs start, stop and step")
+                mappings.append(range(*(_integer(value, "axis code range") for value in parts)))
+    repeats = data.get("axis_code_repeats")
+    if "axis_code_repeats" in data and (
+        not isinstance(repeats, list) or any(not isinstance(pair, list) for pair in repeats)
     ):
-        raise ValueError("DomainSpec axis_codes must be a list of lists or null")
+        raise ValueError("axis_code_repeats must be a list of pairs")
     domain = DomainSpec(
         shape=tuple(shape),
         axes=tuple(axis_from_tree(axis) for axis in axes),
-        axis_codes=None if codes is None else tuple(tuple(item) for item in codes),
+        axis_codes=None if mappings is None else tuple(mappings),
+        axis_code_repeats=None if repeats is None else tuple(tuple(pair) for pair in repeats),
     )
-    if _encode(domain_to_tree(domain)) != _encode(tree):
+    if "axis_code_repeats" in data and domain.axis_code_repeats is None:
         raise ValueError("DomainSpec tree is typed but non-canonical")
+    if repeats is not None and repeats != [list(pair) for pair in domain.axis_code_repeats]:
+        raise ValueError("DomainSpec tree is typed but non-canonical")
+    if codes is not None:
+        for raw, normalized in zip(codes, domain.axis_codes, strict=True):
+            if isinstance(raw, dict):
+                if not isinstance(normalized, range) or raw["range"] != [normalized.start, normalized.stop, normalized.step]:
+                    raise ValueError("DomainSpec tree is typed but non-canonical")
+            elif isinstance(normalized, range):
+                raise ValueError("DomainSpec tree is typed but non-canonical")
     return domain
 
 
@@ -205,23 +272,25 @@ def value_schema_from_tree(tree: Any) -> ValueSchema:
         raise ValueError("component_axis_ids must be a list")
     contract = ValidityContract(mode, tuple(AxisId(item) for item in component_ids))
     unit = data["value_unit"]
+    if "name" in data and data["name"] is None:
+        raise ValueError("ValueSchema tree is typed but non-canonical")
     schema = ValueSchema(
         validity_contract=contract,
         dtype=np.dtype(_text(data["dtype"], "dtype")),
         value_unit=unit,
         name=data.get("name"),
     )
-    if _encode(value_schema_to_tree(schema)) != _encode(tree):
+    if data["dtype"] != schema.dtype.str:
         raise ValueError("ValueSchema tree is typed but non-canonical")
     return schema
 
 
-def dataset_schema_to_tree(schema: DatasetSchema) -> dict[str, Any]:
+def dataset_schema_to_tree(schema: DatasetSchema, *, structure: bool = False) -> dict[str, Any]:
     return {
         "schema": DATASET_SCHEMA,
-        "repeat_domain": domain_to_tree(schema.repeat_domain),
-        "point_domain": domain_to_tree(schema.point_domain),
-        "cell_domain": domain_to_tree(schema.cell_domain),
+        "repeat_domain": domain_to_tree(schema.repeat_domain, structure=structure),
+        "point_domain": domain_to_tree(schema.point_domain, structure=structure),
+        "cell_domain": domain_to_tree(schema.cell_domain, structure=structure),
         "value_schema": value_schema_to_tree(schema.value_schema),
     }
 
@@ -238,8 +307,6 @@ def dataset_schema_from_tree(tree: Any) -> DatasetSchema:
         cell_domain=domain_from_tree(data["cell_domain"]),
         value_schema=value_schema_from_tree(data["value_schema"]),
     )
-    if _encode(dataset_schema_to_tree(schema)) != _encode(tree):
-        raise ValueError("DatasetSchema tree is typed but non-canonical")
     return schema
 
 
@@ -249,107 +316,6 @@ def value_schema_fingerprint(schema: ValueSchema) -> str:
 
 def dataset_schema_fingerprint(schema: DatasetSchema) -> str:
     return _tree_digest(dataset_schema_to_tree(schema))
-
-
-#: Tree keys holding one entry per coordinate rather than a structural fact.
-_COORDINATE_KEYS = frozenset({"coordinates", "coordinate_labels"})
-#: One name for everything a bounded history's own advance renames.  Its
-#: DEPTH is not what the dataset is either: the window grows while it fills
-#: and then holds while its coordinates slide past, and neither is a
-#: different world to an interaction already under way.
-_SLIDING = "sliding"
-
-
-def _sliding_axes(axes: object) -> frozenset[int]:
-    """Positions in this domain held by an axis a bounded history slides.
-
-    The ROLE is what says so: a primary index IS the shot index, and a
-    bounded window advances it by design.
-    """
-
-    if not isinstance(axes, list):
-        return frozenset()
-    return frozenset(
-        index
-        for index, axis in enumerate(axes)
-        if isinstance(axis, dict) and axis.get("role") == PRIMARY_INDEX.value
-    )
-
-
-def _axis_structure(axis: object, sliding: bool) -> object:
-    if not isinstance(axis, dict):
-        return _structure_only(axis)
-    return {
-        key: (
-            _SLIDING
-            if sliding and key in ("size", "index_origin")
-            else None
-            if item is None
-            else _SLIDING
-            if sliding and key in _COORDINATE_KEYS and isinstance(item, list)
-            else len(item)
-            if key in _COORDINATE_KEYS and isinstance(item, list)
-            else _structure_only(item)
-        )
-        for key, item in axis.items()
-    }
-
-
-def _domain_structure(node: dict) -> dict:
-    """A domain named by what it IS, less any history depth inside it."""
-
-    sliding = _sliding_axes(node.get("axes"))
-    # An explicitly mapped domain has ONE physical dimension -- the flat
-    # carrier every axis is coded over -- so a sliding axis inside it sizes
-    # the whole shape, and lengthens every axis's codes rather than only its
-    # own.  An unmapped domain is axis-major, where the sliding axis sizes
-    # exactly its own dimension.
-    mapped = node.get("axis_codes") is not None
-    result: dict[str, Any] = {}
-    for key, item in node.items():
-        if key == "axes" and isinstance(item, list):
-            result[key] = [
-                _axis_structure(axis, index in sliding)
-                for index, axis in enumerate(item)
-            ]
-        elif key == "shape" and isinstance(item, list):
-            result[key] = [
-                _SLIDING
-                if sliding and (mapped or index in sliding)
-                else _structure_only(entry)
-                for index, entry in enumerate(item)
-            ]
-        elif key == "axis_codes" and sliding and item is not None:
-            result[key] = _SLIDING
-        else:
-            result[key] = _structure_only(item)
-    return result
-
-
-def _structure_only(node: object) -> object:
-    """The same tree with every coordinate LIST replaced by its length.
-
-    A domain is named through :func:`_domain_structure`, which additionally
-    drops the depth of any axis a bounded history slides: the window's size,
-    its origin and its codes all advance with the history itself.
-    """
-
-    if isinstance(node, dict):
-        if node.get("schema") == DOMAIN_SCHEMA:
-            return _domain_structure(node)
-        return {
-            key: (
-                None
-                if item is None
-                else len(item)
-                if key in _COORDINATE_KEYS and isinstance(item, list)
-                else _structure_only(item)
-            )
-            for key, item in node.items()
-        }
-    if isinstance(node, list):
-        return [_structure_only(item) for item in node]
-    return node
 
 
 def dataset_schema_structure_fingerprint(schema: DatasetSchema) -> str:
@@ -367,4 +333,4 @@ def dataset_schema_structure_fingerprint(schema: DatasetSchema) -> str:
     holding a viewport or an open drag would have lost it on each one.
     """
 
-    return _tree_digest(_structure_only(dataset_schema_to_tree(schema)))
+    return _tree_digest(dataset_schema_to_tree(schema, structure=True))

@@ -236,7 +236,7 @@ class FrameSurvivalProcessor:
     def _pair(self, occupied: OwnedSnapshot) -> OwnedSnapshot:
         schema = occupied.block.schema
         output_schema, condition, later = self._plan(schema)
-        values = np.asarray(occupied.block.values, dtype=bool)
+        values = np.asarray(occupied.materialize().block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
         # The denominator stays per-site validity, independently in each
         # Point group: loaded before and judgeable in both frames.

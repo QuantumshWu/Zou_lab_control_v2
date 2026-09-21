@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import partial
 from dataclasses import dataclass, field, replace
 from array import array
 import math
@@ -45,18 +46,17 @@ from zlc_data import (
     DatasetComponentValidity,
     DatasetRevision,
     DatasetSchema,
+    DataBlock,
     DomainSpec,
     IndexedWindow,
     Invalid,
     OwnedSnapshot,
     StreamGenerationId,
     Valid,
-    owned_snapshot_from_arrays,
     repeat_coordinate_counts,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
 from zlc_data.units import resolve_unit
-from zlc_data.value import dataset_validity_storage, compact_dataset_validity
 from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
@@ -185,21 +185,46 @@ def _retained_array(data: bytes, shape: tuple, dtype) -> np.ndarray:
     return np.ndarray(shape, dtype=dtype, buffer=data)
 
 
-def _finite_planes(chunk: tuple, schema: DatasetSchema, facts: tuple) -> tuple:
+def _retained_snapshot(
+    template: DataBlock,
+    revision: int,
+    generation: StreamGenerationId,
+    chunk: tuple,
+    facts: tuple,
+    *,
+    block_id: BlockId | None = None,
+) -> OwnedSnapshot:
+    """Rehydrate committed bytes using their already-validated event contract.
+
+    Exact replay and a finite display range read the same retained planes.
+    Neither is a new producer admission or a reason to rescan sample sigma.
+    """
+    schema = template.schema
     values, sigma = (facts[6], chunk[0]) if schema.value_schema.dtype == np.bool_ else chunk
     validity = facts[7]
     shape = schema.physical_shape
     values = _retained_array(values, shape, schema.value_schema.dtype)
-    if type(validity) is not bool:
-        positions = facts[5] or ()
-        components = schema.value_schema.validity_contract.component_axis_ids
-        validity_shape = shape[:2] + tuple(
-            axis.size if index in positions else 1
-            for index, axis in enumerate(schema.cell_domain.axes) if axis.axis_id in components
+    if type(validity) is bool:
+        validity = VALID if validity else INVALID
+    elif facts[5] is None:
+        validity = CellValidity(_retained_array(validity, shape[:2], np.bool_))
+    else:
+        axes = tuple(schema.cell_domain.axes[index] for index in facts[5])
+        validity = DatasetComponentValidity(
+            tuple(axis.axis_id for axis in axes),
+            _retained_array(validity, shape[:2] + tuple(axis.size for axis in axes), np.bool_),
         )
-        validity = _retained_array(validity, validity_shape, np.bool_)
     sigma = None if sigma is None else _retained_array(sigma, shape, np.float64)
-    return values, validity, sigma
+    block = template.replacing(
+        block_id=template.block_id if block_id is None else block_id,
+        revision=DatasetRevision(revision),
+    )
+    for name, value in (
+        ("values", values), ("validity", validity), ("sigma", sigma),
+        ("window", None if facts[4] is None else IndexedWindow(*facts[4])),
+    ):
+        object.__setattr__(block, name, value)
+    return OwnedSnapshot(block.ref(generation), block)
 
 
 @runtime_checkable
@@ -345,7 +370,7 @@ class SignalValue:
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return tuple(self.values.shape)
+        return self.schema.physical_shape
 
     @property
     def value_schema(self):
@@ -728,6 +753,19 @@ def _merge_event_records(
     return MappingProxyType(merged)
 
 
+def _merge_packed_event_records(records: tuple[bytes, ...]) -> Mapping[str, object]:
+    """Expand the exact retained records only for a provenance consumer."""
+    decoded: dict[bytes, Mapping[str, object]] = {}
+    def unpack():
+        for packed in records:
+            record = decoded.get(packed)
+            if record is None:
+                record = _freeze_run_record(marshal.loads(packed))
+                decoded[packed] = record
+            yield record
+    return _merge_event_records(unpack())
+
+
 def _require_signal_producer(node: object) -> SignalProducer:
     if not isinstance(node, SignalProducer):
         raise TypeError("signal producer must implement SignalProducer")
@@ -747,6 +785,7 @@ def _restamp_snapshot(
     block_id: str,
     generation: StreamGenerationId,
     revision: int,
+    schema: DatasetSchema | None = None,
 ) -> OwnedSnapshot:
     """Give committed immutable bytes their Runtime-owned content identity."""
 
@@ -756,6 +795,7 @@ def _restamp_snapshot(
     block = snapshot.block.replacing(
         block_id=BlockId(block_id),
         revision=DatasetRevision(revision),
+        schema=(schema if schema is not None and schema == snapshot.block.schema else snapshot.block.schema),
     )
     return OwnedSnapshot(block.ref(generation), block)
 
@@ -779,11 +819,7 @@ def _indexed_schema(
         indices,
     )
     retained_count = len(indices)
-    primary_codes = tuple(
-        index
-        for index in range(retained_count)
-        for _point in range(point_count)
-    )
+    primary_codes = range(retained_count)
     # The shot-time axis rides the primary index's rows: one coordinate per
     # shot, the same codes object, so it costs the schema one axis and no
     # second row mapping.
@@ -797,34 +833,37 @@ def _indexed_schema(
                      coordinate_of=PRIMARY_INDEX_AXIS_ID),
         )
         shot_codes = (primary_codes,)
-    event_axes, event_codes = [], []
+    event_axes, event_codes, event_repeats = [], [], []
     for axis in event_schema.point_domain.axes:
         codes = event_schema.point_domain.codes(axis.axis_id)
         if axis.role == SAMPLE_TIME and times is not None:
             offsets = (
                 np.arange(axis.size, dtype=np.float64) + axis.index_origin
-                if axis.coordinates is None else np.asarray(axis.coordinates, dtype=np.float64)
+                if axis.coordinates is None else np.asarray(axis.coordinate_values(), dtype=np.float64)
             )[codes]
             origins = resolve_unit("s").convert_value_to(
                 np.asarray(times, dtype=np.float64), resolve_unit(axis.unit)
             )
-            coordinates = (origins[:, None] + offsets[None, :]).reshape(-1)
             event_axes.append(replace(
-                axis, size=coordinates.size, coordinates=tuple(coordinates.tolist()),
+                axis, size=retained_count * offsets.size, coordinates=offsets,
+                coordinate_origins=origins,
                 coordinate_labels=(None if axis.coordinate_labels is None else tuple(
                     np.tile(np.asarray(axis.coordinate_labels)[codes], retained_count).tolist()
                 )),
             ))
-            event_codes.append(tuple(range(coordinates.size)))
+            event_codes.append(range(retained_count * offsets.size))
+            event_repeats.append((1, 1))
         else:
             event_axes.append(axis)
-            event_codes.append(tuple(codes.tolist()) * retained_count)
+            event_codes.append(codes)
+            event_repeats.append((1, retained_count))
     return DatasetSchema(
         event_schema.repeat_domain,
         DomainSpec(
             (point_count * retained_count,),
             (primary, *shot_axes, *event_axes),
             (primary_codes, *shot_codes, *event_codes),
+            ((point_count, 1), *((point_count, 1) for _axis in shot_axes), *event_repeats),
         ),
         event_schema.cell_domain,
         event_schema.value_schema,
@@ -846,211 +885,61 @@ def _materialize_indexed_dataset(
             None if materialization.times is None else _row_times(materialization.times),
         )
     point_count = event_schema.point_domain.size
-    trailing = (slice(None),) * len(event_schema.cell_domain.axes)
-
-    def placements():
-        for primary_index, snapshot in materialization.appended:
-            if not start <= primary_index <= latest_index:
-                continue
-            point_start = (primary_index - start) * point_count
-            yield (
-                (
-                    slice(None),
-                    slice(point_start, point_start + point_count),
-                    *trailing,
-                ),
-                snapshot.block.values,
-                dataset_validity_storage(snapshot.block.validity, snapshot.block.schema),
-                snapshot.block.sigma,
-            )
-
     basis = materialization.basis
-    if basis is None:
-        values, validity, sigma = _assembled_planes(
-            schema,
-            placements(),
-        )
-    else:
-        values, validity, sigma = _rolled_planes(
-            schema,
-            basis,
-            start,
-            point_count,
-            trailing,
-            tuple(placements()),
-        )
-    return owned_snapshot_from_arrays(
-        schema,
-        values,
-        materialization.sequence,
-        validity=validity,
-        sigma=sigma,
-        block_id=BlockId(f"{materialization.signal_name}.indexed"),
-        stream_generation=materialization.generation,
+    segments = {}
+    if basis is not None:
+        for origin, snapshot in zip(basis.snapshot.block.segment_origins, basis.snapshot.block.segments, strict=True):
+            index = basis.start + origin[1] // point_count
+            if start <= index <= latest_index:
+                segments[index] = snapshot
+    segments.update((index, snapshot) for index, snapshot in materialization.appended
+                    if start <= index <= latest_index)
+    ordered = sorted(segments)
+    origins = np.zeros((len(ordered), 2), dtype=np.int64)
+    origins[:, 1] = (np.asarray(ordered, dtype=np.int64) - start) * point_count
+    sizes = np.frombuffer(np.asarray(event_schema.physical_shape[:2], dtype=np.int64).tobytes(), dtype=np.int64)
+    block = DataBlock._from_owned_segments(
+        BlockId(f"{materialization.signal_name}.indexed/{start}:{latest_index}"),
+        DatasetRevision(materialization.sequence), schema,
         window=IndexedWindow(start, latest_index, materialization.stable_since),
+        segments=tuple(segments[index] for index in ordered), origins=origins,
+        shapes=np.broadcast_to(sizes, (len(ordered), 2)),
     )
+    return OwnedSnapshot(block.ref(materialization.generation), block)
 
 
-def _rolled_planes(
-    schema: DatasetSchema,
-    basis: _MaterializedIndexed,
-    start: int,
-    point_count: int,
-    trailing: tuple[slice, ...],
-    placements: tuple,
-) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
-    """Planes for a window that only ROLLED FORWARD from a known basis.
-
-    The overlapping indices are copied out of the basis planes in one
-    slice per plane -- holes, validity, and per-event sigma exactly as
-    the from-scratch assembly left them -- and only the appended events
-    are placed.  Callers guarantee the overlap really is unchanged (no
-    retained index was replaced since the basis was built).
-    """
-
-    block = basis.snapshot.block
-    keep = (basis.latest - start + 1) * point_count
-    source = (slice(None), slice((start - basis.start) * point_count, (start - basis.start) * point_count + keep), *trailing)
-    target = (slice(None), slice(0, keep), *trailing)
-    shape = schema.physical_shape
-    values = np.zeros(shape, dtype=schema.value_schema.dtype)
-    validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
-    values[target] = block.values[source]
-    validity[target[:2]] = dataset_validity_storage(block.validity, block.schema)[source[:2]]
-    sigma: np.ndarray | None = None
-    if block.sigma is not None or any(stated is not None for _place, _values, _validity, stated in placements):
-        sigma = np.full(shape, np.nan, dtype=np.float64)
-        if block.sigma is not None:
-            sigma[target] = block.sigma[source]
-    for place, event_values, event_validity, stated in placements:
-        values[place] = event_values
-        validity[place[:2]] = event_validity
-        if stated is not None:
-            sigma[place] = stated
-    return values, compact_dataset_validity(validity, schema), sigma
-
-
-def _extended_planes(
-    schema: DatasetSchema,
-    basis: OwnedSnapshot,
-    placements: tuple,
-) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
-    """Planes for a dataset that only GAINED cells since a known basis.
-
-    Re-placing every chunk rebuilt an answer that could not have changed:
-    a run of N shots paid N placements on every redraw, so the cost of
-    watching a scan grew with the scan and the last shots of a long one
-    cost seconds each.  The basis is copied in one pass per plane and
-    only the chunks committed since are placed, so a redraw costs the
-    SHOT it added, not the run behind it.
-
-    Sigma follows the same rule as a from-scratch assembly: absent until
-    some contributing snapshot states one, and NaN wherever none did.
-    """
-
-    block = basis.block
-    shape = schema.physical_shape
-    values = np.array(block.values, dtype=schema.value_schema.dtype)
-    validity = np.array(dataset_validity_storage(block.validity, block.schema), dtype=np.bool_)
-    sigma = None if block.sigma is None else np.array(block.sigma)
-    for target, event_values, event_validity, stated in placements:
-        values[target] = event_values
-        validity[target[:2]] = event_validity
-        if stated is None:
-            continue
-        if sigma is None:
-            sigma = np.full(shape, np.nan, dtype=np.float64)
-        sigma[target] = stated
-    return values, compact_dataset_validity(validity, schema), sigma
-
-
-def _assembled_planes(
-    schema: DatasetSchema,
-    placements: object,
-) -> tuple[np.ndarray, Valid | Invalid | CellValidity | DatasetComponentValidity, np.ndarray | None]:
-    """Allocate and fill EVERY plane of a rebuilt dataset, as a set.
-
-    Both materializers wrote out "allocate values, allocate validity, fill
-    values, fill validity" in their own words, and both were therefore
-    blind to the sigma plane on the day it arrived -- one on the leased
-    rolling path, one on the exact path, the same omission typed twice.
-    Assembling the planes in one place is what makes the next one arrive
-    in both.
-
-    Sigma is allocated only if some contributing snapshot states one, and
-    the cells no snapshot covered are NaN rather than zero: an error
-    nobody stated is unknown, and zero would read as certainty.
-    """
-
-    shape = schema.physical_shape
-    values = np.zeros(shape, dtype=schema.value_schema.dtype)
-    validity = np.zeros(dataset_validity_storage(INVALID, schema).shape, dtype=np.bool_)
-    sigma: np.ndarray | None = None
-    for target, event_values, event_validity, stated in placements:
-        values[target] = event_values
-        validity[target[:2]] = event_validity
-        if stated is None:
-            continue
-        if sigma is None:
-            sigma = np.full(shape, np.nan, dtype=np.float64)
-        sigma[target] = stated
-    return values, compact_dataset_validity(validity, schema), sigma
 
 
 @dataclass(slots=True)
 class _MaterializedFinite:
-    """One full canonical materialization, kept as the next one's basis.
-
-    A canonical Dataset is written cell by cell and never rewrites a cell
-    it already holds -- the commit refuses an overlap -- so every cell of
-    this snapshot is still that cell's answer for every later sequence of
-    the same generation.  That is what makes it a basis rather than a
-    cache: the next materialization is this one plus the cells committed
-    since, and nothing else can have changed.
-    """
+    """One exact range of immutable event segments and its provenance."""
 
     sequence: int
     snapshot: OwnedSnapshot
-    record: Mapping[str, object] | None
+    record: Mapping[str, object] | Callable[[], Mapping[str, object]] | None
     # Values-only reads can advance the snapshot without preparing its record.
     record_sequence: int = 0
 
 
 @dataclass(slots=True)
 class _MaterializedIndexed:
-    """One full indexed materialization, kept as the next shot's basis."""
+    """One exact window; advancing it reuses its unchanged source segments."""
 
     sequence: int
     snapshot: OwnedSnapshot
-    record: Mapping[str, object] | None
+    record: Mapping[str, object] | Callable[[], Mapping[str, object]] | None
     start: int
     latest: int
 
 
 @dataclass(slots=True)
 class _IndexedHistory:
-    """One indexed signal's retained events, plus its steady-state reuse.
+    """The sole raw history owner; snapshots retain exact immutable events.
 
-    At a deep window the naive materialization was O(window) PER SHOT in
-    three separate ways -- the indexed schema rebuilt every point-row mapping
-    across the whole window, the planes were reassembled event by event,
-    and every retained event record was re-merged -- turning a 5000-deep
-    35-site occupancy history into ~300 ms on the one presentation
-    thread every panel shares.  ``materialized`` therefore keeps the last
-    full materialization as a BASIS: while the window only rolls forward
-    and still overlaps it, the next shot reuses its schema object outright
-    (the indexed schema depends on nothing but the retained count) and
-    copies the overlapping plane rows in one slice.  The record merge is
-    incremental only while the window grows; a rolled window re-merges
-    the records of the rows it kept, because the epoch-range union of the
-    rows that left cannot be subtracted.
-
-    The basis is invalidated by COMPARISON, never by clearing:
-    ``replaced_at`` records the last sequence at which a retained index
-    was overwritten -- the one mutation that changes rows a rolled copy
-    would silently carry forward -- and every consumer checks it against
-    the basis sequence.  Appends and front-trims stay cheap because the
-    roll arithmetic simply does not copy rows that left the window.
+    Rolling a window changes references, not pixel arrays. A replacement
+    advances ``replaced_at`` so neither a later view nor a statistical
+    consumer reuses a value that was replaced. Frozen readers continue to
+    own the events and provenance they actually captured.
     """
 
     events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object], float | None]]
@@ -1281,7 +1170,7 @@ def _indexed_materialization_input(
                 if include_record:
                     appended_records.append(record)
         row_times.append(shot_time)
-    if include_record and basis is not None and basis.record is not None and start == basis.start:
+    if include_record and basis is not None and isinstance(basis.record, Mapping) and start == basis.start:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
         records = (basis.record, *appended_records)
@@ -2257,7 +2146,7 @@ class SignalDataPlane:
         sequence: int,
     ) -> tuple[
         DatasetSchema,
-        DatasetSchema,
+        DataBlock,
         StreamGenerationId,
         tuple[bytes | None, ...],
         tuple[bytearray, array, int, int],
@@ -2281,19 +2170,23 @@ class SignalDataPlane:
         stride = 1 + int(state.published_schemas[signal_name].value_schema.dtype != np.bool_)
         chunks = tuple(planes[floor * stride:sequence * stride])
         packed_facts = (facts, offsets, floor, sequence)
-        return schema, state.published_schemas[signal_name], state.generation, chunks, packed_facts, basis
+        template = state.publication.value(signal_name).snapshot.block
+        return schema, template, state.generation, chunks, packed_facts, basis
 
     @staticmethod
     def _materialize_dataset(
         signal_name: str,
         sequence: int,
         schema: DatasetSchema,
-        event_schema: DatasetSchema,
+        event_template: DataBlock,
         generation: StreamGenerationId,
         chunks: tuple[bytes | None, ...],
         packed_facts: tuple[bytearray, array, int, int],
         basis: _MaterializedFinite | None,
     ) -> OwnedSnapshot:
+        event_schema = event_template.schema
+        event_block_id = BlockId(f"{signal_name}.event")
+
         def placements():
             records, offsets, floor, stop = packed_facts
             stride = 1 + int(event_schema.value_schema.dtype != np.bool_)
@@ -2303,38 +2196,24 @@ class SignalDataPlane:
                 facts = marshal.loads(records[offsets[sequence]:offsets[sequence + 1]])
                 chunk = chunks[index * stride:(index + 1) * stride]
                 repeat_origin, point_origin = facts[0]
-                repeat_stop = repeat_origin + event_schema.repeat_domain.size
-                point_stop = point_origin + event_schema.point_domain.size
-                values, validity, sigma = _finite_planes(chunk, event_schema, facts)
-                yield (
-                    (
-                        slice(repeat_origin, repeat_stop),
-                        slice(point_origin, point_stop),
-                        *(slice(None) for _axis in schema.cell_domain.axes),
-                    ),
-                    values, validity, sigma,
+                snapshot = _retained_snapshot(
+                    event_template, sequence + 1, generation, chunk, facts,
+                    block_id=event_block_id,
                 )
+                yield (repeat_origin, point_origin), snapshot
 
-        if basis is None:
-            values, validity, sigma = _assembled_planes(
-                schema,
-                placements(),
-            )
-        else:
-            values, validity, sigma = _extended_planes(
-                schema,
-                basis.snapshot,
-                tuple(placements()),
-            )
-        return owned_snapshot_from_arrays(
-            schema,
-            values,
-            sequence,
-            validity=validity,
-            sigma=sigma,
-            block_id=BlockId(f"{signal_name}.run"),
-            stream_generation=generation,
+        added = tuple(placements())
+        segments = () if basis is None else basis.snapshot.block.segments
+        origins = np.asarray([origin for origin, _child in added], dtype=np.int64).reshape(-1, 2)
+        if basis is not None:
+            origins = np.concatenate((basis.snapshot.block.segment_origins, origins), axis=0)
+        segments = (*segments, *(child for _origin, child in added))
+        sizes = np.frombuffer(np.asarray(event_schema.physical_shape[:2], dtype=np.int64).tobytes(), dtype=np.int64)
+        block = DataBlock._from_owned_segments(
+            BlockId(f"{signal_name}.run"), DatasetRevision(sequence), schema,
+            segments=segments, origins=origins, shapes=np.broadcast_to(sizes, (len(segments), 2)),
         )
+        return OwnedSnapshot(block.ref(generation), block)
 
     def commit_live(
         self,
@@ -2431,6 +2310,19 @@ class SignalDataPlane:
 
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("live commit outputs must be a non-empty mapping")
+        # Acquire only the published planes, before taking the Plane lock.
+        # A small ROI otherwise retains every full camera frame in history.
+        retained = {}
+        for name, output in outputs.items():
+            if not isinstance(output, LiveDatasetOutput):
+                raise TypeError("live commit outputs must be LiveDatasetOutput")
+            # A finite *event* is serialized into the append log once. This
+            # is not a request to flatten its accumulating canonical run.
+            snapshot = (output.snapshot.materialize()
+                        if isinstance(output.coverage, DatasetCoverage) else output.snapshot)
+            snapshot = snapshot.compact()
+            retained[name] = output if snapshot is output.snapshot else replace(output, snapshot=snapshot)
+        outputs = retained
         # The producer's contract was checked when its generation began;
         # a commit needs only its identity, and ``state.node is not node``
         # below is what refuses a stranger.  The Protocol check walks every
@@ -2561,6 +2453,7 @@ class SignalDataPlane:
                     block_id=f"{qualified}.event",
                     generation=state.generation,
                     revision=sequence,
+                    schema=None if state.published_schemas is None else state.published_schemas.get(qualified),
                 )
                 history_demand = self._indexed_history_demand_locked(qualified)
                 # A producer's shots index its own history by its own
@@ -2745,21 +2638,30 @@ class SignalDataPlane:
         indexed_history: bool = True,
         history_window: int | None = None,
         history_signals: tuple[str, ...] = (),
-    ) -> tuple[OwnedSnapshot, Mapping[str, object]]:
-        """Materialize one Dataset and the exact event record it contains."""
+        defer_record: bool = False,
+    ) -> tuple[OwnedSnapshot, Mapping[str, object] | Callable[[], Mapping[str, object]]]:
+        """Read exact data and retain its provenance, expanding it on demand.
+
+        A deferred record owns immutable record references, never a query of
+        latest state. It remains valid after its history rows have retired.
+        """
         snapshot, record = self._materialize_current(
             signal_name, publication, include_record=True,
             indexed_history=indexed_history, history_window=history_window,
             history_signals=history_signals,
+            defer_record=defer_record,
         )
         assert record is not None
+        if not defer_record and callable(record):
+            record = record()
         return snapshot, record
 
     def _materialize_current(
         self, signal_name: str, publication: SignalPublication | None, *,
         include_record: bool, indexed_history: bool = True,
         history_window: int | None = None, history_signals: tuple[str, ...] = (),
-    ) -> tuple[OwnedSnapshot, Mapping[str, object] | None]:
+        defer_record: bool = False,
+    ) -> tuple[OwnedSnapshot, Mapping[str, object] | Callable[[], Mapping[str, object]] | None]:
         """One numerical path; records are prepared only for their consumers."""
         name = canonical_text(signal_name, "signal name")
         if history_window is not None:
@@ -2772,7 +2674,7 @@ class SignalDataPlane:
         record_chunks = ()
         record_sequence = 0
         merge_record = False
-        materialized_record: Mapping[str, object] | None = None
+        materialized_record: Mapping[str, object] | Callable[[], Mapping[str, object]] | None = None
         with self._lock:
             state = self._state_for_signal_locked(name)
             if state is None or state.retired:
@@ -2847,14 +2749,21 @@ class SignalDataPlane:
                 # Keep their latest prepared answers in this existing cache.
                 seed = max((
                     item for item in state.materialized.values()
-                    if item.record is not None and item.record_sequence <= sequence
+                    if isinstance(item.record, Mapping) and item.record_sequence <= sequence
                 ), key=lambda item: item.record_sequence, default=None)
                 if seed is not None:
                     materialized_record, record_sequence = seed.record, seed.record_sequence
                 if include_record and record_sequence != sequence:
-                    # Only capture immutable chunk references under the lock.
-                    record_chunks = (state.event_records, state.commit_record_indices[record_sequence:sequence])
-                    merge_record = True
+                    if defer_record:
+                        materialized_record = partial(_merge_packed_event_records, tuple(
+                            state.event_records[index]
+                            for index in state.commit_record_indices[:sequence]
+                        ))
+                        record_sequence = sequence
+                    else:
+                        # Only capture immutable chunk references under the lock.
+                        record_chunks = (state.event_records, state.commit_record_indices[record_sequence:sequence])
+                        merge_record = True
         if snapshot is None:
             snapshot = (
                 _materialize_indexed_dataset(indexed_input)
@@ -2863,7 +2772,10 @@ class SignalDataPlane:
             )
         if include_record:
             if indexed_input is not None and materialized_record is None:
-                materialized_record = _merge_event_records(indexed_input.records)
+                materialized_record = (
+                    partial(_merge_event_records, indexed_input.records)
+                    if defer_record else _merge_event_records(indexed_input.records)
+                )
             elif merge_record:
                 packed_records, indices = record_chunks
                 decoded = {0: _EMPTY_MAPPING}
@@ -3743,30 +3655,9 @@ class SignalDataPlane:
             stride = 1 + int(schema.value_schema.dtype != np.bool_)
             chunk = planes[(sequence - 1) * stride:sequence * stride]
             facts = marshal.loads(packed_facts[offsets[sequence - 1]:offsets[sequence]])
-            origin, primary_index, repeat_counts, shot_time, window, _validity_axes, _bits, _validity = facts
+            origin, primary_index, repeat_counts, shot_time = facts[:4]
             written = sequence * schema.repeat_domain.size * schema.point_domain.size
-            values, validity, sigma = _finite_planes(chunk, schema, facts)
-            if type(validity) is bool:
-                validity = VALID if validity else INVALID
-            elif _validity_axes is None:
-                validity = CellValidity(validity.reshape(schema.physical_shape[:2]))
-            else:
-                axes = tuple(schema.cell_domain.axes[index] for index in _validity_axes)
-                validity = DatasetComponentValidity(
-                    tuple(axis.axis_id for axis in axes),
-                    validity.reshape(schema.physical_shape[:2] + tuple(axis.size for axis in axes)),
-                )
-            # These planes were validated at commit and have only immutable
-            # byte owners. Rehydrate the private identity copy, without
-            # freezing again or scanning a retained image's sigma twice.
-            template = templates[name]
-            block = template.replacing(revision=DatasetRevision(sequence))
-            for field_name, field_value in (
-                ("values", values), ("validity", validity), ("sigma", sigma),
-                ("window", None if window is None else IndexedWindow(*window)),
-            ):
-                object.__setattr__(block, field_name, field_value)
-            snapshot = OwnedSnapshot(block.ref(generation), block)
+            snapshot = _retained_snapshot(templates[name], sequence, generation, chunk, facts)
             canonical = canonicals[name]
             signals[name] = SignalValue._from_owned_records(
                 name, snapshot, DatasetCoverage(written, canonical.repeat_domain.size * canonical.point_domain.size),

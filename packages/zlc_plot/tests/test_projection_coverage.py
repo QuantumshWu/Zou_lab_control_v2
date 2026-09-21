@@ -52,7 +52,6 @@ def test_curve_collapses_an_unassigned_data_axis_under_the_declared_reduction(re
         expected,
     )
     expected_counts = valid[-1, :, -1].astype(int) if reduction is Reduction.LAST else valid.sum(axis=(0, 2))
-    np.testing.assert_array_equal(series.counts, expected_counts)
     np.testing.assert_array_equal(series.valid, expected_counts > 0)
 
 def test_curve_min_pools_the_unassigned_axis_too() -> None:
@@ -114,8 +113,6 @@ def test_curve_pools_the_point_domain_like_every_other_unassigned_axis() -> None
         np.asarray(series.y.canonical),
         [values[0, :].mean(), values[1, :].mean()],
     )
-    # Each plotted repeat pooled the whole 2-row point domain.
-    assert tuple(series.counts) == (2, 2)
 
 def test_facet_curve_cell_pools_the_point_domain_too() -> None:
     """The same rule inside a facet cell: kinds do not each get a policy."""

@@ -423,7 +423,7 @@ def _render(
         # wheel notch compiling.  The picture is the cell's trailing two
         # dimensions of the (repeat, point, ..., y, x) block.
         height, width = (
-            int(size) for size in np.asarray(snapshot.block.values).shape[-2:]
+            int(size) for size in snapshot.block.schema.physical_shape[-2:]
         )
         span = float(width)
         for _ in range(zoom_steps):
@@ -470,7 +470,7 @@ def _save(
             if not zoom_steps:
                 return
             height, width = (
-                int(size) for size in np.asarray(snapshot.block.values).shape[-2:]
+                int(size) for size in snapshot.block.schema.physical_shape[-2:]
             )
             span = float(width)
             for _ in range(zoom_steps):
@@ -591,6 +591,12 @@ def representative_work(
         _mixed_snapshot(repeats=8, points=8, sites=8),
         RollingPlot(group=AxisRef.cell_data("site")),
     )
+    for dtype in (np.float32, np.float64):
+        # A floating ROI pooled into grouped shot means and a centred SEM
+        # reaches the same axis-code kernel as an indexed Rolling window.
+        _render(_image_snapshot(8, 16, dtype),
+                RollingPlot(group=AxisRef.cell_data("x")), {"uncertainty": True})
+        _render(_image_snapshot(8, 16, dtype, holes=True), HistogramPlot())
     # The fused value+count leading reduction exists only for a genuinely
     # holey, C-laid-out floating tensor; an all-valid curve takes NumPy's
     # plain reduction and a transposed tensor deliberately stays on its exact

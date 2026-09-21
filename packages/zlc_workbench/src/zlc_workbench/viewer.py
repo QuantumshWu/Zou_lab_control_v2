@@ -79,7 +79,7 @@ def _manual_version() -> str:
 
 def _axis_coordinates(axis: object) -> object:
     if axis.coordinates is not None:
-        return tuple(axis.coordinates)
+        return tuple(axis.coordinate_values())
     return range(int(axis.index_origin), int(axis.index_origin) + int(axis.size))
 
 
@@ -105,7 +105,7 @@ def _resized_coordinates(axis: object | None, length: int) -> tuple[object, ...]
     if axis is None or axis.coordinates is None:
         return None
     wanted = int(length)
-    values = list(axis.coordinates[:wanted])
+    values = [axis.coordinate_at(index) for index in range(min(wanted, axis.size))]
     occupied = set(values)
     while len(values) < wanted:
         if values and all(type(value) in (int, float) for value in values):
@@ -181,7 +181,7 @@ def _edited_mapped_domain(axes: tuple[object, ...], source: object) -> object:
         return _mapped_domain(axes)
     from zlc_data import DomainSpec
 
-    return DomainSpec(tuple(source.shape), axes, source.axis_codes)
+    return DomainSpec(tuple(source.shape), axes, source.axis_codes, source.axis_code_repeats)
 
 
 def _domain_flat_rows(domain: object) -> np.ndarray:
@@ -199,6 +199,7 @@ def _domain_flat_rows(domain: object) -> np.ndarray:
 def _expand_snapshot_for_edit(snapshot: object) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     from zlc_data import expand_snapshot_validity
 
+    snapshot = snapshot.materialize()
     schema = snapshot.block.schema
     repeat_shape = schema.repeat_domain.logical_shape
     point_shape = schema.point_domain.logical_shape
@@ -3036,8 +3037,8 @@ class FigureViewerPresenter:
             "dataset": {
                 "name": str(draft["name"]),
                 "schema_fingerprint": snapshot.block.schema.fingerprint,
-                "shape": list(snapshot.block.values.shape),
-                "dtype": snapshot.block.values.dtype.str,
+                "shape": list(snapshot.block.schema.physical_shape),
+                "dtype": snapshot.block.schema.value_schema.dtype.str,
             },
             "note": str(draft["note"]),
         }

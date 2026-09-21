@@ -26,6 +26,7 @@ from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot
 from zlc_plot.data_view import DataView
 from zlc_plot.specs import Reduction
+from test_factored_curve import _numpy_projection
 
 def _scan_of_frames(repeat: int = 2) -> OwnedSnapshot:
     """A 3x2 Cartesian scan of 4x5 uint16 frames with some invalid cells."""
@@ -83,9 +84,6 @@ def _assert_facets_equal(dense, generic) -> None:
             )
             np.testing.assert_array_equal(
                 left.series[0].valid, right.series[0].valid
-            )
-            np.testing.assert_array_equal(
-                left.series[0].counts, right.series[0].counts
             )
             np.testing.assert_allclose(
                 np.asarray(left.series[0].y.canonical)[left.series[0].valid],
@@ -148,13 +146,15 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     if isinstance(spec.cell, HistogramPlot):
         data = view.facet(spec, bins=bins)
         values, valid = view.samples.value.canonical.reshape(-1), view.samples.valid_mask.reshape(-1)
-        for cell, (_key, positions) in zip(data.cells, view._groups((spec.facet,), view._all_positions()), strict=True):
+        domain = view._domain(spec.facet, view._all_positions())
+        for cell in data.cells:
+            positions = np.flatnonzero(domain.codes == cell.facet_index)
             expected, _edges = np.histogram(values[positions[valid[positions]]], bins=bins)
             np.testing.assert_array_equal(cell.payload.counts[0], expected)
         return
     dense = view._factored_facet(spec, False)
     assert dense is not None, "a tensor/factored path must actually engage here"
-    generic = view._facet_from_positions(spec, view._all_positions())
+    generic = _numpy_projection(view, "facet", spec)
     _assert_facets_equal(dense, generic)
 
 @pytest.mark.parametrize(

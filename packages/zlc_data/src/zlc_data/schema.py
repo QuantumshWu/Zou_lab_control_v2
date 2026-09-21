@@ -7,7 +7,7 @@ from math import prod
 from typing import Any
 
 import numpy as np
-from .validation import canonical_text, positive_integer
+from .validation import canonical_text, integer, positive_integer
 
 from ._arrays import canonical_dtype, immutable_array
 from .axis import (
@@ -36,7 +36,7 @@ def _ordered_subset(candidate: tuple[AxisId, ...], available: tuple[AxisId, ...]
     return positions == sorted(positions)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class DomainSpec:
     """One physical domain and its logical named axes.
 
@@ -44,11 +44,16 @@ class DomainSpec:
     carrier. Cell-data leaves ``axis_codes`` as ``None``: each axis then maps
     by position to one dense physical dimension. Dense codes are only the
     corresponding one-dimensional identity, never a broadcast pixel plane.
+    A range and optional inner/outer repeats retain a declared regular mapping
+    without a carrier-sized code array. ``codes`` expands it only on request.
     """
 
     shape: tuple[int, ...]
     axes: tuple[AxisSpec, ...] = ()
-    axis_codes: tuple[tuple[int, ...], ...] | None = None
+    axis_codes: tuple[np.ndarray | range, ...] | None = None
+    #: Each base code is repeated inner times, then that vector outer times.
+    #: None is the ordinary, already complete mapping: (1, 1) for every axis.
+    axis_code_repeats: tuple[tuple[int, int], ...] | None = None
     _codes: Any = field(init=False, repr=False, compare=False, default=None)
     #: Filled on first request, per row asked: the live commit asks the
     #: same domain the same question for every event it publishes.
@@ -65,13 +70,6 @@ class DomainSpec:
         if any(not isinstance(axis, AxisSpec) for axis in axes):
             raise TypeError("domain axes must contain AxisSpec values")
         _unique_axis_ids(axes, context="domain")
-        for axis in axes:
-            if axis.coordinates is not None:
-                if any(value is None for value in axis.coordinates):
-                    raise ValueError("domain axis coordinates cannot be missing")
-                if len(set(axis.coordinates)) != axis.size:
-                    raise ValueError("domain axis coordinates must be unique")
-
         authored_codes = self.axis_codes
         for axis in axes:
             if axis.coordinate_of is None:
@@ -81,9 +79,11 @@ class DomainSpec:
                 raise ValueError("alternative coordinates need one same-sized primary axis in their domain")
             if authored_codes is None:
                 raise ValueError("alternative coordinates require an explicitly mapped domain")
-        normalized_codes: tuple[tuple[int, ...], ...] | None
-        cached_codes: list[np.ndarray] = []
+        normalized_codes: tuple[np.ndarray | range, ...] | None
+        repeats = None
         if authored_codes is None:
+            if self.axis_code_repeats is not None:
+                raise ValueError("code repeats require an explicitly mapped domain")
             if len(axes) != len(shape) or any(
                 axis.size != size for axis, size in zip(axes, shape, strict=True)
             ):
@@ -91,13 +91,6 @@ class DomainSpec:
                     "a dense domain needs one same-sized axis per physical dimension"
                 )
             normalized_codes = None
-            for axis in axes:
-                codes = immutable_array(
-                    np.arange(axis.size, dtype=np.int64),
-                    dtype=np.dtype("<i8"),
-                    shape=(axis.size,),
-                )
-                cached_codes.append(codes)
         else:
             authored_codes = tuple(authored_codes)
             if len(shape) != 1:
@@ -105,42 +98,83 @@ class DomainSpec:
             if len(authored_codes) != len(axes):
                 raise ValueError("axis_codes must contain one vector per axis")
             carrier_size = prod(shape)
-            normalized: list[tuple[int, ...]] = []
-            for axis, entries in zip(axes, authored_codes, strict=True):
-                array = np.asarray(entries)
-                if array.ndim != 1 or array.size != carrier_size:
-                    raise ValueError("each axis code vector must match domain size")
-                if not issubclass(array.dtype.type, np.integer):
-                    raise TypeError("axis codes must be integers")
-                codes = np.asarray(array, dtype=np.int64)
-                if bool(np.any(codes < 0)) or bool(np.any(codes >= axis.size)):
-                    raise ValueError("axis code is outside its coordinate domain")
-                canonical = tuple(codes.tolist())
-                cached_codes.append(
-                    codes if axis.coordinate_of is not None else immutable_array(
-                        codes,
-                        dtype=np.dtype("<i8"),
-                        shape=(carrier_size,),
-                    )
-                )
-                normalized.append(canonical)
+            authored_repeats = ((1, 1),) * len(axes) if self.axis_code_repeats is None else tuple(self.axis_code_repeats)
+            if len(authored_repeats) != len(axes):
+                raise ValueError("axis_code_repeats must contain one pair per axis")
+            factors = []
+            for pair in authored_repeats:
+                if len(pair) != 2:
+                    raise ValueError("each axis code repeat needs inner and outer counts")
+                factors.append(tuple(positive_integer(value, "axis code repeat") for value in pair))
+            normalized: list[np.ndarray | range] = []
+            for axis, entries, (inner, outer) in zip(axes, authored_codes, factors, strict=True):
+                if isinstance(entries, range):
+                    count = len(entries)
+                    if count * inner * outer != carrier_size:
+                        raise ValueError("each axis code vector must match domain size")
+                    low, high = min(entries[0], entries[-1]), max(entries[0], entries[-1])
+                    if low < 0 or high >= axis.size or high > np.iinfo(np.int64).max:
+                        raise ValueError("axis code is outside its coordinate domain")
+                    step = entries.step if count > 1 else 1
+                    normalized.append(range(entries.start, entries.start + step * count, step))
+                else:
+                    array = np.asarray(entries)
+                    if array.ndim != 1 or array.size * inner * outer != carrier_size:
+                        raise ValueError("each axis code vector must match domain size")
+                    if not issubclass(array.dtype.type, np.integer):
+                        raise TypeError("axis codes must be integers")
+                    if bool(np.any(array < 0)) or bool(np.any(array >= axis.size)) or bool(np.any(array > np.iinfo(np.int64).max)):
+                        raise ValueError("axis code is outside its coordinate domain")
+                    normalized.append(immutable_array(
+                        np.asarray(array, dtype="<i8"), dtype=np.dtype("<i8"), shape=array.shape,
+                    ))
             for index, axis in enumerate(axes):
                 if axis.coordinate_of is not None:
                     primary_index = next(i for i, item in enumerate(axes) if item.axis_id == axis.coordinate_of)
-                    if normalized[index] != normalized[primary_index]:
-                        raise ValueError("alternative coordinates must name the same physical rows")
-                    cached_codes[index] = cached_codes[primary_index]
+                    left, right = normalized[index], normalized[primary_index]
+                    same_base = left == right if isinstance(left, range) and isinstance(right, range) else np.array_equal(left, right)
+                    if factors[index] != factors[primary_index] or not same_base:
+                        mappings = [
+                            np.tile(np.repeat(normalized[position], factors[position][0]), factors[position][1])
+                            for position in (index, primary_index)
+                        ]
+                        if not np.array_equal(*mappings):
+                            raise ValueError("alternative coordinates must name the same physical rows")
                     normalized[index] = normalized[primary_index]
+                    factors[index] = factors[primary_index]
             normalized_codes = tuple(normalized)
+            repeats = tuple(factors) if any(pair != (1, 1) for pair in factors) else None
             if not axes and carrier_size != 1:
                 raise ValueError("a mapped domain with multiple rows needs a named axis")
 
         object.__setattr__(self, "shape", shape)
         object.__setattr__(self, "axes", axes)
         object.__setattr__(self, "axis_codes", normalized_codes)
-        object.__setattr__(self, "_codes", tuple(cached_codes))
+        object.__setattr__(self, "axis_code_repeats", repeats)
+        object.__setattr__(self, "_codes", [None] * len(axes))
         object.__setattr__(self, "_coordinate_counts", {})
         object.__setattr__(self, "_row_groups", None)
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, DomainSpec):
+            return NotImplemented
+        if self.shape != other.shape or self.axes != other.axes or self.axis_code_repeats != other.axis_code_repeats:
+            return False
+        if self.axis_codes is None or other.axis_codes is None:
+            return self.axis_codes is other.axis_codes
+        return all(
+            left == right if isinstance(left, range) and isinstance(right, range)
+            else False if isinstance(left, range) or isinstance(right, range)
+            else np.array_equal(left, right)
+            for left, right in zip(self.axis_codes, other.axis_codes, strict=True)
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.shape, self.axes, None if self.axis_codes is None else tuple(
+            codes if isinstance(codes, range) else tuple(codes) for codes in self.axis_codes
+        ), self.axis_code_repeats))
 
     @property
     def size(self) -> int:
@@ -159,10 +193,46 @@ class DomainSpec:
         raise KeyError(axis_id)
 
     def codes(self, axis_id: AxisId) -> np.ndarray:
-        """Readonly one-dimensional codes along the axis's physical dimension."""
+        """Read the complete code vector, expanding declared repetition once."""
 
         axis = self.axis(axis_id)
-        return self._codes[self.axes.index(axis)]
+        if axis.coordinate_of is not None:
+            return self.codes(axis.coordinate_of)
+        index = self.axes.index(axis)
+        cached = self._codes[index]
+        if cached is not None:
+            return cached
+        base = range(axis.size) if self.axis_codes is None else self.axis_codes[index]
+        inner, outer = (1, 1) if self.axis_code_repeats is None else self.axis_code_repeats[index]
+        array = np.arange(base.start, base.stop, base.step, dtype="<i8") if isinstance(base, range) else base
+        if inner != 1:
+            array = np.repeat(array, inner)
+        if outer != 1:
+            array = np.tile(array, outer)
+        cached = immutable_array(array, dtype=np.dtype("<i8"), shape=array.shape)
+        self._codes[index] = cached
+        return cached
+
+    def code_at(self, axis_id: AxisId, row: int) -> int:
+        """Read one physical row's code directly from its declared mapping."""
+
+        axis = self.axis(axis_id)
+        row = integer(row, "domain row", minimum=0)
+        extent = axis.size if self.axis_codes is None else self.size
+        if row >= extent:
+            raise IndexError("domain row is outside its physical dimension")
+        if self.axis_codes is None:
+            return row
+        index = self.axes.index(axis)
+        base = self.axis_codes[index]
+        inner = 1 if self.axis_code_repeats is None else self.axis_code_repeats[index][0]
+        return int(base[(row // inner) % len(base)])
+
+    def code_base(self, axis_id: AxisId) -> np.ndarray | range:
+        """The stored code vector before its declared inner/outer repetition."""
+
+        axis = self.axis(axis_id)
+        return range(axis.size) if self.axis_codes is None else self.axis_codes[self.axes.index(axis)]
 
     def coordinate_axis(self, axis_id: AxisId) -> AxisSpec:
         """The physical axis whose positions this coordinate names."""
@@ -188,9 +258,10 @@ class DomainSpec:
         if counts is None:
             result: list[int] = []
             primary_ids = tuple(axis.coordinate_of or axis.axis_id for axis in self.axes)
-            for target, target_codes in enumerate(self._codes):
+            codes = tuple(self.codes(axis.axis_id) for axis in self.axes)
+            for target, target_codes in enumerate(codes):
                 rows = np.ones(self.size, dtype=bool)
-                for index, other_codes in enumerate(self._codes):
+                for index, other_codes in enumerate(codes):
                     if primary_ids[index] != primary_ids[target]:
                         rows &= other_codes == other_codes[row]
                 result.append(int(np.unique(target_codes[rows]).size))
@@ -205,8 +276,7 @@ class DomainSpec:
         row = int(current_row) % self.size
         groups = self._row_groups
         if groups is None:
-            codes = tuple(code for axis, code in zip(self.axes, self._codes, strict=True)
-                          if axis.coordinate_of is None)
+            codes = tuple(self.codes(axis.axis_id) for axis in self.axes if axis.coordinate_of is None)
             groups = ()
             if codes and self.size > 1:
                 order = np.lexsort(codes[::-1])
@@ -229,8 +299,8 @@ class DomainSpec:
         group = lookup[row]
         return order[starts[group]:starts[group + 1]]
 
-    def __getstate__(self):
-        return {**self.__dict__, "_row_groups": None}
+    def __reduce__(self):
+        return DomainSpec, (self.shape, self.axes, self.axis_codes, self.axis_code_repeats)
 
     def physical_dimension(self, axis_id: AxisId) -> int:
         """The domain-local physical dimension carrying one logical axis."""

@@ -135,7 +135,7 @@ def test_the_repeat_domain_is_exactly_the_two_execution_facts() -> None:
     assert tuple(axis.size for axis in domain.axes) == (2, 3)
     assert all(axis.role == REPEAT for axis in domain.axes)
     assert domain.shape == (6,)
-    assert domain.axis_codes == (
+    assert tuple(tuple(codes) for codes in domain.axis_codes) == (
         (0, 0, 0, 1, 1, 1),
         (0, 1, 2, 0, 1, 2),
     ), "scan repeat is the outer index, run repeat the inner"

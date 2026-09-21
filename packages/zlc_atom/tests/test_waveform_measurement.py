@@ -301,7 +301,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
             AxisId("zlc_data.primary-index")
         )
         assert source_index.role == PRIMARY_INDEX
-        assert source_index.coordinates == tuple(range(-7, 1))
+        assert tuple(source_index.coordinate_values()) == tuple(range(-7, 1))
         # The window holds eight consecutive shots: their x fields are the
         # packet numbers, eight of them in a row.
         packets = np.asarray(snapshot.block.values)[0, :, 0]

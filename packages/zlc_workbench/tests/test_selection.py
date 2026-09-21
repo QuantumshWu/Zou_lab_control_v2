@@ -1147,7 +1147,7 @@ def test_a_box_on_a_focused_frame_cell_derives_all_frames(
         derived = roi_frame.snapshot.block
         assert derived.schema.point_domain.size == schema.point_domain.size
         derived_axis = derived.schema.point_domain.axis(frame_axis.axis_id)
-        assert derived_axis.coordinates == frame_axis.coordinates
+        assert tuple(derived_axis.coordinate_values()) == tuple(frame_axis.coordinate_values())
 
         # The derived pixels are the same crop of every frame, located through
         # the derived axes' own origins.

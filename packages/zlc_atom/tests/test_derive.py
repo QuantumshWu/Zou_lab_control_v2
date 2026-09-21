@@ -96,7 +96,7 @@ def test_scalar_isel_drops_only_its_named_axis_while_lists_keep_length_one() -> 
     assert scalar.shape == kept.shape == (2, 1, 3)
     assert scalar.schema.point_domain.axes == ()
     assert kept.schema.point_domain.axes[0].size == 1
-    assert kept.schema.point_domain.axes[0].coordinates == (1,)
+    assert tuple(kept.schema.point_domain.axes[0].coordinate_values()) == (1,)
     assert kept.schema.point_domain.axes[0].coordinate_labels == ("frame 1",)
     np.testing.assert_array_equal(scalar.values, kept.values)
     np.testing.assert_array_equal(source.sel(frame=1).values, scalar.values)
@@ -116,7 +116,7 @@ def test_scalar_isel_drops_only_its_named_axis_while_lists_keep_length_one() -> 
         np.testing.assert_array_equal(selected.values,
             np.take(np.take(source.values[::-1], indexes, axis=1), [2, 0], axis=2))
         frame = selected.schema.point_domain.axes[0]
-        assert frame.coordinates == tuple(indexes)
+        assert tuple(frame.coordinate_values()) == tuple(indexes)
         assert frame.coordinate_labels == tuple(f"frame {i}" for i in indexes)
         assert tuple(selected.schema.point_domain.codes(frame.axis_id)) == tuple(range(len(indexes)))
 
@@ -162,7 +162,7 @@ def test_sparse_logical_axes_reduce_without_densifying_or_averaging_means() -> N
     assert tuple(axis.name for axis in selected.schema.point_domain.axes) == ("b",)
     np.testing.assert_array_equal(selected.values, values[:, 2:, :])
     reordered = source.isel(b=[2, 0])
-    assert reordered.schema.point_domain.axes[1].coordinates == (3, 1)
+    assert tuple(reordered.schema.point_domain.axes[1].coordinate_values()) == (3, 1)
     assert tuple(reordered.schema.point_domain.codes(b.axis_id)) == (0, 0, 1, 1)
     np.testing.assert_array_equal(reordered.values, values[:, [1, 4, 0, 2], :])
     np.testing.assert_array_equal(reordered.valid, valid[:, [1, 4, 0, 2], :])
@@ -182,8 +182,8 @@ def test_sparse_logical_axes_reduce_without_densifying_or_averaging_means() -> N
         np.testing.assert_array_equal(selected.values, source.isel(b=1).values)
         selected = paired.isel({coordinate: [2, 0]})
         points = selected.schema.point_domain
-        assert points.axis(b.axis_id).coordinates == (3, 1)
-        assert points.axis(time.axis_id).coordinates == (0.4, 0.1)
+        assert tuple(points.axis(b.axis_id).coordinate_values()) == (3, 1)
+        assert tuple(points.axis(time.axis_id).coordinate_values()) == (0.4, 0.1)
         assert points.codes(b.axis_id) is points.codes(time.axis_id)
         np.testing.assert_array_equal(selected.values, reordered.values)
 

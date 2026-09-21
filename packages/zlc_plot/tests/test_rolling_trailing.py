@@ -56,7 +56,8 @@ def _trailing_mean(shots: np.ndarray, span: int) -> np.ndarray:
         ]
     )
 
-def test_a_trailing_point_is_the_mean_of_the_last_n_shots() -> None:
+@pytest.mark.parametrize("uncertainty", (False, True))
+def test_a_trailing_point_is_the_mean_of_the_last_n_shots(uncertainty) -> None:
     """Feed 0/1 occupancy shot by shot; each drawn point must equal the
     mean over every sample the last N shots pooled, and its sem the sample
     standard error of those -- which for booleans IS the binomial error."""
@@ -68,7 +69,7 @@ def test_a_trailing_point_is_the_mean_of_the_last_n_shots() -> None:
     session = PlotSession(
         _shots(shots),
         RollingPlot(reduction=Reduction.MEAN),
-        parameters={"trailing": span, "uncertainty": True},
+        parameters={"trailing": span, "uncertainty": uncertainty},
     )
     try:
         series = session._projection._payload.series[0]
@@ -76,7 +77,10 @@ def test_a_trailing_point_is_the_mean_of_the_last_n_shots() -> None:
         np.testing.assert_allclose(y, _trailing_mean(shots, span), rtol=1e-12)
         window = shots[-span:].reshape(-1)
         expected_sem = float(np.std(window, ddof=1) / np.sqrt(window.size))
-        np.testing.assert_allclose(series.sem[-1], expected_sem, rtol=1e-12)
+        if uncertainty:
+            np.testing.assert_allclose(series.sem[-1], expected_sem, rtol=1e-12)
+        else:
+            assert series.sem is None
     finally:
         session.close()
 

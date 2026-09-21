@@ -199,19 +199,29 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
     np.testing.assert_array_equal(single[0], histogram_counts(values, edges, valid))
 
 
-def test_the_histogram_kernel_declines_a_float32_pool() -> None:
-    """numpy would do that pool's arithmetic in float32; the kernel would not.
-
-    Rather than reproduce a second precision, the dispatch defers -- and
-    the counts are still numpy's, which is what the equality above asserts
-    for every dtype the kernel does take.
-    """
+def test_the_histogram_kernel_keeps_float32_bin_boundaries(monkeypatch) -> None:
+    """Widen actual boundaries, never replace them with a different grid."""
 
     rng = np.random.default_rng(7)
     pool = (rng.random(10_000) * 10.0).astype(np.float32)
     edges = np.linspace(0.0, 10.0, 21)
     reference, compiled = _both_engines(lambda: histogram_counts(pool, edges))
     np.testing.assert_array_equal(reference, compiled)
+    monkeypatch.setattr(kernels, "engaged", lambda: True)
+    for first, last in ((-3.0, 7.0), (1e8, 1e8 + 128), (-3e38, 3e38)):
+        edges = np.linspace(first, last, 9, dtype=np.float32)
+        samples = np.concatenate((edges, np.nextafter(edges, np.float32(-np.inf)),
+                                  np.nextafter(edges, np.float32(np.inf)),
+                                  np.asarray([np.nan, -np.inf, np.inf], dtype=np.float32)))
+        values = np.tile(samples, (2, 3, 1))
+        valid = rng.random(values.shape) > 0.17
+        codes = np.asarray((1, -1, 0), dtype=np.int64)
+        actual = _histogram_kernel_counts(values, valid, codes, 1, 2, edges)
+        assert actual is not None
+        expected = np.stack([np.histogram(values[:, codes == group][valid[:, codes == group]],
+                                         bins=edges)[0] for group in (0, 1)])
+        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(histogram_counts(samples, edges), np.histogram(samples, bins=edges)[0])
 
 
 def test_joint_axis_kernel_matches_the_exact_bucket_reduction() -> None:
