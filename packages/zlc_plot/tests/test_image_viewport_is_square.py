@@ -14,7 +14,7 @@ from data_factory import (
 )
 from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, ImagePlot, PlotSession
-from zlc_plot.selectors import NumericRange, RectangleRange
+from zlc_plot.selectors import NumericRange
 
 def _square_field_snapshot() -> OwnedSnapshot:
     """Same pitch on both axes in the same unit: a camera frame's shape."""
@@ -38,7 +38,7 @@ def _samples(session, viewport):
     snapped = session._image_viewport_on_pixel_grid(viewport)
     payload = session._payload
     counts = []
-    for axis, span in ((payload.x, snapped.x), (payload.y, snapped.y)):
+    for axis, span in ((payload.x, snapped[0]), (payload.y, snapped[1])):
         values = np.asarray(
             getattr(axis, "display", axis), dtype=float
         ).reshape(-1)
@@ -68,7 +68,7 @@ def test_a_snapped_viewport_is_square_in_cell_units() -> None:
         ):
             x_count, y_count = _samples(
                 session,
-                RectangleRange(
+                (
                     NumericRange(low_x, high_x), NumericRange(low_y, high_y)
                 ),
             )
@@ -138,11 +138,11 @@ def test_the_snap_still_contains_what_was_asked_for() -> None:
             (10.7, 29.2, 10.2, 30.8),
             (12.49, 34.51, 12.51, 34.49),
         ):
-            asked = RectangleRange(
+            asked = (
                 NumericRange(low_x, high_x), NumericRange(low_y, high_y)
             )
             got = session._image_viewport_on_pixel_grid(asked)
-            assert got.x.low <= low_x + 1e-9 and got.x.high >= high_x - 1e-9
-            assert got.y.low <= low_y + 1e-9 and got.y.high >= high_y - 1e-9
+            assert got[0].low <= low_x + 1e-9 and got[0].high >= high_x - 1e-9
+            assert got[1].low <= low_y + 1e-9 and got[1].high >= high_y - 1e-9
     finally:
         session.close()

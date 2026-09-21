@@ -64,6 +64,7 @@ from .selectors import (
     SelectorKind,
     SelectorSnapshot,
     SelectorState,
+    Viewport,
 )
 from .specs import (
     CurvePlot,
@@ -380,7 +381,7 @@ class FitAuthority:
     """What defines a fit's domain: the committed selector, else the viewport."""
 
     selector: SelectorState | None
-    viewport: RectangleRange | None
+    viewport: Viewport | None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -540,7 +541,7 @@ class ProjectionContext:
 
     display_state: DisplayState
     selector_snapshot: SelectorSnapshot
-    viewport: RectangleRange | None = None
+    viewport: Viewport | None = None
     focused_facet_index: int | None = None
 
     def selector_state(self, kind: SelectorKind) -> SelectorState:
@@ -724,7 +725,7 @@ class FitProjection:
         return self._data
 
     @property
-    def viewport(self) -> RectangleRange | None:
+    def viewport(self) -> Viewport | None:
         return self._context.viewport
 
     @property
@@ -736,7 +737,7 @@ class FitProjection:
         return self._payload
 
     @property
-    def _viewport(self) -> RectangleRange | None:
+    def _viewport(self) -> Viewport | None:
         return self._context.viewport
 
     @property
@@ -1731,10 +1732,10 @@ class FitProjection:
             else:
                 raise ValueError("selected geometry cannot define a curve fit domain")
             scope = FitScope.SELECTOR
-        elif authority.viewport is not None:
-            viewport = authority.viewport
-            valid &= (x_canonical >= viewport.x.low) & (
-                x_canonical <= viewport.x.high
+        elif authority.viewport is not None and authority.viewport[0] is not None:
+            x_range = authority.viewport[0]
+            valid &= (x_canonical >= x_range.low) & (
+                x_canonical <= x_range.high
             )
             scope = FitScope.VIEWPORT
         else:
@@ -1811,9 +1812,9 @@ class FitProjection:
                     "selected geometry cannot define a histogram fit domain"
                 )
             scope = FitScope.SELECTOR
-        elif authority.viewport is not None:
-            viewport = authority.viewport
-            valid &= (canonical >= viewport.x.low) & (canonical <= viewport.x.high)
+        elif authority.viewport is not None and authority.viewport[0] is not None:
+            x_range = authority.viewport[0]
+            valid &= (canonical >= x_range.low) & (canonical <= x_range.high)
             scope = FitScope.VIEWPORT
         else:
             scope = FitScope.ALL
@@ -1993,9 +1994,11 @@ class FitProjection:
                 raise ValueError("selected geometry cannot define an image fit domain")
             scope = FitScope.SELECTOR
         elif authority.viewport is not None:
-            viewport = authority.viewport
-            columns = (x >= viewport.x.low) & (x <= viewport.x.high)
-            rows = (y >= viewport.y.low) & (y <= viewport.y.high)
+            x_range, y_range = authority.viewport
+            columns = (np.ones(x.shape, dtype=np.bool_) if x_range is None
+                       else (x >= x_range.low) & (x <= x_range.high))
+            rows = (np.ones(y.shape, dtype=np.bool_) if y_range is None
+                    else (y >= y_range.low) & (y <= y_range.high))
             box = rows[:, None] & columns[None, :]
             valid = box if valid is None else valid & box
             scope = FitScope.VIEWPORT
@@ -2003,16 +2006,16 @@ class FitProjection:
             scope = FitScope.ALL
         return valid, observations, scope, active
 
-    def _viewport_in_canonical(self) -> RectangleRange:
+    def _viewport_in_canonical(self) -> Viewport:
         assert self._viewport is not None
-        return RectangleRange(
-            self._display_range_to_canonical(
-                self._viewport.x, self._x_selector_source()
+        x_range, y_range = self._viewport
+        return (
+            None if x_range is None else self._display_range_to_canonical(
+                x_range, self._x_selector_source()
             ),
-            self._viewport.y
-            if self._is_histogram_plot()
-            else self._display_range_to_canonical(
-                self._viewport.y, self._y_ref_or_value()
+            None if y_range is None else (
+                y_range if self._is_histogram_plot()
+                else self._display_range_to_canonical(y_range, self._y_ref_or_value())
             ),
         )
 

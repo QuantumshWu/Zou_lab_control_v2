@@ -455,18 +455,11 @@ class GestureSessionMixin:
         # advancing the view -- the operator turns the wheel and the picture
         # keeps landing back where it was.  With nothing committed yet the
         # drawn limits ARE the commitment: they are what autoscale chose.
-        committed = self._projected.viewport
-        if committed is None:
-            x_axes = NumericRange(*sorted(map(float, axes.get_xlim())))
-            y_axes = NumericRange(*sorted(map(float, axes.get_ylim())))
-        else:
-            axes_x = self._viewport_x_to_axes(committed.x)
-            x_axes = NumericRange(
-                *sorted((float(axes_x.low), float(axes_x.high)))
-            )
-            y_axes = NumericRange(
-                *sorted(map(float, self._viewport_y_to_axes(committed.y)))
-            )
+        committed = self._projected.viewport or (None, None)
+        x_axes = (NumericRange(*sorted(map(float, axes.get_xlim())))
+                  if committed[0] is None else self._viewport_x_to_axes(committed[0]))
+        y_axes = (NumericRange(*sorted(map(float, axes.get_ylim())))
+                  if committed[1] is None else committed[1])
 
         def centered(value: NumericRange, scale) -> NumericRange:
             low = axis_space(value.low, scale)
@@ -479,7 +472,7 @@ class GestureSessionMixin:
             )
 
         zoomed_x = centered(x_axes, self._renderer.axis_scale(axes, "x"))
-        zoomed_y = y_axes
+        zoomed_y = committed[1]
         if isinstance(self._projected._semantic_spec(), ImagePlot):
             zoomed_y = centered(y_axes, self._renderer.axis_scale(axes, "y"))
         self.set_viewport(self._viewport_x_from_axes(zoomed_x), zoomed_y)
@@ -487,8 +480,8 @@ class GestureSessionMixin:
     def _zoom_to_selection_or_reset(self) -> None:
         """Zoom the viewport to the current range selection, or go home.
 
-        A committed AREA selector wins over an X_RANGE one; X_RANGE keeps the
-        current y limits.  Degenerate spans and selector-free plots restore
+        A committed AREA selector wins over an X_RANGE one; X_RANGE leaves
+        Y navigation/automatic limits untouched. Degenerate spans restore
         the complete home view.  The selector itself is kept.  The viewport
         is display-space, so the display projection applies here (pulse maps
         it back to source units through ``_viewport_x_to_axes``).
@@ -514,10 +507,7 @@ class GestureSessionMixin:
             assert isinstance(value, NumericRange)
             if value.span <= 0.0:
                 break
-            current_y = NumericRange(
-                *sorted(map(float, self._renderer.primary_axes.get_ylim()))
-            )
-            self.set_viewport(value, current_y)
+            self.set_x_limits(value.low, value.high)
             return
         self.reset_viewport()
 
@@ -1054,7 +1044,10 @@ class GestureSessionMixin:
         )
         if moved is None:
             return False
-        selected = RectangleRange(self._viewport_x_from_axes(moved.x), moved.y)
+        selected = (
+            self._viewport_x_from_axes(moved.x),
+            moved.y if image_like else (self._viewport or (None, None))[1],
+        )
         # The same grid the wheel and every other viewport writer lands on.
         # A pan left the view a third of a pixel off it, and an image whose
         # front does not land on whole canvas pixels cannot be copied -- so
@@ -1062,12 +1055,7 @@ class GestureSessionMixin:
         # the view it left behind kept the NEXT zoom off the grid too.
         selected = self._image_viewport_on_pixel_grid(selected)
         current = gesture.candidate or self._projected.viewport
-        if current is not None and np.allclose(
-            (current.x.low, current.x.high, current.y.low, current.y.high),
-            (selected.x.low, selected.x.high, selected.y.low, selected.y.high),
-            rtol=1.0e-12,
-            atol=1.0e-15,
-        ):
+        if current == selected:
             return False
         gesture.candidate = selected
         if render:

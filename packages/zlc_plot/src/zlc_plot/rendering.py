@@ -2017,7 +2017,7 @@ class RenderFrame:
     selectors: SelectorSnapshot = SelectorSnapshot(())
     facet_index: int | None = None
     facet_focus_index: int | None = None
-    view_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
+    view_limits: tuple[tuple[float, float] | None, tuple[float, float] | None] | None = None
     presentation: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
@@ -2540,7 +2540,7 @@ class MatplotlibRenderer:
         self._last_state: DisplayState | None = None
         self._home_limits: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
         self._requested_view_limits: tuple[
-            tuple[float, float], tuple[float, float]
+            tuple[float, float] | None, tuple[float, float] | None
         ] | None = None
         self._chrome_dirty_axes: set[Any] = set()
         #: Per-axes boundary chrome (ticks, gridlines, spines) collected for
@@ -3263,14 +3263,20 @@ class MatplotlibRenderer:
     def _apply_requested_view(
         self,
         axis: Any,
-        requested: tuple[tuple[float, float], tuple[float, float]] | None,
+        requested: tuple[tuple[float, float] | None, tuple[float, float] | None] | None,
     ) -> None:
+        x, y = self._resolved_view_limits(axis, requested)
+        self._set_xlim(axis, *x)
+        self._set_ylim(axis, *y)
+
+    def _resolved_view_limits(self, axis: Any, requested: Any) -> tuple:
+        """Resolve each navigation override against the same automatic home."""
+        home = self._home_limits.get(id(axis))
+        if home is None:
+            home = (axis.get_xlim(), axis.get_ylim())
         if requested is None:
-            requested = self._home_limits.get(id(axis))
-        if requested is None:
-            return
-        self._set_xlim(axis, *requested[0])
-        self._set_ylim(axis, *requested[1])
+            return home
+        return (requested[0] or home[0], requested[1] or home[1])
 
     def _update_base_style(self, state: DisplayState) -> None:
         """Apply property-only edits without rebuilding data geometry."""
@@ -6995,7 +7001,7 @@ class MatplotlibRenderer:
                     # a materialization for an export or a compose fallback
                     # has no such second pass, and the picture that left
                     # the window was the un-zoomed one.
-                    shown = {**shown, "limits": requested}
+                    shown = {**shown, "limits": self._resolved_view_limits(axis, requested)}
                 handler.render(
                     self,
                     getattr(cell, "payload", cell),
@@ -7022,8 +7028,7 @@ class MatplotlibRenderer:
             # it is the home whatever a later zoom did -- and reading it
             # here rather than baking a copy into the command is what keeps
             # ONE axis range with ONE owner.
-            limits=self._requested_view_limits
-            or self._home_limits.get(id(self.primary_axes)),
+            limits=self._resolved_view_limits(self.primary_axes, self._requested_view_limits),
             paint_labels=True,
             isolated_glyphs=True,
         )
@@ -7983,11 +7988,7 @@ class MatplotlibRenderer:
             if any(axes is item for _key, item, _index in self.painted_surfaces)
             else None
         )
-        if requested is None:
-            x_limits = (home_extent[0], home_extent[1])
-            y_limits = (home_extent[2], home_extent[3])
-        else:
-            x_limits, y_limits = requested
+        x_limits, y_limits = self._resolved_view_limits(axes, requested)
         self._set_xlim(axes, *x_limits)
         self._set_ylim(axes, *y_limits)
         display_limits = (x_limits, y_limits)
@@ -10333,7 +10334,7 @@ class MatplotlibRenderer:
                 float(value)
                 for value in (
                     requested_view[1]
-                    if requested_view is not None
+                    if requested_view is not None and requested_view[1] is not None
                     else history.get_ylim()
                 )
             )

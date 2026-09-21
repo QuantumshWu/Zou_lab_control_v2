@@ -23,6 +23,7 @@ from .selectors import (
     DragHandle,
     NumericRange,
     RectangleRange,
+    Viewport,
     SelectorKind,
     _drag_numeric_range,
 )
@@ -231,7 +232,7 @@ class _PanGesture(_PointerGestureBase):
     origin: CrosshairPoint
     x: NumericRange
     y: NumericRange
-    candidate: RectangleRange | None = None
+    candidate: Viewport | None = None
 
 
 @dataclass(slots=True)

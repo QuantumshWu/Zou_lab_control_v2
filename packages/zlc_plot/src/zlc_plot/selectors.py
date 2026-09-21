@@ -71,6 +71,20 @@ class RectangleRange:
             raise TypeError("rectangle x and y must be NumericRange")
 
 
+Viewport: TypeAlias = tuple[NumericRange | None, NumericRange | None]
+
+
+def normalize_viewport(value: Viewport | None) -> Viewport | None:
+    """Navigation overrides only the axes explicitly selected by the operator."""
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) != 2 or any(
+        item is not None and not isinstance(item, NumericRange) for item in value
+    ):
+        raise TypeError("viewport must be an (x, y) tuple of NumericRange or None")
+    return value if any(item is not None for item in value) else None
+
+
 @dataclass(frozen=True, slots=True)
 class CrosshairPoint:
     x: float

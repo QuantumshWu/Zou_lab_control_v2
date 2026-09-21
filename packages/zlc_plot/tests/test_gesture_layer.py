@@ -505,7 +505,8 @@ def test_an_overview_grid_only_focuses_then_the_focused_cell_accepts_an_area(
         session.close()
 
 
-def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one() -> None:
+@pytest.mark.parametrize("kind", ("curve", "rolling", "histogram"))
+def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one(kind) -> None:
     """The wheel compounds on what the session HOLDS, not on the last frame.
 
     Renders lag commitments, and once rendering moved into its own process
@@ -516,23 +517,24 @@ def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one() -> None:
     zoom for this exact reason; the viewport branch was not.
     """
 
-    from zlc_plot import DEFAULTS, CurvePlot
+    from zlc_plot import DEFAULTS, CurvePlot, RollingPlot
 
     schema = make_dataset_schema(
-        repeat_domain(size=1),
+        repeat_domain(size=4),
         mapped_domain_from_columns({"shot": [0.0, 1.0, 2.0, 3.0]}),
         dtype=np.float64,
     )
-    snapshot = make_snapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
-    session = PlotSession(snapshot, CurvePlot(AxisRef.point("shot")), size="2x2")
+    snapshot = make_snapshot(schema, np.arange(16.0).reshape(4, 4), revision=0)
+    spec = {"curve": CurvePlot(AxisRef.point("shot")),
+            "rolling": RollingPlot(), "histogram": HistogramPlot()}[kind]
+    session = PlotSession(snapshot, spec, parameters={"window": 4}, size="2x2")
     try:
         session.rgba()
-        transform = next(
-            item
-            for item in session._raster_axes_snapshot()
-            if item.role == "main"
-        )
-        session.set_viewport(NumericRange(0.0, 100.0), NumericRange(0.0, 10.0))
+        transform = session._axis_transform_for_axis(session._renderer.primary_axes)
+        session.set_area_selector(NumericRange(0.0, 3.0), NumericRange(-100.0, 100.0))
+        selectors = session.selectors
+        session.set_viewport(NumericRange(0.0, 100.0), None)
+        automatic_y = session.describe_display().limits.y
         # A frame that has not caught up: the drawn limits are a previous
         # commitment's, which during a wheel burst is the ordinary state.
         session._renderer.primary_axes.set_xlim(0.0, 1000.0)
@@ -546,7 +548,8 @@ def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one() -> None:
         )
         first = session.viewport
         assert first is not None
-        width = float(first.x.high) - float(first.x.low)
+        assert first[1] is None
+        width = float(first[0].high) - float(first[0].low)
         assert width == pytest.approx(100.0 * factor, rel=1e-9)
 
         # And a second notch compounds on the first, whatever the axes say.
@@ -559,9 +562,47 @@ def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one() -> None:
         )
         second = session.viewport
         assert second is not None
-        assert float(second.x.high) - float(second.x.low) == pytest.approx(
+        assert second[1] is None
+        assert float(second[0].high) - float(second[0].low) == pytest.approx(
             100.0 * factor * factor, rel=1e-9
         )
+
+        updated = make_snapshot(schema, np.full((4, 4), 50.0), revision=1)
+        values_before = updated.block.values.copy()
+        session.update_data(updated)
+        assert session.viewport == second
+        assert session.describe_display().limits.y.high > automatic_y.high
+
+        # Editing Y owns only Y, including a mirrored old viewport in the
+        # same configure transaction. The operator's X zoom stays intact.
+        zoom_x = second[0]
+        old_view = (zoom_x, NumericRange(-10.0, 10.0))
+        fixed = {"relim_mode": "fixed", "y_min": 20.0, "y_max": 80.0}
+        session.configure(viewport=old_view, parameters=fixed, parameter_updates=fixed)
+        assert session.viewport == (zoom_x, None)
+        assert session.describe_display().limits.y == NumericRange(20.0, 80.0)
+        session.set_viewport(*old_view)
+        session.set_y_limits(25.0, 75.0)
+        assert session.viewport == (zoom_x, None)
+        assert session.describe_display().limits.y == NumericRange(25.0, 75.0)
+
+        session.set_viewport(*old_view)
+        session.set_parameters({"title": "live values", "show_grid": True})
+        assert session.viewport == old_view
+        assert session.describe_display().limits.y == old_view[1]
+        limits = session.describe_display().limits
+        session.configure(parameters=dict(session.display_state.values))
+        assert session.viewport == old_view
+        assert session.describe_display().limits == limits
+        for mode in ("tight", "normal"):
+            session.set_viewport(*old_view)
+            session.set_relim_mode(mode)
+            assert session.viewport == (zoom_x, None)
+            assert session.describe_display().limits.y not in (
+                old_view[1], NumericRange(25.0, 75.0)
+            )
+        assert session.selectors == selectors
+        np.testing.assert_array_equal(updated.block.values, values_before)
     finally:
         session.close()
 

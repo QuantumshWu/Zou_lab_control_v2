@@ -19,7 +19,6 @@ from zlc_plot import (
 from zlc_plot.selectors import (
     CrosshairPoint,
     NumericRange,
-    RectangleRange,
     SelectorKind,
     SelectorState,
 )
@@ -49,8 +48,14 @@ def test_plot_spec_recipe_round_trip_is_exact(spec) -> None:
             decode_plot_recipe(document)
 
 
-def test_plot_recipe_round_trip_keeps_view_and_rejects_unknown_fields() -> None:
-    viewport = RectangleRange(NumericRange(1.0, 2.0), NumericRange(3.0, 4.0))
+@pytest.mark.parametrize("viewport", (
+    (NumericRange(1.0, 2.0), NumericRange(3.0, 4.0)),
+    (NumericRange(1.0, 2.0), None),
+    (None, NumericRange(3.0, 4.0)),
+    (None, None),
+    None,
+))
+def test_plot_recipe_round_trip_keeps_view_and_rejects_unknown_fields(viewport) -> None:
     selectors = (
         SelectorState(SelectorKind.CROSSHAIR, CrosshairPoint(1.5, 3.5)),
     )
@@ -62,7 +67,7 @@ def test_plot_recipe_round_trip_keeps_view_and_rejects_unknown_fields() -> None:
         selectors=selectors,
     )
     decoded = decode_plot_recipe(document)
-    assert decoded["viewport"] == viewport
+    assert decoded["viewport"] == (None if viewport == (None, None) else viewport)
     assert decoded["selectors"] == selectors
     assert decoded["parameters"]["show_grid"] is True
     assert set(decoded["parameters"]) > {"show_grid"}
@@ -79,17 +84,23 @@ def test_saved_value_name_is_used_when_the_figure_is_redrawn(tmp_path) -> None:
     schema = make_dataset_schema(repeat_domain(size=1), mapped_domain_from_columns({"x": [0, 1, 2]}))
     schema = replace(schema, value_schema=replace(schema.value_schema, name="Survival"))
     snapshot = make_snapshot(schema, np.array([[0.9, 0.8, 0.7]]), 1)
+    viewport = (NumericRange(0.5, 1.5), None)
     image, archive = save_figure_artifact(
         tmp_path / "survival", plot_input=snapshot, spec=CurvePlot(AxisRef.point("x")),
-        parameters={}, size="2x2",
+        parameters={}, size="2x2", viewport=viewport,
     )
     info, arrays, datasets = read_archive(archive)
     restored, recipe = read_figure_plot(info, arrays, datasets, "data")
     assert image.is_file()
     assert restored.block.schema.value_schema.name == "Survival"
     np.testing.assert_array_equal(restored.block.values, snapshot.block.values)
-    session = PlotSession(restored, recipe["spec"], parameters=recipe["parameters"], size=recipe["size"])
+    session = PlotSession(
+        restored, recipe["spec"], parameters=recipe["parameters"], size=recipe["size"],
+        initial_configuration={"viewport": recipe["viewport"]},
+    )
     try:
+        assert session.viewport == viewport
+        assert session.describe_display().limits.x == viewport[0]
         assert session._renderer.primary_axes.get_ylabel() == "Survival"
     finally:
         session.close()

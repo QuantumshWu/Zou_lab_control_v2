@@ -19,6 +19,7 @@ from data_factory import (
     repeat_domain,
 )
 from zlc_plot.kinds import PlotKind
+from zlc_plot.selectors import NumericRange
 
 def _grid_session():
     row = np.repeat(np.arange(10.0), 10)
@@ -74,12 +75,16 @@ def test_a_refused_configure_restores_the_picture_with_the_state(monkeypatch) ->
 
     session = _grid_session()
     try:
+        viewport = (NumericRange(10.0, 60.0), None)
+        session.set_viewport(*viewport)
         before = session.rgba()
         limits = session.describe_display().limits
         with pytest.raises(ValueError, match="y_min must be smaller than y_max"):
             session.configure(
-                parameters={"relim_mode": "fixed", "y_min": 2.0, "y_max": 1.0}
+                parameters={"relim_mode": "fixed", "y_min": 2.0, "y_max": 1.0},
+                viewport=(NumericRange(20.0, 50.0), NumericRange(0.0, 10.0)),
             )
+        assert session.viewport == viewport
         assert session.describe_display().limits == limits
         assert np.array_equal(session.rgba(), before)
         session.redraw_surface()
@@ -103,6 +108,7 @@ def test_a_refused_configure_restores_the_picture_with_the_state(monkeypatch) ->
         monkeypatch.setattr(renderer, "_compose_frame", fail_after_drawing)
         with pytest.raises(RuntimeError, match="after touching canvas"):
             session.configure(parameters={"title": "must not survive"})
+        assert session.viewport == viewport
         assert np.array_equal(renderer._rgba_buffer(), before)
         assert session.describe_display().limits == limits
         session.redraw_surface()
