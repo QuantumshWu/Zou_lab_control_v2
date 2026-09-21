@@ -49,10 +49,15 @@ def test_non_equivalent_image_uses_anisotropic_fit_and_recovers_center() -> None
         models = {model.model_id for model in session.fit_models}
         assert "anisotropic_gaussian_center" in models
         assert "radial_gaussian_center" not in models
+        from zlc_plot import NumericRange, SelectorKind
+        session.set_area_selector(NumericRange(-2.0, 2.0), NumericRange(-3.0, 3.0))
         result = session.fit("anisotropic_gaussian_center")
         assert result.success
         assert abs(result.parameters["center_x"] - 0.35) < 1.0e-9
         assert abs(result.parameters["center_y"] + 0.8) < 1.0e-9
+        roi_label = next(artist for artist in session._renderer._selector_artists[SelectorKind.AREA]
+                         if hasattr(artist, "get_text"))
+        assert not roi_label.get_visible()
         source = _image_snapshot(x_unit="m", y_unit="s")
         from zlc_data import owned_snapshot_from_arrays
 
@@ -67,6 +72,7 @@ def test_non_equivalent_image_uses_anisotropic_fit_and_recovers_center() -> None
         assert session.last_fit is None
         assert session.fit_status is None
         assert fit_events[-1] is None
+        assert roi_label.get_visible()
     finally:
         session.close()
 
