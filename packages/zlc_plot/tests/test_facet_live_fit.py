@@ -70,7 +70,7 @@ def test_facet_grid_without_facet_is_one_full_cell_and_one_fit() -> None:
         session.close()
 
 
-def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
+def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation(tmp_path) -> None:
     session = PlotSession(_facet_snapshot(), _spec())
     try:
         result = session.fit("gaussian_offset", live=True)
@@ -95,6 +95,40 @@ def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
         assert "x_0" in focused.texts[0].get_text()
         assert "\n" in focused.texts[0].get_text()
         assert "$f(" in focused.texts[0].get_text()
+
+        from zlc_plot.selectors import RectangleRange, SelectorKind, SelectorState
+
+        selection = session.set_area_selector(NumericRange(-2.5, -0.5), NumericRange(0.1, 2.5))
+        renderer = session._renderer
+        artists = renderer._selector_artists[SelectorKind.AREA]
+        label = next(artist for artist in artists if hasattr(artist, "get_text"))
+        assert not label.get_visible()
+        assert all(artist.get_visible() for artist in artists if artist is not label)
+        session.set_crosshair_selector(-1.0, 1.0)
+        assert all(artist.get_visible() for artist in renderer._selector_artists[SelectorKind.CROSSHAIR])
+
+        renderer.begin_selector_gesture(SelectorKind.AREA)
+        renderer.preview_selector(SelectorState(
+            SelectorKind.AREA,
+            RectangleRange(NumericRange(-2.0, -0.5), NumericRange(0.2, 2.0)),
+            facet_index=0,
+        ))
+        assert renderer._selector_artists[SelectorKind.AREA] == artists
+        assert not label.get_visible()
+        assert session.selector_state(SelectorKind.AREA, display=False) == selection
+        renderer.end_selector_gesture()
+
+        prepared = session.prepare_live_frame(_facet_snapshot(revision=1, scale=1.1)).result(timeout=10.0)
+        solved = session.solve_live_frame(prepared).result(timeout=10.0)
+        session.commit_live_frame(prepared, solved)
+        assert not label.get_visible()
+        target = tmp_path / "fit-roi.svg"
+        session.save(target)
+        exported = target.read_text(encoding="utf-8")
+        assert all(line not in exported for line in label.get_text().splitlines())
+        session.clear_fit()
+        assert label.get_visible()
+        assert session.selector_state(SelectorKind.AREA, display=False) == selection
     finally:
         session.close()
 

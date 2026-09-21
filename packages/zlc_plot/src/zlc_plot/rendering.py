@@ -83,7 +83,6 @@ from .style import PlotStyleConfig, style_context
 from .ticks import (
     DeclaredLocator,
     MIN_TICK_LABEL_PT,
-    _SHRINK,
     SmartOffsetLocator,
     TICKS_FLOOR,
     apply_declared_ticks,
@@ -10793,87 +10792,169 @@ class MatplotlibRenderer:
         self._facet_chrome_signature = None
         self._facet_chrome_shape = None
 
-    def _fit_tick_label_text(self, axes, direction_labels, title_artists) -> None:
-        # Empty gutter is not an obstacle. Price actual anchored text against
-        # other text and the visible data boxes, once per changed chrome
-        # layout. Optional count-rail zero yields before a whole direction
-        # shrinks; required ticks keep their ordinary anchors and identities.
+    def _fit_tick_label_text(self, axes, direction_labels, title_artists) -> bool:
+        """Resolve final text collisions: locator choices first, then small type."""
+        # Fixed coordinate names do not run a numeric locator. Restore their
+        # authored tier too when layout changes, before assessing new crowding.
+        for owner in axes:
+            for axis in (owner.xaxis, owner.yaxis):
+                signature = getattr(axis, "_zlc_tick_signature", ())
+                if signature and signature[0] == "named":
+                    if axis._major_tick_kw.get("labelsize") != signature[-1]:
+                        owner.tick_params(axis=axis.axis_name, labelsize=signature[-1])
+        if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
+            for labels in direction_labels:
+                size = min((label.get_fontsize() for label in labels), default=MIN_TICK_LABEL_PT)
+                for label in labels:
+                    label.set_fontsize(size)
         renderer = _prepare_renderer(self._figure.canvas.get_renderer())
         obstacles = np.asarray(
             [axis.bbox.extents for axis in axes]
             + [title.get_window_extent(renderer).extents for title in title_artists],
             dtype=float,
         ).reshape(-1, 4)
-        labels = [label for group in direction_labels for label in group]
-        if not labels:
-            return
-        directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
-        sizes = [max((label.get_fontsize() for label in group), default=MIN_TICK_LABEL_PT)
-                 for group in direction_labels]
-        optional = []
-        for axis_owner in axes:
-            for direction, axis in enumerate((axis_owner.xaxis, axis_owner.yaxis)):
-                locator = axis.get_major_locator()
-                if (isinstance(locator, DeclaredLocator) and locator.zero_optional
-                        and 0.0 in locator.ticks):
-                    zero_labels = {id(label) for tick in axis.majorTicks if tick.get_loc() == 0.0
-                                   for label in (tick.label1, tick.label2)}
-                    optional.append((direction, axis, locator, zero_labels))
-        while True:
-            boxes = np.asarray([label.get_window_extent(renderer).extents for label in labels])
-            # These are the same positive-extent rectangle comparisons as
-            # Bbox.overlaps, batched instead of thousands of Python calls.
-            all_boxes = np.concatenate((boxes, obstacles))
-            touching = (
-                (boxes[:, None, 2] >= all_boxes[None, :, 0])
-                & (boxes[:, None, 3] >= all_boxes[None, :, 1])
-                & (boxes[:, None, 0] <= all_boxes[None, :, 2])
-                & (boxes[:, None, 1] <= all_boxes[None, :, 3])
+        figure_box = self._figure.bbox.extents
+        changed_ticks = False
+        compacted = False
+
+        def intersections(boxes, other):
+            return (
+                (boxes[:, None, 2] >= other[None, :, 0])
+                & (boxes[:, None, 3] >= other[None, :, 1])
+                & (boxes[:, None, 0] <= other[None, :, 2])
+                & (boxes[:, None, 1] <= other[None, :, 3])
             )
+
+        def outside(boxes):
+            return ((boxes[:, 0] < figure_box[0]) | (boxes[:, 1] < figure_box[1])
+                    | (boxes[:, 2] > figure_box[2]) | (boxes[:, 3] > figure_box[3]))
+
+        def refresh_labels():
+            for group in direction_labels:
+                group.clear()
+            for owner in axes:
+                for direction, axis in enumerate((owner.xaxis, owner.yaxis)):
+                    direction_labels[direction].extend(
+                        label for tick in axis._update_ticks() for label in (tick.label1, tick.label2)
+                        if label.get_visible() and label.get_text()
+                    )
+
+        while True:
+            labels = [label for group in direction_labels for label in group]
+            if not labels:
+                return changed_ticks
+            directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
+            boxes = np.asarray([label.get_window_extent(renderer).extents for label in labels])
+            touching = intersections(boxes, np.concatenate((boxes, obstacles)))
             touching[np.arange(len(boxes)), np.arange(len(boxes))] = False
-            collisions = np.any(touching, axis=1)
-            crowded_labels = ({id(label) for label, hit in zip(labels, collisions) if hit}
-                              if optional else set())
-            dropped = False
-            for direction, axis, locator, zero_labels in optional:
-                if 0.0 not in locator.ticks or not crowded_labels.intersection(zero_labels):
-                    continue
-                previous = {id(label) for tick in axis.majorTicks for label in (tick.label1, tick.label2)}
-                locator.omit_optional_zero()
-                direction_labels[direction][:] = [label for label in direction_labels[direction]
-                                                   if id(label) not in previous]
-                direction_labels[direction].extend(
-                    label for tick in axis._update_ticks() for label in (tick.label1, tick.label2)
-                    if label.get_visible() and label.get_text()
-                )
-                dropped = True
-            optional.clear()
-            if dropped:
-                labels = [label for group in direction_labels for label in group]
-                directions = np.repeat((0, 1), tuple(map(len, direction_labels)))
+            collisions = np.any(touching, axis=1) | outside(boxes)
+            if not collisions.any():
+                break
+            positions = {id(label): index for index, label in enumerate(labels)}
+
+            # A grid's equivalent axes keep the same tick lattice, including
+            # unlabelled interior cells. Other surfaces have independent axes.
+            groups = {}
+            for owner in axes:
+                for axis in (owner.xaxis, owner.yaxis):
+                    locator = axis.get_major_locator()
+                    if not isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
+                        continue
+                    key = ((axis.axis_name, type(locator), tuple(axis.get_view_interval()),
+                            getattr(axis, "_zlc_tick_signature", None),
+                            np.round(axis.axes.bbox.size, 6).tobytes())
+                           if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None
+                           else id(axis))
+                    groups.setdefault(key, []).append(axis)
+
+            revised = False
+            if not compacted:
+                for members in sorted(groups.values(), key=lambda group:
+                                      not getattr(group[0].get_major_locator(), "zero_optional", False)):
+                    locator = members[0].get_major_locator()
+                    indices = [positions[id(label)]
+                               for axis in members for tick in axis.majorTicks
+                               for label in (tick.label1, tick.label2) if id(label) in positions]
+                    if not indices or not np.any(collisions[indices]):
+                        continue
+                    if isinstance(locator, DeclaredLocator):
+                        if locator.zero_optional and 0.0 in locator.ticks and any(
+                            collisions[positions[id(label)]]
+                            for axis in members for tick in axis.majorTicks if tick.get_loc() == 0.0
+                            for label in (tick.label1, tick.label2) if id(label) in positions
+                        ):
+                            for axis in members:
+                                axis.get_major_locator().omit_optional_zero()
+                            revised = True
+                            break
+                        continue
+
+                    keep = np.ones(len(labels), dtype=bool)
+                    keep[indices] = False
+                    blockers = np.concatenate((boxes[keep], obstacles))
+                    prototypes = []
+                    for axis in members:
+                        for side in ("label1", "label2"):
+                            prototype = next(
+                                (getattr(tick, side) for tick in axis.majorTicks
+                                 if id(getattr(tick, side)) in positions), None
+                            )
+                            if prototype is not None:
+                                prototypes.append((axis.axis_name, copy.copy(prototype)))
+                    best, best_score = None, int(np.sum(touching[indices]) + np.sum(outside(boxes[indices])))
+                    for candidate in locator.layout_candidates():
+                        trial_boxes = []
+                        for direction, text in prototypes:
+                            fixed = text.get_position()
+                            for value, label in zip(candidate.ticks, candidate.texts):
+                                text.set_text(label)
+                                text.set_position((value, fixed[1]) if direction == "x" else (fixed[0], value))
+                                trial_boxes.append(text.get_window_extent(renderer).extents)
+                        trial = np.asarray(trial_boxes)
+                        mutual = intersections(trial, trial)
+                        np.fill_diagonal(mutual, False)
+                        score = int(np.sum(intersections(trial, blockers)) + np.sum(mutual) + np.sum(outside(trial)))
+                        if score < best_score:
+                            best, best_score = candidate, score
+                            if not score:
+                                break
+                    if best is not None:
+                        for axis in members:
+                            low, high = axis.get_view_interval()
+                            axis.get_major_locator().adopt_layout(best, reverse=low > high)
+                        revised = True
+                        break
+            if revised:
+                changed_ticks = True
+                refresh_labels()
                 continue
+
             crowded = set(directions[collisions])
             adjustable = [direction for direction in crowded
-                          if sizes[direction] > MIN_TICK_LABEL_PT + 1e-9]
+                          if any(label.get_fontsize() > MIN_TICK_LABEL_PT
+                                 for label in direction_labels[direction])]
             if not adjustable:
                 break
+            compacted = True
             for direction in adjustable:
-                size = sizes[direction] = max(MIN_TICK_LABEL_PT, sizes[direction] * _SHRINK)
                 for label in direction_labels[direction]:
-                    label.set_fontsize(min(size, label.get_fontsize()))
-        # Commit to Axis templates once, after the size search. Re-running
-        # tick_params on every hidden cell at every trial dominated planning.
+                    label.set_fontsize(MIN_TICK_LABEL_PT)
+
+        # Commit accepted typography to the Axis templates and locator so
+        # screen composition, full draws and export use the same answer.
         for direction, name in enumerate(("xaxis", "yaxis")):
-            for axis_owner in axes:
-                axis = getattr(axis_owner, name)
+            size = max((label.get_fontsize() for label in direction_labels[direction]),
+                       default=MIN_TICK_LABEL_PT)
+            for owner in axes:
+                axis = getattr(owner, name)
                 locator = axis.get_major_locator()
                 if isinstance(locator, (SmartOffsetLocator, DeclaredLocator)):
-                    locator._apply_drawn_size(min(sizes[direction], locator.drawn_pt))
+                    locator._apply_drawn_size(min(size, locator.drawn_pt))
                 else:
-                    old_size = axis._major_tick_kw.get("labelsize", sizes[direction])
-                    size = min(sizes[direction], old_size)
-                    if size != old_size:
-                        axis_owner.tick_params(axis="x" if direction == 0 else "y", labelsize=size)
+                    old_size = axis._major_tick_kw.get("labelsize", size)
+                    if size < old_size:
+                        owner.tick_params(axis="x" if direction == 0 else "y", labelsize=size)
+        return changed_ticks
 
     def _sync_axes_chrome(self) -> None:
         """Prepare anchored tick typography for standalone, focus and overview.
@@ -11008,6 +11089,8 @@ class MatplotlibRenderer:
         self,
         visible: Sequence[tuple[int, Any]],
         titles: Mapping[int, tuple[str, float]],
+        *,
+        tick_layout_ready: bool = False,
     ) -> None:
         """Read the cells' tick policy and move the chrome artists onto it."""
 
@@ -11086,7 +11169,7 @@ class MatplotlibRenderer:
                     horizontal = axis is axes.xaxis
                     locator = axis.get_major_locator()
                     measured = isinstance(locator, (SmartOffsetLocator, DeclaredLocator))
-                    if measured:
+                    if measured and not tick_layout_ready:
                         # A previous grid may have drawn this lane smaller
                         # for a neighbour. Re-adopt its own cached placement
                         # before choosing this grid's common size; no new
@@ -11289,7 +11372,7 @@ class MatplotlibRenderer:
             title.set_text(text_value)
             title.set_fontsize(size_pt)
 
-        self._fit_tick_label_text(
+        ticks_changed = not tick_layout_ready and self._fit_tick_label_text(
             tuple(axes for _index, axes in visible), direction_labels, title_artists,
         )
         carrier = self._artists.get("facet:chrome_labels")
@@ -11309,6 +11392,11 @@ class MatplotlibRenderer:
             )
             for artist, (axes, *_rest) in zip(artists, plan, strict=True)
         }
+        if ticks_changed:
+            # Refined locators also own the marks. Reuse these just-built
+            # artists once with the final tick lists; do not replan fonts.
+            self._refresh_facet_cell_chrome(visible, titles, tick_layout_ready=True)
+            return
         # A moved title or stroke invalidates the foreground plan it was laid
         # into, and the boundary labels are part of the composed BACKGROUND,
         # so a refreshed group is a background that is no longer current.
@@ -12534,6 +12622,33 @@ class MatplotlibRenderer:
                 self._selector_topologies[kind] = topology
             for artist, primitive in zip(artists, primitives, strict=True):
                 self._mutate_selector_artist(artist, primitive)
+        self._sync_roi_text_visibility()
+
+    def _sync_roi_text_visibility(self) -> None:
+        """Visible Fit text takes precedence over ROI coordinates on its axes."""
+        from matplotlib.text import Text
+
+        labels = tuple(
+            artist
+            for kind in (SelectorKind.AREA, SelectorKind.X_RANGE)
+            for artist in self._selector_artists.get(kind, ())
+            if isinstance(artist, Text)
+        )
+        if not labels:
+            return
+        fit_axes = {
+            axis
+            for axis, _family, _model, slots, _artists in self._fit_topologies.values()
+            if axis.get_visible() and any(
+                text.get_visible() and bool(text.get_text())
+                for name in ("annotation", "annotation_value", "diagnostic")
+                if (text := slots.get(name)) is not None
+            )
+        }
+        for label in labels:
+            visible = label.axes not in fit_axes
+            if label.get_visible() != visible:
+                label.set_visible(visible)
 
     def _fit_annotation_text(self, overlay: FitOverlay) -> str:
         lines: list[str] = []
@@ -13035,6 +13150,7 @@ class MatplotlibRenderer:
     def _refresh_fit_focus(self) -> None:
         """Mirror the data-series emphasis and select one annotation per axes."""
         if not self._fit_topologies and not self._classifier_artists:
+            self._sync_roi_text_visibility()
             return
         selected = {axis_id: records[0][1] for axis_id, records in self._series_lines.items() if records}
         active = self._series_locked or self._series_hover
@@ -13106,6 +13222,7 @@ class MatplotlibRenderer:
             label.set_visible(not interactive and chosen and bool(label.get_text()))
             if label.get_visible():
                 label.set_fontsize(self._annotation_size_that_fits(axis, label.get_text()))
+        self._sync_roi_text_visibility()
 
     def _annotation_size_that_fits(self, axis: Any, content: str) -> float:
         """The size this annotation must shrink to in order to stay inside.

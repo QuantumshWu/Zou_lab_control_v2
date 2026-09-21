@@ -168,6 +168,8 @@ def test_a_caller_says_where_it_draws_and_how_big_never_how_many() -> None:
             apply_declared_ticks(axes, "x", 1, label_pt=LABEL_PT)
         with pytest.raises(ValueError, match="label_pt"):
             apply_smart_ticks(axes, label_pt=0.0)
+        with pytest.raises(ValueError, match="6.5 or 3.25"):
+            apply_smart_ticks(axes, label_pt=5.2)
         with pytest.raises(ValueError, match="which"):
             apply_smart_ticks(axes, "diagonal", label_pt=LABEL_PT)
     finally:
@@ -408,7 +410,7 @@ def test_every_surface_prints_two_labels_inside_its_room(
             else:
                 assert len(set(texts)) >= 2, (where, texts)
             for text, size_pt, box in drawn:
-                assert size_pt >= MIN_TICK_LABEL_PT - 1e-6, (where, text, size_pt)
+                assert size_pt in (6.5, 3.25), (where, text, size_pt)
                 assert canvas_box.contains(box.x0, box.y0) and canvas_box.contains(box.x1, box.y1), (
                     f"{where} {text!r} leaves the figure: {box}"
                 )
@@ -545,6 +547,27 @@ def test_the_ladder_takes_fewer_before_smaller() -> None:
         assert all(abs(pt - LABEL_PT) < 1e-6 for _t, pt, _b in drawn), drawn
     finally:
         plt.close(figure)
+
+    # On the real panel, X=-2 meets Y=0 in the corner. The next legal
+    # lattice [0,5,10] clears it at 6.5 pt; the old cross-axis pass skipped
+    # the locator and shrank both directions to 3.328 pt instead.
+    session = _surface_sessions("curve", "2x2", 1.0)
+    try:
+        session.set_x_limits(-2.0, 11.0)
+        axes = session._renderer.primary_axes
+        assert list(axes.get_xticks()) == [0.0, 5.0, 10.0]
+        assert {label.get_fontsize() for axis in (axes.xaxis, axes.yaxis)
+                for label in axis.get_ticklabels()} == {6.5}
+        # If both ranges start at zero, every legal coarser lattice keeps
+        # that corner: use the small tier rather than invent a shifted tick.
+        session.set_x_limits(0.0, 11.0)
+        assert {label.get_fontsize() for axis in (axes.xaxis, axes.yaxis)
+                for label in axis.get_ticklabels()} == {3.25}
+        session.set_x_limits(-2.0, 11.0)
+        assert axes.xaxis.get_major_locator().drawn_pt == 6.5
+        assert axes.yaxis.get_major_locator().drawn_pt == 6.5
+    finally:
+        session.close()
     figure, axes = _strip(5.0, room_left_pt=0.5, room_right_pt=0.5)
     try:
         axes.set_xlim(0.0, 7.0)
@@ -714,7 +737,8 @@ def test_a_colorbar_limit_change_keeps_the_size_its_labels_were_priced_at() -> N
             drawn: list[tuple[float, set[float]]] = []
             for limits in ((0.0, 1.0), (0.0, 2.0)):
                 colorbar.mappable.set_clim(*limits)
-                declare_colorbar_ticks(colorbar, label_pt=50.0, label_chars=5, span=limits)
+                colorbar.ax.set_ylim(-100.0, 100.0)
+                declare_colorbar_ticks(colorbar, label_pt=LABEL_PT, label_chars=5, span=limits)
                 figure.canvas.draw()
                 drawn.append(
                     (
@@ -727,7 +751,7 @@ def test_a_colorbar_limit_change_keeps_the_size_its_labels_were_priced_at() -> N
                     )
                 )
             for priced, actual in drawn:
-                assert 0.0 < priced < 50.0
+                assert priced == 3.25
                 assert actual == {priced}
         finally:
             plt.close(figure)

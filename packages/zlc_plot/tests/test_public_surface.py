@@ -25,6 +25,7 @@ from zlc_plot import (
 )
 from zlc_plot.fit import FacetFitBatchResult
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
+from zlc_plot.selectors import SelectorKind
 
 def _snapshot(*, revision: int = 0, repeats: int = 1) -> OwnedSnapshot:
     x = np.arange(6, dtype=np.float64)
@@ -321,6 +322,14 @@ def test_an_identical_static_fit_target_does_no_work(monkeypatch) -> None:
         session.set_x_selector(1.0, 4.0)
         session.configure(fit=target, fit_live=False)
         assert session.last_fit is not first
+        artists = session._renderer._selector_artists[SelectorKind.X_RANGE]
+        label = next(artist for artist in artists if hasattr(artist, "get_text"))
+        assert not label.get_visible(), "visible Fit text owns the ROI annotation space"
+        assert all(artist.get_visible() for artist in artists if artist is not label)
+        selection = session.selector_state(SelectorKind.X_RANGE, display=False)
+        session.clear_fit()
+        assert label.get_visible()
+        assert session.selector_state(SelectorKind.X_RANGE, display=False) == selection
     finally:
         release()
         session.close()
