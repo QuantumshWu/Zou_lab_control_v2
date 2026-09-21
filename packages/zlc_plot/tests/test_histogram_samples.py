@@ -49,8 +49,8 @@ def test_a_steady_bin_grid_moves_its_bars_instead_of_rebuilding_them() -> None:
         session.rgba()
         collection = next(
             artist
-            for key, artist in session._renderer._artists.items()
-            if key.startswith("histogram") and hasattr(artist, "get_paths")
+            for artist in session._renderer.primary_axes.collections
+            if hasattr(artist, "get_paths")
         )
         before = [id(path) for path in collection.get_paths()]
         vertices = [path.vertices.copy() for path in collection.get_paths()]

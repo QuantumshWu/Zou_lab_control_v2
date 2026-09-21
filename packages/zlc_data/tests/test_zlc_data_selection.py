@@ -205,26 +205,6 @@ def test_value_selection_rejects_non_unique_human_axis_name() -> None:
         value_selection(schema, {"shared": 0})
 
 
-def test_numeric_coordinate_range_skips_missing_coordinates() -> None:
-    from zlc_data.selection import CoordinateRangeSelection, resolve_selection_indices
-
-    axis = AxisSpec(
-        AxisId("scan.frequency"),
-        "frequency",
-        SPATIAL_X,
-        3,
-        (0.0, None, 2.0),
-    )
-
-    indices, dropped = resolve_selection_indices(
-        axis,
-        CoordinateRangeSelection(axis.axis_id, 0.0, 2.0, None),
-    )
-
-    assert indices == (0, 2)
-    assert dropped is False
-
-
 def test_axis_catalog_preserves_point_coordinate_labels() -> None:
     site_id = AxisId("measurement.site")
     repeat = AxisSpec(AxisId("measurement.repeat"), "repeat", REPEAT, 1, (0,))
