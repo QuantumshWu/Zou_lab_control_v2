@@ -2017,6 +2017,15 @@ class FitProjection:
     def _viewport_in_canonical(self) -> Viewport:
         assert self._viewport is not None
         x_range, y_range = self._viewport
+        if isinstance(self._spec, PulseTimelinePlot):
+            # A pulse's canonical time is its source unit, scaled for the
+            # axis the way its selectors are; its rows carry no unit.  Asked
+            # for a coordinate x axis instead, every wheel notch on the
+            # timeline raised after the zoom had already been committed.
+            return (
+                None if x_range is None else self._pulse_display_range_to_source(x_range),
+                y_range,
+            )
         return (
             None if x_range is None else self._display_range_to_canonical(
                 x_range, self._x_selector_source()
@@ -2724,6 +2733,12 @@ class FitProjection:
     ) -> NumericRange:
         factor = self._pulse_x_factor()
         return NumericRange(value.low * factor, value.high * factor)
+
+    def _pulse_display_range_to_source(
+        self, value: NumericRange
+    ) -> NumericRange:
+        factor = self._pulse_x_factor()
+        return NumericRange(value.low / factor, value.high / factor)
 
     def _canonical_x_scalar_to_display(self, value: float) -> float:
         source = self._x_selector_source()

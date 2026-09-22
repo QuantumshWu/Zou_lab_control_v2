@@ -4536,8 +4536,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _pulse_display_range_to_source(
         self, value: NumericRange
     ) -> NumericRange:
-        factor = self._projected._pulse_x_factor()
-        return NumericRange(value.low / factor, value.high / factor)
+        return self._projected._pulse_display_range_to_source(value)
 
 
     def _viewport_x_to_axes(self, value: NumericRange) -> NumericRange:

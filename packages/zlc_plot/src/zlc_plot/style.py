@@ -439,29 +439,42 @@ class PulseStyleConfig:
     label_fit_pad_pt: float = 1.5
     #: The band above the top row where period names are printed, in rows.
     period_band_height: float = 0.6
-    period_boundary_linewidth: float = 0.7
-    period_boundary_alpha: float = 0.35
+    period_boundary_linewidth: float = 0.8
+    period_boundary_alpha: float = 0.45
+    #: Period rules are dashed, in the period ink; the grid is dotted and
+    #: lighter, so the two stay distinguishable where they coincide.
+    period_boundary_dash: tuple[float, tuple[float, float]] = (0.0, (3.0, 2.2))
+    #: A spacer's span is hatched across the rows and its name unprinted.
+    spacer_hatch: str = "////"
+    spacer_alpha: float = 0.22
     analog_zero_alpha: float = 0.5
     analog_zero_dash: tuple[float, tuple[float, float]] = (0.0, (4.0, 3.0))
     scan_region_alpha: float = 0.18
     scan_badge_pad: float = 0.3
     scan_dac_linewidth: float = 3.0
     scan_dac_alpha: float = 0.9
-    repeat_tick_fraction: float = 0.024
+    #: A bracket's feet are a fraction of the AXES' WIDTH ON SCREEN, capped
+    #: at a fraction of the loop's own span.  Measured in data they grew
+    #: with every zoom until they ran across the whole view.
+    repeat_foot_axes_fraction: float = 0.024
     repeat_max_foot_fraction: float = 0.2
-    repeat_min_foot_fraction: float = 0.006
     repeat_bottom: float = -0.42
     repeat_bottom_step: float = 0.13
     repeat_top_offset: float = -0.10
-    repeat_top_step: float = 0.34
+    #: Nested loops stack upward by this many POINTS per depth, and the
+    #: outermost line keeps this much room above it: a label's height, so
+    #: the stack is sized by the label, whatever the rows measure on screen.
+    #: Stacked in rows they sat closer than a label whenever the rows were
+    #: small, and the outer loop's line ran through the inner loop's name.
+    repeat_top_step_pt: float = 9.0
+    repeat_ylim_room_pt: float = 11.0
     repeat_alpha: float = 0.58
     repeat_linewidth: float = 1.05
-    repeat_label_x_fraction: float = 0.12
-    repeat_label_y_offset: float = 0.055
+    #: The label's offset from the bracket's top right corner, in points:
+    #: constant on screen, like the foot it sits above.
+    repeat_label_offset_pt: tuple[float, float] = (-2.0, 1.5)
     ylim_bottom: float = -0.62
     ylim_top_offset: float = -0.38
-    repeat_ylim_top_offset: float = 0.78
-    repeat_ylim_top_step: float = 0.26
     ytick_font_floor_pt: float = 4.8
     ytick_font_delta_pt: float = 1.2
     xtick_count: int = 5
@@ -490,10 +503,9 @@ class PulseStyleConfig:
             "period_band_height",
             "period_boundary_linewidth",
             "repeat_bottom_step",
-            "repeat_top_step",
+            "repeat_top_step_pt",
+            "repeat_ylim_room_pt",
             "repeat_linewidth",
-            "repeat_label_y_offset",
-            "repeat_ylim_top_step",
             "ytick_font_floor_pt",
             "ytick_font_delta_pt",
             "xtick_pad_pt",
@@ -504,10 +516,9 @@ class PulseStyleConfig:
         for field in (
             "x_margin_fraction",
             "period_boundary_alpha",
-            "repeat_tick_fraction",
+            "spacer_alpha",
+            "repeat_foot_axes_fraction",
             "repeat_max_foot_fraction",
-            "repeat_min_foot_fraction",
-            "repeat_label_x_fraction",
         ):
             object.__setattr__(
                 self,
@@ -516,14 +527,11 @@ class PulseStyleConfig:
             )
         if self.dense_min_row_height > self.row_height:
             raise ValueError("dense_min_row_height must not exceed row_height")
-        if self.repeat_min_foot_fraction > self.repeat_max_foot_fraction:
-            raise ValueError("repeat foot minimum must not exceed its maximum")
         for field in (
             "repeat_bottom",
             "repeat_top_offset",
             "ylim_bottom",
             "ylim_top_offset",
-            "repeat_ylim_top_offset",
             "base_zorder",
             "scan_region_zorder",
             "scan_dac_zorder",

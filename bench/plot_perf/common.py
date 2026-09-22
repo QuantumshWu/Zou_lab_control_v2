@@ -185,6 +185,46 @@ def lattice_feed(
         masks.append(mask)
     return SnapshotFeed(schema, stack, masks)
 
+class StaticFeed:
+    """A document that does not stream, handed out as alternating revisions.
+
+    A pulse timeline is re-projected on every edit and never fed; two
+    projections of the same document stand in for the edits, so every
+    update_data has a new revision to draw.
+    """
+
+    def __init__(self, payloads, size: int) -> None:
+        self._payloads = tuple(payloads)
+        self._index = 0
+        self.size = int(size)
+
+    def next(self):
+        payload = self._payloads[self._index % len(self._payloads)]
+        self._index += 1
+        return payload
+
+
+def pulse_feed() -> StaticFeed:
+    """The product's imaging template through the editor's own projection.
+
+    The plot layer alone cannot author a pulse; the product bootstrap puts
+    this checkout's every layer first, the way run_console reaches the
+    pulse fixtures.
+    """
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import zou_lab_control  # noqa: F401
+    from zlc_pulse.codec import read_pulse_document
+    from zlc_workbench.pulse_editor import timeline_of
+
+    sequence, _editor = read_pulse_document(
+        ROOT / "packages/zlc_atom/tests/pulses/imaging_template.json"
+    )
+    payloads = (timeline_of(sequence), timeline_of(sequence, include_off=True))
+    return StaticFeed(payloads, size=sum(len(payload.blocks) for payload in payloads))
+
+
 def camera_feed(
     *, height: int = 2048, width: int = 2048, buffers: int = 3, seed: int = 1
 ) -> SnapshotFeed:
