@@ -12,6 +12,11 @@ ACCENT = "#77AADD"
 #: and a table cell painted with it hides the very number the click
 #: was asking to see.
 ACCENT_TINT = "#E4EFF9"
+#: The edge of a selected card: the accent brought halfway to the resting
+#: divider.  The fill (ACCENT_TINT) is what says "selected"; the edge only
+#: closes the shape.  A full-strength 2 px accent border read as an outline
+#: drawn around a card, not as the card being picked.
+SELECTION_EDGE = "#ACC4DD"
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
@@ -86,6 +91,7 @@ WINDOW_SCREEN_FRACTION = 0.90
 
 __all__ = [
     "ACCENT",
+    "SELECTION_EDGE",
     "API_VIOLET",
     "API_VIOLET_DARK",
     "BG",

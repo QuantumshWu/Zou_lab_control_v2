@@ -14,6 +14,9 @@ HIDE_BUTTON_WIDTH = 26
 PANEL_TOP_HEIGHT = 178
 CHANNEL_ROW_SPACING = 4
 PERIOD_CARD_WIDTH = 158
+#: A spacer card carries one number and a column of circles: narrow enough
+#: to read as a gap between periods rather than as one of them.
+SPACER_CARD_WIDTH = 90
 
 
 def px(value: int | float, *, minimum: int = 1) -> int:
@@ -64,6 +67,15 @@ def period_control_width(card_width: int) -> int:
     return max(px(76, minimum=68), card_width - 2 * px(7) - px(4))
 
 
+def spacer_card_width() -> int:
+    return px(SPACER_CARD_WIDTH, minimum=68)
+
+
+def spacer_control_width(card_width: int) -> int:
+    """The one control column of a spacer card: its full inner width."""
+    return card_width - 2 * px(7) - px(4)
+
+
 def set_fixed_height(widget: QtWidgets.QWidget, height: int | None = None) -> QtWidgets.QWidget:
     widget.setFixedHeight(row_height() if height is None else height)
     return widget
@@ -112,6 +124,7 @@ __all__ = [
     "channel_label_width", "channel_name_edit_width", "channel_row_height",
     "form_control_cell", "hide_button_width", "panel_top_height",
     "period_card_width", "period_control_width", "px", "row_height",
-    "row_region_vmetrics", "row_spacing", "set_fixed_height",
+    "row_region_vmetrics", "row_spacing", "set_fixed_height", "spacer_card_width",
+    "spacer_control_width",
     "set_form_label_geometry", "time_unit_width",
 ]

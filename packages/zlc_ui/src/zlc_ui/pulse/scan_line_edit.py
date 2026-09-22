@@ -121,11 +121,12 @@ class FluentScanLineEdit(FluentLineEdit):
     def _project_popup(self) -> None:
         if self._popup is None or self._field_state is None:
             return
-        _editable, scan, source, can_scan, _effective, _source_text, config_key = self._field_state
+        _editable, scan, source, can_scan, _effective, _source_text, config_key, can_api = self._field_state
         with signals_blocked(self.scan_toggle, self.source_switch):
             self.scan_toggle.setChecked(scan)
             self.scan_toggle.setEnabled(can_scan)
             self.source_switch.setState(("default", "api", "config").index(source))
+            self.source_switch.set_position_offered(1, can_api)
         self.config_name.setText(config_key or "Unassigned")
         self.config_name_label.setVisible(source == "config")
         self.config_name.setVisible(source == "config")
@@ -135,10 +136,11 @@ class FluentScanLineEdit(FluentLineEdit):
 
     def set_field_state(self, *, editable: bool, scan: bool = False, source: str = "default",
                         can_scan: bool = True, effective_text: str = "", source_text: str = "",
-                        config_key: str = "") -> None:
+                        config_key: str = "", can_api: bool = True) -> None:
         if source not in ("default", "api", "config"):
             raise ValueError("source must be default, api or config")
-        state = (bool(editable), bool(scan), source, bool(can_scan), effective_text, source_text, config_key)
+        state = (bool(editable), bool(scan), source, bool(can_scan), effective_text, source_text, config_key,
+                 bool(can_api))
         if state == self._field_state:
             return
         self._field_state = state

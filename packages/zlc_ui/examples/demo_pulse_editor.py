@@ -247,6 +247,7 @@ def populate(editor) -> None:
         (schedule.digital_committed, "digital_committed"),
         (schedule.analog_committed, "analog_committed"),
         (schedule.binding_committed, "binding_committed"),
+        (schedule.insert_spacer_requested, "insert_spacer_requested"),
         (schedule.reorder_items_requested, "reorder_items_requested"),
         (schedule.bracket_committed, "bracket_committed"),
         (schedule.run_repeats_committed, "run_repeats_committed"),

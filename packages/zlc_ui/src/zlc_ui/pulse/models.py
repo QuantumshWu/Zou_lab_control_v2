@@ -24,6 +24,13 @@ VALIDATOR_INT = "int"
 VALIDATOR_FLOAT = "float"
 VALIDATOR_KINDS = (VALIDATOR_NONE, VALIDATOR_INT, VALIDATOR_FLOAT)
 
+#: A period is authored; a spacer is time between two periods for a slow
+#: device to settle.  Spelled here in the widget layer's own words: the card
+#: decides its shape from this, and no pulse-domain object crosses.
+PERIOD_KIND_PERIOD = "period"
+PERIOD_KIND_SPACER = "spacer"
+PERIOD_KINDS = (PERIOD_KIND_PERIOD, PERIOD_KIND_SPACER)
+
 
 def schedule_item_order(
     period_ids: tuple[str, ...], start: str | None = None, end: str | None = None,
@@ -50,6 +57,7 @@ class FieldVM:
     scan: bool = False
     source: str = "default"
     can_scan: bool = True
+    can_api: bool = True
     effective_text: str = ""
     source_text: str = ""
     config_key: str = ""
@@ -89,6 +97,11 @@ class PeriodVM:
     unit_choices: tuple[str, ...] = ()
     digital: tuple[tuple[str, bool], ...] = ()
     analog: tuple[tuple[str, str, FieldVM], ...] = ()
+    kind: str = PERIOD_KIND_PERIOD
+
+    def __post_init__(self) -> None:
+        if self.kind not in PERIOD_KINDS:
+            raise ValueError(f"period kind must be one of {PERIOD_KINDS}, got {self.kind!r}")
 
 
 @dataclass(frozen=True)
@@ -271,6 +284,9 @@ class TargetWidthRule:
 
 __all__ = [
     "BindingRecord",
+    "PERIOD_KIND_PERIOD",
+    "PERIOD_KIND_SPACER",
+    "PERIOD_KINDS",
     "ConnectionChoiceVM",
     "ConnectionVM",
     "ConfigPageRecord",

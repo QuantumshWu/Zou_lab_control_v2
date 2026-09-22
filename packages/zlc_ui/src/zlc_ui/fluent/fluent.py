@@ -31,6 +31,7 @@ from ..qt import ensure_qt_app
 from .style import (
     ACCENT,
     ACCENT_TINT,
+    SELECTION_EDGE,
     AUTO_SCALE_BASIS,
     AUTO_SCALE_MARGIN,
     BG,
@@ -1025,7 +1026,8 @@ class FluentSettingsPopupAnchor:
 
 
 class FluentGroupBox(QtWidgets.QGroupBox):
-    def __init__(self, title: str = "", parent=None, *, title_strip_px: int = CARD_TITLE_PX):
+    def __init__(self, title: str = "", parent=None, *, title_strip_px: int = CARD_TITLE_PX,
+                 title_color: str = TEXT):
         super().__init__(title, parent)
         # How much room the strip above the body takes.  A card that draws its
         # OWN strip -- because it has more to say than one line of plain text
@@ -1055,50 +1057,69 @@ class FluentGroupBox(QtWidgets.QGroupBox):
                 background: {BG};
                 padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
                 border-radius: {_radius()}px;
-                color: {TEXT};
+                color: {title_color};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             """
         )
 
-    def set_outline(self, color: str | None) -> None:
-        """Select (color) or clear (None) this card: its continuous edge border switches to a 2 px
-        accent (from the resting 1 px DIVIDER), painted in paintEvent.  Never via stylesheet -- an
-        unscoped ``border:`` cascades to every CHILD widget, so each inner checkbox/lineedit grew its
-        own box."""
-        value = str(color) if color else None
-        if getattr(self, "_zlc_outline", None) != value:
-            self._zlc_outline = value
+    def set_selected(self, selected: bool) -> None:
+        """Mark this card as the one the next edit acts on, or unmark it.
+
+        Selection is a FILL, not a frame: the body takes the accent tint and
+        the edge a softer accent, the way a picked item in a Fluent list
+        reads.  A 2 px accent border was tried first and read as an outline
+        drawn around the card rather than as the card being picked.  Painted
+        in paintEvent, never via stylesheet -- an unscoped ``border:``
+        cascades to every CHILD widget, so each inner checkbox/lineedit grew
+        its own box.
+        """
+
+        value = bool(selected)
+        if getattr(self, "_zlc_selected", False) != value:
+            self._zlc_selected = value
             self.update()
 
-    def outline_colour(self) -> str | None:
-        """Which selection colour this box is wearing, or None for none.
+    def is_selected(self) -> bool:
+        """Whether this box is wearing the selection fill.
 
         Readable because "is this the selected one" is a question about what
         is on screen, and the only other way to ask it is to name the private
         attribute the painter happens to keep it in.
         """
 
-        return getattr(self, "_zlc_outline", None)
+        return bool(getattr(self, "_zlc_selected", False))
+
+    def set_surface(self, fill: str | None = None, *, dashed: bool = False) -> None:
+        """The resting look of this box: its body colour (white when None)
+        and whether its edge is dashed.  A spacer card is the page's own grey
+        with a dashed edge, so it reads as something to look past; selection
+        paints over both."""
+
+        state = (None if fill is None else str(fill), bool(dashed))
+        if getattr(self, "_zlc_surface", (None, False)) != state:
+            self._zlc_surface = state
+            self.update()
 
     def paintEvent(self, event) -> None:
-        # Paint the white body + a CONTINUOUS rounded border, THEN let Qt draw the grey title pill +
-        # text on top (super) -- so the pill covers its segment of the border, never the reverse, and
-        # the border is unbroken all the way round.  1 px DIVIDER at rest; 2 px accent when selected.
+        # Paint the body + a CONTINUOUS rounded border, THEN let Qt draw the grey title pill +
+        # text on top (super) -- so the pill covers its segment of the border, never the reverse,
+        # and the border is unbroken all the way round.
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         radius = float(_radius())
+        fill, dashed = getattr(self, "_zlc_surface", (None, False))
+        selected = bool(getattr(self, "_zlc_selected", False))
         painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor("white"))
+        painter.setBrush(QtGui.QColor(ACCENT_TINT if selected else (fill or "white")))
         painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
-        outline = getattr(self, "_zlc_outline", None)
-        width = 2.0 if outline else 1.0
-        pen = QtGui.QPen(QtGui.QColor(outline or DIVIDER))
-        pen.setWidthF(width)
+        pen = QtGui.QPen(QtGui.QColor(SELECTION_EDGE if selected else DIVIDER))
+        pen.setWidthF(1.0)
+        if dashed and not selected:
+            pen.setStyle(QtCore.Qt.DashLine)
         painter.setPen(pen)
         painter.setBrush(QtCore.Qt.NoBrush)
-        half = width / 2.0
-        painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(half, half, -half, -half), radius, radius)
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         painter.end()
         super().paintEvent(event)
 
@@ -4492,6 +4513,7 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
             raise ValueError("a tri-switch needs three non-empty labels")
         self._labels = tuple(str(label) for label in labels)
         self._state = 0
+        self._offered = [True, True, True]
         self._position = 0.0
         self._animation = QtCore.QPropertyAnimation(self, b"position", self)
         self._animation.setDuration(150)
@@ -4500,7 +4522,29 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
         self.setFont(QtGui.QFont(FONT, fluent_font_size()))
         self._measure_segments()
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.clicked.connect(lambda: self.setState((self._state + 1) % 3))
+        self.clicked.connect(lambda: self.setState(self._offered_after(self._state, 1)))
+
+    def set_position_offered(self, index: int, offered: bool) -> None:
+        """Offer or withhold one position.  A withheld one is skipped by
+        clicks and keys and drawn muted; the current position stays offered."""
+
+        if index not in (0, 1, 2):
+            raise ValueError("tri-switch position must be 0, 1 or 2")
+        if not offered and index == self._state:
+            raise ValueError("the current tri-switch position cannot be withheld")
+        if self._offered[index] != bool(offered):
+            self._offered[index] = bool(offered)
+            self.update()
+
+    def _offered_after(self, state: int, step: int) -> int:
+        """The next offered position from ``state`` in ``step`` direction, wrapping."""
+
+        candidate = state
+        for _ in range(3):
+            candidate = (candidate + step) % 3
+            if self._offered[candidate]:
+                return candidate
+        return state
 
     def _measure_segments(self) -> None:
         metrics = self.fontMetrics()
@@ -4544,7 +4588,9 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
             self.setDown(False)
             if self.rect().contains(event.pos()):
                 for index in range(3):
-                    if self._segment_rect(index).contains(QtCore.QPointF(event.pos())):
+                    if self._offered[index] and self._segment_rect(index).contains(
+                        QtCore.QPointF(event.pos())
+                    ):
                         self.setState(index)
                         break
             event.accept()
@@ -4552,10 +4598,11 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
+        offered = [index for index in range(3) if self._offered[index]]
         changes = {
-            QtCore.Qt.Key_Left: max(0, self._state - 1),
-            QtCore.Qt.Key_Right: min(2, self._state + 1),
-            QtCore.Qt.Key_Home: 0, QtCore.Qt.Key_End: 2,
+            QtCore.Qt.Key_Left: max([index for index in offered if index < self._state], default=self._state),
+            QtCore.Qt.Key_Right: min([index for index in offered if index > self._state], default=self._state),
+            QtCore.Qt.Key_Home: offered[0], QtCore.Qt.Key_End: offered[-1],
         }
         if event.key() in changes:
             self.setState(changes[event.key()])
@@ -4583,9 +4630,9 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
             thumb.adjusted(margin, margin, -margin, -margin),
             height / 2 - margin, height / 2 - margin,
         )
-        painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
         painter.setFont(self.font())
         for index, label in enumerate(self._labels):
+            painter.setPen(QtGui.QColor(TEXT if self.isEnabled() and self._offered[index] else PLACEHOLDER))
             painter.drawText(self._segment_rect(index), QtCore.Qt.AlignCenter, label)
 
     def _get_position(self) -> float:

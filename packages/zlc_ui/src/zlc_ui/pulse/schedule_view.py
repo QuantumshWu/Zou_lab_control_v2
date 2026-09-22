@@ -16,7 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCheckBox,
+    ACCENT, BG, GREEN, GREY, ORANGE, RED, TEXT, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
     signals_blocked,
@@ -26,9 +26,10 @@ from ._layout import (
     add_labeled_widget, channel_label_width,
     card_gutter, channel_name_edit_width, channel_row_height, hide_button_width,
     panel_top_height, px, period_card_width, period_control_width, row_height,
-    row_region_vmetrics, time_unit_width,
+    row_region_vmetrics, spacer_card_width, spacer_control_width, time_unit_width,
 )
 from .models import (
+    PERIOD_KIND_SPACER,
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
     ConnectionVM,
@@ -49,7 +50,8 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
     with signals_blocked(widget):
         widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
                                can_scan=field.can_scan, effective_text=field.effective_text,
-                               source_text=field.source_text, config_key=field.config_key)
+                               source_text=field.source_text, config_key=field.config_key,
+                               can_api=field.can_api)
         if field.validator_kind in (VALIDATOR_INT, VALIDATOR_FLOAT):
             widget.set_numeric_validator(
                 field.validator_kind,
@@ -64,7 +66,15 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
 
 
 class PeriodCard(FluentGroupBox):
-    """One stable period card keyed by ``period_id``."""
+    """One stable period card keyed by ``period_id``.
+
+    A SPACER is a period of another kind and takes the same card, narrowed:
+    the page's grey with a dashed edge and a muted "Spacer" pill, its
+    duration, unit and name on the same lines as every other card's -- the
+    name given by the editor and not editable -- its channel circles
+    without labels (the neighbours' rows say which is which; the label is
+    on hover), and each DAC as a disabled "Hold": a spacer holds every DAC.
+    """
 
     period_name_committed = QtCore.pyqtSignal(str, str)
     duration_committed = QtCore.pyqtSignal(str, object, str)
@@ -78,7 +88,9 @@ class PeriodCard(FluentGroupBox):
                  analog_mode_choices: tuple[FormChoice, ...] = (), parent=None) -> None:
         if not isinstance(period, PeriodVM):
             raise TypeError("period must be PeriodVM")
-        super().__init__("", parent)
+        self.kind = period.kind
+        spacer = period.kind == PERIOD_KIND_SPACER
+        super().__init__("", parent, title_color=GREY if spacer else TEXT)
         self.period_id = period.period_id
         self._period = period
         self._ports: dict[str, PortRowVM] = {}
@@ -87,9 +99,11 @@ class PeriodCard(FluentGroupBox):
         self.bus_value_edits: dict[str, FluentScanLineEdit] = {}
         self.port_rows: dict[str, QtWidgets.QWidget] = {}
 
-        width = period_card_width()
+        width = spacer_card_width() if spacer else period_card_width()
         self.setFixedWidth(width)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        if spacer:
+            self.set_surface(BG, dashed=True)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(px(7), px(7), px(7), px(7))
         column.setSpacing(px(4, minimum=3))
@@ -98,12 +112,14 @@ class PeriodCard(FluentGroupBox):
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(px(6, minimum=4))
-        top_layout.addWidget(self._center_label("Duration"))
+        # The duration box sits on the same line on every card: a spacer
+        # leaves the label's line empty rather than moving the box up into it.
+        top_layout.addWidget(self._blank_line() if spacer else self._center_label("Duration"))
         self.duration_edit = FluentScanLineEdit(
             "",
-            tooltip="Edit Scan and value source",
+            tooltip="Edit value source" if spacer else "Edit Scan and value source",
         )
-        control_width = period_control_width(width)
+        control_width = spacer_control_width(width) if spacer else period_control_width(width)
         self.duration_edit.setFixedWidth(control_width)
         top_layout.addWidget(self.duration_edit)
         self.unit_combo = FluentComboBox()
@@ -112,6 +128,9 @@ class PeriodCard(FluentGroupBox):
         self.name_edit = FluentLineEdit("")
         self.name_edit.setPlaceholderText("name")
         self.name_edit.setFixedWidth(control_width)
+        # A spacer is named by the editor, not the operator: the name is
+        # shown where every card shows its name and cannot be typed into.
+        self.name_edit.setEnabled(not spacer)
         top_layout.addWidget(self.name_edit)
         top_layout.addStretch(1)
         column.addWidget(top)
@@ -141,13 +160,27 @@ class PeriodCard(FluentGroupBox):
         label.setFixedHeight(row_height())
         return label
 
+    @staticmethod
+    def _blank_line() -> QtWidgets.QWidget:
+        blank = QtWidgets.QWidget()
+        blank.setStyleSheet("background: transparent;")
+        blank.setFixedHeight(row_height())
+        return blank
+
     def set_period(self, period: PeriodVM, *, index: int, total_periods: int,
                    ports: tuple[PortRowVM, ...],
                    analog_mode_choices: tuple[FormChoice, ...]) -> None:
         if period.period_id != self.period_id:
             raise ValueError("period identity cannot change")
+        if period.kind != self.kind:
+            raise ValueError("a period cannot change kind under its card")
         self._period = period
-        self.setTitle(f"Period {int(index) + 1}/{max(1, int(total_periods))}")
+        # Spacers are not counted: "Period 2/5" numbers the periods someone
+        # wrote, and a spacer is the gap between two of them.
+        self.setTitle(
+            "Spacer" if self.kind == PERIOD_KIND_SPACER
+            else f"Period {int(index) + 1}/{max(1, int(total_periods))}"
+        )
         with signals_blocked(self.unit_combo):
             choices = period.unit_choices or (period.unit,)
             if tuple(self.unit_combo.itemText(i) for i in range(self.unit_combo.count())) != choices:
@@ -219,7 +252,9 @@ class PeriodCard(FluentGroupBox):
                         _apply_field(edit, field)
                 continue
             if port.kind == "digital":
-                widget = FluentCheckBox(port.label)
+                widget = FluentCheckBox("" if self.kind == PERIOD_KIND_SPACER else port.label)
+                if self.kind == PERIOD_KIND_SPACER:
+                    widget.setToolTip(port.label)
                 widget.setChecked(bool(digital.get(port.key, False)))
                 widget.setFixedHeight(channel_row_height())
                 widget.toggled.connect(lambda checked, key=port.key: self.digital_committed.emit(self.period_id, key, bool(checked)))
@@ -236,6 +271,20 @@ class PeriodCard(FluentGroupBox):
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(px(4, minimum=3))
                 combo = FluentComboBox()
+                if self.kind == PERIOD_KIND_SPACER:
+                    # A spacer holds every DAC: the one mode it has is shown,
+                    # cannot be changed, and there is no value to type.
+                    label = next(
+                        (choice.label for choice in self._analog_mode_choices if choice.value == mode),
+                        mode,
+                    )
+                    combo.addItem(label, mode)
+                    combo.setEnabled(False)
+                    combo.setToolTip(f"{port.label}: a spacer holds the DAC")
+                    row_layout.addWidget(combo, 1)
+                    self.bus_mode_combos[port.key] = combo
+                    self.port_rows[port.key] = widget
+                    continue
                 self._set_analog_mode(combo, mode)
                 combo.setSizePolicy(
                     QtWidgets.QSizePolicy.Fixed,
@@ -329,7 +378,11 @@ class PeriodCard(FluentGroupBox):
 
     def set_port_label(self, port: str, label: str) -> None:
         check = self.checks.get(port)
-        if check is not None:
+        if check is None:
+            return
+        if self.kind == PERIOD_KIND_SPACER:
+            check.setToolTip(str(label))
+        else:
             check.setText(str(label))
 
 
@@ -678,10 +731,12 @@ class PulseDragContainer(QtWidgets.QWidget):
         self._posts: tuple["BracketPost", ...] = ()
         self._pressed: tuple[tuple[str, str], QtCore.QPoint] | None = None
         self._dragging = False
+        # The insertion caret: a rounded accent bar the height of the cards,
+        # centred in the gap it marks.
         self._indicator = QtWidgets.QFrame(self)
-        self._indicator.setFixedWidth(px(3, minimum=2))
-        self._indicator.setStyleSheet(f"background: {ACCENT};")
+        self._indicator_width = 0
         self._indicator.hide()
+        self._picked_on_press = False
         # WHERE the next Add lands and WHICH period Remove takes: a card, a gap,
         # or neither.  The two are mutually exclusive because they answer the
         # same question, and clicking the current one again clears it.
@@ -812,16 +867,16 @@ class PulseDragContainer(QtWidgets.QWidget):
     ) -> None:
         """Mark the period, the bracket post, or the gap an edit will act on.
 
-        A post is outlined exactly as a card is, by this same call: it is a
+        A post is filled exactly as a card is, by this same call: it is a
         FluentGroupBox too, so the mechanism has been there since the day it
         was written and simply never reached.  Clicking a card drew a border
         and clicking a post drew nothing, which made the two look like
         different kinds of thing when they are the same kind of thing --
         something you pick, and then drag if you want to.
 
-        The outline goes on the widget's own outer edge through
-        FluentGroupBox.set_outline; a stylesheet border set here would
-        cascade into everything inside it.
+        The fill goes on the widget's own body through
+        FluentGroupBox.set_selected; a stylesheet set here would cascade
+        into everything inside it.
         """
 
         chosen = tuple(
@@ -837,11 +892,9 @@ class PulseDragContainer(QtWidgets.QWidget):
         self._selected_post = None if post is None else str(post)
         self._selected_gap = None if gap is None else int(gap)
         for widget in self._cards:
-            widget.set_outline(
-                ACCENT if widget.period_id == self._selected_card else None
-            )
+            widget.set_selected(widget.period_id == self._selected_card)
         for widget in self._posts:
-            widget.set_outline(ACCENT if widget.kind == self._selected_post else None)
+            widget.set_selected(widget.kind == self._selected_post)
         if self._selected_gap is None:
             self._indicator.hide()
         else:
@@ -861,16 +914,44 @@ class PulseDragContainer(QtWidgets.QWidget):
         return len(items)
 
     def _show_indicator_at_gap(self, position: int) -> None:
+        """Centre the caret in the gap and give it the cards' own height.
+
+        It used to start at the next item's left edge and run the strip's
+        full height, so it hugged a card instead of standing between two,
+        and hung into the gutters above and below them.
+        """
+
         items = self.items()
         if not items:
             self._indicator.hide()
             return
         clamped = max(0, min(int(position), len(items)))
-        if clamped < len(items):
-            x = items[clamped].geometry().left() - self.layout_main.spacing() // 2
+        margins = self.layout_main.contentsMargins()
+        # The gap as the pixels between two painted edges, [left, right).
+        if clamped == 0:
+            right = items[0].geometry().left()
+            left = right - margins.left()
+        elif clamped == len(items):
+            left = items[-1].geometry().right() + 1
+            right = left + margins.right()
         else:
-            x = items[-1].geometry().right() + self.layout_main.spacing() // 2
-        self._indicator.setGeometry(x, 0, self._indicator.width(), self.height())
+            left = items[clamped - 1].geometry().right() + 1
+            right = items[clamped].geometry().left()
+        # The caret keeps one pixel clear of each neighbour and takes the
+        # rest, so a four-pixel gap holds a two-pixel caret dead centre.  A
+        # caret of fixed width sat off-centre whenever the parities differed.
+        clearance = px(1, minimum=1)
+        width = max(px(2, minimum=2), (right - left) - 2 * clearance)
+        if width != self._indicator_width:
+            self._indicator_width = width
+            self._indicator.setStyleSheet(
+                f"background: {ACCENT}; border-radius: {width // 2}px;"
+            )
+        top = min(item.geometry().top() for item in items)
+        bottom = max(item.geometry().bottom() for item in items)
+        self._indicator.setGeometry(
+            left + ((right - left) - width) // 2, top, width, bottom - top + 1
+        )
         self._indicator.raise_()
         self._indicator.show()
 
@@ -992,14 +1073,38 @@ class PulseDragContainer(QtWidgets.QWidget):
             # label and its card must not turn a stationary click into drag.
             self._pressed = (key, event.globalPos())
             self._dragging = False
+            # The press already LOOKS like a pick: the one under the button
+            # fills, the rest empty, so what a drag is about to lift is the
+            # one lit.  Only the look changes here.  The pick itself is made
+            # by the click (the release, through the view's toggle) or by
+            # the drag's first movement, so that a press on the picked one
+            # still reads as the click that clears it.
+            current = self._selected_card if key[0] == "period" else self._selected_post
+            self._picked_on_press = current != key[1]
+            if self._picked_on_press:
+                for widget in self.items():
+                    widget.set_selected(widget is item)
+                self._indicator.hide()
         elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
             if not event.buttons() & QtCore.Qt.LeftButton:
+                # The button came up somewhere this filter did not see.
                 self._pressed = None
+                self._picked_on_press = False
+                self._restore_selection()
             elif not self._dragging and (
                 event.globalPos() - self._pressed[1]
             ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
                 moving = self._pressed[0]
                 self._pressed = None
+                # Lifting it picks it: the drop restores this selection, and
+                # a reorder keeps a selected item that still exists, so the
+                # one that was dragged is the one lit afterwards.
+                if self._picked_on_press:
+                    if moving[0] == "period":
+                        self.show_selection(card=moving[1])
+                    else:
+                        self.show_selection(post=moving[1])
+                self._picked_on_press = False
                 self._dragging = True
                 try:
                     self._begin_drag(moving)
@@ -1010,9 +1115,15 @@ class PulseDragContainer(QtWidgets.QWidget):
         elif event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
             pressed = self._pressed
             self._pressed = None
+            self._picked_on_press = False
+            # A press and release that never moved is a CLICK, which selects
+            # (or deselects, if it was the selected one).  A press that moved
+            # became a drag, whose selection was restored at the drop.
             if not self._dragging and pressed is not None and pressed[0] == key:
                 signal = self.period_clicked if key[0] == "period" else self.bracket_clicked
                 signal.emit(key[1])
+            else:
+                self._restore_selection()
         return super().eventFilter(obj, event)
 
 
@@ -1026,6 +1137,7 @@ class PulseScheduleView(QtWidgets.QWidget):
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
     insert_period_requested = QtCore.pyqtSignal(object)
+    insert_spacer_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
     remove_period_requested = QtCore.pyqtSignal(str)
     bracket_committed = QtCore.pyqtSignal(object, object, int)
@@ -1051,6 +1163,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._version = (-1, -1)
         self._capabilities = {"can_sync": True, "can_hold": True, "can_step": True}
         self._cards: dict[str, PeriodCard] = {}
+        # Set by Add; the next schedule that brings exactly one new card is
+        # what that Add produced, and the new card is picked.
+        self._expect_new_card = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(px(8, minimum=5), px(8, minimum=5), px(8, minimum=5), px(8, minimum=5))
         layout.setSpacing(px(8, minimum=5))
@@ -1116,6 +1231,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         stub_layout.addWidget(stub_label)
         self.stub_show_button = FluentButton("Show", color=ACCENT)
         self.stub_show_button.setFixedHeight(row_height())
+        # As wide as the stub's column: a button narrower than its column
+        # sat against the left edge under a centred label.
+        self.stub_show_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.stub_show_button.clicked.connect(self._show_left_panels)
         stub_layout.addWidget(self.stub_show_button)
         stub_layout.addStretch(1)
@@ -1190,22 +1308,27 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.stop_button = FluentButton("Stop Pulse", color=RED)
         self.sync_button = FluentButton("Sync", color=ORANGE)
         self.add_button = FluentButton("Add Period", color=ACCENT)
+        self.spacer_button = FluentButton("Add Spacer", color=ACCENT)
         self.remove_button = FluentButton("Remove", color=ORANGE)
         self.bracket_button = FluentButton("Add Bracket", color=ACCENT)
         self.save_button = FluentButton("Save*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
+        # Three rows read as three sentences: run it; edit it; keep it.  The
+        # editing row is the full one, so the grid is four wide and the first
+        # and last rows let their leading and trailing buttons take the slack.
         control_buttons = (
-            self.run_button, self.stop_button, self.sync_button,
-            self.add_button, self.remove_button, self.bracket_button,
-            self.save_button, self.load_button, self.collapse_button,
+            (self.run_button, 0, 0, 2), (self.stop_button, 0, 2, 1), (self.sync_button, 0, 3, 1),
+            (self.add_button, 1, 0, 1), (self.spacer_button, 1, 1, 1),
+            (self.bracket_button, 1, 2, 1), (self.remove_button, 1, 3, 1),
+            (self.save_button, 2, 0, 1), (self.load_button, 2, 1, 1), (self.collapse_button, 2, 2, 2),
         )
-        for index, button in enumerate(control_buttons):
+        for button, row, column, span in control_buttons:
             button.setFixedHeight(control_height)
             button.setMinimumWidth(px(74, minimum=62))
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-            controls.addWidget(button, index // 3, index % 3)
-        for column in range(3):
+            controls.addWidget(button, row, column, 1, span)
+        for column in range(4):
             controls.setColumnStretch(column, 1)
         control_layout.addLayout(controls)
         control_layout.addStretch(1)
@@ -1292,7 +1415,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.sync_button.clicked.connect(self.sync_requested)
         self.save_button.clicked.connect(self.save_requested)
         self.load_button.clicked.connect(self.load_requested)
-        self.add_button.clicked.connect(lambda: self.insert_period_requested.emit(self._selected_before_item()))
+        self.add_button.clicked.connect(lambda: self._request_insert(self.insert_period_requested))
+        self.spacer_button.clicked.connect(lambda: self._request_insert(self.insert_spacer_requested))
         self.remove_button.clicked.connect(self._request_remove_period)
         self.bracket_button.clicked.connect(self._request_toggle_bracket)
         self.collapse_button.clicked.connect(self._toggle_left_panels)
@@ -1357,14 +1481,17 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.set_delay_rows(self._visible_delay_rows(vm), vm.ports)
         self.channel_panel.set_clock(vm.clock_text)
         self.channel_panel.set_scan_summary(vm.scan_summary_text)
+        previous = set(self._cards)
         desired: dict[str, PeriodCard] = {}
-        for index, period in enumerate(vm.periods):
+        authored = [period for period in vm.periods if period.kind != PERIOD_KIND_SPACER]
+        for period in vm.periods:
+            index = authored.index(period) if period in authored else 0
             card = self._cards.get(period.period_id)
             if card is None:
                 card = PeriodCard(
                     period,
                     index=index,
-                    total_periods=len(vm.periods),
+                    total_periods=len(authored),
                     ports=vm.ports,
                     analog_mode_choices=vm.analog_mode_choices,
                 )
@@ -1373,7 +1500,7 @@ class PulseScheduleView(QtWidgets.QWidget):
                 card.set_period(
                     period,
                     index=index,
-                    total_periods=len(vm.periods),
+                    total_periods=len(authored),
                     ports=vm.ports,
                     analog_mode_choices=vm.analog_mode_choices,
                 )
@@ -1385,6 +1512,10 @@ class PulseScheduleView(QtWidgets.QWidget):
             order=vm.item_order,
             minimum_bracket=vm.min_bracket_count,
         )
+        arrived = set(desired) - previous
+        if self._expect_new_card and len(arrived) == 1:
+            self.drag_container.show_selection(card=next(iter(arrived)))
+        self._expect_new_card = False
         if not being_edited(self.channel_panel.run_repeats_spin):
             with signals_blocked(self.channel_panel.run_repeats_spin):
                 self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
@@ -1423,10 +1554,11 @@ class PulseScheduleView(QtWidgets.QWidget):
         )
         self._schedule = replace(self._schedule, periods=periods)
         card = self._cards[period.period_id]
+        authored = [item for item in periods if item.kind != PERIOD_KIND_SPACER]
         card.set_period(
             period,
-            index=next(i for i, item in enumerate(periods) if item.period_id == period.period_id),
-            total_periods=len(periods),
+            index=authored.index(period) if period in authored else 0,
+            total_periods=len(authored),
             ports=self._schedule.ports,
             analog_mode_choices=self._schedule.analog_mode_choices,
         )
@@ -1616,6 +1748,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.drag_container.show_selection(
             gap=None if current == int(position) else int(position)
         )
+
+    def _request_insert(self, signal: QtCore.pyqtBoundSignal) -> None:
+        """Add where the selection says, and pick what was added once it arrives."""
+
+        self._expect_new_card = True
+        signal.emit(self._selected_before_item())
 
     def _selected_before_item(self) -> tuple[str, str] | None:
         """Add in the selected visual gap, or immediately after the selection."""
