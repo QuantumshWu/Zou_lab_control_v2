@@ -1620,6 +1620,7 @@ class FitProjection:
             projected.append((ref.domain.value, replace(
                 original, size=len(values), coordinates=values, unit=None if unit == "1" else unit,
                 coordinate_labels=labels, index_origin=0, coordinate_of=None,
+                coordinate_origins=None,
             )))
         return tuple(projected)
 

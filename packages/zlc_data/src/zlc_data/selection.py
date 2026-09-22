@@ -285,9 +285,21 @@ def resolve_selection_indices(
             # AxisSpec already normalized this entire numeric vector. Keep
             # the scalar comparison's short circuit for unrepresentable upper
             # bounds when the lower bound selects nothing.
-            selected = coordinates >= term.lower
+            lower = term.lower
+            if coordinates.dtype.kind == "f" and type(lower) is int:
+                # An integer bound can lie between two float64 coordinates.
+                # Round inward so NumPy cannot include a value outside it.
+                lower = float(lower)
+                if lower < term.lower:
+                    lower = np.nextafter(lower, np.inf)
+            selected = coordinates >= lower
             if bool(np.any(selected)):
-                selected &= coordinates <= term.upper
+                upper = term.upper
+                if coordinates.dtype.kind == "f" and type(upper) is int:
+                    upper = float(upper)
+                    if upper > term.upper:
+                        upper = np.nextafter(upper, -np.inf)
+                selected &= coordinates <= upper
             indices = np.flatnonzero(selected)
         else:
             # Mixed coordinates and integers beyond ndarray precision retain

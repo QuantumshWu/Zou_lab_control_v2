@@ -435,7 +435,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.close()
 
 
-def test_indexed_history_retains_only_the_requested_window() -> None:
+@pytest.mark.parametrize("segmented", (False, True))
+def test_indexed_history_retains_only_the_requested_window(segmented) -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration(
         "value",
@@ -484,9 +485,25 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
                 )
                 publication = plane.latest_publication("bounded-source/frame")
                 assert publication is not None
+            output = _latest(derived_declaration, float(revision))
+            if segmented:
+                block = output.snapshot.block
+                point = block.schema.point_domain.axes[0]
+                schema = replace(block.schema, point_domain=DomainSpec(
+                    (2,), (replace(point, size=2, coordinates=(0, 1)),), ((0, 1),),
+                ))
+                block = DataBlock(
+                    block.block_id, block.revision, None, INVALID, schema,
+                    segments=((-block.values, True, None), block.as_segment()),
+                    segment_origins=np.asarray(((0, 1), (0, 0)), dtype=np.int64),
+                    segment_shapes=np.ones((2, 2), dtype=np.int64),
+                )
+                output = replace(output, coverage=MonitorCoverage(2, 2), snapshot=OwnedSnapshot(
+                    block.ref(output.snapshot.ref.stream_generation), block,
+                ))
             plane.commit_processor(
                 derived,
-                {"value": _latest(derived_declaration, float(revision))},
+                {"value": output},
                 source_publication=publication,
             )
             if revision == 1:
@@ -494,11 +511,19 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
                     "bounded-derived/value",
                     100,
                 )
+            if revision == 100:
+                plane.current_dataset("bounded-derived/value")
         snapshot = plane.current_dataset("bounded-derived/value")
         primary = snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
         )
         assert tuple(primary.coordinate_values()) == tuple(range(-99, 1))
+        expected = np.arange(51, 151)
+        if segmented:
+            expected = np.column_stack((expected, -expected)).reshape(-1)
+        np.testing.assert_array_equal(snapshot.materialize().block.values.reshape(-1), expected)
+        latest = plane.latest_publication("bounded-derived/value").value("bounded-derived/value")
+        np.testing.assert_array_equal(latest.values.reshape(-1), [150.0, -150.0] if segmented else [150.0])
     finally:
         if history is not None:
             history.close()
@@ -1575,6 +1600,24 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
             assert set(pending.signals) == {"visible/history", "visible/phase"}
         finally:
             visible_tap.close()
+        _, bounded_tap = plane.follow_publications("visible/phase", replay=False, max_bytes=1024)
+        try:
+            output = _large_latest(phase_declaration, 400.0)
+            block = output.snapshot.block
+            block = DataBlock(
+                block.block_id, block.revision, None, INVALID, block.schema,
+                segments=(block.as_segment(),),
+                segment_origins=np.zeros((1, 2), dtype=np.int64),
+                segment_shapes=np.ones((1, 2), dtype=np.int64),
+            )
+            plane.commit_live(visible, {
+                "history": _latest(history_declaration, 4.0),
+                "phase": replace(output, snapshot=OwnedSnapshot(output.snapshot.ref, block)),
+            })
+            with pytest.raises(SourceFailed, match="payload bytes"):
+                bounded_tap.next(0.0)
+        finally:
+            bounded_tap.close()
     finally:
         if live_tap is not None:
             live_tap.close()

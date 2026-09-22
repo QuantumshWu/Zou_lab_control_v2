@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from dataclasses import replace
 
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
 from zlc_plot._fit_projection import FitScope
@@ -13,7 +15,7 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
-from zlc_data import OwnedSnapshot, REPEAT
+from zlc_data import OwnedSnapshot, REPEAT, SAMPLE_TIME
 
 
 def _facet_snapshot(
@@ -173,9 +175,24 @@ class _FailFirstFitEngine(FitEngine):
         return super().fit(model, coordinates, observations, **kwargs)
 
 
-def test_facet_result_publishes_mixed_success_and_explicit_error_validity() -> None:
+@pytest.mark.parametrize("factored_time", (False, True))
+def test_facet_result_publishes_mixed_success_and_explicit_error_validity(factored_time) -> None:
+    unit = "s" if factored_time else "m"
+    snapshot = _facet_snapshot(facet_unit=unit)
+    if factored_time:
+        point = snapshot.block.schema.point_domain
+        axes = tuple(
+            replace(axis, role=SAMPLE_TIME, coordinates=(0.0,), coordinate_origins=(0.0, 1.0))
+            if str(axis.axis_id) == "facet" else axis
+            for axis in point.axes
+        )
+        schema = replace(snapshot.block.schema, point_domain=replace(point, axes=axes))
+        snapshot = OwnedSnapshot(
+            replace(snapshot.ref, schema_fingerprint=schema.fingerprint),
+            replace(snapshot.block, schema=schema),
+        )
     session = PlotSession(
-        _facet_snapshot(facet_unit="m"),
+        snapshot,
         _spec(),
         fit_engine=_FailFirstFitEngine(),
     )
@@ -183,7 +200,8 @@ def test_facet_result_publishes_mixed_success_and_explicit_error_validity() -> N
         result = session.fit("gaussian_offset", live=True)
         assert isinstance(result, FacetFitBatchResult)
         assert np.array_equal(result.success, [False, True])
-        assert result.sample_axes[0][1].unit == "m"
+        assert result.sample_axes[0][1].unit == unit
+        np.testing.assert_array_equal(result.sample_axes[0][1].coordinate_values(), [0.0, 1.0])
         for name in result.parameter_names:
             assert np.isnan(result.parameter_values[name][0])
             assert np.isnan(result.parameter_errors[name][0])

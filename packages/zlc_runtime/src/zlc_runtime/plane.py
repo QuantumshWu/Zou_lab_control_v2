@@ -351,7 +351,7 @@ class SignalValue:
     def values(self):
         """The block's array.  Read-only by ownership: never mutate a frozen block."""
 
-        return self.block.values
+        return self.block.materialize().values
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -875,25 +875,33 @@ def _materialize_indexed_dataset(
     if basis is not None:
         previous = basis.snapshot.block
         shift = (start - basis.start) * point_count
+        # Segments are grouped by event; a window boundary falls between
+        # groups even when placements inside one event are unordered.
         first = int(np.searchsorted(previous.segment_origins[:, 1], shift))
         retained = previous.segments[first:]
     # The input already orders appends after the retained basis, without overlap.
-    appended = materialization.appended
-    segments = (*retained, *(snapshot.block.as_segment() for _index, snapshot in appended))
-    origins = np.zeros((len(segments), 2), dtype=np.int64)
+    appended, origins, sizes = [], [], []
+    for index, snapshot in materialization.appended:
+        block = snapshot.block
+        point_origin = (index - start) * point_count
+        if block.values is None:
+            appended.extend(block.segments)
+            origins.extend(block.segment_origins + (0, point_origin))
+            sizes.extend(block.segment_shapes)
+        else:
+            appended.append(block.as_segment())
+            origins.append((0, point_origin))
+            sizes.append(event_schema.physical_shape[:2])
+    origins = np.asarray(origins, dtype=np.int64).reshape(-1, 2)
+    sizes = np.asarray(sizes, dtype=np.int64).reshape(-1, 2)
     if retained:
-        origins[:len(retained), 1] = previous.segment_origins[first:, 1] - shift
-    origins[len(retained):, 1] = np.fromiter(
-        ((index - start) * point_count for index, _snapshot in appended),
-        dtype=np.int64, count=len(appended),
-    )
-    sizes = np.frombuffer(np.asarray(event_schema.physical_shape[:2], dtype=np.int64).tobytes(), dtype=np.int64)
+        origins = np.concatenate((previous.segment_origins[first:] - (0, shift), origins))
+        sizes = np.concatenate((previous.segment_shapes[first:], sizes))
     block = DataBlock._from_owned_segments(
         BlockId(f"{materialization.signal_name}.indexed/{start}:{latest_index}"),
         DatasetRevision(materialization.sequence), schema,
         window=IndexedWindow(start, latest_index, materialization.stable_since),
-        segments=segments, origins=origins,
-        shapes=np.broadcast_to(sizes, (len(segments), 2)),
+        segments=(*retained, *appended), origins=origins, shapes=sizes,
     )
     return OwnedSnapshot(block.ref(materialization.generation), block)
 
@@ -3157,8 +3165,11 @@ class SignalDataPlane:
             pending.extend(self._publication_parents[current])
             for value in current.signals.values():
                 block = value.snapshot.block
-                for array in (block.values, block.sigma, getattr(block.validity, "mask", None)):
-                    if array is None:
+                arrays = ((array for segment in block.segments for array in segment)
+                          if block.values is None else
+                          (block.values, block.sigma, getattr(block.validity, "mask", None)))
+                for array in arrays:
+                    if array is None or isinstance(array, bool):
                         continue
                     owner = array
                     while isinstance(owner, np.ndarray) and owner.base is not None:
