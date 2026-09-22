@@ -1700,3 +1700,24 @@ assert edit.config_name.text() == "\u2014" and popup.size() == resting
 popup.hide()
 '''
     )
+
+
+def test_a_bracket_post_shows_a_count_of_ten_thousand_whole() -> None:
+    """A post is as wide as its count box asks to be.  Cut to a fixed 78 px
+    it refused 10000 as too narrow -- a count the board takes."""
+
+    _run_qt(
+        """
+from PyQt5 import QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse.schedule_view import BracketPost
+from zlc_ui.pulse._layout import px
+
+app = ensure_qt_app(["post-width"])
+post = BracketPost("end", count=10000)
+post.show(); app.processEvents()
+assert post.width() == post.count_spin.sizeHint().width() + 2 * px(7)
+assert post.count_spin.text() == "10000" and not post.count_spin.property("numericError")
+post.close(); post.deleteLater()
+"""
+    )

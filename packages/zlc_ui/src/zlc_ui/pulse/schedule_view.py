@@ -645,8 +645,6 @@ class ChannelPanel(FluentGroupBox):
     def set_scan_summary(self, text: str) -> None:
         self.scan_summary_label.setText(str(text))
 
-BRACKET_WIDTH = 78
-
 
 class BracketPost(FluentGroupBox):
     """One draggable post framing a bracketed run of periods.
@@ -660,6 +658,10 @@ class BracketPost(FluentGroupBox):
     It had become a titled box with a glyph in it, at whatever height the
     layout happened to give -- the thing marking a span lined up with nothing
     in the span it marked.
+
+    As wide as its count box asks to be, plus the card margins: the box
+    refuses a number it cannot show whole, and a post cut to a fixed 78 px
+    refused 10000 -- a count the board takes without comment.
     """
 
     count_committed = QtCore.pyqtSignal(int)
@@ -667,7 +669,9 @@ class BracketPost(FluentGroupBox):
     def __init__(self, kind: str, *, count: int = 2, minimum: int = 2, parent=None) -> None:
         super().__init__("", parent)
         self.kind = str(kind)
-        width = px(BRACKET_WIDTH, minimum=60)
+        self.count_spin = fluent_count_box(minimum=int(minimum))
+        box_width = self.count_spin.sizeHint().width()
+        width = box_width + 2 * px(7)
         self.setFixedWidth(width)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         column = QtWidgets.QVBoxLayout(self)
@@ -687,9 +691,8 @@ class BracketPost(FluentGroupBox):
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
         self.setToolTip("Drag to move this bracket boundary")
-        self.count_spin = fluent_count_box(minimum=int(minimum))
         self.count_spin.setValue(float(count))
-        self.count_spin.setFixedSize(width - 2 * px(7), row_height())
+        self.count_spin.setFixedSize(box_width, row_height())
         self.count_spin.valueChanged.connect(
             lambda value: self.count_committed.emit(int(value))
         )
