@@ -55,7 +55,9 @@ from zlc_pulse import api_parameter_columns_for, authored_api_entries
 from .plan import (
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
+    API_PARAM_FAMILY,
     api_overrides_from_authored,
+    api_scan_ports_for,
     api_overrides_to_authored,
     ScanAxis,
     ScanPlan,
@@ -630,8 +632,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
             axes = plan_input_rows(plan_text)
         except (TypeError, ValueError):
             axes = ()  # The existing row editor reports an unfinished plan.
+        # The pulse's slots for the board, and its API parameters for the
+        # host to walk -- the same parameters the values form below sets.
         template_ports = (
-            hardware_scan_ports_for(sequence)
+            (*hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence))
             if sequence is not None
             else ()
         )
@@ -766,11 +770,26 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if (entry := row.input_entry())["port"].startswith(PULSE_PARAM_FAMILY)
         }
 
+    def _walked_parameters(self) -> set[str]:
+        """The API parameters an ``api:`` axis of the plan walks."""
+
+        return {
+            entry["port"][len(API_PARAM_FAMILY):]
+            for row in self._rows
+            if (entry := row.input_entry())["port"].startswith(API_PARAM_FAMILY)
+        }
+
     def _reconcile_values(self, sequence: object) -> None:
-        """One row per API field this run sets but does not sweep."""
+        """One row per API field this run sets but does not sweep.
+
+        A parameter an ``api:`` axis walks keeps its row, locked: the plan
+        says what it plays, point by point, and the box says so until the
+        axis is taken out of the plan.
+        """
 
         parameters = tuple(getattr(sequence, "api_bindings", ()) or ())
         scanned = self._scanned_parameters()
+        walked = self._walked_parameters()
         self._sequence = sequence
         broken = ""
         columns = {}
@@ -821,6 +840,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     description=name,
                     minimum=int(column.limit_lo) if code else column.limit_lo,
                     maximum=int(column.limit_hi) if code else column.limit_hi,
+                    unavailable_reason=(
+                        "swept by the scan plan; take its axis out of the "
+                        "plan to set a value for the run"
+                        if name in walked
+                        else ""
+                    ),
                 )
             )
         self._loading = True
@@ -842,7 +867,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if broken:
             self.values_note.setText(broken)
             return
-        self._refresh_values_note(scanned & set(self._authored))
+        self._refresh_values_note()
 
     def _rescope_values(self) -> None:
         """The projected text, re-read against THIS pulse.
@@ -865,16 +890,19 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if self._sequence is None or self._values_broken or not self.isEnabled():
             return
         current = self._current_overrides()
+        walked = self._walked_parameters()
         kept = {
             name: value
             for name, value in current.items()
-            if name in self.values_form.keys and value != self._authored[name][0]
+            if name in self.values_form.keys
+            and name not in walked
+            and value != self._authored[name][0]
         }
         if kept == current:
             return
         self._values_text = api_overrides_to_authored(kept)
         self.draft_changed.emit({"values": {"api_values": self._values_text}})
-        self._refresh_values_note(set())
+        self._refresh_values_note()
 
     def _current_overrides(self) -> dict[str, float]:
         try:
@@ -905,7 +933,11 @@ class ScanPlanEditor(QtWidgets.QWidget):
         """
 
         overrides: dict[str, float] = {}
+        walked = self._walked_parameters()
         for name in self.values_form.keys:
+            if name in walked:
+                # The plan says what this one plays, point by point.
+                continue
             try:
                 value = self.values_form.read_value(name)
             except ValueError:
@@ -922,9 +954,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if normalized:
             patch["normalized"] = True
         self.draft_changed.emit(patch)
-        self._refresh_values_note(set())
+        self._refresh_values_note()
 
-    def _refresh_values_note(self, scanned: set[str]) -> None:
+    def _refresh_values_note(self) -> None:
+        """The note reads the rows for what the plan sweeps, every time.
+
+        Handed the swept set by its callers, one of them -- the one a box's
+        own normalization reaches -- handed it nothing, and the note lost
+        the plan's parameters the moment a box settled.
+        """
+
         parts = []
         offered = len(self.values_form.keys)
         if offered:
@@ -932,8 +971,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 f"{len(self._overrides())} of {offered} set for this run; "
                 "the rest run what the pulse carries."
             )
-        if scanned:
-            parts.append(f"swept by the plan: {', '.join(sorted(scanned))}.")
+        swept = (self._scanned_parameters() | self._walked_parameters()) & set(self._authored)
+        if swept:
+            parts.append(f"swept by the plan: {', '.join(sorted(swept))}.")
         self.values_note.setText("  ".join(parts))
 
     def set_mutation_enabled(self, enabled: bool) -> None:

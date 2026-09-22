@@ -33,6 +33,7 @@ from zlc_data.units import DEFAULT_UNITS, format_quantity
 from zlc_pulse import (
     apply_api_values,
     PulseSequence,
+    api_parameter_columns_for,
     scan_columns_for,
     normalize_binding_values,
 )
@@ -51,6 +52,15 @@ PULSE_PARAM_FAMILY = "pulse:param:"
 #: advance is a ``tune(field, value)`` call before the point fires; the board
 #: cannot advance it itself, so a board-advanced plan refuses it.
 DEVICE_PARAM_FAMILY = "device:"
+
+#: ``api:<field id>`` -- one of the pulse's API parameters, walked by the
+#: HOST the way a caller of the API would walk it: before the point fires
+#: the value is written into the pulse and the board is loaded again.  An
+#: API parameter is a number in the program, not a slot in the board's
+#: table, so like a device knob it stands outside every board-advanced
+#: axis.  A parameter that is also a slot is the board's to sweep, from one
+#: load, and is not offered here.
+API_PARAM_FAMILY = "api:"
 
 #: ``manual:<name>`` -- a knob no machine here can reach.  Nothing advances
 #: it: the run stops, the OPERATOR moves it, and the run continues.  That is
@@ -104,6 +114,8 @@ def port_label(port: str) -> str:
     text = str(port)
     if text.startswith(PULSE_PARAM_FAMILY):
         return text[len(PULSE_PARAM_FAMILY):]
+    if text.startswith(API_PARAM_FAMILY):
+        return text[len(API_PARAM_FAMILY):]
     if text.startswith(DEVICE_PARAM_FAMILY):
         return text[len(DEVICE_PARAM_FAMILY):].replace(":", ".")
     if text.startswith(MANUAL_PARAM_FAMILY):
@@ -127,6 +139,8 @@ def port_group(port: str) -> str:
     text = str(port)
     if text.startswith(PULSE_PARAM_FAMILY):
         return "pulse"
+    if text.startswith(API_PARAM_FAMILY):
+        return "api"
     if text.startswith(DEVICE_PARAM_FAMILY):
         return text[len(DEVICE_PARAM_FAMILY):].split(":", 1)[0]
     if text.startswith(MANUAL_PARAM_FAMILY):
@@ -148,17 +162,20 @@ def port_leaf(port: str) -> str:
 def host_advanced_port(port: str) -> bool:
     """Whether the HOST advances this port between fires of the board.
 
-    Two families qualify, for one structural reason: the board plays its
-    whole table from a single load, and neither a hand on a thumbscrew nor
-    a ``tune()`` call on an installed device can reach inside that.  Both
-    therefore stand outside every board-advanced axis, walked between
-    segments -- the run pauses, the knob moves (by hand or by call), the
-    next segment fires.
+    Three families qualify, for one structural reason: the board plays its
+    whole table from a single load, and neither a hand on a thumbscrew, a
+    ``tune()`` call on an installed device nor a new value in the program
+    can reach inside that.  All three therefore stand outside every
+    board-advanced axis, walked between segments -- the run pauses, the
+    knob moves (by hand, by call, or by writing the pulse and loading it
+    again), the next segment fires.
     """
 
     text = str(port)
-    return text.startswith(MANUAL_PARAM_FAMILY) or text.startswith(
-        DEVICE_PARAM_FAMILY
+    return (
+        text.startswith(MANUAL_PARAM_FAMILY)
+        or text.startswith(DEVICE_PARAM_FAMILY)
+        or text.startswith(API_PARAM_FAMILY)
     )
 
 
@@ -185,7 +202,7 @@ def scan_axis_ids(labels: Sequence[str]) -> tuple[str, ...]:
     return tuple(ids)
 
 
-def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
+def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[ScanPort, ...]:
     ports = []
     for column in columns:
         lo = float(column.limit_lo if column.limit_lo is not None else column.lo)
@@ -199,7 +216,7 @@ def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
         # stopped the crash and told the next reader the axis is
         # dimensionless, which it is not: it is a count of codes, and the
         # registry has one now.
-        port = PULSE_PARAM_FAMILY + str(column.name)
+        port = family + str(column.name)
         ports.append(
             ScanPort(
                 port,
@@ -227,6 +244,27 @@ def hardware_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
     return _ports_from_columns(scan_columns_for(sequence))
+
+
+def api_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
+    """Every API parameter this pulse offers the HOST to walk, in parameter
+    order -- the ones no board slot already sweeps.
+
+    The port's range is the column's own limit, the same one the API values
+    form prints, because the value is written into the same field.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    slots = {column.name for column in scan_columns_for(sequence)}
+    return _ports_from_columns(
+        tuple(
+            column
+            for column in api_parameter_columns_for(sequence)
+            if column.name not in slots
+        ),
+        family=API_PARAM_FAMILY,
+    )
 
 
 def label_device_scan_ports(
