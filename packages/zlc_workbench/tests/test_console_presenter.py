@@ -7906,6 +7906,63 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     assert not binding.editor_host.describe_display().result().value.selectors
 
 
+def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
+    """Once the device is free, a restart still waits for one of two things
+    and the card names it: the old run has not finished stopping, or a
+    panel is still drawing that run's generation.  A bare "restart queued"
+    was a ten-minute mystery."""
+
+    from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE
+    from zlc_workbench.logic import LogicBinding, LogicDraft
+
+    generation = object()
+    binding = LogicBinding("camera_measurement", LOGIC_NODE, LogicDraft(values={}))
+    binding.pending = SimpleNamespace(waiting_for=())
+    stopping = SimpleNamespace(
+        running=True, error="", phase="stopping", terminal=False, progress=None, warnings=(),
+    )
+    binding.host = SimpleNamespace(
+        running=True, observation=stopping, instance_id="camera_measurement", generation=generation,
+    )
+    publication = object()
+    console = SimpleNamespace(
+        panels={
+            "panel-1": SimpleNamespace(
+                panel_id="panel-1",
+                port=SimpleNamespace(
+                    surface_busy=True, front_signals=("@logic/camera_measurement/frames",),
+                    surface_age_seconds=42.0,
+                ),
+            ),
+        },
+        session=SimpleNamespace(signal_plane=SimpleNamespace(
+            latest_publication=lambda _signal: publication,
+            publication_roots=lambda _publication: (
+                SimpleNamespace(stream_id=SimpleNamespace(value="camera_measurement"), generation=generation),
+            ),
+        )),
+        _finalize_logic_binding=lambda _binding: SimpleNamespace(issues=()),
+        _observation_status=ConsolePresenter._observation_status,
+        _generation_surface_holders=lambda host: ConsolePresenter._generation_surface_holders(console, host),
+    )
+
+    state, status = ConsolePresenter._logic_state(console, binding)
+    assert state == "running" and status == "restart queued: the last run is still stopping (stopping)"
+
+    binding.host.running = False
+    stopping.running = False
+    stopping.phase = "cancelled"
+    state, status = ConsolePresenter._logic_state(console, binding)
+    assert state == "running"
+    assert status == "restart queued: panel-1 still drawing the last run (42 s)", status
+
+    console.panels["panel-1"].port.surface_busy = False
+    assert ConsolePresenter._logic_state(console, binding)[1] == "restart queued"
+
+    binding.pending = SimpleNamespace(waiting_for=("camera_measurement",))
+    assert ConsolePresenter._logic_state(console, binding)[1] == "waiting for camera_measurement"
+
+
 def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
     """Removing a routed region restores the draft from before it -- until a
     run has started with the routed values.  From then on they are the

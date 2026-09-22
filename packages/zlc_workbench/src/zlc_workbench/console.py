@@ -7590,13 +7590,19 @@ class ConsolePresenter:
         self._sync_task_takeover()
         self._refresh_console_projection()
 
-    def _generation_surface_busy(self, host: object) -> bool:
-        """Whether a Panel is still consuming this Host's causal generation."""
+    def _generation_surface_holders(self, host: object) -> tuple[str, ...]:
+        """The Panels still consuming this Host's causal generation.
+
+        Named, because a restart waits on them: a queued restart that only
+        said "queued" left the operator guessing between a run that had not
+        finished stopping and a picture that had not finished travelling.
+        """
 
         generation = host.generation
         if generation is None:
-            return False
+            return ()
         owner = host.instance_id
+        holders: list[str] = []
         for panel in self.panels.values():
             port = panel.port
             if port is None or not port.surface_busy:
@@ -7611,8 +7617,9 @@ class ConsolePresenter:
                     and root.generation == generation
                     for root in roots
                 ):
-                    return True
-        return False
+                    holders.append(str(panel.panel_id))
+                    break
+        return tuple(holders)
 
     @staticmethod
     def _observation_status(observed: object) -> str:
@@ -7665,7 +7672,29 @@ class ConsolePresenter:
         if binding.pending is not None:
             waiting = ", ".join(sorted(binding.pending.waiting_for))
             state = "running"
-            status = f"waiting for {waiting}" if waiting else "restart queued"
+            if waiting:
+                status = f"waiting for {waiting}"
+            else:
+                # The device is free.  What still holds the restart is one
+                # of two things, and the card says which: the old run has
+                # not finished stopping, or a panel is still drawing it.
+                status = "restart queued"
+                if host is not None and host.running:
+                    status = (
+                        "restart queued: the last run is still stopping "
+                        f"({self._observation_status(host.observation)})"
+                    )
+                elif host is not None:
+                    holders = self._generation_surface_holders(host)
+                    if holders:
+                        age = max(
+                            float(getattr(self.panels[panel_id].port, "surface_age_seconds", 0.0) or 0.0)
+                            for panel_id in holders
+                        )
+                        status = (
+                            f"restart queued: {', '.join(holders)} still drawing "
+                            f"the last run ({age:.0f} s)"
+                        )
         return state, str(status)
 
     def _show_logic(
@@ -7974,7 +8003,7 @@ class ConsolePresenter:
             # before withdrawing the generation.  Manual Stop then Start had
             # this drain interval naturally; Restart must provide the same
             # lifecycle boundary without blanking or rebuilding the Panel.
-            if self._generation_surface_busy(old_host):
+            if self._generation_surface_holders(old_host):
                 binding.pending = candidate
                 self._refresh_console_projection()
                 return True
