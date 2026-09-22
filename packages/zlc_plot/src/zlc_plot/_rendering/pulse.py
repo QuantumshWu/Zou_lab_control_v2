@@ -452,13 +452,19 @@ def update_pulse_timeline(
     periods = payload.periods
     band = pulse.period_band_height if periods else 0.0
     row_top = row_count - 1 + row_height / 2.0
+    # Boundaries and spacer hatches stand exactly as tall as the innermost
+    # bracket's rails (its foot to its top), so the three read as one frame
+    # around the pulse; running from the axes' floor to the band's top they
+    # overshot the bracket at both ends and read as a second, unrelated grid.
+    frame_low = pulse.repeat_bottom
+    frame_high = row_count + band + pulse.repeat_top_offset
     edges = tuple(mark.start for mark in periods) + (
         (periods[-1].stop,) if periods else ()
     )
     boundaries = _sync_lines(axis, artists, "pulse:period_bounds", len(edges))
     for index, edge in enumerate(edges):
         line = boundaries[index]
-        line.set_data((edge, edge), (pulse.ylim_bottom, row_top + band))
+        line.set_data((edge, edge), (frame_low, frame_high))
         line.set_color(style.palette.pulse_period)
         line.set_linewidth(pulse.period_boundary_linewidth)
         line.set_alpha(pulse.period_boundary_alpha)
@@ -471,9 +477,9 @@ def update_pulse_timeline(
     hatches = _sync_rectangles(axis, artists, "pulse:spacers", len(spacers))
     for index, mark in enumerate(spacers):
         rectangle = hatches[index]
-        rectangle.set_xy((mark.start, pulse.ylim_bottom))
+        rectangle.set_xy((mark.start, frame_low))
         rectangle.set_width(mark.stop - mark.start)
-        rectangle.set_height(row_top + band - pulse.ylim_bottom)
+        rectangle.set_height(frame_high - frame_low)
         rectangle.set_facecolor("none")
         rectangle.set_edgecolor(style.palette.pulse_period)
         rectangle.set_linewidth(0.0)
@@ -523,8 +529,8 @@ def update_pulse_timeline(
         # therefore grow around earlier ones; reversing this made an internal
         # Bracket visually surround the complete Run loop.
         outer_depth = index
-        y_low = pulse.repeat_bottom - pulse.repeat_bottom_step * outer_depth
-        y_high = row_count + band + pulse.repeat_top_offset
+        y_low = frame_low - pulse.repeat_bottom_step * outer_depth
+        y_high = frame_high
         lift_pt = pulse.repeat_top_step_pt * outer_depth
         left_line = left_brackets[index]
         right_line = right_brackets[index]
@@ -573,7 +579,7 @@ def update_pulse_timeline(
         bottom_limit = min(bottom_limit, lowest_foot - margin)
         # The top rails stack by points above the innermost one and the
         # outermost carries its label: room for exactly that, on screen.
-        innermost_top = row_count + band + pulse.repeat_top_offset
+        innermost_top = frame_high
         room_pt = (
             pulse.repeat_top_step_pt * (len(loop_markers) - 1) + pulse.repeat_ylim_room_pt
         )
