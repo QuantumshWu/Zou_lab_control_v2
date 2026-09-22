@@ -740,7 +740,7 @@ def _merge_event_records(
 
 def _merge_packed_event_records(records: tuple[bytes, ...]) -> Mapping[str, object]:
     """Expand the exact retained records only for a provenance consumer."""
-    decoded: dict[bytes, Mapping[str, object]] = {}
+    decoded: dict[bytes, Mapping[str, object]] = {b"": _EMPTY_MAPPING}
     def unpack():
         for packed in records:
             record = decoded.get(packed)

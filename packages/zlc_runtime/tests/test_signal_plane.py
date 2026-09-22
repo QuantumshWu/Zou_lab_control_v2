@@ -912,7 +912,8 @@ def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_sto
         plane.close()
 
 
-def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> None:
+@pytest.mark.parametrize("event_record", ({}, {"acquisition": "scan"}))
+def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive(event_record) -> None:
     declaration = DatasetOutputDeclaration("scan", "test.scan")
     node = _node("grid-display", declaration)
     plane = SignalDataPlane()
@@ -936,6 +937,9 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         description = directory[0]
         assert description.shape == (1, 4, 1)
         first = plane.current_dataset(description.name)
+        first_view, first_record = plane.current_dataset_view(description.name, defer_record=True)
+        assert first_view is first and callable(first_record)
+        assert first_record() == {}
         assert first.block.schema.point_domain.logical_shape == (2, 2)
         assert first.expanded_validity()[0, :, 0].tolist() == [
             True,
@@ -947,15 +951,19 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         plane.commit_live(
             node,
             {
-                "scan": _finite_grid_point(
+                "scan": replace(_finite_grid_point(
                     declaration,
                     value=40.0,
                     point_origin=3,
                     written=2,
-                )
+                ), event_record=event_record)
             },
         )
         second = plane.current_dataset(description.name)
+        second_view, second_record = plane.current_dataset_view(description.name, defer_record=True)
+        assert second_view is second and callable(second_record)
+        assert second_record() == event_record
+        assert plane.current_dataset_view(description.name)[1] == event_record
         assert plane.describe_signals() is directory, "new values do not rebuild the directory"
         assert second.materialize().block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
         assert second.expanded_validity()[0, :, 0].tolist() == [
@@ -967,6 +975,9 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         assert plane.seal_committed(node, cut_short=True)
         assert plane.describe_signals() is not directory
         assert plane.describe_signals()[0].shape == (1, 4, 1)
+        plane.retire(node)
+        assert first_record() == {}
+        assert second_record() == event_record
     finally:
         plane.close()
 
