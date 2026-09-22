@@ -350,7 +350,7 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
     assert axes[0].axis_id.value == "scan.rf.frequency"
     assert axes[0].unit == "GHz" and tuple(axes[0].coordinates) == (1.0, 1.5, 2.0)
     assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 2)
-    assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
+    assert np.asarray(value.block.materialize().values).mean(axis=(2, 3)).tolist() == [
         [0.0, 2.0, 4.0], [1.0, 3.0, 5.0],
         [6.0, 8.0, 10.0], [7.0, 9.0, 11.0],
     ]
@@ -974,7 +974,7 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     assert power.unit is None, "a manual axis carries a name, not a unit"
 
     # Every point captured, in played order: publication k lands on row k.
-    block = np.asarray(value.block.values, dtype=float)
+    block = np.asarray(value.block.materialize().values, dtype=float)
     assert block.mean(axis=(2, 3)).tolist() == [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]]
 
     # One question, one stop, and nothing else asked of the operator.
