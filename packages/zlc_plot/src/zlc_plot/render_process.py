@@ -3158,6 +3158,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
     """Child entry: multiplex commands over unchanged local RasterPlotHosts."""
 
     from .config import DEFAULTS
+    from zlc_data import OwnedSnapshot
     from .data_contract import snapshot_schema
     from .raster import RasterPlotHost
     from .session import PlotSession
@@ -3502,9 +3503,16 @@ def _render_process_main(connection: Connection, name: str) -> None:
 
         host = RasterPlotHost(factory, host_id=host_id)
         # The warming needs the panel's storage along with its spec: which
-        # of a fit's kernels an image takes is decided by its dtype.
+        # of a fit's kernels an image takes is decided by its dtype.  An
+        # authored picture -- a pulse timeline -- has no storage and no
+        # fit; asked for a dataset's schema anyway, its create failed.
         snapshot = getattr(plot_input, "snapshot", plot_input)
-        panel.append((spec, snapshot_schema(snapshot).value_schema.dtype))
+        storage = (
+            snapshot_schema(snapshot).value_schema.dtype
+            if isinstance(snapshot, OwnedSnapshot)
+            else None
+        )
+        panel.append((spec, storage))
         with state_lock:
             hosts[host_id] = host
             last_front_sequence[host_id] = -1

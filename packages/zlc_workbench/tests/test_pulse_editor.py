@@ -1834,7 +1834,8 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
 
     from threading import Event
 
-    from zlc_plot import RasterPlotHost
+    # The shipped preview host: the one a render child hands the window.
+    from zlc_plot.render_process import _RemoteRasterPlotHost as PreviewHost
 
     preview_started = Event()
     release_preview = Event()
@@ -1842,7 +1843,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
     release_load = Event()
     safe_started = Event()
     release_safe = Event()
-    real_wait = RasterPlotHost.wait_for_front
+    real_wait = PreviewHost.wait_for_front
 
     def blocked_front(self, *args, **kwargs):
         preview_started.set()
@@ -1860,7 +1861,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
             assert release_safe.wait(2.0)
             super().safe()
 
-    monkeypatch.setattr(RasterPlotHost, "wait_for_front", blocked_front)
+    monkeypatch.setattr(PreviewHost, "wait_for_front", blocked_front)
     board = _BlockedLoad(description=_board_description())
     application, QtCore, window = _formal_pulse_window(
         tmp_path, monkeypatch, sequence=_ordinary_sequence(), board=board
@@ -1916,19 +1917,20 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
     from concurrent.futures import Future
     from threading import Event, Thread, current_thread, main_thread
 
-    from zlc_plot import RasterPlotHost
+    # The shipped preview host: the one a render child hands the window.
+    from zlc_plot.render_process import _RemoteRasterPlotHost as PreviewHost
 
     sequence = _ordinary_sequence()
     build_started = Event()
     release_build = Event()
-    real_wait = RasterPlotHost.wait_for_front
+    real_wait = PreviewHost.wait_for_front
 
     def slow_first_front(self, *args, **kwargs):
         build_started.set()
         assert release_build.wait(2.0)
         return real_wait(self, *args, **kwargs)
 
-    monkeypatch.setattr(RasterPlotHost, "wait_for_front", slow_first_front)
+    monkeypatch.setattr(PreviewHost, "wait_for_front", slow_first_front)
     application, QtCore, window = _formal_pulse_window(
         tmp_path, monkeypatch, sequence=sequence, path=str(tmp_path / "ordinary.json")
     )
