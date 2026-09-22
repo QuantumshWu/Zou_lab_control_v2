@@ -5129,6 +5129,26 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     _low: Decimal | None = None
     _high: Decimal | None = None
 
+    def width_for(self, sample: str) -> int:
+        """The width at which ``sample`` shows whole.
+
+        Measured the way the box measures a number it is asked to show --
+        its frame, buttons, padding and focus inset at this style and
+        scale, plus the two pixels the fit rule keeps -- rather than a
+        nominal sum rounded once, which at a fractional scale came out
+        four pixels short and refused the very number it was sized for.
+        The edit is placed by the box's resize, so a box never shown is
+        resized in place first; the chrome does not depend on the width.
+        """
+
+        edit = self.lineEdit()
+        QtWidgets.QApplication.sendEvent(
+            self, QtGui.QResizeEvent(self.size(), self.size())
+        )
+        right = None if self._step_btn.isHidden() else self._step_btn.x() - edit.x()
+        chrome = self.width() - _numeric_text_width(edit, right)
+        return self.fontMetrics().horizontalAdvance(str(sample)) + 2 + chrome
+
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
         size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + scaled_px(2 * EDIT_PADDING_H + COMBO_WIDTH + STEP_WIDTH + 4))

@@ -659,10 +659,16 @@ class BracketPost(FluentGroupBox):
     layout happened to give -- the thing marking a span lined up with nothing
     in the span it marked.
 
-    As wide as its count box asks to be, plus the card margins: the box
+    As wide as five digits of count, plus the card margins: the box
     refuses a number it cannot show whole, and a post cut to a fixed 78 px
-    refused 10000 -- a count the board takes without comment.
+    refused 10000 -- a count an experiment reaches -- while the box's own
+    generic hint, sized for a signed float in scientific notation, made
+    the post nearly a card.
     """
+
+    #: The widest count a post shows whole.  The board counts in 32 bits,
+    #: but a post sized for ten digits would be a card.
+    COUNT_SAMPLE = "10000"
 
     count_committed = QtCore.pyqtSignal(int)
 
@@ -670,7 +676,7 @@ class BracketPost(FluentGroupBox):
         super().__init__("", parent)
         self.kind = str(kind)
         self.count_spin = fluent_count_box(minimum=int(minimum))
-        box_width = self.count_spin.sizeHint().width()
+        box_width = self.count_spin.width_for(self.COUNT_SAMPLE)
         width = box_width + 2 * px(7)
         self.setFixedWidth(width)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)

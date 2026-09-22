@@ -1703,8 +1703,9 @@ popup.hide()
 
 
 def test_a_bracket_post_shows_a_count_of_ten_thousand_whole() -> None:
-    """A post is as wide as its count box asks to be.  Cut to a fixed 78 px
-    it refused 10000 as too narrow -- a count the board takes."""
+    """A post is as wide as five digits of count and no wider.  Cut to a
+    fixed 78 px it refused 10000 as too narrow; sized by the box's generic
+    hint it was nearly a card."""
 
     _run_qt(
         """
@@ -1716,7 +1717,8 @@ from zlc_ui.pulse._layout import px
 app = ensure_qt_app(["post-width"])
 post = BracketPost("end", count=10000)
 post.show(); app.processEvents()
-assert post.width() == post.count_spin.sizeHint().width() + 2 * px(7)
+assert post.width() == post.count_spin.width_for("10000") + 2 * px(7)
+assert post.width() < post.count_spin.sizeHint().width() + 2 * px(7)
 assert post.count_spin.text() == "10000" and not post.count_spin.property("numericError")
 post.close(); post.deleteLater()
 """
