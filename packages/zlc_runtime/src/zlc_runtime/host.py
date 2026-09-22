@@ -915,7 +915,19 @@ class NodeHost:
                 )
                 terminal_error_text = str(terminal_exception)
         if not kept:
-            self._retire_plane_state()
+            try:
+                self._retire_plane_state()
+            except BaseException as retire_error:
+                # The run still ENDS.  Retirement is plane bookkeeping; a
+                # failure in it is how this run ended, not a reason to leave
+                # the host running with a completion nobody will deliver
+                # again -- which no Stop could end and no restart could pass.
+                terminal_phase = "failed"
+                terminal_exception = RuntimeError(
+                    "signal generation could not be retired: "
+                    f"{type(retire_error).__name__}: {retire_error}"
+                )
+                terminal_error_text = str(terminal_exception)
         if terminal_exception is None:
             terminal_error_text = unsaved_text
         elif unsaved_text is not None:

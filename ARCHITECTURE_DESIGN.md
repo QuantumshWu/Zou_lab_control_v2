@@ -162,6 +162,7 @@ Node new chunk
 
 - Scan数据的两条Repeat轴name与任务UI对齐为`repeat`、`shots per point`，不以Pulse硬件的Scan/Run repeats命名。轴顺序、坐标与稳定AxisId不随manual/device/pulse执行方式改变；Pulse本身的参数和执行字段保持原意。
 - Generation标识一次run/restart；generation内schema和stream generation固定。
+- Restart只等两件事：旧run真正停下（device lease随worker终态释放），以及仍要从Plane读旧generation的面板投影（含正在retarget的候选port）跑完。投影读完后surface拿着自己的副本走，渲染子进程里的绘制、cohort的成组、屏幕翻转都不参与等待；卡片说明在等哪一件。终态过渡无条件：worker完成一旦被取走，即使退休Plane generation失败，run也以failed结束并说明原因；display步骤失败不跳过节点轮询。
 - Panel标题仅Repeat域显示条件写入数量，Point/Cell-data仍显示完整维度。对每个Repeat轴只放开自身，其余Repeat/Point轴固定于同一publication最后写入位置的canonical axis_codes；只数该切面已写入的不同Repeat坐标。Cell-data整块发布，site/pixel没有用于标题的当前坐标，科学validity（例如Survival分母资格）不能充当写入覆盖。Runtime复用唯一occupied_cells覆盖记录，在commit时把包括本次block的计数作为SignalValue.repeat_counts固定下来；Monitor的完整事件按实际Repeat carrier计数。旧publication、Stop后的数据与Frozen继续持有自己的整数，不读独立latest，不扫描像素或累计第二份进度。Panel只投影exact accepted publication的计数，不受Scope/Focus/Facet/Reduction影响，不产生min–max区间；计数之积不表示全Dataset样本总数。
 - Producer与latest/frozen/follow Processor的Start共用同一终态世代交接：旧结果在结束/Shutdown后仍保留，直到下一次Start才退休旧owner及派生closure。cleanup在Plane锁外，最终source exact校验与新state安装在同一锁内，`_starting`由同一入口释放；仍active的owner不得被覆盖。不得用关闭时清数据或为Derive另建重启路径绕过。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。

@@ -1204,6 +1204,73 @@ def test_same_geometry_image_frame_generation_restart_updates_in_place(
         first.close(timeout=10)
 
 
+def test_a_panel_names_the_publications_its_projections_have_yet_to_read(
+    live_bench,
+) -> None:
+    """A restart waits for exactly these.  Until the board's worker has run
+    a projection its publication must stay readable on the plane; once it
+    has, the surface travels on its own copy -- the render, its cohort and
+    the screen hold nothing the plane needs to keep -- and a reservation
+    cancelled before its projection ran will never read anything."""
+
+    from concurrent.futures import Future
+
+    plot = pytest.importorskip("zlc_plot")
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    host = plot.RasterPlotHost.from_plot(
+        value.snapshot, _camera_image_spec(plot, value),
+    )
+    held: list[tuple[object, Future]] = []
+
+    def submit_later(work):
+        future: Future = Future()
+        held.append((work, future))
+        return future
+
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        submit_projection=submit_later,
+        replace_host=_initial_then(host),
+    )
+    try:
+        update = port.prepare(value, publication, front)
+        assert update is not None
+        pending = port.pending_projections
+        assert [item.publication for item in pending] == [publication]
+        assert pending[0].age_seconds >= 0.0
+        assert port.surface_busy
+
+        work, future = held.pop()
+        future.set_result(work())
+        assert port.surface_busy, "the render still travels"
+        assert port.pending_projections == (), "but the plane has been read"
+        operation = update.future.result(timeout=10.0)
+        assert port.accept(update, operation)
+        assert not port.surface_busy
+
+        next_value, next_publication = _advanced(value, publication, signal)
+        later = port.prepare(next_value, next_publication, front)
+        assert later is not None
+        assert [item.publication for item in port.pending_projections] == [
+            next_publication
+        ]
+        later.future.cancel()
+        assert port.surface_busy, "the cohort has not released it yet"
+        assert port.pending_projections == (), "cancelled: it will never read"
+        port.finish_unpresented(later)
+        assert not port.surface_busy
+    finally:
+        port.close()
+        host.close(timeout=10)
+
+
 def test_atomic_surface_advances_only_after_its_front_is_presented(
     live_bench,
 ) -> None:

@@ -50,6 +50,19 @@ class _Prepared:
     replacement_host: object | None = None
     operation: object | None = None
     completion: Future | None = None
+    #: Whether the projection has read this publication from the plane and
+    #: composed the plot input.  Until then the plane must keep the
+    #: publication's generation; from then on the surface travels on its
+    #: own copy, and the generation may retire under it.
+    projected: bool = False
+
+
+@dataclass(frozen=True)
+class PendingProjection:
+    """A publication a panel reserved from the plane and has not read yet."""
+
+    publication: object
+    age_seconds: float
 
 
 def _revision_of(snapshot: object) -> object | None:
@@ -320,6 +333,31 @@ class PlotPanelPort:
             if not self._pending:
                 return 0.0
             return max(now - prepared.staged_at for prepared in self._pending.values())
+
+    @property
+    def pending_projections(self) -> tuple[PendingProjection, ...]:
+        """The publications this panel still has to read from the plane.
+
+        A restart waits for exactly these.  A projection reserves its
+        publication here and reads it on the board's worker; retiring the
+        generation before that read fails it as "publication belongs to
+        another signal generation" on the card.  After the read the surface
+        travels on its own copy: the render in the child, the cohort it
+        joins and the screen it lands on hold nothing of the plane.  A
+        reservation whose completion is already settled is not counted --
+        cancelled before its projection ran, it will never read anything.
+        """
+
+        now = monotonic()
+        with self._state_lock:
+            return tuple(
+                PendingProjection(prepared.publication, now - prepared.staged_at)
+                for prepared in self._pending.values()
+                if not prepared.projected
+                and not (
+                    prepared.completion is not None and prepared.completion.done()
+                )
+            )
 
     @property
     def presentation_current(self) -> bool:
@@ -643,6 +681,9 @@ class PlotPanelPort:
                     or prepared.completion is not completion
                 ):
                     raise CancelledError()
+                # The plane has been read.  From here this surface travels
+                # on its own copy, and a restart no longer has to wait for it.
+                self._pending[serial] = replace(prepared, projected=True)
                 surface = self._surface
                 host = None if surface is None else surface.host
                 shown_generation = (

@@ -843,6 +843,53 @@ def test_stop_reports_partial_seal_failure_instead_of_cancellation(
         plane.close()
 
 
+def test_a_stop_whose_generation_cannot_retire_still_ends_the_run(
+    monkeypatch,
+) -> None:
+    """The terminal transition is unconditional.  Retiring the plane
+    generation is bookkeeping of how the run ended; when it fails, the run
+    ends failed and says so.  It used to raise out of the poll with the
+    worker's completion already consumed, leaving a host that reported
+    running for ever: no Stop could end it, no restart could pass it."""
+
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            while not context.cancel_requested():
+                time.sleep(0.001)
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="unretirable",
+        kind="measurement",
+        outputs=(declaration,),
+    )
+    try:
+        host.start()
+        assert host.running
+
+        def fail_retire(_node):
+            raise RuntimeError("cleanup exploded")
+
+        monkeypatch.setattr(plane, "retire", fail_retire)
+        host.cancel("operator stop")
+        observation = _wait(host, wake)
+        assert not host.running
+        assert observation.phase == "failed"
+        assert observation.error == (
+            "signal generation could not be retired: RuntimeError: cleanup exploded"
+        )
+    finally:
+        monkeypatch.undo()
+        host.shutdown()
+        plane.close()
+
+
 @pytest.mark.parametrize(
     ("partial", "phase"),
     ((False, "failed"), (True, "done")),
