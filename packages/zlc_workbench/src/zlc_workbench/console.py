@@ -8030,6 +8030,11 @@ class ConsolePresenter:
             self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             return False
+        # The run makes the values it starts with the producer's own: a
+        # field a panel's selection had written is no longer something to
+        # undo, so removing that selection afterwards leaves the value the
+        # latest run used rather than restoring the draft from before it.
+        binding.selection_restore.clear()
         binding.draft_error = ""
         self._refresh_console_projection()
         self._report(f"{binding.node_id} started", severity="task")

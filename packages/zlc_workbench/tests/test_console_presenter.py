@@ -7906,6 +7906,53 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     assert not binding.editor_host.describe_display().result().value.selectors
 
 
+def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
+    """Removing a routed region restores the draft from before it -- until a
+    run has started with the routed values.  From then on they are the
+    producer's own: removing the region leaves what the latest run used."""
+
+    import json
+
+    from zlc_atom.nodes.scan import ScanAxis, ScanPlan
+    from zlc_atom.nodes.seamless_scan import LOGIC_NODE
+    from zlc_workbench.logic import LogicBinding, LogicDraft
+
+    original = json.dumps(ScanPlan((ScanAxis("pulse:param:bias", (0.0, 1.0, 2.0)),)).to_tree())
+    routed = json.dumps(ScanPlan((ScanAxis("pulse:param:bias", (0.4, 0.9)),)).to_tree())
+    binding = LogicBinding("scan-owner", LOGIC_NODE, LogicDraft(values={"plan": original}))
+    console = SimpleNamespace(
+        logic={"scan-owner": binding},
+        _task_command_blocked=lambda _action: False,
+        _refresh_console_projection=lambda: None,
+        refresh_logic_editor=lambda _node: None,
+        _refresh_producer_projections=lambda _node: None,
+        _report=lambda *_args, **_kwargs: None,
+        _discard_candidate=lambda _binding, _candidate: None,
+    )
+    console.update_logic_draft = lambda node_id, **kwargs: (
+        ConsolePresenter.update_logic_draft(console, node_id, **kwargs)
+    )
+    # The region's write, the way routing does it: the patch, then the undo.
+    assert console.update_logic_draft("scan-owner", values={"plan": routed})
+    binding.selection_restore["plan"] = ("panel-1", original)
+
+    started: list[bool] = []
+    lease = SimpleNamespace(release=lambda: None)
+    candidate = SimpleNamespace(
+        reservation=SimpleNamespace(commit=lambda: lease),
+        node=object(),
+        host=SimpleNamespace(start=lambda **_kwargs: started.append(True), running=False),
+        previews=(),
+        run_root=None,
+        input_summary=None,
+    )
+    assert ConsolePresenter._activate_candidate(console, binding, candidate) is True
+    assert started and binding.selection_restore == {}
+
+    ConsolePresenter._restore_producer_draft(console, "panel-1")
+    assert binding.draft.values["plan"] == routed, "the run's values are the producer's own"
+
+
 def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
     """Which gestures mean a producer's setting is the producer's declaration.
 
