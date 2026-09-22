@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT,
     EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
-    RADIUS, SURFACE, FluentCheckBox, FluentTriSwitch, FluentLabel,
+    RADIUS, SURFACE, TEXT, FluentCheckBox, FluentTriSwitch, FluentLabel,
     FluentLineEdit, FluentPopup, FluentSettingsPopupAnchor, fluent_font_size, scaled_px, signals_blocked,
     show_fluent_popup_for_anchor,
 )
@@ -127,9 +127,19 @@ class FluentScanLineEdit(FluentLineEdit):
             self.scan_toggle.setEnabled(can_scan)
             self.source_switch.setState(("default", "api", "config").index(source))
             self.source_switch.set_position_offered(1, can_api)
-        self.config_name.setText(config_key or "Unassigned")
-        self.config_name_label.setVisible(source == "config")
-        self.config_name.setVisible(source == "config")
+        # The row is always there and never wider than the switch above it:
+        # choosing Config changes a text, not the popup's shape.  Shown and
+        # hidden with the source, the popup grew a row under the pointer.
+        named = source == "config"
+        name = (config_key or "Unassigned") if named else "\u2014"
+        self.config_name.setText(self.config_name.fontMetrics().elidedText(
+            name, QtCore.Qt.ElideMiddle, self.source_switch.sizeHint().width(),
+        ))
+        self.config_name.setToolTip(config_key if named else "")
+        self.config_name.setStyleSheet(
+            f'QLabel {{ color: {TEXT if named else PLACEHOLDER}; '
+            f'font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}'
+        )
 
     def _commit_binding(self, *_args) -> None:
         self.binding_committed.emit(self.scan_toggle.isChecked(), ("default", "api", "config")[self.source_switch.state()])

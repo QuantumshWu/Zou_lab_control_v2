@@ -1309,6 +1309,12 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             if self.validator().validate(text, len(text))[0] != QtGui.QValidator.Acceptable:
                 return
             if self.fontMetrics().horizontalAdvance(text) + 2 <= _numeric_text_width(self):
+                # A spelling that fits is not too narrow, whatever the last
+                # full evaluation of an earlier text said.  Left standing,
+                # that refusal met the next commit as a message about a
+                # number the box was already showing whole: 10000 refused,
+                # then 1000 refused with it, then 100 accepted.
+                self.setProperty("numericError", "")
                 return  # Keep an in-progress spelling such as 0. or 0.00.
         margins = self.textMargins()
         key = (self.text(), self.width(), margins.left(), margins.right(),

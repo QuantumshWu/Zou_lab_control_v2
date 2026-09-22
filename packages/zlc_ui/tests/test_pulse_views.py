@@ -1660,3 +1660,43 @@ view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 '''
     )
+
+
+def test_choosing_config_in_the_slot_popup_changes_a_text_not_the_popups_shape() -> None:
+    """The Config name row is always there, never wider than the switch
+    above it: choosing Config fills a text in place.  Shown and hidden
+    with the source, the popup grew a row under the pointer."""
+
+    _run_qt(
+        '''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import PLACEHOLDER
+from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
+
+app = ensure_qt_app(["popup-shape"])
+edit = FluentScanLineEdit("12")
+edit.show(); app.processEvents()
+edit.set_field_state(editable=True)
+edit.binding_button.click()
+popup = edit._popup
+app.processEvents()
+assert popup.isVisible()
+assert edit.config_name_label.isVisible() and edit.config_name.isVisible()
+assert edit.config_name.text() == "\u2014" and PLACEHOLDER in edit.config_name.styleSheet()
+resting = popup.size()
+hint = popup.sizeHint()
+edit.set_field_state(editable=True, source="config", config_key="a_config_name_far_longer_than_the_switch_row")
+app.processEvents()
+assert popup.isVisible() and popup.size() == resting and popup.sizeHint() == hint, (resting, popup.size())
+assert edit.config_name.toolTip() == "a_config_name_far_longer_than_the_switch_row"
+assert "\u2026" in edit.config_name.text(), edit.config_name.text()
+assert edit.config_name.width() <= edit.source_switch.width()
+edit.set_field_state(editable=True, source="config", config_key="bias")
+app.processEvents()
+assert edit.config_name.text() == "bias" and popup.size() == resting
+edit.set_field_state(editable=True, source="api")
+app.processEvents()
+assert edit.config_name.text() == "\u2014" and popup.size() == resting
+popup.hide()
+'''
+    )
