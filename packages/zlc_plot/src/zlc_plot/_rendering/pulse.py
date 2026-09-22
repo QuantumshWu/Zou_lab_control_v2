@@ -465,8 +465,8 @@ def update_pulse_timeline(
         line.set_linestyle(pulse.period_boundary_dash)
         line.set_clip_on(True)
         line.set_zorder(pulse.base_zorder - 1.0)
-    # A spacer is hatched across the rows and the band, and carries no name:
-    # it is time given to a device, not a period anybody reads by name.
+    # A spacer is hatched across the rows and the band, and named in the
+    # band like any period: the hatch says what it is, the name which.
     spacers = tuple(mark for mark in periods if mark.spacer)
     hatches = _sync_rectangles(axis, artists, "pulse:spacers", len(spacers))
     for index, mark in enumerate(spacers):
@@ -484,7 +484,7 @@ def update_pulse_timeline(
     for index, mark in enumerate(periods):
         text = period_labels[index]
         text.set_position(((mark.start + mark.stop) / 2.0, row_top + band / 2.0))
-        text.set_text("" if mark.spacer else mark.name)
+        text.set_text(mark.name)
         text.set_ha("center")
         text.set_va("center")
         text.set_clip_on(True)

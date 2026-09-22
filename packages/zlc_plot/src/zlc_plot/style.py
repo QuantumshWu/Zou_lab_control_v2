@@ -456,7 +456,7 @@ class PulseStyleConfig:
     #: A bracket's feet are a fraction of the AXES' WIDTH ON SCREEN, capped
     #: at a fraction of the loop's own span.  Measured in data they grew
     #: with every zoom until they ran across the whole view.
-    repeat_foot_axes_fraction: float = 0.024
+    repeat_foot_axes_fraction: float = 0.012
     repeat_max_foot_fraction: float = 0.2
     repeat_bottom: float = -0.42
     repeat_bottom_step: float = 0.13
