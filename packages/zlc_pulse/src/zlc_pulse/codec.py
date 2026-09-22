@@ -28,6 +28,7 @@ from .binding import config_parameter_key
 from .model import (
     AnalogStep,
     MAXIMUM_REPEAT_COUNT,
+    PERIOD_KIND_PERIOD,
     OutputDelay,
     PulseBinding,
     PulseBracket,
@@ -204,6 +205,7 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
         "periods": [
             {
                 "period_id": period.period_id,
+                "kind": period.kind,
                 "duration": period.duration,
                 "unit": period.unit,
                 "states": list(period.states),
@@ -342,12 +344,14 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
                 )
             ),
             name=period["name"],
+            kind=period.get("kind", PERIOD_KIND_PERIOD),
         )
         for period in (
             _object(
                 item,
                 ("period_id", "duration", "unit", "states", "name", "analog_steps"),
                 "pulse period",
+                optional=("kind",),
             )
             for item in _array(tree["periods"], "pulse periods")
         )

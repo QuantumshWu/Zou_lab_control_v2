@@ -42,6 +42,7 @@ from zlc_pulse import (
     AnalogStep,
     MINIMUM_BRACKET_COUNT,
     OutputDelay,
+    PERIOD_KIND_SPACER,
     PulseBracket,
     PulseBinding,
     PulsePeriod,
@@ -426,8 +427,10 @@ def project_period(
     duration_binding = _binding_for(
         bindings, "duration", period.period_id
     )
+    spacer = period.kind == PERIOD_KIND_SPACER
     return PeriodVM(
         period_id=period.period_id,
+        kind=period.kind,
         name=period.name or period.period_id,
         duration=FieldVM(
             # DISPLAYED, THEN TYPED BACK.  ``_commit_duration`` parses what
@@ -437,6 +440,10 @@ def project_period(
             # duration the first time anyone touched its period.
             text=format_quantity(float(period.duration), "1"),
             **_binding_field_state(duration_binding, config_values, scan_active),
+            # A spacer's length is a property of the device it waits for (or
+            # a Config value): never scanned, never set by an API caller.
+            can_scan=not spacer,
+            can_api=not spacer,
             validator_kind=VALIDATOR_FLOAT,
             # One tick, and the shortest legal period, EXPRESSED IN THE UNIT
             # THIS BOX IS IN.  The grid the hardware plays on is 20 ns; the
@@ -517,6 +524,12 @@ def project_schedule(
         _nanoseconds(period.duration, period.unit)
         for period in (() if sequence is None else sequence.periods)
     )
+    # Spacers are counted in the time, not among the periods: they are the
+    # gaps between the periods someone wrote, and the cards number them so.
+    authored = tuple(
+        period for period in (() if sequence is None else sequence.periods)
+        if period.kind != PERIOD_KIND_SPACER
+    )
     bracket = None if sequence is None else sequence.bracket
     slots = () if sequence is None else sequence.scan_bindings
     return ScheduleVM(
@@ -527,11 +540,12 @@ def project_schedule(
         total_text=_readable(total_ns) if sequence is not None else "",
         total_tooltip=(
             f"{format_quantity(float(total_ns), '1')} ns over "
-            f"{len(periods)} period(s)"
+            f"{len(authored)} period(s)"
+            + (f" and {len(periods) - len(authored)} spacer(s)" if len(periods) > len(authored) else "")
             if sequence is not None
             else ""
         ),
-        period_count=len(periods),
+        period_count=len(authored),
         visible_text=f"{sum(1 for port in ports if port.visible)}/{len(ports)} ports",
         summary_text=(
             (Path(path).name if path else sequence.name)
@@ -786,6 +800,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
             start,
             start + _nanoseconds(period.duration, period.unit) * 1e-9,
             period.name or period.period_id,
+            spacer=period.kind == PERIOD_KIND_SPACER,
         )
         for start, period in zip(starts, sequence.periods)
         if _nanoseconds(period.duration, period.unit) > 0
@@ -1188,6 +1203,7 @@ class PulseEditorPresenter:
         view.analog_committed.connect(self._guarded(self.set_analog))
         view.delay_committed.connect(self._guarded(self.set_delay))
         view.insert_period_requested.connect(self._guarded(self.insert_period))
+        view.insert_spacer_requested.connect(self._guarded(self.insert_spacer))
         view.reorder_items_requested.connect(self._guarded(self.reorder_items))
         view.remove_period_requested.connect(self._guarded(self.remove_period))
         view.bracket_committed.connect(self._guarded(self.set_bracket))
@@ -1656,6 +1672,50 @@ class PulseEditorPresenter:
         )
         order.insert(position, ("period", new_id))
         self._apply_item_order(order, periods={p.period_id: p for p in (*periods, period)})
+
+    def insert_spacer(self, before_item: tuple[str, str] | None) -> None:
+        """Add a spacer: time between two periods for a slow device to settle.
+
+        Its lines start as what BOTH neighbours agree on -- a line high on one
+        side alone stays low, so a fresh spacer never does more than the
+        periods around it -- and the operator raises what the device needs.
+        Every DAC holds.  Its length copies the last spacer in the pulse, or
+        is one millisecond when it is the first.
+        """
+
+        if before_item is not None and (
+            not isinstance(before_item, tuple) or len(before_item) != 2
+            or any(not isinstance(value, str) for value in before_item)
+        ):
+            raise TypeError("insert target must be a schedule item tuple or None")
+        if self.sequence is None:
+            self._warn("add a period first: a spacer is time between periods")
+            return
+        periods = list(self.sequence.periods)
+        ids = [period.period_id for period in periods]
+        order = list(_sequence_item_order(self.sequence))
+        position = order.index(before_item) if before_item is not None else len(order)
+        period_position = sum(kind == "period" for kind, _key in order[:position])
+        neighbours = [
+            periods[index]
+            for index in (period_position - 1, period_position)
+            if 0 <= index < len(periods)
+        ]
+        lanes = len(self.sequence.target.raw_lanes)
+        states = tuple(int(all(period.states[lane] for period in neighbours)) for lane in range(lanes))
+        model = next((period for period in reversed(periods) if period.kind == PERIOD_KIND_SPACER), None)
+        new_id = _unique_id((*ids, *(period.name for period in periods)), "spacer")
+        spacer = PulsePeriod(
+            period_id=new_id,
+            duration=model.duration if model else 1.0,
+            unit=model.unit if model else "ms",
+            states=states,
+            analog_steps=(),
+            name="",
+            kind=PERIOD_KIND_SPACER,
+        )
+        order.insert(position, ("period", new_id))
+        self._apply_item_order(order, periods={p.period_id: p for p in (*periods, spacer)})
 
     def reorder_items(self, order: Sequence[tuple[str, str]]) -> None:
         self._apply_item_order(order)
@@ -4894,8 +4954,14 @@ def _carried_onto(sequence: PulseSequence, target: PulseTarget) -> dict[str, Any
 
 
 def _unique_id(existing: Sequence[str], stem: str) -> str:
+    """The first free ``<stem><n>``, counting from one.
+
+    A spacer's name is read off its card (it cannot be typed), so the first
+    spacer is "spacer1" -- not "spacer8" because seven periods came first.
+    """
+
     taken = set(existing)
-    ordinal = len(taken) + 1
+    ordinal = 1
     while f"{stem}{ordinal}" in taken:
         ordinal += 1
     return f"{stem}{ordinal}"

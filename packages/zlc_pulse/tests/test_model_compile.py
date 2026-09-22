@@ -499,3 +499,50 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
     assert resolve_scan_point(resolved, (100,)).periods[0].duration == 100
 
 
+
+
+def test_a_spacer_holds_its_dacs_and_takes_only_a_config_duration() -> None:
+    """A spacer is time between two authored periods, given to a slow device.
+
+    It holds every DAC, so it carries no analog step and no DAC field can be
+    bound on it; its length is the device's or a Config value, never scanned
+    and never set by an API caller.  The kind survives the file.
+    """
+
+    from zlc_pulse import PERIOD_KIND_PERIOD, PERIOD_KIND_SPACER
+
+    assert PulsePeriod("p", 20, "ns", (0, 0, 0, 0)).kind == PERIOD_KIND_PERIOD
+    spacer = PulsePeriod("spacer1", 20, "ns", (0, 0, 0, 0), kind=PERIOD_KIND_SPACER)
+    with np.testing.assert_raises(ValueError):
+        PulsePeriod("s", 20, "ns", (0, 0, 0, 0), (AnalogStep("dac", "edge", 0),), kind=PERIOD_KIND_SPACER)
+    with np.testing.assert_raises(ValueError):
+        PulsePeriod("s", 20, "ns", (0, 0, 0, 0), kind="gap")
+
+    def with_bindings(*bindings) -> PulseSequence:
+        return PulseSequence(
+            name="test",
+            target=_target(),
+            time_step_ns=20,
+            periods=(
+                PulsePeriod("p0", 20, "ns", (1, 0, 0, 0), (AnalogStep("dac", "edge", 0),)),
+                spacer,
+                PulsePeriod("p1", 20, "ns", (0, 1, 0, 0)),
+            ),
+            bindings=bindings,
+        )
+
+    duration = PulseFieldRef("duration", "spacer1")
+    for refused in (
+        PulseBinding(duration, "ns", scan=True),
+        PulseBinding(duration, "ns", source="api"),
+        PulseBinding(PulseFieldRef("dac", "spacer1", "dac"), "value", source="config", config_key="bias"),
+    ):
+        with np.testing.assert_raises(ValueError):
+            with_bindings(refused)
+
+    configured = with_bindings(PulseBinding(duration, "ns", source="config", config_key="shutter_time"))
+    compile_sequence(configured, StreamerParams(max_edges=8, bank_size=2), 50e6)
+    reread = sequence_from_tree(sequence_to_tree(configured))
+    assert [period.kind for period in reread.periods] == [
+        PERIOD_KIND_PERIOD, PERIOD_KIND_SPACER, PERIOD_KIND_PERIOD,
+    ]
