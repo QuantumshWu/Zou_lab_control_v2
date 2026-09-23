@@ -652,13 +652,13 @@ for _ in range(4):
 print('hidden row geometry', before_height, strip.height(), strip._indicator.height())
 assert strip.height() < before_height
 assert strip.size() == strip.sizeHint()
-assert strip._indicator.height() == strip.height(), 'selected gap did not follow the real layout'
+assert strip._indicator.height() == strip.pulse_cards()[0].height(), 'selected gap did not follow the real layout'
 assert strip.items() == timeline and strip._posts == posts
 assert strip.selection() == (None, None, 1)
 view.set_visible_ports(("d0", "d2"))
 for _ in range(4):
     app.processEvents()
-assert strip._indicator.height() == strip.height()
+assert strip._indicator.height() == strip.pulse_cards()[0].height()
 
 # The single-row push is the other way into that column, and it must obey the
 # same rule -- otherwise one API binding brings a hidden row back.
@@ -1241,10 +1241,10 @@ def click(widget):
     app.processEvents()
 
 def outlined():
-    """Everything currently wearing the selection border."""
-    return {item.period_id for item in cards if item.outline_colour() is not None} | {
+    """Everything currently wearing the selection fill."""
+    return {item.period_id for item in cards if item.is_selected()} | {
         f"post:{kind}" for kind, post in posts.items()
-        if post.outline_colour() is not None
+        if post.is_selected()
     }
 
 click(cards[0])
@@ -1557,5 +1557,169 @@ for button in (fill_d, clear_d, fill_a, clear_a):
     QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
 assert asked == [("on", "d0"), ("off", "d0"), ("off", "a0")], asked
 view.close()
+"""
+    )
+
+
+def test_a_press_lights_the_card_and_lifting_it_picks_it() -> None:
+    """Pressing an unpicked card lights it at once, so what a drag is about
+    to lift is the one lit; a press that never moves is still the click
+    that picks (or, on the picked one, clears); and the drag's first
+    movement makes the pick real, so it is the dragged one that stays lit
+    after the drop -- until the operator clears it."""
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["press-lights"])
+view = PulseScheduleView()
+assert view.set_schedule(vm)
+view.resize(1200, 700); view.show(); app.processEvents()
+strip = view.drag_container
+starts = []
+strip._begin_drag = starts.append
+
+def send(widget, kind, button, buttons, at=QtCore.QPoint(5, 5)):
+    QtWidgets.QApplication.sendEvent(widget, QtGui.QMouseEvent(
+        kind, QtCore.QPointF(at), QtCore.QPointF(widget.mapToGlobal(at)),
+        button, buttons, QtCore.Qt.NoModifier))
+    app.processEvents()
+
+def lit():
+    return {card.period_id for card in strip.pulse_cards() if card.is_selected()}
+
+cards = {card.period_id: card for card in strip.pulse_cards()}
+# The press lights it before anything is picked.
+send(cards["p2"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+assert lit() == {"p2"} and strip.selection() == (None, None, None), (lit(), strip.selection())
+# ...and the release is the click that picks it.
+send(cards["p2"], QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+assert strip.selection() == ("p2", None, None) and lit() == {"p2"}
+# A press on the other card moves the light without moving the pick...
+send(cards["p1"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+assert lit() == {"p1"} and strip.selection() == ("p2", None, None)
+# ...and lifting it (a press that moves) picks it for real.  The drag
+# (stubbed here) restores this selection when it ends, dropped or not.
+far = QtCore.QPoint(5 + QtWidgets.QApplication.startDragDistance() * 3, 5)
+send(cards["p1"], QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton, at=far)
+assert starts == [("period", "p1")], starts
+assert strip.selection() == ("p1", None, None) and lit() == {"p1"}
+# The reorder the drop proposes keeps the picked one picked.
+assert view.set_schedule(replace(vm, revision=3, periods=(periods[1], periods[0])))
+assert tuple(card.period_id for card in strip.pulse_cards()) == ("p2", "p1")
+assert strip.selection() == ("p1", None, None) and lit() == {"p1"}
+# Clicking the picked one clears it: the press changes nothing it shows.
+send(cards["p1"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+assert lit() == {"p1"}
+send(cards["p1"], QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+assert strip.selection() == (None, None, None) and lit() == set()
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+'''
+    )
+
+
+def test_a_spacer_card_is_narrow_named_by_the_editor_and_holds_every_dac() -> None:
+    """A spacer takes the period card narrowed: its name shown where every
+    card shows its name but not typable, its duration and unit editable,
+    its channel circles without labels, and each DAC one disabled Hold."""
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+from zlc_ui.pulse._layout import period_card_width, spacer_card_width
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["spacer-card"])
+spacer = PeriodVM(
+    "spacer1", "spacer1", FieldVM("1", can_scan=False, can_api=False), "ms", ("ns", "us", "ms"),
+    digital=(("d0", True),), analog=(("a0", "hold", FieldVM("0", editable=False)),), kind="spacer",
+)
+view = PulseScheduleView()
+assert view.set_schedule(replace(vm, periods=(periods[0], spacer, periods[1])))
+view.resize(1200, 700); view.show(); app.processEvents()
+card = view._cards["spacer1"]
+period = view._cards["p1"]
+assert card.width() == spacer_card_width() < period_card_width() == period.width()
+assert card.name_edit.text() == "spacer1" and not card.name_edit.isEnabled()
+assert period.name_edit.isEnabled()
+assert card.duration_edit.isEnabled() and card.unit_combo.isEnabled()
+assert card.checks["d0"].text() == "" and card.checks["d0"].toolTip() == "Gate"
+assert card.checks["d0"].isChecked() and card.checks["d0"].isEnabled()
+combo = card.bus_mode_combos["a0"]
+assert combo.count() == 1 and combo.currentText() == "Leave unchanged" and not combo.isEnabled()
+assert "a0" not in card.bus_value_edits
+assert card.title() == "Spacer" and period.title() == "Period 1/2"
+view.close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+'''
+    )
+
+
+def test_choosing_config_in_the_slot_popup_changes_a_text_not_the_popups_shape() -> None:
+    """The Config name row is always there, never wider than the switch
+    above it: choosing Config fills a text in place.  Shown and hidden
+    with the source, the popup grew a row under the pointer."""
+
+    _run_qt(
+        '''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import PLACEHOLDER
+from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
+
+app = ensure_qt_app(["popup-shape"])
+edit = FluentScanLineEdit("12")
+edit.show(); app.processEvents()
+edit.set_field_state(editable=True)
+edit.binding_button.click()
+popup = edit._popup
+app.processEvents()
+assert popup.isVisible()
+assert edit.config_name_label.isVisible() and edit.config_name.isVisible()
+assert edit.config_name.text() == "\u2014" and PLACEHOLDER in edit.config_name.styleSheet()
+resting = popup.size()
+hint = popup.sizeHint()
+edit.set_field_state(editable=True, source="config", config_key="a_config_name_far_longer_than_the_switch_row")
+app.processEvents()
+assert popup.isVisible() and popup.size() == resting and popup.sizeHint() == hint, (resting, popup.size())
+assert edit.config_name.toolTip() == "a_config_name_far_longer_than_the_switch_row"
+assert "\u2026" in edit.config_name.text(), edit.config_name.text()
+assert edit.config_name.width() <= edit.source_switch.width()
+edit.set_field_state(editable=True, source="config", config_key="bias")
+app.processEvents()
+assert edit.config_name.text() == "bias" and popup.size() == resting
+edit.set_field_state(editable=True, source="api")
+app.processEvents()
+assert edit.config_name.text() == "\u2014" and popup.size() == resting
+popup.hide()
+'''
+    )
+
+
+def test_a_bracket_post_shows_a_count_of_ten_thousand_whole() -> None:
+    """A post is as wide as five digits of count and no wider.  Cut to a
+    fixed 78 px it refused 10000 as too narrow; sized by the box's generic
+    hint it was nearly a card."""
+
+    _run_qt(
+        """
+from PyQt5 import QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse.schedule_view import BracketPost
+from zlc_ui.pulse._layout import px
+
+app = ensure_qt_app(["post-width"])
+post = BracketPost("b", "end", count=10000)
+post.show(); app.processEvents()
+assert post.width() == post.count_spin.width_for("10000") + 2 * px(7)
+assert post.width() < post.count_spin.sizeHint().width() + 2 * px(7)
+assert post.count_spin.text() == "10000" and not post.count_spin.property("numericError")
+post.close(); post.deleteLater()
 """
     )

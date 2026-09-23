@@ -55,6 +55,8 @@ def build(
     from ..console import ConsolePresenter
     from ..device_use import DeviceUseCoordinator
     from ..panel_catalog import task_console_fitting_spec
+    from functools import partial
+
     from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
     from ..viewer import FigureViewerPresenter
 
@@ -127,7 +129,7 @@ def build(
         build_figure_host=editor_render.build_host,
         save_figure_artifact=editor_render.save_figure_artifact,
         confirm_discard=getattr(view, "confirm_discard", None),
-        make_pulse_preview=build_pulse_preview_host,
+        make_pulse_preview=partial(build_pulse_preview_host, build_host=editor_render.build_host),
         resize_pulse_preview=resize_pulse_preview_host,
     )
 

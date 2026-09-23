@@ -614,7 +614,7 @@ class FitProjection:
         #: carries over when the coordinate plane did not change.  Consumed
         #: and released by the first _build_view.
         self._inherit_view = inherit_view
-        self._scoped_cache: tuple[object, OwnedSnapshot] | None = None
+        self._scoped_cache: tuple[object, OwnedSnapshot, object, dict] | None = None
         self._payload = None
         selected_revision = integer(revision, "projection revision", minimum=0)
         self._validate_input(data, self._spec)
@@ -641,7 +641,7 @@ class FitProjection:
     ) -> "FitProjection":
         """Capture immutable worker inputs using this projection's configuration."""
 
-        return FitProjection(
+        frozen = FitProjection(
             data=data,
             revision=revision,
             spec=self._spec,
@@ -651,6 +651,8 @@ class FitProjection:
             histogram_projection=self._histogram_projection,
             inherit_view=self._view,
         )
+        frozen._scoped_cache = self._scoped_cache
+        return frozen
 
     def _reproject(
         self,
@@ -667,6 +669,7 @@ class FitProjection:
             self._view,
             self._payload,
             self._histogram_projection,
+            self._scoped_cache,
         )
         try:
             self._context = context
@@ -680,6 +683,7 @@ class FitProjection:
                 self._view,
                 self._payload,
                 self._histogram_projection,
+                self._scoped_cache,
             ) = previous
             raise
 
@@ -820,6 +824,7 @@ class FitProjection:
         count = layout.shot_count if layout is not None else self._data.block.schema.repeat_domain.size
         narrowed = window is not None and window < count
         if not scope and not narrowed:
+            self._scoped_cache = None
             return self._data
         source = self._data
         schema = source.block.schema
@@ -835,14 +840,13 @@ class FitProjection:
             f"{domain}:{axis_id}={value!r}"
             for domain, axis_id, value in sorted(identity)
         )
-        key = (
-            source.ref.block_id,
-            source.ref.stream_generation,
-            source.ref.revision,
-            digest,
-        )
+        key = source.ref, digest
         if self._scoped_cache is not None and self._scoped_cache[0] == key:
             return self._scoped_cache[1]
+        scope_identity = tuple((domain, axis_id, type(value), value) for domain, axis_id, value in sorted(identity))
+        context = source.ref.stream_generation, scope_identity, schema.cell_domain, schema.value_schema
+        memo = (dict(self._scoped_cache[3]) if scope and self._scoped_cache is not None
+                and self._scoped_cache[2] == context else {})
 
         def reference_for(derived_schema: object) -> DatasetRevisionRef:
             # Deterministic: the same source and the same scope name the same
@@ -869,8 +873,9 @@ class FitProjection:
         if scope:
             scoped = restrict_snapshot(
                 scoped, value_selection(scoped.block.schema, terms), reference_for=reference_for,
+                slice_memo=memo,
             )
-        self._scoped_cache = (key, scoped)
+        self._scoped_cache = (key, scoped, context, memo)
         return scoped
 
     def _install_view(self, view: "DataView | None") -> None:
@@ -918,6 +923,8 @@ class FitProjection:
             return
         if self._view is None:
             raise RuntimeError("dataset payload projection requires a DataView")
+        if not isinstance(self._spec, HistogramPlot):
+            self._view._frequency_carry = None
         handler_for(self._spec).build_payload(self, self._view, self.display_state)
 
     def _rolling_payload(
@@ -1063,11 +1070,12 @@ class FitProjection:
         """
 
         count = int(state["bin_count"])
-        samples = view.samples
+        canonical_unit = schema_value_unit(view._schema, view._unit_registry)
+        display_unit = view._value_display_unit
         if frequency is not None:
             if binned_values is not None:
                 raise ValueError("a frequency table describes the whole binned pool")
-            canonical = np.asarray(samples.value.canonical)
+            integral = True
             offset, table = frequency
             occupied = np.flatnonzero(table)
             has_values = bool(occupied.size)
@@ -1075,14 +1083,16 @@ class FitProjection:
                 data_low = float(offset + int(occupied[0]))
                 data_high = float(offset + int(occupied[-1]))
         elif binned_values is None:
+            samples = view.samples
             canonical = np.asarray(samples.value.canonical)
             valid = np.asarray(samples.valid_mask, dtype=bool)
+            integral = canonical.dtype.kind in "biu"
         else:
             if binned_valid is None:
                 raise ValueError("binned validity is required with binned values")
             canonical = np.asarray(binned_values)
             valid = np.asarray(binned_valid, dtype=bool)
-        integral = canonical.dtype.kind in "biu"
+            integral = canonical.dtype.kind in "biu"
         if frequency is not None:
             pass
         elif integral:
@@ -1190,9 +1200,9 @@ class FitProjection:
                 if value is None:
                     return fallback
                 return float(
-                    samples.value.display_unit.convert_value_to(
+                    display_unit.convert_value_to(
                         np.asarray(float(value), dtype=float),
-                        samples.value.canonical_unit,
+                        canonical_unit,
                     )
                 )
 
@@ -1231,9 +1241,9 @@ class FitProjection:
             self._histogram_projection = previous
         assert previous is not None
         return np.asarray(
-            samples.value.canonical_unit.convert_value_to(
+            canonical_unit.convert_value_to(
                 previous.edges,
-                samples.value.display_unit,
+                display_unit,
             ),
             dtype=float,
         )
@@ -1604,15 +1614,13 @@ class FitProjection:
             unit = coordinate.canonical_unit.symbol
             labels = None
             if original.coordinate_labels is not None:
-                dimension = int(self._view._resolve(ref).dimension)
-                shape = self._view.samples.shape
-                positions = np.arange(shape[dimension], dtype=np.int64) * math.prod(shape[dimension + 1:])
-                source_values = self._view._domain(ref, positions).values
+                source_values = self._view._domain(ref).values
                 by_value = {value.canonical: original.coordinate_labels[value.index] for value in source_values}
                 labels = tuple(by_value[value] for value in values)
             projected.append((ref.domain.value, replace(
                 original, size=len(values), coordinates=values, unit=None if unit == "1" else unit,
                 coordinate_labels=labels, index_origin=0, coordinate_of=None,
+                coordinate_origins=None,
             )))
         return tuple(projected)
 
@@ -2009,6 +2017,15 @@ class FitProjection:
     def _viewport_in_canonical(self) -> Viewport:
         assert self._viewport is not None
         x_range, y_range = self._viewport
+        if isinstance(self._spec, PulseTimelinePlot):
+            # A pulse's canonical time is its source unit, scaled for the
+            # axis the way its selectors are; its rows carry no unit.  Asked
+            # for a coordinate x axis instead, every wheel notch on the
+            # timeline raised after the zoom had already been committed.
+            return (
+                None if x_range is None else self._pulse_display_range_to_source(x_range),
+                y_range,
+            )
         return (
             None if x_range is None else self._display_range_to_canonical(
                 x_range, self._x_selector_source()
@@ -2716,6 +2733,12 @@ class FitProjection:
     ) -> NumericRange:
         factor = self._pulse_x_factor()
         return NumericRange(value.low * factor, value.high * factor)
+
+    def _pulse_display_range_to_source(
+        self, value: NumericRange
+    ) -> NumericRange:
+        factor = self._pulse_x_factor()
+        return NumericRange(value.low / factor, value.high / factor)
 
     def _canonical_x_scalar_to_display(self, value: float) -> float:
         source = self._x_selector_source()

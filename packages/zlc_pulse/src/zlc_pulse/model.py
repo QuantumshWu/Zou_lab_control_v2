@@ -35,6 +35,13 @@ BINDING_API = "api"
 BINDING_CONFIG = "config"
 BINDING_DEFAULT = "default"
 BINDING_SOURCES = (BINDING_DEFAULT, BINDING_API, BINDING_CONFIG)
+#: A period is authored; a spacer is time given to a slow device between two
+#: authored periods.  A spacer's levels are set like any period's, but it
+#: holds every DAC, is never scanned and takes no API value: its length is a
+#: property of the device it waits for (or a Config value), not of the run.
+PERIOD_KIND_PERIOD = "period"
+PERIOD_KIND_SPACER = "spacer"
+PERIOD_KINDS = (PERIOD_KIND_PERIOD, PERIOD_KIND_SPACER)
 #: The coarsest and finest a pulse may be authored in.  A limit of this
 #: instrument, stated beside the second's own ladder: the board's clock is
 #: tens of nanoseconds, so a finer unit would only ever be refused by the
@@ -443,9 +450,14 @@ class PulsePeriod:
     states: tuple[int, ...] = ()
     analog_steps: tuple[AnalogStep, ...] = ()
     name: str = ""
+    kind: str = PERIOD_KIND_PERIOD
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "period_id", _identifier(self.period_id, "period_id"))
+        kind = _text(self.kind, "period kind")
+        if kind not in PERIOD_KINDS:
+            raise ValueError(f"period kind must be one of {PERIOD_KINDS}, got {kind!r}")
+        object.__setattr__(self, "kind", kind)
         duration = _number(self.duration, "period duration")
         if duration <= 0:
             raise ValueError("period duration must be positive")
@@ -460,6 +472,8 @@ class PulsePeriod:
             raise TypeError("analog_steps must contain AnalogStep values")
         if len({step.port for step in steps}) != len(steps):
             raise ValueError("a period has at most one analog step per port")
+        if kind == PERIOD_KIND_SPACER and steps:
+            raise ValueError("a spacer holds every DAC; it has no analog steps")
         object.__setattr__(self, "analog_steps", steps)
         object.__setattr__(self, "name", _text(self.name, "period name", empty=True))
 
@@ -635,6 +649,14 @@ class PulseSequence:
             ref = binding.field_ref
             if ref.kind in (FIELD_DURATION, FIELD_DAC) and ref.period_id not in by_period:
                 raise ValueError(f"binding references missing period {ref.period_id!r}")
+            if ref.kind in (FIELD_DURATION, FIELD_DAC) and by_period[ref.period_id].kind == PERIOD_KIND_SPACER:
+                if ref.kind == FIELD_DAC:
+                    raise ValueError(f"spacer {ref.period_id!r} holds its DACs; nothing there can be bound")
+                if binding.scan or binding.source == BINDING_API:
+                    raise ValueError(
+                        f"spacer {ref.period_id!r} duration can take a Config value but is never scanned "
+                        "or set by API"
+                    )
             if ref.kind == FIELD_DAC:
                 port = target.by_key.get(ref.port)
                 if port is None or port.kind != PORT_DAC:
@@ -778,6 +800,9 @@ class PulseSequence:
 
 __all__ = [
     "ANALOG_MODES",
+    "PERIOD_KIND_PERIOD",
+    "PERIOD_KIND_SPACER",
+    "PERIOD_KINDS",
     "DAC_OFFSET_BINARY",
     "BINDING_CONFIG",
     "FIELD_DAC",

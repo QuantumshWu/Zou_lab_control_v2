@@ -146,9 +146,13 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     if isinstance(spec.cell, HistogramPlot):
         data = view.facet(spec, bins=bins)
         values, valid = view.samples.value.canonical.reshape(-1), view.samples.valid_mask.reshape(-1)
-        domain = view._domain(spec.facet, view._all_positions())
+        domain = view._domain(spec.facet)
+        shape = view.samples.shape
+        spread = [1] * len(shape)
+        spread[view._resolve(spec.facet).dimension] = -1
+        codes = np.broadcast_to(domain.codes.reshape(spread), shape).reshape(-1)
         for cell in data.cells:
-            positions = np.flatnonzero(domain.codes == cell.facet_index)
+            positions = np.flatnonzero(codes == cell.facet_index)
             expected, _edges = np.histogram(values[positions[valid[positions]]], bins=bins)
             np.testing.assert_array_equal(cell.payload.counts[0], expected)
         return
@@ -171,8 +175,7 @@ def test_facet_projection_takes_the_dense_tensor_path(
 
     view = DataView(_scan_of_frames())
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("facet allocated generic element positions")
-
-    monkeypatch.setattr(DataView, "_all_positions", forbidden)
     view.facet(spec, bins=bins)
+    for resolved in view._axis_cache.values():
+        if resolved.retained_domain is not None:
+            assert resolved.retained_domain.codes.size == view._schema.physical_shape[resolved.dimension]

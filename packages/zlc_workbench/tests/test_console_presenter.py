@@ -7906,6 +7906,157 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     assert not binding.editor_host.describe_display().result().value.selectors
 
 
+def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
+    """Once the device is free, a restart still waits for one of two things
+    and the card names it: the old run has not finished stopping, or a
+    panel's projection has still to read that run's generation from the
+    plane.  A bare "restart queued" was a ten-minute mystery.
+
+    Only the READ holds it.  A surface already projected -- rendering in
+    the child, waiting in a cohort, waiting for the screen -- travels on
+    its own copy, and a panel that still has to read some OTHER generation
+    is nobody's business here either."""
+
+    from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE
+    from zlc_workbench.logic import LogicBinding, LogicDraft
+    from zlc_workbench.presentation import PendingProjection
+
+    generation = object()
+    binding = LogicBinding("camera_measurement", LOGIC_NODE, LogicDraft(values={}))
+    binding.pending = SimpleNamespace(waiting_for=())
+    stopping = SimpleNamespace(
+        running=True, error="", phase="stopping", terminal=False, progress=None, warnings=(),
+    )
+    binding.host = SimpleNamespace(
+        running=True, observation=stopping, instance_id="camera_measurement", generation=generation,
+    )
+    old_shot = object()
+    other_shot = object()
+
+    def roots_of(publication):
+        owner = "camera_measurement" if publication is old_shot else "elsewhere"
+        return (SimpleNamespace(stream_id=SimpleNamespace(value=owner), generation=generation),)
+
+    port = SimpleNamespace(
+        surface_busy=True,
+        pending_projections=(PendingProjection(old_shot, 42.0), PendingProjection(other_shot, 99.0)),
+    )
+    console = SimpleNamespace(
+        panels={
+            "panel-1": SimpleNamespace(panel_id="panel-1", port=port, configuration=None),
+        },
+        session=SimpleNamespace(signal_plane=SimpleNamespace(publication_roots=roots_of)),
+        _finalize_logic_binding=lambda _binding: SimpleNamespace(issues=()),
+        _observation_status=ConsolePresenter._observation_status,
+        _generation_holders=lambda host: ConsolePresenter._generation_holders(console, host),
+    )
+
+    state, status = ConsolePresenter._logic_state(console, binding)
+    assert state == "running" and status == "restart queued: the last run is still stopping (stopping)"
+
+    binding.host.running = False
+    stopping.running = False
+    stopping.phase = "cancelled"
+    state, status = ConsolePresenter._logic_state(console, binding)
+    assert state == "running"
+    assert status == "restart queued: panel-1 still to read the last run (42 s)", status
+
+    # Projected: the render may travel for as long as it likes.
+    port.pending_projections = (PendingProjection(other_shot, 99.0),)
+    assert ConsolePresenter._logic_state(console, binding)[1] == "restart queued"
+    assert ConsolePresenter._generation_holders(console, binding.host) == ()
+
+    # A retarget's candidate port reads the plane too, and holds the same way.
+    candidate = SimpleNamespace(pending_projections=(PendingProjection(old_shot, 3.0),))
+    console.panels["panel-1"].configuration = ("retarget", port, candidate, object(), object())
+    assert ConsolePresenter._generation_holders(console, binding.host) == (("panel-1", 3.0),)
+    console.panels["panel-1"].configuration = None
+
+    binding.pending = SimpleNamespace(waiting_for=("camera_measurement",))
+    assert ConsolePresenter._logic_state(console, binding)[1] == "waiting for camera_measurement"
+
+
+def test_the_beat_polls_logic_even_when_a_display_step_fails() -> None:
+    """A display step that raises is the slot guard's to report; the node
+    hosts are polled regardless.  Skipping the poll left a stopping host
+    unable to accept its terminal completion, its device lease unreleased
+    and a queued restart waiting for as long as the display defect lasted."""
+
+    calls: list[str] = []
+
+    def settle_panel_hosts() -> None:
+        raise RuntimeError("a panel host exploded")
+
+    console = SimpleNamespace(
+        board=SimpleNamespace(
+            wake=SimpleNamespace(take=lambda: calls.append("take")),
+            tick=lambda **_kw: calls.append("tick"),
+            commit=lambda **_kw: calls.append("commit"),
+        ),
+        _closing=False,
+        _paused=False,
+        _drain_panel_interactions=lambda: calls.append("interactions"),
+        _poll_retired_plot_hosts=lambda: calls.append("retired"),
+        _settle_panel_hosts=settle_panel_hosts,
+        _reconcile_panel_derivations=lambda: calls.append("derivations"),
+        _report_panel_errors=lambda: calls.append("errors"),
+        poll_logic=lambda: calls.append("logic"),
+        _refresh_signal_choices=lambda: calls.append("choices"),
+    )
+
+    with pytest.raises(RuntimeError, match="a panel host exploded"):
+        ConsolePresenter.beat(console)
+    assert "logic" in calls, calls
+    assert "tick" not in calls and "commit" not in calls, calls
+
+
+def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
+    """Removing a routed region restores the draft from before it -- until a
+    run has started with the routed values.  From then on they are the
+    producer's own: removing the region leaves what the latest run used."""
+
+    import json
+
+    from zlc_atom.nodes.scan import ScanAxis, ScanPlan
+    from zlc_atom.nodes.seamless_scan import LOGIC_NODE
+    from zlc_workbench.logic import LogicBinding, LogicDraft
+
+    original = json.dumps(ScanPlan((ScanAxis("pulse:param:bias", (0.0, 1.0, 2.0)),)).to_tree())
+    routed = json.dumps(ScanPlan((ScanAxis("pulse:param:bias", (0.4, 0.9)),)).to_tree())
+    binding = LogicBinding("scan-owner", LOGIC_NODE, LogicDraft(values={"plan": original}))
+    console = SimpleNamespace(
+        logic={"scan-owner": binding},
+        _task_command_blocked=lambda _action: False,
+        _refresh_console_projection=lambda: None,
+        refresh_logic_editor=lambda _node: None,
+        _refresh_producer_projections=lambda _node: None,
+        _report=lambda *_args, **_kwargs: None,
+        _discard_candidate=lambda _binding, _candidate: None,
+    )
+    console.update_logic_draft = lambda node_id, **kwargs: (
+        ConsolePresenter.update_logic_draft(console, node_id, **kwargs)
+    )
+    # The region's write, the way routing does it: the patch, then the undo.
+    assert console.update_logic_draft("scan-owner", values={"plan": routed})
+    binding.selection_restore["plan"] = ("panel-1", original)
+
+    started: list[bool] = []
+    lease = SimpleNamespace(release=lambda: None)
+    candidate = SimpleNamespace(
+        reservation=SimpleNamespace(commit=lambda: lease),
+        node=object(),
+        host=SimpleNamespace(start=lambda **_kwargs: started.append(True), running=False),
+        previews=(),
+        run_root=None,
+        input_summary=None,
+    )
+    assert ConsolePresenter._activate_candidate(console, binding, candidate) is True
+    assert started and binding.selection_restore == {}
+
+    ConsolePresenter._restore_producer_draft(console, "panel-1")
+    assert binding.draft.values["plan"] == routed, "the run's values are the producer's own"
+
+
 def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
     """Which gestures mean a producer's setting is the producer's declaration.
 

@@ -4536,8 +4536,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _pulse_display_range_to_source(
         self, value: NumericRange
     ) -> NumericRange:
-        factor = self._projected._pulse_x_factor()
-        return NumericRange(value.low / factor, value.high / factor)
+        return self._projected._pulse_display_range_to_source(value)
 
 
     def _viewport_x_to_axes(self, value: NumericRange) -> NumericRange:
@@ -4967,6 +4966,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._facet_focus_callbacks.clear()
                 self._fit_callbacks.clear()
                 self._selection_subscriptions.clear()
+                self._projection._scoped_cache = None
         if logical_completion is not None and not logical_completion.done():
             logical_completion.set_exception(RuntimeError("plot session is closed"))
         caller_name = current_thread().name

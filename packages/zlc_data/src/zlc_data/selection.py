@@ -280,17 +280,41 @@ def resolve_selection_indices(
     ):
         # An interval asks which coordinates lie BETWEEN two numbers, and
         # that order exists only on an axis that is numeric throughout.
-        if any(
-            value is not None
-            and (isinstance(value, (bool, str)) or not isinstance(value, Real))
-            for value in axis.coordinate_values()
-        ):
-            raise TypeError(f"axis {axis.axis_id} coordinates are not entirely numeric")
-        indices = tuple(
-            index
-            for index, value in enumerate(axis.coordinate_values())
-            if value is not None and term.lower <= value <= term.upper
-        )
+        coordinates = axis.coordinate_values()
+        if isinstance(coordinates, np.ndarray):
+            # AxisSpec already normalized this entire numeric vector. Keep
+            # the scalar comparison's short circuit for unrepresentable upper
+            # bounds when the lower bound selects nothing.
+            lower = term.lower
+            if coordinates.dtype.kind == "f" and type(lower) is int:
+                # An integer bound can lie between two float64 coordinates.
+                # Round inward so NumPy cannot include a value outside it.
+                lower = float(lower)
+                if lower < term.lower:
+                    lower = np.nextafter(lower, np.inf)
+            selected = coordinates >= lower
+            if bool(np.any(selected)):
+                upper = term.upper
+                if coordinates.dtype.kind == "f" and type(upper) is int:
+                    upper = float(upper)
+                    if upper > term.upper:
+                        upper = np.nextafter(upper, -np.inf)
+                selected &= coordinates <= upper
+            indices = np.flatnonzero(selected)
+        else:
+            # Mixed coordinates and integers beyond ndarray precision retain
+            # their exact Python comparison semantics.
+            if any(
+                value is not None
+                and (isinstance(value, (bool, str)) or not isinstance(value, Real))
+                for value in coordinates
+            ):
+                raise TypeError(f"axis {axis.axis_id} coordinates are not entirely numeric")
+            indices = [
+                index
+                for index, value in enumerate(coordinates)
+                if value is not None and term.lower <= value <= term.upper
+            ]
     else:
         # One exact coordinate -- a number, a text or null -- is an equality
         # question every axis answers, whatever else it holds: an axis whose
@@ -299,13 +323,13 @@ def resolve_selection_indices(
         # coordinate once, so the answer is one position.
         position = axis.coordinate_position(term.lower)
         indices = () if position is None else (position,)
-    if not indices:
+    if len(indices) == 0:
         raise EmptySelection(
             f"coordinate selection is empty on axis {axis.axis_id}"
         )
     if indices[-1] - indices[0] + 1 == len(indices):
-        return range(indices[0], indices[-1] + 1), False
-    return indices, False
+        return range(int(indices[0]), int(indices[-1]) + 1), False
+    return tuple(indices.tolist() if isinstance(indices, np.ndarray) else indices), False
 
 
 __all__ = [

@@ -6,6 +6,7 @@ from collections.abc import MutableMapping
 from typing import Any
 
 import numpy as np
+from matplotlib.lines import Line2D
 from matplotlib.text import Text
 
 from .._pulse_time import pulse_content_bounds, pulse_time_scale
@@ -87,6 +88,102 @@ class SpanLabel(Text):
             return
         self.fitted = True
         super().draw(renderer)
+
+
+class RepeatBracketSide(Line2D):
+    """One side of a loop bracket: a rail from foot to foot, with feet whose
+    length is a fraction of the axes' width ON SCREEN.
+
+    Drawn in data units the feet grew with every zoom, until a loop that
+    spanned the view had feet running across all of it.  So the foot is
+    measured at draw time against the axes' pixel width under the current
+    transform, and capped at a fraction of the loop's own span so the two
+    feet of a short loop never cross.
+    """
+
+    #: The loop in data (time) units and which end this side stands at.
+    start: float = 0.0
+    stop: float = 0.0
+    at_start: bool = True
+    #: The rail's vertical extent in axis units, and how far above y_high
+    #: the top rail is lifted, in points: nested loops stack by points so
+    #: that each line clears the label of the one inside it at any size.
+    y_low: float = 0.0
+    y_high: float = 0.0
+    lift_pt: float = 0.0
+    #: The foot as a fraction of the axes' width, and its cap as a fraction
+    #: of the loop's span.
+    foot_fraction: float = 0.0
+    max_foot_fraction: float = 0.0
+
+    def draw(self, renderer: Any) -> None:
+        axes = self.axes
+        if axes is None or not self.get_visible():
+            self.stale = False
+            return
+        pixels = axes.transData.transform([(self.start, 0.0), (self.stop, 0.0)])[:, 0]
+        span_pixels = abs(float(pixels[1] - pixels[0]))
+        foot_pixels = min(
+            float(axes.get_window_extent(renderer).width) * self.foot_fraction,
+            span_pixels * self.max_foot_fraction,
+        )
+        span = self.stop - self.start
+        foot = span * foot_pixels / span_pixels if span_pixels > 0.0 else 0.0
+        x = self.start if self.at_start else self.stop
+        toe = x + foot if self.at_start else x - foot
+        top = self.y_high
+        if self.lift_pt:
+            unit = axes.transData.transform([(0.0, 0.0), (0.0, 1.0)])[:, 1]
+            pixels_per_unit = abs(float(unit[1] - unit[0]))
+            if pixels_per_unit > 0.0:
+                top += self.lift_pt * renderer.points_to_pixels(1.0) / pixels_per_unit
+        self.set_data((toe, x, x, toe), (top, top, self.y_low, self.y_low))
+        super().draw(renderer)
+
+
+def _room_above(axis: Any, room_pt: float, below: float) -> float:
+    """Axis units that put ``room_pt`` points above a line ``below`` units
+    up from the bottom limit, once the limits are set so.
+
+    The points are what the stacked loop lines and the outermost label
+    need; the axes' height on screen is what they are measured against.
+    An axes too short to hold them gives up under half of itself.
+    """
+
+    figure = axis.figure
+    room_pixels = room_pt * figure.dpi / 72.0
+    axes_pixels = axis.get_position().height * figure.get_figheight() * figure.dpi
+    room_pixels = min(room_pixels, 0.45 * axes_pixels)
+    return room_pixels * below / (axes_pixels - room_pixels)
+
+
+def _sync_bracket_sides(
+    axis: Any, artists: MutableMapping[str, Any], key: str, count: int
+) -> list[RepeatBracketSide]:
+    sides: list[RepeatBracketSide] = artists.setdefault(key, [])
+    while len(sides) < count:
+        side = RepeatBracketSide([], [])
+        side.set_clip_on(True)
+        axis.add_line(side)
+        sides.append(side)
+    for index, side in enumerate(sides):
+        side.set_visible(index < count)
+    return sides
+
+
+def _sync_annotations(
+    axis: Any, artists: MutableMapping[str, Any], key: str, count: int
+) -> list[Any]:
+    """Texts anchored at a data point and offset from it by points."""
+
+    notes: list[Any] = artists.setdefault(key, [])
+    while len(notes) < count:
+        note = axis.annotate("", xy=(0.0, 0.0), xytext=(0.0, 0.0), textcoords="offset points")
+        note.set_clip_on(True)
+        notes.append(note)
+    for index, note in enumerate(notes):
+        note.set_visible(index < count)
+    return notes
 
 
 def _sync_span_labels(
@@ -355,19 +452,40 @@ def update_pulse_timeline(
     periods = payload.periods
     band = pulse.period_band_height if periods else 0.0
     row_top = row_count - 1 + row_height / 2.0
+    # Boundaries and spacer hatches stand exactly as tall as the innermost
+    # bracket's rails (its foot to its top), so the three read as one frame
+    # around the pulse; running from the axes' floor to the band's top they
+    # overshot the bracket at both ends and read as a second, unrelated grid.
+    frame_low = pulse.repeat_bottom
+    frame_high = row_count + band + pulse.repeat_top_offset
     edges = tuple(mark.start for mark in periods) + (
         (periods[-1].stop,) if periods else ()
     )
     boundaries = _sync_lines(axis, artists, "pulse:period_bounds", len(edges))
     for index, edge in enumerate(edges):
         line = boundaries[index]
-        line.set_data((edge, edge), (pulse.ylim_bottom, row_top + band))
+        line.set_data((edge, edge), (frame_low, frame_high))
         line.set_color(style.palette.pulse_period)
         line.set_linewidth(pulse.period_boundary_linewidth)
         line.set_alpha(pulse.period_boundary_alpha)
-        line.set_linestyle("-")
+        line.set_linestyle(pulse.period_boundary_dash)
         line.set_clip_on(True)
         line.set_zorder(pulse.base_zorder - 1.0)
+    # A spacer is hatched across the rows and the band, and named in the
+    # band like any period: the hatch says what it is, the name which.
+    spacers = tuple(mark for mark in periods if mark.spacer)
+    hatches = _sync_rectangles(axis, artists, "pulse:spacers", len(spacers))
+    for index, mark in enumerate(spacers):
+        rectangle = hatches[index]
+        rectangle.set_xy((mark.start, frame_low))
+        rectangle.set_width(mark.stop - mark.start)
+        rectangle.set_height(frame_high - frame_low)
+        rectangle.set_facecolor("none")
+        rectangle.set_edgecolor(style.palette.pulse_period)
+        rectangle.set_linewidth(0.0)
+        rectangle.set_hatch(pulse.spacer_hatch)
+        rectangle.set_alpha(pulse.spacer_alpha)
+        rectangle.set_zorder(pulse.base_zorder - 1.0)
     period_labels = _sync_span_labels(axis, artists, "pulse:period_labels", len(periods))
     for index, mark in enumerate(periods):
         text = period_labels[index]
@@ -386,26 +504,24 @@ def update_pulse_timeline(
         text.span = (mark.start, mark.stop)
         text.pad_pt = pulse.label_fit_pad_pt
         text.set_visible(bool(mark.name))
-    left_brackets = _sync_lines(
+    left_brackets = _sync_bracket_sides(
         axis,
         artists,
         "pulse:loop_left",
         len(loop_markers),
     )
-    right_brackets = _sync_lines(
+    right_brackets = _sync_bracket_sides(
         axis,
         artists,
         "pulse:loop_right",
         len(loop_markers),
     )
-    bracket_labels = _sync_texts(
+    bracket_labels = _sync_annotations(
         axis,
         artists,
         "pulse:loop_labels",
         len(loop_markers),
     )
-    home_span = right_limit - left_limit
-    tick_base = home_span * pulse.repeat_tick_fraction
     for index, marker in enumerate(loop_markers):
         start, stop, label_value = marker.start, marker.stop, marker.label
         color = style.palette.bracket_cycle[index % len(style.palette.bracket_cycle)]
@@ -413,25 +529,20 @@ def update_pulse_timeline(
         # therefore grow around earlier ones; reversing this made an internal
         # Bracket visually surround the complete Run loop.
         outer_depth = index
-        y_low = pulse.repeat_bottom - pulse.repeat_bottom_step * outer_depth
-        y_high = (
-            row_count + band + pulse.repeat_top_offset + pulse.repeat_top_step * outer_depth
-        )
-        tick = min(
-            max(tick_base, home_span * pulse.repeat_min_foot_fraction),
-            (stop - start) * pulse.repeat_max_foot_fraction,
-        )
+        y_low = frame_low - pulse.repeat_bottom_step * outer_depth
+        y_high = frame_high
+        lift_pt = pulse.repeat_top_step_pt * outer_depth
         left_line = left_brackets[index]
         right_line = right_brackets[index]
-        left_line.set_data(
-            (start + tick, start, start, start + tick),
-            (y_high, y_high, y_low, y_low),
-        )
-        right_line.set_data(
-            (stop - tick, stop, stop, stop - tick),
-            (y_high, y_high, y_low, y_low),
-        )
-        for line in (left_line, right_line):
+        for line, at_start in ((left_line, True), (right_line, False)):
+            line.start = start
+            line.stop = stop
+            line.at_start = at_start
+            line.y_low = y_low
+            line.y_high = y_high
+            line.lift_pt = lift_pt
+            line.foot_fraction = pulse.repeat_foot_axes_fraction
+            line.max_foot_fraction = pulse.repeat_max_foot_fraction
             line.set_color(color)
             line.set_alpha(pulse.repeat_alpha)
             line.set_linewidth(pulse.repeat_linewidth)
@@ -439,12 +550,9 @@ def update_pulse_timeline(
             line.set_clip_on(True)
             line.set_zorder(pulse.repeat_bracket_zorder + index)
         text = bracket_labels[index]
-        text.set_position(
-            (
-                stop - tick * pulse.repeat_label_x_fraction,
-                y_high + pulse.repeat_label_y_offset,
-            )
-        )
+        text.xy = (stop, y_high)
+        offset_x, offset_y = pulse.repeat_label_offset_pt
+        text.set_position((offset_x, offset_y + lift_pt))
         text.set_text(label_value)
         text.set_ha("right")
         text.set_va("bottom")
@@ -459,12 +567,6 @@ def update_pulse_timeline(
     top_limit = row_count + band + pulse.ylim_top_offset
     bottom_limit = pulse.ylim_bottom
     if loop_markers:
-        top_limit = (
-            row_count
-            + band
-            + pulse.repeat_ylim_top_offset
-            + pulse.repeat_ylim_top_step * max(0, len(loop_markers) - 1)
-        )
         # Every bracket's foot stands INSIDE the axes, or its bottom rail
         # is clipped away at the edge.  The footer clears the second
         # bracket's foot by a margin; a deeper bracket keeps that same
@@ -475,6 +577,13 @@ def update_pulse_timeline(
         )
         margin = pulse.repeat_bottom - pulse.repeat_bottom_step - pulse.ylim_bottom
         bottom_limit = min(bottom_limit, lowest_foot - margin)
+        # The top rails stack by points above the innermost one and the
+        # outermost carries its label: room for exactly that, on screen.
+        innermost_top = frame_high
+        room_pt = (
+            pulse.repeat_top_step_pt * (len(loop_markers) - 1) + pulse.repeat_ylim_room_pt
+        )
+        top_limit = innermost_top + _room_above(axis, room_pt, innermost_top - bottom_limit)
     axis.set_ylim(bottom_limit, top_limit)
     axis.set_yticks([row_index[key] for key in row_keys])
     row_labels = [channel.label for channel in channels] + [

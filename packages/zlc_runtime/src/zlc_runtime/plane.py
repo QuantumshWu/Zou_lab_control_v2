@@ -351,7 +351,7 @@ class SignalValue:
     def values(self):
         """The block's array.  Read-only by ownership: never mutate a frozen block."""
 
-        return self.block.values
+        return self.block.materialize().values
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -740,7 +740,7 @@ def _merge_event_records(
 
 def _merge_packed_event_records(records: tuple[bytes, ...]) -> Mapping[str, object]:
     """Expand the exact retained records only for a provenance consumer."""
-    decoded: dict[bytes, Mapping[str, object]] = {}
+    decoded: dict[bytes, Mapping[str, object]] = {b"": _EMPTY_MAPPING}
     def unpack():
         for packed in records:
             record = decoded.get(packed)
@@ -787,8 +787,8 @@ def _restamp_snapshot(
 
 def _indexed_schema(
     event_schema: DatasetSchema,
-    indices: tuple[int, ...],
-    times: tuple[float, ...] | None,
+    indices: np.ndarray,
+    times: np.ndarray | None,
 ) -> DatasetSchema:
     point_count = event_schema.point_domain.size
     if any(
@@ -866,29 +866,42 @@ def _materialize_indexed_dataset(
     schema = materialization.schema
     if schema is None:
         schema = _indexed_schema(
-            event_schema, tuple(range(start - latest_index, 1)),
-            None if materialization.times is None else _row_times(materialization.times),
+            event_schema, np.arange(start - latest_index, 1, dtype=np.int64),
+            None if materialization.times is None else np.asarray(_row_times(materialization.times), dtype=np.float64),
         )
     point_count = event_schema.point_domain.size
     basis = materialization.basis
-    segments = {}
+    retained = ()
     if basis is not None:
-        for origin, planes in zip(basis.snapshot.block.segment_origins, basis.snapshot.block.segments, strict=True):
-            index = basis.start + origin[1] // point_count
-            if start <= index <= latest_index:
-                segments[index] = planes
-    segments.update((index, snapshot.block.as_segment()) for index, snapshot in materialization.appended
-                    if start <= index <= latest_index)
-    ordered = sorted(segments)
-    origins = np.zeros((len(ordered), 2), dtype=np.int64)
-    origins[:, 1] = (np.asarray(ordered, dtype=np.int64) - start) * point_count
-    sizes = np.frombuffer(np.asarray(event_schema.physical_shape[:2], dtype=np.int64).tobytes(), dtype=np.int64)
+        previous = basis.snapshot.block
+        shift = (start - basis.start) * point_count
+        # Segments are grouped by event; a window boundary falls between
+        # groups even when placements inside one event are unordered.
+        first = int(np.searchsorted(previous.segment_origins[:, 1], shift))
+        retained = previous.segments[first:]
+    # The input already orders appends after the retained basis, without overlap.
+    appended, origins, sizes = [], [], []
+    for index, snapshot in materialization.appended:
+        block = snapshot.block
+        point_origin = (index - start) * point_count
+        if block.values is None:
+            appended.extend(block.segments)
+            origins.extend(block.segment_origins + (0, point_origin))
+            sizes.extend(block.segment_shapes)
+        else:
+            appended.append(block.as_segment())
+            origins.append((0, point_origin))
+            sizes.append(event_schema.physical_shape[:2])
+    origins = np.asarray(origins, dtype=np.int64).reshape(-1, 2)
+    sizes = np.asarray(sizes, dtype=np.int64).reshape(-1, 2)
+    if retained:
+        origins = np.concatenate((previous.segment_origins[first:] - (0, shift), origins))
+        sizes = np.concatenate((previous.segment_shapes[first:], sizes))
     block = DataBlock._from_owned_segments(
         BlockId(f"{materialization.signal_name}.indexed/{start}:{latest_index}"),
         DatasetRevision(materialization.sequence), schema,
         window=IndexedWindow(start, latest_index, materialization.stable_since),
-        segments=tuple(segments[index] for index in ordered), origins=origins,
-        shapes=np.broadcast_to(sizes, (len(ordered), 2)),
+        segments=(*retained, *appended), origins=origins, shapes=sizes,
     )
     return OwnedSnapshot(block.ref(materialization.generation), block)
 
@@ -1132,7 +1145,8 @@ def _indexed_materialization_input(
     stamped = next(iter(events.values()))[3] is not None
     row_times: list[float | None] = []
     append_from = start if basis is None else basis.latest + 1
-    for index in range(start, primary_index + 1):
+    # Without times or provenance, the basis already owns every earlier row.
+    for index in range(start if stamped or include_record else append_from, primary_index + 1):
         held = events.get(index)
         if index == primary_index:
             current = held is not None and held[0] == sequence
@@ -2726,7 +2740,8 @@ class SignalDataPlane:
                 # Keep their latest prepared answers in this existing cache.
                 seed = max((
                     item for item in state.materialized.values()
-                    if isinstance(item.record, Mapping) and item.record_sequence <= sequence
+                    if (isinstance(item.record, Mapping) and item.record_sequence <= sequence)
+                    or (defer_record and item.record is not None and item.record_sequence == sequence)
                 ), key=lambda item: item.record_sequence, default=None)
                 if seed is not None:
                     materialized_record, record_sequence = seed.record, seed.record_sequence
@@ -3150,8 +3165,11 @@ class SignalDataPlane:
             pending.extend(self._publication_parents[current])
             for value in current.signals.values():
                 block = value.snapshot.block
-                for array in (block.values, block.sigma, getattr(block.validity, "mask", None)):
-                    if array is None:
+                arrays = ((array for segment in block.segments for array in segment)
+                          if block.values is None else
+                          (block.values, block.sigma, getattr(block.validity, "mask", None)))
+                for array in arrays:
+                    if array is None or isinstance(array, bool):
                         continue
                     owner = array
                     while isinstance(owner, np.ndarray) and owner.base is not None:

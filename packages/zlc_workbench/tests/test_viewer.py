@@ -1449,9 +1449,13 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
         for sequence in range(1, 4):
             plane.commit_live(node, {"value": LiveDatasetOutput(
                 declaration, _snapshot, DatasetCoverage(sequence * repeats * points, 3 * repeats * points),
-                canonical, ((sequence - 1) * repeats, 0), {"shot": sequence},
+                canonical, ((sequence - 1) * repeats, 0), {} if sequence == 1 else {"shot": sequence},
             )}, worker_source=None if parent is None else ("scan/value", parent))
             parent = plane.latest_publication("scan/value")
+            if sequence == 1:
+                _, deferred = plane.current_dataset_view("scan/value", parent, defer_record=True)
+                captured, _ = capture_run_chain(plane, parent, event_records={parent: deferred})
+                assert captured["nodes"][0]["event_record"] == {}
         _, tap = plane.follow_publications("scan/value")
         try:
             for _ in range(3):

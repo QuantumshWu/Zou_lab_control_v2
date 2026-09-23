@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .common import SnapshotFeed, camera_feed, lattice_feed
+from .common import SnapshotFeed, camera_feed, lattice_feed, pulse_feed
 
 
 def open_session(case, feed):
@@ -390,4 +390,19 @@ def catalog() -> tuple[Case, ...]:
             fit={"model": "gaussian_offset"},
             notes="facet batch fit, 10 cells",
         ),
+        Case(
+            "pulse_timeline_imaging",
+            pulse_feed,
+            lambda: _pulse_spec(),
+            ("hover_series", "drag_main", "wheel_main"),
+            notes="the editor's preview: the imaging template through the "
+            "presenter's own projection; hover is the crosshair, the drag "
+            "an x-range selector",
+        ),
     )
+
+
+def _pulse_spec():
+    from zlc_plot import PlotLabels, PulseTimelinePlot
+
+    return PulseTimelinePlot(PlotLabels())

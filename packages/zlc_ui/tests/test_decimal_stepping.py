@@ -418,3 +418,44 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
     finally:
         box.close()
         app.processEvents()
+
+
+def test_a_spelling_that_fits_clears_an_earlier_narrow_refusal() -> None:
+    """10000 typed into a box too narrow for it is refused; 1000 typed over
+    it fits and is not.  The refusal used to stand until some full
+    re-evaluation cleared it, so the next commit reported a number the box
+    was already showing whole, and only a third edit went through."""
+
+    pytest.importorskip("PyQt5")
+    from PyQt5 import QtCore, QtTest, QtWidgets
+    from zlc_ui.qt import ensure_qt_app
+    from zlc_ui.fluent import FluentLineEdit
+
+    from zlc_ui.fluent.fluent import _numeric_text_width
+
+    app = ensure_qt_app(["narrow-refusal"])
+    edit = FluentLineEdit("1")
+    edit.set_numeric_validator("int", bottom=0)
+    edit.setFixedWidth(120)
+    edit.show()
+    try:
+        app.processEvents()
+        # Room for "1000" and not for "10000", whatever the font.
+        chrome = edit.width() - _numeric_text_width(edit)
+        edit.setFixedWidth(chrome + edit.fontMetrics().horizontalAdvance("1000") + 4)
+        app.processEvents()
+        edit.setFocus()
+        edit.selectAll()
+        QtTest.QTest.keyClicks(edit, "10000")
+        app.processEvents()
+        assert "too narrow" in str(edit.property("numericError") or ""), edit.width()
+        edit.selectAll()
+        QtTest.QTest.keyClicks(edit, "1000")
+        app.processEvents()
+        assert edit.text() == "1000"
+        assert not edit.property("numericError"), "a number the box shows whole is not too narrow"
+        QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+        app.processEvents()
+        assert edit.text() == "1000" and not edit.property("numericError")
+    finally:
+        edit.close()

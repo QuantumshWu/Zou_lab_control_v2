@@ -155,7 +155,8 @@ def test_naming_one_point_axis_collapses_that_coordinate() -> None:
     assert int(by_power.counts.sum()) == 2
 
 
-def test_first_is_the_first_value_and_not_the_largest() -> None:
+@pytest.mark.parametrize("dtype", (np.float16, np.float32, np.float64))
+def test_first_is_the_first_value_and_not_the_largest(dtype) -> None:
     """FIRST fell into the MIN/MAX branch and came back as MAX."""
 
     from zlc_plot.data_view import DataView
@@ -164,9 +165,9 @@ def test_first_is_the_first_value_and_not_the_largest() -> None:
     schema = make_dataset_schema(
         repeat_domain(size=3),
         mapped_domain_from_columns({"i": np.asarray([0.0])}),
-        dtype=np.float64,
+        dtype=dtype,
     )
-    values = np.asarray([[1.0], [10.0], [5.0]])
+    values = np.asarray([[1.0], [10.0], [5.0]], dtype=dtype)
     view = DataView(make_snapshot(schema, values, revision=1))
     edges = [0.0, 3.0, 8.0, 15.0]
     first = view.histogram(

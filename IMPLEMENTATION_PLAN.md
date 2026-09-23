@@ -1,6 +1,6 @@
 # ZLC — Current Implementation Status
 
-更新时间：2026-08-25
+更新时间：2026-09-21
 
 状态：`PLOT/RUNTIME/WORKBENCH CUT COMPLETE / OVERALL GOAL IN PROGRESS`
 
@@ -9,6 +9,16 @@
 完成证明。
 
 ## 1. 当前实施范围
+
+- 周期表 + 多层命名Bracket合入master（2026-09-23）：分支`claude/20260914-fieldmon`（host周期表模型/RTL/编辑器/文档/xsim/引擎瘦身/估算器校准，10个提交）与master（spacer种类、选中语义、预览子进程、post定宽、`api:`扫描轴、restart根修等20余个提交）合并。文本冲突5处：BracketPost取分支的item key加master按「10000」量出的宽度、tooltip带bracket id、选中改为按key的填充；presenter的`_schedule_vm`保留spacer计数并改走`brackets=`；seamless保留master的`outer_rows`/`api:`轴逻辑并删掉分支已废除的`slot_tick_scales`（`_program_for`签名、compile调用、重编译调用三处）；设计文档同一区域两边条目合成一份。语义核对：预览的loop marker由分支按`brackets`+`bracket_bounds`从内到外生成，master的括号脚/虚线边界/hatch/按点堆叠标签按marker深度画，直接适用；`insert_spacer`走分支的`_apply_item_order`（按id重算bounds）；codec同时带`kind`与`brackets`列表，`migrate_pulses`把单`bracket`迁成`brackets[bracket_1]`；两条master新测试改到周期表API（`StreamerParams(max_rows=8)`、`BracketPost("b", "end")`）。验证：zlc_pulse 172 passed（3条`test_config_values_on_the_board`红在master同红）；UI pulse views 30 passed；workbench pulse editor 119 passed（`test_a_dot_binds…`master同红）；zlc_atom scan/seamless/board-config/architecture 50 passed（7条seamless + 2条architecture红在master同红）；task console app 24 passed（3条master同红，`generic_device_tune`全量里偶发、单跑绿）。真屏（capture_window开产品编辑器窗口）：无选择Add Bracket包整个Pulse→选中short再Add Bracket得嵌套bracket2→选中long_before后Add Spacer→bracket2的end post输入10000（post 75 px、无narrow拒绝）→切到Preview 90 ms出首帧：三层括号（Run×∞/Bracket×2/Bracket×10000）按深度堆叠、脚在两端、spacer斜线hatch、period边界虚线与最内层括号立柱同高。bitstream仍未烧板。
+- Restart卡在「restart queued」的自查与根修（2026-09-22）：沿restart链逐段核对。第一道闸（旧run未停、lease未释放）：worker终态簿记在`_end_run`里退休Plane generation失败会抛出poll、而completion已被取走，host从此永远running，Stop/Restart都无解——改为run仍以failed结束并写明「signal generation could not be retired」；display步骤（settle/tick/commit/derivations/errors）任一抛出会跳过同一拍的`poll_logic`，持续抛出则lease永不释放——`beat`改为display半拍失败也照样轮询节点。第二道闸（旧run已停、面板占着旧generation）：原闸门看`surface_busy`，即等整条显示流水线——render子进程慢但心跳在（10 s静默检查过不了）、join-window cohort在Pause时不封口（`tick_boundary`只在staging时跑）、同面板后一个cohort排在前一个之后——都能无限期扣住restart；而真正需要Plane的只有投影里的`current_dataset_view(publication)`一次读，读完surface拿自己的副本走（accept时的run chain只走lineage与deferred record，退休后仍可用）。port新增`pending_projections`（未投影且completion未settle的reservation），console的`_generation_holders`只按这些reservation自己的publication roots判定（原来按signal的latest publication），retarget候选port一并计入；状态改说「panel-1 still to read the last run (N s)」。SDK停采集无超时是硬件故障，卡片如实报「the last run is still stopping」，不加超时掩盖。验证：presenter 3项（队列状态、display失败仍轮询、真实相机drain-before-restart）、workbench presentation新增port用例、runtime host新增退休失败用例。
+- Seamless scan可扫pulse的API参数（2026-09-22）：新增`api:<field id>`轴族，host推进：每点把值写进pulse、解析API来源、重编译并重新load后fire一次，shots_per_point走Run repeats；只提供不是board slot的API参数，端口范围/单位取该参数列自己的限制。编辑器的Add axis下多出api组；被扫的参数在API values表单里保留行但锁定（unavailable_reason），注释写swept by the scan plan，run的api_values文本不含它，轴移出计划后恢复可编辑；values note改为自己读行判断扫了什么（原来某条路径传空集把注释清掉）。验证：scan plan 8项、scan plan editor 16项、seamless node新增一条端到端（三点各load一次、每次load的源pulse带该点值、fire三次、轴单位code、无设备claim）；seamless文件里另有7条在master上本来就红的用例未动。
+
+- Pulse预览改在预热的render子进程里画（2026-09-22）：编辑器窗口（standalone与bound两个入口）打开时先起一个`RenderProcess("zlc-pulse-preview-render")`，预览host由它的`build_host`建，关窗时在SAFE worker上先关预览host再`release`子进程；Viewer的Pulse页改用它已有的edit/save子进程。render子进程的create原来向输入索取数据集dtype做二级预热，脉冲时间线不是数据集因而整个create被拒，现在无存储的图跳过二级预热。实屏产品窗口量：点Preview到首帧从1173 ms降到245 ms（开窗即点，子进程还在预热）/91 ms（开窗3 s后点）；session层冷启动833 ms（import 545+numba注册与内核加载450）对比热态31 ms是根因。Pulse Editor套件119项通过（两条formal窗口测试的打桩目标改为出货的远程host），console app与viewer的pulse用例通过。
+
+- Pulse编辑器的spacer与选中语义（2026-09-21）：Period多了`kind=spacer`（Add Spacer手动加入、更窄的灰底虚线卡、通道只画圆圈、每路DAC禁用的「Hold」、编辑器起名spacer1…显示在禁用的name框里、时长/单位可编辑、时长可Config不可scan/API；模型拒绝spacer的analog step、DAC绑定与scan/API时长绑定；文件多一个缺省为period的`kind`字段；编号与Periods汇总只数作者period）。选中改为正文填充`ACCENT_TINT`+`SELECTION_EDGE`边而非蓝色描边；按下即点亮、松开才是点击、拖动的第一下把点亮变成真选中、放下后仍亮着直到操作员再点；Add Period/Add Spacer后新卡片即选中；这套语义对spacer与Bracket post同样成立；gap选中是一条与卡同高、按间隙宽度取偶数居中的`ACCENT`细杠（实屏3×DPR逐像素量得两侧各3px）；collapse后的Show按钮与Name/Delay同宽居中。预览：period边界改虚线（与网格dash不同形）、spacer跨度斜线hatch且印名、Bracket/Run括号脚长在draw时按坐标轴屏幕宽度1.2%取并以loop跨度20%封顶（缩放进去脚不再横跨显示范围）、嵌套loop顶杆按点堆叠且y上限按屏幕像素为标签预留（原来按行堆叠时Run线穿过Bracket名字）。顺带根修master 4a3fa31e引入的回归：`_viewport_in_canonical`向pulse时间线要坐标x轴而抛`TypeError`，每个滚轮notch在缩放已提交后抛异常、`test_period_names_are_printed_over_their_spans_above_the_rows`因此红；现在pulse按时间单位因子回源。bench矩阵补上`pulse_timeline_imaging`（imaging模板经presenter投影，离屏2x2）：修前wheel_main中位99 ms/notch，修后30 ms（≈一次完整重绘25 ms）；drag_main喷发200 Hz→呈现180 Hz；hover无响应位置（该kind没有hover反馈）。验证：zlc_pulse模型编译16项、Pulse UI 28项、Pulse Editor定向、view contracts（仅master既有的2条`_ScheduleView`红）、plot渲染/语义/单位/viewport相关用例；实屏截图经`zlc_ui.acceptance.capture_window`打开产品窗口逐状态核对（按下、松开、gap、Add Period、Add Spacer、bracket、post、collapse、预览与两级缩放），证据只在ignored research；未访问硬件、未build。
+
+- 数据开销第二轮收口：Domain共享紧凑映射、历史布局不展开完整行列；Plot直接建立一维坐标域并共享相同单位数值，删除全样本代表位置及重复域缓存；Histogram按真实immutable贡献增量计数，退出统计时释放旧carry。Plane新窗口坐标走批量输入，exact deferred记录共享，数值续读不生成弃用时间列表。数值/映射/Frozen与原有直接用例验证保持，实屏及隔离性能证据只留ignored research，尚不宣称全部性能工作结束。
 
 - Indexed history布局删除逐坐标Python读取、结果构造时的重复计数、以及事件映射先全量装箱再截取；共用既有批量坐标接口，规则/裁剪窗口的公开布局不变。前后计时仅记ignored报告，不把布局函数耗时当作全链帧率。
 
@@ -249,6 +259,7 @@
   explicit row codes，Cell-data使用不物化pixel codes的dense implicit stride；`ValueSchema`
   保留dtype/unit/validity及可选数值name。旧的平行row-coordinate/topology与Plot双身份路径整体删除；
   scan、history、selection、fit与Figure只读取同一axis domain/code truth。
+- 公共Scope裁剪按选中行读取codes，连续局部范围借slice；跨revision的不可变切片复用归入既有projection cache，Frozen/拒绝事务互不修改，window缩小、取消Scope和关闭后不保留未消费条目。数值坐标精确定位共用有序方向/排序索引，避免逐点Python字典。
 - Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
   64-cell等容量限制只在真实replace/layout transaction执行。旧semantic probe、cache和kind validate
   wrapper已删除，schema vocabulary不再随size、DPR或renderer可用性改变。

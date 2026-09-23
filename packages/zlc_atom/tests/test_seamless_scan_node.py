@@ -350,7 +350,7 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
     assert axes[0].axis_id.value == "scan.rf.frequency"
     assert axes[0].unit == "GHz" and tuple(axes[0].coordinates) == (1.0, 1.5, 2.0)
     assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 2)
-    assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
+    assert np.asarray(value.block.materialize().values).mean(axis=(2, 3)).tolist() == [
         [0.0, 2.0, 4.0], [1.0, 3.0, 5.0],
         [6.0, 8.0, 10.0], [7.0, 9.0, 11.0],
     ]
@@ -963,7 +963,7 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     assert power.unit is None, "a manual axis carries a name, not a unit"
 
     # Every point captured, in played order: publication k lands on row k.
-    block = np.asarray(value.block.values, dtype=float)
+    block = np.asarray(value.block.materialize().values, dtype=float)
     assert block.mean(axis=(2, 3)).tolist() == [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]]
 
     # One question, one stop, and nothing else asked of the operator.
@@ -1441,3 +1441,75 @@ def test_a_device_readback_does_not_replace_the_authored_scan_coordinates() -> N
     assert tuple(axis.coordinates) == wanted
     assert record["plan"]["axes"][0]["values"] == list(wanted)
     assert record["plan"]["axes"][0]["unit"] == "mVpp"
+
+
+def test_an_api_parameter_axis_is_walked_by_the_host_one_load_per_point() -> None:
+    """A plan over a pulse API parameter plays like one over a device knob:
+    the host writes the point's value into the pulse, loads the board again
+    and fires once per point; the dataset's axis is the parameter, in its
+    own unit, and every load carried that point's value."""
+
+    from zlc_atom.nodes.scan import API_PARAM_FAMILY
+    from zlc_pulse import pulse_field_value
+
+    raw = pulse_sequence("mot_field_template.json")
+    assert not raw.scan_bindings and raw.api_bindings
+    binding = next(item for item in raw.api_bindings if item.field_id == "dac:load:da_bias_x")
+    codes = (-256.0, 0.0, 256.0)
+    shots = 2
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    bench = None
+    host = None
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"), plane, publications_per_fire=shots,
+        )
+        bench.publish(SCRIPTED_SEED_VALUE)
+        plan = ScanPlan((ScanAxis(API_PARAM_FAMILY + binding.field_id, codes),))
+        node = descriptors["seamless_scan"].instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(TEMPLATE_NAME, raw),
+            plan=plan.to_tree(),
+            repeats=1,
+            shots_per_point=shots,
+        )
+        host = _scan_host(node, plane)
+        host.start()
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+            assert host.operator_request is None, "an API axis is written, never asked for"
+            time.sleep(0.002)
+        observation = host.poll()
+        assert observation.terminal and observation.phase == "done", observation
+        value = plane.current_dataset(host.signal_key(SCAN_OUTPUT.name))
+        record = dict(node.last_run_record or {})
+    finally:
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+    assert bench.fired_repeats == [(shots, 1)] * len(codes), "one fire per point"
+    assert bench.loads == len(codes) and bench.scan_tables == [], "one load per point, no table"
+    assert [
+        pulse_field_value(source, binding.field_ref, binding.unit)
+        for source in bench.loaded_sources
+    ] == list(codes), "each load carried its point's value"
+    assert all(not source.api_bindings for source in bench.loaded_sources), (
+        "the API source is resolved into the program the board plays"
+    )
+    schema = value.block.schema
+    axis = next(item for item in schema.point_domain.axes if item.name == "load.da_bias_x")
+    assert axis.unit == "code" and tuple(axis.coordinates) == codes
+    assert tuple(item.size for item in schema.repeat_domain.axes) == (1, shots)
+    assert record["plan"]["axes"][0]["port"] == API_PARAM_FAMILY + binding.field_id
+    assert record["plan"]["axes"][0]["values"] == list(codes)
+    assert node.resolved_device_claims() == (), "an API axis claims no device"

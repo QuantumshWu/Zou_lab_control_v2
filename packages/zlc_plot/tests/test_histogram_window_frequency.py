@@ -10,19 +10,22 @@ holes, invalid samples, replacements and window changes included.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import SimpleNamespace
 import numpy as np
 import pytest
 
 from data_factory import (
     axis,
     make_dataset_schema,
+    make_snapshot,
     mapped_domain_from_columns,
     repeat_domain,
 )
-from zlc_data import DatasetSchema
+from zlc_data import AxisId, BlockId, DataBlock, DatasetSchema
 from zlc_data import PRIMARY_INDEX, IndexedWindow, owned_snapshot_from_arrays
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
-from zlc_plot import HistogramPlot, PlotSession
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, restrict_snapshot, value_selection
+from zlc_plot import AxisRef, HistogramPlot, PlotSession
 from zlc_plot.data_view import DataView
 
 HEIGHT, WIDTH = 4, 5
@@ -104,7 +107,7 @@ def _assert_exact(view: DataView, snapshot, window: int) -> None:
     np.testing.assert_array_equal(counts, expected)
 
 
-def test_the_table_moves_with_the_window_and_stays_exact() -> None:
+def test_the_table_moves_with_the_window_and_stays_exact(monkeypatch) -> None:
     """Fill-up, steady rolling, a hole, invalid samples, a replacement, a window change."""
 
     history = _History(capacity=6)
@@ -150,6 +153,100 @@ def test_the_table_moves_with_the_window_and_stays_exact() -> None:
     _assert_exact(view, snapshot, 6)
     _assert_exact(view, snapshot, 1)
 
+    # The real Runtime changes block_id on EVERY window move. Unchanged
+    # immutable event planes, not that range-dependent string, carry counts.
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage, SignalDataPlane
+
+    event_schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"frame": [0, 1]}),
+        cell_axes=(axis("y", size=HEIGHT), axis("x", size=WIDTH)), dtype=np.uint16,
+    )
+    declaration = DatasetOutputDeclaration("value", "test.frequency", index_by_source=True)
+    node = SimpleNamespace(instance_id="frequency", dataset_output_declarations=(declaration,),
+                           signal_key=lambda name: f"frequency/{name}")
+    plane = SignalDataPlane()
+    plane.begin_generation(node)
+    lease = plane.acquire_indexed_history("frequency/value", 6)
+    try:
+        for index in range(7):
+            event = make_snapshot(event_schema, np.stack((_frame(index), _frame(index + 1)))[None], index)
+            plane.commit_live(node, {"value": LiveDatasetOutput(declaration, event, MonitorCoverage(2, 2))})
+            snapshot = plane.current_dataset("frequency/value")
+            if index == 5:
+                previous = DataView(snapshot)
+                _assert_exact(previous, snapshot, 4)
+                _ = previous.samples  # An earlier raw selector may have packed this window.
+        assert previous._snapshot.ref.block_id != snapshot.ref.block_id
+        view = DataView(snapshot, inherit_domains_from=previous)
+        assert view._packed_carry is not None
+        packed = DataBlock.packed_planes
+        reads = []
+        def observed(block, *, selection=None, sigma=False):
+            assert not sigma, "histogram never consumes sample sigma"
+            indices = range(len(block.segments)) if selection is None else selection
+            reads.extend(block.segments[int(index)][0].size for index in indices)
+            return packed(block, selection=selection, sigma=sigma)
+        with monkeypatch.context() as patch:
+            patch.setattr(DataBlock, "packed_planes", observed)
+            view.window_frequency(4)
+        assert sum(reads) == 2 * np.prod(event_schema.physical_shape), "only entering and leaving events are read"
+        assert view._samples is None and view._packed_segments is None and view._packed_carry is None
+        _assert_exact(view, snapshot, 4)
+        _assert_exact(view, snapshot, 2)
+        assert view._frequency_carry.snapshot is snapshot
+
+        # The normal worker fork must preserve a fixed Scope's slices after
+        # the window cutter, without changing a held Frozen projection.
+        scoped_session = PlotSession(snapshot, HistogramPlot(scope=((AxisRef.point("frame"), 1),)),
+                                     parameters={"window": 4})
+        try:
+            owner = scoped_session._projection
+            frozen = owner._fork_frozen(data=snapshot, revision=snapshot.ref.revision.value, context=owner._context)
+            frozen._build_view_and_payload()
+            old_cache = frozen._scoped_cache
+            old_memo = dict(old_cache[3])
+            frozen_counts = frozen.payload.counts.copy()
+            event = make_snapshot(event_schema, np.stack((_frame(7), _frame(8)))[None], 7)
+            plane.commit_live(node, {"value": LiveDatasetOutput(declaration, event, MonitorCoverage(2, 2))})
+            snapshot = plane.current_dataset("frequency/value")
+            reads.clear()
+            with monkeypatch.context() as patch:
+                patch.setattr(DataBlock, "packed_planes", observed)
+                scoped_session.update_data(snapshot)
+            assert sum(reads) == 2 * HEIGHT * WIDTH, "fixed Scope counts only entering/leaving slices"
+            current_cache = scoped_session._projection._scoped_cache
+            assert len({id(item) for item in old_cache[1].block.segments}
+                       & {id(item) for item in current_cache[1].block.segments}) == 3
+            assert frozen._scoped_cache is old_cache and old_cache[3].keys() == old_memo.keys()
+            assert all(old_cache[3][key] is entry for key, entry in old_memo.items())
+            np.testing.assert_array_equal(frozen.payload.counts, frozen_counts)
+            scoped_session.set_parameters({"window": 2})
+            smaller = scoped_session._projection._scoped_cache
+            assert len(smaller[3]) == 2
+            assert all(left is right for left, right in
+                       zip(smaller[1].block.segments, current_cache[1].block.segments[-2:]))
+            scoped_session.set_parameters({"window": 4})
+            assert len(scoped_session._projection._scoped_cache[3]) == 4
+            scoped_session.replace_spec(HistogramPlot(scope=((AxisRef.point("frame"), 0),)))
+            assert not current_cache[3].keys() & scoped_session._projection._scoped_cache[3].keys()
+            selected = np.concatenate([item[0][:, 0:1].reshape(-1) for item in snapshot.block.segments[-4:]])
+            expected, _ = np.histogram(selected, bins=scoped_session._payload.edges.canonical)
+            np.testing.assert_array_equal(scoped_session._payload.counts, expected[None])
+            accepted_cache = scoped_session._projection._scoped_cache
+            with pytest.raises(ValueError):
+                scoped_session.replace_spec(HistogramPlot(scope=((AxisRef.point("frame"), 99),)))
+            assert scoped_session._projection._scoped_cache is accepted_cache
+            scoped_session.replace_spec(HistogramPlot(), parameters={"window": 6})
+            assert scoped_session._projection._scoped_cache is None
+            scoped_session.replace_spec(HistogramPlot(scope=((AxisRef.point("frame"), 1),)))
+            assert scoped_session._projection._scoped_cache is not None
+        finally:
+            scoped_session.close()
+        assert scoped_session._projection._scoped_cache is None
+    finally:
+        lease.close()
+        plane.close()
+
 
 def test_an_unchanged_snapshot_shares_the_table_and_no_provenance_means_no_table() -> None:
     history = _History(capacity=5)
@@ -167,6 +264,7 @@ def test_an_unchanged_snapshot_shares_the_table_and_no_provenance_means_no_table
         revision=1,
     )
     assert DataView(plain).window_frequency(2) is None
+    assert DataView(plain, inherit_domains_from=view)._frequency_carry is None
 
     floats = owned_snapshot_from_arrays(
         schema=_schema((-1, 0), np.float64),
@@ -175,6 +273,35 @@ def test_an_unchanged_snapshot_shares_the_table_and_no_provenance_means_no_table
         window=IndexedWindow(0, 1, -1),
     )
     assert DataView(floats).window_frequency(2) is None
+    assert DataView(floats, inherit_domains_from=view)._frequency_carry is None
+
+    # Different same-shaped Scope selections can keep block_id, generation,
+    # revision and window facts. Their actual immutable planes differ.
+    source = history.publish(1)
+    previous = None
+    for coordinate in (0, 1):
+        scoped = restrict_snapshot(
+            source, value_selection(source.block.schema, {AxisId("x"): coordinate}),
+            reference_for=lambda schema: replace(source.ref, block_id=BlockId("roi.scoped"),
+                                                 schema_fingerprint=schema.fingerprint),
+        )
+        view = DataView(scoped, inherit_domains_from=previous)
+        _assert_exact(view, scoped, 3)
+        previous = view
+
+    # One immutable two-row plane can occur twice. A changing window also
+    # cuts inside it: match occurrences and subtract just the changed rows.
+    repeated_schema = _schema((-3, -2, -1, 0))
+    planes = plain.block.as_segment()
+    block = DataBlock._from_owned_segments(
+        BlockId("repeated"), plain.ref.revision, repeated_schema, (planes, planes),
+        origins=np.asarray(((0, 0), (0, 2))), shapes=np.asarray(((1, 2), (1, 2))),
+        window=IndexedWindow(0, 3, -1),
+    )
+    repeated = type(plain)(block.ref(plain.ref.stream_generation), block)
+    view = DataView(repeated)
+    for window in (4, 3, 2, 1, 4):
+        _assert_exact(view, repeated, window)
 
 
 def test_a_wide_integer_table_grows_with_its_values_and_gives_up_past_the_limit() -> None:
@@ -228,13 +355,20 @@ def test_the_session_histogram_is_the_same_picture_shot_after_shot() -> None:
                 invalid=np.ones((HEIGHT, WIDTH), dtype=bool) if index % 3 == 0 else None,
             )
             live.update_data(snapshot)
+            assert live._view._samples is None, "integer frequency edges do not need the raw window"
             edges = np.asarray(live._payload.edges.canonical, dtype=float)
             values, valid = DataView(snapshot).history_values(window)
             selected = np.asarray(values)[np.asarray(valid, dtype=bool)]
             expected, _edges = np.histogram(selected, bins=edges)
-            np.testing.assert_array_equal(np.asarray(live._payload.counts), expected)
+            np.testing.assert_array_equal(np.asarray(live._payload.counts), expected[None])
             assert int(expected.sum()) == int(selected.size), "the domain lost samples"
         assert live._view._frequency_carry is not None, "the session never used the table"
+        live.replace_spec(HistogramPlot(group=AxisRef.cell_data("x")))
+        assert live._view._frequency_carry is None, "Group no longer consumes the whole-pool table"
+        live.replace_spec(HistogramPlot())
+        assert live._view._frequency_carry is not None
+        live.replace_spec(HistogramPlot(reduced=(AxisRef.point(str(PRIMARY_INDEX_AXIS_ID)),)))
+        assert live._view._frequency_carry is None, "Reduced no longer consumes the whole-pool table"
     finally:
         live.close()
 

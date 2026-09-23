@@ -128,9 +128,16 @@ def build(
     run_safe_work=None,
     run_completion_work=None,
     request_close=None,
+    build_preview_host=None,
 ) -> object:
-    """Wire one editor window, with or without a pulse in it."""
+    """Wire one editor window, with or without a pulse in it.
 
+    ``build_preview_host`` is the render child's ``build_host``; without one
+    the editor has no preview to draw, which is what a headless check and a
+    presenter under test want.
+    """
+
+    from functools import partial
 
     from ..pulse_editor import PulseEditorPresenter
     from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
@@ -138,7 +145,10 @@ def build(
     return PulseEditorPresenter(
         view,
         state,
-        make_preview=build_pulse_preview_host,
+        make_preview=(
+            None if build_preview_host is None
+            else partial(build_pulse_preview_host, build_host=build_preview_host)
+        ),
         update_preview=resize_pulse_preview_host,
         sequencer=sequencer,
         device_use=device_use,
@@ -196,11 +206,22 @@ def _guard_window_close(
     run_close_work,
     close_workers,
     request_close,
+    release_render,
     refresh_timer: object | None = None,
 ) -> None:
-    """Retire PulseGUI resources off Qt before allowing its window to vanish."""
+    """Retire PulseGUI resources off Qt before allowing its window to vanish.
+
+    The render child goes with them, on the same worker and after the
+    presenter has closed the preview it drew in: a child told to shut down
+    exits on its own, and waiting for it here is what stops the wait from
+    landing on a Qt turn or being skipped altogether.
+    """
     closing = False
     retired = False
+
+    def retire() -> None:
+        window.presenter.close(present=False)
+        release_render()
 
     def failed(error: BaseException) -> None:
         nonlocal closing
@@ -234,7 +255,7 @@ def _guard_window_close(
         closing = True
         try:
             run_close_work(
-                lambda: window.presenter.close(present=False),
+                retire,
                 completed,
                 failed,
             )
@@ -259,15 +280,23 @@ def create_window(
     entry means the window under inspection is the window that ships.
     """
 
+    import zlc_plot as plot
     from zlc_ui import open_pulse_editor
     from ..board import attach_qt_owner_turn, attach_qt_worker
 
     space, state, path = resolve(workspace, pulse)
+    # The preview's render child, started before the window so it warms
+    # while the window builds and the operator reads the Edit page.
+    render = plot.RenderProcess("zlc-pulse-preview-render")
     # One call, one handle.  This layer never names a widget class: what comes
     # back has signals to hear and methods to call, and nothing to assemble.
-    window = open_pulse_editor(
-        title="PulseGUI@Zou lab", window_ratio=window_ratio
-    )
+    try:
+        window = open_pulse_editor(
+            title="PulseGUI@Zou lab", window_ratio=window_ratio
+        )
+    except BaseException:
+        render.close(timeout=0.0)
+        raise
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
     run_safe_work, close_safe_worker = attach_qt_worker("zlc-pulse-safe")
@@ -285,10 +314,12 @@ def create_window(
             run_safe_work=run_safe_work,
             run_completion_work=run_completion_work,
             request_close=request_close,
+            build_preview_host=render.build_host,
         )
     except BaseException:
         for close_worker in close_workers:
             close_worker()
+        render.close(timeout=0.0)
         window.close()
         raise
     _guard_window_close(
@@ -296,6 +327,7 @@ def create_window(
         run_close_work=run_safe_work,
         close_workers=close_workers,
         request_close=request_close,
+        release_render=lambda: render.release(timeout=30.0),
     )
     if connect:
         mode, _, endpoint = str(connect).partition(":")
@@ -320,6 +352,7 @@ def create_bound_window(
     retires only its presenter/preview -- the session remains the device owner.
     """
 
+    import zlc_plot as plot
     from zlc_ui import open_pulse_editor
     from ..board import attach_qt_owner_turn, attach_qt_worker
 
@@ -327,10 +360,15 @@ def create_bound_window(
     from ..session import Workspace
 
     space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
-    window = open_pulse_editor(
-        title=f"{device_label} Pulse Editor" if device_label else "PulseGUI@Zou lab",
-        window_ratio=window_ratio,
-    )
+    render = plot.RenderProcess("zlc-pulse-preview-render")
+    try:
+        window = open_pulse_editor(
+            title=f"{device_label} Pulse Editor" if device_label else "PulseGUI@Zou lab",
+            window_ratio=window_ratio,
+        )
+    except BaseException:
+        render.close(timeout=0.0)
+        raise
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
     run_safe_work, close_safe_worker = attach_qt_worker("zlc-pulse-safe")
@@ -352,10 +390,12 @@ def create_bound_window(
             run_safe_work=run_safe_work,
             run_completion_work=run_completion_work,
             request_close=request_close,
+            build_preview_host=render.build_host,
         )
     except BaseException:
         for close_worker in close_workers:
             close_worker()
+        render.close(timeout=0.0)
         window.close()
         raise
     from ..board import attach_qt
@@ -370,6 +410,7 @@ def create_bound_window(
         run_close_work=run_safe_work,
         close_workers=close_workers,
         request_close=request_close,
+        release_render=lambda: render.release(timeout=30.0),
         refresh_timer=refresh_timer,
     )
     return window

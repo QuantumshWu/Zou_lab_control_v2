@@ -32,6 +32,7 @@ from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
 from .devices import ScanDeviceKnobs, release_after_scan
 from .plan import (
+    API_PARAM_FAMILY,
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
@@ -84,10 +85,10 @@ class SeamlessScanMeasurement:
         self.plan = plan
         #: The host's axes and the board's, split once: who moves an axis
         #: decides where its loop lives, and that never changes for the
-        #: life of one measurement.  Manual and device axes are both
+        #: life of one measurement.  Manual, device and API axes are all
         #: host-advanced -- the run pauses between fires either way; what
-        #: differs is only whether a hand or a ``tune()`` call moves the
-        #: knob.
+        #: differs is only whether a hand, a ``tune()`` call or a new
+        #: program moves the knob.
         self.outer_axes, self.board_axes = split_outer_axes(plan)
         self.tunables = dict(tunables or {})
         bound = tuple(ports)
@@ -136,13 +137,18 @@ class SeamlessScanMeasurement:
     def dataset_output_declarations(self):
         return (SCAN_OUTPUT,)
 
-    def _streamed_sequence(self, board: object) -> tuple[PulseSequence, tuple]:
+    def _streamed_sequence(
+        self, board: object, api_values: Mapping[str, float] | None = None
+    ) -> tuple[PulseSequence, tuple]:
         """Only planned slots vary; omitted fields compile as Pulse constants.
 
         The authored template and plan remain untouched. Removing an unused
         scan flag from this execution copy preserves the field's actual value
         and uses the ordinary compiler, without redundant constant wire columns.
         Unknown authored ports have already been refused by plan binding.
+        ``api_values`` are the point's values for the API parameters the
+        host walks, in each parameter's declared unit, written into the
+        fields before the API source is resolved away.
         """
 
         planned = {
@@ -154,7 +160,7 @@ class SeamlessScanMeasurement:
                 replace(binding, scan=binding.field_id in planned)
                 for binding in self.sequence.bindings
             ),
-        ))
+        ), api_values)
         num_slots = int(board.geometry.num_slots)
         if len(streamed.scan_bindings) > num_slots:
             raise ValueError(
@@ -219,6 +225,35 @@ class SeamlessScanMeasurement:
             ResolvedDeviceClaim(key, self.tunables[key], tuple(fields))
             for key, fields in selected.items()
         )
+
+    def _api_values_for(self, outer_row: Sequence[float]) -> dict[str, float]:
+        """The point's values for the API parameters the host walks, in
+        each parameter's declared unit -- the port's, like every axis."""
+
+        return {
+            axis.port[len(API_PARAM_FAMILY):]: axis.native_value(port, outer_row[position])
+            for position, (axis, port) in enumerate(zip(self.outer_axes, self.outer_ports))
+            if axis.port.startswith(API_PARAM_FAMILY)
+        }
+
+    def _program_for(
+        self,
+        context: object,
+        board: object,
+        *,
+        outer_row: Sequence[float],
+        changed: Sequence[tuple[str, float, int, int]],
+    ) -> tuple[PulseSequence, object]:
+        """The program for this point's API values: written into the pulse
+        and compiled again, the way a caller of the API would run it."""
+
+        for port, _value, index, points in changed:
+            check_cancelled(context)
+            context.report_progress(
+                f"Setting {port_label(port)} ({index + 1}/{points})"
+            )
+        streamed, _columns = self._streamed_sequence(board, self._api_values_for(outer_row))
+        return self.sequencer.compile_pulse(streamed, board.geometry, board.clock_hz)
 
     def _apply_device_setting(
         self,
@@ -291,8 +326,14 @@ class SeamlessScanMeasurement:
         progress_total: int,
         run_record: dict,
         on_point: object,
+        load: bool,
     ) -> None:
-        """Play a segment of the one prepared acquisition and resident program."""
+        """Play a segment of the one prepared acquisition.
+
+        ``load`` says whether the program goes to the board before this
+        segment: the first segment's always does, and so does one whose
+        API values changed, because those live in the program.
+        """
 
         readouts = sweeps * inner_count * shots
         first = progress_base == 0
@@ -304,7 +345,7 @@ class SeamlessScanMeasurement:
                 run_repeats=shots,
                 scan_repeats=sweeps,
             )
-            if first:
+            if load:
                 self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
             check_cancelled(context)
@@ -417,13 +458,19 @@ class SeamlessScanMeasurement:
             # One fixed Pulse per host point. No columns go on the wire: an
             # unslotted program uses ordinary Run repeats, not a dummy table.
             effective_inner, wire = inner_rows, ()
-        # Prepare once from the authored fields; the device applies saved
-        # Config values at LOAD/Fire and supplies the initial execution record.
-        streamed, program = self.sequencer.compile_pulse(
-            streamed, board.geometry, board.clock_hz,
-        )
         outer_rows = tuple(
             itertools.product(*(axis.values for axis in self.outer_axes))
+        )
+        # Prepare once from the authored fields; the device applies saved
+        # Config values at LOAD/Fire and supplies the initial execution record.
+        # A plan that walks API parameters starts from its first point's
+        # values, and every later point that changes one compiles again.
+        if outer_rows and self._api_values_for(outer_rows[0]):
+            streamed, _columns = self._streamed_sequence(
+                board, self._api_values_for(outer_rows[0])
+            )
+        streamed, program = self.sequencer.compile_pulse(
+            streamed, board.geometry, board.clock_hz,
         )
         effective_rows = tuple(
             tuple(outer_row) + tuple(inner_row)
@@ -485,6 +532,7 @@ class SeamlessScanMeasurement:
                     row_offset=0,
                     scan_repeat_base=0,
                     progress_base=0,
+                    load=True,
                     **segment,
                 )
             else:
@@ -524,6 +572,24 @@ class SeamlessScanMeasurement:
                                 if entry[0].startswith(DEVICE_PARAM_FAMILY)
                             ),
                         )
+                        # Then the program: an API parameter is a number in
+                        # it, so a point that moves one is compiled and
+                        # loaded again before it fires.
+                        api_changed = tuple(
+                            entry
+                            for entry in changed
+                            if entry[0].startswith(API_PARAM_FAMILY)
+                        )
+                        if api_changed and standing is not None:
+                            point_streamed, point_program = self._program_for(
+                                context,
+                                board,
+                                outer_row=outer_row,
+                                changed=api_changed,
+                            )
+                            segment = dict(
+                                segment, streamed=point_streamed, program=point_program
+                            )
                         standing = outer_row
                         self._play_table(
                             context,
@@ -531,6 +597,7 @@ class SeamlessScanMeasurement:
                             row_offset=index * inner_count,
                             scan_repeat_base=sweep,
                             progress_base=done,
+                            load=done == 0 or bool(api_changed),
                             **segment,
                         )
                         done += inner_count

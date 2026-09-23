@@ -771,3 +771,33 @@ def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_refused_by_name()
         apply_api_overrides(_plain_sequence(), {"duration:p0": 240.0})
     applied = apply_api_overrides(_bound_sequence(), {"duration:p0": 240.0})
     assert applied.periods[0].duration == 240
+
+
+def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
+    """A parameter the plan walks keeps its row in the API values form,
+    locked and named as swept, until its axis leaves the plan; the run's
+    values never carry it, because the plan says what it plays."""
+
+    import json
+
+    app = ensure_qt_app(["scan-editor-api-axis"])
+    editor = scan_plan_editor_factory(device_ports=False)
+    editor.show()
+    bound = _bound_sequence()
+    plan = json.dumps({"axes": [{"port": "api:dac:p0:dac", "values": [0.0, 1.0], "unit": ""}]})
+
+    editor.update_projection(_projection(bound, plan=plan, api_values="duration:p0 = 250"))
+    app.processEvents()
+    assert "api:dac:p0:dac" in {port.port for port in editor._ports}
+    form = editor.values_form
+    assert set(form.keys) == {"duration:p0", "dac:p0:dac"}
+    assert not form.widget_for("dac:p0:dac").isEnabled(), "walked by the plan: locked"
+    assert form.widget_for("duration:p0").isEnabled()
+    assert "swept by the plan: dac:p0:dac" in editor.values_note.text()
+    assert editor._overrides() == {"duration:p0": 250.0}
+
+    editor.update_projection(_projection(bound, plan="", api_values="duration:p0 = 250"))
+    app.processEvents()
+    assert form.widget_for("dac:p0:dac").isEnabled(), "its axis left the plan"
+    assert "swept" not in editor.values_note.text()
+    editor.close()

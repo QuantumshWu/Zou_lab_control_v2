@@ -31,6 +31,7 @@ from zlc_atom.nodes.scan import (
     SEAMLESS_PULSE_RESOURCE,
     SeamlessScanMeasurement,
     ScanPlan,
+    api_scan_ports_for,
     bind_plan,
     hardware_scan_ports_for,
     api_overrides_from_authored,
@@ -125,8 +126,10 @@ def _build(
     parsed = plan_from_authored(plan)
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to an installed knob the HOST moves
-    # between fires.  Everything left under them is the table the board
-    # plays, if there are board axes. A host-only plan plays a fixed Pulse.
+    # between fires, and an API axis to a parameter of the pulse the host
+    # writes and loads again between fires.  Everything left under them is
+    # the table the board plays, if there are board axes.  A host-only plan
+    # plays a fixed Pulse.
     bindable = tuple(
         axis
         for axis in parsed.axes
@@ -136,6 +139,7 @@ def _build(
         ScanPlan(bindable),
         (
             *hardware_scan_ports_for(sequence),
+            *api_scan_ports_for(sequence),
             *scan_ports_for_devices(
                 tunable_devices, units={axis.port: axis.unit for axis in parsed.axes},
                 device_labels=device_labels,
@@ -164,9 +168,9 @@ def _editor_factory(parent=None):
 
     # The board axes are the template's own hardware slots: the board plays
     # the slots selected by the plan; omitted slots keep their Pulse values.
-    # Manual AND device axes are offered
-    # because this node can stop between fires -- for a hand on a
-    # thumbscrew or a tune() call on an installed device alike.
+    # Manual, device AND API axes are offered because this node can stop
+    # between fires -- for a hand on a thumbscrew, a tune() call on an
+    # installed device or a new value in the pulse alike.
     return scan_plan_editor_factory(
         parent, device_ports=True, manual_axes=True
     )

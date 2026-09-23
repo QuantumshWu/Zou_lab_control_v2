@@ -16,7 +16,25 @@ from zlc_data.validity import ValidityContract
 
 
 
-def test_a_coordinate_selection_resolves_on_an_implicit_axis() -> None:
+@pytest.mark.parametrize(
+    ("coordinates", "lower", "upper", "expected"),
+    (
+        (None, 2, 5, range(2, 6)),
+        (np.arange(8), 2, 5, range(2, 6)),
+        (np.arange(7, -1, -1), 2, 5, range(2, 6)),
+        ((2.5, 8.5, 3.5, 9.5), 2, 4, (0, 2)),
+        ((2**53, 2**53 + 1, 2**53 + 2), 2**53 + 1, 2**53 + 2, range(1, 3)),
+        ((2**63 + 1, 2**63 + 3, 2**64 - 1), 2**63 + 1, 2**63 + 3, range(0, 2)),
+        ((2**53 + 1, 0.5, 2**53 + 3), 2**53, 2**53 + 2, range(0, 1)),
+        (np.asarray((0.5, float(2**53), float(2**53 + 2))), 2**53 + 1, 2**53 + 3, range(2, 3)),
+        (np.asarray((0.5, float(2**53), float(2**53 + 4))), 0, 2**53 + 3, range(0, 2)),
+        ((-1, 2**63 + 1, 0.5), 0, 2**63 + 2, range(1, 3)),
+        ((10**400, 0.5, 10**400 + 2), 10**400 + 1, 10**400 + 3, range(2, 3)),
+    ),
+)
+def test_a_coordinate_selection_resolves_on_an_implicit_axis(
+    coordinates, lower, upper, expected
+) -> None:
     """An implicit axis HAS coordinates: index_origin + i, and says so.
 
     Refusing one here meant a box drawn on a camera frame only worked because
@@ -28,13 +46,14 @@ def test_a_coordinate_selection_resolves_on_an_implicit_axis() -> None:
     from zlc_data.axis import AxisId, AxisSpec
     from zlc_data import SPATIAL_X
 
-    axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 8)
+    axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X,
+                    8 if coordinates is None else len(coordinates), coordinates)
 
     indices, dropped = resolve_selection_indices(
-        axis, CoordinateRangeSelection(AxisId("cam.x"), 2.0, 5.0, None)
+        axis, CoordinateRangeSelection(AxisId("cam.x"), lower, upper, None)
     )
 
-    assert tuple(indices) == (2, 3, 4, 5)
+    assert indices == expected
     assert dropped is False
 
 
@@ -65,6 +84,22 @@ def test_a_coordinate_selection_off_an_implicit_axis_is_refused() -> None:
         resolve_selection_indices(
             axis, CoordinateRangeSelection(AxisId("cam.x"), 10.0, 20.0, None)
         )
+
+    from zlc_data import CoordinateFrameId, SAMPLE_TIME
+
+    frame = CoordinateFrameId("sample.clock")
+    timed = AxisSpec(AxisId("sample.time"), "sample time", SAMPLE_TIME, 6,
+                     np.asarray((0.0, 0.1, 0.2)), unit="s", coordinate_frame=frame,
+                     coordinate_origins=np.asarray((0.0, 1.0)))
+    assert resolve_selection_indices(
+        timed, CoordinateRangeSelection(timed.axis_id, 0.1, 1.1, frame)
+    ) == (range(1, 5), False)
+    with pytest.raises(ValueError, match="coordinate frame mismatch"):
+        resolve_selection_indices(timed, CoordinateRangeSelection(timed.axis_id, 0.1, 1.1, None))
+    with pytest.raises(EmptySelection):
+        resolve_selection_indices(timed, CoordinateRangeSelection(timed.axis_id, 2**63, 10**400, frame))
+    with pytest.raises(OverflowError):
+        resolve_selection_indices(timed, CoordinateRangeSelection(timed.axis_id, 0.1, 10**400, frame))
 
 
 def test_value_selection_resolves_axis_id_and_text_coordinate() -> None:
@@ -170,26 +205,6 @@ def test_value_selection_rejects_non_unique_human_axis_name() -> None:
 
     with pytest.raises(ValueError, match="not uniquely present"):
         value_selection(schema, {"shared": 0})
-
-
-def test_numeric_coordinate_range_skips_missing_coordinates() -> None:
-    from zlc_data.selection import CoordinateRangeSelection, resolve_selection_indices
-
-    axis = AxisSpec(
-        AxisId("scan.frequency"),
-        "frequency",
-        SPATIAL_X,
-        3,
-        (0.0, None, 2.0),
-    )
-
-    indices, dropped = resolve_selection_indices(
-        axis,
-        CoordinateRangeSelection(axis.axis_id, 0.0, 2.0, None),
-    )
-
-    assert indices == (0, 2)
-    assert dropped is False
 
 
 def test_axis_catalog_preserves_point_coordinate_labels() -> None:

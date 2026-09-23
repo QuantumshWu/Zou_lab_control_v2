@@ -32,6 +32,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
             if payload is not None:
                 projection._payload = payload
                 return
+    view._frequency_carry = None
     plan = view._histogram_plan(
         () if spec.group is None else (spec.group,), collapsed, aggregation, window,
     )

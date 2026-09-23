@@ -111,6 +111,12 @@ def test_domain_labels_round_trip_through_the_codec() -> None:
     np.testing.assert_array_equal(np.asarray(sample), sample.coordinate_values())
     assert sample.coordinate_position(1.1) == 4
     assert sample.coordinate_position(0.8) is None
+    for missing in (None, "missing", -1, 2):
+        assert sample.coordinate_position(missing) is None
+    overlapping = replace(sample, coordinate_origins=np.asarray((0.0, 0.15)))
+    assert overlapping.coordinate_position(0.15) == 3
+    descending = replace(sample, coordinates=sample.coordinates[::-1])
+    assert descending.coordinate_position(1.1) == 4
     assert domain_from_tree(domain_to_tree(times)) == times
     assert len(domain_to_tree(times)["axes"][0]["coordinates"]) == 3
     cropped = restricted_schema(replace(_schema(), point_domain=times), range(1), (4,), {SITE_ID: range(2)})
@@ -126,7 +132,26 @@ def test_domain_labels_round_trip_through_the_codec() -> None:
         ((3, 2), (3, 2), (1, 4)),
     )
     expected = np.tile(np.repeat(np.arange(2), 3), 2)
-    assert mapped.code_base(record.axis_id) == range(2)
+    assert mapped.code_mapping(record.axis_id) == (range(2), 3, 2)
+    rows = np.asarray((11, 0, 7, 4, 4), dtype=np.int64)
+    selected = mapped.codes(record_time.axis_id, rows)
+    np.testing.assert_array_equal(selected, expected[rows])
+    np.testing.assert_array_equal(mapped.codes(record.axis_id, rows[:0]), expected[:0])
+    for selected_rows in (range(2, 10), range(11, -1, -3), range(0)):
+        np.testing.assert_array_equal(mapped.codes(record.axis_id, selected_rows), expected[list(selected_rows)])
+    with pytest.raises(ValueError):
+        selected.setflags(write=True)
+    with pytest.raises(IndexError):
+        mapped.codes(record.axis_id, np.asarray((-1,)))
+    with pytest.raises(IndexError):
+        mapped.codes(record.axis_id, np.asarray((12,)))
+    with pytest.raises(TypeError):
+        mapped.codes(record.axis_id, np.asarray((0.5,)))
+    dense = DomainSpec((2, 3), (record, domain.axes[0]))
+    np.testing.assert_array_equal(dense.codes(PAIR, np.asarray((2, 0))), (2, 0))
+    assert dense.code_at(PAIR, 2) == 2
+    with pytest.raises(IndexError):
+        dense.codes(PAIR, np.asarray((3,)))
     np.testing.assert_array_equal(mapped.codes(record.axis_id), expected)
     np.testing.assert_array_equal([mapped.code_at(record.axis_id, row) for row in range(12)], expected)
     np.testing.assert_array_equal(mapped.codes(PAIR), np.tile(np.arange(3), 4))

@@ -24,6 +24,9 @@ everything later hangs from: a box drawn on the plot's x axis is a range of
 from __future__ import annotations
 
 from collections.abc import Sequence
+
+import numpy as np
+
 from zlc_data import (
     AxisId,
     AxisSpec,

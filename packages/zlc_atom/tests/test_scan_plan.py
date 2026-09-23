@@ -344,3 +344,41 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
         converted = DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", "dBm")
         assert authored.unit == "dBm"
         assert authored.values == tuple(np.linspace(*converted, 10))
+
+
+def test_api_parameters_are_host_walked_ports_unless_a_slot_sweeps_them() -> None:
+    """An API parameter is offered to the HOST as an ``api:`` port, in the
+    parameter's own range and unit; one that is also a board slot is the
+    board's to sweep and is not offered twice."""
+
+    from zlc_atom.nodes.scan import (
+        API_PARAM_FAMILY,
+        api_scan_ports_for,
+        hardware_scan_ports_for,
+    )
+    from zlc_atom.nodes.scan.plan import host_advanced_port, port_group, port_label
+
+    raw = pulse_sequence("mot_field_template.json")
+    ports = api_scan_ports_for(raw)
+    assert [port.port for port in ports] == [
+        API_PARAM_FAMILY + binding.field_id for binding in raw.api_bindings
+    ]
+    first = ports[0]
+    assert first.label == "load.da_bias_x" and first.unit == "code"
+    assert (first.lo, first.hi) == (-512.0, 511.0)
+    assert host_advanced_port(first.port) and not host_advanced_port(
+        "pulse:param:dac:load:da_bias_x"
+    )
+    assert port_group(first.port) == "api" and port_label(first.port) == "dac:load:da_bias_x"
+
+    slotted = replace(raw, bindings=tuple(
+        replace(binding, scan=binding.field_id == "dac:load:da_bias_x")
+        for binding in raw.bindings
+    ))
+    assert [port.port for port in hardware_scan_ports_for(slotted)] == [
+        "pulse:param:dac:load:da_bias_x"
+    ]
+    assert [port.port for port in api_scan_ports_for(slotted)] == [
+        API_PARAM_FAMILY + "dac:load:da_bias_y",
+        API_PARAM_FAMILY + "dac:load:da_bias_z",
+    ]

@@ -581,12 +581,17 @@ class PulsePeriodMark:
     start: float
     stop: float
     name: str
+    #: A spacer is time given to a slow device between two authored periods:
+    #: drawn as a hatched gap, its name left unprinted.
+    spacer: bool = False
 
     def __post_init__(self) -> None:
         start = _nonnegative_time(self.start, "period start")
         stop = _nonnegative_time(self.stop, "period stop")
         if stop <= start:
             raise ValueError("period stop must be greater than start")
+        if not isinstance(self.spacer, bool):
+            raise TypeError("period spacer flag must be a bool")
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "stop", stop)
         object.__setattr__(self, "name", _text(self.name, "period name"))

@@ -4920,6 +4920,13 @@ class ConsolePresenter:
         The commit runs even while paused: a batch already travelling must
         still land -- atomically, as one group -- or pausing at the wrong
         moment would freeze half a causal group one shot behind the other.
+
+        The lifecycle does not wait on the picture.  A display step that
+        fails is reported by the slot guard, but the node hosts are still
+        polled: an unpolled host never accepts its worker's terminal
+        completion, never releases its device lease, and a restart queued
+        behind it waits for as long as the failure lasts -- a plot defect
+        turned into a bench that cannot stop.
         """
 
         # The turn is claimed before any of its work: a completion that
@@ -4933,12 +4940,14 @@ class ConsolePresenter:
             self.poll_logic()
             self._advance_close()
             return
-        self._settle_panel_hosts()
-        self.board.tick(stage=not self._paused)
-        self.board.commit(admit_new=not self._paused)
-        self._reconcile_panel_derivations()
-        self._report_panel_errors()
-        self.poll_logic()
+        try:
+            self._settle_panel_hosts()
+            self.board.tick(stage=not self._paused)
+            self.board.commit(admit_new=not self._paused)
+            self._reconcile_panel_derivations()
+            self._report_panel_errors()
+        finally:
+            self.poll_logic()
         self._refresh_signal_choices()
 
     def commit_surfaces(self) -> None:
@@ -7590,29 +7599,48 @@ class ConsolePresenter:
         self._sync_task_takeover()
         self._refresh_console_projection()
 
-    def _generation_surface_busy(self, host: object) -> bool:
-        """Whether a Panel is still consuming this Host's causal generation."""
+    def _generation_holders(self, host: object) -> tuple[tuple[str, float], ...]:
+        """The Panels whose projection still has to read this Host's generation.
+
+        Each with how long it has waited.  Named, because a restart waits on
+        them: a queued restart that only said "queued" left the operator
+        guessing between a run that had not finished stopping and a
+        picture that had not finished travelling.
+
+        Only the READ needs the plane.  The gate used to be every panel with
+        a surface in flight, which made a restart wait on the whole display
+        pipeline -- a render child that was slow but alive (its heartbeat
+        passes the silence check), a join-window cohort that cannot seal
+        while the display is paused, a cohort queued behind one of those --
+        for as long as any of them lasted.  A panel being retargeted has a
+        candidate port reading too, and it is asked the same question.
+        """
 
         generation = host.generation
         if generation is None:
-            return False
+            return ()
         owner = host.instance_id
+        plane = self.session.signal_plane
+        holders: list[tuple[str, float]] = []
         for panel in self.panels.values():
-            port = panel.port
-            if port is None or not port.surface_busy:
-                continue
-            for signal in port.front_signals:
-                publication = self.session.signal_plane.latest_publication(signal)
-                if publication is None:
-                    continue
-                roots = self.session.signal_plane.publication_roots(publication)
+            ports = [panel.port]
+            configuration = panel.configuration
+            if configuration is not None and configuration[0] == "retarget":
+                ports.append(configuration[2])
+            ages = [
+                projection.age_seconds
+                for port in ports
+                if port is not None
+                for projection in port.pending_projections
                 if any(
                     root.stream_id.value == owner
                     and root.generation == generation
-                    for root in roots
-                ):
-                    return True
-        return False
+                    for root in plane.publication_roots(projection.publication)
+                )
+            ]
+            if ages:
+                holders.append((str(panel.panel_id), max(ages)))
+        return tuple(holders)
 
     @staticmethod
     def _observation_status(observed: object) -> str:
@@ -7665,7 +7693,28 @@ class ConsolePresenter:
         if binding.pending is not None:
             waiting = ", ".join(sorted(binding.pending.waiting_for))
             state = "running"
-            status = f"waiting for {waiting}" if waiting else "restart queued"
+            if waiting:
+                status = f"waiting for {waiting}"
+            else:
+                # The device is free.  What still holds the restart is one
+                # of two things, and the card says which: the old run has
+                # not finished stopping, or a panel's projection has still
+                # to read it from the plane.
+                status = "restart queued"
+                if host is not None and host.running:
+                    status = (
+                        "restart queued: the last run is still stopping "
+                        f"({self._observation_status(host.observation)})"
+                    )
+                elif host is not None:
+                    holders = self._generation_holders(host)
+                    if holders:
+                        names = ", ".join(panel_id for panel_id, _age in holders)
+                        age = max(age for _panel_id, age in holders)
+                        status = (
+                            f"restart queued: {names} still to read the last "
+                            f"run ({age:.0f} s)"
+                        )
         return state, str(status)
 
     def _show_logic(
@@ -7969,12 +8018,15 @@ class ConsolePresenter:
                 return True
             # Beginning the replacement generation retires this run and its
             # whole derived closure from the Plane.  A Panel projection that
-            # already reserved the old publication still has to materialize
-            # it there, so let only those causally-related surfaces finish
-            # before withdrawing the generation.  Manual Stop then Start had
-            # this drain interval naturally; Restart must provide the same
-            # lifecycle boundary without blanking or rebuilding the Panel.
-            if self._generation_surface_busy(old_host):
+            # already reserved the old publication still has to read it
+            # there, so let those reads finish before withdrawing the
+            # generation.  Only the reads: once a projection has composed
+            # its plot input the surface travels on its own copy, so a
+            # render still in the child, a cohort still forming and a
+            # screen still to flip hold nothing here.  Manual Stop then
+            # Start had this drain interval naturally; Restart must provide
+            # the same boundary without blanking or rebuilding the Panel.
+            if self._generation_holders(old_host):
                 binding.pending = candidate
                 self._refresh_console_projection()
                 return True
@@ -8030,6 +8082,11 @@ class ConsolePresenter:
             self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             return False
+        # The run makes the values it starts with the producer's own: a
+        # field a panel's selection had written is no longer something to
+        # undo, so removing that selection afterwards leaves the value the
+        # latest run used rather than restoring the draft from before it.
+        binding.selection_restore.clear()
         binding.draft_error = ""
         self._refresh_console_projection()
         self._report(f"{binding.node_id} started", severity="task")

@@ -13,6 +13,7 @@ from .dataset import (
 from .seamless import MANUAL_AXIS_REQUEST, SeamlessScanMeasurement
 from .plan import (
     SCAN_PLAN_SELECTIONS,
+    API_PARAM_FAMILY,
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
@@ -23,6 +24,7 @@ from .plan import (
     ScanPort,
     bind_plan,
     host_advanced_port,
+    api_scan_ports_for,
     hardware_scan_ports_for,
     manual_axis_name,
     split_outer_axes,
@@ -45,6 +47,7 @@ __all__ = [
     "watched_signal_source",
     "check_cancelled",
     "wait_for_board",
+    "API_PARAM_FAMILY",
     "DEVICE_PARAM_FAMILY",
     "MANUAL_AXIS_REQUEST",
     "MANUAL_PARAM_FAMILY",
@@ -59,6 +62,7 @@ __all__ = [
     "SeamlessScanMeasurement",
     "bind_plan",
     "host_advanced_port",
+    "api_scan_ports_for",
     "hardware_scan_ports_for",
     "manual_axis_name",
     "split_outer_axes",

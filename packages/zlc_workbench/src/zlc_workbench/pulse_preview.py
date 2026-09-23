@@ -7,10 +7,12 @@ a timeline becomes a picture.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 
-def build_pulse_preview_host(timeline: Any, *, size: str = "2x2") -> Any:
+def build_pulse_preview_host(
+    timeline: Any, *, size: str = "2x2", build_host: Callable[..., Any]
+) -> Any:
     """The host, and only the host.
 
     It is what a save writes through, what the next edit updates rather than
@@ -21,13 +23,18 @@ def build_pulse_preview_host(timeline: Any, *, size: str = "2x2") -> Any:
     for and could not remove.  The preview page lays content out at its
     natural size rather than stretching it, so nothing may be mounted before
     a front exists: a raster host has no size until it has painted one.
+
+    ``build_host`` is a render child's: the preview is drawn where the
+    console's and the viewer's panels are drawn, in a process that warmed
+    itself the moment its window opened.  Drawn in the window's own process
+    it paid that process's cold start on the operator's first Preview --
+    Matplotlib's imports, numba's registry refresh, the kernels read off the
+    disk cache: 1.2 s measured, against 40 ms in a process already warm.
     """
 
     import zlc_plot as plot
 
-    host = plot.RasterPlotHost.from_plot(
-        timeline, plot.PulseTimelinePlot(), size=str(size)
-    )
+    host = build_host(timeline, plot.PulseTimelinePlot(), size=str(size))
     try:
         host.wait_for_front(5.0)
     except BaseException:

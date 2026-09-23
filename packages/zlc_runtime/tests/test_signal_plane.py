@@ -435,7 +435,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.close()
 
 
-def test_indexed_history_retains_only_the_requested_window() -> None:
+@pytest.mark.parametrize("segmented", (False, True))
+def test_indexed_history_retains_only_the_requested_window(segmented) -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration(
         "value",
@@ -484,9 +485,25 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
                 )
                 publication = plane.latest_publication("bounded-source/frame")
                 assert publication is not None
+            output = _latest(derived_declaration, float(revision))
+            if segmented:
+                block = output.snapshot.block
+                point = block.schema.point_domain.axes[0]
+                schema = replace(block.schema, point_domain=DomainSpec(
+                    (2,), (replace(point, size=2, coordinates=(0, 1)),), ((0, 1),),
+                ))
+                block = DataBlock(
+                    block.block_id, block.revision, None, INVALID, schema,
+                    segments=((-block.values, True, None), block.as_segment()),
+                    segment_origins=np.asarray(((0, 1), (0, 0)), dtype=np.int64),
+                    segment_shapes=np.ones((2, 2), dtype=np.int64),
+                )
+                output = replace(output, coverage=MonitorCoverage(2, 2), snapshot=OwnedSnapshot(
+                    block.ref(output.snapshot.ref.stream_generation), block,
+                ))
             plane.commit_processor(
                 derived,
-                {"value": _latest(derived_declaration, float(revision))},
+                {"value": output},
                 source_publication=publication,
             )
             if revision == 1:
@@ -494,11 +511,19 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
                     "bounded-derived/value",
                     100,
                 )
+            if revision == 100:
+                plane.current_dataset("bounded-derived/value")
         snapshot = plane.current_dataset("bounded-derived/value")
         primary = snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
         )
         assert tuple(primary.coordinate_values()) == tuple(range(-99, 1))
+        expected = np.arange(51, 151)
+        if segmented:
+            expected = np.column_stack((expected, -expected)).reshape(-1)
+        np.testing.assert_array_equal(snapshot.materialize().block.values.reshape(-1), expected)
+        latest = plane.latest_publication("bounded-derived/value").value("bounded-derived/value")
+        np.testing.assert_array_equal(latest.values.reshape(-1), [150.0, -150.0] if segmented else [150.0])
     finally:
         if history is not None:
             history.close()
@@ -769,6 +794,11 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
             },
         )["epoch-camera/frame"]
         first_publication = plane.latest_publication("epoch-camera/frame")
+        first_snapshot, first_deferred = plane.current_dataset_view("epoch-camera/frame", defer_record=True)
+        assert callable(first_deferred)
+        assert plane.current_dataset_view("epoch-camera/frame", defer_record=True) == (first_snapshot, first_deferred)
+        assert plane.current_dataset_view("epoch-camera/counts", defer_record=True)[1] is first_deferred
+        assert merge_calls == []
         _, first_record = plane.current_dataset_view("epoch-camera/frame")
         assert plane.current_dataset_view("epoch-camera/counts")[1] is first_record
         assert merge_calls == [1]
@@ -796,6 +826,11 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         assert publication is not None
         prepared = plane.current_dataset("epoch-camera/frame")
         assert merge_calls == [1]
+        deferred_snapshot, prefix_deferred = plane.current_dataset_view("epoch-camera/frame", defer_record=True)
+        assert deferred_snapshot is prepared
+        assert callable(prefix_deferred) and prefix_deferred is not first_deferred
+        assert plane.current_dataset_view("epoch-camera/counts", defer_record=True)[1] is prefix_deferred
+        assert merge_calls == [1]
         _snapshot, prefix_record = plane.current_dataset_view(
             "epoch-camera/frame",
             publication,
@@ -818,6 +853,8 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         assert tuple(old_record["record_timing"]["camera"]) == ("0",)
         assert old_snapshot.expanded_validity()[:, 0, 0].tolist() == [True, False]
         assert plane.current_dataset_view("epoch-camera/frame")[1] is prefix_record
+        assert first_deferred() == first_record
+        assert prefix_deferred() == prefix_record
     finally:
         plane.close()
 
@@ -900,7 +937,8 @@ def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_sto
         plane.close()
 
 
-def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> None:
+@pytest.mark.parametrize("event_record", ({}, {"acquisition": "scan"}))
+def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive(event_record) -> None:
     declaration = DatasetOutputDeclaration("scan", "test.scan")
     node = _node("grid-display", declaration)
     plane = SignalDataPlane()
@@ -924,6 +962,9 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         description = directory[0]
         assert description.shape == (1, 4, 1)
         first = plane.current_dataset(description.name)
+        first_view, first_record = plane.current_dataset_view(description.name, defer_record=True)
+        assert first_view is first and callable(first_record)
+        assert first_record() == {}
         assert first.block.schema.point_domain.logical_shape == (2, 2)
         assert first.expanded_validity()[0, :, 0].tolist() == [
             True,
@@ -935,15 +976,19 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         plane.commit_live(
             node,
             {
-                "scan": _finite_grid_point(
+                "scan": replace(_finite_grid_point(
                     declaration,
                     value=40.0,
                     point_origin=3,
                     written=2,
-                )
+                ), event_record=event_record)
             },
         )
         second = plane.current_dataset(description.name)
+        second_view, second_record = plane.current_dataset_view(description.name, defer_record=True)
+        assert second_view is second and callable(second_record)
+        assert second_record() == event_record
+        assert plane.current_dataset_view(description.name)[1] == event_record
         assert plane.describe_signals() is directory, "new values do not rebuild the directory"
         assert second.materialize().block.values[0, :, 0].tolist() == [10.0, 0.0, 0.0, 40.0]
         assert second.expanded_validity()[0, :, 0].tolist() == [
@@ -955,6 +1000,9 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
         assert plane.seal_committed(node, cut_short=True)
         assert plane.describe_signals() is not directory
         assert plane.describe_signals()[0].shape == (1, 4, 1)
+        plane.retire(node)
+        assert first_record() == {}
+        assert second_record() == event_record
     finally:
         plane.close()
 
@@ -1552,6 +1600,24 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
             assert set(pending.signals) == {"visible/history", "visible/phase"}
         finally:
             visible_tap.close()
+        _, bounded_tap = plane.follow_publications("visible/phase", replay=False, max_bytes=1024)
+        try:
+            output = _large_latest(phase_declaration, 400.0)
+            block = output.snapshot.block
+            block = DataBlock(
+                block.block_id, block.revision, None, INVALID, block.schema,
+                segments=(block.as_segment(),),
+                segment_origins=np.zeros((1, 2), dtype=np.int64),
+                segment_shapes=np.ones((1, 2), dtype=np.int64),
+            )
+            plane.commit_live(visible, {
+                "history": _latest(history_declaration, 4.0),
+                "phase": replace(output, snapshot=OwnedSnapshot(output.snapshot.ref, block)),
+            })
+            with pytest.raises(SourceFailed, match="payload bytes"):
+                bounded_tap.next(0.0)
+        finally:
+            bounded_tap.close()
     finally:
         if live_tap is not None:
             live_tap.close()

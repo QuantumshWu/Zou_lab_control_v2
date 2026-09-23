@@ -85,6 +85,7 @@ class _ScheduleView:
         "analog_committed",
         "delay_committed",
         "insert_period_requested",
+        "insert_spacer_requested",
         "reorder_items_requested",
         "remove_period_requested",
         "bracket_committed",
@@ -356,7 +357,7 @@ class _EditorView:
         "document_name_committed", "port_label_committed",
         "period_name_committed", "duration_committed", "digital_committed",
         "analog_committed", "delay_committed", "binding_committed",
-        "insert_period_requested", "reorder_items_requested",
+        "insert_period_requested", "insert_spacer_requested", "reorder_items_requested",
         "remove_period_requested", "bracket_committed",
         "bracket_add_requested", "bracket_remove_requested",
         "run_repeats_committed",
@@ -710,6 +711,45 @@ def test_removing_the_last_period_is_refused_with_a_reason(presenter) -> None:
 
     assert len(presenter.sequence.periods) == 1
     assert any("at least one period" in text for text in presenter.view.warnings)
+
+
+def test_inserting_a_spacer_names_it_and_counts_it_apart(presenter) -> None:
+    """A spacer is added by hand where a period would be, and is the locked
+    card: named by the editor from one (spacer1, spacer2, ...) and shown so,
+    holding every DAC, a line high only where BOTH neighbours have it high,
+    its duration Config-able but never scanned or set by API, counted apart
+    from the periods, and a hatched span on the timeline."""
+
+    from zlc_pulse import PERIOD_KIND_SPACER
+    from zlc_workbench.pulse_editor import timeline_of
+
+    before = presenter.sequence.periods
+    presenter.view.insert_spacer_requested.emit(("period", before[1].period_id))
+
+    after = presenter.sequence.periods
+    assert len(after) == len(before) + 1
+    spacer = after[1]
+    assert spacer.kind == PERIOD_KIND_SPACER
+    assert spacer.period_id == "spacer1"
+    assert spacer.analog_steps == ()
+    assert spacer.states == tuple(
+        int(left and right) for left, right in zip(before[0].states, before[1].states)
+    )
+
+    vm = next(p for p in presenter.view.schedule_view.schedule.periods if p.period_id == "spacer1")
+    assert vm.kind == PERIOD_KIND_SPACER
+    assert vm.name == "spacer1"
+    assert not vm.duration.can_scan and not vm.duration.can_api
+    assert all(mode == "hold" for _key, mode, _field in vm.analog)
+    schedule = presenter.view.schedule_view.schedule
+    assert schedule.period_count == len(before)
+    assert schedule.total_tooltip.endswith(f"{len(before)} period(s) and 1 spacer(s)")
+
+    marks = {mark.name: mark for mark in timeline_of(presenter.sequence).periods}
+    assert marks["spacer1"].spacer and not marks[before[0].period_id].spacer
+
+    presenter.view.insert_spacer_requested.emit(None)
+    assert presenter.sequence.periods[-1].period_id == "spacer2"
 
 
 def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
@@ -1798,7 +1838,8 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
 
     from threading import Event
 
-    from zlc_plot import RasterPlotHost
+    # The shipped preview host: the one a render child hands the window.
+    from zlc_plot.render_process import _RemoteRasterPlotHost as PreviewHost
 
     preview_started = Event()
     release_preview = Event()
@@ -1806,7 +1847,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
     release_load = Event()
     safe_started = Event()
     release_safe = Event()
-    real_wait = RasterPlotHost.wait_for_front
+    real_wait = PreviewHost.wait_for_front
 
     def blocked_front(self, *args, **kwargs):
         preview_started.set()
@@ -1824,7 +1865,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
             assert release_safe.wait(2.0)
             super().safe()
 
-    monkeypatch.setattr(RasterPlotHost, "wait_for_front", blocked_front)
+    monkeypatch.setattr(PreviewHost, "wait_for_front", blocked_front)
     board = _BlockedLoad(description=_board_description())
     application, QtCore, window = _formal_pulse_window(
         tmp_path, monkeypatch, sequence=_ordinary_sequence(), board=board
@@ -1880,19 +1921,20 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
     from concurrent.futures import Future
     from threading import Event, Thread, current_thread, main_thread
 
-    from zlc_plot import RasterPlotHost
+    # The shipped preview host: the one a render child hands the window.
+    from zlc_plot.render_process import _RemoteRasterPlotHost as PreviewHost
 
     sequence = _ordinary_sequence()
     build_started = Event()
     release_build = Event()
-    real_wait = RasterPlotHost.wait_for_front
+    real_wait = PreviewHost.wait_for_front
 
     def slow_first_front(self, *args, **kwargs):
         build_started.set()
         assert release_build.wait(2.0)
         return real_wait(self, *args, **kwargs)
 
-    monkeypatch.setattr(RasterPlotHost, "wait_for_front", slow_first_front)
+    monkeypatch.setattr(PreviewHost, "wait_for_front", slow_first_front)
     application, QtCore, window = _formal_pulse_window(
         tmp_path, monkeypatch, sequence=sequence, path=str(tmp_path / "ordinary.json")
     )
