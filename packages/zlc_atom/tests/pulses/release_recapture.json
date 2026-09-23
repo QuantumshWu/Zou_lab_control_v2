@@ -452,6 +452,7 @@
   "periods": [
     {
       "period_id": "load",
+      "kind": "period",
       "duration": 20,
       "unit": "ms",
       "states": [
@@ -464,6 +465,7 @@
     },
     {
       "period_id": "probe_a",
+      "kind": "period",
       "duration": 5,
       "unit": "ms",
       "states": [
@@ -476,6 +478,7 @@
     },
     {
       "period_id": "release",
+      "kind": "period",
       "duration": 0.02,
       "unit": "ms",
       "states": [
@@ -488,6 +491,7 @@
     },
     {
       "period_id": "recapture",
+      "kind": "period",
       "duration": 15.1,
       "unit": "ms",
       "states": [
@@ -500,6 +504,7 @@
     },
     {
       "period_id": "probe_b",
+      "kind": "period",
       "duration": 5,
       "unit": "ms",
       "states": [
@@ -512,6 +517,7 @@
     },
     {
       "period_id": "rest",
+      "kind": "period",
       "duration": 5,
       "unit": "ms",
       "states": [

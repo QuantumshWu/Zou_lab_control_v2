@@ -452,6 +452,7 @@
   "periods": [
     {
       "period_id": "load",
+      "kind": "period",
       "duration": 20,
       "unit": "ms",
       "states": [
@@ -480,6 +481,7 @@
     },
     {
       "period_id": "image",
+      "kind": "period",
       "duration": 100,
       "unit": "ms",
       "states": [
@@ -492,6 +494,7 @@
     },
     {
       "period_id": "rest",
+      "kind": "period",
       "duration": 5,
       "unit": "ms",
       "states": [

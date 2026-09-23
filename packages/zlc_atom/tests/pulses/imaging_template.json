@@ -452,6 +452,7 @@
   "periods": [
     {
       "period_id": "load",
+      "kind": "period",
       "duration": 100,
       "unit": "µs",
       "states": [
@@ -464,6 +465,7 @@
     },
     {
       "period_id": "long_before",
+      "kind": "period",
       "duration": 0.02,
       "unit": "s",
       "states": [
@@ -476,6 +478,7 @@
     },
     {
       "period_id": "gap_0",
+      "kind": "period",
       "duration": 0.0001,
       "unit": "s",
       "states": [
@@ -488,6 +491,7 @@
     },
     {
       "period_id": "short",
+      "kind": "period",
       "duration": 0.005,
       "unit": "s",
       "states": [
@@ -500,6 +504,7 @@
     },
     {
       "period_id": "gap_1",
+      "kind": "period",
       "duration": 0.0151,
       "unit": "s",
       "states": [
@@ -512,6 +517,7 @@
     },
     {
       "period_id": "long_after",
+      "kind": "period",
       "duration": 0.02,
       "unit": "s",
       "states": [
