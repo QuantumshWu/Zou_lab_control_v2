@@ -40,6 +40,10 @@ The maintained benches are self-contained except where explicitly noted:
   per sparse word; regenerate them the same way after any layout change); the
   bench checks that repeated runs produce identical first frames through the
   CTRL decoder, loop/delay registers, engine, and output mapping.
+- `diff/` is the differential harness: two BUILT checkouts (the last edge-table
+  build and the period-table build) play the same authored pulses through their
+  own real tops in xsim and the per-clock pin dumps are compared; its README
+  records what was compared when the period table replaced the edge table.
 
 The engine benches other than `tb_real_engine.v` model the row and scan BRAMs
 behaviorally (a registered address plus three pipeline stages, the RD_LAT+2
