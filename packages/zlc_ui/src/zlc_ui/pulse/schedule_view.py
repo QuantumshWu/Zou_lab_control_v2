@@ -833,7 +833,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         brackets: tuple[BracketVM, ...],
         *,
         order: tuple[tuple[str, str], ...],
-        minimum_bracket: int = 2,
+        minimum_bracket: int = 1,
     ) -> None:
         previous = self.items()
         self._cards = tuple(cards)

@@ -213,7 +213,9 @@ class CompiledProgram:
             if not 0 <= start <= end < rows:
                 raise ValueError("a loop lies outside the row table")
             if not MINIMUM_BRACKET_COUNT <= count <= MAXIMUM_REPEAT_COUNT:
-                raise ValueError("a loop count must be from 2 through 2^32-1")
+                raise ValueError(
+                    f"a loop count must be from {MINIMUM_BRACKET_COUNT} through 2^32-1"
+                )
         for index, (start, end, _count) in enumerate(loops):
             for other_start, other_end, _other in loops[index + 1:]:
                 nested = (

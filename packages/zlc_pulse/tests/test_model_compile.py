@@ -137,6 +137,25 @@ def test_a_full_span_bracket_is_only_an_internal_timeline_loop() -> None:
     assert windows["d1"] == ((1, 2), (4, 5), (7, 8))
 
 
+def test_a_bracket_of_one_plays_its_range_once_like_no_bracket() -> None:
+    """A count of one is legal: the bracket stays in the document and on the
+    editor's strip but plays its periods exactly once, which is what an
+    operator debugging a loop wants instead of deleting and redrawing it."""
+
+    geometry = StreamerParams(max_rows=8, bank_size=2)
+    plain = compile_sequence(_sequence(), geometry, 50e6)
+    once = replace(_sequence(), brackets=(PulseBracket("whole", "p0", "p2", 1),))
+    program = compile_sequence(once, geometry, 50e6)
+    assert program.loops == ((0, 2, 1),)
+    assert program.frame_visits() == plain.frame_visits()
+    assert program.frame_ticks() == plain.frame_ticks()
+    assert trigger_windows_by_channel(program, ("d0", "d1")) == trigger_windows_by_channel(plain, ("d0", "d1"))
+    # The wire image carries the count as written: the engine plays 1 once.
+    from zlc_pulse.wire import pack_program
+
+    assert pack_program(program, geometry, target=once.target)
+
+
 def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
     """Several brackets: disjoint or one inside the other, never crossing.
 
@@ -190,7 +209,7 @@ def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
 
 
 def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:
-    for invalid in (True, 1.5, 1, 0, -1, 2**32):
+    for invalid in (True, 1.5, 0, -1, 2**32):
         with np.testing.assert_raises((TypeError, ValueError)):
             PulseBracket("b", "p0", "p2", invalid)
 

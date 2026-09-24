@@ -3089,14 +3089,13 @@ def test_hide_off_keeps_what_the_pulse_drives_and_show_all_brings_it_back(sequen
         presenter.close()
 
 
-def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_path) -> None:
+def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> None:
     """Add Bracket silently undid itself.
 
-    The view model carried default_bracket_count=1 and the presenter reads a
-    count below the domain's minimum as "no repeat" -- correctly, because a
-    region that plays its periods once IS the sequence.  So the button
-    committed a count-1 region and the presenter cleared it, every time.  The
-    minimum is the domain's to state, and now does.
+    The view model carried a default count below the domain's minimum and
+    the presenter read such a count as "no repeat", so the button committed
+    a region and the presenter cleared it, every time.  The minimum is the
+    domain's to state, and the editor reads it from there.
     """
 
     from zlc_pulse import MINIMUM_BRACKET_COUNT, PulseBracket
@@ -3132,7 +3131,7 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_p
             current = presenter.sequence
             assert current.bracket_bounds == ((gap, gap),) and current.brackets[0].count == 5
             with pytest.raises(ValueError, match="bracket loops at least"):
-                presenter.set_bracket("b", start, end, 1)
+                presenter.set_bracket("b", start, end, 0)
             assert presenter.sequence is current
             order = view.schedule_view.schedule.item_order
             assert order.index(("bracket", "b:end")) == order.index(("bracket", "b:start")) + 1
@@ -3161,14 +3160,16 @@ def test_a_bracket_repeats_at_least_twice_or_it_is_not_a_bracket(sequence, tmp_p
         presenter.close()
 
 
-def test_a_bracket_of_one_is_refused_by_the_model_itself(sequence) -> None:
-    """One encoding per pulse: the redundant one cannot be built at all."""
+def test_a_bracket_of_zero_is_refused_by_the_model_itself(sequence) -> None:
+    """A bracket that plays nothing cannot be built; one that plays once can."""
 
     import pytest as _pytest
     from zlc_pulse import PulseBracket
 
+    first, last = sequence.periods[0].period_id, sequence.periods[-1].period_id
     with _pytest.raises(ValueError, match="bracket loops at least"):
-        PulseBracket("b", sequence.periods[0].period_id, sequence.periods[-1].period_id, 1)
+        PulseBracket("b", first, last, 0)
+    assert PulseBracket("b", first, last, 1).count == 1
 
 
 def test_a_timeline_names_its_periods_over_their_spans(sequence) -> None:

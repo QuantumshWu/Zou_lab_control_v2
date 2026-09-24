@@ -28,8 +28,9 @@ A `PulseBracket` is one continuous interval inside the timeline, named by its
 `bracket_id`. A Pulse holds any number of them; two brackets are either
 disjoint or one lies inside the other, and the board plays them as nested
 loops (`loop_depth` levels deep, `max_loops` per Pulse, both geometry
-constants). Each count is at least two and compiles only to the program's
-loop table. Even a bracket spanning the whole Pulse does not become or alter
+constants). Each count is at least one -- a count of one plays the range once,
+exactly as if unbracketed, so a loop can be debugged without deleting it -- and
+compiles only to the program's loop table. Even a bracket spanning the whole Pulse does not become or alter
 `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 

@@ -1818,6 +1818,57 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
     assert binding.state.display["color_max"] is None
 
 
+def test_a_colour_range_set_by_hand_still_mounts_edit_and_saves(
+    presenter, session, tmp_path
+) -> None:
+    """Fixed colour limits are STORED state, and Edit and Save build a new
+    host from it.  Every such host died at start with a bare 'color_min'
+    (a KeyError out of the session's limit transition), so after setting the
+    colour range by hand the Edit tab showed no frozen picture and Save
+    through it failed with the same one word."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and not binding.parameter_surface["display_unavailable"],
+    )
+    natural = _operation_value(binding.host.resolved_color_limits())
+    low, high = float(natural.low), float(natural.high)
+    chosen_low, chosen_high = low + 0.1 * (high - low), high - 0.1 * (high - low)
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"relim_mode": "fixed", "color_min": chosen_low, "color_max": chosen_high}},
+    )
+    _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None
+        and not binding.frozen_configuration_incompatible,
+    )
+    assert getattr(binding.editor_host, "startup_failure", None) is None
+    assert not any(
+        "failed to start" in text for _severity, text in presenter.view.status
+    ), presenter.view.status
+    described = _operation_value(binding.editor_host.describe_display())
+    assert described.display_state.values["relim_mode"] == "fixed"
+    assert described.display_state.values["color_min"] == pytest.approx(chosen_low)
+    assert described.display_state.values["color_max"] == pytest.approx(chosen_high)
+
+    target = tmp_path / "fixed.png"
+    assert presenter.save_panel_figure(binding.panel_id, str(target)) is True
+    _wait_for_panel_save(presenter, target)
+    assert not any(
+        "cannot save" in text for _severity, text in presenter.view.status
+    ), presenter.view.status
+
+
 def test_selector_interaction_does_not_disconnect_panel_signals(
     presenter, session
 ) -> None:

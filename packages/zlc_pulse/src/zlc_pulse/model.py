@@ -490,14 +490,17 @@ class OutputDelay:
         object.__setattr__(self, "unit", canonical_time_unit(self.unit, "delay unit"))
 
 
-#: The smallest count that makes a timeline bracket meaningful.
-MINIMUM_BRACKET_COUNT = 2
+#: The smallest count a timeline bracket may loop.  Once plays the range
+#: exactly as it would play unbracketed; the bracket stays in the document
+#: and on the editor's strip, which is what debugging a loop needs -- the
+#: count goes to 1 and back instead of the bracket being deleted and redrawn.
+MINIMUM_BRACKET_COUNT = 1
 MAXIMUM_REPEAT_COUNT = (1 << 32) - 1
 
 
 @dataclass(frozen=True)
 class PulseBracket:
-    """Loop one continuous range of timeline periods, at least twice.
+    """Loop one continuous range of timeline periods a whole number of times.
 
     A pulse holds any number of brackets; each is named by ``bracket_id`` the
     way a period is named by ``period_id``, so an editor, the remote API and a
@@ -530,8 +533,7 @@ class PulseBracket:
         )
         if self.count < MINIMUM_BRACKET_COUNT:
             raise ValueError(
-                f"a bracket loops at least {MINIMUM_BRACKET_COUNT} times; "
-                "once needs no bracket"
+                f"a bracket loops at least {MINIMUM_BRACKET_COUNT} time(s)"
             )
         if self.count > MAXIMUM_REPEAT_COUNT:
             raise ValueError("bracket count does not fit the hardware 32-bit count")

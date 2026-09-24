@@ -248,7 +248,7 @@ class ScheduleVM:
     run_repeats: int = 0
     delay_rows: tuple[DelayRowVM, ...] = ()
     scan_summary_text: str = ""
-    min_bracket_count: int = 2
+    min_bracket_count: int = 1
     default_bracket_count: int = 2
 
     @property

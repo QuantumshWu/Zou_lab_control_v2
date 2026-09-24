@@ -2351,10 +2351,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             != RelimMode.FIXED.value
                         ):
                             continue
+                        # The EFFECTIVE limits too.  A host built over a
+                        # stored fixed pair configures with no limit in its
+                        # patch at all -- the pair is already in the store --
+                        # and asking the patch for one raised a bare
+                        # KeyError('color_min') that killed every Edit and
+                        # Save host of a panel whose colour range had been
+                        # set by hand.
                         if transition_values.get(low_name) is None:
-                            transition_values[low_name] = prepared[low_name]
+                            transition_values[low_name] = prepared.get(
+                                low_name, previous.values[low_name]
+                            )
                         if transition_values.get(high_name) is None:
-                            transition_values[high_name] = prepared[high_name]
+                            transition_values[high_name] = prepared.get(
+                                high_name, previous.values[high_name]
+                            )
                     authored_candidate = self._parameter_schema._transition_prepared(
                         previous.values,
                         transition_values,

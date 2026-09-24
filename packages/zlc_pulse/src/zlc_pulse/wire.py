@@ -452,8 +452,11 @@ def pack_program(program, params: StreamerParams | None = None, *, target) -> di
             raise ValueError(f"loop {i} rows {first}..{last} lie outside the {n_rows}-row table")
         w[bases["loop"] + i * p.loop_words] = first | (last << 16)
         count = _checked_unsigned(count, 32, f"loop {i} count")
-        if count < 2:
-            raise ValueError(f"loop {i} count must be at least two")
+        # The engine finishes a loop whose remaining count is 0 or 1 at its
+        # last row, so a count word of zero would PLAY ONCE; the image never
+        # carries a count that does not mean what it says.
+        if count < 1:
+            raise ValueError(f"loop {i} count must be at least one")
         w[bases["loop"] + i * p.loop_words + 1] = count
 
     # Runtime rows do not belong to the compiled image.
