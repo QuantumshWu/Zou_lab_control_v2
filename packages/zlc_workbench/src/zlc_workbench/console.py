@@ -7084,7 +7084,12 @@ class ConsolePresenter:
         artifact_specs = artifact_input_specs(binding.descriptor)
         workspace = getattr(self.session, "workspace", None)
         artifact_base_dir = str(getattr(workspace, "data", ""))
-        frames_per_cycle = self._frames_per_cycle_for(binding)
+        artifact_form_spec = project_artifact_inputs(
+            artifact_specs,
+            base_dir=artifact_base_dir,
+            frames_per_cycle=self._frames_per_cycle_for(binding),
+            named=binding.draft.artifact_inputs,
+        )
         state, status = self._logic_state(binding)
         resource_fields = {
             spec.field_name for spec in binding.descriptor.workspace_resources
@@ -7173,12 +7178,13 @@ class ConsolePresenter:
             ),
             "form_values": form_values,
             "acquisition_input": binding.descriptor.acquisition_input,
-            "artifact_form_spec": project_artifact_inputs(
-                artifact_specs,
-                base_dir=artifact_base_dir,
-                frames_per_cycle=frames_per_cycle,
-            ),
-            "artifact_values": dict(binding.draft.artifact_inputs),
+            "artifact_form_spec": artifact_form_spec,
+            # Exactly the form's keys: a frame row the draft has no path for
+            # yet reads "", and the form refuses any other key set.
+            "artifact_values": {
+                key: str(binding.draft.artifact_inputs.get(key, ""))
+                for key in artifact_form_spec.keys
+            },
             "artifact_results": self._artifact_results(binding),
             # Beside Start, in both places an operator can press it.  One
             # preference, projected twice; neither widget keeps a default --

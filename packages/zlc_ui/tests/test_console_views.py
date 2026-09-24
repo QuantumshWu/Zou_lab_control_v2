@@ -2772,6 +2772,60 @@ assert not new.isHidden() and board._cards == {'stable': new}
     )
 
 
+def test_a_per_frame_artifact_form_reconciles_row_by_row() -> None:
+    """The REAL editor takes a projection whose artifact form has one row per
+    frame -- keys with brackets in them, a value for every key -- and takes
+    the rows away again when the cycle shrinks.  A stand-in view had let a
+    projection through whose values named fewer keys than its form, which
+    the real form refuses on the operator's screen as an internal error."""
+
+    _run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import LogicEditorView
+from zlc_ui.form import FormFieldProps, FormSpec
+app = ensure_qt_app(['test'])
+
+def path_field(key, label, required):
+    return FormFieldProps(key=key, kind='path', label=label, default='', required=required,
+                          description='Artifact contract: calibration.readout',
+                          file_filter='Calibration artifacts (*.json)', base_dir='C:/data',
+                          refreshable=True)
+
+def projection(frames, values):
+    fields = [path_field('calibration_path', 'Calibration artifact (every frame)' if frames > 1 else 'Calibration artifact', True)]
+    # One row per frame, as the console projects them: none for a single frame.
+    fields += [path_field(f'calibration_path[{k}]', f'Calibration artifact \u00b7 frame {k}', False)
+               for k in range(1, frames + 1) if frames > 1]
+    spec = FormSpec(tuple(fields))
+    return {'node_id': 'occupancy', 'api_name': 'occupancy', 'kind': 'processor',
+            'form_spec': FormSpec(()), 'form_values': {},
+            'artifact_form_spec': spec,
+            'artifact_values': {key: values.get(key, '') for key in spec.keys},
+            'artifact_results': (), 'preview_offered': False, 'auto_preview': False,
+            'can_start': False, 'can_stop': False}
+
+editor = LogicEditorView('occupancy', projection(3, {'calibration_path[2]': 'C:/data/readout.json'}))
+editor.show(); app.processEvents()
+form = editor.artifact_form
+assert form.keys == ('calibration_path', 'calibration_path[1]', 'calibration_path[2]', 'calibration_path[3]'), form.keys
+assert form.read_value('calibration_path[2]') == 'C:/data/readout.json'
+assert form.read_value('calibration_path[1]') == ''
+changed = []
+editor.draft_changed.connect(changed.append)
+editor.update_projection(projection(2, {'calibration_path[2]': 'C:/data/readout.json'}))
+app.processEvents()
+assert form.keys == ('calibration_path', 'calibration_path[1]', 'calibration_path[2]'), form.keys
+editor.update_projection(projection(1, {}))
+app.processEvents()
+assert form.keys == ('calibration_path',), form.keys
+assert changed == [], 'projecting is not editing'
+editor.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+"""
+    )
+
+
 def test_identical_artifact_results_keep_their_readouts() -> None:
     """The same results re-projected destroyed every readout and built
     them again on every beat; a readout whose name is still listed is kept

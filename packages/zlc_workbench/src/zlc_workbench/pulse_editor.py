@@ -877,8 +877,10 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     # inside the timeline, while Run starts the complete pulse again without
     # advancing the scan point.
     markers: list[Any] = []
-    # Innermost first: the renderer draws each later marker one step further
-    # out, and the model keeps its brackets outermost first.
+    # Innermost first.  The renderer stacks loops by what they contain, so the
+    # order only decides between two loops over exactly the same span (a
+    # whole-pulse bracket inside the Run loop); the model keeps its brackets
+    # outermost first, so this reverses them.
     for series, (bracket, (first, stop_gap)) in reversed(
         tuple(enumerate(zip(sequence.brackets, sequence.bracket_bounds)))
     ):

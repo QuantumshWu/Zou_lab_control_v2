@@ -122,6 +122,13 @@ def test_per_frame_pickers_follow_the_source_cycle() -> None:
     assert three.fields[0].label == "Calibration artifact (every frame)"
     assert three.fields[2].label == "Calibration artifact · frame 2"
     assert all(field.base_dir == "d" for field in three.fields)
+    # A frame the draft names keeps its row past the cycle's count, so a
+    # stale path can be seen and cleared; an empty name adds no row.
+    named = {"calibration_path[4]": "old.json", "calibration_path[9]": ""}
+    assert project_artifact_inputs((spec,), base_dir="d", frames_per_cycle=2, named=named).keys == (
+        "calibration_path", "calibration_path[1]", "calibration_path[2]",
+        "calibration_path[3]", "calibration_path[4]",
+    )
     # One frame, or none known yet: only the plain picker.
     for frames in (0, 1):
         assert project_artifact_inputs((spec,), base_dir="d", frames_per_cycle=frames).keys == (

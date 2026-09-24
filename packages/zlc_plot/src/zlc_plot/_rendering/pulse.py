@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import MutableMapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -10,7 +10,7 @@ from matplotlib.lines import Line2D
 from matplotlib.text import Text
 
 from .._pulse_time import pulse_content_bounds, pulse_time_scale
-from ..primitives import PulseAnalogTrace, PulseTimelineData
+from ..primitives import PulseAnalogTrace, PulseLoopMarker, PulseTimelineData
 from ..state import DisplayState
 from ..style import PlotStyleConfig
 
@@ -155,6 +155,35 @@ def _room_above(axis: Any, room_pt: float, below: float) -> float:
     axes_pixels = axis.get_position().height * figure.get_figheight() * figure.dpi
     room_pixels = min(room_pixels, 0.45 * axes_pixels)
     return room_pixels * below / (axes_pixels - room_pixels)
+
+
+def _loop_depths(loop_markers: Sequence[PulseLoopMarker]) -> tuple[int, ...]:
+    """How many steps out each loop is drawn, from what it contains.
+
+    A loop with nothing inside it stands at the rows (0); a loop stands one
+    step outside the deepest loop it contains; loops that share no time
+    stand at the same level.  Two loops over exactly the same span are the
+    caller's inner-then-outer order (a whole-pulse bracket, then the Run
+    loop around it).  Drawing by list position instead put two disjoint
+    brackets at two heights.
+    """
+
+    spans = [(marker.start, marker.stop) for marker in loop_markers]
+
+    def contains(outer: int, inner: int) -> bool:
+        if outer == inner:
+            return False
+        (o_start, o_stop), (i_start, i_stop) = spans[outer], spans[inner]
+        if not (o_start <= i_start and i_stop <= o_stop):
+            return False
+        return (o_stop - o_start) > (i_stop - i_start) or outer > inner
+
+    depths = [0] * len(spans)
+    # Inner loops first, so every loop's contents are settled before it.
+    for outer in sorted(range(len(spans)), key=lambda i: (spans[i][1] - spans[i][0], i)):
+        inside = [depths[inner] + 1 for inner in range(len(spans)) if contains(outer, inner)]
+        depths[outer] = max(inside, default=0)
+    return tuple(depths)
 
 
 def _sync_bracket_sides(
@@ -522,6 +551,7 @@ def update_pulse_timeline(
         "pulse:loop_labels",
         len(loop_markers),
     )
+    depths = _loop_depths(loop_markers)
     for index, marker in enumerate(loop_markers):
         start, stop, label_value = marker.start, marker.stop, marker.label
         # A bracket keeps its own ink whatever its depth -- the ink its posts
@@ -533,10 +563,10 @@ def update_pulse_timeline(
             if series is None
             else style.palette.bracket_cycle[series % len(style.palette.bracket_cycle)]
         )
-        # Callers state nested loops from inner to outer.  Later markers must
-        # therefore grow around earlier ones; reversing this made an internal
-        # Bracket visually surround the complete Run loop.
-        outer_depth = index
+        # How far out this loop stands is what it CONTAINS, not where it came
+        # in the list: two brackets that share no time stand at one level,
+        # and a loop stands one step outside the deepest loop inside it.
+        outer_depth = depths[index]
         y_low = frame_low - pulse.repeat_bottom_step * outer_depth
         y_high = frame_high
         lift_pt = pulse.repeat_top_step_pt * outer_depth
@@ -575,22 +605,19 @@ def update_pulse_timeline(
     top_limit = row_count + band + pulse.ylim_top_offset
     bottom_limit = pulse.ylim_bottom
     if loop_markers:
-        # Every bracket's foot stands INSIDE the axes, or its bottom rail
-        # is clipped away at the edge.  The footer clears the second
-        # bracket's foot by a margin; a deeper bracket keeps that same
-        # margin under its own foot, so one or two brackets draw exactly
-        # as they always have and a third is drawn complete.
-        lowest_foot = pulse.repeat_bottom - pulse.repeat_bottom_step * (
-            len(loop_markers) - 1
-        )
+        # Every loop's foot stands INSIDE the axes, or its bottom rail is
+        # clipped away at the edge.  The footer clears the foot one step
+        # down by a margin; the deepest loop keeps that same margin under
+        # its own foot, so one or two levels draw exactly as they always
+        # have and a third is drawn complete.
+        deepest = max(depths)
+        lowest_foot = pulse.repeat_bottom - pulse.repeat_bottom_step * deepest
         margin = pulse.repeat_bottom - pulse.repeat_bottom_step - pulse.ylim_bottom
         bottom_limit = min(bottom_limit, lowest_foot - margin)
         # The top rails stack by points above the innermost one and the
         # outermost carries its label: room for exactly that, on screen.
         innermost_top = frame_high
-        room_pt = (
-            pulse.repeat_top_step_pt * (len(loop_markers) - 1) + pulse.repeat_ylim_room_pt
-        )
+        room_pt = pulse.repeat_top_step_pt * deepest + pulse.repeat_ylim_room_pt
         top_limit = innermost_top + _room_above(axis, room_pt, innermost_top - bottom_limit)
     axis.set_ylim(bottom_limit, top_limit)
     axis.set_yticks([row_index[key] for key in row_keys])

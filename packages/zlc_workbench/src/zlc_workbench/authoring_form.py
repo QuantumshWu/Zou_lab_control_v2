@@ -145,6 +145,7 @@ def project_artifact_inputs(
     *,
     base_dir: str,
     frames_per_cycle: int = 0,
+    named: Mapping[str, str] | None = None,
 ) -> FormSpec:
     """Declared artifact paths using each domain codec's picker contract.
 
@@ -153,15 +154,27 @@ def project_artifact_inputs(
     every frame reads unless its own row names another file.  With the
     cycle's frame count unknown -- no source yet -- or a single frame, only
     the plain picker is offered; the rows appear the moment a source says
-    how many frames a cycle has.
+    how many frames a cycle has.  A frame the draft already ``named`` keeps
+    its row even past the cycle's count, so a path set for a frame that no
+    longer exists can be seen and cleared rather than refusing the run from
+    behind a hidden row.
     """
 
-    from zlc_atom.nodes import artifact_input_key
+    from zlc_atom.nodes import artifact_input_key, split_artifact_input_key
 
     frames = max(0, int(frames_per_cycle))
     fields: list[FormFieldProps] = []
     for spec in specs:
-        per_frame = bool(getattr(spec, "per_frame", False)) and frames > 1
+        highest_named = 0
+        for key, path in dict(named or {}).items():
+            try:
+                name, frame = split_artifact_input_key(key)
+            except ValueError:
+                continue
+            if name == spec.name and frame is not None and str(path).strip():
+                highest_named = max(highest_named, frame)
+        rows = max(frames, highest_named)
+        per_frame = bool(getattr(spec, "per_frame", False)) and (frames > 1 or highest_named > 0)
         fields.append(
             FormFieldProps(
                 key=str(spec.name),
@@ -178,7 +191,7 @@ def project_artifact_inputs(
         )
         if not per_frame:
             continue
-        for frame in range(1, frames + 1):
+        for frame in range(1, rows + 1):
             fields.append(
                 FormFieldProps(
                     key=artifact_input_key(spec.name, frame),
