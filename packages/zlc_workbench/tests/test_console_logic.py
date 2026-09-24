@@ -1564,6 +1564,20 @@ def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(
     assert projection["can_start"] is True
     assert presenter.logic[node_id].draft.values[PHOTOELECTRONS] is True
 
+    # Whether or not the rest of the draft projects: what the camera cannot
+    # do is a fact about the camera.  The switch stayed OFFERED on a draft
+    # with a bad field until every other field was right.
+    presenter.update_logic_draft(node_id, values={"exposure_seconds": -1.0})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is False
+    field = next(
+        item for item in projection["form_spec"].fields if item.key == PHOTOELECTRONS
+    )
+    assert field.unavailable
+    assert projection["form_values"][PHOTOELECTRONS] is False
+    presenter.update_logic_draft(node_id, values={"exposure_seconds": 0.1})
+    assert presenter.logic_editor_projection(node_id)["can_start"] is True
+
     presenter.update_logic_draft(node_id, device_keys={"camera": "camera"})
     projection = presenter.logic_editor_projection(node_id)
     assert projection["form_values"][PHOTOELECTRONS] is True

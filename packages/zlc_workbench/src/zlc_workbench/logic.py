@@ -423,11 +423,14 @@ def finalize_logic_draft(
     # against the schema alone.  An unavailable boolean has one neutral
     # effective value, False; the raw draft stays untouched so selecting a
     # capable device restores its authored/default value.
+    # Asked whether or not the rest of the draft projects: what a device
+    # cannot do is a fact about the device alone, and a switch that stayed
+    # offered until every other required field was right offered the
+    # operator something the camera could not do.
     field_availability: dict[str, str] = {}
     resolve_availability = getattr(descriptor, "resolve_field_availability", None)
     if (
         resolve_availability is not None
-        and authored
         and len(devices) == len(declared_device_arguments)
     ):
         field_availability = {
