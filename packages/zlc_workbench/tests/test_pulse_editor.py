@@ -3198,6 +3198,35 @@ def test_a_timeline_names_its_periods_over_their_spans(sequence) -> None:
         presenter.close()
 
 
+def test_bracket_view_models_are_numbered_outermost_first_in_the_previews_ink(sequence) -> None:
+    """The posts and the preview name a bracket the same way: its number in
+    the model's order (outermost first) and the colour that number takes
+    from the plotting palette, so the frame in the strip and the loop over
+    the timeline read as one thing."""
+
+    from zlc_plot import bracket_color
+    from zlc_workbench.pulse_editor import _bracket_vms
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        while len(presenter.sequence.periods) < 3:
+            presenter.insert_period(None)
+        ids = [period.period_id for period in presenter.sequence.periods]
+        presenter.add_bracket(ids[1], ids[1], 2)          # the inner one, added first
+        presenter.add_bracket(ids[0], ids[-1], 3)         # the outer one, added second
+        vms = _bracket_vms(presenter.sequence)
+        assert [(vm.bracket_id, vm.ordinal, vm.color) for vm in vms] == [
+            ("bracket2", 1, bracket_color(0)),
+            ("bracket1", 2, bracket_color(1)),
+        ], "outermost first, whatever order they were added in"
+        assert bracket_color(0) != bracket_color(1)
+        markers = timeline_of(presenter.sequence).loop_markers
+        assert [marker.series for marker in markers] == [1, 0, None], "drawn innermost first, inked by number"
+    finally:
+        presenter.close()
+
+
 def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> None:
     """Even a full-span bracket cannot replace the complete-Pulse Run loop."""
 
@@ -3218,31 +3247,35 @@ def test_preview_keeps_run_repeats_and_bracket_as_separate_markers(sequence) -> 
         ]
 
         # A bracket over everything is still the inner loop; both are shown.
+        # Each says only its count: the loop's ink (its ``series``, the
+        # bracket's number outermost first) says which bracket it is.
         presenter.add_bracket(ids[0], ids[-1], 3)
         whole = timeline_of(presenter.sequence)
-        assert [marker.label for marker in whole.loop_markers] == [
-            "Bracket ×3",
-            RUN_FOREVER_LABEL,
+        assert [(marker.label, marker.series) for marker in whole.loop_markers] == [
+            ("×3", 0),
+            (RUN_FOREVER_LABEL, None),
         ]
+        assert RUN_FOREVER_LABEL == "×∞"
         assert all((marker.start, marker.stop) == (0.0, total) for marker in whole.loop_markers)
 
         # A finite Run value changes only its marker, not the bracket.
         presenter.set_bracket("bracket1", ids[1], ids[2], 5)
         presenter.set_run_repeats(7)
         part = timeline_of(presenter.sequence)
-        assert [marker.label for marker in part.loop_markers] == [
-            "Bracket ×5",
-            "Run ×7",
+        assert [(marker.label, marker.series) for marker in part.loop_markers] == [
+            ("×5", 0),
+            ("×7", None),
         ]
         inner, outer = part.loop_markers
         assert 0.0 < inner.start and inner.stop < total
         assert (outer.start, outer.stop) == (0.0, total)
 
-        # A second bracket inside the first is drawn inside it: innermost first.
+        # A second bracket inside the first is drawn inside it: innermost
+        # first, but numbered as the model keeps them, outermost first.
         presenter.add_bracket(ids[2], ids[2], 2)
         nested = timeline_of(presenter.sequence)
-        assert [marker.label for marker in nested.loop_markers] == [
-            "Bracket ×2", "Bracket ×5", "Run ×7",
+        assert [(marker.label, marker.series) for marker in nested.loop_markers] == [
+            ("×2", 1), ("×5", 0), ("×7", None),
         ]
         innermost, middle, _outer = nested.loop_markers
         assert middle.start <= innermost.start and innermost.stop <= middle.stop

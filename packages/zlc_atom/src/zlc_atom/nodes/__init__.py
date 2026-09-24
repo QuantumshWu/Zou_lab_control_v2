@@ -3,6 +3,8 @@
 from ._framework.descriptor import (
     ArtifactCodec,
     ArtifactInputSpec,
+    artifact_input_key,
+    split_artifact_input_key,
     ArtifactOutputSpec,
     DatasetInputSpec,
     DeviceRequirement,
@@ -21,6 +23,8 @@ from ._framework.discovery import discover_logic_nodes
 __all__ = [
     "ArtifactCodec",
     "ArtifactInputSpec",
+    "artifact_input_key",
+    "split_artifact_input_key",
     "ArtifactOutputSpec",
     "DatasetInputSpec",
     "DeviceRequirement",

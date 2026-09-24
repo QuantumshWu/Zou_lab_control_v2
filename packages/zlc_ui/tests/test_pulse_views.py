@@ -678,11 +678,12 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 def test_the_bracket_posts_are_built_to_frame_the_cards_they_span() -> None:
     """The bracket art carries the repeat meaning.
 
-    Two untitled posts the same height as a period card, each with "Bracket" on
-    the cards' own header line and the count on their first control line, so
-    the pair reads as a frame drawn around the span.  It had become a titled
-    box with a glyph in it at whatever height the layout gave -- the thing
-    marking a span lined up with nothing inside the span.
+    Two posts the same height as a period card, titled "Bracket N" in the
+    pill where a card says "Period k/N", the count on the cards' first
+    control line under a "Repeats" header on the end post only, so the pair
+    reads as a frame drawn around the span.  It had become a box with a
+    glyph in it at whatever height the layout gave -- the thing marking a
+    span lined up with nothing inside the span.
     """
 
     _run_qt(
@@ -698,10 +699,11 @@ app = ensure_qt_app(["repeat-art"])
 start = BracketPost("b", "start", minimum=2)
 end = BracketPost("b", "end", count=4, minimum=2)
 for post in (start, end):
-    assert post.title() == "", "an untitled column, like the cards it frames"
+    assert post.title() == "Bracket 1", "named in the pill, like the cards it frames"
     assert post.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
     labels = [w.text() for w in post.findChildren(QtWidgets.QLabel)]
-    assert "Bracket" in labels, labels
+    assert ("Repeats" in labels) == (post.kind == "end"), labels
+    assert "Bracket" not in labels, "the pill says it; a second line saying it again said nothing"
     top = post.findChildren(QtWidgets.QWidget)[0]
     assert top.height() == panel_top_height(), (top.height(), panel_top_height())
 assert start.width() == end.width(), "the two posts match"
@@ -737,6 +739,62 @@ view.bracket_button.click()
 assert requested == [("p1", "p1", one.default_bracket_count)]
 assert feedback == []
 for widget in (view, start, end):
+    widget.close()
+    widget.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
+app.quit()
+'''
+    )
+
+
+def test_a_posts_number_and_ink_say_which_bracket_it_frames() -> None:
+    """Both posts of a bracket wear its number in the title and its colour on
+    the title and the edge -- the colour the preview draws that bracket's
+    loop in -- and a kept post is renumbered in place when the brackets
+    around it change.  A period card stays black on white, a spacer grey and
+    dashed: three kinds an eye tells apart."""
+
+    _run_qt(
+        """
+from dataclasses import replace
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import TEXT
+from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
+""" + _schedule_source() + r'''
+app = ensure_qt_app(["bracket-ink"])
+
+outer = BracketVM("b", "p1", "p2", 3, ordinal=1, color="#C96F3D")
+inner = BracketVM("c", "p2", "p2", 2, ordinal=2, color="#4F7EA8")
+view = PulseScheduleView()
+view.set_schedule(replace(vm, brackets=(outer, inner)))
+view.show(); app.processEvents()
+posts = {post.key: post for post in view.drag_container._posts}
+assert set(posts) == {"b:start", "b:end", "c:start", "c:end"}, sorted(posts)
+for key in ("b:start", "b:end"):
+    assert posts[key].title() == "Bracket 1" and posts[key].color == "#C96F3D", key
+    assert posts[key]._zlc_surface == (None, False, "#C96F3D")
+    assert posts[key]._zlc_title_color == "#C96F3D"
+for key in ("c:start", "c:end"):
+    assert posts[key].title() == "Bracket 2" and posts[key].color == "#4F7EA8", key
+    assert "Bracket 2" in posts[key].toolTip()
+card = view.drag_container.pulse_cards()[0]
+assert card._zlc_surface == (None, False, None) and card._zlc_title_color == TEXT
+
+# The outer bracket leaves: the kept posts of the other become "Bracket 1"
+# in their new ink, without being rebuilt.
+kept = posts["c:end"]
+view.set_schedule(replace(vm, document_generation=2, brackets=(replace(inner, ordinal=1, color="#C96F3D"),)))
+app.processEvents()
+assert view.drag_container._posts[1] is kept
+assert kept.title() == "Bracket 1" and kept.color == "#C96F3D"
+assert kept._zlc_surface == (None, False, "#C96F3D")
+
+# A bare post is Bracket 1 in the text ink until told otherwise.
+plain = BracketPost("z", "end")
+assert plain.title() == "Bracket 1" and plain.color == "" and plain._zlc_title_color == TEXT
+for widget in (view, plain):
     widget.close()
     widget.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)

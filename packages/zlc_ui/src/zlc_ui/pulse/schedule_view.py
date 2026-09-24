@@ -650,11 +650,16 @@ class ChannelPanel(FluentGroupBox):
 class BracketPost(FluentGroupBox):
     """One draggable post framing a bracketed run of periods.
 
-    The shape is the point: an untitled column built to the same height and
-    header block as a period card, so its "Bracket" sits on the cards' own
-    header line and its count on their first control line.  The
+    The shape is the point: a column built to the same height and header
+    block as a period card, titled "Bracket N" in the pill where a card says
+    "Period k/N", with its count on the cards' first control line.  The
     bracket then reads as a frame drawn around cards rather than a widget
-    wedged between them.
+    wedged between them, and the number and the ink say WHICH frame: both
+    posts of a bracket wear its colour on the title and the edge, and the
+    preview draws that bracket's loop in the same colour.  A period card is
+    white with a black title, a spacer grey and dashed with a grey title, a
+    bracket post white with a coloured title and edge: three kinds, three
+    looks.
 
     It had become a titled box with a glyph in it, at whatever height the
     layout happened to give -- the thing marking a span lined up with nothing
@@ -674,13 +679,17 @@ class BracketPost(FluentGroupBox):
     count_committed = QtCore.pyqtSignal(int)
 
     def __init__(
-        self, bracket_id: str, kind: str, *, count: int = 2, minimum: int = 2, parent=None,
+        self, bracket_id: str, kind: str, *, count: int = 2, minimum: int = 2,
+        ordinal: int = 1, color: str = "", parent=None,
     ) -> None:
         super().__init__("", parent)
         self.bracket_id = str(bracket_id)
         self.kind = str(kind)
         #: The item key this post answers to in the strip's order.
         self.key = bracket_post_key(self.bracket_id, self.kind)
+        self.ordinal = 1
+        self.color = ""
+        self.set_bracket_style(ordinal, color)
         self.count_spin = fluent_count_box(minimum=int(minimum))
         box_width = self.count_spin.width_for(self.COUNT_SAMPLE)
         width = box_width + 2 * px(7)
@@ -695,14 +704,16 @@ class BracketPost(FluentGroupBox):
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(px(6, minimum=4))
-        label = FluentLabel("Bracket")
+        # The post's name is its title pill, where a card says "Period 3/6".
+        # The header line under it names the count on the end post and stays
+        # empty on the start post, so both posts stay level with the cards.
+        label = FluentLabel("Repeats" if kind == "end" else "")
         label.setAlignment(QtCore.Qt.AlignCenter)
         label.setFixedHeight(row_height())
         top_layout.addWidget(label)
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
-        self.setToolTip(f"Bracket {self.bracket_id}: drag to move this boundary")
         self.count_spin.setValue(float(count))
         self.count_spin.setFixedSize(box_width, row_height())
         self.count_spin.valueChanged.connect(
@@ -721,6 +732,22 @@ class BracketPost(FluentGroupBox):
         row_top, _row_gap = row_region_vmetrics()
         column.addSpacing(max(0, row_top - px(7)))
         column.addStretch(1)
+
+    def set_bracket_style(self, ordinal: int, color: str) -> None:
+        """Say which bracket this post frames.
+
+        Its number goes in the title pill and its ink on the title and the
+        edge; both posts of a bracket wear the same, and the preview draws
+        that bracket's loop in it.  Renumbered in place when a bracket is
+        added or removed before it, the way a card's "Period k/N" is.
+        """
+
+        self.ordinal = int(ordinal)
+        self.color = str(color or "")
+        self.setTitle(f"Bracket {self.ordinal}")
+        self.set_title_color(self.color or TEXT)
+        self.set_surface(edge=self.color or None)
+        self.setToolTip(f"Bracket {self.ordinal}: drag to move this boundary")
 
 
 def bracket_spans_of(order: list[tuple[str, str]]) -> dict[str, tuple[int, int]] | None:
@@ -822,12 +849,17 @@ class PulseDragContainer(QtWidgets.QWidget):
                 if post is None:
                     post = BracketPost(
                         bracket.bracket_id, side, count=bracket.count, minimum=minimum_bracket,
+                        ordinal=bracket.ordinal, color=bracket.color,
                     )
                     if side == "end":
                         post.count_committed.connect(
                             lambda count, bracket_id=bracket.bracket_id:
                                 self.bracket_count_committed.emit(bracket_id, int(count))
                         )
+                else:
+                    # A kept post may have become another number: a bracket
+                    # added or removed before it renumbers the rest.
+                    post.set_bracket_style(bracket.ordinal, bracket.color)
                 posts.append(post)
                 widgets[("bracket", key)] = post
                 with signals_blocked(post.count_spin):

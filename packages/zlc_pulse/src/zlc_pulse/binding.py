@@ -19,6 +19,7 @@ from .model import (
     PORT_DIGITAL,
     nanoseconds_per,
     OutputDelay,
+    PulseBinding,
     PulseFieldRef,
     PulseSequence,
     align_to_grid,
@@ -184,6 +185,29 @@ def prune_orphaned_bindings(
     retained = tuple(binding for binding in sequence.bindings if held(binding.field_ref))
     dropped = tuple(binding.field_id for binding in sequence.bindings if not held(binding.field_ref))
     return (replace(sequence, bindings=retained), dropped) if dropped else (sequence, ())
+
+
+def api_bindings_in_period_order(sequence: PulseSequence) -> tuple[PulseBinding, ...]:
+    """The API parameters as the pulse plays them, not as somebody declared them.
+
+    By the period each sits on, a duration before that period's DAC fields,
+    and an output delay -- which sits on no period -- last.  A caller that
+    wants "the first API field" therefore gets the first one in time.
+    """
+
+    positions = {period.period_id: index for index, period in enumerate(sequence.periods)}
+    kind_rank = {FIELD_DURATION: 0, FIELD_DAC: 1, FIELD_DELAY: 2}
+
+    def played_at(binding: PulseBinding) -> tuple[int, int, str]:
+        reference = binding.field_ref
+        position = (
+            len(positions)
+            if reference.kind == FIELD_DELAY
+            else positions.get(reference.period_id, len(positions))
+        )
+        return (position, kind_rank.get(reference.kind, 3), str(reference.port or ""))
+
+    return tuple(sorted(sequence.api_bindings, key=played_at))
 
 
 def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:

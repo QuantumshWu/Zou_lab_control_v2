@@ -257,6 +257,14 @@ def resolve_layout(
             selected[name] = key
         artifact_specs = artifact_input_specs(descriptor)
         artifacts = {spec.name: entry.artifact_inputs.get(spec.name, "") for spec in artifact_specs}
+        # A per-frame artifact keeps each frame's own path it was saved with.
+        for spec in artifact_specs:
+            if spec.per_frame:
+                artifacts.update({
+                    str(key): path
+                    for key, path in entry.artifact_inputs.items()
+                    if str(key).startswith(f"{spec.name}[")
+                })
         if any(not isinstance(path, str) for path in artifacts.values()):
             raise LayoutError(f"{entry.node_id}: artifact input paths must be strings")
         bindings.append(

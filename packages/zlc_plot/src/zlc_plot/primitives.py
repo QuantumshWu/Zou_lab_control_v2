@@ -557,6 +557,10 @@ class PulseLoopMarker:
     start: float
     stop: float
     label: str
+    #: Which bracket this loop is, counted from the outermost (0), or None
+    #: for the Run loop that frames the whole pulse.  It picks the loop's
+    #: ink, so a bracket keeps its colour whatever depth it is drawn at.
+    series: int | None = None
 
     def __post_init__(self) -> None:
         start = _nonnegative_time(self.start, "loop start")
@@ -566,6 +570,11 @@ class PulseLoopMarker:
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "stop", stop)
         object.__setattr__(self, "label", _text(self.label, "loop label"))
+        if self.series is not None:
+            series = int(self.series)
+            if series < 0:
+                raise ValueError("loop series must be a non-negative bracket index")
+            object.__setattr__(self, "series", series)
 
 
 @dataclass(frozen=True)

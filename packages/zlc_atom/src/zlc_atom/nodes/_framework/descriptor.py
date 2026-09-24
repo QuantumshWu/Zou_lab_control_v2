@@ -101,6 +101,13 @@ class ArtifactInputSpec:
     codec: ArtifactCodec
     required: bool = True
     argument_name: str = ""
+    #: The run may take one of these PER FRAME of its Dataset input's cycle,
+    #: beside the plain path every frame falls back to: an occupancy reads a
+    #: load frame and a readout frame with calibrations trained on each.  The
+    #: draft keys a frame's own path ``"<name>[<frame>]"`` (frames counted
+    #: from 1, as the operator sees them) and the build receives them as
+    #: ``<argument_name>_by_frame``, a mapping from that frame number.
+    per_frame: bool = False
 
     def __post_init__(self) -> None:
         name = str(self.name).strip()
@@ -115,10 +122,42 @@ class ArtifactInputSpec:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "label", label)
         object.__setattr__(self, "argument_name", argument_name)
+        object.__setattr__(self, "per_frame", bool(self.per_frame))
 
     @property
     def contract_id(self) -> str:
         return self.codec.contract_id
+
+    @property
+    def frame_argument_name(self) -> str:
+        """The build argument carrying the per-frame artifacts, by frame number."""
+
+        return f"{self.argument_name}_by_frame"
+
+
+def artifact_input_key(name: str, frame: int) -> str:
+    """The draft key of one frame's artifact: ``"<name>[<frame>]"``, frames from 1."""
+
+    number = int(frame)
+    if number < 1:
+        raise ValueError("artifact frames are counted from 1")
+    return f"{str(name).strip()}[{number}]"
+
+
+def split_artifact_input_key(key: str) -> tuple[str, int | None]:
+    """A draft key back into ``(artifact name, frame number)``; a plain key has no frame.
+
+    A bracketed key that is not a frame number from 1 is refused: a key
+    either is an artifact's own name or names one of its frames.
+    """
+
+    text = str(key).strip()
+    if not text.endswith("]") or "[" not in text:
+        return text, None
+    name, _bracket, rest = text[:-1].rpartition("[")
+    if not name or not rest.isdigit() or int(rest) < 1:
+        raise ValueError(f"artifact input key {text!r} does not name a frame from 1")
+    return name, int(rest)
 
 
 @dataclass(frozen=True)
@@ -386,6 +425,17 @@ class LogicNodeDescriptor:
     resolve_field_availability: (
         Callable[[Mapping[str, object]], Mapping[str, str]] | None
     ) = None
+    #: Values the node would choose for authoring fields the operator left
+    #: empty, given the workspace resources the draft resolved to -- a
+    #: calibration's three API fields, from the pulse it was given.  Called
+    #: with the raw draft values and the resolved resources by field name.
+    #: Only EMPTY fields take what it returns, so a choice the operator made
+    #: stands; and it is asked at every finalization, so the defaults follow
+    #: the resource rather than being copied into the draft once.
+    resolve_defaults: (
+        Callable[[Mapping[str, object], Mapping[str, object]], Mapping[str, object]]
+        | None
+    ) = None
     #: Optional text authoring field naming a readiness-reporting Logic instance.
     acquisition_input: str = ""
     #: The node reports acquisition readiness through its host execution context.
@@ -475,6 +525,8 @@ class LogicNodeDescriptor:
             self.resolve_field_availability
         ):
             raise TypeError("resolve_field_availability must be callable or None")
+        if self.resolve_defaults is not None and not callable(self.resolve_defaults):
+            raise TypeError("resolve_defaults must be callable or None")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
@@ -576,6 +628,11 @@ class LogicNodeDescriptor:
                 value.argument_name
                 for value in inputs
                 if isinstance(value, ArtifactInputSpec)
+            ),
+            *(
+                value.frame_argument_name
+                for value in inputs
+                if isinstance(value, ArtifactInputSpec) and value.per_frame
             ),
             *(value.argument_name for value in workspace_resources),
             *(("source_signal",) if dataset_inputs else ()),

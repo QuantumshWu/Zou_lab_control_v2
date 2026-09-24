@@ -18,7 +18,7 @@ from zlc_atom.nodes._framework.descriptor import (
     NodePreviewSpec,
     WorkspaceResourceSpec,
 )
-from zlc_pulse import PulseSequence
+from zlc_pulse import PulseSequence, api_bindings_in_period_order
 
 from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import ReadoutModelKind
@@ -315,6 +315,33 @@ def _calibration_editor_factory(parent=None):
     return CalibrationForm(parent)
 
 
+#: The three windows a calibration compares, in the order the pulse plays
+#: them: the reference before, the readout, the reference after.
+_API_FIELD_NAMES = ("reference_before_field", "readout_field", "reference_after_field")
+
+
+def _default_api_fields(values, resources):
+    """The pulse's first three API parameters, in the order they play.
+
+    A calibration pulse is written with exactly these three windows as its
+    API parameters, so on a template chosen for the purpose the defaults are
+    the answer and the operator has nothing to pick.  Only empty fields take
+    them (the framework's rule): a field the operator set stands, and one
+    naming a parameter the chosen pulse lacks is shown as unavailable rather
+    than silently replaced.
+    """
+
+    del values
+    resource = resources.get("pulse_template")
+    sequence = getattr(resource, "value", None)
+    if not isinstance(sequence, PulseSequence):
+        return {}
+    return {
+        name: binding.field_id
+        for name, binding in zip(_API_FIELD_NAMES, api_bindings_in_period_order(sequence))
+    }
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "calibration",
     NodeKind.TASK,
@@ -343,6 +370,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # no conversion of its own, so a bench that has not configured one cannot
     # switch this on here either.
     resolve_field_availability=resolve_photoelectron_availability,
+    resolve_defaults=_default_api_fields,
 )
 
 

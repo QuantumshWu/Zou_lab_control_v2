@@ -144,15 +144,29 @@ def project_artifact_inputs(
     specs: Sequence[object],
     *,
     base_dir: str,
+    frames_per_cycle: int = 0,
 ) -> FormSpec:
-    """Declared artifact paths using each domain codec's picker contract."""
+    """Declared artifact paths using each domain codec's picker contract.
 
-    return FormSpec(
-        tuple(
+    A per-frame artifact gets one picker per frame of the source's cycle
+    after its plain one, keyed ``"<name>[<frame>]"``: the plain path is what
+    every frame reads unless its own row names another file.  With the
+    cycle's frame count unknown -- no source yet -- or a single frame, only
+    the plain picker is offered; the rows appear the moment a source says
+    how many frames a cycle has.
+    """
+
+    from zlc_atom.nodes import artifact_input_key
+
+    frames = max(0, int(frames_per_cycle))
+    fields: list[FormFieldProps] = []
+    for spec in specs:
+        per_frame = bool(getattr(spec, "per_frame", False)) and frames > 1
+        fields.append(
             FormFieldProps(
                 key=str(spec.name),
                 kind="path",
-                label=str(spec.label),
+                label=f"{spec.label} (every frame)" if per_frame else str(spec.label),
                 default="",
                 required=bool(spec.required),
                 description=f"Artifact contract: {spec.contract_id}",
@@ -161,9 +175,27 @@ def project_artifact_inputs(
                 # Written by a run that may finish after this row was set up.
                 refreshable=True,
             )
-            for spec in specs
         )
-    )
+        if not per_frame:
+            continue
+        for frame in range(1, frames + 1):
+            fields.append(
+                FormFieldProps(
+                    key=artifact_input_key(spec.name, frame),
+                    kind="path",
+                    label=f"{spec.label} · frame {frame}",
+                    default="",
+                    required=False,
+                    description=(
+                        f"Artifact contract: {spec.contract_id}. "
+                        "Empty: this frame reads the one every frame reads."
+                    ),
+                    file_filter=str(spec.codec.file_filter),
+                    base_dir=str(base_dir),
+                    refreshable=True,
+                )
+            )
+    return FormSpec(tuple(fields))
 
 
 def _project_field(field: AuthoringField) -> FormFieldProps:

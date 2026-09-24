@@ -195,6 +195,11 @@ class PaletteConfig:
     line_single: str
     pulse_cycle: tuple[str, ...]
     bracket_cycle: tuple[str, ...]
+    #: The ink of the Run loop that frames the whole pulse.  Every
+    #: bracket takes its own from ``bracket_cycle`` by its number, and its
+    #: posts in the editor wear the same, so the loop over the timeline
+    #: and the frame around the cards read as one thing.
+    pulse_run: str
     hist_fill: str
     bright: str
     fit_left: str
@@ -234,6 +239,7 @@ class PaletteConfig:
             "pulse_name",
             "pulse_grid",
             "pulse_period",
+            "pulse_run",
         ):
             object.__setattr__(self, field, _color(getattr(self, field), field))
 
@@ -849,7 +855,8 @@ def build_plot_style() -> PlotStyleConfig:
         series=("#517FA6", "#B17D4B", "#568C79", "#99719B", "#B36F72", "#558F9C", "#7E7CA5", "#92924F"),
         line_single="#808080",
         pulse_cycle=("#5D7583", "#C37D5A", "#6F8D73", "#A66E87", "#7A6FA4", "#B5A262", "#5E9A9A", "#9A765E", "#7890B5", "#8B8B8B", "#B97878", "#679174"),
-        bracket_cycle=("#6A6A6A", "#C96F3D", "#4F7EA8", "#8B6BB8"),
+        bracket_cycle=("#C96F3D", "#4F7EA8", "#8B6BB8", "#5B9A6B"),
+        pulse_run="#6A6A6A",
         hist_fill="grey",
         bright="skyblue",
         fit_left="skyblue",
@@ -1050,6 +1057,23 @@ class _RcLane:
 
 
 _MATPLOTLIB_COMPOSE_LANE = _RcLane()
+
+
+@lru_cache(maxsize=1)
+def _shipped_palette() -> PaletteConfig:
+    return build_plot_style().palette
+
+
+def bracket_color(index: int) -> str:
+    """The ink of the bracket numbered ``index`` (0 = outermost).
+
+    One source for two places: the loop the preview draws and the posts the
+    editor's strip draws take the same colour from here, so an operator can
+    tell which frame in the strip is which loop over the timeline by eye.
+    """
+
+    cycle = _shipped_palette().bracket_cycle
+    return cycle[int(index) % len(cycle)]
 
 
 @contextmanager

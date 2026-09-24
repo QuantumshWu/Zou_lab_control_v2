@@ -149,6 +149,10 @@ class BracketVM:
     start_period_id: str | None
     end_period_id: str | None
     count: int
+    #: Its number among the pulse's brackets, outermost first, and the ink
+    #: its posts wear -- the preview draws its loop in the same.
+    ordinal: int = 1
+    color: str = ""
 
 
 @dataclass(frozen=True)

@@ -524,7 +524,15 @@ def update_pulse_timeline(
     )
     for index, marker in enumerate(loop_markers):
         start, stop, label_value = marker.start, marker.stop, marker.label
-        color = style.palette.bracket_cycle[index % len(style.palette.bracket_cycle)]
+        # A bracket keeps its own ink whatever its depth -- the ink its posts
+        # wear in the editor -- and the Run loop has one of its own.  Inking
+        # by depth recoloured every bracket whenever one was added inside.
+        series = marker.series
+        color = (
+            style.palette.pulse_run
+            if series is None
+            else style.palette.bracket_cycle[series % len(style.palette.bracket_cycle)]
+        )
         # Callers state nested loops from inner to outer.  Later markers must
         # therefore grow around earlier ones; reversing this made an internal
         # Bracket visually surround the complete Run loop.

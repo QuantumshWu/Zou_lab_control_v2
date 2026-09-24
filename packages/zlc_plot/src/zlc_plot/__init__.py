@@ -73,6 +73,7 @@ _EXPORTS = {
     "PulseTimelineData": ("zlc_plot.primitives", "PulseTimelineData"),
     "fitting_spec": ("zlc_plot._kinds", "fitting_spec"),
     "PANEL_SIZE_NAMES": ("zlc_plot.layout", "PANEL_SIZE_NAMES"),
+    "bracket_color": ("zlc_plot.style", "bracket_color"),
     "recommended_pulse_preset": ("zlc_plot.layout", "recommended_pulse_preset"),
     "image_axes": ("zlc_plot.data_contract", "image_axes"),
     "RasterPlotHost": ("zlc_plot.raster", "RasterPlotHost"),
@@ -152,6 +153,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "accepts_classifier_thresholds",
     "PANEL_SIZE_NAMES",
+    "bracket_color",
     "recommended_pulse_preset",
     "AxisRef",
     "BackendUnavailableError",

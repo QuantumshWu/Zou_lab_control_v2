@@ -12,6 +12,7 @@ from zlc_data import (
     DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
+    READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
     ValidityContract,
@@ -28,8 +29,27 @@ from zlc_plot import (
 )
 
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
-from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
+from zlc_atom.nodes.calibration import ReadoutModel, ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
+
+
+def _require_calibration(candidate: object, what: str) -> None:
+    if not isinstance(candidate, TrapCalibration):
+        raise TypeError(f"{what} must be TrapCalibration")
+    if candidate.site_map.coordinate_frame != "image_pixel_xy":
+        raise ValueError(
+            f"occupancy requires {what} centers in image_pixel_xy coordinates"
+        )
+
+
+def _model_of(calibration: TrapCalibration, kind: ReadoutModelKind, frame: int) -> ReadoutModel:
+    try:
+        return calibration.select_model(kind)
+    except KeyError:
+        raise ValueError(
+            f"frame {frame}'s calibration has no {kind.value} readout model; "
+            "the model chosen here must exist in every frame's calibration"
+        ) from None
 
 
 OCCUPANCY_OUTPUTS = (
@@ -70,38 +90,98 @@ class OccupancyResult:
 
 
 class OccupancyProcessor:
-    """Evaluate the calibrated readout once per camera frame."""
+    """Evaluate the calibrated readout once per camera frame.
+
+    Every frame of a cycle reads the SAME sites; a frame may read them with
+    a calibration of its own -- a load frame and a readout frame taken under
+    different exposures, each with the thresholds and kernels trained on
+    frames like it -- and every frame not given one reads the shared one.
+    Frames are numbered from 1, the way the operator sees them.
+    """
 
     def __init__(
         self,
         calibration: TrapCalibration,
         *,
+        calibration_by_frame: Mapping[int, TrapCalibration] | None = None,
         calibration_path: str | Path | None = None,
+        calibration_paths_by_frame: Mapping[int, str | Path] | None = None,
         producer: str = "occupancy",
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
     ) -> None:
-        if not isinstance(calibration, TrapCalibration):
-            raise TypeError("calibration must be TrapCalibration")
-        if calibration.site_map.coordinate_frame != "image_pixel_xy":
-            raise ValueError(
-                "occupancy requires calibration centers in image_pixel_xy coordinates"
-            )
+        _require_calibration(calibration, "calibration")
         self.calibration = calibration
-        #: The calibration placed against the crop the RUN is taking, once a
+        by_frame: dict[int, TrapCalibration] = {}
+        for frame, candidate in dict(calibration_by_frame or {}).items():
+            number = int(frame)
+            if number < 1:
+                raise ValueError("calibration frames are counted from 1")
+            _require_calibration(candidate, f"frame {number} calibration")
+            if tuple(candidate.site_map.site_ids) != tuple(calibration.site_map.site_ids):
+                raise ValueError(
+                    f"frame {number}'s calibration names different sites "
+                    f"({candidate.n_sites}) from the shared one ({calibration.n_sites}): "
+                    "occupancy reads one set of sites in every frame"
+                )
+            by_frame[number] = candidate
+        self.calibration_by_frame: Mapping[int, TrapCalibration] = MappingProxyType(by_frame)
+        #: The model kind every frame reads with, resolved once: a frame's
+        #: calibration that lacks it is refused here, not at its first frame.
+        self._model_kind = calibration.select_model(model_kind).kind
+        #: The calibrations placed against the crop the RUN is taking, once a
         #: run record says what that crop is.  Until then a run is assumed to
-        #: be taking the crop the calibration was measured on.
+        #: be taking the crop each calibration was measured on.
         self._runtime: TrapCalibration | None = None
-        self.model = calibration.select_model(model_kind)
+        self._runtime_by_frame: dict[int, TrapCalibration] = {}
+        self.model: ReadoutModel
+        self._models_by_frame: dict[int, ReadoutModel] = {}
+        self._place(None, {})
         self.calibration_path = (
             None
             if calibration_path is None
             else Path(calibration_path).expanduser().resolve()
         )
+        self.calibration_paths_by_frame: Mapping[int, Path] = MappingProxyType({
+            int(frame): Path(path).expanduser().resolve()
+            for frame, path in dict(calibration_paths_by_frame or {}).items()
+        })
         self.instance_id = str(producer).strip()
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
         self.source_signal = None if source_signal is None else str(source_signal).strip()
+
+    def _place(
+        self,
+        placed: TrapCalibration | None,
+        placed_by_frame: Mapping[int, TrapCalibration],
+    ) -> None:
+        """Take the calibrations as placed against the run's crop (or not yet)."""
+
+        self._runtime = placed
+        self._runtime_by_frame = dict(placed_by_frame)
+        self.model = self.readout.select_model(self._model_kind)
+        self._models_by_frame = {
+            frame: _model_of(self.readout_for(frame), self.model.kind, frame)
+            for frame in self.calibration_by_frame
+        }
+
+    def readout_for(self, frame: int | None) -> TrapCalibration:
+        """The calibration frame ``frame`` (from 1) reads with; the shared one when it names none."""
+
+        if frame is not None:
+            own = self._runtime_by_frame.get(frame)
+            if own is not None:
+                return own
+            own = self.calibration_by_frame.get(frame)
+            if own is not None:
+                return own
+        return self.readout
+
+    def _model_for(self, frame: int | None) -> ReadoutModel:
+        if frame is not None and frame in self._models_by_frame:
+            return self._models_by_frame[frame]
+        return self.model
 
     def _validate_images(self, snapshot: OwnedSnapshot) -> None:
         """Validate image cells; Repeat/Point axes pass through unchanged."""
@@ -129,9 +209,7 @@ class OccupancyProcessor:
     def _validate_source_run_record(self, source: SignalValue) -> None:
         """Check only structural camera facts present on the parent."""
 
-        model_kind = self.model.kind
-        self._runtime = None
-        self.model = self.calibration.select_model(model_kind)
+        self._place(None, {})
         record = source.run_record
         contract = self.calibration.frame_contract
         snapshots = record.get("device_snapshots")
@@ -163,12 +241,14 @@ class OccupancyProcessor:
             return result
 
         sensor = pair("sensor_shape_yx")
-        if contract.sensor_shape is not None and sensor is not None:
-            if sensor != contract.sensor_shape:
-                raise ValueError(
-                    f"camera sensor shape {sensor} differs from calibration "
-                    f"{contract.sensor_shape}"
-                )
+        if sensor is not None:
+            for frame, candidate in ((None, self.calibration), *self.calibration_by_frame.items()):
+                expected = candidate.frame_contract.sensor_shape
+                if expected is not None and sensor != expected:
+                    which = "calibration" if frame is None else f"frame {frame}'s calibration"
+                    raise ValueError(
+                        f"camera sensor shape {sensor} differs from {which} {expected}"
+                    )
 
         # A run may crop the sensor differently from the calibration: where a
         # trap IS, is a fact about the sensor, so a different ROI numbers the
@@ -182,12 +262,19 @@ class OccupancyProcessor:
         binning = pair("binning_yx") or tuple(contract.binning_yx)
         if origin is not None and shape is not None:
             roi = (int(origin[1]), int(origin[0]), int(shape[1]), int(shape[0]))
-            frame = (
+            image_shape = (
                 int(shape[0]) // int(binning[0]),
                 int(shape[1]) // int(binning[1]),
             )
-            self._runtime = self.calibration.rebased(roi, binning, frame)
-            self.model = self._runtime.select_model(model_kind)
+            # Every calibration is read against the same crop: the shared one
+            # and each frame's own are placed together.
+            self._place(
+                self.calibration.rebased(roi, binning, image_shape),
+                {
+                    frame: candidate.rebased(roi, binning, image_shape)
+                    for frame, candidate in self.calibration_by_frame.items()
+                },
+            )
         elif tuple(binning) != tuple(contract.binning_yx):
             raise ValueError(
                 f"camera binning {tuple(binning)} differs from calibration "
@@ -276,6 +363,10 @@ class OccupancyProcessor:
         repeats, points = images.shape[:2]
         n_sites = self.readout.n_sites
         flat = images.reshape((repeats * points, *images.shape[2:]))
+        # Which frame of its cycle each cell is.  The Point axis with the
+        # readout-event role counts a cycle's frames, whatever else the
+        # Point domain carries beside it (a scan's own axes, say).
+        frame_of_cell = self._frame_numbers(frames.block.schema, repeats, points)
         source_validity = frames.expanded_validity()
         cell_valid = np.all(
             source_validity,
@@ -293,24 +384,21 @@ class OccupancyProcessor:
         # number is marked invalid, so the cast need not also warn.
         with np.errstate(over="ignore"):
             for index in np.flatnonzero(cell_valid):
-                counts[index] = self.readout.signals(
+                counts[index] = self.readout_for(int(frame_of_cell[index])).signals(
                     flat[index],
                     model_kind=self.model.kind,
                 )
-        model = self.model
-        site_usable = (
-            self.readout.site_map.valid_sites
-            & model.usable_sites
-            & np.isfinite(model.thresholds)
-        )
+        # Every frame judges its sites by the thresholds and the usable set
+        # of the calibration IT reads with: one row of each per cell.
+        site_usable, thresholds = self._per_frame_tables(frame_of_cell)
         # A verdict needs a number to read.  Where the readout produced none
         # -- a frame with NaN in the box, a sum beyond single precision --
         # there is no count and no verdict, and the site is INVALID for this
         # cell: publishing it as a valid EMPTY would let a survival or
         # agreement panel count an unjudgeable trial as an atom lost.
-        valid = cell_valid[:, None] & site_usable[None, :] & np.isfinite(counts)
+        valid = cell_valid[:, None] & site_usable & np.isfinite(counts)
         counts[~valid] = np.nan
-        occupied = classify_threshold(counts, model.thresholds) & valid
+        occupied = classify_threshold(counts, thresholds) & valid
         counts = counts.reshape((repeats, points, n_sites))
         occupied = occupied.reshape((repeats, points, n_sites))
         valid = valid.reshape((repeats, points, n_sites))
@@ -326,6 +414,68 @@ class OccupancyProcessor:
             "frame_judged": frames,
         }
         return OccupancyResult(artifacts)
+
+    def _frame_numbers(self, schema: DatasetSchema, repeats: int, points: int) -> np.ndarray:
+        """The frame number (from 1) of every cell of the flattened event.
+
+        Zero everywhere when the source has no frame axis -- then there is
+        only the shared calibration to read with, and a frame's own would be
+        a claim about frames that do not exist.
+        """
+
+        axes = schema.point_domain.axes
+        position = next(
+            (index for index, axis in enumerate(axes) if axis.role == READOUT_EVENT),
+            None,
+        )
+        if position is None:
+            if self.calibration_by_frame:
+                raise ValueError(
+                    "these frames have no frame axis to read per-frame calibrations against"
+                )
+            return np.zeros(repeats * points, dtype=int)
+        sizes = tuple(int(axis.size) for axis in axes)
+        beyond = sorted(frame for frame in self.calibration_by_frame if frame > sizes[position])
+        if beyond:
+            raise ValueError(
+                f"frame {beyond[0]} has its own calibration but a cycle has only "
+                f"{sizes[position]} frame(s)"
+            )
+        point_index = np.arange(repeats * points) % points
+        return np.asarray(np.unravel_index(point_index, sizes)[position]) + 1
+
+    def _per_frame_tables(self, frame_of_cell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Per cell: which sites are usable, and each site's threshold.
+
+        Read from the calibration the cell's frame uses.  Without a frame's
+        own calibration this is the shared row broadcast, at no cost.
+        """
+
+        def usable(readout: TrapCalibration, model: ReadoutModel) -> np.ndarray:
+            return (
+                readout.site_map.valid_sites
+                & model.usable_sites
+                & np.isfinite(model.thresholds)
+            )
+
+        cells = int(frame_of_cell.shape[0])
+        shared_usable = usable(self.readout, self.model)
+        shared_thresholds = np.asarray(self.model.thresholds, dtype=float)
+        if not self.calibration_by_frame:
+            return (
+                np.broadcast_to(shared_usable, (cells, shared_usable.size)),
+                np.broadcast_to(shared_thresholds, (cells, shared_thresholds.size)),
+            )
+        usable_rows = np.tile(shared_usable, (cells, 1))
+        threshold_rows = np.tile(shared_thresholds, (cells, 1))
+        for frame in self.calibration_by_frame:
+            rows = frame_of_cell == frame
+            if not rows.any():
+                continue
+            readout, model = self.readout_for(frame), self._model_for(frame)
+            usable_rows[rows] = usable(readout, model)
+            threshold_rows[rows] = np.asarray(model.thresholds, dtype=float)
+        return usable_rows, threshold_rows
 
     def _live_outputs(
         self,
@@ -386,6 +536,10 @@ class OccupancyProcessor:
             "parameters": {
                 "frames_signal": self.source_signal or source.name,
                 "calibration_path": None if self.calibration_path is None else str(self.calibration_path),
+                "calibration_paths_by_frame": {
+                    str(frame): str(path)
+                    for frame, path in sorted(self.calibration_paths_by_frame.items())
+                },
                 "model_kind": self.model.kind.value,
             },
         }

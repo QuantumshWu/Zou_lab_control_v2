@@ -67,7 +67,7 @@ from zlc_pulse import (
 )
 from zlc_data.units import format_quantity
 from zlc_durable import unique_path
-from zlc_plot import PANEL_SIZE_NAMES
+from zlc_plot import PANEL_SIZE_NAMES, bracket_color
 from zlc_ui import (
     ConnectionChoiceVM,
     ConnectionVM,
@@ -114,9 +114,19 @@ _TIME_UNITS = TIME_UNIT_CHOICES
 
 
 def _bracket_vms(sequence: PulseSequence) -> tuple[BracketVM, ...]:
+    """Each bracket numbered and inked as the model orders them: outermost first.
+
+    The number is what its posts say ("Bracket 2") and the ink is what its
+    posts and the preview's loop share, so the frame drawn around cards in
+    the strip and the loop drawn over the timeline read as one thing.
+    """
+
     return tuple(
-        BracketVM(b.bracket_id, b.start_period_id, b.end_period_id, b.count)
-        for b in sequence.brackets
+        BracketVM(
+            b.bracket_id, b.start_period_id, b.end_period_id, b.count,
+            ordinal=index + 1, color=bracket_color(index),
+        )
+        for index, b in enumerate(sequence.brackets)
     )
 
 
@@ -156,7 +166,7 @@ def _readable(nanoseconds: float) -> str:
 #: What an editor holding no sequence shows.  Not an error state: an editor
 #: opens before it has a subject, and its job then is to say how to get one.
 #: How a preview writes "this scan point plays until Stop".
-RUN_FOREVER_LABEL = "Run ×∞"
+RUN_FOREVER_LABEL = "×∞"
 #: What a period with NO step for a DAC means: the output keeps whatever the
 #: period before it left there.  It is a reading of the model, not a mode the
 #: model has -- ANALOG_MODES is edge and ramp -- and the one place both the
@@ -869,8 +879,8 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     markers: list[Any] = []
     # Innermost first: the renderer draws each later marker one step further
     # out, and the model keeps its brackets outermost first.
-    for bracket, (first, stop_gap) in reversed(
-        tuple(zip(sequence.brackets, sequence.bracket_bounds))
+    for series, (bracket, (first, stop_gap)) in reversed(
+        tuple(enumerate(zip(sequence.brackets, sequence.bracket_bounds)))
     ):
         last = stop_gap - 1
         stop = starts[last] + _nanoseconds(
@@ -878,12 +888,17 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         ) * 1e-9
         # A LABEL, which is what the marker takes.  Passing the count
         # itself raised TypeError inside the primitive, so a bracketed
-        # pulse could not be previewed at all.
-        markers.append(PulseLoopMarker(starts[first], stop, f"Bracket ×{bracket.count}"))
+        # pulse could not be previewed at all.  Only the count: the loop's
+        # ink says which bracket it is -- the ink its posts wear -- and the
+        # word "Bracket" beside every one of several said nothing the frame
+        # did not.  ``series`` is the bracket's number, outermost first.
+        markers.append(
+            PulseLoopMarker(starts[first], stop, f"×{bracket.count}", series=series)
+        )
     run_label = (
         RUN_FOREVER_LABEL
         if sequence.run_repeats == 0
-        else f"Run ×{sequence.run_repeats}"
+        else f"×{sequence.run_repeats}"
     )
     if total > 0:
         markers.append(PulseLoopMarker(0.0, total, run_label))

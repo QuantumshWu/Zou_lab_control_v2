@@ -7084,6 +7084,7 @@ class ConsolePresenter:
         artifact_specs = artifact_input_specs(binding.descriptor)
         workspace = getattr(self.session, "workspace", None)
         artifact_base_dir = str(getattr(workspace, "data", ""))
+        frames_per_cycle = self._frames_per_cycle_for(binding)
         state, status = self._logic_state(binding)
         resource_fields = {
             spec.field_name for spec in binding.descriptor.workspace_resources
@@ -7096,9 +7097,15 @@ class ConsolePresenter:
         }
         form_values = {}
         for field in binding.descriptor.authoring_schema.fields:
+            # The effective value: what the bound devices allow, and what
+            # the node chose for a field left empty (a calibration's API
+            # fields from its pulse); the raw draft otherwise.
             value = (
                 finalization.values[field.name]
-                if field.name in finalization.field_availability
+                if (
+                    field.name in finalization.field_availability
+                    or field.name in finalization.defaulted
+                )
                 and field.name in finalization.values
                 else binding.draft.values.get(field.name, field.default)
             )
@@ -7169,6 +7176,7 @@ class ConsolePresenter:
             "artifact_form_spec": project_artifact_inputs(
                 artifact_specs,
                 base_dir=artifact_base_dir,
+                frames_per_cycle=frames_per_cycle,
             ),
             "artifact_values": dict(binding.draft.artifact_inputs),
             "artifact_results": self._artifact_results(binding),
@@ -8264,6 +8272,44 @@ class ConsolePresenter:
         ):
             self._artifact_completion_order += 1
             binding.artifact_completion_order = self._artifact_completion_order
+
+    def _frames_per_cycle_for(self, binding: LogicBinding) -> int:
+        """How many frames one cycle of this node's source carries.
+
+        Asked of the source's PRODUCER first: its draft says so before it has
+        published anything, so a frame's own calibration can be chosen while
+        the camera is still being set up.  A source without a producer draft
+        (a replayed or derived signal) answers from the plane's latest
+        publication -- the Point axis with the readout-event role counts a
+        cycle's frames.  Zero when there is no frame axis to speak of.
+        """
+
+        from zlc_data import READOUT_EVENT
+
+        source = str(binding.draft.source_signal).strip()
+        if not source:
+            return 0
+        parts = split_signal_key(source)
+        producer = None if parts is None else self.logic.get(parts[0])
+        if (
+            producer is not None
+            and "frames_per_cycle" in producer.descriptor.authoring_schema.field_names
+        ):
+            try:
+                return max(0, int(producer.draft.values.get("frames_per_cycle") or 0))
+            except (TypeError, ValueError):
+                return 0
+        publication = self.session.signal_plane.latest_publication(source)
+        if publication is None:
+            return 0
+        value = publication.value(source)
+        if value is None:
+            return 0
+        schema = value.canonical_schema or value.snapshot.block.schema
+        for axis in schema.point_domain.axes:
+            if axis.role == READOUT_EVENT:
+                return int(axis.size)
+        return 0
 
     def _default_artifact_inputs(self, descriptor: object) -> dict[str, str]:
         """Freeze the latest observed matching artifact into a new row draft."""

@@ -1126,6 +1126,59 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert stable_signal_key(node_id, "counts") not in projection["source_options"]
 
 
+def test_an_occupancy_offers_a_calibration_per_frame_of_its_camera_source(presenter) -> None:
+    """The per-frame pickers count the frames the camera's draft says a
+    cycle has -- before anything is published -- and a frame's own path is
+    kept in the draft beside the shared one; the rows follow the camera's
+    draft when it changes."""
+
+    camera_id = presenter.add_logic("camera_measurement", values={"frames_per_cycle": 3})
+    node_id = presenter.add_logic("occupancy")
+    assert presenter.view.logic_editors[node_id]["artifact_form_spec"].keys == ("calibration_path",)
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"source_signal": stable_signal_key(camera_id, "frames")}
+    )
+    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
+    assert keys == (
+        "calibration_path", "calibration_path[1]", "calibration_path[2]", "calibration_path[3]",
+    ), keys
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"artifact_inputs": {"calibration_path[2]": "readout.json"}}
+    )
+    assert presenter.logic[node_id].draft.artifact_inputs == {
+        "calibration_path": "", "calibration_path[2]": "readout.json",
+    }
+    assert presenter.logic_editor_projection(node_id)["artifact_values"] == {
+        "calibration_path": "", "calibration_path[2]": "readout.json",
+    }
+    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
+    keys = presenter.logic_editor_projection(node_id)["artifact_form_spec"].keys
+    assert keys == ("calibration_path", "calibration_path[1]", "calibration_path[2]"), keys
+
+
+def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:
+    """Empty API fields show the pulse's first three API parameters in
+    period order; the draft itself stays empty, so the default follows the
+    pulse; a field the operator chose stands."""
+
+    import shutil
+
+    fixture = Path(__file__).resolve().parents[2] / "zlc_atom" / "tests" / "pulses" / "imaging_template.json"
+    shutil.copy(fixture, Path(session.workspace.root) / "pulses" / "calib.json")
+    node_id = presenter.add_logic("calibration", values={"pulse_template": "calib.json"})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"]["reference_before_field"] == "duration:long_before"
+    assert projection["form_values"]["readout_field"] == "duration:short"
+    assert projection["form_values"]["reference_after_field"] == "duration:long_after"
+    assert presenter.logic[node_id].draft.values["readout_field"] == "", "a default is not written into the draft"
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"values": {"readout_field": "duration:long_after"}}
+    )
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"]["readout_field"] == "duration:long_after"
+    assert projection["form_values"]["reference_before_field"] == "duration:long_before"
+
+
 def test_an_unresolved_processor_source_disables_start_before_click(presenter) -> None:
     node_id = presenter.add_logic("occupancy")
 

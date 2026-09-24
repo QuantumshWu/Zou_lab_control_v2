@@ -1033,7 +1033,13 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         # OWN strip -- because it has more to say than one line of plain text
         # -- passes zero and lays that strip out as an ordinary first row, so
         # the card's height stays the sum of what is in it.
-        strip_px = scaled_px(int(title_strip_px)) if title_strip_px else 0
+        self._zlc_strip_px = scaled_px(int(title_strip_px)) if title_strip_px else 0
+        self._zlc_title_color = str(title_color)
+        #: The resting surface: body fill (white when None), dashed edge, edge ink.
+        self._zlc_surface: tuple[str | None, bool, str | None] = (None, False, None)
+        self._apply_chrome()
+
+    def _apply_chrome(self) -> None:
         # Flat card delineated by a CONTINUOUS 1 px DIVIDER border painted in ``paintEvent`` (below) --
         # NOT Qt's own ``QGroupBox`` frame, which cuts a NOTCH in the top border where the title sits
         # (the "border broken at the rounded title corner" look).  The stylesheet keeps ONLY a
@@ -1047,7 +1053,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
                 border: none;
                 border-radius: {_radius()}px;
                 margin-top: 0px;
-                padding-top: {strip_px}px;
+                padding-top: {self._zlc_strip_px}px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
@@ -1057,11 +1063,24 @@ class FluentGroupBox(QtWidgets.QGroupBox):
                 background: {BG};
                 padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
                 border-radius: {_radius()}px;
-                color: {title_color};
+                color: {self._zlc_title_color};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             """
         )
+
+    def set_title_color(self, color: str) -> None:
+        """The ink of the title pill's text.
+
+        A bracket post wears its bracket's colour here, the colour the
+        preview's loop is drawn in; a spacer wears grey.  Re-applied through
+        the same stylesheet the constructor wrote, so there is one chrome.
+        """
+
+        value = str(color or TEXT)
+        if getattr(self, "_zlc_title_color", None) != value:
+            self._zlc_title_color = value
+            self._apply_chrome()
 
     def set_selected(self, selected: bool) -> None:
         """Mark this card as the one the next edit acts on, or unmark it.
@@ -1090,14 +1109,21 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 
         return bool(getattr(self, "_zlc_selected", False))
 
-    def set_surface(self, fill: str | None = None, *, dashed: bool = False) -> None:
-        """The resting look of this box: its body colour (white when None)
-        and whether its edge is dashed.  A spacer card is the page's own grey
-        with a dashed edge, so it reads as something to look past; selection
-        paints over both."""
+    def set_surface(
+        self, fill: str | None = None, *, dashed: bool = False, edge: str | None = None,
+    ) -> None:
+        """The resting look of this box: its body colour (white when None),
+        whether its edge is dashed, and the edge's own colour (the divider
+        grey when None).  A spacer card is the page's own grey with a dashed
+        edge, so it reads as something to look past; a bracket post wears
+        its bracket's colour on the edge; selection paints over all of it."""
 
-        state = (None if fill is None else str(fill), bool(dashed))
-        if getattr(self, "_zlc_surface", (None, False)) != state:
+        state = (
+            None if fill is None else str(fill),
+            bool(dashed),
+            None if edge is None else str(edge),
+        )
+        if getattr(self, "_zlc_surface", (None, False, None)) != state:
             self._zlc_surface = state
             self.update()
 
@@ -1108,12 +1134,12 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         radius = float(_radius())
-        fill, dashed = getattr(self, "_zlc_surface", (None, False))
+        fill, dashed, edge = getattr(self, "_zlc_surface", (None, False, None))
         selected = bool(getattr(self, "_zlc_selected", False))
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(ACCENT_TINT if selected else (fill or "white")))
         painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
-        pen = QtGui.QPen(QtGui.QColor(SELECTION_EDGE if selected else DIVIDER))
+        pen = QtGui.QPen(QtGui.QColor(SELECTION_EDGE if selected else (edge or DIVIDER)))
         pen.setWidthF(1.0)
         if dashed and not selected:
             pen.setStyle(QtCore.Qt.DashLine)

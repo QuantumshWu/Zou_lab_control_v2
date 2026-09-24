@@ -80,6 +80,11 @@ class LogicDraftFinalization:
     #: signal appears.  An INCOMPATIBLE source -- present under another
     #: contract -- stays a hard issue; waiting would never fix it.
     source_absent: bool = False
+    #: The fields the node filled itself because the operator left them
+    #: empty -- a calibration's API fields from the pulse it was given.  The
+    #: form shows these as the effective values; the raw draft keeps its
+    #: vacancy, so they follow the resource instead of freezing.
+    defaulted: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -90,6 +95,7 @@ class LogicDraftFinalization:
             "artifacts",
             "resources",
             "field_availability",
+            "defaulted",
         ):
             object.__setattr__(
                 self,
@@ -346,14 +352,20 @@ def finalize_logic_draft(
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run."""
 
-    from zlc_atom.nodes import ResolvedArtifact, ResolvedWorkspaceResource
+    from zlc_atom.nodes import ResolvedArtifact, split_artifact_input_key
 
     if not isinstance(draft, LogicDraft):
         raise TypeError("finalize_logic_draft needs LogicDraft")
     issues: list[str] = []
+    # The workspace resources come first: what a draft is given (the pulse a
+    # calibration will play) decides the defaults of the fields the operator
+    # left empty, so the resources are known before the draft is projected.
+    resources, resource_issues = _resolve_workspace_resources(descriptor, draft, workspace)
+    issues.extend(resource_issues)
+    raw_values, defaulted = _defaults_from_resources(descriptor, draft.values, resources)
     authored = True
     try:
-        values = descriptor.authoring_schema.project_values(draft.values)
+        values = descriptor.authoring_schema.project_values(raw_values)
     except Exception as error:
         values = {}
         authored = False
@@ -482,8 +494,22 @@ def finalize_logic_draft(
 
     offered_artifacts = dict(draft.artifact_inputs)
     artifact_specs = artifact_input_specs(descriptor)
-    declared_artifacts = {spec.name for spec in artifact_specs}
-    unknown_artifacts = set(offered_artifacts) - declared_artifacts
+    specs_by_name = {spec.name: spec for spec in artifact_specs}
+    # A per-frame artifact is offered under "<name>[<frame>]" beside its
+    # plain path; anything else offered is a key this node did not declare.
+    frame_keys: dict[str, list[tuple[int, str]]] = {spec.name: [] for spec in artifact_specs}
+    unknown_artifacts: list[str] = []
+    for key in offered_artifacts:
+        try:
+            name, frame = split_artifact_input_key(key)
+        except ValueError:
+            unknown_artifacts.append(str(key))
+            continue
+        spec = specs_by_name.get(name)
+        if spec is None or (frame is not None and not spec.per_frame):
+            unknown_artifacts.append(str(key))
+        elif frame is not None:
+            frame_keys[name].append((frame, key))
     if unknown_artifacts:
         issues.append(
             f"{descriptor.api_name} has no artifact inputs "
@@ -492,32 +518,65 @@ def finalize_logic_draft(
     artifact_paths: dict[str, str] = {}
     artifacts: dict[str, ResolvedArtifact] = {}
     data_root = Path(getattr(workspace, "data", Path.cwd())).resolve()
+    # One decode per file: several frames naming the same calibration read
+    # it once, and the processor then holds one object for all of them.
+    decoded: dict[Path, ResolvedArtifact] = {}
     for spec in artifact_specs:
-        raw = offered_artifacts.get(spec.name, "")
-        if not isinstance(raw, str):
-            issues.append(f"artifact input {spec.name!r} must be a path string")
-            continue
-        text = raw.strip()
-        if not text:
-            if spec.required:
-                issues.append(
-                    f"{descriptor.api_name} needs artifact input {spec.name}"
-                )
-            continue
-        selected_path = Path(text).expanduser()
-        if not selected_path.is_absolute():
-            selected_path = data_root / selected_path
-        try:
-            resolved = spec.codec.resolve(selected_path)
-        except Exception as error:
-            issues.append(
-                f"{spec.contract_id} artifact {text!r} is invalid: {error}"
-            )
-            continue
-        artifact_paths[spec.name] = str(resolved.path)
-        artifacts[spec.name] = resolved
+        for frame, key in ((None, spec.name), *sorted(frame_keys[spec.name])):
+            raw = offered_artifacts.get(key, "")
+            if not isinstance(raw, str):
+                issues.append(f"artifact input {key!r} must be a path string")
+                continue
+            text = raw.strip()
+            if not text:
+                # Only the plain path can be owed: a frame that names none
+                # reads the plain one.
+                if frame is None and spec.required:
+                    issues.append(
+                        f"{descriptor.api_name} needs artifact input {spec.name}"
+                    )
+                continue
+            selected_path = Path(text).expanduser()
+            if not selected_path.is_absolute():
+                selected_path = data_root / selected_path
+            selected_path = selected_path.resolve()
+            resolved = decoded.get(selected_path)
+            if resolved is None:
+                try:
+                    resolved = spec.codec.resolve(selected_path)
+                except Exception as error:
+                    issues.append(
+                        f"{spec.contract_id} artifact {text!r} is invalid: {error}"
+                    )
+                    continue
+                decoded[selected_path] = resolved
+            artifact_paths[key] = str(resolved.path)
+            artifacts[key] = resolved
 
-    resources: dict[str, ResolvedWorkspaceResource] = {}
+    return LogicDraftFinalization(
+        dict(values),
+        source,
+        selected_devices,
+        devices,
+        artifact_paths,
+        artifacts,
+        resources,
+        field_availability,
+        tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
+        source_absent=source_absent,
+        defaulted=defaulted,
+    )
+
+
+def _resolve_workspace_resources(
+    descriptor: Any,
+    draft: LogicDraft,
+    workspace: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """Each declared workspace resource the draft names, decoded, and why not."""
+
+    resources: dict[str, Any] = {}
+    issues: list[str] = []
     workspace_root = Path(getattr(workspace, "root", Path.cwd())).resolve()
     for spec in descriptor.workspace_resources:
         directory = (workspace_root / spec.directory).resolve()
@@ -540,19 +599,41 @@ def finalize_logic_draft(
             issues.append(
                 f"{spec.contract_id} resource {str(selected)!r} is invalid: {error}"
             )
+    return resources, issues
 
-    return LogicDraftFinalization(
-        dict(values),
-        source,
-        selected_devices,
-        devices,
-        artifact_paths,
-        artifacts,
-        resources,
-        field_availability,
-        tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
-        source_absent=source_absent,
-    )
+
+def _defaults_from_resources(
+    descriptor: Any,
+    raw: Mapping[str, Any],
+    resources: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The raw draft with the node's own defaults in its empty fields.
+
+    A node that knows what an empty field should hold once its resources are
+    known -- a calibration's three API fields, from the pulse it was given --
+    says so through ``resolve_defaults``.  Only EMPTY fields take them: a
+    choice the operator made stands.  The raw draft is never written; the
+    defaults are recomputed at every finalization, so they follow the
+    resource instead of being copied once and going stale with it.
+    """
+
+    values = dict(raw)
+    hook = getattr(descriptor, "resolve_defaults", None)
+    if hook is None:
+        return values, {}
+    declared = set(descriptor.authoring_schema.field_names)
+    defaulted: dict[str, Any] = {}
+    offered = dict(hook(MappingProxyType(values), MappingProxyType(dict(resources))))
+    for name, value in offered.items():
+        if name not in declared:
+            raise ValueError(
+                f"{descriptor.api_name} resolves defaults for undeclared field {name!r}"
+            )
+        current = values.get(name)
+        if current is None or (isinstance(current, str) and not current.strip()):
+            values[name] = value
+            defaulted[name] = value
+    return values, defaulted
 
 
 def build_arguments(
@@ -605,6 +686,15 @@ def build_arguments(
         resolved = finalization.artifacts.get(spec.name)
         if resolved is not None:
             available[spec.argument_name] = resolved
+        if spec.per_frame:
+            from zlc_atom.nodes import split_artifact_input_key
+
+            by_frame: dict[int, Any] = {}
+            for key, value in finalization.artifacts.items():
+                name, frame = split_artifact_input_key(key)
+                if name == spec.name and frame is not None:
+                    by_frame[frame] = value
+            available[spec.frame_argument_name] = by_frame
     for spec in descriptor.workspace_resources:
         resolved = finalization.resources.get(spec.field_name)
         if resolved is not None:
