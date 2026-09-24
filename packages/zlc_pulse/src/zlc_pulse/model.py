@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .canonical import canonical_digest
+from .loops import frame_ticks
 
 
 PORT_DIGITAL = "digital"
@@ -750,6 +751,40 @@ class PulseSequence:
             )
             for index, inner in enumerate(self._bracket_bounds)
         )
+
+    @property
+    def loops(self) -> tuple[tuple[int, int, int], ...]:
+        """The row loop table: ``(first_row, last_row, count)`` per bracket, outermost first.
+
+        One period is one row, so a bracket over the period gaps
+        ``start..end`` loops rows ``start..end-1``.  An EMPTY bracket loops
+        nothing and is not in the table; whether it may stand at all is
+        ``require_nonempty_brackets``'s question, asked before any compile,
+        save or export.
+        """
+
+        return tuple(
+            (start, end - 1, bracket.count)
+            for bracket, (start, end) in zip(self.brackets, self._bracket_bounds, strict=True)
+            if end > start
+        )
+
+    def played_nanoseconds(self) -> float:
+        """How long the board plays one Pulse: the rows as the loop table expands them.
+
+        The sum of the periods is one PASS.  A bracket plays its rows
+        ``count`` times, a nested one that many times per pass of its
+        parent, so the time the board takes is the pass with every bracket
+        expanded.  This is the same walk the compiler stamps a program's
+        duration with, over the authored durations exactly in nanoseconds,
+        so an editor's total and the board's clock agree to the digit.
+        """
+
+        durations = tuple(
+            Fraction(str(float(period.duration))) * nanoseconds_per(period.unit)
+            for period in self.periods
+        )
+        return float(frame_ticks(durations, self.loops))
 
     def require_nonempty_brackets(self) -> None:
         for bracket, (start, end) in zip(self.brackets, self._bracket_bounds, strict=True):

@@ -4056,6 +4056,24 @@ class ConsolePresenter:
                     projection = self._producer_projection(node_id)
                 update(panel.panel_id, projection)
 
+    def _refresh_consumer_editors(self, node_id: str) -> None:
+        """Re-project the editors of the nodes that read this node's signals.
+
+        What a consumer's editor offers can depend on its producer's DRAFT:
+        an occupancy's per-frame calibration rows count the frames the
+        camera says a cycle has.  So a producer's edit is a consumer's edit
+        too, the way a producer's edit already reaches the panels drawn
+        from it.  Without this, a changed frames_per_cycle reached the
+        occupancy editor only when something else happened to re-project it.
+        """
+
+        for other in tuple(self.logic.values()):
+            if (
+                other.node_id != node_id
+                and self._direct_producer_node_id(other.draft.source_signal) == node_id
+            ):
+                self.refresh_logic_editor(other.node_id)
+
     def refresh_panel_editor(self, panel_id: str) -> bool:
         binding = self.panels.get(str(panel_id))
         if binding is None or not binding.editor_open:
@@ -7289,6 +7307,7 @@ class ConsolePresenter:
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
         self._refresh_producer_projections(binding.node_id)
+        self._refresh_consumer_editors(binding.node_id)
         return True
 
     def _logic_draft_changed(self, node_id: str, patch: Mapping[str, Any]) -> None:

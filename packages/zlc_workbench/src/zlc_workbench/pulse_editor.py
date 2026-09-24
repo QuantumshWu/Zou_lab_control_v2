@@ -534,10 +534,13 @@ def project_schedule(
         for period in (() if sequence is None else sequence.periods)
     )
 
-    total_ns = sum(
+    # One pass through the periods is what the strip shows; what the board
+    # PLAYS is that pass with every bracket expanded, and that is the total.
+    pass_ns = sum(
         _nanoseconds(period.duration, period.unit)
         for period in (() if sequence is None else sequence.periods)
     )
+    total_ns = 0.0 if sequence is None else sequence.played_nanoseconds()
     # Spacers are counted in the time, not among the periods: they are the
     # gaps between the periods someone wrote, and the cards number them so.
     authored = tuple(
@@ -552,8 +555,13 @@ def project_schedule(
         clock_text=f"{format_quantity(float(step_ns), '1')} ns/tick",
         total_text=_readable(total_ns) if sequence is not None else "",
         total_tooltip=(
-            f"{format_quantity(float(total_ns), '1')} ns over "
-            f"{len(authored)} period(s)"
+            (
+                f"{format_quantity(float(total_ns), '1')} ns as the board plays it; "
+                f"{format_quantity(float(pass_ns), '1')} ns in one pass through "
+                if total_ns != pass_ns
+                else f"{format_quantity(float(total_ns), '1')} ns over "
+            )
+            + f"{len(authored)} period(s)"
             + (f" and {len(periods) - len(authored)} spacer(s)" if len(periods) > len(authored) else "")
             if sequence is not None
             else ""
@@ -4278,10 +4286,9 @@ class PulseEditorPresenter:
             size,
             rows,
             len(sequence.periods),
-            sum(
-                _nanoseconds(period.duration, period.unit)
-                for period in sequence.periods
-            ),
+            # The header says how long the board PLAYS the pulse: the pass
+            # the axis shows, with every bracket expanded.
+            sequence.played_nanoseconds(),
         )
 
     def refresh_preview(self) -> None:

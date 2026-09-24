@@ -137,6 +137,36 @@ def test_a_full_span_bracket_is_only_an_internal_timeline_loop() -> None:
     assert windows["d1"] == ((1, 2), (4, 5), (7, 8))
 
 
+def test_a_sequence_says_how_long_the_board_plays_it() -> None:
+    """One pass through the periods is what the strip shows; the board plays
+    every bracket, so the model's played duration expands the loop table
+    with the compiler's own walk, and an empty bracket plays nothing."""
+
+    from fractions import Fraction
+
+    from zlc_pulse.model import nanoseconds_per
+
+    base = _sequence()
+    one_pass = float(sum(
+        Fraction(str(float(period.duration))) * nanoseconds_per(period.unit)
+        for period in base.periods
+    ))
+    assert base.loops == ()
+    assert base.played_nanoseconds() == one_pass
+    whole = replace(base, brackets=(PulseBracket("whole", "p0", "p2", 3),))
+    assert whole.loops == ((0, 2, 3),)
+    assert whole.played_nanoseconds() == 3 * one_pass
+    nested = replace(base, brackets=(
+        PulseBracket("inner", "p1", "p1", 3), PulseBracket("outer", "p0", "p1", 2),
+    ))
+    program = compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2), 50e6)
+    assert nested.loops == program.loops
+    assert abs(nested.played_nanoseconds() - program.duration_seconds * 1e9) < 1e-6
+    empty = replace(base, brackets=(PulseBracket("empty", "p1", "p0", 2),))
+    assert empty.loops == ()
+    assert empty.played_nanoseconds() == one_pass
+
+
 def test_a_bracket_of_one_plays_its_range_once_like_no_bracket() -> None:
     """A count of one is legal: the bracket stays in the document and on the
     editor's strip but plays its periods exactly once, which is what an

@@ -1157,14 +1157,22 @@ def test_an_occupancy_offers_a_calibration_per_frame_of_its_camera_source(presen
     assert set(projection["artifact_values"]) == set(projection["artifact_form_spec"].keys)
     # The camera drops to two frames: frame 3's row stays, because it names
     # a path the operator has to be able to see and clear.
+    # The OPEN editor, not a fresh projection: the camera's edit has to
+    # reach the occupancy editor on screen, which reads the camera's draft.
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
-    keys = presenter.logic_editor_projection(node_id)["artifact_form_spec"].keys
+    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
     assert keys == (
         "calibration_path", "calibration_path[1]", "calibration_path[2]", "calibration_path[3]",
     ), keys
     presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibration_path[3]": ""}})
-    keys = presenter.logic_editor_projection(node_id)["artifact_form_spec"].keys
+    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
     assert keys == ("calibration_path", "calibration_path[1]", "calibration_path[2]"), keys
+    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
+    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
+    assert keys == (
+        "calibration_path", "calibration_path[1]", "calibration_path[2]",
+        "calibration_path[3]", "calibration_path[4]",
+    ), keys
 
 
 def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:

@@ -3160,6 +3160,35 @@ def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> N
         presenter.close()
 
 
+def test_the_strips_total_is_what_the_board_plays(sequence) -> None:
+    """The total above the strip and the preview's header count every
+    bracket's replays -- the time the board takes -- and the tooltip still
+    says what one pass through the periods lasts.  Summing the periods put
+    a third of the truth over a pulse looping three times."""
+
+    from zlc_workbench.pulse_editor import _readable
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        before = view.schedule_view.schedule
+        one_pass = presenter.sequence.played_nanoseconds()
+        assert before.total_text == _readable(one_pass)
+        assert " over " in before.total_tooltip
+        first, last = before.periods[0].period_id, before.periods[-1].period_id
+        presenter.add_bracket(first, last, 3)
+        after = view.schedule_view.schedule
+        assert presenter.sequence.played_nanoseconds() == 3 * one_pass
+        assert after.total_text == _readable(3 * one_pass)
+        assert "as the board plays it" in after.total_tooltip
+        assert "in one pass through" in after.total_tooltip
+        assert after.total_tooltip.endswith(f"{before.period_count} period(s)")
+        candidate = presenter._preview_candidate(presenter.sequence, False, None)
+        assert candidate[-1] == 3 * one_pass
+    finally:
+        presenter.close()
+
+
 def test_a_bracket_of_zero_is_refused_by_the_model_itself(sequence) -> None:
     """A bracket that plays nothing cannot be built; one that plays once can."""
 
