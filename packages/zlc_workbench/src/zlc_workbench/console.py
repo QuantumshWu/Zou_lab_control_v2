@@ -7284,6 +7284,7 @@ class ConsolePresenter:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
+        outputs_before = tuple(output.name for output in self._logic_outputs(binding))
         if values is not None:
             for name, value in values.items():
                 if (not normalized and name in binding.selection_restore
@@ -7307,7 +7308,16 @@ class ConsolePresenter:
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
         self._refresh_producer_projections(binding.node_id)
-        self._refresh_consumer_editors(binding.node_id)
+        if tuple(output.name for output in self._logic_outputs(binding)) != outputs_before:
+            # What this node PUBLISHES changed -- a derive named another
+            # signal -- so what every other node may choose as its source
+            # changed with it: every other editor is re-projected, exactly
+            # as adding or removing a node re-projects them.
+            for other_id in tuple(self.logic):
+                if other_id != binding.node_id:
+                    self.refresh_logic_editor(other_id)
+        else:
+            self._refresh_consumer_editors(binding.node_id)
         return True
 
     def _logic_draft_changed(self, node_id: str, patch: Mapping[str, Any]) -> None:
@@ -8352,6 +8362,11 @@ class ConsolePresenter:
 
         from zlc_atom.nodes import split_artifact_input_key
 
+        if not any(
+            getattr(spec, "per_frame", False)
+            for spec in artifact_input_specs(binding.descriptor)
+        ):
+            return
         frames = self._frames_per_cycle_for(binding)
         if frames <= 0:
             return

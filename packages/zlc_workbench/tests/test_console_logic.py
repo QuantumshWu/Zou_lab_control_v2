@@ -1185,6 +1185,29 @@ def test_an_occupancy_offers_a_calibration_per_frame_of_its_camera_source(presen
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
 
 
+def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:
+    """A derive publishes what its rows name.  Naming another signal changes
+    what every other node may choose as its source, so every other open
+    editor is re-projected -- the way adding or removing a node already
+    re-projects them.  A draft edit that leaves the outputs alone reaches
+    only the editors of the nodes reading this one."""
+
+    camera_id = presenter.add_logic("camera_measurement")
+    producer_id = presenter.add_logic("derive")
+    presenter.view.logic_draft_changed.emit(
+        producer_id, {"source_signal": stable_signal_key(camera_id, "frames")}
+    )
+    consumer_id = presenter.add_logic("derive")
+    assert consumer_id != producer_id
+    total = stable_signal_key(producer_id, "total")
+    assert total not in presenter.view.logic_editors[consumer_id]["source_options"]
+    presenter.view.logic_draft_changed.emit(
+        producer_id,
+        {"values": {"expressions": ({"name": "total", "code": "result = a.frames"},)}},
+    )
+    assert total in presenter.view.logic_editors[consumer_id]["source_options"]
+
+
 def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:
     """Empty API fields show the pulse's first three API parameters in
     period order; the draft itself stays empty, so the default follows the
