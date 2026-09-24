@@ -7064,6 +7064,7 @@ class ConsolePresenter:
     ) -> LogicDraftFinalization:
         """Cache one owner finalization until its raw or external facts change."""
 
+        self._reconcile_frame_artifacts(binding)
         source_options = self._source_options(binding.descriptor, binding.node_id)
         acquisition_options = self._acquisition_options(binding.node_id)
         key = self._logic_finalization_key(
@@ -7106,7 +7107,6 @@ class ConsolePresenter:
             artifact_specs,
             base_dir=artifact_base_dir,
             frames_per_cycle=self._frames_per_cycle_for(binding),
-            named=binding.draft.artifact_inputs,
         )
         state, status = self._logic_state(binding)
         resource_fields = {
@@ -8335,6 +8335,42 @@ class ConsolePresenter:
             if axis.role == READOUT_EVENT:
                 return int(axis.size)
         return 0
+
+    def _reconcile_frame_artifacts(self, binding: LogicBinding) -> None:
+        """Keep the draft's per-frame artifact paths to the frames its source's cycle has.
+
+        A frame's own path means something only while that frame exists.
+        So a path for a frame the cycle no longer has is DROPPED, not hidden:
+        hidden, it would refuse the run ("frame 3 has its own calibration
+        but a cycle has only 2 frames") from behind a row nobody can see.
+        A frame the cycle gains starts with no path of its own.  With a
+        single frame there are no per-frame rows at all, so no per-frame
+        path stands; with the cycle unknown (no source yet) nothing is
+        judged.  Every finalization passes through here, so Start and the
+        editor see the same draft.
+        """
+
+        from zlc_atom.nodes import split_artifact_input_key
+
+        frames = self._frames_per_cycle_for(binding)
+        if frames <= 0:
+            return
+        offered = frames if frames > 1 else 0
+        stale = []
+        for key in binding.draft.artifact_inputs:
+            try:
+                _name, frame = split_artifact_input_key(key)
+            except ValueError:
+                continue
+            if frame is not None and frame > offered:
+                stale.append(key)
+        if not stale:
+            return
+        for key in stale:
+            binding.draft.artifact_inputs.pop(key)
+        binding.draft_revision += 1
+        binding.finalization_key = ()
+        binding.finalization = None
 
     def _default_artifact_inputs(self, descriptor: object) -> dict[str, str]:
         """Freeze the latest observed matching artifact into a new row draft."""

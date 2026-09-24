@@ -1129,8 +1129,9 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
 def test_an_occupancy_offers_a_calibration_per_frame_of_its_camera_source(presenter) -> None:
     """The per-frame pickers count the frames the camera's draft says a
     cycle has -- before anything is published -- and a frame's own path is
-    kept in the draft beside the shared one; the rows follow the camera's
-    draft when it changes."""
+    kept in the draft beside the shared one.  The rows ARE the cycle's
+    frames: a frame the cycle loses takes its path with it, a frame it
+    gains starts empty, and Start sees the same draft the editor shows."""
 
     camera_id = presenter.add_logic("camera_measurement", values={"frames_per_cycle": 3})
     node_id = presenter.add_logic("occupancy")
@@ -1159,20 +1160,29 @@ def test_an_occupancy_offers_a_calibration_per_frame_of_its_camera_source(presen
     # a path the operator has to be able to see and clear.
     # The OPEN editor, not a fresh projection: the camera's edit has to
     # reach the occupancy editor on screen, which reads the camera's draft.
+    # Frame 3 is gone, and its path with it -- not hidden behind a row that
+    # is no longer offered, where it would refuse the next Start.
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
-    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
-    assert keys == (
-        "calibration_path", "calibration_path[1]", "calibration_path[2]", "calibration_path[3]",
-    ), keys
-    presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibration_path[3]": ""}})
-    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
-    assert keys == ("calibration_path", "calibration_path[1]", "calibration_path[2]"), keys
+    editor = presenter.view.logic_editors[node_id]
+    assert editor["artifact_form_spec"].keys == (
+        "calibration_path", "calibration_path[1]", "calibration_path[2]",
+    ), editor["artifact_form_spec"].keys
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
-    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
-    assert keys == (
+    editor = presenter.view.logic_editors[node_id]
+    assert editor["artifact_form_spec"].keys == (
         "calibration_path", "calibration_path[1]", "calibration_path[2]",
         "calibration_path[3]", "calibration_path[4]",
-    ), keys
+    ), editor["artifact_form_spec"].keys
+    assert editor["artifact_values"]["calibration_path[3]"] == ""
+    # A single-frame cycle offers no per-frame rows, so no per-frame path stands.
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"artifact_inputs": {"calibration_path[2]": "readout.json"}}
+    )
+    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 1}})
+    editor = presenter.view.logic_editors[node_id]
+    assert editor["artifact_form_spec"].keys == ("calibration_path",)
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
 
 
 def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:
