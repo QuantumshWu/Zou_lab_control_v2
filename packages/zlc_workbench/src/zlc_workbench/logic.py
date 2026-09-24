@@ -612,9 +612,11 @@ def _defaults_from_resources(
     A node that knows what an empty field should hold once its resources are
     known -- a calibration's three API fields, from the pulse it was given --
     says so through ``resolve_defaults``.  Only EMPTY fields take them: a
-    choice the operator made stands.  The raw draft is never written; the
-    defaults are recomputed at every finalization, so they follow the
-    resource instead of being copied once and going stale with it.
+    choice the operator made stands.  A DERIVED field takes the hook's value
+    whatever the draft holds -- it is the node's outright, the form shows it
+    and nobody edits it.  The raw draft is never written; the values are
+    recomputed at every finalization, so they follow the draft and the
+    resource instead of being copied once and going stale with them.
     """
 
     values = dict(raw)
@@ -622,6 +624,11 @@ def _defaults_from_resources(
     if hook is None:
         return values, {}
     declared = set(descriptor.authoring_schema.field_names)
+    derived = {
+        field.name
+        for field in descriptor.authoring_schema.fields
+        if getattr(field, "derived", False)
+    }
     defaulted: dict[str, Any] = {}
     offered = dict(hook(MappingProxyType(values), MappingProxyType(dict(resources))))
     for name, value in offered.items():
@@ -630,7 +637,11 @@ def _defaults_from_resources(
                 f"{descriptor.api_name} resolves defaults for undeclared field {name!r}"
             )
         current = values.get(name)
-        if current is None or (isinstance(current, str) and not current.strip()):
+        if (
+            name in derived
+            or current is None
+            or (isinstance(current, str) and not current.strip())
+        ):
             values[name] = value
             defaulted[name] = value
     return values, defaulted

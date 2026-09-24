@@ -45,6 +45,12 @@ class AuthoringField:
     #: and disappears as another is touched is a moving target, and an
     #: operator cannot see what a setting would offer before choosing it.
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
+    #: The node computes this field from the rest of the draft and its
+    #: resources -- a calibration's camera exposure from its windows.  It is
+    #: SHOWN, never edited, and is whatever the node's ``resolve_defaults``
+    #: says at every finalization; the draft holds nothing for it.  The
+    #: description is what the operator reads as the reason it is not theirs.
+    derived: bool = False
     #: The unit this field's value is expressed in, or None for a bare
     #: number.  Declared by the field's owner because it is a fact about the
     #: KNOB -- an RF frequency is hertz whoever reads it -- and a scan axis
@@ -64,6 +70,11 @@ class AuthoringField:
             raise ValueError("authoring fields require name, value_type, and label")
         if not isinstance(self.description, str):
             raise TypeError("authoring field description must be text")
+        if self.derived and (self.required or self.enabled_when is not None):
+            raise ValueError(
+                f"derived field {self.name!r} is the node's to fill: it is neither "
+                "required of the operator nor conditionally editable"
+            )
         columns = tuple(self.columns)
         if str(self.value_type) == "rows":
             if not columns:

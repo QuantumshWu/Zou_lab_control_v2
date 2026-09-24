@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
+from zlc_atom.nodes.calibration.task import camera_exposure_seconds
 from zlc_atom.devices.camera.photoelectrons import (
     PHOTOELECTRONS,
     photoelectron_switch,
@@ -78,6 +79,17 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "Readout exposure seconds",
             0.005,
             minimum=1e-9,
+        ),
+        AuthoringField(
+            "camera_exposure_seconds",
+            "float",
+            "Camera exposure seconds",
+            None,
+            derived=True,
+            description=(
+                "Set by the calibration: the camera is armed with the longest "
+                "of the three windows, so every frame integrates its whole window."
+            ),
         ),
         AuthoringField(
             "reference_before_field", "text", "Reference before API field",
@@ -231,6 +243,13 @@ def _build(
                 authored["reference_exposure_seconds"]
             ),
             readout_exposure_seconds=float(authored["readout_exposure_seconds"]),
+            # By the rule, not from the form: the derived field is what the
+            # form SHOWS of this rule, and a build reached without the form
+            # (a notebook, a test) arms the camera the same way.
+            camera_exposure_seconds=camera_exposure_seconds(
+                float(authored["reference_exposure_seconds"]),
+                float(authored["readout_exposure_seconds"]),
+            ),
             reference_before_field=str(authored["reference_before_field"]),
             readout_field=str(authored["readout_field"]),
             reference_after_field=str(authored["reference_after_field"]),
@@ -342,6 +361,23 @@ def _default_api_fields(values, resources):
     }
 
 
+def _camera_exposure(values):
+    """The derived camera exposure, while the two windows are numbers."""
+
+    try:
+        reference = float(values.get("reference_exposure_seconds"))
+        readout = float(values.get("readout_exposure_seconds"))
+    except (TypeError, ValueError):
+        return {}
+    return {"camera_exposure_seconds": camera_exposure_seconds(reference, readout)}
+
+
+def _resolve_defaults(values, resources):
+    """What the node fills itself: the API fields from its pulse, the camera exposure from its windows."""
+
+    return {**_default_api_fields(values, resources), **_camera_exposure(values)}
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "calibration",
     NodeKind.TASK,
@@ -370,7 +406,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # no conversion of its own, so a bench that has not configured one cannot
     # switch this on here either.
     resolve_field_availability=resolve_photoelectron_availability,
-    resolve_defaults=_default_api_fields,
+    resolve_defaults=_resolve_defaults,
 )
 
 

@@ -159,3 +159,49 @@ def test_a_calibrations_api_fields_default_to_the_pulses_first_three_in_period_o
         "reference_after_field": "duration:long_after",
     }
     assert CALIBRATION_NODE.resolve_defaults({}, {}) == {}
+
+
+def test_a_calibration_arms_its_camera_with_the_longest_window_and_shows_it() -> None:
+    """The camera exposure is the calibration's own, derived from its two
+    windows: the reference is the longest, so that is what the camera
+    integrates.  The field is declared derived -- shown, never edited --
+    and a request whose camera exposure would cut the reference window is
+    refused."""
+
+    from zlc_atom.nodes.calibration.task import CalibrationRequest, camera_exposure_seconds
+
+    assert camera_exposure_seconds(0.02, 0.005) == 0.02
+    assert CALIBRATION_NODE.resolve_defaults(
+        {"reference_exposure_seconds": 0.02, "readout_exposure_seconds": 0.005}, {}
+    ) == {"camera_exposure_seconds": 0.02}
+    assert CALIBRATION_NODE.resolve_defaults({"reference_exposure_seconds": ""}, {}) == {}
+    field = next(
+        field for field in CALIBRATION_NODE.authoring_schema.fields
+        if field.name == "camera_exposure_seconds"
+    )
+    assert field.derived and not field.required
+
+    def request(camera_exposure: float) -> CalibrationRequest:
+        return CalibrationRequest(
+            camera_key="camera",
+            sequencer_key="sequencer",
+            pulse_template="imaging_template.json",
+            repeats=3,
+            reference_exposure_seconds=0.02,
+            readout_exposure_seconds=0.005,
+            camera_exposure_seconds=camera_exposure,
+            reference_before_field="duration:long_before",
+            readout_field="duration:short",
+            reference_after_field="duration:long_after",
+            default_model_kind=ReadoutModelKind.BOX,
+            threshold_method="gaussian",
+            box_half_width=1,
+            psf_half_width=3,
+            psf_padding=3,
+            detection_spot_sigma=1.0,
+            detection_sigma=6.0,
+        )
+
+    assert request(0.02).to_dict()["camera_exposure_seconds"] == 0.02
+    with pytest.raises(ValueError, match="cover the reference window"):
+        request(0.01)

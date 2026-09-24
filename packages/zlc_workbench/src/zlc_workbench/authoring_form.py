@@ -112,7 +112,11 @@ def project_logic_schema(
                 choices.append(FormChoice(f"{acquisition_selected} (unavailable)", acquisition_selected))
             fields.append(replace(_project_field(field), kind="choice", choices=tuple(choices)))
             continue
-        reason = str(unavailable.get(field.name, ""))
+        # A derived field is the node's to fill: shown, with its description
+        # as the reason it is not the operator's, and never edited.
+        reason = str(unavailable.get(field.name, "")) or (
+            str(field.description) if getattr(field, "derived", False) else ""
+        )
         if reason:
             fields.append(replace(_project_field(field), unavailable_reason=reason))
             continue

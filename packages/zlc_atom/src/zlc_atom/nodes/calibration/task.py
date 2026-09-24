@@ -109,6 +109,21 @@ def _non_empty_key(value: object, name: str) -> str:
     return result
 
 
+def camera_exposure_seconds(
+    reference_exposure_seconds: float,
+    readout_exposure_seconds: float,
+) -> float:
+    """The exposure a calibration arms its camera with: the longest of its windows.
+
+    Every frame must integrate its whole window, and the reference windows
+    are the longest; a longer exposure only adds dark counts to all three
+    alike.  The form shows this number and the measurement is armed with
+    it, so what the operator reads is what the camera does.
+    """
+
+    return max(float(reference_exposure_seconds), float(readout_exposure_seconds))
+
+
 @dataclass(frozen=True)
 class CalibrationRequest:
     """One frozen calibration protocol and analysis request."""
@@ -119,6 +134,8 @@ class CalibrationRequest:
     repeats: int
     reference_exposure_seconds: float
     readout_exposure_seconds: float
+    #: What the camera is armed with; see :func:`camera_exposure_seconds`.
+    camera_exposure_seconds: float
     #: Stable field references selected explicitly in the task's form.
     reference_before_field: str
     readout_field: str
@@ -163,6 +180,14 @@ class CalibrationRequest:
             # compiled program by being the SHORT one, so a run whose three
             # windows are the same length has no readout frame to find.
             raise ValueError("readout exposure must be shorter than the reference exposure")
+        camera_exposure = _positive_float(
+            self.camera_exposure_seconds,
+            "camera_exposure_seconds",
+        )
+        if camera_exposure < reference_exposure:
+            raise ValueError(
+                "the camera exposure must cover the reference window, the longest of the three"
+            )
         fields = tuple(
             _non_empty_key(value, name)
             for value, name in (
@@ -210,6 +235,7 @@ class CalibrationRequest:
         object.__setattr__(self, "repeats", repeats)
         object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
         object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
+        object.__setattr__(self, "camera_exposure_seconds", camera_exposure)
         object.__setattr__(self, "reference_before_field", fields[0])
         object.__setattr__(self, "readout_field", fields[1])
         object.__setattr__(self, "reference_after_field", fields[2])
@@ -235,6 +261,7 @@ class CalibrationRequest:
             "repeats": self.repeats,
             "reference_exposure_seconds": self.reference_exposure_seconds,
             "readout_exposure_seconds": self.readout_exposure_seconds,
+            "camera_exposure_seconds": self.camera_exposure_seconds,
             "reference_before_field": self.reference_before_field,
             "readout_field": self.readout_field,
             "reference_after_field": self.reference_after_field,
@@ -1269,7 +1296,7 @@ class CalibrationTask:
                 camera=self.camera,
                 request=CameraMeasurementRequest(
                     camera_key=self.request.camera_key,
-                    exposure_seconds=self.request.reference_exposure_seconds,
+                    exposure_seconds=self.request.camera_exposure_seconds,
                     roi_xywh=_roi_xywh(self.camera.working_point()),
                     repeat=self.request.repeats,
                     frames_per_cycle=3,

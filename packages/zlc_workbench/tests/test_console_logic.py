@@ -1200,6 +1200,15 @@ def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, 
     assert projection["form_values"]["readout_field"] == "duration:short"
     assert projection["form_values"]["reference_after_field"] == "duration:long_after"
     assert presenter.logic[node_id].draft.values["readout_field"] == "", "a default is not written into the draft"
+    # The camera exposure is the node's, derived from the windows: shown,
+    # disabled with the reason on it, following the reference window, and
+    # never written into the draft.
+    assert projection["form_values"]["camera_exposure_seconds"] == 0.02
+    exposure = next(f for f in projection["form_spec"].fields if f.key == "camera_exposure_seconds")
+    assert exposure.unavailable and "longest" in exposure.unavailable_reason
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"reference_exposure_seconds": 0.05}})
+    assert presenter.logic_editor_projection(node_id)["form_values"]["camera_exposure_seconds"] == 0.05
+    assert presenter.logic[node_id].draft.values.get("camera_exposure_seconds") is None
     presenter.view.logic_draft_changed.emit(
         node_id, {"values": {"readout_field": "duration:long_after"}}
     )

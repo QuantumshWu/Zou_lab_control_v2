@@ -39,6 +39,7 @@ def _calibration_request() -> CalibrationRequest:
         repeats=30,
         reference_exposure_seconds=0.02,
         readout_exposure_seconds=0.005,
+        camera_exposure_seconds=0.02,
         reference_before_field="duration:long_before",
         readout_field="duration:short",
         reference_after_field="duration:long_after",
