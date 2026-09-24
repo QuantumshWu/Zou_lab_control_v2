@@ -7120,18 +7120,23 @@ class ConsolePresenter:
         }
         form_values = {}
         for field in binding.descriptor.authoring_schema.fields:
-            # The effective value: what the bound devices allow, and what
-            # the node chose for a field left empty (a calibration's API
-            # fields from its pulse); the raw draft otherwise.
-            value = (
-                finalization.values[field.name]
-                if (
-                    field.name in finalization.field_availability
-                    or field.name in finalization.defaulted
-                )
+            # The effective value: what the bound devices allow, what the
+            # node chose for a field left empty or derives outright (a
+            # calibration's API fields from its pulse, its camera exposure
+            # from its windows); the raw draft otherwise.  What the node
+            # chose is read from the choice itself, not from the projected
+            # value set: that set is EMPTY while any required field is
+            # still blank, and a derived number was blank with it on a
+            # calibration that had no pulse chosen yet.
+            if (
+                field.name in finalization.field_availability
                 and field.name in finalization.values
-                else binding.draft.values.get(field.name, field.default)
-            )
+            ):
+                value = finalization.values[field.name]
+            elif field.name in finalization.defaulted:
+                value = finalization.defaulted[field.name]
+            else:
+                value = binding.draft.values.get(field.name, field.default)
             if field.name in resource_fields and value:
                 selected = Path(str(value)).expanduser()
                 if not selected.is_absolute():

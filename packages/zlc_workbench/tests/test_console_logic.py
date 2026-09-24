@@ -1208,6 +1208,22 @@ def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) ->
     assert total in presenter.view.logic_editors[consumer_id]["source_options"]
 
 
+def test_a_derived_value_shows_before_the_draft_is_complete(presenter) -> None:
+    """A calibration just added has no pulse and no API fields yet, so its
+    draft does not project -- and its camera exposure still shows, because
+    the node derives it from the two windows alone, and follows them as
+    they are typed.  It was blank until every required field was filled."""
+
+    node_id = presenter.add_logic("calibration")
+    editor = presenter.view.logic_editors[node_id]
+    assert editor["can_start"] is False
+    assert editor["form_values"]["camera_exposure_seconds"] == 0.02
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"values": {"reference_exposure_seconds": 0.03}}
+    )
+    assert presenter.view.logic_editors[node_id]["form_values"]["camera_exposure_seconds"] == 0.03
+
+
 def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:
     """Empty API fields show the pulse's first three API parameters in
     period order; the draft itself stays empty, so the default follows the
