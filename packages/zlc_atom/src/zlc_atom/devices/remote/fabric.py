@@ -23,7 +23,8 @@ What every remote device SHARES is only this:
   plane: fields / tune / values / provenance over the same socket.
 
 Wire format: length-prefixed JSON, serialized requests on an owned connection.
-A broken connection fails its current request without replaying a write.
+A broken connection fails its current request without replaying a write; the
+next request dials again.
 The UDP responder answers the broadcast with the TCP port; everything else is TCP.
 """
 
@@ -43,25 +44,18 @@ import struct
 import threading
 from typing import Any, Mapping
 
+from zlc_durable import strict_json_loads
+
 FABRIC_VERSION = 1
 DEFAULT_FABRIC_PORT = 18859
 PROBE_MESSAGE = b"zlc-device-fabric?"
 _HEADER = struct.Struct("!I")
 MAX_FRAME_BYTES = 1 << 20  # 1 MiB: announce records and scalar tunes, not data.
 _REQUEST_TIMEOUT_SECONDS = 10.0
-
-
-def local_lan_ip() -> str:
-    """This machine's LAN address, the way the pulse and SLM servers learn it."""
-
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("8.8.8.8", 80))
-        return str(probe.getsockname()[0])
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        probe.close()
+#: A tune answers only once the device has settled, and some take far longer
+#: than a question: an N100 rate change is six console writes 1.2 s apart, a
+#: restart and a re-timing of its stream, and undoing one takes longer still.
+_TUNE_TIMEOUT_SECONDS = 120.0
 
 
 def _send_frame(connection: socket.socket, value: Any) -> None:
@@ -89,7 +83,7 @@ def _recv_frame(connection: socket.socket) -> Any:
         if not chunk:
             raise ConnectionError("fabric connection closed mid-frame")
         payload += chunk
-    return json.loads(payload.decode("utf-8"))
+    return strict_json_loads(payload.decode("utf-8"), "fabric frame")
 
 
 # --------------------------------------------------------------- announcing
@@ -217,10 +211,6 @@ class DeviceAnnouncer:
             known = self._published.pop(str(instance_id), None)
         if known is not None:
             _LOG.info("FABRIC WITHDRAW device=%s", instance_id)
-
-    def published_ids(self) -> tuple[str, ...]:
-        with self._registry_lock:
-            return tuple(sorted(self._published))
 
     def close(self) -> None:
         self._server.shutdown()
@@ -413,7 +403,7 @@ def discover_announcers(
             except OSError:
                 break
             try:
-                answer = json.loads(message.decode("utf-8"))
+                answer = strict_json_loads(message.decode("utf-8"), "fabric announcement")
                 found[(str(sender[0]), int(answer["port"]))] = None
             except (ValueError, KeyError, TypeError):
                 continue
@@ -451,9 +441,8 @@ class RemoteTunableDevice:
         self._port = int(port)
         self._instance = str(instance_id)
         self._io_lock = threading.RLock()
-        self._connection = socket.create_connection(
-            (self._host, self._port), timeout=_REQUEST_TIMEOUT_SECONDS
-        )
+        self._connection: socket.socket | None = None
+        self._closed = False
         #: How this proxy's OWN log lines are tagged on the consuming bench;
         #: the serving machine tags the same actions with its instance id.
         self.identity = f"fabric:{self._instance}@{self._host}:{self._port}"
@@ -466,15 +455,26 @@ class RemoteTunableDevice:
             self.close()
             raise
 
-    def _call(self, method: str, **extra: Any) -> dict[str, Any]:
+    def _call(
+        self, method: str, *, timeout: float = _REQUEST_TIMEOUT_SECONDS, **extra: Any
+    ) -> dict[str, Any]:
         with self._io_lock:
-            if self._connection is None:
+            if self._closed:
                 raise ConnectionError("remote tunable connection is closed")
+            if self._connection is None:
+                # The request that broke the last connection is never sent
+                # again -- it may have been a write the device already made
+                # -- but the device itself is still there: the next request
+                # dials it anew.
+                self._connection = socket.create_connection(
+                    (self._host, self._port), timeout=_REQUEST_TIMEOUT_SECONDS
+                )
+            self._connection.settimeout(timeout)
             try:
                 return _call(self._connection,
                              {"method": method, "instance": self._instance, **extra})
             except (OSError, ValueError, TypeError):
-                self.close()
+                self._drop_connection()
                 raise
 
     def tunable_fields(self):
@@ -526,6 +526,7 @@ class RemoteTunableDevice:
         try:
             effective = self._call(
                 "tune" if unit is None else "tune_in_unit",
+                timeout=_TUNE_TIMEOUT_SECONDS,
                 name=str(name), value=value, **({} if unit is None else {"unit": unit}),
             )[
                 "effective"
@@ -555,9 +556,7 @@ class RemoteTunableDevice:
     def settings_provenance(self) -> dict[str, Any]:
         return dict(self._call("provenance")["provenance"])
 
-    def close(self) -> None:
-        """Closing the handle closes nothing remote: PC2 owns its device."""
-
+    def _drop_connection(self) -> None:
         with self._io_lock:
             connection, self._connection = self._connection, None
             if connection is not None:
@@ -566,6 +565,13 @@ class RemoteTunableDevice:
                 except OSError:
                     pass
                 connection.close()
+
+    def close(self) -> None:
+        """Closing the handle closes nothing remote: PC2 owns its device."""
+
+        with self._io_lock:
+            self._closed = True
+            self._drop_connection()
 
 
 __all__ = [
@@ -578,5 +584,4 @@ __all__ = [
     "RemoteTunableDevice",
     "discover_announcers",
     "list_remote_devices",
-    "local_lan_ip",
 ]

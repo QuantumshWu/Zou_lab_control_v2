@@ -4,15 +4,10 @@ from .ports import (
     DeviceBroker,
     bind_verified_device,
 )
-from .resources import (
-    DeviceIdentityEvidenceKind,
-    PhysicalDeviceIdentity,
-    ResourceKey,
-)
+from .resources import PhysicalDeviceIdentity, ResourceKey
 
 __all__ = [
     "DeviceBroker",
-    "DeviceIdentityEvidenceKind",
     "PhysicalDeviceIdentity",
     "ResourceKey",
     "bind_verified_device",

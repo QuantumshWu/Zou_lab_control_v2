@@ -19,7 +19,7 @@ import atexit
 import contextlib
 import ctypes
 import threading
-from typing import Any, Iterator
+from typing import Iterator
 
 import numpy as np
 
@@ -58,7 +58,6 @@ class LibDaq2:
         dll = ctypes.CDLL(library_path)
         self._dll = dll
         self._lock = threading.RLock()
-        self._path = library_path
         # How many devices hold each open card.  The library has no handle:
         # one serial IS one card to it, so who owns it is counted here, where
         # the process-global library lives, and nowhere else.
@@ -100,10 +99,6 @@ class LibDaq2:
             function.argtypes = [ctypes.c_int]
             function.restype = ctypes.c_char_p
         self._started = False
-
-    @property
-    def path(self) -> str:
-        return self._path
 
     def _describe(self, code: int) -> str:
         def read(name: str) -> str:
@@ -335,18 +330,9 @@ def library() -> LibDaq2:
         return _LIBRARY
 
 
-def set_library(value: Any) -> None:
-    """Install a stand-in for the vendor library (a test bench, a fake card)."""
-
-    global _LIBRARY
-    with _LIBRARY_LOCK:
-        _LIBRARY = value
-
-
 __all__ = [
     "LIBRARY_NAME",
     "LibDaq2",
     "LibDaq2Error",
     "library",
-    "set_library",
 ]

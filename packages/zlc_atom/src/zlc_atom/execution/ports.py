@@ -4,16 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
-import uuid
 import weakref
 from typing import Callable, Mapping
 
 from .capabilities import CAPABILITY_TYPES
-from .resources import (
-    DeviceBindingStamp,
-    PhysicalDeviceIdentity,
-    ResourceKey,
-)
+from .resources import PhysicalDeviceIdentity, ResourceKey
 
 
 _IDENTITY_PROOF_TOKEN = object()
@@ -52,16 +47,11 @@ class CapabilityProof:
 @dataclass(frozen=True)
 class BoundDevice:
     key: ResourceKey
-    stamp: DeviceBindingStamp
+    #: The real resource this logical binding owns.
+    physical_identity: PhysicalDeviceIdentity
     capabilities: Mapping[str, object]
     _broker_token: object
     _broker_ref: weakref.ReferenceType["DeviceBroker"]
-
-    @property
-    def physical_identity(self) -> PhysicalDeviceIdentity:
-        """The real resource this logical binding owns."""
-
-        return self.stamp.physical_identity
 
     @property
     def broker(self) -> "DeviceBroker":
@@ -128,9 +118,9 @@ class DeviceBroker:
         if not callable(capability_probe):
             raise TypeError("capability_probe must be callable")
         # One proof, one attempt: the nonce is spent as the bind BEGINS, so a
-        # refusal -- a capability the contract will not take, a physical
-        # identity already bound -- cannot leave its minted proof behind in a
-        # broker that lives as long as the session.
+        # refusal -- a capability the contract will not take -- cannot leave
+        # its minted proof behind in a broker that lives as long as the
+        # session.
         with self._lock:
             if self._verified_identities.get(identity._nonce) is not identity:
                 raise RuntimeError(
@@ -139,17 +129,12 @@ class DeviceBroker:
                 )
             self._verified_identities.pop(identity._nonce)
         # Checked before anything is registered: a capability the contract
-        # refuses must not leave the physical identity bound behind an
-        # exception, out of reach of the caller who could have released it.
+        # refuses must not leave a binding behind an exception, out of reach
+        # of the caller who could have released it.
         snapshot = self._typed_snapshot(capability_probe())
         token = object()
-        stamp = DeviceBindingStamp(identity.identity, uuid.uuid4().hex)
-        binding = BoundDevice(key, stamp, snapshot, token, weakref.ref(self))
+        binding = BoundDevice(key, identity.identity, snapshot, token, weakref.ref(self))
         with self._lock:
-            stable_id = stamp.physical_identity.stable_device_identity
-            if stable_id in self._physical_ids:
-                raise RuntimeError(f"physical device {stable_id!r} is already bound")
-            self._physical_ids[stable_id] = token
             self._active_bindings[token] = binding
 
             broker_ref = weakref.ref(self)
@@ -176,6 +161,27 @@ class DeviceBroker:
             self._known_bindings[token] = weakref.ref(binding, forget)
         return binding
 
+    def claim(self, binding: BoundDevice) -> None:
+        """Make ``binding`` the one owner of its physical identity.
+
+        Not part of ``bind``: an installation opens -- and binds -- all its
+        devices at once, one thread each, so which of two bindings of one
+        instrument reached the broker first is thread timing.  The claim is
+        made where the installation admits its leaves, one at a time in the
+        operator's order, so of two specs naming one device it is always the
+        later one refused.  The owner claiming again is a no-op.
+        """
+
+        if not isinstance(binding, BoundDevice):
+            raise TypeError("binding must be BoundDevice")
+        token = binding._broker_token
+        with self._lock:
+            if self._active_bindings.get(token) is not binding:
+                raise RuntimeError("device binding is unknown")
+            stable_id = binding.physical_identity.stable_device_identity
+            if self._physical_ids.setdefault(stable_id, token) is not token:
+                raise RuntimeError(f"physical device {stable_id!r} is already bound")
+
     def unbind(self, binding: BoundDevice) -> bool:
         """Release one exact physical binding after its device has closed.
 
@@ -194,11 +200,12 @@ class DeviceBroker:
                 raise RuntimeError("device binding is unknown")
             if self._active_bindings.get(token) is not binding:
                 return False
-            stable_id = binding.physical_identity.stable_device_identity
-            if self._physical_ids.get(stable_id) is not token:
-                raise RuntimeError("device binding physical identity is inconsistent")
             self._active_bindings.pop(token)
-            self._physical_ids.pop(stable_id)
+            # A binding refused at admission, or closed before it, never
+            # claimed its identity -- and must not release another's claim.
+            stable_id = binding.physical_identity.stable_device_identity
+            if self._physical_ids.get(stable_id) is token:
+                self._physical_ids.pop(stable_id)
             return True
 
     def verify_capability(self, binding: BoundDevice) -> CapabilityProof:
@@ -232,9 +239,10 @@ def bind_verified_device(
     """Bind one physical identity and verify its declared capabilities.
 
     Either both come back or nothing was bound: the broker checks the
-    capability types before it registers the identity, so a refused
+    capability types before it registers the binding, so a refused
     capability leaves no binding behind that the caller never received and
-    could not release.
+    could not release.  The identity itself is claimed -- and a duplicate
+    refused -- when an installation admits the leaf (``DeviceBroker.claim``).
     """
 
     identity = broker.verify_identity(identity_probe)

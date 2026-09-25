@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.rf.binding import bind_rf_source
 from zlc_atom.devices.rf.contract import (
     WINDOW_AUTHORING_FIELDS,
     validate_window_values,
 )
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from .source import CtypesLmsLibrary, VaunixLmsConfig, VaunixLmsRfSource
 
@@ -37,12 +36,13 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
         power_high_dbm=authored["power_high_dbm"],
     )
     source = VaunixLmsRfSource(config)
-    return bind_rf_source(
+    return bind_leaf(
         context,
         key,
+        "rf.vaunix_lms",
         source,
         f"vaunix-lms:{config.serial}",
-        "rf.vaunix_lms",
+        "rf.source",
     )
 
 

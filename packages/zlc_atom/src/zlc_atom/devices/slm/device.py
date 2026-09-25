@@ -153,45 +153,21 @@ def bind_slm(
 ) -> InstalledLeaf:
     """Bind one adapter through the installation's existing device broker."""
 
-    from zlc_atom.execution import (
-        DeviceIdentityEvidenceKind,
-        PhysicalDeviceIdentity,
-        ResourceKey,
-        bind_verified_device,
-    )
-    from zlc_atom.install.descriptors import InstalledLeaf
+    from zlc_atom.install.descriptors import bind_leaf
 
-    if not isinstance(slm, SlmAdapter):
-        raise TypeError("slm must implement the canonical SlmAdapter contract")
     try:
-        identity, _shape_yx, _phase, _command, _mapping, _receipt = _validated_state(
+        identity = _validated_state(
             slm.identity,
             slm.shape_yx,
             slm.last_commanded_phase,
             slm.command_revision,
             slm.mapping_revision,
             slm.last_command_receipt,
-        )
-        binding, proof = bind_verified_device(
-            context.broker,
-            key=ResourceKey.parse(f"device/{key}"),
-            identity_probe=lambda: PhysicalDeviceIdentity(
-                identity,
-                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-            ),
-            capability_probe=lambda: {"slm.phase": slm},
-        )
+        )[0]
     except BaseException:
         slm.close()
         raise
-    return InstalledLeaf(
-        key,
-        type_id,
-        slm,
-        dict(proof.snapshot),
-        binding=binding,
-        closer=slm.close,
-    )
+    return bind_leaf(context, key, type_id, slm, identity, "slm.phase")
 
 
 __all__ = ["SlmAdapter", "bind_slm", "canonical_phase"]

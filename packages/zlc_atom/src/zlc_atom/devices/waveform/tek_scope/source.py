@@ -58,22 +58,13 @@ class ScopeLink(Protocol):
     def close(self) -> None: ...
 
 
-class VisaScopeLink:
+class VisaScopeLink(visa.VisaScpiLink):
     """A pyvisa resource behind the four-verb link."""
 
     def __init__(self, resource: str, *, timeout_seconds: float = 5.0) -> None:
-        if not isinstance(resource, str) or not resource.strip():
-            raise ValueError("VISA resource name is required")
-        self._resource = visa.visa_resources().open_resource(resource.strip())
-        self._resource.timeout = int(float(timeout_seconds) * 1000.0)
+        super().__init__(resource, timeout_seconds=timeout_seconds)
         self._resource.read_termination = "\n"
         self._resource.write_termination = "\n"
-
-    def write(self, command: str) -> None:
-        self._resource.write(command)
-
-    def query(self, command: str) -> str:
-        return str(self._resource.query(command))
 
     def query_int16(self, command: str) -> np.ndarray:
         return np.asarray(
@@ -82,9 +73,6 @@ class VisaScopeLink:
             ),
             dtype=np.int16,
         )
-
-    def close(self) -> None:
-        self._resource.close()
 
 
 _IDENTITY_VENDOR = "TEKTRONIX"
@@ -102,34 +90,15 @@ def discover_tek_scopes(
     *,
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
 ) -> tuple[tuple[str, str], ...]:
-    """Every Tektronix scope attached, as ``(resource, identity)`` pairs.
+    """Every Tektronix scope attached, as ``(resource, identity)`` pairs."""
 
-    Found the way a signal generator is found: open each listed resource,
-    ask the one universal question, close it.  What does not answer is
-    passed over.
-    """
-
-    manager = visa.visa_resources() if resources is None else resources
-    milliseconds = max(1, int(float(timeout_seconds) * 1000.0))
-    found: list[tuple[str, str]] = []
-    for name in visa.probeable_resources(manager.list_resources()):
-        try:
-            session = manager.open_resource(name, open_timeout=milliseconds)
-        except Exception:
-            continue
-        try:
-            session.timeout = milliseconds
-            identity = str(session.query("*IDN?")).strip()
-        except Exception:
-            continue
-        finally:
-            try:
-                session.close()
-            except Exception:
-                pass
-        if is_tektronix(identity):
-            found.append((name, identity))
-    return tuple(found)
+    return tuple(
+        (name, identity)
+        for name, identity in visa.identify_resources(
+            resources, timeout_seconds=timeout_seconds
+        )
+        if is_tektronix(identity)
+    )
 
 
 @dataclass(frozen=True)
@@ -364,22 +333,8 @@ class TekScopeWaveformSource:
 
     def _acquire(self, stop: threading.Event) -> None:
         acquiring = False
+        interval: float | None = None
         try:
-            # The vertical scaling of every channel, read once: the knobs
-            # are frozen for the whole capture, so the preamble cannot
-            # change under a record.
-            with self._link_lock:
-                scaling: list[tuple[int, float, float, float]] = []
-                for channel in self.config.channels:
-                    self._select(channel)
-                    scaling.append(
-                        (
-                            channel,
-                            self._query_float(":WFMOutpre:YMUlt?"),
-                            self._query_float(":WFMOutpre:YOFf?"),
-                            self._query_float(":WFMOutpre:YZEro?"),
-                        )
-                    )
             points = self._record_samples
             while not stop.is_set() and self._records.accepting:
                 with self._link_lock:
@@ -398,10 +353,18 @@ class TekScopeWaveformSource:
                         acquiring = False
                         break
                     stop.wait(_ACQUISITION_POLL_SECONDS)
+                # Each curve is scaled by the preamble read beside it, not
+                # by one read before the capture: tune() is refused while
+                # armed, but the front panel is never locked, and a volts or
+                # time per division turned between records must not be
+                # applied by the old numbers to the rest of the capture.
                 with self._link_lock:
                     columns = []
-                    for channel, multiplier, offset, zero in scaling:
+                    for channel in self.config.channels:
                         self._select(channel)
+                        multiplier = self._query_float(":WFMOutpre:YMUlt?")
+                        offset = self._query_float(":WFMOutpre:YOFf?")
+                        zero = self._query_float(":WFMOutpre:YZEro?")
                         raw = self._link.query_int16(":CURVe?")
                         if raw.size != points:
                             raise RuntimeError(
@@ -413,6 +376,15 @@ class TekScopeWaveformSource:
                             * np.float32(multiplier)
                             + np.float32(zero)
                         )
+                    sampled = self._query_float(":WFMOutpre:XINcr?")
+                if interval is None:
+                    interval = sampled
+                elif sampled != interval:
+                    raise RuntimeError(
+                        f"the scope's sample interval moved from {interval:g} s to "
+                        f"{sampled:g} s during the capture: its time base was "
+                        "changed while it was acquiring"
+                    )
                 # The host's high-resolution clock: two records read within
                 # one coarse tick must still be two distinct times.
                 self._records.push(WaveformRecord(

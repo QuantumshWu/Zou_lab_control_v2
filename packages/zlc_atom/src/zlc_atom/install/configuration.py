@@ -28,6 +28,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from zlc_durable import atomic_write_text, strict_json_loads
+
 
 __all__ = [
     "DEVICE_ENTRY_KEYS",
@@ -200,8 +202,6 @@ class InstallationConfig:
 def save_installation_config(config: InstallationConfig, path: str | os.PathLike[str]) -> Path:
     """Write the apparatus atomically, so a crash cannot leave half a file."""
 
-    from zlc_durable import atomic_write_text
-
     target = Path(path)
     if not target.parent.is_dir():
         raise NotADirectoryError(f"directory does not exist: {target.parent}")
@@ -217,18 +217,5 @@ def load_installation_config(path: str | os.PathLike[str]) -> InstallationConfig
     look valid and mean something other than what it says.
     """
 
-    def _no_duplicates(pairs):
-        seen: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in seen:
-                raise ValueError(f"duplicate key {key!r} in installation document")
-            seen[key] = value
-        return seen
-
-    def _no_constants(name):
-        raise ValueError(f"installation document contains {name}")
-
     text = Path(path).read_text(encoding="utf-8")
-    return InstallationConfig.from_dict(
-        json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
-    )
+    return InstallationConfig.from_dict(strict_json_loads(text, "installation document"))

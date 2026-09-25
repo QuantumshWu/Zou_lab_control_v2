@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.camera.binding import bind_camera
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from ..authoring import simulation_world_config
 from ..world import DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX, SimulationWorld
@@ -63,14 +64,23 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
             exposure_seconds=exposure,
         ),
     )
-    world.register_camera(camera)
-    return bind_camera(
+    leaf = bind_leaf(
         context,
         key,
+        "camera.virtual",
         camera,
         f"virtual-camera:{key}",
-        "camera.virtual",
+        "camera.adapter",
     )
+    # Registered only once it is owned, and forgotten when it closes: the
+    # world is kept across re-installs and walks its cameras on every shot.
+    world.register_camera(camera)
+
+    def close() -> None:
+        world.unregister_camera(camera)
+        camera.close()
+
+    return replace(leaf, closer=close)
 
 
 def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
@@ -98,12 +108,13 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
         frame_source=lambda exposure: render(exposure_seconds=exposure),
         free_running=True,
     )
-    return bind_camera(
+    return bind_leaf(
         context,
         key,
+        "camera.virtual_mot",
         camera,
         f"virtual-mot-camera:{key}",
-        "camera.virtual_mot",
+        "camera.adapter",
     )
 
 

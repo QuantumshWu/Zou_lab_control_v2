@@ -290,38 +290,45 @@ class ZishuDaq4211WaveformSource:
     def _acquire(self, stop: threading.Event) -> None:
         serial, module = self.config.serial, ADC_MODULE
         block = self.config.record_samples * self._columns
-        # Long enough that a read normally comes back full, short enough that
-        # a stop is noticed within one: the USB stream is delivered in packets
-        # of tens of milliseconds whatever is asked for.
-        slice_ms = int(
-            max(_AGGREGATION_SECONDS, block / (self._sample_rate * self._columns)) * 1000.0
-        ) + 50
-        carry = np.zeros(0, dtype=np.float64)
-        produced = 0
+        # One aggregation packet and a margin, whatever the record length.
+        # A read that runs out of time answers with what has arrived (the
+        # library's "not yet") and ``pieces`` keeps them until the record is
+        # whole, so a record longer than the slice costs nothing -- while a
+        # Stop, and every other call waiting on the library's one lock,
+        # waits at most one slice instead of a whole record.  Each read asks
+        # for no more than two slices of the stream: the library allocates
+        # the whole request per call, and a long record's remainder asked for
+        # every slice was that record allocated over and over.
+        slice_ms = int(_AGGREGATION_SECONDS * 1000.0) + 50
+        most = max(1, int(2.0 * self._sample_rate * slice_ms / 1000.0)) * self._columns
+        pieces: list[np.ndarray] = []
+        carried = produced = 0
         try:
             self._daq.command(serial, module, "StartTask")
             self._daq.command(serial, module, "SoftTrigger")
             self._records.mark_ready()
             while not stop.is_set() and self._records.accepting:
                 arrived = self._daq.read_analog(
-                    serial, module, block - carry.size, slice_ms
+                    serial, module, min(block - carried, most), slice_ms
                 )
                 if arrived.size:
-                    carry = np.concatenate((carry, arrived))
-                while carry.size >= block and not stop.is_set() and self._records.accepting:
-                    values = carry[:block].reshape(
-                        self.config.record_samples, self._columns
-                    )
-                    carry = carry[block:]
-                    samples = (values - self._offset) * self._scale
-                    # The card's own sample clock: every record is exactly
-                    # its length after the one before it, whatever the USB
-                    # packets did on the way here.
-                    seconds = produced * self.config.record_samples / self._sample_rate
-                    self._records.push(WaveformRecord(
-                        np.asarray(samples, dtype=np.float32), produced, seconds, 0,
-                    ))
-                    produced += 1
+                    pieces.append(arrived)
+                    carried += arrived.size
+                if carried < block or stop.is_set() or not self._records.accepting:
+                    continue
+                values = np.concatenate(pieces).reshape(
+                    self.config.record_samples, self._columns
+                )
+                pieces, carried = [], 0
+                samples = (values - self._offset) * self._scale
+                # The card's own sample clock: every record is exactly its
+                # length after the one before it, whatever the USB packets
+                # did on the way here.
+                seconds = produced * self.config.record_samples / self._sample_rate
+                self._records.push(WaveformRecord(
+                    np.asarray(samples, dtype=np.float32), produced, seconds, 0,
+                ))
+                produced += 1
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._records.fail(error)
         finally:

@@ -14,12 +14,11 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
-import weakref
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from zlc_durable import atomic_write_file, write_readable_json
+from zlc_durable import atomic_write_file, strict_json_loads, write_readable_json
 
 from .device import canonical_phase
 
@@ -435,16 +434,8 @@ def imported_target(values: object) -> np.ndarray:
         raise ValueError("imported target must contain positive intensity")
     return _readonly(target / peak)
 
-#: Prepared solve inputs keyed by the identity of the caller's immutable
-#: array.  A feedback run hands the SAME frozen target and pupil to every
-#: candidate solve, and re-validating, re-copying and re-shifting a full
-#: 1024x1272 plane cost ~25 ms per call.  Identity is verified through the
-#: stored weak reference, and only memory nothing can write -- an array
-#: over a ``bytes`` object, which is what every frozen input here is --
-#: may stand in for its contents across calls.
-_PREPARED_LIMIT = 8
-_PREPARED_TARGETS: dict[int, tuple[object, tuple]] = {}
-_PREPARED_PUPILS: dict[int, tuple[object, tuple]] = {}
+#: The default pupil and its shifted plane, per shape: a pure function of
+#: the shape, built once.
 _DEFAULT_PUPILS: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 
 
@@ -482,50 +473,6 @@ def _frozen(values: np.ndarray) -> np.ndarray:
 
     values.setflags(write=False)
     return values
-
-
-def _immutable(values: object) -> bool:
-    """Whether NOTHING can write this array: its memory is a bytes object.
-
-    A cleared WRITEABLE flag is a request, not a guarantee -- the array's
-    owner can set it back and write, and a cache that trusted the flag
-    answered a later call from the array's old contents after the caller
-    had zeroed it.  Memory that has no writable form at all is the only
-    thing that may stand in for its contents across calls.
-    """
-
-    if not isinstance(values, np.ndarray) or values.flags.writeable:
-        return False
-    base = values
-    while isinstance(base, np.ndarray):
-        base = base.base
-    return isinstance(base, bytes)
-
-
-def _prepared_cache_get(cache: dict, values: object) -> tuple | None:
-    if not _immutable(values):
-        return None
-    entry = cache.get(id(values))
-    if entry is None:
-        return None
-    reference, prepared = entry
-    if reference() is values:
-        return prepared
-    del cache[id(values)]
-    return None
-
-
-def _prepared_cache_put(cache: dict, values: object, prepared: tuple) -> None:
-    if not _immutable(values):
-        return
-    key = id(values)
-
-    def _drop(_reference: object, *, _cache: dict = cache, _key: int = key) -> None:
-        _cache.pop(_key, None)
-
-    cache[key] = (weakref.ref(values, _drop), prepared)
-    while len(cache) > _PREPARED_LIMIT:
-        cache.pop(next(iter(cache)))
 
 
 def _pupil(shape: tuple[int, int]) -> np.ndarray:
@@ -830,13 +777,9 @@ def solve_phase(
     if isinstance(minimum_iterations, bool) or int(minimum_iterations) < 1:
         raise ValueError("minimum_iterations must be a positive integer")
     minimum_passes = int(minimum_iterations)
-    prepared_target = _prepared_cache_get(_PREPARED_TARGETS, target)
-    if prepared_target is None:
-        desired = validate_target(target)
-        if float(np.max(desired)) <= 0.0:
-            raise ValueError("target must contain positive intensity")
-    else:
-        desired = prepared_target[0]
+    desired = validate_target(target)
+    if float(np.max(desired)) <= 0.0:
+        raise ValueError("target must contain positive intensity")
     if spot_optimizer_state is not None and not isinstance(
         spot_optimizer_state, dict
     ):
@@ -844,39 +787,30 @@ def solve_phase(
     saved_state = dict(spot_optimizer_state) if spot_optimizer_state else None
     state_requested = spot_optimizer_state is not None
     seed_value = int(seed)
-    prepared_pupil = None
     if pupil_amplitude is None:
         cached_default = _DEFAULT_PUPILS.get(desired.shape)
         if cached_default is None:
             pupil = _frozen(_pupil(desired.shape))
             cached_default = (pupil, _frozen(fft.ifftshift(pupil)))
             _DEFAULT_PUPILS[desired.shape] = cached_default
-        prepared_pupil = cached_default
-        pupil = cached_default[0]
+        pupil, pupil_unshifted = cached_default
         pupil_source = "default"
     else:
         pupil_source = "provided"
-        prepared_pupil = _prepared_cache_get(_PREPARED_PUPILS, pupil_amplitude)
-        if prepared_pupil is not None:
-            pupil = prepared_pupil[0]
-            if pupil.shape != desired.shape:
-                raise ValueError(
-                    "pupil_amplitude shape must match the target shape"
-                )
-        else:
-            try:
-                pupil = np.asarray(pupil_amplitude, dtype=np.float32)
-            except (TypeError, ValueError) as error:
-                raise TypeError("pupil_amplitude must be a numeric array") from error
-            if pupil.shape != desired.shape:
-                raise ValueError("pupil_amplitude shape must match the target shape")
-            if not np.all(np.isfinite(pupil)):
-                raise ValueError("pupil_amplitude must be finite")
-            if np.any(pupil < 0.0):
-                raise ValueError("pupil_amplitude must be non-negative")
-            if not np.any(pupil > 0.0):
-                raise ValueError("pupil_amplitude must contain positive amplitude")
-            pupil = _readonly(pupil)
+        try:
+            pupil = np.asarray(pupil_amplitude, dtype=np.float32)
+        except (TypeError, ValueError) as error:
+            raise TypeError("pupil_amplitude must be a numeric array") from error
+        if pupil.shape != desired.shape:
+            raise ValueError("pupil_amplitude shape must match the target shape")
+        if not np.all(np.isfinite(pupil)):
+            raise ValueError("pupil_amplitude must be finite")
+        if np.any(pupil < 0.0):
+            raise ValueError("pupil_amplitude must be non-negative")
+        if not np.any(pupil > 0.0):
+            raise ValueError("pupil_amplitude must contain positive amplitude")
+        pupil = _readonly(pupil)
+        pupil_unshifted = _frozen(fft.ifftshift(pupil))
     if not isinstance(objective_kind, str) or objective_kind not in {
         "auto",
         "spots",
@@ -909,24 +843,8 @@ def solve_phase(
             raise ValueError("iterations must be a positive integer or None")
         count = int(iterations)
 
-    if prepared_pupil is not None and len(prepared_pupil) > 1:
-        pupil_unshifted = prepared_pupil[1]
-    else:
-        pupil_unshifted = _frozen(fft.ifftshift(pupil))
-        if pupil_source == "provided":
-            _prepared_cache_put(
-                _PREPARED_PUPILS, pupil_amplitude, (pupil, pupil_unshifted)
-            )
-    if prepared_target is not None:
-        desired_unshifted, support_unshifted = prepared_target[1:3]
-    else:
-        desired_unshifted = _frozen(fft.ifftshift(desired))
-        support_unshifted = _frozen(desired_unshifted > 0.0)
-        _prepared_cache_put(
-            _PREPARED_TARGETS,
-            target,
-            (desired, desired_unshifted, support_unshifted),
-        )
+    desired_unshifted = _frozen(fft.ifftshift(desired))
+    support_unshifted = _frozen(desired_unshifted > 0.0)
     epsilon = np.finfo(np.float32).eps
     # One set of plane-sized scratch buffers for the whole solve: the
     # per-iteration projection reuses them instead of allocating ~30 MB of
@@ -1494,17 +1412,6 @@ def solve_phase(
         )
     return result, metadata
 
-def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        result[key] = value
-    return result
-
-def _constant(value: str) -> None:
-    raise ValueError(f"JSON contains {value}")
-
 def save_target(
     path: str | Path,
     target: object,
@@ -1523,11 +1430,7 @@ def save_target(
     )
 
 def load_target(path: str | Path) -> tuple[np.ndarray, str]:
-    payload = json.loads(
-        Path(path).read_text(encoding="utf-8"),
-        object_pairs_hook=_strict_object,
-        parse_constant=_constant,
-    )
+    payload = strict_json_loads(Path(path).read_text(encoding="utf-8"), "target JSON")
     if not isinstance(payload, dict) or set(payload) != _TARGET_KEYS:
         raise ValueError(
             "target JSON fields differ from the strict intensity/objective format"
@@ -1566,9 +1469,7 @@ def _json_object(value: object, name: str) -> dict[str, object]:
     ):
         raise TypeError(f"{name} must be a string-keyed mapping")
     encoded = _metadata_json(value)
-    result = json.loads(
-        encoded, object_pairs_hook=_strict_object, parse_constant=_constant
-    )
+    result = strict_json_loads(encoded, name)
     if not isinstance(result, dict):
         raise TypeError(f"{name} must be a JSON object")
     return result
@@ -1872,11 +1773,12 @@ def compose_science_phase(
     operator = np.asarray(operator_wavefront)
     if pattern.ndim != 2 or operator.shape != pattern.shape:
         raise ValueError("Science Context phase layers differ")
-    shape = tuple(pattern.shape)
+    # Both layers arrive canonical -- a frozen pattern, an operator plane --
+    # and canonicalizing a canonical plane returns it unchanged, so the sum
+    # is wrapped once rather than each full plane re-validated first.
     return canonical_phase(
-        canonical_phase(pattern, shape).astype(np.float64)
-        + canonical_phase(operator, shape).astype(np.float64),
-        shape,
+        pattern.astype(np.float64) + operator.astype(np.float64),
+        tuple(pattern.shape),
     )
 
 
@@ -1935,11 +1837,7 @@ def load_science_context(path: str | Path) -> dict[str, object]:
         encoded = np.asarray(archive["metadata"])
         if encoded.shape != () or encoded.dtype.kind != "U":
             raise ValueError("science context metadata must be scalar Unicode JSON")
-        metadata = json.loads(
-            str(encoded.item()),
-            object_pairs_hook=_strict_object,
-            parse_constant=_constant,
-        )
+        metadata = strict_json_loads(str(encoded.item()), "science context metadata")
     if not isinstance(metadata, dict) or set(metadata) != _SCIENCE_CONTEXT_KEYS:
         raise ValueError("science context metadata has the wrong fields")
     if metadata["format"] != _SCIENCE_CONTEXT_FORMAT:

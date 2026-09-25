@@ -7,6 +7,7 @@ from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_co
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse import (
+    DEFAULT_PORT,
     DEFAULT_REQUEST_TIMEOUT,
     PulseStreamer,
     RemotePulseStreamer,
@@ -20,7 +21,7 @@ from zlc_pulse import (
 HARDWARE_SEQUENCER_SCHEMA = AuthoringSchema(
     (
         AuthoringField("host", "str", "Pulse server host", "127.0.0.1"),
-        AuthoringField("port", "int", "Pulse server port", 18861, minimum=1, maximum=65535),
+        AuthoringField("port", "int", "Pulse server port", DEFAULT_PORT, minimum=1, maximum=65535),
         AuthoringField("config_file", "str", "Config file (optional)", ""),
     )
 )
@@ -30,10 +31,9 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Reach the real board at the endpoint the configuration writes down.
 
     The streamer is this factory's to own from here: on success the leaf's
-    closer closes it, and a failure between open and bind -- the broker
-    refusing a physical identity that is already bound, say -- closes it
-    here, because a device that never became a leaf has nobody else to
-    close it.
+    closer closes it, and a failure between open and bind -- a Config file
+    that will not load, say -- closes it here, because a device that never
+    became a leaf has nobody else to close it.
     """
 
     authored = HARDWARE_SEQUENCER_SCHEMA.project_values(values)

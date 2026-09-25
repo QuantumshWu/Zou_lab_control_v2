@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.roi_grid import authored_roi_xywh
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from .adapter import PylonCameraAdapter, PylonCameraConfig
 
@@ -84,12 +83,13 @@ def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:
         ),
     )
     camera.open()
-    return bind_camera(
+    return bind_leaf(
         context,
         key,
+        "camera.pylon",
         camera,
         f"pylon-camera:serial={camera.config.serial}",
-        "camera.pylon",
+        "camera.adapter",
     )
 
 

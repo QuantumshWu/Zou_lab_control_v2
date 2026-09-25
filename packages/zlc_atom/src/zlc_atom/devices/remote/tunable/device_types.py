@@ -25,7 +25,7 @@ from zlc_atom.devices.remote.fabric import (
     list_remote_devices,
 )
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 #: Peers a broadcast cannot reach (a different subnet), named once here
 #: instead of per device: comma-separated hostnames or addresses.
@@ -50,40 +50,19 @@ REMOTE_TUNABLE_SCHEMA = AuthoringSchema(
 
 
 def _remote_tunable_factory(context, key: str, values: dict) -> InstalledLeaf:
-    from zlc_atom.execution import (
-        DeviceIdentityEvidenceKind,
-        PhysicalDeviceIdentity,
-        ResourceKey,
-        bind_verified_device,
-    )
-
     authored = REMOTE_TUNABLE_SCHEMA.project_values(values)
     device = RemoteTunableDevice(
         host=str(authored["host"]),
         port=int(authored["port"]),
         instance_id=str(authored["instance_id"]),
     )
-    try:
-        binding, proof = bind_verified_device(
-            context.broker,
-            key=ResourceKey.parse(f"device/{key}"),
-            identity_probe=lambda: PhysicalDeviceIdentity(
-                f"fabric:{authored['host']}:{authored['port']}"
-                f"/{authored['instance_id']}",
-                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-            ),
-            capability_probe=lambda: {},
-        )
-    except BaseException:
-        device.close()
-        raise
-    return InstalledLeaf(
+    return bind_leaf(
+        context,
         key,
         FABRIC_TUNABLE_TYPE,
         device,
-        dict(proof.snapshot),
-        binding=binding,
-        closer=device.close,
+        f"fabric:{authored['host']}:{authored['port']}/{authored['instance_id']}",
+        None,
     )
 
 
@@ -122,6 +101,11 @@ def _discover_fabric() -> tuple[DeviceInstanceConfig, ...]:
             # A device with its own server: offer the ORIGIN family with
             # its endpoint parameters pre-filled.  Connecting is the
             # existing client doing what it always did, minus the typing.
+            # Its server listens on every interface of the machine that
+            # just answered here, so the address this bench reached it at
+            # is the host -- never one the serving machine guessed for
+            # itself, which a second NIC or a rig LAN without a gateway
+            # gets wrong.
             parameters = record.get("parameters")
             type_id = str(record.get("type_id", ""))
             if not type_id or not isinstance(parameters, dict):
@@ -131,7 +115,7 @@ def _discover_fabric() -> tuple[DeviceInstanceConfig, ...]:
                     instance_id=f"remote_{instance}",
                     role=str(record.get("role") or instance),
                     type_id=type_id,
-                    parameters=dict(parameters),
+                    parameters={**parameters, "host": host},
                 )
             )
     return tuple(entries)

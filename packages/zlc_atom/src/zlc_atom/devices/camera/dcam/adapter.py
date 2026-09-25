@@ -31,6 +31,8 @@ from ..contract import (
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
+    arm_groups,
+    roi_request,
 )
 from ..photoelectrons import stated_conversion
 
@@ -95,17 +97,7 @@ class DcamCameraConfig:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, positive_integer(value, name))
-        roi = self.roi_xywh
-        if roi is not None:
-            if not isinstance(roi, tuple) or len(roi) != 4:
-                raise TypeError("roi_xywh must be a four-item tuple or None")
-            normalized: list[int] = []
-            for index, value in enumerate(roi):
-                minimum = 0 if index < 2 else 1
-                item = integer(value, f"roi_xywh[{index}]", minimum=minimum)
-                assert item is not None
-                normalized.append(item)
-            object.__setattr__(self, "roi_xywh", tuple(normalized))
+        object.__setattr__(self, "roi_xywh", roi_request(self.roi_xywh))
         stated_conversion(
             self.offset_counts,
             self.electrons_per_count,
@@ -489,29 +481,6 @@ class DcamCameraAdapter:
 
         return self._lane.call(apply)
 
-    @staticmethod
-    def _finite_groups(
-        frames: int | None,
-        source_group_sizes: tuple[int, ...] | None,
-    ) -> tuple[int | None, tuple[int, ...] | None]:
-        if frames is None:
-            groups = tuple(int(value) for value in (source_group_sizes or ()))
-            if groups and (len(groups) != 1 or groups[0] <= 0):
-                raise ValueError(
-                    "continuous external capture requires one positive source group"
-                )
-            return None, groups or None
-        expected = positive_integer(frames, "frames")
-        if not isinstance(source_group_sizes, tuple):
-            raise TypeError("finite arm requires tuple source_group_sizes")
-        groups = tuple(
-            positive_integer(value, "source_group_sizes item")
-            for value in source_group_sizes
-        )
-        if not groups or sum(groups) != expected:
-            raise ValueError("source_group_sizes must exactly cover frames")
-        return expected, groups
-
     def arm(
         self,
         frames: int | None,
@@ -520,7 +489,7 @@ class DcamCameraAdapter:
         buffer_frame_count: int,
         timeout: float,
     ) -> None:
-        expected, _groups = self._finite_groups(frames, source_group_sizes)
+        expected, _groups = arm_groups(frames, source_group_sizes)
         buffer_count = positive_integer(buffer_frame_count, "buffer_frame_count")
         positive_real(timeout, "timeout")
 

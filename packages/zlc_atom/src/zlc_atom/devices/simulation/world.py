@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
-import json
 import math
 from pathlib import Path
 import threading
@@ -12,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from zlc_durable import strict_json_loads
 from zlc_pulse.compile import CompiledProgram
 from zlc_pulse.schedule import (
     run_duration_seconds,
@@ -237,25 +237,11 @@ class SimulationWorldConfig:
         """Resolve one strict workspace profile before constructing the world."""
 
         resolved = Path(path).expanduser().resolve()
-
-        def strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-            result: dict[str, object] = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError(f"duplicate simulation profile field {key!r}")
-                result[key] = value
-            return result
-
-        def reject_constant(value: str) -> object:
-            raise ValueError(f"non-finite simulation profile value {value!r}")
-
         try:
-            payload = json.loads(
-                resolved.read_text(encoding="utf-8"),
-                object_pairs_hook=strict_object,
-                parse_constant=reject_constant,
+            payload = strict_json_loads(
+                resolved.read_text(encoding="utf-8"), "simulation world profile"
             )
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             raise ValueError(f"simulation world profile {resolved} is not strict JSON") from error
         if not isinstance(payload, dict):
             raise ValueError("simulation world profile must be a JSON object")
@@ -355,11 +341,9 @@ class SimulationWorld:
         ) ** 2
         imaging_psf /= float(np.max(imaging_psf))
         self._camera_psf = _readonly(imaging_psf)
-        height, width = self.geometry.image_shape_yx
         self._trap_centers_xy = _readonly(np.empty((0, 2), dtype=float))
-        self._trap_psf_spots = _readonly(
-            np.empty((0, height, width), dtype=float)
-        )
+        #: One ``(top, left, stamp)`` per trap: the PSF over its footprint.
+        self._trap_psf_spots: tuple[tuple[int, int, np.ndarray], ...] = ()
         self._occupancy = np.zeros(0, dtype=bool)
         self._mot_population = 1.0
         self._dac_values = {"da_bias_x": 0, "da_bias_y": 0, "da_bias_z": 0}
@@ -517,36 +501,45 @@ class SimulationWorld:
             )
         )
 
-    def _camera_spots(self, centers_xy: np.ndarray) -> np.ndarray:
-        """Translate one shared aberrated optical PSF to every physical site."""
+    def _camera_spots(
+        self, centers_xy: np.ndarray
+    ) -> tuple[tuple[int, int, np.ndarray], ...]:
+        """Translate one shared aberrated optical PSF to every physical site.
+
+        Each spot is ``(top, left, stamp)``: the PSF over the pixels its
+        samples can reach and nothing else, so a world authored at a real
+        sensor size keeps a PSF-sized stamp per trap rather than a frame.
+        """
 
         from scipy.ndimage import map_coordinates
 
         height, width = self.geometry.image_shape_yx
-        centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
-        if not len(centers):
-            return np.empty((0, height, width), dtype=float)
-        yy, xx = np.mgrid[:height, :width]
         psf = np.asarray(self._camera_psf, dtype=float)
         origin_y, origin_x = np.unravel_index(int(np.argmax(psf)), psf.shape)
         scale = float(self.atom_sigma_px) / 0.7
-        return np.asarray(
-            [
-                map_coordinates(
-                    psf,
-                    (
-                        origin_y + (yy - float(y)) / scale,
-                        origin_x + (xx - float(x)) / scale,
-                    ),
-                    order=1,
-                    mode="constant",
-                    cval=0.0,
-                    prefilter=False,
-                )
-                for x, y in centers
-            ],
-            dtype=float,
-        )
+        spots = []
+        for x, y in np.asarray(centers_xy, dtype=float).reshape(-1, 2):
+            # Linear interpolation against the zero border reaches at most
+            # one PSF sample past either edge; every pixel beyond samples
+            # exactly zero, so the stamp is the whole spot.
+            top = min(height, max(0, math.floor(y - (origin_y + 1) * scale)))
+            bottom = max(top, min(height, math.ceil(y + (psf.shape[0] - origin_y) * scale) + 1))
+            left = min(width, max(0, math.floor(x - (origin_x + 1) * scale)))
+            right = max(left, min(width, math.ceil(x + (psf.shape[1] - origin_x) * scale) + 1))
+            yy, xx = np.mgrid[top:bottom, left:right]
+            stamp = map_coordinates(
+                psf,
+                (
+                    origin_y + (yy - float(y)) / scale,
+                    origin_x + (xx - float(x)) / scale,
+                ),
+                order=1,
+                mode="constant",
+                cval=0.0,
+                prefilter=False,
+            )
+            spots.append((top, left, _readonly(stamp)))
+        return tuple(spots)
 
     @staticmethod
     def _resolved_traps(
@@ -630,7 +623,7 @@ class SimulationWorld:
         self._trap_intensities = _immutable(trap_intensities, "<f4")
         if not np.array_equal(trap_centers, self._trap_centers_xy):
             self._trap_centers_xy = _readonly(trap_centers)
-            self._trap_psf_spots = _readonly(self._camera_spots(trap_centers))
+            self._trap_psf_spots = self._camera_spots(trap_centers)
         self._occupancy = occupancy
         self._propagated_revision = self._slm_phase_revision
         self._propagation_count += 1
@@ -706,6 +699,14 @@ class SimulationWorld:
         with self._lock:
             if not any(existing is camera for existing in self._cameras):
                 self._cameras.append(camera)
+
+    def unregister_camera(self, camera: Any) -> None:
+        """Stop driving a camera that closed; the world outlives re-installs."""
+
+        with self._lock:
+            self._cameras = [
+                existing for existing in self._cameras if existing is not camera
+            ]
 
     def _load_shot(self) -> np.ndarray:
         self._ensure_slm_propagation()
@@ -820,18 +821,20 @@ class SimulationWorld:
             fluorescence_scales = self._fluorescence_scales(
                 self._trap_intensities
             )
-            for occupied, brightness, spot in zip(
+            for occupied, brightness, (top, left, stamp) in zip(
                 shot_occupancy,
                 fluorescence_scales,
                 self._trap_psf_spots,
                 strict=True,
             ):
                 if occupied:
-                    expected_electrons += (
+                    expected_electrons[
+                        top : top + stamp.shape[0], left : left + stamp.shape[1]
+                    ] += (
                         self.atom_rate
                         * fluorescence_seconds
                         * float(brightness)
-                        * spot
+                        * stamp
                     )
             electrons = self._qcmos_rng.poisson(
                 np.clip(expected_electrons, 0.0, None)
@@ -1016,9 +1019,7 @@ class SimulationWorld:
                         # An external rising edge starts the camera's authored
                         # integration; a free-running camera remains bounded by
                         # the high window that was actually played.
-                        free_running = str(point.acquisition_mode).upper().endswith(
-                            "FREE_RUNNING"
-                        )
+                        free_running = point.acquisition_mode == "FREE_RUNNING"
                         exposure = (
                             min(configured, (end_tick - start_tick) / clock)
                             if free_running

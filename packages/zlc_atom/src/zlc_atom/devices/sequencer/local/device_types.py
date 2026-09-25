@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import logging
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
-from zlc_pulse import DEFAULT_REQUEST_TIMEOUT
+from zlc_pulse import DEFAULT_PORT, DEFAULT_REQUEST_TIMEOUT
 
+
+#: Where the in-process server narrates, and where this leaf says what
+#: withdrawing it could not do: the board's log is one story.
+_NARRATION = "zlc_pulse.remote"
+_LOG = logging.getLogger(_NARRATION)
 
 #: The machine the board is plugged into serves it FROM the bench process:
 #: no .bat, no second console -- initialize the device and the server is up,
@@ -31,7 +37,7 @@ LOCAL_SEQUENCER_SCHEMA = AuthoringSchema(
             ),
         ),
         AuthoringField("uart_port", "str", "UART port (blank = probe)", ""),
-        AuthoringField("port", "int", "Serve on port", 18861, minimum=1, maximum=65535),
+        AuthoringField("port", "int", "Serve on port", DEFAULT_PORT, minimum=1, maximum=65535),
         AuthoringField("config_file", "str", "Config file (optional)", ""),
     )
 )
@@ -85,7 +91,37 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
         finally:
             service.close()
 
-    return replace(leaf, closer=_close, admit_peers=service.admit_peers)
+    def _admit_peers(admitted: bool, device=device, service=service) -> None:
+        service.admit_peers(admitted)
+        if admitted:
+            return
+        # The board goes to whichever client connected last, so a peer that
+        # used the published board took it from this machine's client, and
+        # withdrawing has just dropped that peer.  The loopback client only
+        # learns it lost the board on its next request; ask, and join again
+        # if so, or this bench could not drive its own board until the
+        # device was initialised again.  An untouched loopback owner answers
+        # and keeps whatever it is running.  Best effort: the door is already
+        # shut, and a rejoin the board refuses (its takeover SAFE failed, the
+        # server faulted) must not stop the withdrawal that asked for it.
+        # Nor is it quick on a board that stopped answering: the rejoin
+        # queues behind the dropped peer's AUTO-SAFE and then SAFEs twice
+        # itself, each up to its deadline -- the bench's device worker waits
+        # it out, never its GUI thread.
+        try:
+            try:
+                device.snapshot()
+            except ConnectionError:
+                device.open()
+        except Exception as error:  # noqa: BLE001 -- told, not raised
+            _LOG.warning(
+                "LOCAL CLIENT NOT REJOINED error=%s: %s -- initialize the "
+                "devices again to drive this board from here",
+                type(error).__name__,
+                str(error).replace(chr(10), " "),
+            )
+
+    return replace(leaf, closer=_close, admit_peers=_admit_peers)
 
 
 def _announce_local(parameters) -> tuple[str, dict]:
@@ -106,7 +142,7 @@ DEVICE_TYPES = (
         factory=_local_factory,
         control_factory=open_sequencer_control,
         announce=_announce_local,
-        log_channels=("zlc_pulse.remote",),
+        log_channels=(_NARRATION,),
     ),
 )
 

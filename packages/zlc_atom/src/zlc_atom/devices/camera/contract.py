@@ -8,6 +8,9 @@ from typing import Protocol, Sequence, runtime_checkable
 import time
 
 import numpy as np
+from zlc_data import integer, is_intrinsically_immutable_array, positive_integer
+
+from .photoelectrons import stated_conversion
 
 
 def _pair(value: object, field: str, *, positive: bool) -> tuple[int, int]:
@@ -18,6 +21,55 @@ def _pair(value: object, field: str, *, positive: bool) -> tuple[int, int]:
     if len(result) != 2 or any(item <= 0 if positive else item < 0 for item in result):
         raise ValueError(f"{field} must contain two {'positive' if positive else 'non-negative'} integers")
     return result
+
+
+def roi_request(
+    value: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """A requested ``(x, y, width, height)``, or None for the whole sensor.
+
+    One reading for every camera -- a four-integer tuple, its origin
+    non-negative and its size positive -- so an ROI the virtual camera
+    takes is one the qCMOS takes too.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) != 4:
+        raise TypeError("roi_xywh must be a four-item tuple or None")
+    return tuple(
+        integer(item, f"roi_xywh[{index}]", minimum=0 if index < 2 else 1)
+        for index, item in enumerate(value)
+    )
+
+
+def arm_groups(
+    frames: int | None,
+    source_group_sizes: tuple[int, ...] | None,
+) -> tuple[int | None, tuple[int, ...] | None]:
+    """What an ``arm`` call asks for: its frame target and trigger groups.
+
+    One reading for every camera, so a request the virtual camera accepts is
+    one the hardware accepts too.
+    """
+
+    if frames is None:
+        groups = tuple(int(value) for value in (source_group_sizes or ()))
+        if groups and (len(groups) != 1 or groups[0] <= 0):
+            raise ValueError(
+                "continuous external capture requires one positive source group"
+            )
+        return None, groups or None
+    expected = positive_integer(frames, "frames")
+    if not isinstance(source_group_sizes, tuple):
+        raise TypeError("finite arm requires tuple source_group_sizes")
+    groups = tuple(
+        positive_integer(value, "source_group_sizes item")
+        for value in source_group_sizes
+    )
+    if not groups or sum(groups) != expected:
+        raise ValueError("source_group_sizes must exactly cover frames")
+    return expected, groups
 
 
 class CameraAcquisitionMode(str, Enum):
@@ -50,6 +102,12 @@ class CameraWorkingPoint:
     electrons_per_count: float | None = None
 
     def __post_init__(self) -> None:
+        # Stored as the plain mode name whichever spelling the adapter used,
+        # so no reader has to normalise it again.
+        mode = CameraAcquisitionMode(
+            str(getattr(self.acquisition_mode, "value", self.acquisition_mode))
+        )
+        object.__setattr__(self, "acquisition_mode", mode.value)
         for name, positive in (
             ("frame_shape_yx", True),
             ("sensor_shape_yx", True),
@@ -75,20 +133,12 @@ class CameraWorkingPoint:
             raise ValueError("integration start offset cannot be negative")
         if float(self.gain) < 0:
             raise ValueError("camera gain cannot be negative")
-        if (self.offset_counts is None) != (self.electrons_per_count is None):
-            raise ValueError(
-                "a photoelectron conversion needs both its offset and its scale"
-            )
-        if self.electrons_per_count is not None:
-            offset = float(self.offset_counts)
-            scale = float(self.electrons_per_count)
-            if not np.isfinite(offset) or not np.isfinite(scale) or scale <= 0:
-                raise ValueError(
-                    "electrons_per_count must be finite and positive, and the "
-                    "offset finite"
-                )
-            object.__setattr__(self, "offset_counts", offset)
-            object.__setattr__(self, "electrons_per_count", scale)
+        conversion = stated_conversion(
+            self.offset_counts, self.electrons_per_count, camera="camera working point"
+        )
+        if conversion is not None:
+            object.__setattr__(self, "offset_counts", conversion[0])
+            object.__setattr__(self, "electrons_per_count", conversion[1])
 
 
 @dataclass(frozen=True, eq=False)
@@ -148,13 +198,20 @@ class CameraFrameRecord:
         # be made writable again, so every downstream boundary copied the whole
         # frame a second time to be sure of it.  A view whose base chain ends in
         # bytes cannot acquire a writable buffer, and zlc_data recognises that
-        # and keeps the view -- one copy per frame instead of two.
+        # and keeps the view -- one copy per frame instead of two.  An image
+        # that already is such a contiguous view is kept as it is: copying it
+        # again bought nothing.
         array = np.asarray(self.image)
-        array = array.astype(array.dtype.newbyteorder("<"), copy=False)
-        owned = np.frombuffer(
-            array.tobytes(order="C"), dtype=array.dtype
-        ).reshape(array.shape)
-        object.__setattr__(self, "image", owned)
+        little = array.dtype.newbyteorder("<")
+        if not (
+            array.dtype == little
+            and array.flags.c_contiguous
+            and is_intrinsically_immutable_array(array)
+        ):
+            array = np.frombuffer(
+                array.astype(little, copy=False).tobytes(order="C"), dtype=little
+            ).reshape(array.shape)
+        object.__setattr__(self, "image", array)
 
 
 @dataclass(frozen=True)
@@ -251,4 +308,6 @@ __all__ = [
     "CameraCaptureTerminalRecord",
     "CameraFrameRecord",
     "CameraWorkingPoint",
+    "arm_groups",
+    "roi_request",
 ]

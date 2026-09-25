@@ -132,44 +132,19 @@ def discover_dg4000(
     *,
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
 ) -> tuple[Dg4000Sighting, ...]:
-    """Every DG4000 attached to this machine, found by asking.
+    """Every DG4000 attached to this machine, found by asking ``*IDN?``.
 
     A Lab Brick can be counted without being opened; a SCPI instrument
-    cannot.  VISA lists resource NAMES -- a USB address, a socket -- and only
-    ``*IDN?`` says what is on the other end, so finding one means opening a
-    session, asking the one universal question, and closing it again.  That
-    is the same question NI MAX asks when it populates its tree, and it is
-    the reason this scan is not free: it briefly opens instruments that turn
-    out to be something else.
-
-    Everything that does not answer -- busy, held by another program, not
-    SCPI at all, silent until its timeout -- is passed over.  A resource
-    failing to identify itself is the ordinary case on a shared bus, not an
-    error worth stopping a scan for; what IS worth stopping for is having no
-    VISA at all, which ``visa_resources`` raises as an instruction.
+    cannot, so this opens and asks every listed resource in turn.
     """
 
-    manager = visa.visa_resources() if resources is None else resources
-    milliseconds = max(1, int(float(timeout_seconds) * 1000.0))
-    found: list[Dg4000Sighting] = []
-    for name in visa.probeable_resources(manager.list_resources()):
-        try:
-            session = manager.open_resource(name, open_timeout=milliseconds)
-        except Exception:
-            continue
-        try:
-            session.timeout = milliseconds
-            identity = str(session.query("*IDN?")).strip()
-        except Exception:
-            continue
-        finally:
-            try:
-                session.close()
-            except Exception:
-                pass
-        if is_dg4000(identity):
-            found.append(Dg4000Sighting(name, identity))
-    return tuple(found)
+    return tuple(
+        Dg4000Sighting(name, identity)
+        for name, identity in visa.identify_resources(
+            resources, timeout_seconds=timeout_seconds
+        )
+        if is_dg4000(identity)
+    )
 
 
 class RigolDg4000RfSource(RfSourceBase):

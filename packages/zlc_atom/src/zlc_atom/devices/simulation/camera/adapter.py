@@ -17,6 +17,8 @@ from zlc_atom.devices.camera.contract import (
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
+    arm_groups,
+    roi_request,
 )
 from zlc_atom.devices.camera.photoelectrons import stated_conversion
 from zlc_atom.devices.camera.roi_grid import snap_roi_axis
@@ -159,15 +161,10 @@ class VirtualCamera:
         """
 
         sensor_height, sensor_width = self._sensor_shape_yx
-        if roi_xywh is None:
+        values = roi_request(roi_xywh)
+        if values is None:
             roi = (0, 0, sensor_width, sensor_height)
         else:
-            try:
-                values = tuple(int(value) for value in roi_xywh)
-            except (TypeError, ValueError) as exc:
-                raise TypeError("roi_xywh must contain four integers or be None") from exc
-            if len(values) != 4:
-                raise ValueError("roi_xywh must contain four integers or be None")
             x, y, width, height = values
             # Which way a requested region meets a sensor's grid is one rule
             # for every sensor; this one's grid is single pixels, and the rule
@@ -263,16 +260,7 @@ class VirtualCamera:
         buffer_count = int(buffer_frame_count)
         if buffer_count <= 0:
             raise ValueError("buffer_frame_count must be positive")
-        if frames is None:
-            expected = None
-            groups = tuple(int(item) for item in (source_group_sizes or ()))
-            if groups and (len(groups) != 1 or groups[0] <= 0):
-                raise ValueError("continuous external capture requires one positive source group")
-        else:
-            expected = int(frames)
-            groups = tuple(int(item) for item in (source_group_sizes or ()))
-            if expected <= 0 or not groups or sum(groups) != expected or any(item <= 0 for item in groups):
-                raise ValueError("finite arm groups must exactly cover frames")
+        expected, _groups = arm_groups(frames, source_group_sizes)
         with self._condition:
             if self._records.armed:
                 raise RuntimeError("virtual camera is already armed")

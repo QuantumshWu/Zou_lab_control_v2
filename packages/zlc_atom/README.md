@@ -7,8 +7,9 @@ dependencies back into the foundation. It contains the camera/sequencer/SLM
 contracts and the experiment's measurement, processor, and task leaves.
 Virtual implementations live only under
 `devices/simulation/`: `VirtualCamera` satisfies the same runtime-checkable
-`CameraAdapter` contract as DCAM/Pylon, and `VirtualSequencer` is a
-`SequencerDevice` over the same pulse-device surface as hardware. `VirtualSLM`
+`CameraAdapter` contract as DCAM/Pylon, and the virtual sequencer is a
+`SequencerDevice` over `VirtualPulseStreamer`, the same pulse-device surface as
+hardware. `VirtualSLM`
 and the real Hamamatsu LCOS-SLM X15213 leaf implement the same narrow
 `SlmAdapter` canonical-radians contract.
 
@@ -38,8 +39,12 @@ background. It has only **Pattern** and **Wavefront** pages. Pattern retains two
 independent `2x2 = 490 x 357` logical target and pre-correction science-phase
 plots. A shared **Size** selector also controls the independent Wavefront
 preview; scrollable canvases avoid overlap or clipping at larger presets.
+The three plots are hosts in a render child, never in the console process:
+opened from a device card in the experiment flow, the Editor borrows the
+console's Edit/Save child; opened without an application it starts a private
+`zlc-slm-editor-render` child and releases it on close.
 
-The main page exposes only Input pupil, Zernike, and vendor correction. Input
+The main page exposes only Input pupil and Zernike. Input
 pupil defaults to a centered Gaussian whose `1/e^2` intensity diameter is 70%
 of the SLM height; its center and X/Y diameters are editable, and Off means
 uniform full-raster solver illumination. Wavefront puts full-raster Steering
@@ -83,7 +88,9 @@ device type `slm.hamamatsu_x15213` stores only its server host and port (default
 `18862`) in the apparatus; `127.0.0.1` is the same-machine form. The proxy reads
 identity, shape, current
 phase and receipt once when the installation opens, then serves all Editor
-display/state reads from that local immutable cache.  Target edits never cross
+display/state reads from that local immutable cache; the cache has its own
+short lock, so no state read (the Editor's first one included) waits behind an
+apply's network round trip.  Target edits never cross
 the network. A healthy **Send to SLM** or Task phase command sends one bounded
 raw command: an 8-byte length header, strict-JSON metadata (at most 1 MiB), and
 canonical `float32` phase bytes (at most 16 MiB). The apply carries expected
@@ -103,10 +110,9 @@ Each supported head has a strict profile under `devices/slm/hamamatsu_x15213/pro
 model, serial, working and phase-curve wavelengths, curve provenance, and
 settle provenance. Authored wavelength builds the nonlinear
 phase-code-to-drive LUT from that curve; `two_pi_gray` remains computed rather
-than authored. A native `L 1272 x 1024` correction BMP is added modulo 256
-before the LUT. Loading or toggling correction advances a mapping revision, and
-each command receipt freezes the transport/profile/wavelength/orientation/correction
-facts it used. A map labelled for another wavelength is rejected because the
+than authored. A native `L 1272 x 1024` correction BMP, named in the device
+configuration, is added modulo 256 before the LUT, and each command receipt
+freezes the transport/profile/wavelength/orientation/correction facts it used. A map labelled for another wavelength is rejected because the
 repository has no measured two-dimensional unwrap authority. The bundled
 LSH0804382 provenance is explicitly incomplete; development mocks prove the
 software byte path, not the vendor ABI, controller, or optical acceptance.
@@ -118,7 +124,8 @@ DVI/USB experiment-machine acceptance remains an unexecuted runbook:
 2. Confirm the selected profile's curve source, measurement wavelength and
    uncertainty instead of treating the bundled values as a calibration claim.
 3. Verify vendor-correction encoding, serial, wavelength, sign and native pixel
-   orientation; exercise correction Off/On under the same device claim.
+   orientation; compare correction Off/On by initializing the server without
+   and with the correction BMP (it is an Init field, with no runtime toggle).
 4. Send asymmetric corner/gray patterns and confirm X/Y orientation plus the
    exact native DVI raster; for optional USB, also confirm frame-memory readback.
 5. Measure optical response for representative increasing and decreasing gray
@@ -176,7 +183,7 @@ readout-event meaning is carried by `DatasetSchema` rather than inferred from
 array shape. Runtime owns their accumulated current/partial/final
 `OwnedSnapshot`; a plugin does not keep a second live history.
 
-Hosted Calibration, Temperature and SLM Feedback receive the TaskRun directory
+Hosted Calibration and SLM Feedback receive the TaskRun directory
 from Runtime after actual Start. Each leaf writes only curated domain files,
 registers completed artifacts through the execution context, and leaves
 `run.json` lifecycle ownership to Runtime. Stop/failure keep registered partial
@@ -206,14 +213,16 @@ A new device leaf stays discoverable and self-contained:
 
 ```python
 from zlc_atom.authoring import AuthoringSchema
-from zlc_atom.install import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, bind_leaf
 
 def factory(context, key, values):
     device = build_device(context, values)
-    return InstalledLeaf(key, "example.device", device, {})
+    # bind the opened device as leaf `key` (the broker checks the capability
+    # against its contract type) or close it if it cannot be bound
+    return bind_leaf(context, key, "example.device", device, "example:serial-1", "rf.source")
 
 DEVICE_TYPE = DeviceTypeDescriptor(
-    "example.device", "example", AuthoringSchema(()), (), factory=factory
+    "example.device", "example", AuthoringSchema(()), ("rf.source",), factory=factory
 )
 ```
 

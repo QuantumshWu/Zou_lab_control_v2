@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.waveform.binding import bind_waveform_source
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from .source import (
     DEFAULT_BAUD,
@@ -40,19 +39,20 @@ def _factory(context, key: str, values: dict) -> InstalledLeaf:
         timeout_seconds=float(authored["timeout_seconds"]),
     )
     source = WheeltecN100WaveformSource(config)
-    return bind_waveform_source(
-        context, key, source, source.identity, "waveform.wheeltec_n100"
+    return bind_leaf(
+        context,
+        key,
+        "waveform.wheeltec_n100",
+        source,
+        source.identity,
+        "waveform.source",
     )
 
 
 def _discover() -> tuple[DeviceInstanceConfig, ...]:
+    # No module on the air is an empty answer, as every other family gives:
+    # a bench without an N100 has nothing to offer, not a fault to report.
     ports = discover_n100()
-    if not ports:
-        raise RuntimeError(
-            "no serial port carries an FDILink IMU stream: plug the N100 in "
-            f"over USB and make sure its line rate is {DEFAULT_BAUD}; a port "
-            "another program holds open cannot be listened to"
-        )
 
     def named(port: str) -> str:
         return "n100_" + "".join(c if c.isalnum() else "_" for c in port)

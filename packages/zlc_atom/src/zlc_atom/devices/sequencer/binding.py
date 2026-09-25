@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.execution import (
-    DeviceIdentityEvidenceKind,
     PhysicalDeviceIdentity,
     ResourceKey,
     bind_verified_device,
@@ -28,10 +27,7 @@ def bind_sequencer(
     binding, proof = bind_verified_device(
         context.broker,
         key=ResourceKey.parse(f"device/{key}"),
-        identity_probe=lambda: PhysicalDeviceIdentity(
-            identity,
-            DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-        ),
+        identity_probe=lambda: PhysicalDeviceIdentity(identity),
         capability_probe=lambda: {"sequencer.streamer": device},
     )
     return InstalledLeaf(
@@ -44,8 +40,12 @@ def bind_sequencer(
     )
 
 
-def open_sequencer_control(session, device_key: str, window_ratio=None):
-    """Open PulseGUI for one named sequencer in an existing experiment."""
+def open_sequencer_control(session, device_key: str, window_ratio=None, render=None):
+    """Open PulseGUI for one named sequencer in an existing experiment.
+
+    ``render`` is the application's Edit/Save render child, where the
+    preview is drawn; without one the editor starts its own.
+    """
 
     from zlc_workbench.apps.pulse_editor import create_bound_window
 
@@ -57,6 +57,7 @@ def open_sequencer_control(session, device_key: str, window_ratio=None):
         device_label=session.device_labels.get(str(device_key), str(device_key)),
         path="",
         window_ratio=window_ratio,
+        render=render,
     )
 
 

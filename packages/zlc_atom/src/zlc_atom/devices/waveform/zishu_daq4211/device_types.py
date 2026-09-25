@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
-from zlc_atom.devices.waveform.binding import bind_waveform_source
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from .source import (
     INPUT_RANGES,
-    SUPPORTED_MODEL,
     ChannelReading,
     ZishuDaq4211Config,
     ZishuDaq4211WaveformSource,
@@ -127,19 +125,20 @@ def authored_config(values: dict) -> ZishuDaq4211Config:
 
 def _factory(context, key: str, values: dict) -> InstalledLeaf:
     source = ZishuDaq4211WaveformSource(authored_config(values))
-    return bind_waveform_source(
-        context, key, source, source.identity, "waveform.zishu_daq4211"
+    return bind_leaf(
+        context,
+        key,
+        "waveform.zishu_daq4211",
+        source,
+        source.identity,
+        "waveform.source",
     )
 
 
 def _discover() -> tuple[DeviceInstanceConfig, ...]:
+    # No card is an empty answer, as every other family gives; a missing
+    # libdaq2 still raises, from library(), with where to put it.
     serials = discover_daq4211()
-    if not serials:
-        raise RuntimeError(
-            f"no {SUPPORTED_MODEL} answered: plug the card in over USB (or add "
-            "its address in DAQ2-Explorer for a LAN card) and make sure no "
-            "other program holds it -- libdaq2 gives one process the card"
-        )
 
     def named(serial: str) -> str:
         return "daq_" + "".join(c if c.isalnum() else "_" for c in serial)

@@ -5,10 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.waveform.binding import bind_waveform_source
 from zlc_atom.devices.waveform.contract import WaveformOutput
 from zlc_atom.devices.waveform.wheeltec_n100 import N100_OUTPUTS
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from ..authoring import simulation_world_config
 from ..world import SimulationWorld
@@ -59,8 +58,13 @@ def _imu_factory(context, key: str, values: dict) -> InstalledLeaf:
         VirtualWaveformConfig(float(authored["packet_rate_hz"]), 1, N100_OUTPUTS),
         sample_source=samples,
     )
-    return bind_waveform_source(
-        context, key, source, f"virtual-imu:{key}", "waveform.virtual_imu"
+    return bind_leaf(
+        context,
+        key,
+        "waveform.virtual_imu",
+        source,
+        f"virtual-imu:{key}",
+        "waveform.source",
     )
 
 
@@ -94,8 +98,13 @@ def _scope_factory(context, key: str, values: dict) -> InstalledLeaf:
         ),
         sample_source=samples,
     )
-    return bind_waveform_source(
-        context, key, source, f"virtual-scope:{key}", "waveform.virtual_scope"
+    return bind_leaf(
+        context,
+        key,
+        "waveform.virtual_scope",
+        source,
+        f"virtual-scope:{key}",
+        "waveform.source",
     )
 
 

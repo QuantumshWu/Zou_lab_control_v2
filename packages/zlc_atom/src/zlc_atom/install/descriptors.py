@@ -7,8 +7,8 @@ from typing import Any, Callable, Mapping
 
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.execution.capabilities import CAPABILITY_TYPES
-from zlc_atom.execution.ports import BoundDevice
-from zlc_atom.execution.resources import PhysicalDeviceIdentity
+from zlc_atom.execution.ports import BoundDevice, bind_verified_device
+from zlc_atom.execution.resources import PhysicalDeviceIdentity, ResourceKey
 from zlc_atom.install.configuration import DeviceInstanceConfig
 
 
@@ -29,6 +29,8 @@ class InstalledLeaf:
     #: pulse board, a local SLM): how the bench opens that protocol to
     #: other machines when the device is published, and closes it again
     #: when it is withdrawn -- ``admit_peers(True)`` / ``admit_peers(False)``.
+    #: Withdrawing may wait on the device (a local board's own client joins
+    #: again), so the bench never calls it on its GUI thread.
     #: Until published, such a server answers nobody but this machine.
     #: None for a leaf that serves nothing.
     admit_peers: Callable[[bool], None] | None = None
@@ -51,12 +53,6 @@ class InstallationFactoryContext:
     # any simulation implementation.
     world: object | None
     broker: object
-    #: The leaves this installation INHERITED from the one it succeeds, by
-    #: key -- what a reconcile kept open rather than closing and reopening.
-    #: Never a device being built beside this one: an apparatus's devices
-    #: are independent instruments and they all open at once, so there is
-    #: no order in which a sibling would be there to see.
-    devices: Mapping[str, InstalledLeaf]
     #: How to reach a pulse server, supplied by the composition root.
     #:
     #: This package declares WHERE a board is -- host, port, timeout, written
@@ -64,6 +60,43 @@ class InstallationFactoryContext:
     #: never HOW to dial it, because importing the pulse client here would break
     #: the boundary that keeps the domain independent of the device packages.
     connect_pulse: Callable[..., object] | None = None
+
+
+def bind_leaf(
+    context: InstallationFactoryContext,
+    key: str,
+    type_id: str,
+    device: object,
+    identity: str,
+    capability: str | None,
+) -> InstalledLeaf:
+    """Bind one opened device as installation leaf ``key``, or close it.
+
+    The broker checks the capability against its contract type, so a family
+    states only which capability the device provides.  A device that cannot
+    be bound is closed here: no owner will ever receive it.
+    """
+
+    close = getattr(device, "close", None)
+    try:
+        binding, proof = bind_verified_device(
+            context.broker,
+            key=ResourceKey.parse(f"device/{key}"),
+            identity_probe=lambda: PhysicalDeviceIdentity(identity),
+            capability_probe=lambda: {} if capability is None else {capability: device},
+        )
+    except BaseException:
+        if callable(close):
+            close()
+        raise
+    return InstalledLeaf(
+        key,
+        type_id,
+        device,
+        dict(proof.snapshot),
+        binding=binding,
+        closer=close,
+    )
 
 
 @dataclass(frozen=True)
@@ -127,4 +160,10 @@ class DeviceTypeDescriptor:
         object.__setattr__(self, "capabilities", capabilities)
 
 
-__all__ = ["CAPABILITY_TYPES", "DeviceTypeDescriptor", "InstallationFactoryContext", "InstalledLeaf"]
+__all__ = [
+    "CAPABILITY_TYPES",
+    "DeviceTypeDescriptor",
+    "InstallationFactoryContext",
+    "InstalledLeaf",
+    "bind_leaf",
+]

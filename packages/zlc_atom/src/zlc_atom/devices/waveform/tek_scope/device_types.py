@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.visa import identity_fields
-from zlc_atom.devices.waveform.binding import bind_waveform_source
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from .source import TekScopeConfig, TekScopeWaveformSource, discover_tek_scopes
 
@@ -41,8 +40,8 @@ def _factory(context, key: str, values: dict) -> InstalledLeaf:
         timeout_seconds=float(authored["timeout_seconds"]),
     )
     source = TekScopeWaveformSource(config)
-    return bind_waveform_source(
-        context, key, source, source.identity, "waveform.tek_scope"
+    return bind_leaf(
+        context, key, "waveform.tek_scope", source, source.identity, "waveform.source"
     )
 
 

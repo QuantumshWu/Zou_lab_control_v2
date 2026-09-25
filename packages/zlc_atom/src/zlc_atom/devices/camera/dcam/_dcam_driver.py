@@ -13,6 +13,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import platform
+import threading
 from enum import IntEnum
 
 import numpy as np
@@ -26,9 +27,19 @@ from zlc_atom.devices.vendor import resolve_vendor_file
 #: ALREADY_INITIALIZED and leaves the count struct untouched, and because a
 #: caller that uninitialised on its way out pulled the runtime from under
 #: everyone else.  Scanning is then a count read rather than a full bring-up
-#: and teardown of the vendor stack per button press.
+#: and teardown of the vendor stack per button press.  A scan and the opens
+#: of an Init run on their own threads, so bringing the runtime up is one at
+#: a time.
 _PROCESS_DEVICE_COUNT: int | None = None
-_PROCESS_RUNTIME_RELEASE: "object | None" = None
+_PROCESS_RUNTIME_LOCK = threading.Lock()
+
+
+def _release_process_runtime(dll: object) -> None:
+    global _PROCESS_DEVICE_COUNT
+    if _PROCESS_DEVICE_COUNT is None:
+        return
+    _PROCESS_DEVICE_COUNT = None
+    dll.dcamapi_uninit()
 
 _DCAMERR_TIMEOUT = -2147483386
 _DCAMERR_ALREADY_INITIALIZED = -520093695
@@ -317,53 +328,35 @@ class DcamSdkDriver:
         wrote and offer no cameras on a bench that has one.
         """
 
-        global _PROCESS_DEVICE_COUNT, _PROCESS_RUNTIME_RELEASE
-        if _PROCESS_DEVICE_COUNT is not None:
-            self._device_count = _PROCESS_DEVICE_COUNT
-            return False
-        init = _DcamApiInit()
-        code = int(self._dll.dcamapi_init(ctypes.byref(init)))
-        if code == _DCAMERR_ALREADY_INITIALIZED:
-            raise RuntimeError(
-                "the DCAM runtime is already initialized by something outside "
-                "this driver, so the camera count is unknown"
-            )
-        _checked("dcamapi_init", code)
-        self._device_count = int(init.device_count)
-        _PROCESS_DEVICE_COUNT = self._device_count
-        dll = self._dll
-
-        def release() -> None:
-            global _PROCESS_DEVICE_COUNT, _PROCESS_RUNTIME_RELEASE
-            if _PROCESS_DEVICE_COUNT is None:
-                return
-            _PROCESS_DEVICE_COUNT = None
-            _PROCESS_RUNTIME_RELEASE = None
-            dll.dcamapi_uninit()
-
-        _PROCESS_RUNTIME_RELEASE = release
-        atexit.register(release)
-        return True
+        global _PROCESS_DEVICE_COUNT
+        with _PROCESS_RUNTIME_LOCK:
+            if _PROCESS_DEVICE_COUNT:
+                self._device_count = _PROCESS_DEVICE_COUNT
+                return False
+            # A runtime that came up with no camera cannot have opened one,
+            # so it is restarted rather than trusted: a qCMOS powered on
+            # after the first scan is counted instead of staying invisible
+            # until the application restarts.
+            _release_process_runtime(self._dll)
+            init = _DcamApiInit()
+            code = int(self._dll.dcamapi_init(ctypes.byref(init)))
+            if code == _DCAMERR_ALREADY_INITIALIZED:
+                raise RuntimeError(
+                    "the DCAM runtime is already initialized by something outside "
+                    "this driver, so the camera count is unknown"
+                )
+            _checked("dcamapi_init", code)
+            self._device_count = int(init.device_count)
+            _PROCESS_DEVICE_COUNT = self._device_count
+            atexit.unregister(_release_process_runtime)
+            atexit.register(_release_process_runtime, self._dll)
+            return True
 
     @property
     def device_count(self) -> int:
         if self._device_count is None:
             raise RuntimeError("DCAM driver is not initialized")
         return self._device_count
-
-    def uninitialize(self) -> None:
-        """Release the process runtime.  Only a process teardown should.
-
-        A camera that closes does NOT come here: the runtime outlives every
-        individual open, and taking it down while another holder is using it
-        is how a scan and an open collided.
-        """
-
-        release = _PROCESS_RUNTIME_RELEASE
-        self._device_count = None
-        if release is not None:
-            atexit.unregister(release)  # type: ignore[arg-type]
-            release()  # type: ignore[operator]
 
     def open_device(self, index: int) -> "DcamSdkDevice":
         opened = _DcamDeviceOpen(index)

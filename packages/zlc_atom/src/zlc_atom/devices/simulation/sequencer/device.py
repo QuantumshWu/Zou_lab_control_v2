@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import time
 
-from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_pulse import load_streamer_config, pulse_target_from_xdc
 from zlc_pulse.device import AppliedState, DoneReport, PulseStreamer, SafeReadback
 from zlc_pulse.schedule import run_duration_seconds
@@ -222,35 +221,7 @@ class VirtualPulseStreamer(PulseStreamer):
             raise RuntimeError("virtual world playback failed") from error
 
 
-class VirtualSequencer(SequencerDevice):
-    def __init__(
-        self,
-        *,
-        world: object,
-        camera_trigger_channel: str = CAMERA_TRIGGER_CHANNEL,
-    ) -> None:
-        super().__init__(
-            VirtualPulseStreamer(
-                world=world,
-                camera_trigger_channel=camera_trigger_channel,
-            )
-        )
-        self.world = world
-
-    @property
-    def camera_trigger_channel(self) -> str:
-        return self.streamer.camera_trigger_channel
-
-    @camera_trigger_channel.setter
-    def camera_trigger_channel(self, value: str) -> None:
-        channel = str(value).strip()
-        if not channel:
-            raise ValueError("camera_trigger_channel must be non-empty")
-        self.streamer.camera_trigger_channel = channel
-
-
 __all__ = [
     "CAMERA_TRIGGER_CHANNEL",
     "VirtualPulseStreamer",
-    "VirtualSequencer",
 ]

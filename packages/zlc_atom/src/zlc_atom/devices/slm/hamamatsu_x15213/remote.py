@@ -19,7 +19,8 @@ from threading import Lock
 from typing import Mapping
 
 import numpy as np
-from zlc_pulse.endpoint import is_loopback_host
+from zlc_durable import strict_json_loads
+from zlc_pulse.endpoint import drop_connection, drop_peer_connections, is_loopback_host
 
 from ..device import SlmAdapter, _shape, _validated_state, canonical_phase
 
@@ -70,22 +71,8 @@ def _recv_packet(connection: socket.socket) -> tuple[dict[str, object], bytes]:
     )
     if metadata_size > _MAX_REMOTE_METADATA_BYTES or payload_size > _MAX_REMOTE_PHASE_BYTES:
         raise ValueError("SLM remote message exceeds the maximum size")
-
-    def strict_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate SLM remote field {key!r}")
-            result[key] = value
-        return result
-
-    def reject_constant(value):
-        raise ValueError(f"non-finite SLM remote value {value!r}")
-
-    decoded = json.loads(
-        _recv_exact(connection, metadata_size).decode("utf-8"),
-        object_pairs_hook=strict_object,
-        parse_constant=reject_constant,
+    decoded = strict_json_loads(
+        _recv_exact(connection, metadata_size).decode("utf-8"), "SLM remote metadata"
     )
     if not isinstance(decoded, dict):
         raise TypeError("SLM remote metadata must be an object")
@@ -182,10 +169,15 @@ def _open_slm_server(
     connections: set[socket.socket] = set()
     closing = False
 
-    def handle(connection: socket.socket, address, _server) -> None:
+    def handle(connection: socket.socket, address, server) -> None:
         client = f"{address[0]}:{address[1]}" if address else "?"
         with connections_lock:
             if closing:
+                return
+            # Admission is asked again under the lock withdrawal takes: a
+            # peer verified just before Remote went off is otherwise
+            # registered after the withdrawal's sweep and kept for good.
+            if not (server.peers or is_loopback_host(address[0] if address else "")):
                 return
             connections.add(connection)
         try:
@@ -241,30 +233,16 @@ def _open_slm_server(
             machine's own clients are not touched.
             """
 
-            self.peers = bool(admitted)
+            with connections_lock:
+                self.peers = bool(admitted)
+                active = tuple(connections)
             if admitted:
                 _LOG.info(
                     "SLM PEERS ADMITTED endpoint=%s:%d",
                     bind_host, int(self.server_address[1]),
                 )
                 return
-            with connections_lock:
-                active = tuple(connections)
-            dropped = 0
-            for connection in active:
-                try:
-                    peer = connection.getpeername()[0]
-                except OSError:
-                    continue
-                if is_loopback_host(peer):
-                    continue
-                try:
-                    connection.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                connection.close()
-                dropped += 1
-            _LOG.info("SLM PEERS REFUSED dropped=%d", dropped)
+            _LOG.info("SLM PEERS REFUSED dropped=%d", drop_peer_connections(active))
 
     server = _Server((bind_host, port), handle)
     server.peers = bool(peers)
@@ -276,11 +254,7 @@ def _open_slm_server(
             closing = True
             active = tuple(connections)
         for connection in active:
-            try:
-                connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            connection.close()
+            drop_connection(connection)
         original_close()
 
     server.server_close = close
@@ -332,7 +306,11 @@ class _RemoteSlmAdapter:
             raise ValueError("remote SLM timeout must be finite and positive")
         self._endpoint = (remote_host, port)
         self._timeout = timeout
+        #: ``_lock`` serialises the connection for a whole round trip; the
+        #: cached state has its own short lock, so a question about it --
+        #: from the Qt thread, say -- never waits behind an apply on the wire.
         self._lock = Lock()
+        self._state_lock = Lock()
         self._connection: socket.socket | None = None
         self._identity = ""
         self._shape_yx = (1, 1)
@@ -380,12 +358,13 @@ class _RemoteSlmAdapter:
         )
         if self._identity and (identity != self._identity or shape != self._shape_yx):
             raise RuntimeError("SLM remote endpoint changed physical identity or shape")
-        self._identity = identity
-        self._shape_yx = shape
-        self._command_revision = command_revision
-        self._mapping_revision = mapping_revision
-        self._phase = phase
-        self._receipt = receipt
+        with self._state_lock:
+            self._identity = identity
+            self._shape_yx = shape
+            self._command_revision = command_revision
+            self._mapping_revision = mapping_revision
+            self._phase = phase
+            self._receipt = receipt
         self._uncertain = False
 
     def _request(
@@ -433,13 +412,14 @@ class _RemoteSlmAdapter:
             raise RuntimeError(error)
 
     def _mark_unknown(self) -> None:
-        self._phase = None
-        self._receipt = {
-            **self._receipt,
-            "outcome": "unknown",
-            "stage": "remote-transport",
-            "readback": "not-run",
-        }
+        with self._state_lock:
+            self._phase = None
+            self._receipt = {
+                **self._receipt,
+                "outcome": "unknown",
+                "stage": "remote-transport",
+                "readback": "not-run",
+            }
         self._uncertain = True
 
     @property
@@ -452,22 +432,22 @@ class _RemoteSlmAdapter:
 
     @property
     def last_commanded_phase(self) -> np.ndarray | None:
-        with self._lock:
+        with self._state_lock:
             return self._phase
 
     @property
     def command_revision(self) -> int:
-        with self._lock:
+        with self._state_lock:
             return self._command_revision
 
     @property
     def mapping_revision(self) -> int:
-        with self._lock:
+        with self._state_lock:
             return self._mapping_revision
 
     @property
     def last_command_receipt(self) -> Mapping[str, object]:
-        with self._lock:
+        with self._state_lock:
             return dict(self._receipt)
 
     def apply_phase(self, radians: object) -> np.ndarray:

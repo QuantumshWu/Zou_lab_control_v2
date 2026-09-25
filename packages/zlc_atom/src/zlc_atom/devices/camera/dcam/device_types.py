@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.camera.roi_grid import authored_roi_xywh
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from ._dcam_driver import DcamSdkDriver
 from .adapter import DcamCameraAdapter, DcamCameraConfig
@@ -94,12 +93,13 @@ def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:
             electrons_per_count=authored["electrons_per_count"],
         ),
     )
-    return bind_camera(
+    return bind_leaf(
         context,
         key,
+        "camera.dcam",
         camera,
         f"dcam-camera:index={device_index}",
-        "camera.dcam",
+        "camera.adapter",
     )
 
 

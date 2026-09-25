@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
+from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from ..authoring import simulation_world_config
 from ..world import SimulationWorld
-from .device import VirtualSequencer
+from .device import VirtualPulseStreamer
 
 
 VIRTUAL_SEQUENCER_SCHEMA = AuthoringSchema(
@@ -20,7 +21,7 @@ def _sequencer_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = VIRTUAL_SEQUENCER_SCHEMA.project_values(values)
     if not isinstance(context.world, SimulationWorld):
         raise TypeError("sequencer.virtual requires the installation SimulationWorld")
-    device = VirtualSequencer(world=context.world)
+    device = SequencerDevice(VirtualPulseStreamer(world=context.world))
     try:
         device.open()
         return bind_sequencer(

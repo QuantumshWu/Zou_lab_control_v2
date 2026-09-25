@@ -8,6 +8,9 @@ from dataclasses import dataclass, replace
 import threading
 from typing import Any, Mapping
 
+from zlc_atom.authoring import is_tunable
+from zlc_atom.execution import DeviceBroker, ResourceKey
+
 from .descriptors import CAPABILITY_TYPES, DeviceTypeDescriptor, InstallationFactoryContext, InstalledLeaf
 from .discovery import DeviceCatalogSnapshot, discover_device_catalog
 from .configuration import _freeze_plain
@@ -40,8 +43,6 @@ class Installation:
         failures: Mapping[str, BaseException] | None = None,
         broker: object | None = None,
     ) -> None:
-        from zlc_atom.execution import DeviceBroker
-
         if broker is not None and not isinstance(broker, DeviceBroker):
             raise TypeError("installation broker must be DeviceBroker or None")
         prepared = dict(devices)
@@ -55,16 +56,17 @@ class Installation:
         if broker is None and any(leaf.binding is not None for leaf in prepared.values()):
             raise ValueError("bound installation leaves require their DeviceBroker")
         if broker is not None:
+            # Owning a leaf is owning its physical identity; a leaf that
+            # ``create_installation`` admitted has claimed it already.
             for leaf in prepared.values():
                 if leaf.binding is not None:
-                    broker.verify_capability(leaf.binding)
+                    broker.claim(leaf.binding)
         self._lock = threading.RLock()
         self._devices = prepared
         self.world = world
         self._failures = dict(failures or {})
         self._broker = broker
         self._revision = 0
-        self._borrow_tokens: set[object] = set()
         self._closing = False
         self._closed = False
 
@@ -85,29 +87,6 @@ class Installation:
 
         with self._lock:
             return self._revision
-
-    def _borrow_snapshot(
-        self,
-        expected_revision: int,
-    ) -> tuple[object, dict[str, InstalledLeaf]]:
-        """Pin one exact ownership snapshot for successor factory construction."""
-
-        if type(expected_revision) is not int or expected_revision < 0:
-            raise TypeError("borrowed_revision must be a non-negative integer")
-        with self._lock:
-            if self._revision != expected_revision:
-                raise RuntimeError("borrowed installation ownership revision changed")
-            if self._closing or self._closed:
-                raise RuntimeError("borrowed installation is closing or closed")
-            token = object()
-            self._borrow_tokens.add(token)
-            return token, dict(self._devices)
-
-    def _release_borrow(self, token: object) -> None:
-        with self._lock:
-            if token not in self._borrow_tokens:
-                raise RuntimeError("installation borrow token is no longer active")
-            self._borrow_tokens.remove(token)
 
     @property
     def failures(self) -> Mapping[str, BaseException]:
@@ -190,10 +169,6 @@ class Installation:
                     raise RuntimeError("source installation is closing or closed")
                 if target._closing or target._closed:
                     raise RuntimeError("target installation is closing or closed")
-                if self._borrow_tokens:
-                    raise RuntimeError("source installation leaves are borrowed")
-                if target._borrow_tokens:
-                    raise RuntimeError("target installation leaves are borrowed")
                 if self._broker is not target._broker:
                     raise RuntimeError("installation transfer requires one DeviceBroker")
                 wanted = set(normalized)
@@ -240,12 +215,13 @@ class Installation:
                 return
             if self._closing:
                 raise RuntimeError("installation close is already in progress")
-            if self._borrow_tokens:
-                raise RuntimeError("installation leaves are borrowed")
             self._closing = True
             pending = tuple(reversed(tuple(self._devices.items())))
         errors: list[BaseException] = []
         closed_keys: list[str] = []
+        # Devices are independent instruments: one that refuses its close
+        # keeps nothing else open.  Every leaf gets its close, and only the
+        # ones that failed stay owned here for the retry.
         for key, leaf in pending:
             try:
                 leaf.close()
@@ -254,11 +230,6 @@ class Installation:
                     self._broker.unbind(leaf.binding)
             except BaseException as error:
                 errors.append(error)
-                # Insertion order is topological and close order is its
-                # reverse.  Everything left in the loop was constructed before
-                # this failed leaf and may be a dependency it still needs in
-                # order to retry close safely.
-                break
             else:
                 closed_keys.append(key)
         with self._lock:
@@ -286,10 +257,12 @@ class Installation:
 def tunable_devices(installation: Installation) -> dict[str, object]:
     """Every installed device that volunteers scan-tunable fields, by key.
 
-    A device volunteers by exposing ``tunable_fields()`` -- ``TunableField``
-    values which keep stable form metadata separate from current device truth
-    -- and ``tune(name, value)`` to move one at runtime and return its effective
-    value.
+    A device volunteers by speaking the tunable quartet ``is_tunable``
+    checks: ``tunable_fields()`` -- ``TunableField`` values which keep
+    stable form metadata separate from current device truth -- ``tune(name,
+    value)`` to move one at runtime and return its effective value, and
+    ``tunable_values()`` / ``settings_provenance()`` to read them all and say
+    which device session that reading belongs to.
     Duck-typed like the optional ``close``: a device without runtime knobs
     simply does not appear, which is an honest absence rather than a stub.
     """
@@ -297,8 +270,7 @@ def tunable_devices(installation: Installation) -> dict[str, object]:
     return {
         key: leaf.device
         for key, leaf in installation.devices.items()
-        if callable(getattr(leaf.device, "tunable_fields", None))
-        and callable(getattr(leaf.device, "tune", None))
+        if is_tunable(leaf.device)
     }
 
 
@@ -336,8 +308,6 @@ def _admit_factory_leaf(
     broker: object,
 ) -> InstalledLeaf:
     """Validate the complete identity a factory claims before ownership passes."""
-
-    from zlc_atom.execution import DeviceBroker, ResourceKey
 
     if not isinstance(broker, DeviceBroker):
         raise TypeError("factory admission requires DeviceBroker")
@@ -380,6 +350,12 @@ def _admit_factory_leaf(
                 f"factory {descriptor.type_id} capability {token!r} differs "
                 "from its verified binding"
             )
+    if leaf.binding is not None:
+        # The physical identity is claimed here, one leaf at a time in the
+        # operator's order, not in the factories that bound it all at once:
+        # of two specs naming one instrument the later one is refused, and
+        # which one does not depend on which thread got there first.
+        broker.claim(leaf.binding)
     return leaf
 
 
@@ -459,49 +435,24 @@ def _build_together(
         return tuple(built)
 
 
-def _abandon_unadmitted(
-    rest: tuple[tuple[DeviceSpec, object, BaseException | None], ...],
+def _close_factory_leaves(
+    leaves: tuple[InstalledLeaf, ...],
 ) -> tuple[tuple[BaseException, ...], tuple[InstalledLeaf, ...]]:
-    """Close the devices that will now never be admitted.
+    """Close leaves last-first; hand back every error and what stayed open.
 
-    Only for a failure that ENDS the installation.  Everything is built
-    before any of it is admitted, so a failure that raises out of the
-    admission loop leaves the rest of them open -- devices holding ports
-    and bus handles that nothing is going to own.  Built one at a time they
-    would never have been made at all; built together, closing them is part
-    of the same failure.  A leaf that will not close is handed back so
-    recovery can own it, exactly as a rolled-back one is.
-
-    A failure the loop RECOVERS from is not one of these.  The devices are
-    independent, so one failing admission says nothing about the others:
-    they are still built, still unadmitted, and the loop reaches each of
-    them in its turn.
+    The devices are independent, so one that will not close stops nothing:
+    each leaf gets its own attempt, and only the ones that refused are
+    returned, in their original order, for recovery to own.
     """
 
     errors: list[BaseException] = []
     stranded: list[InstalledLeaf] = []
-    for _spec, made, error in rest:
-        if error is not None or not isinstance(made, InstalledLeaf):
-            continue
-        failed = _close_factory_leaf(made)
-        if failed:
-            errors.extend(failed)
-            stranded.append(made)
-    return tuple(errors), tuple(stranded)
-
-
-def _rollback_factory_leaves(
-    installed: Mapping[str, InstalledLeaf],
-) -> tuple[tuple[BaseException, ...], tuple[InstalledLeaf, ...]]:
-    ordered = tuple(installed.values())
-    for index in range(len(ordered) - 1, -1, -1):
-        leaf = ordered[index]
+    for leaf in reversed(leaves):
         failed = _close_factory_leaf(leaf)
         if failed:
-            # Everything opened before this leaf is still open, and a later
-            # close retry may need it.  Recovery owns the whole intact prefix.
-            return failed, ordered[: index + 1]
-    return (), ()
+            errors.extend(failed)
+            stranded.append(leaf)
+    return tuple(errors), tuple(reversed(stranded))
 
 
 class InstallationRecovery:
@@ -512,13 +463,13 @@ class InstallationRecovery:
         if not prepared or any(not isinstance(leaf, InstalledLeaf) for leaf in prepared):
             raise TypeError("installation recovery requires InstalledLeaf values")
         self._lock = threading.RLock()
-        self._leaves = list(prepared)
+        self._leaves = prepared
         self._closing = False
 
     @property
     def leaves(self) -> tuple[InstalledLeaf, ...]:
         with self._lock:
-            return tuple(self._leaves)
+            return self._leaves
 
     def close(self) -> None:
         with self._lock:
@@ -527,28 +478,13 @@ class InstallationRecovery:
             if self._closing:
                 raise RuntimeError("installation recovery close is already in progress")
             self._closing = True
-        error: BaseException | None = None
-        try:
-            while True:
-                with self._lock:
-                    if not self._leaves:
-                        break
-                    leaf = self._leaves[-1]
-                failed = _close_factory_leaf(leaf)
-                if failed:
-                    error = BaseExceptionGroup(
-                        "installation recovery close failed", list(failed)
-                    )
-                    break
-                with self._lock:
-                    if not self._leaves or self._leaves[-1] is not leaf:
-                        raise RuntimeError("installation recovery ownership changed")
-                    self._leaves.pop()
-        finally:
-            with self._lock:
-                self._closing = False
-        if error is not None:
-            raise error
+            pending = self._leaves
+        errors, stranded = _close_factory_leaves(pending)
+        with self._lock:
+            self._leaves = stranded
+            self._closing = False
+        if errors:
+            raise BaseExceptionGroup("installation recovery close failed", list(errors))
 
 
 class InstallationCompositionError(BaseExceptionGroup):
@@ -575,23 +511,16 @@ class InstallationCompositionError(BaseExceptionGroup):
 
 @dataclass(frozen=True)
 class InstallationBlueprint:
-    """Side-effect-free, dependency-ordered input to device factory execution.
+    """Side-effect-free, operator-ordered input to device factory execution.
 
-    What makes a blueprint trustworthy is the data it carries -- the ordered
-    specs, the catalog they were checked against, the resolved world and the
-    borrow snapshot -- every one of which ``create_installation`` re-verifies
-    against the live owners before a factory runs.  ``preflight_installation``
-    is the function that produces one.
+    The ordered specs, the catalog they were checked against and the
+    resolved world, all decided before any device opens.
+    ``preflight_installation`` is the function that produces one.
     """
 
     specs: tuple[DeviceSpec, ...]
     catalog: DeviceCatalogSnapshot
     world: object | None
-    borrowed_from: Installation | None = None
-    borrowed_revision: int | None = None
-    borrowed_keys: tuple[str, ...] = ()
-    borrowed_types: frozenset[str] = frozenset()
-
 
 
 def preflight_installation(
@@ -600,10 +529,8 @@ def preflight_installation(
     world: object | None = None,
     simulation: Mapping[str, Any] | None = None,
     catalog: DeviceCatalogSnapshot | None = None,
-    borrowed_from: Installation | None = None,
-    borrowed_revision: int | None = None,
 ) -> InstallationBlueprint:
-    """Validate structure/topology and resolve the world without opening devices."""
+    """Validate structure and resolve the world without opening devices."""
 
     snapshot = catalog if catalog is not None else discover_device_catalog()
     if not isinstance(snapshot, DeviceCatalogSnapshot):
@@ -633,72 +560,13 @@ def preflight_installation(
     unknown = {spec.type_id for spec in normalized} - set(by_type)
     if unknown:
         raise KeyError(f"unknown device types: {sorted(unknown)}")
-
-    borrow_token = None
-    borrowed: dict[str, InstalledLeaf] = {}
-    if borrowed_from is None:
-        if borrowed_revision is not None:
-            raise ValueError("borrowed_revision requires borrowed_from")
+    if world is None:
+        resolved_world = _world_from_apparatus(normalized, by_type, frozen_simulation)
+    elif simulation_supplied:
+        raise ValueError("pass an explicit world or simulation config, not both")
     else:
-        if not isinstance(borrowed_from, Installation):
-            raise TypeError("borrowed_from must be Installation or None")
-        if borrowed_revision is None:
-            raise ValueError("borrowed_from requires borrowed_revision")
-        borrow_token, borrowed = borrowed_from._borrow_snapshot(borrowed_revision)
-    try:
-        overlap = set(borrowed).intersection(keys)
-        if overlap:
-            raise ValueError(
-                f"borrowed leaves duplicate device spec key(s): {sorted(overlap)}"
-            )
-        world_bound = tuple(
-            key for key, leaf in borrowed.items() if leaf.world_affinity is not None
-        )
-        if borrowed_from is not None and not simulation_supplied and world is None:
-            resolved_world = borrowed_from.world
-            if resolved_world is None and any(
-                by_type[spec.type_id].world_config is not None for spec in normalized
-            ):
-                resolved_world = _world_from_apparatus(
-                    normalized, by_type, frozen_simulation
-                )
-        elif world is None:
-            if world_bound:
-                raise ValueError(
-                    "world-bound borrowed leaves cannot accompany a new simulation world"
-                )
-            resolved_world = _world_from_apparatus(
-                normalized, by_type, frozen_simulation
-            )
-        else:
-            if simulation_supplied:
-                raise ValueError("pass an explicit world or simulation config, not both")
-            incompatible = tuple(
-                key
-                for key, leaf in borrowed.items()
-                if leaf.world_affinity is not None
-                and leaf.world_affinity is not world
-            )
-            if incompatible:
-                raise ValueError(
-                    "borrowed leaves belong to another world: "
-                    f"{list(incompatible)}"
-                )
-            resolved_world = world
-        borrowed_types = frozenset(leaf.type_id for leaf in borrowed.values())
-        return InstallationBlueprint(
-            normalized,
-            snapshot,
-            resolved_world,
-            borrowed_from,
-            borrowed_revision,
-            tuple(borrowed),
-            borrowed_types,
-        )
-    finally:
-        if borrow_token is not None:
-            assert borrowed_from is not None
-            borrowed_from._release_borrow(borrow_token)
+        resolved_world = world
+    return InstallationBlueprint(normalized, snapshot, resolved_world)
 
 
 def _raise_composition_failure(
@@ -727,23 +595,13 @@ def create_installation(
     broker: object | None = None,
     catalog: DeviceCatalogSnapshot | None = None,
     connect_pulse: object | None = None,
-    borrowed_from: Installation | None = None,
-    borrowed_revision: int | None = None,
 ) -> Installation:
     """Open only the leaves described by one proven installation blueprint."""
 
-    from zlc_atom.execution import DeviceBroker
-
     if isinstance(specs, InstallationBlueprint):
-        if (
-            world is not None
-            or simulation is not None
-            or catalog is not None
-            or borrowed_from is not None
-            or borrowed_revision is not None
-        ):
+        if world is not None or simulation is not None or catalog is not None:
             raise ValueError(
-                "an InstallationBlueprint already owns world, catalog, and borrow input"
+                "an InstallationBlueprint already owns world and catalog input"
             )
         blueprint = specs
     else:
@@ -752,145 +610,98 @@ def create_installation(
             world=world,
             simulation=simulation,
             catalog=catalog,
-            borrowed_from=borrowed_from,
-            borrowed_revision=borrowed_revision,
         )
+    if broker is None:
+        broker = DeviceBroker()
+    elif not isinstance(broker, DeviceBroker):
+        raise TypeError("broker must be DeviceBroker or None")
 
-    owner = blueprint.borrowed_from
-    borrow_token = None
-    borrowed: dict[str, InstalledLeaf] = {}
-    if owner is not None:
-        assert blueprint.borrowed_revision is not None
-        borrow_token, borrowed = owner._borrow_snapshot(
-            blueprint.borrowed_revision
-        )
-    try:
-        if tuple(borrowed) != blueprint.borrowed_keys or frozenset(
-            leaf.type_id for leaf in borrowed.values()
-        ) != blueprint.borrowed_types:
-            raise RuntimeError("borrowed installation leaves changed after preflight")
-        if owner is not None:
-            if owner.broker is None:
-                raise RuntimeError("borrowed installation has no DeviceBroker")
-            if broker is None:
-                broker = owner.broker
-            elif broker is not owner.broker:
-                raise RuntimeError("successor requires the borrowed installation broker")
-        if broker is None:
-            broker = DeviceBroker()
-        elif not isinstance(broker, DeviceBroker):
-            raise TypeError("broker must be DeviceBroker or None")
-        for leaf in borrowed.values():
-            if leaf.binding is not None:
-                broker.verify_capability(leaf.binding)
-
-        by_type = {
-            descriptor.type_id: descriptor
-            for descriptor in blueprint.catalog.available
-        }
-        installed: dict[str, InstalledLeaf] = {}
-        failures: dict[str, BaseException] = {}
-        # ONE context, and the only devices in it are the ones this
-        # installation INHERITED -- complete, pinned, and open before any
-        # factory here runs.  No factory is shown a sibling, because
-        # instruments in an apparatus do not compose: that is what makes
-        # opening them ALL at once safe, and why Init costs the slowest
-        # device rather than the sum of them, while admission stays serial
-        # and in the operator's own order -- the order close() reverses.
-        context = InstallationFactoryContext(
-            blueprint.world,
-            broker,
-            dict(borrowed),
-            connect_pulse,
-        )
-        built = _build_together(blueprint.specs, by_type, context)
-        for position, (spec, made, build_error) in enumerate(built):
-            if build_error is not None:
-                # Its factory raised, so nothing here is open and there
-                # is nothing to close: one device's failure, recorded, and
-                # every other device still gets its turn.
-                failures[spec.key] = build_error
-                continue
-            descriptor = by_type[spec.type_id]
-            try:
-                leaf = _admit_factory_leaf(made, spec, descriptor, broker)
-                if leaf.world_affinity is not None:
-                    raise ValueError(
-                        "device factory must not assign world_affinity"
-                    )
-                leaf = replace(
-                    leaf,
-                    world_affinity=(
-                        blueprint.world
-                        if descriptor.world_config is not None
-                        else None
-                    ),
-                )
-            except BaseException as original:
-                cleanup: tuple[BaseException, ...] = ()
-                if isinstance(made, InstalledLeaf):
-                    cleanup = _close_factory_leaf(made)
-                    if not cleanup:
-                        # This device is closed and nothing else was
-                        # disturbed, so it is recorded as one device's
-                        # failure and the loop walks on -- to THE DEVICES
-                        # AFTER IT, which are built, still unadmitted and
-                        # perfectly good.  Closing them here, as this used
-                        # to, left the loop admitting devices it had just
-                        # shut.
-                        failures[spec.key] = original
-                        continue
-                # Past this point nothing returns to the loop, so every
-                # device after this one is open and nobody is going to
-                # own it.
-                abandoned, stranded = _abandon_unadmitted(built[position + 1 :])
-                if not isinstance(made, InstalledLeaf):
-                    rollback, rollback_remaining = _rollback_factory_leaves(
-                        installed
-                    )
-                    installed.clear()
-                    _raise_composition_failure(
-                        f"device {spec.key!r} factory result was not ownable",
-                        original,
-                        abandoned,
-                        rollback,
-                        recovery_leaves=(*stranded, *rollback_remaining),
-                    )
-                # This device is still open, and its close retry may need
-                # every leaf opened before it -- a shared bus, a vendor
-                # library, a server one of them started.  Nothing is rolled
-                # back here: recovery owns the intact prefix and this
-                # device, and closes them in reverse order, this one
-                # first.
-                prefix = tuple(installed.values())
-                installed.clear()
-                _raise_composition_failure(
-                    f"device {spec.key!r} admission and cleanup failed",
-                    original,
-                    abandoned,
-                    cleanup,
-                    recovery_leaves=(*stranded, *prefix, made),
-                )
-            installed[spec.key] = leaf
+    by_type = {
+        descriptor.type_id: descriptor
+        for descriptor in blueprint.catalog.available
+    }
+    installed: dict[str, InstalledLeaf] = {}
+    failures: dict[str, BaseException] = {}
+    # ONE context, and no factory is shown a sibling, because instruments in
+    # an apparatus do not compose: that is what makes opening them ALL at
+    # once safe, and why Init costs the slowest device rather than the sum
+    # of them, while admission stays serial and in the operator's own order
+    # -- the order close() reverses.
+    context = InstallationFactoryContext(blueprint.world, broker, connect_pulse)
+    built = _build_together(blueprint.specs, by_type, context)
+    for position, (spec, made, build_error) in enumerate(built):
+        if build_error is not None:
+            # Its factory raised, so nothing here is open and there
+            # is nothing to close: one device's failure, recorded, and
+            # every other device still gets its turn.
+            failures[spec.key] = build_error
+            continue
+        descriptor = by_type[spec.type_id]
         try:
-            return Installation(
-                installed,
-                world=blueprint.world,
-                failures=failures,
-                broker=broker,
+            leaf = _admit_factory_leaf(made, spec, descriptor, broker)
+            if leaf.world_affinity is not None:
+                raise ValueError(
+                    "device factory must not assign world_affinity"
+                )
+            leaf = replace(
+                leaf,
+                world_affinity=(
+                    blueprint.world
+                    if descriptor.world_config is not None
+                    else None
+                ),
             )
         except BaseException as original:
-            rollback, rollback_remaining = _rollback_factory_leaves(installed)
-            _raise_composition_failure(
-                "installation ownership admission failed",
-                original,
-                rollback,
-                recovery_leaves=rollback_remaining,
+            cleanup: tuple[BaseException, ...] = ()
+            if isinstance(made, InstalledLeaf):
+                cleanup = _close_factory_leaf(made)
+                if not cleanup:
+                    # This device is closed and nothing else was
+                    # disturbed, so it is recorded as one device's
+                    # failure and the loop walks on to the devices after
+                    # it, which are built, still unadmitted and good.
+                    failures[spec.key] = original
+                    continue
+            # A result nothing can own, or a rejected device that will not
+            # close, has only the composition error to hand it to recovery
+            # through.  Every other device -- admitted or still waiting --
+            # is closed on its own, and whatever refuses joins recovery.
+            abandoned, stranded = _close_factory_leaves(
+                tuple(
+                    later
+                    for _spec, later, error in built[position + 1 :]
+                    if error is None and isinstance(later, InstalledLeaf)
+                )
             )
-    finally:
-        if borrow_token is not None:
-            assert owner is not None
-            owner._release_borrow(borrow_token)
+            rollback, rolled = _close_factory_leaves(tuple(installed.values()))
+            installed.clear()
+            ownable = isinstance(made, InstalledLeaf)
+            _raise_composition_failure(
+                f"device {spec.key!r} admission and cleanup failed"
+                if ownable
+                else f"device {spec.key!r} factory result was not ownable",
+                original,
+                abandoned,
+                rollback,
+                cleanup,
+                recovery_leaves=(*rolled, *stranded, *((made,) if ownable else ())),
+            )
+        installed[spec.key] = leaf
+    try:
+        return Installation(
+            installed,
+            world=blueprint.world,
+            failures=failures,
+            broker=broker,
+        )
+    except BaseException as original:
+        rollback, rolled = _close_factory_leaves(tuple(installed.values()))
+        _raise_composition_failure(
+            "installation ownership admission failed",
+            original,
+            rollback,
+            recovery_leaves=rolled,
+        )
 
 
 __all__ = [

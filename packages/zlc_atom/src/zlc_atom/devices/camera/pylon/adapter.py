@@ -32,6 +32,8 @@ from ..contract import (
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
+    arm_groups,
+    roi_request,
 )
 from ..photoelectrons import stated_conversion
 
@@ -48,20 +50,6 @@ def _serialized(method):
             return method(self, *args, **kwargs)
 
     return call
-
-
-def _roi_request(
-    value: tuple[int, int, int, int] | None,
-) -> tuple[int, int, int, int] | None:
-    if value is None:
-        return None
-    try:
-        result = tuple(int(item) for item in value)
-    except (TypeError, ValueError) as exc:
-        raise TypeError("roi_xywh must contain four integers or be None") from exc
-    if len(result) != 4:
-        raise ValueError("roi_xywh must contain four integers or be None")
-    return result
 
 
 @dataclass(frozen=True)
@@ -110,7 +98,7 @@ class PylonCameraConfig:
         object.__setattr__(self, "exposure_seconds", exposure)
         object.__setattr__(self, "gain_db", gain_db)
         object.__setattr__(self, "timeout_seconds", timeout)
-        object.__setattr__(self, "roi_xywh", _roi_request(self.roi_xywh))
+        object.__setattr__(self, "roi_xywh", roi_request(self.roi_xywh))
         stated_conversion(
             self.offset_counts,
             self.electrons_per_count,
@@ -291,10 +279,23 @@ class PylonCameraAdapter:
         # which is why this asks for the value and then believes the readback.
         self._camera.Gain.SetValue(float(self.config.gain_db))
 
-    def _gain_node(self) -> object:
-        """The camera's own gain node, opened if it has to be."""
+    def _require_open(self) -> None:
+        """Configure an attached camera on first use; never re-attach one.
 
+        The factory opens explicitly.  A late call on a closed leaf -- a
+        Device Control refresh racing an unload -- must fail, as DCAM's
+        does, rather than attach the Basler again with nobody left to close
+        it and its serial held.
+        """
+
+        if self._camera is None:
+            raise RuntimeError("pylon camera is closed")
         self.open()
+
+    def _gain_node(self) -> object:
+        """The camera's own gain node."""
+
+        self._require_open()
         return self._camera.Gain
 
     @_serialized
@@ -511,7 +512,7 @@ class PylonCameraAdapter:
         """
 
         return self._reconfigure(
-            replace(self.config, roi_xywh=_roi_request(roi_xywh)), "roi_xywh"
+            replace(self.config, roi_xywh=roi_request(roi_xywh)), "roi_xywh"
         )
 
     def _reconfigure(self, candidate: PylonCameraConfig, field: str) -> CameraWorkingPoint:
@@ -519,7 +520,7 @@ class PylonCameraAdapter:
 
         if self._armed:
             raise RuntimeError("pylon settings cannot change while armed")
-        self.open()
+        self._require_open()
         requested = getattr(candidate, field)
         if field in self._requested_settings and requested == self._requested_settings[field]:
             return self.working_point()
@@ -560,11 +561,11 @@ class PylonCameraAdapter:
     @_serialized
     def working_point(self) -> CameraWorkingPoint:
         """Reuse actual readback until a setting or acquisition mode changes."""
-        self.open()
+        self._require_open()
         return self._working_point or self._record_readback()
 
     def _read_working_point(self) -> CameraWorkingPoint:
-        self.open()
+        self._require_open()
         camera = self._camera
         width = int(camera.Width.GetValue())
         height = int(camera.Height.GetValue())
@@ -639,31 +640,7 @@ class PylonCameraAdapter:
         size never determines how much SDK or application memory is reserved.
         """
 
-        if frames is None:
-            expected = None
-            groups = tuple(int(value) for value in (source_group_sizes or ()))
-            if groups and (len(groups) != 1 or groups[0] <= 0):
-                raise ValueError(
-                    "continuous external capture requires one positive source group"
-                )
-        else:
-            if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
-                raise ValueError("frames must be a positive integer or None")
-            if not isinstance(source_group_sizes, tuple):
-                raise TypeError("finite arm requires tuple source_group_sizes")
-            if (
-                not source_group_sizes
-                or any(
-                    isinstance(value, bool)
-                    or not isinstance(value, int)
-                    or value <= 0
-                    for value in source_group_sizes
-                )
-                or sum(source_group_sizes) != frames
-            ):
-                raise ValueError("source_group_sizes must exactly cover frames")
-            expected = frames
-            groups = source_group_sizes
+        expected, groups = arm_groups(frames, source_group_sizes)
         if (
             isinstance(buffer_frame_count, bool)
             or not isinstance(buffer_frame_count, int)
@@ -673,7 +650,7 @@ class PylonCameraAdapter:
         bounded_timeout = float(timeout)
         if not np.isfinite(bounded_timeout) or bounded_timeout <= 0.0:
             raise ValueError("timeout must be positive and finite")
-        self.open()
+        self._require_open()
         from pypylon import pylon  # noqa: PLC0415
 
         camera = self._camera
@@ -790,10 +767,14 @@ class PylonCameraAdapter:
     def _receive(self) -> None:
         try:
             while not self._worker_stop.is_set():
+                # Every tune, readback and provenance call shares this lock,
+                # so it is held for one short wait at a time: a result that
+                # is ready returns at once, and a Device Control apply during
+                # live view waits one short poll per call instead of 50 ms.
                 with self._command_lock:
                     if self._worker_stop.is_set():
                         break
-                    self._receive_one(50)
+                    self._receive_one(5)
                     if not self._records.accepting:
                         break
         except BaseException as error:

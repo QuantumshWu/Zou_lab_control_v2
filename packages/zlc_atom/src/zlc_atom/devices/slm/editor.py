@@ -13,9 +13,7 @@ import time
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 from zlc_data import SPATIAL_X, SPATIAL_Y
-from zlc_plot import (
-    PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels, RasterPlotHost,
-)
+from zlc_plot import PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
     FluentLineEdit, FluentPopup, FluentScrollArea, FluentSettingsPopupAnchor,
@@ -50,19 +48,27 @@ _ZERNIKE = (
 _DEFAULT_PLOT_SIZE = "2x2"
 
 
-def _snapshot(values: np.ndarray, signal: str, revision: int):
+def _snapshot(values: np.ndarray, signal: str, revision: int, generation: str):
+    """One plot input.  Its revision ref is its identity in the render child.
+
+    The child is shared -- the console's Edit/Save child -- and keys what it
+    holds by that ref (signal, generation, schema, revision), so two SLMs'
+    Editors at the same revision would share one input.  ``generation``
+    names the Editor's device, which has one Editor at a time.
+    """
+
     return snapshot_from_array(
         values[None], producer="slm_editor", signal=signal,
         cell_axes=(SPATIAL_Y, SPATIAL_X),
-        generation="control",
+        generation=generation,
         revision=revision,
     )
 
 
-def _host(values: np.ndarray, signal: str, title: str) -> RasterPlotHost:
+def _host(build_host, generation: str, values: np.ndarray, signal: str, title: str):
     prefix = f"slm_editor.{signal}"
-    return RasterPlotHost.from_plot(
-        _snapshot(values, signal, 0),
+    return build_host(
+        _snapshot(values, signal, 0, generation),
         ImagePlot(
             AxisRef.cell_data(f"{prefix}.1.spatial-x"),
             AxisRef.cell_data(f"{prefix}.0.spatial-y"),
@@ -99,14 +105,19 @@ def _read_imported_target(path: object) -> np.ndarray:
 
 
 class SlmEditorControl(QtCore.QObject):
-    """Plugin-local handle, brush controller, and latest-only solve owner."""
+    """Plugin-local handle, brush controller, and latest-only solve owner.
+
+    ``build_host`` makes its three plot hosts -- a render child's
+    ``build_host`` (see :func:`open_slm_control`); the Editor itself draws
+    nothing.
+    """
 
     closed = QtCore.pyqtSignal()
     _solve_ready = QtCore.pyqtSignal(object)
     _command_ready = QtCore.pyqtSignal(object)
     _device_state_ready = QtCore.pyqtSignal(object)
 
-    def __init__(self, session: object, device_key: str) -> None:
+    def __init__(self, session: object, device_key: str, *, build_host) -> None:
         super().__init__()
         self.session, self.device_key = session, str(device_key)
         self.device = session.installation.device(self.device_key)
@@ -120,9 +131,11 @@ class SlmEditorControl(QtCore.QObject):
         self._phase_metadata: dict[str, object] = {"source": "authoring-draft"}
         self._system_correction: dict[str, object] | None = None
         #: The device's last answer -- revisions, commanded phase, receipt --
-        #: as this editor shows it.  Asked on the command executor, where the
-        #: device's I/O belongs, never on the Qt thread; one question in
-        #: flight at a time.
+        #: as this editor shows it.  The first answer is read right here, on
+        #: the Qt thread, because it is cheap: every adapter keeps that state
+        #: cached behind a short lock of its own that no apply's round trip
+        #: holds.  The poll asks again on the command executor, one question
+        #: in flight at a time.
         self._device_state_in_flight = False
         self._phase_match: tuple[np.ndarray, np.ndarray, bool] | None = None
         self._device_state = self._read_device_state()
@@ -167,6 +180,9 @@ class SlmEditorControl(QtCore.QObject):
             int, np.ndarray, str, np.ndarray, dict[str, object] | None
         ] | None = None
         self._running = self._painting = self._closed = self._cleaned = False
+        #: A brush drag's target with every stroke since the last flush, and
+        #: the objective it asks for; ``_flush_brush`` hands it on.
+        self._brush: tuple[np.ndarray, str] | None = None
         self._command_active = False
         self._close_deadline: float | None = None
         self._window = None
@@ -175,12 +191,17 @@ class SlmEditorControl(QtCore.QObject):
         self._command_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="slm-command"
         )
-        self._target_host = _host(self._target, "target", "Target intensity")
+        self._generation = f"control.{self.device_key}"
+        self._target_host = _host(
+            build_host, self._generation, self._target, "target", "Target intensity"
+        )
         self._phase_host = _host(
-            self._phase, "phase", "Science phase (pre-correction)"
+            build_host, self._generation,
+            self._phase, "phase", "Science phase (pre-correction)",
         )
         self._wavefront_host = _host(
-            self._wavefront_phase, "wavefront", "Wavefront phase (rad)"
+            build_host, self._generation,
+            self._wavefront_phase, "wavefront", "Wavefront phase (rad)",
         )
         self._target_host.set_interaction_enabled(False)
         self._phase_host.set_interaction_enabled(False)
@@ -204,6 +225,17 @@ class SlmEditorControl(QtCore.QObject):
             self._guarded("device poll", self._sync_device_state)
         )
         self._device_poll.start()
+        # A mouse reports 60-125 moves a second, and every ``set_target``
+        # validates, shows and re-queues the solve of the whole plane, so a
+        # drag reaches it at most once per interval: the first stroke at
+        # once, the rest together when the interval ends or the button is
+        # released.
+        self._brush_flush = QtCore.QTimer(self)
+        self._brush_flush.setSingleShot(True)
+        self._brush_flush.setInterval(30)
+        self._brush_flush.timeout.connect(
+            self._guarded("brush flush", self._flush_brush)
+        )
         self._sync_device_state()
         self._queue_solve()
 
@@ -305,21 +337,6 @@ class SlmEditorControl(QtCore.QObject):
             layer_layout.addWidget(widgets[1], row, 1, 1, 4)
             layer_layout.addWidget(widgets[2], row, 5)
 
-        self._correction_enabled = FluentSwitch("Vendor correction", layers)
-        self._correction_status = QtWidgets.QLabel("Unavailable", layers)
-        self._correction_load = FluentButton("Load correction", layers)
-        correction_hint = (
-            "Changes the device mapping used by the next explicit Send; "
-            "science phase and hardware remain unchanged now."
-        )
-        self._correction_enabled.setToolTip(correction_hint)
-        self._correction_load.setToolTip(correction_hint)
-        layer_layout.addWidget(self._correction_enabled, 2, 0)
-        layer_layout.addWidget(self._correction_status, 2, 1, 1, 4)
-        layer_layout.addWidget(self._correction_load, 2, 5)
-        self._correction_load.clicked.connect(partial(self._choose, "correction"))
-        self._correction_enabled.toggled.connect(self._set_correction_enabled)
-        self._sync_correction_controls()
         layer_layout.setColumnStretch(1, 1)
         root.addWidget(layers)
 
@@ -606,38 +623,6 @@ class SlmEditorControl(QtCore.QObject):
             self._pending = None
             self._status.setText("Empty target; hardware unchanged")
 
-    def _sync_correction_controls(self) -> None:
-        available = all(callable(getattr(self.device, name, None)) for name in (
-            "load_correction", "set_correction_enabled",
-        ))
-        self._correction_load.setEnabled(available)
-        self._correction_enabled.setEnabled(available)
-        if not available:
-            self._correction_status.setText("Unavailable")
-            return
-        enabled = bool(getattr(self.device, "correction_enabled", False))
-        name = str(getattr(self.device, "correction_name", ""))
-        previous = self._correction_enabled.blockSignals(True)
-        self._correction_enabled.setChecked(enabled)
-        self._correction_enabled.blockSignals(previous)
-        state = "On" if enabled else "Off"
-        details = [state]
-        if name:
-            details.append(name)
-        wavelength = getattr(self.device, "wavelength_nm", None)
-        two_pi_gray = getattr(self.device, "two_pi_gray", None)
-        if wavelength is not None and two_pi_gray is not None:
-            details.extend((f"{float(wavelength):g} nm", f"2π gray {float(two_pi_gray):g}"))
-        self._correction_status.setText(" · ".join(details))
-
-    def _set_correction_enabled(self, enabled: bool) -> None:
-        if not self._queue_work(
-            "Vendor correction updated",
-            partial(self.device.set_correction_enabled, bool(enabled)),
-            claim_device=True,
-        ):
-            self._sync_correction_controls()
-
     def _build_layer_tabs(self, parent: QtWidgets.QWidget) -> FluentTabWidget:
         tabs = FluentTabWidget(parent)
         self._layer_tabs = tabs
@@ -785,10 +770,15 @@ class SlmEditorControl(QtCore.QObject):
         if not keep_optimizer:
             self._spot_optimizer_state = None
         self._objective_kind = objective_kind
+        # Strokes not flushed yet were painted on the target this replaces;
+        # the drag goes on painting on this one.
+        self._brush = None
         self._target, self._request_revision = target, self._request_revision + 1
         self._sync_send_enabled()
         self._target_revision += 1
-        self._target_host.update_data(_snapshot(target, "target", self._target_revision))
+        self._target_host.update_data(
+            _snapshot(target, "target", self._target_revision, self._generation)
+        )
         if np.any(target > 0.0):
             self._queue_solve()
         else:
@@ -875,7 +865,7 @@ class SlmEditorControl(QtCore.QObject):
         return guarded
 
     def _read_device_state(self) -> tuple[int, int, np.ndarray | None, dict[str, object]]:
-        """The device's state question, asked where its I/O belongs."""
+        """The device's cached state: revisions, commanded phase, receipt."""
 
         return (
             int(self.device.command_revision),
@@ -887,15 +877,14 @@ class SlmEditorControl(QtCore.QObject):
     def _sync_device_state(self) -> None:
         """Show what the device last answered, and ask it again off the Qt thread.
 
-        The 100 ms poll and every draft change come through here.  A remote
-        SLM answers its state questions from a cache behind the same lock
-        its apply holds for the whole network round trip, so a question
-        asked on the Qt thread waited behind a Task's Send -- the event
-        loop with it.  The question runs on the command executor instead:
-        serial with this editor's own commands, so it never overtakes one,
-        and asked only while none of them runs, because a command's own
-        delivery reports the device it left behind.  One question is in
-        flight at a time; ``_show_device_state`` shows the answer here.
+        The 100 ms poll and every draft change come through here.  A
+        device's state question is the device's I/O, and a slow one must
+        not stall the event loop ten times a second, so it runs on the
+        command executor: serial with this editor's own commands, so it
+        never overtakes one, and asked only while none of them runs,
+        because a command's own delivery reports the device it left behind.
+        One question is in flight at a time; ``_show_device_state`` shows
+        the answer here.
         """
 
         if self._closed:
@@ -1043,11 +1032,16 @@ class SlmEditorControl(QtCore.QObject):
 
     def _show_phase(self) -> None:
         self._phase_revision += 1
-        self._phase_host.update_data(_snapshot(self._phase, "phase", self._phase_revision))
+        self._phase_host.update_data(
+            _snapshot(self._phase, "phase", self._phase_revision, self._generation)
+        )
 
     def _show_wavefront(self) -> None:
         self._wavefront_host.update_data(
-            _snapshot(self._wavefront_phase, "wavefront", self._phase_revision)
+            _snapshot(
+                self._wavefront_phase, "wavefront", self._phase_revision,
+                self._generation,
+            )
         )
 
     def eventFilter(self, watched: object, event: object) -> bool:  # noqa: N802
@@ -1060,6 +1054,7 @@ class SlmEditorControl(QtCore.QObject):
                 return self._paint(event.pos())
             if kind == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
                 self._painting = False
+                self._flush_brush()
                 return True
         return super().eventFilter(watched, event)
 
@@ -1075,17 +1070,38 @@ class SlmEditorControl(QtCore.QObject):
         column, row = int(np.floor(point.x + 0.5)), int(np.floor(point.y + 0.5))
         if not (0 <= row < self.shape[0] and 0 <= column < self.shape[1]):
             return False
-        target = np.array(self._target, copy=True)
-        yy, xx = np.ogrid[:self.shape[0], :self.shape[1]]
-        brush = (yy - row) ** 2 + (xx - column) ** 2 <= 4
         mode = self._mode.currentText()
         if mode == "Toggle":
+            target = np.array(self._target, copy=True)
             target[row, column] = 0.0 if target[row, column] > 0.0 else 1.0
-        else:
-            target[brush] = 0.0 if mode == "Erase" else self._intensity.value()
-        objective_kind = self._objective_kind if mode == "Erase" else "spots"
-        self.set_target(target, objective_kind=objective_kind)
+            self.set_target(target, objective_kind="spots")
+            return True
+        target = (
+            np.array(self._target, copy=True) if self._brush is None else self._brush[0]
+        )
+        # The radius-2 brush touches a 5 x 5 window, so only that window
+        # is masked -- not a full-plane grid on every mouse move.
+        top, left = max(0, row - 2), max(0, column - 2)
+        bottom = min(self.shape[0], row + 3)
+        right = min(self.shape[1], column + 3)
+        yy, xx = np.ogrid[top:bottom, left:right]
+        window = target[top:bottom, left:right]
+        window[(yy - row) ** 2 + (xx - column) ** 2 <= 4] = (
+            0.0 if mode == "Erase" else self._intensity.value()
+        )
+        self._brush = (target, self._objective_kind if mode == "Erase" else "spots")
+        if not self._brush_flush.isActive():
+            self._flush_brush()
         return True
+
+    def _flush_brush(self) -> None:
+        """Hand the drag's strokes to ``set_target``, and hold the next ones an interval."""
+
+        if self._brush is None:
+            return
+        (target, objective_kind), self._brush = self._brush, None
+        self._brush_flush.start()
+        self.set_target(target, objective_kind=objective_kind)
 
     def _save_target_operation(self, path: object):
         return partial(
@@ -1176,7 +1192,9 @@ class SlmEditorControl(QtCore.QObject):
         self._target = frozen_target
         self._target_revision += 1
         self._target_host.update_data(
-            _snapshot(frozen_target, "target", self._target_revision)
+            _snapshot(
+                frozen_target, "target", self._target_revision, self._generation
+            )
         )
         self._phase = context["phase"]
         self._pattern_phase = context["pattern_phase"]
@@ -1326,7 +1344,6 @@ class SlmEditorControl(QtCore.QObject):
                     self._context_command_receipt = receipt
             if completion is None:
                 self._status.setText(label)
-        self._sync_correction_controls()
         self._sync_device_state()
         if self._closed and self._window is not None:
             QtCore.QTimer.singleShot(0, self._window.close)
@@ -1348,7 +1365,6 @@ class SlmEditorControl(QtCore.QObject):
             "load_context": (False, "science-context.npz", "SLM Science Context (*.npz)"),
             "save_context": (True, "science-context.npz", "SLM Science Context (*.npz)"),
             "import": (False, "", "Array or image (*.npy *.png *.tif *.tiff *.bmp)"),
-            "correction": (False, "correction_Pattern.bmp", "8-bit correction BMP (*.bmp)"),
         }
         saving, name, filters = actions[action]
         start = str(Path(self.session.workspace.data) / name)
@@ -1377,18 +1393,11 @@ class SlmEditorControl(QtCore.QObject):
                     operation, completion, label = (
                         self._save_target_operation(path), None, "Target saved",
                     )
-                elif action == "save_context":
+                else:
                     operation, completion, label = (
                         self._save_context_operation(path), None,
                         "Science Context saved",
                     )
-                else:
-                    self._queue_work(
-                        "Vendor correction loaded",
-                        partial(self.device.load_correction, path),
-                        claim_device=True,
-                    )
-                    return
                 self._queue_work(label, operation, completion=completion)
             except Exception as error:
                 self._status.setText(str(error))
@@ -1400,6 +1409,8 @@ class SlmEditorControl(QtCore.QObject):
             self._closed, self._pending = True, None
             self._close_deadline = time.monotonic() + 2.0
             self._device_poll.stop()
+            self._brush_flush.stop()
+            self._brush = None
             self._spot_optimizer_state = None
             self._stop.set()
             self._body.setEnabled(False)
@@ -1471,22 +1482,54 @@ class SlmEditorControl(QtCore.QObject):
         self._window.setWindowTitle(f"{label} SLM Editor")
 
 
-def open_slm_control(session: object, device_key: str, window_ratio=None) -> SlmEditorControl:
-    """Open one Editor against the named SLM of an existing session."""
+def open_slm_control(
+    session: object, device_key: str, window_ratio=None, render=None,
+) -> SlmEditorControl:
+    """Open one Editor against the named SLM of an existing session.
+
+    Its plots are drawn by ``render``, the application's Edit/Save render
+    child, on which the Editor holds a claim of its own until its window
+    closes, as a FigureViewer does.  An Editor with no application behind
+    it starts a render child of its own and lets it go the same way.
+    """
+
+    if render is None:
+        from zlc_plot import RenderProcess
+
+        render = RenderProcess("zlc-slm-editor-render")
+    else:
+        render.retain()
     held: dict[str, SlmEditorControl] = {}
 
     def body() -> QtWidgets.QWidget:
-        held["control"] = SlmEditorControl(session, device_key)
+        held["control"] = SlmEditorControl(
+            session, device_key, build_host=render.build_host
+        )
         return held["control"]._body
 
-    window = open_fluent_window(
-        body,
-        title=f"{session.device_labels.get(str(device_key), str(device_key))} SLM Editor",
-        window_ratio=0.8 if window_ratio is None else float(window_ratio),
-    )
+    try:
+        window = open_fluent_window(
+            body,
+            title=f"{session.device_labels.get(str(device_key), str(device_key))} SLM Editor",
+            window_ratio=0.8 if window_ratio is None else float(window_ratio),
+        )
+    except BaseException:
+        render.release(timeout=0.0)
+        raise
     control = held["control"]
     control._window = window
     window.set_close_guard(control._finish_close)
+
+    def let_go() -> None:
+        # The guard commits a close only once all three plots have stopped,
+        # so the claim goes after the last of them -- and goes once: a close
+        # retry queued before that commit closes the closed window again and
+        # ``closed`` comes again, and a second release would be another
+        # owner's claim.
+        window.closed.disconnect(let_go)
+        render.release(timeout=0.0)
+
+    window.closed.connect(let_go)
     window.closed.connect(control.closed)
     return control
 

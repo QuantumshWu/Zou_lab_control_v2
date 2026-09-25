@@ -7,7 +7,7 @@ from zlc_atom.devices.rf.contract import (
     WINDOW_AUTHORING_FIELDS,
     validate_window_values,
 )
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 
 #: The virtual brick reuses the REAL RF policy fields: an absent edge and an
@@ -22,7 +22,6 @@ VIRTUAL_RF_SCHEMA = AuthoringSchema(
 
 
 def _rf_factory(context, key: str, values: dict) -> InstalledLeaf:
-    from zlc_atom.devices.rf.binding import bind_rf_source
     from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
     from .source import virtual_rf_source
 
@@ -34,12 +33,13 @@ def _rf_factory(context, key: str, values: dict) -> InstalledLeaf:
         power_low_dbm=authored["power_low_dbm"],
         power_high_dbm=authored["power_high_dbm"],
     )
-    return bind_rf_source(
+    return bind_leaf(
         context,
         key,
+        "rf.virtual",
         virtual_rf_source(config),
         f"virtual-rf:{config.serial}",
-        "rf.virtual",
+        "rf.source",
     )
 
 

@@ -1206,20 +1206,16 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
     program holds cannot be opened and is passed over, which is the ordinary
     case on a bench whose pulse board owns one.
 
-    A port that says nothing is asked once more, after ``#fdeconfig`` -- a
-    module left in its configuration console is silent, and silence is
-    exactly what this function otherwise reads as "not an N100".  But that
-    line is written ONLY once listening alone has found nothing at all,
-    because a scan runs against every serial port on the bench: the pulse
-    board's side-channel, an SLM, whatever else is idle.  Twelve ASCII
-    bytes into one of those is not something to do on the off-chance, so it
-    is done only when the alternative is not finding the module.
+    Listening is all it does.  A scan reaches every serial port on the
+    bench -- the pulse board's side-channel, an SLM, whatever else is idle
+    -- and writes to none of them.  A module left silent in its
+    configuration console is added by its port instead; opening it sends
+    the ``#fdeconfig`` that brings it back.
     """
 
     from serial.tools import list_ports
 
     found: list[str] = []
-    silent: list[str] = []
     for info in sorted(list_ports.comports(), key=lambda item: item.device):
         try:
             port = _open_serial(info.device, baud)
@@ -1236,28 +1232,6 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
                 pass
         if packets >= 2:
             found.append(info.device)
-        else:
-            silent.append(info.device)
-    if found:
-        return tuple(found)
-    # Nothing answered on its own.  NOW it is worth asking a silent port
-    # whether it is a module someone left in its console.
-    for device in silent:
-        try:
-            port = _open_serial(device, baud)
-        except Exception:
-            continue
-        try:
-            wake_from_config_mode(port)
-            if _listen_for_packets(port, listen_seconds) >= 2:
-                found.append(device)
-        except Exception:
-            continue
-        finally:
-            try:
-                port.close()
-            except Exception:
-                pass
     return tuple(found)
 
 

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.rf.binding import bind_rf_source
 from zlc_atom.devices.rf.contract import (
     WINDOW_AUTHORING_FIELDS,
     validate_window_values,
 )
 from zlc_atom.install.configuration import DeviceInstanceConfig
-from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from .source import RigolDg4000Config, RigolDg4000RfSource
 
@@ -51,12 +50,13 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
         power_high_dbm=authored["power_high_dbm"],
     )
     source = RigolDg4000RfSource(config)
-    return bind_rf_source(
+    return bind_leaf(
         context,
         key,
+        "rf.rigol_dg4000",
         source,
         f"rigol-dg4000:{config.resource}",
-        "rf.rigol_dg4000",
+        "rf.source",
     )
 
 
@@ -67,33 +67,10 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
     scanning again offers the same card rather than a differently numbered
     stranger.  When an instrument gives no serial the resource it was found
     at is the name -- still stable, still that instrument, just longer.
+    A VISA that lists nothing to ask is raised by the bus probe itself.
     """
 
-    from zlc_atom.devices import visa
-    from zlc_atom.devices.visa import PROBED_RESOURCE_PREFIXES
-
     from .source import discover_dg4000
-
-    # "Found nothing" is only an answer if something was asked.  VISA's own
-    # list is far blinder than an operator expects: a LAN instrument appears
-    # only once it has been added in NI MAX, and a USB one only once its
-    # USB-TMC driver is bound -- so a Rigol sitting there, plugged in and
-    # working, can simply not be in the list.  Saying nothing then reports
-    # "no Rigol here" about a bench that has one.
-    manager = visa.visa_resources()
-    listed = tuple(str(name) for name in manager.list_resources())
-    probeable = visa.probeable_resources(listed)
-    if not probeable:
-        raise RuntimeError(
-            "VISA lists nothing to ask: no "
-            f"{' or '.join(PROBED_RESOURCE_PREFIXES)} resource is registered "
-            f"on this machine (it lists: {', '.join(listed) or 'nothing'}). "
-            "A LAN instrument has to be added in NI MAX -- or skip that and "
-            "type its TCPIP0::<address>::INSTR in by hand, which needs no "
-            "install; a USB one is invisible to VISA until a USB-TMC driver "
-            "is bound to it, which is what installing NI-VISA (or Rigol "
-            "UltraSigma) does."
-        )
 
     def named(sighting) -> str:
         tail = sighting.serial or "".join(

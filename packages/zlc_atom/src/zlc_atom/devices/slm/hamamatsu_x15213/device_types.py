@@ -6,22 +6,22 @@ import argparse
 import ctypes
 from ctypes import wintypes
 from dataclasses import replace
-import json
 import logging
 import os
 from pathlib import Path
 from queue import Empty, Queue
 import re
-import socket
 from threading import Event, Lock, Thread
 import time
 from typing import Callable, Mapping
 
 import numpy as np
+from zlc_durable import strict_json_loads
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.vendor import resolve_vendor_file
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
+from zlc_pulse.endpoint import local_ipv4_addresses
 
 from .. import open_slm_control
 from ..device import bind_slm, canonical_phase
@@ -86,11 +86,15 @@ class _DevModeW(ctypes.Structure):
     )
 
 
+#: The port an SLM server listens on and a client dials.
+DEFAULT_PORT = 18862
+
+
 HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
     (
         AuthoringField("host", "str", "SLM server host", "127.0.0.1", required=True),
         AuthoringField(
-            "port", "int", "SLM server port", 18862, minimum=1, maximum=65535
+            "port", "int", "SLM server port", DEFAULT_PORT, minimum=1, maximum=65535
         ),
     )
 )
@@ -381,37 +385,6 @@ def _load_sdk():
         ) from error
 
 
-def _local_ipv4_addresses() -> tuple[str, ...]:
-    """Return unique non-loopback IPv4 addresses clients can actually use."""
-
-    addresses: list[str] = []
-
-    def add(value: object) -> None:
-        address = str(value).strip()
-        try:
-            socket.inet_aton(address)
-        except OSError:
-            return
-        if address == "0.0.0.0" or address.startswith("127.") or address in addresses:
-            return
-        addresses.append(address)
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("8.8.8.8", 80))
-            add(probe.getsockname()[0])
-    except OSError:
-        pass
-    try:
-        for info in socket.getaddrinfo(
-            socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM
-        ):
-            add(info[4][0])
-    except OSError:
-        pass
-    return tuple(addresses)
-
-
 def _print_client_endpoints(bind_host: str, port: int) -> None:
     """Print the same-machine and LAN values to enter in the SLM device form."""
 
@@ -425,7 +398,7 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
         flush=True,
     )
     lan_addresses = (
-        _local_ipv4_addresses()
+        local_ipv4_addresses()
         if wildcard
         else (() if same_host.startswith("127.") else (same_host,))
     )
@@ -579,19 +552,6 @@ _PROFILE_FIELDS = frozenset(
 )
 
 
-def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate X15213 profile field {key!r}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(value: str) -> object:
-    raise ValueError(f"non-finite X15213 profile value {value!r}")
-
-
 def _load_profile(profile_name: str) -> dict[str, object]:
     requested = profile_name.strip()
     if not requested or Path(requested).name != requested:
@@ -601,12 +561,8 @@ def _load_profile(profile_name: str) -> dict[str, object]:
     if not path.is_file():
         raise FileNotFoundError(f"X15213 device profile {requested!r} was not found")
     try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_strict_object,
-            parse_constant=_reject_constant,
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        payload = strict_json_loads(path.read_text(encoding="utf-8"), "X15213 device profile")
+    except (OSError, ValueError) as error:
         raise ValueError(f"X15213 device profile {requested!r} is not strict JSON") from error
     if not isinstance(payload, dict) or set(payload) != _PROFILE_FIELDS:
         raise ValueError(f"X15213 device profile {requested!r} has an invalid field set")
@@ -661,7 +617,7 @@ def _phase_lut(
     curve: np.ndarray,
     wavelength_nm: float,
     phase_curve_wavelength_nm: float,
-) -> tuple[np.ndarray, int]:
+) -> np.ndarray:
     phase_codes = np.arange(256, dtype=np.float64)
     target_pi = phase_codes * wavelength_nm / (128.0 * phase_curve_wavelength_nm)
     two_pi_target = 2.0 * wavelength_nm / phase_curve_wavelength_nm
@@ -677,7 +633,7 @@ def _phase_lut(
         raise ValueError(
             f"wavelength {wavelength_nm:g} nm lies outside the device profile gray range"
         )
-    return gray.astype(np.uint8), two_pi_gray
+    return gray.astype(np.uint8)
 
 
 _WAVELENGTH_IN_NAME = re.compile(r"(?P<wavelength>\d+(?:\.\d+)?)\s*nm", re.IGNORECASE)
@@ -748,7 +704,7 @@ class X15213Adapter:
         self._wavelength_nm = float(authored["wavelength_nm"])
         if not np.isfinite(self._wavelength_nm) or self._wavelength_nm <= 0.0:
             raise ValueError("X15213 wavelength must be finite and positive")
-        self._phase_to_gray, self._two_pi_gray = _phase_lut(
+        self._phase_to_gray = _phase_lut(
             np.asarray(profile["phase_pi_by_gray"]),
             self._wavelength_nm,
             float(profile["phase_curve_wavelength_nm"]),
@@ -863,51 +819,6 @@ class X15213Adapter:
     def last_command_receipt(self) -> dict[str, object]:
         with self._state_lock:
             return dict(self._last_receipt)
-
-    @property
-    def wavelength_nm(self) -> float:
-        return self._wavelength_nm
-
-    @property
-    def two_pi_gray(self) -> float:
-        return float(self._two_pi_gray)
-
-    @property
-    def correction_name(self) -> str:
-        with self._state_lock:
-            return Path(self._correction_path).name if self._correction_path else ""
-
-    @property
-    def correction_enabled(self) -> bool:
-        with self._state_lock:
-            return self._correction_enabled
-
-    def load_correction(self, path: str | Path) -> int:
-        path_text = str(path)
-        if not path_text:
-            raise ValueError("X15213 correction load requires a local BMP path")
-        resolved = str(Path(path_text).resolve())
-        correction = _load_correction(
-            resolved,
-            expected_serial=self._profile_serial,
-            wavelength_nm=self._wavelength_nm,
-        )
-        with self._state_lock:
-            self._correction = correction
-            self._correction_path = resolved
-            self._correction_enabled = True
-            self._mapping_revision += 1
-            return self._mapping_revision
-
-    def set_correction_enabled(self, enabled: bool) -> int:
-        requested = bool(enabled)
-        with self._state_lock:
-            if requested and not self._correction_path:
-                raise RuntimeError("no X15213 correction map is loaded")
-            if requested != self._correction_enabled:
-                self._correction_enabled = requested
-                self._mapping_revision += 1
-            return self._mapping_revision
 
     def _gray(self, canonical: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
         mapping = self._mapping_snapshot()
@@ -1185,7 +1096,7 @@ X15213_LOCAL_SCHEMA = AuthoringSchema(
     X15213_SERVER_SCHEMA.fields
     + (
         AuthoringField(
-            "port", "int", "Serve on port", 18862, minimum=1, maximum=65535
+            "port", "int", "Serve on port", DEFAULT_PORT, minimum=1, maximum=65535
         ),
     ),
 )
@@ -1283,7 +1194,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--host", default=os.environ.get("ZLC_SLM_HOST", "0.0.0.0"))
     parser.add_argument(
-        "--port", type=int, default=int(os.environ.get("ZLC_SLM_PORT", "18862"))
+        "--port", type=int, default=int(os.environ.get("ZLC_SLM_PORT", DEFAULT_PORT))
     )
     parser.add_argument(
         "--transport",
