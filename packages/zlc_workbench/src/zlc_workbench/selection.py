@@ -54,7 +54,7 @@ from zlc_runtime import (
     SelectionState,
     selection_output_catalog,
 )
-from zlc_runtime.selection_bridge import FacetCondition
+from zlc_runtime.selection_bridge import SELECTION_PLOT_KINDS, FacetCondition
 
 
 __all__ = [
@@ -160,15 +160,6 @@ def same_plot_generation(observation: object, plot_input: object) -> bool:
         getattr(observation, "data_generation", None),
     )
 
-
-#: Plot kinds the runtime can derive from -- all of them.  A region cuts
-#: the signal it was drawn on whatever surface drew it.
-_PLOT_KINDS = {
-    "image": "image",
-    "curve": "curve",
-    "histogram": "histogram",
-    "rolling": "rolling",
-}
 
 #: Selector kinds that describe a region.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
@@ -429,8 +420,8 @@ def panel_selection_matches_subject(
         raise TypeError("selection must be SelectionState")
     if not isinstance(subject, SelectionSubject):
         raise TypeError("subject must be SelectionSubject")
-    plot_kind = _PLOT_KINDS.get(_name_of(subject.plot_kind))
-    if plot_kind is None or selection.plot_kind != plot_kind:
+    plot_kind = _name_of(subject.plot_kind)
+    if plot_kind not in SELECTION_PLOT_KINDS or selection.plot_kind != plot_kind:
         return False
     dummy = NumericRange(0.0, 1.0)
     try:
@@ -846,8 +837,10 @@ class PlotSelectionSource:
 
         selector = event.selector
         subject = event.subject
-        plot_kind = _PLOT_KINDS.get(_name_of(subject.plot_kind))
-        if plot_kind is None:
+        plot_kind = _name_of(subject.plot_kind)
+        # The runtime's own vocabulary: a region cuts the signal it was
+        # drawn on whatever surface drew it.
+        if plot_kind not in SELECTION_PLOT_KINDS:
             raise _Unbridgeable(
                 f"a {_name_of(subject.plot_kind)} plot has no upstream region to derive"
             )

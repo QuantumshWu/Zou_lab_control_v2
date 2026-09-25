@@ -283,14 +283,3 @@ def test_with_nobody_drawing_a_card_is_sized_as_the_empty_frame_it_is() -> None:
         assert geometry.panel_display_size("8x4") == (4 * cell_width, 8 * cell_height)
     finally:
         geometry._measure = supplied
-
-
-def test_the_two_content_name_rules_agree() -> None:
-    """zlc_data and zlc_pulse each state the digest width, and cannot import
-    each other -- zlc_pulse depends on numpy and pyserial so a board can be
-    driven with no data layer present.  This is where both are visible."""
-
-    from zlc_data.validation import DIGEST_BITS as DATA_BITS
-    from zlc_pulse.canonical import DIGEST_BITS as PULSE_BITS
-
-    assert DATA_BITS == PULSE_BITS

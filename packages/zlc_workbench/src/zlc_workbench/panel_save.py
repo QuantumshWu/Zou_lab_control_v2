@@ -6,9 +6,9 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import numpy as np
+from zlc_plot.figure_artifact import _plain
+
 from .panel_state import PanelFrozenData, PanelState
 
 
@@ -60,20 +60,6 @@ def _typed_writer_result(written: object) -> PanelFigureFiles | Future:
 
     add_done(completed)
     return result
-
-
-def _plain(value: Any) -> Any:
-    if value is None or type(value) in (str, bool, int, float):
-        return value
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise TypeError("lineage record keys must be text")
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    raise TypeError(f"lineage contains unsupported {type(value).__name__}")
 
 
 def _event_document(publication: object) -> dict[str, object]:

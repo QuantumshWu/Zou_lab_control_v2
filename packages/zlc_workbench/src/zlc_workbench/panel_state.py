@@ -833,7 +833,7 @@ class PanelState:
         if not isinstance(document, Mapping):
             raise TypeError("panel state must be an object")
         from zlc_plot.config import DEFAULTS
-        from zlc_plot.specs import parameter_schema_for_kind
+        from zlc_plot.specs import parameter_schema_for_kind, validate_authored_display
         from zlc_plot.state import DisplayState
 
         if not isinstance(document.get("kind"), str):
@@ -880,6 +880,13 @@ class PanelState:
         else:
             # The first dataset chooses the cell; retain only fields declared
             # by an available cell, then use its exact defaults at projection.
+            # Whichever cell it chooses must be able to START on this bag, so
+            # the bag is judged as every cell's -- as a whole, the way every
+            # other door judges it, not one field at a time.
+            for cell in GRID_CELL_KINDS:
+                validate_authored_display(
+                    kind, display, style=DEFAULTS.style, facet_cell_kind=cell
+                )
             vocabulary = {name: parameter for cell in GRID_CELL_KINDS
                           for name, parameter in parameter_schema_for_kind(
                               kind, style=DEFAULTS.style, facet_cell_kind=cell).items()}

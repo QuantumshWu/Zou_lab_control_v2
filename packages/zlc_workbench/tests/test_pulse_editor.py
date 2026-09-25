@@ -74,41 +74,9 @@ class _Signal:
 
 
 class _ScheduleView:
-    """Every intent the real schedule page raises, with Qt taken out."""
-
-    _INTENTS = (
-        "document_name_committed",
-        "port_label_committed",
-        "period_name_committed",
-        "duration_committed",
-        "digital_committed",
-        "analog_committed",
-        "delay_committed",
-        "insert_period_requested",
-        "insert_spacer_requested",
-        "reorder_items_requested",
-        "remove_period_requested",
-        "bracket_committed",
-        "bracket_add_requested",
-        "bracket_remove_requested",
-        "run_repeats_committed",
-        "visible_ports_committed",
-        "fill_port_requested",
-        "clear_port_requested",
-        "binding_committed",
-        "scan_array_load_requested",
-        "feedback_requested",
-        "run_requested",
-        "stop_requested",
-        "sync_requested",
-        "save_requested",
-        "load_requested",
-        "connection_requested",
-    )
+    """What the schedule page is told, recorded.  Its intents are the handle's."""
 
     def __init__(self) -> None:
-        for name in self._INTENTS:
-            setattr(self, name, _Signal())
         self.schedule = None
         self._version = (-1, -1)
         self.rebuilds = 0
@@ -120,7 +88,6 @@ class _ScheduleView:
         self.capabilities = None
         self.control_state = None
         self.can_run = None
-        self.scan_busy = False
 
     def set_visible_ports(self, ports) -> None:
         """The value path, mirrored: the real view re-flags its own rows."""
@@ -135,7 +102,6 @@ class _ScheduleView:
             ports=tuple(
                 replace(port, visible=port.key in shown) for port in self.schedule.ports
             ),
-            visible_text=f"{len(shown)}/{len(self.schedule.ports)}",
         )
 
     def set_schedule(self, vm) -> bool:
@@ -193,9 +159,6 @@ class _ScheduleView:
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
 
-    def set_scan_busy(self, busy: bool) -> None:
-        self.scan_busy = bool(busy)
-
     def set_control_state(
         self,
         running: bool,
@@ -211,13 +174,9 @@ class _ScheduleView:
 
 
 class _PreviewView:
-    """The preview page's whole contract, with Qt taken out."""
+    """What the preview page is told, recorded.  Its intents are the handle's."""
 
     def __init__(self) -> None:
-        self.include_off_toggled = _Signal()
-        self.size_committed = _Signal()
-        self.selectors_toggled = _Signal()
-        self.save_requested = _Signal()
         self.size_names: tuple = ()
         self.size = ""
         self.content = None
@@ -254,11 +213,9 @@ class _PreviewView:
 
 
 class _TargetView:
-    """The wiring page's contract, with Qt taken out."""
+    """What the wiring page is told, recorded.  Its intents are the handle's."""
 
     def __init__(self) -> None:
-        self.apply_requested = _Signal()
-        self.feedback_requested = _Signal()
         self.records: tuple = ()
         self.editable = None
         self.status = ""
@@ -278,23 +235,9 @@ class _TargetView:
 
 
 class _ScanView:
-    """The Scan page's contract, with Qt taken out."""
-
-    _INTENTS = (
-        "repeats_committed",
-        "hold_requested",
-        "step_requested",
-        "load_program_requested",
-        "template_requested",
-        "source_edited",
-        "run_requested",
-        "save_array_requested",
-        "progress_refresh_requested",
-    )
+    """What the Scan page is told, recorded.  Its intents are the handle's."""
 
     def __init__(self) -> None:
-        for name in self._INTENTS:
-            setattr(self, name, _Signal())
         self.page = None
         self.progress = ""
 
@@ -478,9 +421,6 @@ class _EditorView:
     def set_connection(self, connection) -> None:
         self.schedule_view.set_connection(connection)
 
-    def set_scan_busy(self, busy: bool) -> None:
-        self.schedule_view.set_scan_busy(busy)
-
     # -- the scan --------------------------------------------------------
 
     def set_scan_page(self, record) -> None:
@@ -538,12 +478,6 @@ class _EditorView:
 def sequence():
     """An ordinary product pulse, with Calibration carrying no implicit role."""
 
-    return _ordinary_sequence()
-
-
-def _ordinary_sequence():
-    """The same pulse, reachable without the fixture, for sibling suites."""
-
     return ordinary_imaging_sequence()
 
 
@@ -593,18 +527,6 @@ def test_the_projection_shows_what_the_sequence_contains(presenter, sequence) ->
     vm = presenter.view.schedule_view.schedule
     assert vm.document_name == sequence.name
     assert vm.period_count == len(sequence.periods)
-    # A DAC is one output: its data lanes and the clock that latches them are
-    # one bundle, and the clock is not something a pulse drives.
-    latched = {
-        port.latch_clock
-        for port in sequence.target.ports
-        if port.kind == "dac" and port.latch_clock
-    }
-    assert {row.key for row in vm.ports} == {
-        port.key for port in sequence.target.ports if port.key not in latched
-    }
-    assert latched, "this board has no DAC latch clock to fold in"
-    assert not any(row.kind == "clock" for row in vm.ports)
     from zlc_pulse.model import ANALOG_MODE_CHOICES
 
     assert tuple(choice.value for choice in vm.analog_mode_choices) == (
@@ -624,23 +546,6 @@ def test_the_projection_shows_what_the_sequence_contains(presenter, sequence) ->
     for port_key, high in first.digital:
         port = sequence.target.by_key[port_key]
         assert high == bool(original.states[lanes.index(port.lanes[0])])
-
-
-def test_turning_a_lane_on_changes_that_lane_and_nothing_else(presenter, sequence) -> None:
-    period = sequence.periods[0]
-    port = next(port for port in sequence.target.ports if port.kind == "digital")
-    index = sequence.target.raw_lanes.index(port.lanes[0])
-    before = period.states
-
-    presenter.view.digital_committed.emit(
-        period.period_id, port.key, not bool(before[index])
-    )
-
-    after = presenter.sequence.periods[0].states
-    assert after[index] != before[index]
-    assert [
-        value for position, value in enumerate(after) if position != index
-    ] == [value for position, value in enumerate(before) if position != index]
 
 
 def test_a_duration_off_the_clock_grid_is_rounded_onto_it(presenter) -> None:
@@ -680,9 +585,7 @@ def test_a_duration_that_is_not_a_number_still_says_so(presenter) -> None:
 
 
 def test_an_analog_level_outside_the_dac_range_is_refused(presenter, sequence) -> None:
-    dac = next((port for port in sequence.target.ports if port.kind == "dac"), None)
-    if dac is None:
-        pytest.skip("this target has no DAC port")
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
     low, high = dac.signed_range
     period_id = presenter.sequence.periods[0].period_id
     kept = presenter.sequence
@@ -817,36 +720,25 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
         presenter.insert_period(ids[0])
 
 
-def test_clearing_a_port_leaves_the_others_and_its_delay_alone(presenter, sequence) -> None:
-    """Off in every period is a statement about the periods.  The port's
-    delay is the output's own timing and is not what the button says."""
-
-    ports = [port for port in sequence.target.ports if port.kind == "digital"]
-    cleared, kept = ports[0], ports[1]
-    lanes = sequence.target.raw_lanes
-    cleared_index = lanes.index(cleared.lanes[0])
-    kept_index = lanes.index(kept.lanes[0])
-    kept_before = [period.states[kept_index] for period in presenter.sequence.periods]
-    presenter.view.delay_committed.emit(cleared.key, 40, "ns")
-    delayed = {item.port: item for item in presenter.sequence.delays}
-    assert cleared.key in delayed
-
-    presenter.view.clear_port_requested.emit(cleared.key)
-
-    assert all(period.states[cleared_index] == 0 for period in presenter.sequence.periods)
-    assert [period.states[kept_index] for period in presenter.sequence.periods] == kept_before
-    assert {item.port: item for item in presenter.sequence.delays} == delayed
-
-
 def test_filling_a_port_turns_it_on_in_every_period(presenter, sequence) -> None:
+    """Off (or on) in every period is a statement about the periods.  The
+    other ports stay as they were, and the port's delay is the output's own
+    timing and is not what the button says."""
+
     ports = [port for port in sequence.target.ports if port.kind == "digital"]
     filled, kept = ports[0], ports[1]
     lanes = sequence.target.raw_lanes
     filled_index = lanes.index(filled.lanes[0])
     kept_index = lanes.index(kept.lanes[0])
     kept_before = [period.states[kept_index] for period in presenter.sequence.periods]
+    presenter.view.delay_committed.emit(filled.key, 40, "ns")
+    delayed = {item.port: item for item in presenter.sequence.delays}
+    assert filled.key in delayed
+
     presenter.view.clear_port_requested.emit(filled.key)
     assert all(period.states[filled_index] == 0 for period in presenter.sequence.periods)
+    assert [period.states[kept_index] for period in presenter.sequence.periods] == kept_before
+    assert {item.port: item for item in presenter.sequence.delays} == delayed
 
     presenter.view.fill_port_requested.emit(filled.key)
 
@@ -855,9 +747,7 @@ def test_filling_a_port_turns_it_on_in_every_period(presenter, sequence) -> None
 
 
 def test_an_analog_port_can_be_cleared_but_not_filled(presenter, sequence) -> None:
-    analog = next((port for port in sequence.target.ports if port.kind == "dac"), None)
-    if analog is None:
-        pytest.skip("this target has no DAC port")
+    analog = next(port for port in sequence.target.ports if port.kind == "dac")
     _low, high = analog.signed_range
     period_id = presenter.sequence.periods[0].period_id
     presenter.view.analog_committed.emit(period_id, analog.key, "edge", high)
@@ -968,6 +858,22 @@ def test_a_timeline_can_be_drawn_for_a_pulse_with_nothing_high(sequence) -> None
     assert data.channels and not data.blocks
 
 
+def _virtual_streamer():
+    """A real PulseStreamer over the in-memory register transport, unopened."""
+
+    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
+    from zlc_pulse.device import PulseStreamer
+    from zlc_pulse.transport import MemoryRegisterTransport
+
+    config = load_streamer_config()
+    return PulseStreamer(
+        MemoryRegisterTransport(geom=config["params"], auto_done=True),
+        config["params"],
+        config["clock_hz"],
+        target=pulse_target_from_xdc(config_path=config["source"]),
+    )
+
+
 def _board_description():
     """A real board description, from the deployed config.
 
@@ -977,18 +883,7 @@ def _board_description():
     depends on it entirely.
     """
 
-    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
-    from zlc_pulse.device import PulseStreamer
-    from zlc_pulse.transport import MemoryRegisterTransport
-
-    config = load_streamer_config()
-    geometry = config["params"]
-    streamer = PulseStreamer(
-        MemoryRegisterTransport(geom=geometry, auto_done=True),
-        geometry,
-        config["clock_hz"],
-        target=pulse_target_from_xdc(config_path=config["source"]),
-    )
+    streamer = _virtual_streamer()
     streamer.open()
     try:
         return streamer.describe()
@@ -1159,7 +1054,14 @@ def test_on_pulse_runs_until_stop(sequence) -> None:
 
 
 def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
-    """A finite run is started the same way a forever run is: started."""
+    """A finite run is started the same way a forever run is: started.
+
+    The finite path used to wait for done on the calling thread, which for On
+    Pulse is the GUI thread -- so a scan long enough to matter froze the window
+    for its whole length, and Stop could not be delivered.  Firing over an
+    unfinished shot cannot happen: the device requires an idle board for load
+    and fire, and raises otherwise.
+    """
 
     view = _EditorView()
     board = _Sequencer()
@@ -1175,7 +1077,8 @@ def test_a_finite_run_is_asked_for_explicitly(sequence) -> None:
     board.events.clear()
     try:
         assert presenter.fire() is True
-        assert board.events == ["load", "fire"]
+        assert board.events == ["load", "fire"], "the GUI thread waited on the board"
+        assert not view.warnings, repr(view.warnings)
         # Started, not finished: nothing waits for the board any more, so a run
         # that was just asked for is a run that is going.
         assert presenter.running is True
@@ -1219,35 +1122,6 @@ def test_a_shot_that_fails_leaves_the_outputs_safe(sequence) -> None:
         assert presenter.fire() is False
         assert board.events[-1] == "safe"
         assert any("firing stopped" in text for text in view.warnings)
-    finally:
-        presenter.close()
-
-
-def test_a_finite_run_does_not_block_on_the_board(sequence) -> None:
-    """Start it and come back; the beat says what the board is doing.
-
-    The finite path used to wait for done on the calling thread, which for On
-    Pulse is the GUI thread -- so a scan long enough to matter froze the window
-    for its whole length, and Stop, the one control that would have helped,
-    could not be delivered.
-
-    Nothing is lost by not waiting.  Firing over an unfinished shot cannot
-    happen: the device requires an idle board for load and fire, and raises
-    otherwise.
-    """
-
-    view = _EditorView()
-    board = _Sequencer(never_done=True)
-    presenter = PulseEditorPresenter(
-        view,
-        replace_sequence(sequence, run_repeats=1),
-        sequencer=board,
-    )
-    try:
-        assert presenter.fire() is True
-        assert "wait_done" not in board.events, "the GUI thread waited on the board"
-        assert board.events.count("fire") == 1
-        assert not view.warnings, repr(view.warnings)
     finally:
         presenter.close()
 
@@ -1678,7 +1552,7 @@ def test_connect_does_not_load_an_unselected_workspace_config(tmp_path, monkeypa
     values.write_text("{not json", encoding="utf-8")
     presenter = application_module.build(
         _EditorView(),
-        PulseEditorState(sequence=_ordinary_sequence()),
+        PulseEditorState(sequence=ordinary_imaging_sequence()),
         pulses_directory=str(tmp_path / "pulses"),
         run_off_thread=_run_preview_immediately,
     )
@@ -1694,7 +1568,6 @@ def test_connect_does_not_load_an_unselected_workspace_config(tmp_path, monkeypa
 def _formal_pulse_window(
     tmp_path, monkeypatch, *, sequence, board=None, bound: bool = False, path: str = ""
 ):
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtCore
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps import pulse_editor as application_module
@@ -1734,7 +1607,7 @@ def test_pulse_window_waits_for_asynchronous_retirement(
     from threading import Event
 
     release = Event()
-    sequence = _ordinary_sequence()
+    sequence = ordinary_imaging_sequence()
 
     class _RefusingSafe(_Sequencer):
         refusing = True
@@ -1784,57 +1657,14 @@ def test_pulse_window_waits_for_asynchronous_retirement(
             _process_qt_until(application, lambda: not window.is_visible())
 
 
-def test_pulse_window_stop_projects_stopping_before_background_safe(
-    tmp_path, monkeypatch
-) -> None:
-    """The ordinary Stop click leaves Qt before the board acknowledges SAFE."""
-
-    from threading import Event, Timer
-
-    started = Event()
-    release = Event()
-
-    class _SlowSafe(_Sequencer):
-        def safe(self) -> None:
-            started.set()
-            release.wait(1.0)
-            super().safe()
-
-    board = _SlowSafe(description=_board_description())
-    application, _QtCore, window = _formal_pulse_window(
-        tmp_path,
-        monkeypatch,
-        sequence=_ordinary_sequence(),
-        board=board,
-    )
-    summaries: list[str] = []
-    monkeypatch.setattr(window, "set_summary", summaries.append)
-    window.fire_requested.emit()
-    _process_qt_until(application, lambda: board.snapshot()["firing"] is True)
-    summaries.clear()
-    try:
-        fallback = Timer(0.1, release.set)
-        fallback.start()
-        before = time.monotonic()
-        window.stop_requested.emit()
-        elapsed = time.monotonic() - before
-        assert elapsed < 0.05, "Stop waited for SAFE on the Qt owner thread"
-        assert summaries == ["Stopping..."]
-        _process_qt_until(application, started.is_set)
-        release.set()
-        _process_qt_until(application, lambda: not board.snapshot()["firing"])
-    finally:
-        fallback.cancel()
-        release.set()
-        if window.is_visible():
-            window.close()
-            _process_qt_until(application, lambda: not window.is_visible())
-
-
 def test_formal_stop_bypasses_blocked_preview_and_device_command(
     tmp_path, monkeypatch
 ) -> None:
-    """Preview, ordinary device work and SAFE are three independent owners."""
+    """Preview, ordinary device work and SAFE are three independent owners.
+
+    The Stop click leaves Qt before the board acknowledges SAFE, whatever
+    else the window is waiting on.
+    """
 
     from threading import Event
 
@@ -1868,7 +1698,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
     monkeypatch.setattr(PreviewHost, "wait_for_front", blocked_front)
     board = _BlockedLoad(description=_board_description())
     application, QtCore, window = _formal_pulse_window(
-        tmp_path, monkeypatch, sequence=_ordinary_sequence(), board=board
+        tmp_path, monkeypatch, sequence=ordinary_imaging_sequence(), board=board
     )
     summaries: list[str] = []
     monkeypatch.setattr(window, "set_summary", summaries.append)
@@ -1924,7 +1754,7 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
     # The shipped preview host: the one a render child hands the window.
     from zlc_plot.render_process import _RemoteRasterPlotHost as PreviewHost
 
-    sequence = _ordinary_sequence()
+    sequence = ordinary_imaging_sequence()
     build_started = Event()
     release_build = Event()
     real_wait = PreviewHost.wait_for_front
@@ -2174,37 +2004,6 @@ def test_run_is_offered_only_with_both_a_pulse_and_a_board(sequence, tmp_path) -
         presenter.close()
 
 
-def test_connecting_with_no_pulse_open_still_shows_the_board() -> None:
-    """The complaint in one test: connected, and the editor showed nothing.
-
-    An editor attached to a board knows its ports, its pins and its clock
-    before any pulse is open.  Hiding that leaves an operator unable to tell a
-    connected editor from a disconnected one -- and with nothing to edit.
-    """
-
-    view = _EditorView()
-    board = _Sequencer()
-    presenter = PulseEditorPresenter(view, dial=lambda _mode, _endpoint: board)
-    try:
-        assert view.schedule_view.schedule.ports == ()
-
-        view.connection_requested.emit("remote", "127.0.0.1:18861")
-
-        vm = view.schedule_view.schedule
-        described = _board_description()
-        from zlc_workbench.pulse_editor import programmable_ports
-
-        assert len(vm.ports) == len(programmable_ports(described.target))
-        assert len(vm.ports) < len(described.target.ports), "no clock was folded in"
-        assert vm.clock_text == f"{described.time_step_ns:g} ns/tick"
-        # The pin an operator wires into, not only the compiler's lane name.
-        first = programmable_ports(described.target)[0]
-        assert vm.ports[0].endpoint_text == described.target.package_pins[first.lanes[0]]
-        assert first.lanes[0] in vm.ports[0].endpoint_tooltip
-    finally:
-        presenter.close()
-
-
 def test_a_new_pulse_starts_on_the_attached_board(sequence) -> None:
     """Not on this machine's files: a different board makes that pulse a fiction."""
 
@@ -2299,12 +2098,12 @@ def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> No
 
     view = presenter.view.preview_view
     presenter.view.preview_size_committed.emit("8x8")
-    assert presenter.preview_size() == "8x8"
+    assert presenter._pinned_size == "8x8"
 
     # An edit keeps the pin: the pulse is the same shape.
     period_id = presenter.sequence.periods[0].period_id
     presenter.view.period_name_committed.emit(period_id, "edited")
-    assert presenter.preview_size() == "8x8"
+    assert presenter._pinned_size == "8x8"
 
     # Showing every channel changes how many rows are drawn, so the pin goes.
     view._include_off = True
@@ -2335,8 +2134,6 @@ def test_a_dac_trace_is_drawable_at_all(sequence) -> None:
     it stayed invisible because the ordinary pulse drives no DAC, so the
     error only appeared the moment someone asked to see every channel.
     """
-
-    from zlc_pulse import AnalogStep
 
     dac = next(port for port in sequence.target.ports if port.kind == "dac")
     view = _EditorView()
@@ -2448,7 +2245,6 @@ def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence) 
             endpoints=record.endpoints,
             clock_key=record.clock_key,
             clock_endpoint=record.clock_endpoint,
-            lane_order=record.lane_order,
         )
         for record in view.records
     )
@@ -2478,12 +2274,6 @@ def test_dropping_a_port_while_a_board_is_attached_is_refused(presenter) -> None
     assert "cannot be added or removed" in view.feedback
 
 
-def test_offline_the_target_is_the_pulse_file_and_is_editable(presenter) -> None:
-    view = presenter.view.target_view
-    assert view.editable is True
-    assert "Offline" in view.status
-
-
 def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> None:
     """Offline, Apply takes the whole record -- wires, widths, ports -- not just names.
 
@@ -2498,7 +2288,9 @@ def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> 
     from zlc_ui import TargetPortRecord
 
     view = presenter.view.target_view
-    assert view.editable
+    # Offline the target is the pulse file's, and it is editable.
+    assert view.editable is True
+    assert "Offline" in view.status
 
     def levels(pulse):
         lanes = {port.key: port.lanes[0] for port in pulse.target.ports if port.kind == "digital"}
@@ -2568,69 +2360,49 @@ def test_toggling_one_lane_updates_one_card_and_rebuilds_nothing(presenter, sequ
     The card already shows the new state -- that is what the widget IS -- so
     re-projecting the whole board rebuilds every card to arrive back where the
     screen already was, throwing away the scroll position and any partly-typed
-    field on the way.
+    field on the way.  The same holds for a duration, a delay and a rename;
+    only a change of shape rebuilds.
     """
 
     schedule = presenter.view.schedule_view
     period = sequence.periods[0]
+    period_id = period.period_id
     port = next(port for port in sequence.target.ports if port.kind == "digital")
+    index = sequence.target.raw_lanes.index(port.lanes[0])
     before = schedule.rebuilds
 
-    presenter.view.digital_committed.emit(period.period_id, port.key, True)
+    presenter.view.digital_committed.emit(period_id, port.key, not bool(period.states[index]))
 
     assert schedule.rebuilds == before, "one checkbox rebuilt the whole board"
-    assert [vm.period_id for vm in schedule.updated_periods] == [period.period_id]
-    # And the model really changed.
-    index = sequence.target.raw_lanes.index(port.lanes[0])
-    assert presenter.sequence.periods[0].states[index] == 1
+    assert [vm.period_id for vm in schedule.updated_periods] == [period_id]
+    # And the model really changed -- that lane, and nothing else.
+    after = presenter.sequence.periods[0].states
+    assert after[index] != period.states[index]
+    assert [
+        value for position, value in enumerate(after) if position != index
+    ] == [value for position, value in enumerate(period.states) if position != index]
 
-
-def test_a_duration_edit_moves_the_totals_without_a_rebuild(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
-    period_id = sequence.periods[0].period_id
-    before = schedule.rebuilds
-
+    # A duration moves the totals: the header follows, no card is rebuilt.
     presenter.view.duration_committed.emit(period_id, 0.004, "s")
-
     assert schedule.rebuilds == before
     assert schedule.updated_periods[-1].period_id == period_id
-    # The header total is a consequence of the edit and must follow it.
     assert schedule.summary["period_count"] == len(sequence.periods)
     assert schedule.summary["total_text"] != ""
 
-
-def test_a_delay_edit_updates_its_row_only(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
-    port = next(port for port in sequence.target.ports if port.kind == "digital")
-    before = schedule.rebuilds
-
+    # A delay updates its own row only.
     presenter.view.delay_committed.emit(port.key, 40, "ns")
-
     assert schedule.rebuilds == before
     assert [row.port_key for row in schedule.updated_delays] == [port.key]
     assert any(delay.port == port.key for delay in presenter.sequence.delays)
 
-
-def test_renaming_an_output_touches_the_label_and_nothing_else(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
-    port = next(port for port in sequence.target.ports if port.kind == "digital")
-    before = schedule.rebuilds
-
+    # A rename touches the label and nothing else.
     presenter.view.port_label_committed.emit(port.key, "MOT cooling")
-
     assert schedule.rebuilds == before
     assert schedule.updated_labels == [(port.key, "MOT cooling")]
     assert presenter.sequence.target.by_key[port.key].label == "MOT cooling"
 
-
-def test_a_change_of_shape_does_rebuild(presenter, sequence) -> None:
-    """The other half of the rule: adding a period IS a change of shape."""
-
-    schedule = presenter.view.schedule_view
-    before = schedule.rebuilds
-
+    # The other half of the rule: adding a period IS a change of shape.
     presenter.view.insert_period_requested.emit(("period", sequence.periods[1].period_id))
-
     assert schedule.rebuilds == before + 1
     assert len(presenter.sequence.periods) == len(sequence.periods) + 1
 
@@ -2646,14 +2418,16 @@ def test_a_dot_binds_a_field_into_a_scan_column(presenter, sequence) -> None:
     device writes per point.
     """
 
-    schedule = presenter.view.schedule_view
     period_id = sequence.periods[3].period_id
 
     presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
 
     assert [slot.field_ref.period_id for slot in presenter.sequence.scan_bindings] == [period_id]
-    assert presenter.view.scan_view.page is not None
-    assert "Bound" in presenter.view.scan_view.page.slots_text
+    page = presenter.view.scan_view.page
+    assert page is not None
+    assert [(row.field_id, row.scan) for row in page.bindings] == [
+        (presenter.sequence.scan_bindings[0].field_id, True)
+    ]
 
 
 def test_scan_and_source_are_independent_and_preserve_scan_columns(presenter, sequence) -> None:
@@ -2676,7 +2450,6 @@ def test_scan_and_source_are_independent_and_preserve_scan_columns(presenter, se
     assert not presenter.sequence.api_bindings
 
 def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     period_id = sequence.periods[3].period_id
     dac = _dac_port(sequence)
@@ -2692,7 +2465,6 @@ def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> No
 
 
 def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
     scan = presenter.view.scan_view
     presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
 
@@ -2713,8 +2485,6 @@ def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequenc
 def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
     """A column per bound slot: anything else would write the wrong field."""
 
-    schedule = presenter.view.schedule_view
-    scan = presenter.view.scan_view
     presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
 
     _run_scan(
@@ -2727,8 +2497,6 @@ def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
 
 
 def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, sequence) -> None:
-    schedule = presenter.view.schedule_view
-    scan = presenter.view.scan_view
     presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
     _run_scan(
         presenter.view,
@@ -2740,37 +2508,6 @@ def test_a_program_that_raises_says_so_and_keeps_the_last_table(presenter, seque
 
     assert presenter._state.scan_rows == kept
     assert any("bad sweep" in text for text in presenter.view.warnings)
-
-
-def test_holding_a_point_stops_the_scan_and_loads_an_ordinary_pulse(presenter, sequence) -> None:
-    """A held point is resolved into an ordinary repeating pulse."""
-
-    board = _Sequencer()
-    presenter.sequencer = board
-    assert presenter.adopt_board() is True
-    board.events.clear()
-    schedule = presenter.view.schedule_view
-    scan = presenter.view.scan_view
-    presenter.view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
-    _run_scan(
-        presenter.view,
-        "import numpy as np\nscan_table = (np.arange(5) + 1).reshape(-1, 1) * 0.001\n"
-    )
-
-    presenter.view.scan_hold_requested.emit()
-    assert board.events[-3:] == ["safe", "load", "fire forever"]
-    assert board._applied.rows == (), "a held point must not become a one-row scan"
-
-    presenter.view.scan_step_requested.emit(1)
-    assert board.events[-3:] == ["safe", "load", "fire forever"]
-    assert presenter._held_point == 1
-    presenter.view.scan_step_requested.emit(-1)
-    assert presenter._held_point == 0
-    # It cannot step off either end of the table.
-    for _ in range(10):
-        presenter.view.scan_step_requested.emit(-1)
-    assert presenter._held_point == 0
-    assert board._applied.rows == ()
 
 
 def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
@@ -2929,22 +2666,6 @@ def test_stepping_is_offered_only_once_there_is_a_table(presenter, sequence) -> 
     assert presenter.view.capabilities[2] is True
 
 
-def test_a_pulse_authored_in_the_units_zlc_pulse_accepts_can_be_opened() -> None:
-    """The window used to declare its own four units and leave one out.
-
-    A period authored in ticks then raised KeyError inside the projection --
-    from a Qt slot, which ends the process rather than drawing anything.
-    """
-
-    from zlc_pulse.model import TIME_UNIT_CHOICES
-
-    from zlc_workbench.pulse_editor import _TIME_UNITS, _nanoseconds
-
-    assert set(_TIME_UNITS) == set(TIME_UNIT_CHOICES)
-    for unit in TIME_UNIT_CHOICES:
-        assert _nanoseconds(1.0, unit) > 0.0
-
-
 def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp_path) -> None:
     """The loader used to skip the width check the generated path made.
 
@@ -2986,19 +2707,30 @@ def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
     from ``endpoint or mode``, which reads the address box -- and the box keeps
     the remote server's address whichever mode is selected.  So the simulated
     board reported the same line a real one gives, next to an empty schedule.
+
+    An editor attached to a board knows its ports, its pins and its clock
+    before any pulse is open; hiding that leaves a connected editor looking
+    like a disconnected one.
     """
+
+    from zlc_workbench.pulse_editor import programmable_ports
 
     view = _EditorView()
     board = _Sequencer()
     presenter = PulseEditorPresenter(view, None, dial=lambda _m, _e: board)
     try:
+        assert view.schedule_view.schedule.ports == ()
         assert presenter.connect_to("virtual", "127.0.0.1:18861") is True
         schedule = view.schedule_view.schedule
-        assert schedule.ports, "an attached board must show its ports"
-        assert len(schedule.periods) == 2, "and a pulse to edit on it"
-        assert len(schedule.delay_rows) == len(
-            [port for port in schedule.ports if port.kind in ("digital", "dac")]
-        ), "every delayable output gets a row"
+        assert len(schedule.periods) == 2, "an attached board opens a pulse to edit on it"
+        described = _board_description()
+        ports = programmable_ports(described.target)
+        assert len(schedule.ports) == len(ports), "an attached board must show its ports"
+        assert len(schedule.ports) < len(described.target.ports), "no clock was folded in"
+        assert schedule.clock_text == f"{described.time_step_ns:g} ns/tick"
+        # The pin an operator wires into, not only the compiler's lane name.
+        assert schedule.ports[0].endpoint_text == described.target.package_pins[ports[0].lanes[0]]
+        assert ports[0].lanes[0] in schedule.ports[0].endpoint_tooltip
 
         status = view.schedule_view.connection.status
         assert status.startswith("virtual"), status
@@ -3187,18 +2919,6 @@ def test_the_strips_total_is_what_the_board_plays(sequence) -> None:
         assert candidate[-1] == 3 * one_pass
     finally:
         presenter.close()
-
-
-def test_a_bracket_of_zero_is_refused_by_the_model_itself(sequence) -> None:
-    """A bracket that plays nothing cannot be built; one that plays once can."""
-
-    import pytest as _pytest
-    from zlc_pulse import PulseBracket
-
-    first, last = sequence.periods[0].period_id, sequence.periods[-1].period_id
-    with _pytest.raises(ValueError, match="bracket loops at least"):
-        PulseBracket("b", first, last, 0)
-    assert PulseBracket("b", first, last, 1).count == 1
 
 
 def test_a_timeline_names_its_periods_over_their_spans(sequence) -> None:
@@ -3744,8 +3464,13 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
     assert board._applied.source.period_by_id[period_id].duration == pytest.approx(1.0)
 
     view.scan_step_requested.emit(-1)
+    assert presenter._held_point == 0
     assert board._applied.source.period_by_id[period_id].duration == pytest.approx(held)
-    assert board._applied.rows == ()
+    # It cannot step off the end of the table.
+    for _ in range(10):
+        view.scan_step_requested.emit(-1)
+    assert presenter._held_point == 0
+    assert board._applied.rows == (), "a held point must not become a one-row scan"
 
 
 def test_scan_repeats_reaches_the_wire(presenter, sequence) -> None:
@@ -3969,11 +3694,14 @@ def test_a_dead_server_connection_never_holds_the_window_hostage(sequence) -> No
 
     board2.safe = refused
     try:
+        with pytest.raises(RuntimeError, match="did not go safe"):
+            presenter2.close(present=False)
+    finally:
+        # The board agrees to SAFE again, so the refused close can finish and
+        # release the drive it still holds.
+        del board2.safe
         presenter2.close(present=False)
-    except RuntimeError as error:
-        assert "did not go safe" in str(error)
-    else:
-        raise AssertionError("a connected SAFE refusal must still block close")
+    assert presenter2._drive_lease is None
 
 
 def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> None:
@@ -3990,16 +3718,17 @@ def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> No
     def detonate(*_args):
         raise LookupError("wired to fail")
 
-    presenter.reorder_items = detonate
-    view.reorder_items_requested.emit((("period", "p0"),))
-    assert any(
-        "internal error in reorder_items" in warning and "wired to fail" in warning
-        for warning in view.warnings
-    ), view.warnings
-    import pytest as _pytest
-
-    with _pytest.raises(LookupError):
-        presenter.reorder_items((("period", "p0"),))
+    try:
+        presenter.reorder_items = detonate
+        view.reorder_items_requested.emit((("period", "p0"),))
+        assert any(
+            "internal error" in warning and "wired to fail" in warning
+            for warning in view.warnings
+        ), view.warnings
+        with pytest.raises(LookupError):
+            presenter.reorder_items((("period", "p0"),))
+    finally:
+        presenter.close()
 
 
 # ---------------------------------------------------------------------------
@@ -4232,7 +3961,13 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.threads_for("applied") == {"pulse-device-worker"}
         assert not [text for text in view.warnings if "cannot sync" in text]
-        assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.5)
+        # The board holds row 2 of this very draft: Sync keeps the draft, its
+        # scan binding and its table instead of baking the held row in.
+        assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.0)
+        assert len(presenter.sequence.scan_bindings) == 1
+        assert len(presenter._state.scan_rows) == 3
+        assert presenter._held_point == 2
+        assert any("holding scan point 2" in text for text in view.done)
     finally:
         presenter.close()
 

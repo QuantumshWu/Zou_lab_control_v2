@@ -1,21 +1,14 @@
-import zou_lab_control
-
 import os
 import time
 from types import SimpleNamespace
 
 import pytest
 
-import zlc_workbench.console as tested_module
-
-
-print(tested_module.__file__)
-
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_workbench.apps.task_console import build_console
-from zlc_workbench.logic import stable_signal_key
+from zlc_runtime import stable_signal_key
 from zlc_workbench.session import ExperimentSession
 from zlc_ui.qt import ensure_qt_app
 
@@ -59,7 +52,6 @@ def _commit_area(host) -> None:
             button=1,
             identity=front.identity,
             axes=axes,
-            interaction=front.interaction,
         ).result()
 
 
@@ -116,7 +108,6 @@ def _visible_logic_roi(editor) -> tuple[int, int, int, int]:
 def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_restarts(
     tmp_path, selection_surface,
 ) -> None:
-    plot = pytest.importorskip("zlc_plot")
     app = ensure_qt_app(["guard-b-task-console-interaction"])
     session = ExperimentSession.open(tmp_path, template="virtual")
     write_ordinary_pulse(tmp_path)
@@ -268,8 +259,10 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_re
         assert _visible_logic_roi(logic_editor) == selected_roi
         visible = panel.editor_host.describe_display().result().value.viewport
         assert visible is not None
-        assert visible.x.span > authored_roi[2]
-        assert visible.y.span > authored_roi[3]
+        x_range, y_range = visible
+        assert x_range is not None and y_range is not None
+        assert x_range.span > authored_roi[2]
+        assert y_range.span > authored_roi[3]
 
         # Removing the region restores what was authored before that region,
         # not the viewport, last selector geometry or camera readback.

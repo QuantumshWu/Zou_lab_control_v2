@@ -9,113 +9,56 @@ There is ONE naming scheme: the plot kind's own name.  A menu row is
 ``image``, ``curve``, ``facet_grid`` -- the standard vocabulary and nothing
 invented beside it.  A FacetGrid's CELL kind is not a menu row at all: it is
 a parameter of the grid panel, chosen in the panel's settings, where empty
-means the data decides.
+means the data decides.  Which cell kinds a grid may hold is ``PanelState``'s
+rule; this module only says which kinds the board offers.
+
+Every axis choice is the one default table in ``zlc_plot._kinds.defaults``,
+read unaltered: this layer fixes WHICH kind (and, for a grid, which cell
+kind) a panel is, and a second choice made here, however small, is a second
+answer to the same question.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from zlc_plot import GRID_CELL_KINDS, PlotKind
+from zlc_plot import PlotKind, fitting_spec
 from zlc_plot.specs import semantic_spec
-
-from .panel_spec import fitting_panel_spec
 
 
 __all__ = [
-    "TASK_CONSOLE_PANEL_CATALOG",
-    "TaskConsolePanelKind",
-    "panel_kind_choices",
+    "TASK_CONSOLE_PANEL_KINDS",
     "task_console_fitting_spec",
-    "task_console_panel_identity",
     "task_console_panel_identity_for_spec",
     "task_console_panel_kind",
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class TaskConsolePanelKind:
-    """One immutable panel identity selected by the combined Add control."""
-
-    kind: PlotKind
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind, PlotKind):
-            raise TypeError("panel kind must be PlotKind")
-
-    @property
-    def key(self) -> str:
-        return self.kind.value
-
-    @property
-    def label(self) -> str:
-        """The plot kind's own name; there is no second naming scheme."""
-
-        return self.kind.value
-
-
-TASK_CONSOLE_PANEL_CATALOG: tuple[TaskConsolePanelKind, ...] = (
-    TaskConsolePanelKind(PlotKind.IMAGE),
-    TaskConsolePanelKind(PlotKind.CURVE),
-    TaskConsolePanelKind(PlotKind.ROLLING),
-    TaskConsolePanelKind(PlotKind.HISTOGRAM),
-    TaskConsolePanelKind(PlotKind.FACET_GRID),
+TASK_CONSOLE_PANEL_KINDS: tuple[PlotKind, ...] = (
+    PlotKind.IMAGE,
+    PlotKind.CURVE,
+    PlotKind.ROLLING,
+    PlotKind.HISTOGRAM,
+    PlotKind.FACET_GRID,
 )
 
-_BY_KEY = {entry.key: entry for entry in TASK_CONSOLE_PANEL_CATALOG}
 
-
-def task_console_panel_kind(kind: object) -> TaskConsolePanelKind:
+def task_console_panel_kind(kind: object) -> PlotKind:
     """Resolve one TaskConsole kind or reject a renderer-only vocabulary item."""
 
     key = kind.value if isinstance(kind, PlotKind) else str(kind)
-    try:
-        return _BY_KEY[key]
-    except KeyError as error:
-        raise ValueError(f"plot kind {key!r} is not available on TaskConsole") from error
-
-
-def panel_kind_choices() -> tuple[tuple[str, str], ...]:
-    """Return the exact plain rows consumed by the toolkit-neutral view port."""
-
-    return tuple((entry.key, entry.label) for entry in TASK_CONSOLE_PANEL_CATALOG)
-
-
-def task_console_panel_identity(
-    kind: object,
-    cell_kind: object = "",
-) -> TaskConsolePanelKind:
-    """Validate the complete immutable identity stored by TaskConsole.
-
-    An empty cell kind on a FacetGrid means the data decides; a named one
-    must be a legal grid cell.  What a grid cell can BE is a fact of the
-    data in it, so nothing here pins a cell to a catalog default.
-    """
-
-    definition = task_console_panel_kind(kind)
-    cell_key = cell_kind.value if isinstance(cell_kind, PlotKind) else str(cell_kind)
-    if definition.kind is not PlotKind.FACET_GRID:
-        if cell_key:
-            raise ValueError(f"{definition.label} does not take a cell kind")
-        return definition
-    if not cell_key:
-        return definition
-    if PlotKind(cell_key) not in GRID_CELL_KINDS:
-        raise ValueError(f"a grid cell cannot be a {cell_key}")
-    return definition
+    for offered in TASK_CONSOLE_PANEL_KINDS:
+        if offered.value == key:
+            return offered
+    raise ValueError(f"plot kind {key!r} is not available on TaskConsole")
 
 
 def task_console_panel_identity_for_spec(spec: object) -> tuple[str, str]:
     """The complete TaskConsole identity of one accepted Plot specification."""
 
-    definition = task_console_panel_kind(getattr(spec, "kind", None))
+    kind = task_console_panel_kind(getattr(spec, "kind", None))
     cell_key = (
-        semantic_spec(spec).kind.value
-        if definition.kind is PlotKind.FACET_GRID
-        else ""
+        semantic_spec(spec).kind.value if kind is PlotKind.FACET_GRID else ""
     )
-    task_console_panel_identity(definition.kind, cell_key)
-    return definition.key, cell_key
+    return kind.value, cell_key
 
 
 def task_console_fitting_spec(
@@ -123,23 +66,27 @@ def task_console_fitting_spec(
     kind: object = "",
     cell_kind: object = "",
 ) -> object | None:
-    """Resolve data through the same fixed identity selected at Add Panel."""
+    """The spec this data admits under one fixed TaskConsole identity.
+
+    With no kind the data decides, and the answer must still be a kind the
+    board offers.  An empty cell kind on a grid means the data decides the
+    cell too; a named one is the operator's choice, and the grid and its cell
+    are composed once, in zlc_plot.
+    """
 
     if kind in (None, ""):
-        spec = fitting_panel_spec(schema)
-        if spec is None:
-            return None
-        task_console_panel_kind(spec.kind)
+        spec = fitting_spec(schema)
+        if spec is not None:
+            task_console_panel_kind(spec.kind)
         return spec
-    definition = task_console_panel_kind(kind)
+    resolved = task_console_panel_kind(kind)
     requested_cell = (
         cell_kind.value if isinstance(cell_kind, PlotKind) else str(cell_kind)
     )
-    task_console_panel_identity(definition.kind, requested_cell)
-    spec = fitting_panel_spec(
+    spec = fitting_spec(
         schema,
-        definition.kind,
-        requested_cell if definition.kind is PlotKind.FACET_GRID else "",
+        resolved,
+        cell=PlotKind(requested_cell) if requested_cell else None,
     )
     if spec is not None and requested_cell:
         if semantic_spec(spec).kind.value != requested_cell:

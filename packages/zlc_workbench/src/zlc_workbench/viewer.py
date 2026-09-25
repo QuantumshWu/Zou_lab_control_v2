@@ -36,7 +36,7 @@ from zlc_plot import figure_plot_recipe, read_figure_plot
 
 from zlc_data.figure_archive import read_archive
 
-from .logic import split_signal_key
+from zlc_runtime import split_signal_key
 from .board import _guarded_slot
 
 
@@ -197,8 +197,6 @@ def _domain_flat_rows(domain: object) -> np.ndarray:
 
 
 def _expand_snapshot_for_edit(snapshot: object) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    from zlc_data import expand_snapshot_validity
-
     snapshot = snapshot.materialize()
     schema = snapshot.block.schema
     repeat_shape = schema.repeat_domain.logical_shape
@@ -210,7 +208,7 @@ def _expand_snapshot_for_edit(snapshot: object) -> tuple[np.ndarray, np.ndarray,
     values = np.zeros(dense_shape, dtype=schema.value_schema.dtype)
     validity = np.zeros(dense_shape, dtype=np.bool_)
     source_values = np.asarray(snapshot.block.values)
-    source_validity = np.asarray(expand_snapshot_validity(snapshot), dtype=np.bool_)
+    source_validity = np.asarray(snapshot.expanded_validity(), dtype=np.bool_)
     target_values = values.reshape((repeat_size, point_size, *cell_shape))
     target_validity = validity.reshape((repeat_size, point_size, *cell_shape))
     repeat_rows = _domain_flat_rows(schema.repeat_domain)
@@ -1361,6 +1359,49 @@ class _ArchiveDatasetProducer:
         return plane.latest_publication(self.data_signal)
 
 
+def _add_recipe_panel(
+    presenter: object,
+    producer: "_ArchiveDatasetProducer",
+    snapshot: object,
+    recipe: Mapping[str, object],
+    publication: object,
+    *,
+    title: str,
+) -> object:
+    """One saved plot recipe as a Panel, under the identity it was saved with.
+
+    Opening an archive and applying a manual copy of one are the same
+    translation: the recipe's kind and cell, its whole semantic table read
+    off its spec, and its size, parameters and fit -- on the exact
+    publication the recipe describes.
+    """
+
+    from zlc_plot.semantics import describe_semantics
+
+    from .panel_catalog import task_console_panel_identity_for_spec
+
+    spec = recipe["spec"]
+    kind, cell_kind = task_console_panel_identity_for_spec(spec)
+    return presenter.add_panel(
+        producer.data_signal,
+        snapshot,
+        title=title,
+        kind=kind,
+        cell_kind=cell_kind,
+        size=recipe["size"],
+        semantic={
+            str(name): value
+            for name, value in describe_semantics(snapshot.block.schema, spec).values.items()
+            if str(name) != "kind"
+        },
+        display=dict(recipe["parameters"]),
+        fit=dict(recipe["fit"]),
+        overlay_signal=producer.overlay_signal,
+        initial_publication=publication,
+        initial_recipe=recipe,
+    )
+
+
 def _manual_plot_input(draft: Mapping[str, object], snapshot: object) -> object:
     """Keep an archived image overlay only while its coordinate contract matches."""
 
@@ -2506,9 +2547,7 @@ class FigureViewerPresenter:
         )
 
     def _accept_runtime_archive(self, result: object) -> bool:
-        from .panel_catalog import task_console_panel_identity_for_spec
         from .panel_save import _IMPORTED_LINEAGE_KEY
-        from zlc_plot.semantics import describe_semantics
 
         if self._close_requested:
             return True
@@ -2540,31 +2579,16 @@ class FigureViewerPresenter:
                 )
             if published:
                 producer, plot_input, recipe, publication = published[0]
-                spec = recipe["spec"]
-                kind, cell_kind = task_console_panel_identity_for_spec(spec)
-                snapshot = getattr(plot_input, "snapshot", plot_input)
-                semantic = {
-                    str(name): value
-                    for name, value in describe_semantics(snapshot.block.schema, spec).values.items()
-                    if str(name) != "kind"
-                }
-                label = dict(description.datasets).get(
-                    producer.dataset,
-                    producer.dataset,
-                )
-                binding = panel_presenter.add_panel(
-                    producer.data_signal,
+                binding = _add_recipe_panel(
+                    panel_presenter,
+                    producer,
                     getattr(plot_input, "snapshot", plot_input),
-                    title=label,
-                    kind=kind,
-                    cell_kind=cell_kind,
-                    size=recipe["size"],
-                    semantic=semantic,
-                    display=dict(recipe["parameters"]),
-                    fit=dict(recipe["fit"]),
-                    overlay_signal=producer.overlay_signal,
-                    initial_publication=publication,
-                    initial_recipe=recipe,
+                    recipe,
+                    publication,
+                    title=dict(description.datasets).get(
+                        producer.dataset,
+                        producer.dataset,
+                    ),
                 )
                 new_panel_id = binding.panel_id
         except BaseException:
@@ -3005,9 +3029,6 @@ class FigureViewerPresenter:
             self.view.set_status(f"cannot edit data: {error}", error=True)
 
     def _apply_data_draft(self, draft: dict[str, object]) -> None:
-        from .panel_catalog import task_console_panel_identity_for_spec
-        from zlc_plot.semantics import describe_semantics
-
         validity = np.asarray(draft["validity"], dtype=np.bool_)
         values = np.asarray(draft["values"])
         if bool(np.any(~validity)):
@@ -3090,26 +3111,13 @@ class FigureViewerPresenter:
                     initial_publication=publication,
                 )
             else:
-                spec = recipe["spec"]
-                kind, cell_kind = task_console_panel_identity_for_spec(spec)
-                semantic = {
-                    str(name): value
-                    for name, value in describe_semantics(snapshot.block.schema, spec).values.items()
-                    if str(name) != "kind"
-                }
-                binding = self._panel_presenter.add_panel(
-                    signal,
+                binding = _add_recipe_panel(
+                    self._panel_presenter,
+                    producer,
                     snapshot,
+                    recipe,
+                    publication,
                     title=str(draft["name"]),
-                    kind=kind,
-                    cell_kind=cell_kind,
-                    size=recipe["size"],
-                    semantic=semantic,
-                    display=dict(recipe["parameters"]),
-                    fit=dict(recipe["fit"]),
-                    overlay_signal=producer.overlay_signal,
-                    initial_publication=publication,
-                    initial_recipe=draft["recipe"],
                 )
             draft["panel_id"] = binding.panel_id
         self._panel_presenter.beat()
@@ -3194,21 +3202,6 @@ class FigureViewerPresenter:
                 self.view.update_data_editor(
                     str(draft["editor_id"]), _data_projection(draft)
                 )
-
-    def add_panel(self, kind: str) -> None:
-        self._panel_presenter.add_selected_panel(str(kind))
-
-    def remove_panel(self, panel_id: str) -> None:
-        self._panel_presenter.remove_panel(str(panel_id))
-
-    def reorder_panels(self, order: object) -> None:
-        self._panel_presenter.reorder_panels(tuple(order))
-
-    def edit_panel(self, panel_id: str) -> object | None:
-        return self._panel_presenter.edit_panel(str(panel_id))
-
-    def close_panel_editor(self, panel_id: str) -> None:
-        self._panel_presenter.close_panel_editor(str(panel_id))
 
     def _submit(
         self,

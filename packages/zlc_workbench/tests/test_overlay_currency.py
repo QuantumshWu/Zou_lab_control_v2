@@ -215,9 +215,12 @@ def test_finite_overlay_uses_the_exact_canonical_prefix_and_last_scope() -> None
                 exact_front, image_publication, "status/status", image, index + 1)
             assert used_publication is status_publication
             assert overlay.status is plane.current_dataset("status/status", status_publication)
-            assert overlay.status.block.values.shape == (50, 3, 2)
-            assert used_record == plane.current_dataset_view("status/status", status_publication)[1]
-            assert used_record["device_settings"]["camera"]["epoch_ranges"] == ((0, index),)
+            assert overlay.status.block.materialize().values.shape == (50, 3, 2)
+            # The console reads the overlay with a deferred record; whoever
+            # keeps it (a panel save) resolves it.
+            resolved = used_record() if callable(used_record) else used_record
+            assert resolved == plane.current_dataset_view("status/status", status_publication)[1]
+            assert resolved["device_settings"]["camera"]["epoch_ranges"] == ((0, index),)
             assert overlay.statuses_for(facet_spec, 0) is None, "Mean over repeats cannot invent a judgement"
             scope_zero = replace(facet_spec, scope=((AxisRef.repeat("repeat"), 0),))
             assert overlay.statuses_for(scope_zero, 0) == (PointStatus.OCCUPIED, PointStatus.EMPTY)
@@ -256,7 +259,6 @@ def test_an_overlay_for_a_replaced_picture_is_dropped_not_pushed(
     and never will be again.
     """
 
-    pytest.importorskip("zlc_plot")
     value, publication, front = _shot(1, 101)
     host = _RevisionHost(0)
     deferred = _Deferred()
@@ -316,7 +318,6 @@ def test_a_render_projected_under_a_revoked_setting_never_lands(
     already revoked.
     """
 
-    pytest.importorskip("zlc_plot")
     with_overlay = SimpleNamespace(overlay_signal=COMPANION)
     without_overlay = SimpleNamespace(overlay_signal="")
     value, publication, front = _shot(1, 101)
@@ -380,7 +381,6 @@ def test_a_missing_companion_waits_without_staging_a_partial_shot(
 ) -> None:
     """A pending companion is not an invalid result for the new image."""
 
-    pytest.importorskip("zlc_plot")
     picture = _publication("camera", "run-1", 1, SIGNAL)
     bare_front = SignalFront(
         {SIGNAL: picture.value(SIGNAL)}, {SIGNAL: picture}

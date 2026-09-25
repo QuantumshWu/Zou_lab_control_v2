@@ -83,7 +83,11 @@ When a same-shot group is still rendering, Workbench does not enqueue another
 full frame; it keeps admission debt and stages Plane latest on completion. The
 Runtime indexed Dataset, not Workbench, preserves every source primary index and
 its validity during that lease. Processor/surface completion wakes spend already-due work without
-waiting for another interval.
+waiting for another interval. A window that is minimized, or shows neither the
+Monitor board nor a panel's Edit, stages no new picture while the rest of the
+beat (plane pump, derivations, node polling) runs; a panel holding a region or
+a fit keeps staging, because its host is a producer too. Coming back into view
+owes every panel its current picture at once.
 
 A standing Plot host receives both the complete coalescing-safe target and the
 fields authored by the current edit; new/replacement/save hosts need only the
@@ -130,7 +134,7 @@ when the worker actually starts, establishes `run.json`, and gives the execution
 context the only artifact-registration path. Workbench projects that lifecycle;
 it does not maintain a second Task status or plugin-specific report manager.
 
-Calibration, Temperature and SLM Feedback all use the same TaskRun contract.
+Calibration and SLM Feedback both use the same TaskRun contract.
 Their domain owners select final JSON/NPZ, summaries and important typed Figure
 artifacts. Stop and failure leave the run folder reachable with its truthful
 partial inventory. Runtime never asks Workbench to dump every publication or
@@ -150,10 +154,13 @@ intermediate shot.
 - Panel Edit **Save Fig** writes only that panel's frozen typed data, exact Plot
   recipe, overlay, viewport and causal lineage. The `zlc.figure` NPZ is primary;
   its same-stem PNG is a preview. It does not include another panel or the whole
-  monitor board. A dedicated composition-owned worker publishes the archive
-  first and then renders the preview through the Edit surface's own plot host
-  when it already shows that exact freeze; otherwise through the same Plot
-  host/configure path used by TaskConsole and FigureViewer. The Qt beat and
+  monitor board. A dedicated composition-owned worker hands the save to the
+  Edit surface's own plot host when it already shows that exact freeze, which
+  checks its settled recipe and data on its worker; otherwise the save runs on
+  the Edit/Save render child without a screen host. Either way the archive and
+  then the preview are written from one fresh export session built from that
+  recipe, so the PNG is what reopening the archive draws (a panel's own session
+  keeps Normal-mode limits a reopened archive does not have). The Qt beat and
   Stop remain live; a second Save for the same panel is rejected rather than
   queued.
 
@@ -173,6 +180,11 @@ saved direct-parent lineage as one node-edge Flow of unique Logic and Device
 nodes. Save and shutdown are asynchronous. TaskConsole
 keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
 Save retire; the window stays visible until every owner is actually stopped.
+The one exception is a Logic row that drives no device (a Derive expression
+that loops): once the close has reported what it is waiting for, that row lets
+go of its bookkeeping lease and stops holding the window, and its daemon
+mailbox thread does not keep the process alive. A row inside a device call
+keeps the close waiting.
 Session/device shutdown runs on the one flow-owned serial device worker used by
 discover/init/tune/shutdown, while Panel Save keeps its independent I/O worker.
 Completion callbacks return to the Qt owner and queue the final guarded close;

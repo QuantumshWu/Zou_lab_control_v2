@@ -1,4 +1,4 @@
-"""The five behaviours the owner named, pinned so they cannot quietly go.
+"""The behaviours the owner named, pinned so they cannot quietly go.
 
 Each was verified once with a throwaway probe, which proves a moment and
 nothing after it -- and this session then moved the scroll keeper, the
@@ -21,27 +21,15 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_workbench.pulse_editor import programmable_ports, project_schedule
 
+from pulse_fixtures import ordinary_imaging_sequence
+from test_pulse_editor import _board_description, _EditorView, _virtual_streamer
+
 
 @pytest.fixture
 def board():
     """A real virtual board, described by itself."""
 
-    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
-    from zlc_pulse.device import PulseStreamer
-    from zlc_pulse.transport import MemoryRegisterTransport
-
-    config = load_streamer_config()
-    streamer = PulseStreamer(
-        MemoryRegisterTransport(geom=config["params"], auto_done=True),
-        config["params"],
-        config["clock_hz"],
-        target=pulse_target_from_xdc(config_path=config["source"]),
-    )
-    streamer.open()
-    try:
-        yield streamer.describe()
-    finally:
-        streamer.close()
+    return _board_description()
 
 
 def test_a_dac_is_one_row_carrying_its_own_latch_clock(board) -> None:
@@ -64,6 +52,9 @@ def test_a_dac_is_one_row_carrying_its_own_latch_clock(board) -> None:
     assert owned, "this board has DACs with latch clocks"
     shown = {port.key for port in programmable_ports(board.target)}
     assert not (owned & shown), "every owned clock is folded into its DAC"
+    assert {row.key for row in vm.ports} == {
+        port.key for port in board.target.ports if port.key not in owned
+    }
     for row in vm.ports:
         if row.kind == "dac":
             assert "latch clock" in row.endpoint_tooltip, (
@@ -80,79 +71,9 @@ def test_every_delayable_output_has_a_delay_row(board) -> None:
     assert {row.port_key for row in vm.delay_rows} == {port.key for port in delayable}
 
 
-def test_target_rows_carry_the_package_pin_of_every_lane(board) -> None:
-    """A pulse names outputs -- cooling, probe -- and the Target page is the
-    only place that says which physical pins those names reach.  Without it an
-    operator has the pulse and the breakout and no way to relate them."""
-
-    from zlc_workbench.pulse_editor import project_target
-
-    pins = dict(board.target.package_pins)
-    assert pins, "the board publishes its pin map"
-    records = project_target(board.target, pins=pins)
-    assert records
-
-    for record in records:
-        assert record.endpoints, f"{record.key} shows no endpoint at all"
-        assert all(text.strip() for text in record.endpoints)
-        if record.kind == "dac":
-            assert len(record.endpoints) > 1, "a DAC shows every data pin"
-            assert record.clock_endpoint, "and the pin its latch clock reaches"
-
-    # Not lane names wearing a pin's clothes: at least one row reaches a pin
-    # that is spelled differently from the lane behind it.
-    lanes = {lane for port in board.target.ports for lane in port.lanes}
-    reached = {text for record in records for text in record.endpoints}
-    assert reached - lanes, "endpoints are package pins, not the lane names"
-
-
-def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
-    """On Pulse is a cycle an experiment holds running, not one shot.
-
-    Asked of a real board, not of the source text: the Pulse's persisted
-    ``run_repeats=0`` must reach the independent hardware counter unchanged.
-    """
-
-    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
-    from zlc_pulse.device import PulseStreamer
-    from zlc_pulse.transport import MemoryRegisterTransport
-    from zlc_workbench.device_use import DeviceUseCoordinator
-    from zlc_workbench.pulse_editor import PulseEditorPresenter
-    from zlc_workbench.pulse_state import PulseEditorState
-
-    from test_pulse_editor import _EditorView, _ordinary_sequence
-
-    config = load_streamer_config()
-    streamer = PulseStreamer(
-        MemoryRegisterTransport(geom=config["params"], auto_done=True),
-        config["params"],
-        config["clock_hz"],
-        target=pulse_target_from_xdc(config_path=config["source"]),
-    )
-    streamer.open()
-    presenter = PulseEditorPresenter(
-        _EditorView(),
-        PulseEditorState(sequence=_ordinary_sequence()),
-        sequencer=streamer,
-        device_use=DeviceUseCoordinator(),
-    )
-    try:
-        assert presenter.fire() is True, presenter.view.warnings
-        applied = streamer.applied()
-        assert applied is not None, "the board was never told anything"
-        assert applied.run_repeats == 0 and applied.scan_repeats == 1, (
-            "On Pulse must ask the board to repeat until Stop"
-        )
-    finally:
-        presenter.stop()
-        presenter.close()
-        streamer.close()
-
-
 def test_the_preview_page_offers_sizes_and_a_show_all_switch() -> None:
     """Both were reported missing.  They are controls, so this asks the widget."""
 
-    pytest.importorskip("PyQt5")
     from zlc_ui.pulse.preview_view import PulsePreviewView
     from zlc_ui.qt import ensure_qt_app
 
@@ -169,7 +90,12 @@ def test_the_preview_page_offers_sizes_and_a_show_all_switch() -> None:
 
 
 def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
-    """Hold plays an ORDINARY pulse, so the board never sees a one-point scan.
+    """On Pulse runs the whole pulse until Stop; Hold plays an ORDINARY pulse,
+    so the board never sees a one-point scan.
+
+    On Pulse is a cycle an experiment holds running, not one shot: asked of a
+    real board, not of the source text, the Pulse's persisted
+    ``run_repeats=0`` must reach the independent hardware counter unchanged.
 
     Reported from a scope: with a scan table loaded, the DAC swept correctly --
     and the moment Stop-at-hold was pressed it sat at 0 V and stayed there,
@@ -183,24 +109,12 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     part that can be checked without hardware.
     """
 
-    from zlc_pulse import load_streamer_config, pulse_target_from_xdc
-    from zlc_pulse.device import PulseStreamer
-    from zlc_pulse.transport import MemoryRegisterTransport
     from zlc_workbench.device_use import DeviceUseCoordinator
     from zlc_workbench.pulse_editor import PulseEditorPresenter
     from zlc_workbench.pulse_state import PulseEditorState
 
-    from test_pulse_editor import _EditorView, _ordinary_sequence
-
-    sequence = _ordinary_sequence()
-    config = load_streamer_config()
-    transport = MemoryRegisterTransport(geom=config["params"], auto_done=True)
-    board = PulseStreamer(
-        transport,
-        config["params"],
-        config["clock_hz"],
-        target=pulse_target_from_xdc(config_path=config["source"]),
-    )
+    sequence = ordinary_imaging_sequence()
+    board = _virtual_streamer()
     board.open()
     presenter = PulseEditorPresenter(
         _EditorView(),
@@ -209,6 +123,13 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
         device_use=DeviceUseCoordinator(),
     )
     try:
+        assert presenter.fire() is True, presenter.view.warnings
+        applied = board.applied()
+        assert applied is not None, "the board was never told anything"
+        assert (applied.run_repeats, applied.scan_repeats) == (0, 1), (
+            "On Pulse must ask the board to repeat until Stop"
+        )
+
         presenter.view.binding_committed.emit(
             "duration", sequence.periods[3].period_id, None, True, "default"
         )

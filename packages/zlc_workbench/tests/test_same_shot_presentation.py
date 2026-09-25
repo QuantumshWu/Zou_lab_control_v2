@@ -21,7 +21,6 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from zlc_runtime import LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
 from zlc_workbench.board import LiveBoard
 from zlc_workbench.presentation import PlotPanelPort
@@ -31,10 +30,6 @@ from test_signal_front import _output
 
 FRAME = "camera/frame"
 OCCUPANCY = "occupancy/value"
-
-
-def _exact_output(name: str, revision: int) -> LiveDatasetOutput:
-    return _output(name, revision)
 
 
 class _RenderHost:
@@ -75,7 +70,7 @@ class _Bench:
     def __init__(self, *, publish_initial_derived: bool = True) -> None:
         self.plane = SignalDataPlane()
         self.revision = 0
-        self.outputs = {"frame": _exact_output("frame", 1)}
+        self.outputs = {"frame": _output("frame", 1)}
         self.node = SimpleNamespace(
             instance_id="camera",
             dataset_output_declarations=(self.outputs["frame"].declaration,),
@@ -88,7 +83,7 @@ class _Bench:
         # once passed while the real console presented skewed shots.
         self.publish_shot()  # revision 1 binds the derived route
         root = self.plane.latest_publication(FRAME)
-        occupancy = _exact_output("occupancy", 1)
+        occupancy = _output("occupancy", 1)
         self.derived_node = SimpleNamespace(
             instance_id="occupancy",
             dataset_output_declarations=(occupancy.declaration,),
@@ -104,7 +99,7 @@ class _Bench:
 
     def publish_shot(self) -> None:
         self.revision += 1
-        self.outputs["frame"] = _exact_output("frame", self.revision)
+        self.outputs["frame"] = _output("frame", self.revision)
         self.plane.commit_live(self.node, self.outputs)
         self.plane.freeze()
 
@@ -112,7 +107,7 @@ class _Bench:
         root = self.plane.latest_publication(FRAME)
         self.plane.commit_processor(
             self.derived_node,
-            {"occupancy": _exact_output("occupancy", self.revision)},
+            {"occupancy": _output("occupancy", self.revision)},
             source_publication=root,
         )
 
@@ -237,6 +232,8 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
         board.tick()
         assert len(frame_host.futures) == len(occupancy_host.futures) == 2
 
+        # From here no tick, only commits: exactly what a paused beat does,
+        # so a group already travelling still lands whole under Pause.
         frame_host.complete()
         board.commit()
         assert presents == []
@@ -254,46 +251,6 @@ def test_mismatched_render_arrival_still_presents_the_group_as_one_shot() -> Non
         occupancy_host.complete()
         board.commit()
         assert len(presents) == 4
-        _assert_same_shot(frame_port, occupancy_port)
-    finally:
-        board.close()
-        bench.close()
-
-
-def test_pause_leaves_every_group_member_on_the_same_shot() -> None:
-    """Pause stops NEW shots; a batch already travelling still lands whole.
-
-    The presenter keeps committing while paused (only the tick stops), so an
-    in-flight group finishes presenting together and the frozen board shows
-    exactly one shot.
-    """
-
-    bench = _Bench()
-    board, frame_host, occupancy_host, frame_port, occupancy_port, presents = (
-        _bench_board(bench)
-    )
-    try:
-        board.tick()
-        _wait_staged(1, frame_host, occupancy_host)
-        frame_host.complete()
-        occupancy_host.complete()
-        board.commit()
-        presents.clear()
-
-        bench.publish_shot()
-        bench.publish_derived()
-        board.tick()
-        _wait_staged(2, frame_host, occupancy_host)
-
-        # Pause NOW: no more ticks.  One member has landed, one is mid-render.
-        frame_host.complete()
-        board.commit()  # the paused beat still commits
-        assert presents == []
-        _assert_same_shot(frame_port, occupancy_port)
-
-        occupancy_host.complete()
-        board.commit()
-        assert len(presents) == 2
         _assert_same_shot(frame_port, occupancy_port)
     finally:
         board.close()

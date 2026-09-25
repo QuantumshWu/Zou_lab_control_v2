@@ -44,19 +44,31 @@ def check() -> list[str]:
             for item in (product.files or ())
         }
     ownership = packages_distributions()
+    expected_owners = {_normalized(DISTRIBUTION_NAME)}
 
     for name in OWNED:
         kind, where = _origin(name)
         if kind != "module" or where is None:
             problems.append(f"{name}: expected an installed module, got {kind} at {where}")
             continue
+        owners = {_normalized(item) for item in ownership.get(name, ())}
+        # Asked in checkout mode too: the bootstrap puts this checkout first,
+        # so every import through it looks right, while a second installed
+        # copy still answers any process, console script or kernel that
+        # imports a layer without the bootstrap.
+        foreign = sorted(owners - expected_owners)
+        if foreign:
+            problems.append(
+                f"{name}: also installed as {foreign}; only {DISTRIBUTION_NAME} "
+                f"may own it (pip uninstall {' '.join(foreign)})"
+            )
         if source_manifest.is_file():
             expected = (ROOT / "packages" / name / "src" / name).resolve()
             if where.parent != expected:
                 problems.append(f"{name}: resolves to {where}, expected under {expected}")
         else:
-            owners = {_normalized(item) for item in ownership.get(name, ())}
-            expected_owners = {_normalized(DISTRIBUTION_NAME)}
+            if foreign:
+                continue
             if owners != expected_owners or where not in installed_files:
                 problems.append(
                     f"{name}: {where} owners={sorted(owners)}; expected only "

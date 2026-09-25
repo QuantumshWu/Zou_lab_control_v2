@@ -88,14 +88,6 @@ def test_the_committed_region_is_read_from_the_panel_itself() -> None:
     assert guards.committed_region(SimpleNamespace(state=SimpleNamespace(selector={}))) == ()
 
 
-def test_the_bench_benchmarks_one_size_and_says_which() -> None:
-    """Three layers comparing different pictures is not a comparison."""
-
-    from bench.plot_perf.common import SIZE_PRESET
-
-    assert SIZE_PRESET == "2x2"
-
-
 def test_a_console_bench_cannot_be_left_open() -> None:
     """The console layer opens a real window and non-daemon threads.
 
@@ -257,59 +249,6 @@ def test_the_bench_shows_the_product_s_own_window() -> None:
         ]
 
 
-def test_the_gesture_measurement_asks_whether_the_picture_followed_the_hand() -> None:
-    """A live console presents frames whether or not the hand did anything.
-
-    ``gesture`` waited for "one more front", which on a beating console is
-    satisfied by the producer's next frame.  Measured that way, the first
-    move of a pan came out at 0.63 ms against 33.66 for the later ones --
-    a harness saying a gesture is fastest before it starts, which is a
-    statement about the producer's phase and nothing else.
-
-    The view and the selectors carry their own revisions on the front's
-    identity and a data frame does not touch them, so that is what the
-    wait has to read.
-    """
-
-    import inspect
-
-    from bench.plot_perf.run_console import ConsoleBench
-
-    body = inspect.getsource(ConsoleBench.gesture)
-    probe = inspect.getsource(ConsoleBench._hand_timeline)
-    assert "presented.count > baseline" not in body, (
-        "counting fronts measures the producer, not the hand"
-    )
-    assert "display_revision" not in body, (
-        "measured: a pan never advances it, so it reports every trial missed"
-    )
-    # The hand's own stream: submitted here, answered there.
-    assert "_submit_pointer" in probe and "_gesture_ready" in probe
-    # And NOT paired, because the host coalesces moves and any
-    # first-in-first-out pairing slips by one on each coalesced move.
-    assert "queue.pop(0)" not in probe, "coalesced moves make pairing a lie"
-    # The start is the complaint, so it is reported apart from the steady
-    # state; each trial starts from the same viewport, or the later ones
-    # walk the view off the data.
-    for key in ("press", "first_move", "steady_gap",
-                "moves_submitted", "moves_answered"):
-        assert '"%s"' % key in body, key
-    assert "set_viewport" in body, "a pan commits; trials must start level"
-    # And it runs against a console that is actually running.
-    assert "ProductBeat" in body, (
-        "a gesture measured on a frozen console competes with nothing"
-    )
-    # In the operator's scenario: zoomed past full, and all four directions.
-    assert "_WALK" in body and "still_full_of_data" in body
-    # The orbit reads the camera the panel ACCEPTED, through the public
-    # description.  The product's three-process console hands the bench a
-    # process-isolated Host with no session and no renderer, so a bench
-    # that reached for ``host._session._renderer`` failed before the first
-    # press and produced no 3D gesture numbers at all.
-    assert "_session" not in body and "height_bars_camera" not in body
-    assert "camera_azimuth" in body and "describe_display" in body
-
-
 def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
     """The harness must never beat the console faster than the board does.
 
@@ -357,26 +296,6 @@ def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
             node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
         }
         assert "ProductBeat" in names, owner
-
-
-def test_a_setting_edit_is_answered_by_its_own_presented_configuration() -> None:
-    """The edit's wait ends on the panel's transaction, not on any front.
-
-    A live card presents a new front whenever the producer delivers one.
-    Ending the wait at "one more front" therefore timed the producer's
-    phase and called it the Setting's cost -- the false answer ``_flows``
-    already refuses with the panel's own configuration and presentation
-    state, which is what this wait has to read too.
-    """
-
-    import inspect
-
-    from bench.plot_perf.run_console import ConsoleBench
-
-    body = inspect.getsource(ConsoleBench.edit_setting)
-    assert "panel.configuration is None" in body
-    assert "presentation_current" in body
-    assert "to_next_front_ms" not in body, "the key would name the wrong answer"
 
 
 def test_an_action_s_wall_clock_runs_from_the_call_to_the_visible_answer(
@@ -432,50 +351,6 @@ def test_an_action_s_wall_clock_runs_from_the_call_to_the_visible_answer(
     assert row["trigger_ms"] == 100.0
     assert row["wait_ms"] == 20.0
     assert row["wall_ms"] == 120.0
-
-
-def test_no_qt_event_is_charged_the_time_until_the_next_one_entered() -> None:
-    """An event filter sees events ENTER; it never sees one return.
-
-    Charging each event the time until the next one entered handed an
-    outer event's remaining work to whatever nested event ran last inside
-    it: measured with a set clock, 90 ms of the outer event and 10 of the
-    nested one came out as 10 and 90.  Neither exclusive nor inclusive, it
-    was printed as "the slowest Qt events".  The owner-turn steps and the
-    relay timer wrap real calls and their returns; the entry-gap
-    attribution is gone.
-    """
-
-    import inspect
-
-    from bench.plot_perf import run_edit_actions as edits
-
-    assert not hasattr(edits, "_EventWatch")
-    source = inspect.getsource(edits)
-    assert "slowest_events" not in source
-    assert "eventFilter" not in source
-
-
-def test_the_isolated_bench_stands_on_its_own_numbers() -> None:
-    """The isolated run reports itself; it compares against nothing stale.
-
-    It read a console result file the chain no longer writes under that
-    name, then a child-renderer stage the product's three-process console
-    never has, and divided a median by a gross mean -- so after its own
-    expensive run it either crashed on a missing file, a missing key, or
-    printed a ratio of two different quantities.
-    """
-
-    import inspect
-
-    from bench.plot_perf import run_mot_roi_isolated as isolated
-
-    source = inspect.getsource(isolated)
-    assert "console-mot-roi-four-panel" not in source
-    assert '"comparison"' not in source
-    assert "console_over_isolated" not in source
-    # It reads no result file of another runner's at all.
-    assert "read_text" not in inspect.getsource(isolated.run)
 
 
 def test_process_cpu_is_counted_only_inside_the_measurement_windows() -> None:

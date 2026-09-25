@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import time
 from types import SimpleNamespace
 
@@ -140,32 +139,71 @@ class _ManagerView:
 @pytest.fixture
 def manager(tmp_path):
     view = _ManagerView()
-    return DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    yield manager
+    manager.close()
 
 
-def test_a_bench_with_no_apparatus_yet_is_answered_not_refused(manager) -> None:
-    """Which is how every new bench starts, so it cannot be an error."""
+def _apparatus(*devices: tuple[str, str, str, dict]) -> InstallationConfig:
+    """An apparatus of catalog types, one ``(key, role, type_id, parameters)`` each.
 
-    assert manager.devices == []
-    assert "no apparatus" in manager.view.status[-1][1]
-    assert manager.view.choices, "no device type could be added"
-
-
-def test_the_types_offered_are_the_types_that_can_be_built(manager) -> None:
-    """Not a list this window keeps.  A second catalog drifts from the real one.
-
-    Minus the types discovery authors (a peer's fabric device): those are
-    reachable, not hand-addable, and the catalog itself says which.
+    Every device holds its type's own editable draft of ``parameters`` -- the
+    projection the presenter makes of every device it loads -- so a field a
+    type gains later is filled here as well, never missing from a hand-typed
+    dict.
     """
 
     from zlc_atom.install import discover_device_catalog
 
+    types = {item.type_id: item for item in discover_device_catalog().available}
+    return InstallationConfig(
+        tuple(
+            DeviceInstanceConfig(
+                instance_id=key,
+                role=role,
+                type_id=type_id,
+                parameters=types[type_id].authoring_schema.draft_values(parameters),
+            )
+            for key, role, type_id, parameters in devices
+        )
+    )
+
+
+def _session(devices: dict, *, failures: dict | None = None, **extra) -> SimpleNamespace:
+    """The loaded session as the presenter reads it: its installation's leaves."""
+
+    return SimpleNamespace(
+        installation=SimpleNamespace(devices=devices, failures=dict(failures or {})),
+        **extra,
+    )
+
+
+def test_a_bench_with_no_apparatus_yet_offers_every_type_that_can_be_added(manager) -> None:
+    """Which is how every new bench starts, so it cannot be an error.
+
+    The types offered are not a list this window keeps -- a second catalog
+    drifts from the real one.  Minus the types discovery authors:
+    remote.tunable is a way of REACHING a family, not a family to add.
+    Hand-adding it would ask the operator to type the very address the fabric
+    exists to carry, so the Add picker does not offer it, while Scan hardware
+    still installs it, prefilled.
+    """
+
+    from zlc_atom.install import discover_device_catalog
+
+    assert manager.devices == []
+    assert "no apparatus" in manager.view.status[-1][1]
     offered = {key for _label, key, _domain in manager.view.choices}
     assert offered == {
         item.type_id
         for item in discover_device_catalog().available
         if item.addable
     }
+    assert "remote.tunable" not in offered
+    assert "rf.vaunix_lms" in offered, "real families still offered"
+    assert "remote.tunable" in manager.types, (
+        "the type stays in the catalog for discovery to author"
+    )
 
 
 def test_one_catalog_snapshot_drives_choices_unavailable_and_templates(tmp_path) -> None:
@@ -229,7 +267,9 @@ def test_two_devices_cannot_share_one_name(manager) -> None:
     assert manager.toggle_lifecycle() is False
     assert not started
     assert "role" in manager.view.status[-1][1]
+    # The exact file grammar refuses duplicate roles before writing.
     assert not manager.save()
+    assert manager.view.status[-1][0] == "error"
     assert not manager.path.exists()
 
     manager.view.role_committed.emit("camera2", "qCMOS")
@@ -317,32 +357,23 @@ def test_save_and_reopen_preserve_devices_and_root_simulation(manager, tmp_path)
     assert json.loads(written.read_text(encoding="utf-8"))["format"] == "zlc.installation"
 
 
-def test_a_structurally_duplicate_apparatus_is_not_written(manager, tmp_path) -> None:
-    """The exact file grammar refuses duplicate roles before writing."""
+def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
+    """The device's schema is the form's whole grammar, in both directions.
 
-    manager.view.device_add_requested.emit("camera.virtual")
-    # Reach past the presenter to forge the state a duplicate role would leave.
-    manager.devices.append(manager.devices[0])
+    A declared type no widget can edit is refused rather than guessed:
+    silently rendering it as text saves the wrong thing, and says nothing.
+    """
 
-    manager.view.save_requested.emit()
-
-    assert not (tmp_path / "apparatus.json").exists()
-    assert manager.view.status[-1][0] == "error"
-
-
-def test_a_declared_type_no_widget_can_edit_is_refused_rather_than_guessed() -> None:
-    """Silently rendering it as text saves the wrong thing, and says nothing."""
-
-    from zlc_atom.authoring import AuthoringField, AuthoringSchema
-
-    schema = AuthoringSchema((AuthoringField("thing", "matrix", "Thing"),))
+    from zlc_atom.authoring import (
+        AuthoringChoice,
+        AuthoringField,
+        AuthoringSchema,
+    )
 
     with pytest.raises(ValueError, match="matrix"):
-        project_schema(schema)
-
-
-def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
-    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+        project_schema(
+            AuthoringSchema((AuthoringField("thing", "matrix", "Thing"),))
+        )
 
     schema = AuthoringSchema(
         (
@@ -384,11 +415,8 @@ def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
             {"n": 1, "x": 1.0, "s": "3 4", "factors": "nan, 2"}
         )
 
-
-def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
-    from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
-
-    schema = AuthoringSchema(
+    # A choice keeps its owner's labels and its typed values.
+    choices = AuthoringSchema(
         (
             AuthoringField(
                 "binning",
@@ -402,13 +430,12 @@ def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
             ),
         )
     )
-
-    field = project_schema(schema).fields[0]
+    field = project_schema(choices).fields[0]
     assert tuple((choice.label, choice.value) for choice in field.choices) == (
         ("1 × 1", 1),
         ("2 × 2", 2),
     )
-    assert schema.project_values({"binning": 2}) == {"binning": 2}
+    assert choices.project_values({"binning": 2}) == {"binning": 2}
 
 
 def test_installation_missing_required_fields_is_reported(tmp_path) -> None:
@@ -510,28 +537,8 @@ def test_a_standalone_editor_without_a_session_factory_cannot_fake_init(tmp_path
 def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) -> None:
     """Init is the shared Experiment boundary, not a build-and-release test."""
 
-    from types import SimpleNamespace
-
-    from zlc_atom.install import discover_device_catalog
-
-    camera = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "camera.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="camera",
-                role="camera",
-                type_id=camera.type_id,
-                parameters=camera.authoring_schema.project_values({}),
-            ),
-        )
-    )
-    session = SimpleNamespace(
-        installation=SimpleNamespace(devices={"camera": object()}, failures={})
-    )
+    initial = _apparatus(("camera", "camera", "camera.virtual", {}))
+    session = _session({"camera": object()})
     initialized: list[object] = []
     shut_down: list[object] = []
     candidates: list[InstallationConfig] = []
@@ -592,26 +599,8 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
 def test_an_active_draft_change_reconciles_without_replacing_or_shutting_session(
     tmp_path,
 ) -> None:
-    from zlc_atom.install import discover_device_catalog
-
-    camera = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "camera.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="camera",
-                role="camera",
-                type_id=camera.type_id,
-                parameters=camera.authoring_schema.project_values({}),
-            ),
-        )
-    )
-    session = SimpleNamespace(
-        installation=SimpleNamespace(devices={"camera": object()}, failures={})
-    )
+    initial = _apparatus(("camera", "camera", "camera.virtual", {}))
+    session = _session({"camera": object()})
     prepared: list[tuple[object, InstallationConfig, tuple[str, ...]]] = []
     reconciled: list[object] = []
     shut_down: list[object] = []
@@ -654,29 +643,12 @@ def test_an_active_draft_change_reconciles_without_replacing_or_shutting_session
 def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
     tmp_path,
 ) -> None:
-    from zlc_atom.install import discover_device_catalog
-
-    descriptors = {
-        item.type_id: item for item in discover_device_catalog().available
-    }
-    initial = InstallationConfig(
-        tuple(
-            DeviceInstanceConfig(
-                instance_id=key,
-                role=key,
-                type_id=type_id,
-                parameters=descriptors[type_id].authoring_schema.project_values({}),
-            )
-            for key, type_id in (
-                ("camera", "camera.virtual"),
-                ("sequencer", "sequencer.virtual"),
-            )
-        )
+    initial = _apparatus(
+        ("camera", "camera", "camera.virtual", {}),
+        ("sequencer", "sequencer", "sequencer.virtual", {}),
     )
     installed = {"camera": object(), "sequencer": object()}
-    session = SimpleNamespace(
-        installation=SimpleNamespace(devices=installed, failures={})
-    )
+    session = _session(installed)
     prepared: list[tuple[InstallationConfig, tuple[str, ...]]] = []
     shut_down: list[object] = []
 
@@ -726,32 +698,17 @@ def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
 
 
 def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path, caplog) -> None:
-    from zlc_atom.install import discover_device_catalog
     from zlc_atom.install.graph import Installation
     from zlc_atom.install.descriptors import InstalledLeaf
 
-    camera = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "camera.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="camera",
-                role="camera",
-                type_id=camera.type_id,
-                parameters=camera.authoring_schema.project_values({}),
-            ),
-        )
-    )
+    initial = _apparatus(("camera", "camera", "camera.virtual", {}))
     close_attempts = []
     def close_leaf():
         close_attempts.append(1)
         if len(close_attempts) == 1:
             raise ExceptionGroup("SDK close", [RuntimeError("fnLMS_CloseDevice refused device 7 error 0x80000001")])
     installation = Installation({"camera": InstalledLeaf(
-        "camera", camera.type_id, object(), {}, closer=close_leaf,
+        "camera", "camera.virtual", object(), {}, closer=close_leaf,
     )}, world=None)
     session = SimpleNamespace(installation=installation)
     reconciled: list[object] = []
@@ -804,31 +761,13 @@ def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path, ca
 
 
 def test_partial_failure_adopts_effective_config_and_refreshes_views(tmp_path) -> None:
-    from zlc_atom.install import discover_device_catalog
-
-    descriptors = {
-        item.type_id: item for item in discover_device_catalog().available
-    }
-    initial = InstallationConfig(
-        tuple(
-            DeviceInstanceConfig(
-                key,
-                key,
-                type_id,
-                descriptors[type_id].authoring_schema.project_values({}),
-            )
-            for key, type_id in (
-                ("camera", "camera.virtual"),
-                ("sequencer", "sequencer.virtual"),
-            )
-        )
+    initial = _apparatus(
+        ("camera", "camera", "camera.virtual", {}),
+        ("sequencer", "sequencer", "sequencer.virtual", {}),
     )
     effective = InstallationConfig((initial.devices[1],), simulation=initial.simulation)
     installed = {"camera": object(), "sequencer": object()}
-    session = SimpleNamespace(
-        installation=SimpleNamespace(devices=installed, failures={}),
-        installation_config=initial,
-    )
+    session = _session(installed, installation_config=initial)
     refreshed: list[object] = []
 
     def prepare(active, _candidate, _close_keys):
@@ -859,27 +798,8 @@ def test_partial_failure_adopts_effective_config_and_refreshes_views(tmp_path) -
 
 
 def test_projection_refresh_failure_retries_without_running_hardware_again(tmp_path) -> None:
-    from zlc_atom.install import discover_device_catalog
-
-    camera = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "camera.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                "camera",
-                "camera",
-                camera.type_id,
-                camera.authoring_schema.project_values({}),
-            ),
-        )
-    )
-    session = SimpleNamespace(
-        installation=SimpleNamespace(devices={"camera": object()}, failures={}),
-        installation_config=initial,
-    )
+    initial = _apparatus(("camera", "camera", "camera.virtual", {}))
+    session = _session({"camera": object()}, installation_config=initial)
     hardware_calls: list[bool] = []
     refresh_calls: list[bool] = []
 
@@ -922,41 +842,18 @@ def test_projection_refresh_failure_retries_without_running_hardware_again(tmp_p
 def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) -> None:
     """DeviceManager emits identity; it neither embeds controls nor tunes hardware."""
 
-    from types import SimpleNamespace
-
-    from zlc_atom.install import discover_device_catalog
-
-    descriptors = {
-        item.type_id: item for item in discover_device_catalog().available
-    }
-    camera = descriptors["camera.virtual"]
-    sequencer = descriptors["sequencer.virtual"]
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={"camera": object()},
-            failures={"sequencer": RuntimeError("not connected")},
-        )
+    session = _session(
+        {"camera": object()},
+        failures={"sequencer": RuntimeError("not connected")},
     )
     opened: list[str] = []
     view = _ManagerView()
     manager = DeviceManagerPresenter(
         view,
         tmp_path / "apparatus.json",
-        initial_config=InstallationConfig(
-            (
-                DeviceInstanceConfig(
-                    instance_id="camera",
-                    role="camera",
-                    type_id="camera.virtual",
-                    parameters=camera.authoring_schema.project_values({}),
-                ),
-                DeviceInstanceConfig(
-                    instance_id="sequencer",
-                    role="sequencer",
-                    type_id="sequencer.virtual",
-                    parameters=sequencer.authoring_schema.project_values({}),
-                ),
-            )
+        initial_config=_apparatus(
+            ("camera", "camera", "camera.virtual", {}),
+            ("sequencer", "sequencer", "sequencer.virtual", {}),
         ),
         initialize_session=lambda _candidate: session,
         on_device_open=opened.append,
@@ -987,11 +884,17 @@ def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) ->
 
 
 def test_scan_families_share_one_total_deadline(tmp_path, monkeypatch) -> None:
+    from threading import Event
+
     import zlc_workbench.device_manager as tested_module
 
     deadline = 0.03
     monkeypatch.setattr(tested_module, "_FAMILY_SCAN_DEADLINE_SECONDS", deadline)
-    manager = DeviceManagerPresenter(_ManagerView(), tmp_path / "apparatus.json")
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    # The last family answers only when the test lets it, so "still
+    # answering" below is a fact of the test, not a race against a sleep.
+    hung = Event()
 
     def slow(delay: float):
         def discover():
@@ -1000,22 +903,32 @@ def test_scan_families_share_one_total_deadline(tmp_path, monkeypatch) -> None:
 
         return discover
 
-    manager.types = {
-        f"slow-{index}": SimpleNamespace(
-            type_id=f"slow-{index}",
-            discover=slow(delay),
-        )
-        for index, delay in enumerate((0.06, 0.09, 0.12))
-    }
-    started = time.monotonic()
-    _found, failures = manager._scan_families()
-    elapsed = time.monotonic() - started
+    def held():
+        hung.wait(5.0)
+        return ()
 
-    assert elapsed < deadline * 2.2, elapsed
-    assert len(failures) == 3
-    assert manager.close() is False
-    time.sleep(0.13)
-    assert manager.close() is True
+    manager.types = {
+        f"slow-{index}": SimpleNamespace(type_id=f"slow-{index}", discover=discover)
+        for index, discover in enumerate((slow(0.06), slow(0.09), held))
+    }
+    try:
+        started = time.monotonic()
+        _found, failures = manager._scan_families()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < deadline * 2.2, elapsed
+        # Three families missed it for one reason, so it is one line that
+        # names all three.
+        (line,) = failures
+        assert all(f"slow-{index}" in line for index in range(3)), line
+        # A family still answering past the deadline holds the next scan,
+        # and says so by name; it never holds the close -- its daemon thread
+        # is abandoned, and nothing would come back to finish a refused close.
+        assert manager.discover() is False
+        assert "slow-2" in view.status[-1][1], view.status[-1]
+        assert manager.close() is True
+    finally:
+        hung.set()
 
 
 def test_busy_presenter_refuses_close_then_closes_its_worker_and_rejects_work(
@@ -1055,106 +968,20 @@ def test_busy_presenter_refuses_close_then_closes_its_worker_and_rejects_work(
     assert manager.discover() is False
 
 
-def test_remote_toggle_publishes_and_withdraws_on_the_fabric(tmp_path) -> None:
-    """One click beside Control publishes; a second withdraws; unload withdraws.
+@pytest.fixture
+def rf_bench(tmp_path):
+    """An Init-ed bench holding one loaded virtual RF card, closed after.
 
-    A tunable device (the virtual RF -- the real driver over a memory
-    library) is served by the fabric's generic data plane; the published
-    set always names exactly what this machine can still serve.
-    """
-
-    from zlc_atom.devices.remote.fabric import list_remote_devices
-    from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
-    from zlc_atom.devices.simulation.rf import virtual_rf_source
-    from zlc_atom.install import discover_device_catalog
-
-    rf_type = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "rf.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="rf",
-                role="detuning",
-                type_id=rf_type.type_id,
-                parameters=rf_type.authoring_schema.project_values({}),
-            ),
-        )
-    )
-    source = virtual_rf_source(VaunixLmsConfig(serial=1001))
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={"rf": SimpleNamespace(device=source, admit_peers=None)}, failures={}
-        ),
-        device_use=DeviceUseCoordinator(),
-    )
-    view = _ManagerView()
-    manager = DeviceManagerPresenter(
-        view,
-        tmp_path / "apparatus.json",
-        initial_config=initial,
-        initialize_session=lambda _candidate: session,
-    )
-    assert manager.toggle_lifecycle() is True
-    try:
-        assert manager.toggle_remote("rf") is True
-        assert view.remoted == ("rf",)
-        announcer = manager._announcer
-        assert announcer is not None
-        records = list_remote_devices("127.0.0.1", announcer.port)
-        assert [record["instance_id"] for record in records] == ["rf"]
-        assert records[0]["tunable"] is True
-
-        assert manager.toggle_remote("rf") is True
-        assert view.remoted == ()
-        assert list_remote_devices("127.0.0.1", announcer.port) == ()
-
-        # Published again, then unloaded: the fabric follows the session.
-        assert manager.toggle_remote("rf") is True
-        session.installation.devices.clear()
-        manager._show()
-        assert view.remoted == ()
-        assert list_remote_devices("127.0.0.1", announcer.port) == ()
-    finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
-        manager.close()
-
-
-def test_a_published_device_refuses_local_control_until_withdrawn(tmp_path) -> None:
-    """Remote means remote: whoever dialled in owns the knobs.
-
-    Publishing hands the device to the fabric; the local Control button
-    is refused BY NAME until Remote is withdrawn -- two hands on one
-    knob is exactly what publishing exists to prevent.
+    The virtual RF is the real driver over a memory library, so a publish
+    serves it through the fabric's generic tunable data plane.
     """
 
     from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
     from zlc_atom.devices.simulation.rf import virtual_rf_source
-    from zlc_atom.install import discover_device_catalog
 
-    rf_type = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "rf.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="rf",
-                role="detuning",
-                type_id=rf_type.type_id,
-                parameters=rf_type.authoring_schema.project_values({}),
-            ),
-        )
-    )
     source = virtual_rf_source(VaunixLmsConfig(serial=1001))
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={"rf": SimpleNamespace(device=source, admit_peers=None)}, failures={}
-        ),
+    session = _session(
+        {"rf": SimpleNamespace(device=source, admit_peers=None)},
         device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
@@ -1162,27 +989,59 @@ def test_a_published_device_refuses_local_control_until_withdrawn(tmp_path) -> N
     manager = DeviceManagerPresenter(
         view,
         tmp_path / "apparatus.json",
-        initial_config=initial,
+        initial_config=_apparatus(("rf", "detuning", "rf.virtual", {})),
         initialize_session=lambda _candidate: session,
         on_device_open=opened.append,
     )
     assert manager.toggle_lifecycle() is True
     try:
-        assert manager.open_device("rf") is True
-        assert opened == ["rf"]
-
-        assert manager.toggle_remote("rf") is True
-        assert manager.open_device("rf") is False
-        assert opened == ["rf"], "a published device must not open locally"
-        assert "withdraw Remote" in view.status[-1][1]
-
-        assert manager.toggle_remote("rf") is True
-        assert manager.open_device("rf") is True
-        assert opened == ["rf", "rf"]
+        yield SimpleNamespace(
+            manager=manager, view=view, source=source, session=session, opened=opened
+        )
     finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
         manager.close()
+
+
+def test_remote_publishes_hands_over_the_knobs_and_withdraws(rf_bench) -> None:
+    """One click beside Control publishes; a second withdraws; unload withdraws.
+
+    The published set always names exactly what this machine can still
+    serve.  And Remote means remote: whoever dialled in owns the knobs, so
+    the local Control button is refused BY NAME until Remote is withdrawn --
+    two hands on one knob is exactly what publishing exists to prevent.
+    """
+
+    from zlc_atom.devices.remote.fabric import list_remote_devices
+
+    manager, view, opened = rf_bench.manager, rf_bench.view, rf_bench.opened
+    assert manager.open_device("rf") is True
+    assert opened == ["rf"]
+
+    assert manager.toggle_remote("rf") is True
+    assert view.remoted == ("rf",)
+    announcer = manager._announcer
+    assert announcer is not None
+    records = list_remote_devices("127.0.0.1", announcer.port)
+    assert [record["instance_id"] for record in records] == ["rf"]
+    assert records[0]["tunable"] is True
+    assert manager.open_device("rf") is False
+    assert opened == ["rf"], "a published device must not open locally"
+    assert "withdraw Remote" in view.status[-1][1]
+
+    assert manager.toggle_remote("rf") is True
+    assert view.remoted == ()
+    assert list_remote_devices("127.0.0.1", announcer.port) == ()
+    assert manager.open_device("rf") is True
+    assert opened == ["rf", "rf"]
+
+    # Published again, then unloaded: the fabric follows the session.
+    assert manager.toggle_remote("rf") is True
+    rf_bench.session.installation.devices.clear()
+    manager._show()
+    assert view.remoted == ()
+    assert list_remote_devices("127.0.0.1", announcer.port) == ()
+    assert manager.close() is True
+    assert manager._announcer is None, "closing the bench closes its fabric"
 
 
 def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
@@ -1190,52 +1049,41 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
 
     The authored parameters are the SERVER's (backend, port); a peer needs
     the CLIENT's (host, port).  The family's announce hook does that
-    mapping, and the presenter substitutes this machine's LAN address for
-    the loopback the hook returns.
+    mapping; the presenter announces the loopback the hook returns, and a
+    peer reads the host as the address it reached this machine's announcer
+    at, the one address known to work.
 
     What is announced is where the server IS -- the accepted apparatus the
     loaded device was built from.  A port edited on the form but not yet
     applied is a draft; announcing it would send the peer to a server
     that does not exist.
+
+    Its log is the pulse server's own narration too: the type declares
+    log_channels=("zlc_pulse.remote",), so its in-process server's lines
+    belong to it, alongside the fabric lines naming it.
     """
 
-    from zlc_atom.devices.remote.fabric import list_remote_devices, local_lan_ip
-    from zlc_atom.install import discover_device_catalog
+    import logging
 
-    local_type = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "sequencer.local"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="board",
-                role="sequencer",
-                type_id=local_type.type_id,
-                parameters=local_type.authoring_schema.project_values(
-                    {"port": 18899}
-                ),
-            ),
-        )
-    )
+    from zlc_atom.devices.remote.fabric import list_remote_devices
+
     # The leaf's own server answers nobody but this machine until it is
     # published; the presenter opens and closes that door.
     admitted: list[bool] = []
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={"board": SimpleNamespace(device=object(), admit_peers=admitted.append)},
-            failures={},
-        ),
+    session = _session(
+        {"board": SimpleNamespace(device=object(), admit_peers=admitted.append)},
         device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
         view,
         tmp_path / "apparatus.json",
-        initial_config=initial,
+        initial_config=_apparatus(
+            ("board", "sequencer", "sequencer.local", {"port": 18899})
+        ),
         initialize_session=lambda _candidate: session,
     )
+    assert manager.types["sequencer.local"].log_channels == ("zlc_pulse.remote",)
     assert manager.toggle_lifecycle() is True
     try:
         # Edited on the form, committed to the draft, NOT applied.
@@ -1253,155 +1101,13 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
         assert record["type_id"] == "sequencer.hardware"
         assert record["tunable"] is False
         assert record["parameters"] == {
-            "host": local_lan_ip(),
+            "host": "127.0.0.1",
             "port": 18899,
         }, "the accepted apparatus is announced, never the draft"
         assert manager.devices[0].parameters["port"] == 18999, (
             "the draft stays on the form"
         )
-        assert manager.toggle_remote("board") is True
-        assert admitted == [True, False], "withdrawing closes the door on peers"
-        assert list_remote_devices("127.0.0.1", announcer.port) == ()
-    finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
-        manager.close()
 
-
-def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
-    """The log is the published device's own console, not a shared one.
-
-    An RF source published on the fabric shows the fabric lines that name
-    it -- and nothing from the pulse server, the SLM, or OTHER published
-    devices.  A device that is not published has no log to offer, because
-    nobody else can be on its knobs.
-    """
-
-    import logging
-
-    from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
-    from zlc_atom.devices.simulation.rf import virtual_rf_source
-    from zlc_atom.install import discover_device_catalog
-
-    rf_type = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "rf.virtual"
-    )
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="rf",
-                role="detuning",
-                type_id=rf_type.type_id,
-                parameters=rf_type.authoring_schema.project_values({}),
-            ),
-        )
-    )
-    source = virtual_rf_source(VaunixLmsConfig(serial=1001))
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={"rf": SimpleNamespace(device=source, admit_peers=None)}, failures={}
-        ),
-        device_use=DeviceUseCoordinator(),
-    )
-    view = _ManagerView()
-    manager = DeviceManagerPresenter(
-        view,
-        tmp_path / "apparatus.json",
-        initial_config=initial,
-        initialize_session=lambda _candidate: session,
-    )
-    assert manager.toggle_lifecycle() is True
-    try:
-        # Before any publishing, the device's OWN interactions already
-        # narrate: the contract layer tags every tune with the hardware
-        # identity, whoever called it.
-        source.tune("frequency", 1_000_000_000.0)
-        assert manager.show_device_log("rf") is True
-        (_key, local_snapshot) = view.device_logs_opened[-1]
-        _total, local_lines = local_snapshot()
-        assert any(
-            "TUNE field=frequency" in line
-            and line.endswith(f"device={source.identity}")
-            for line in local_lines
-        ), local_lines
-
-        assert manager.toggle_remote("rf") is True
-        logging.getLogger("zlc_pulse.remote").info("ZLC NOISE for the board")
-        logging.getLogger("zlc_atom.devices.remote.fabric").info(
-            "FABRIC TUNE device=rf field=frequency value=1.0"
-        )
-        logging.getLogger("zlc_atom.devices.remote.fabric").info(
-            "FABRIC TUNE device=other field=power value=2.0"
-        )
-        logging.getLogger("zlc_atom.devices.remote.fabric").info(
-            "FABRIC WITHDRAW device=rf"
-        )
-        assert manager.show_device_log("rf") is True
-        (key, snapshot) = view.device_logs_opened[-1]
-        assert key == "rf"
-        _total, lines = snapshot()
-        tails = [line.split("] ", 1)[1] for line in lines]
-        assert "FABRIC TUNE device=rf field=frequency value=1.0" in tails
-        assert "FABRIC WITHDRAW device=rf" in tails
-        assert not any("device=other" in line for line in tails), (
-            "another device's lines must not appear"
-        )
-        assert not any("ZLC NOISE" in line for line in tails), (
-            "the pulse server is not this device"
-        )
-    finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
-        manager.close()
-
-
-def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) -> None:
-    """sequencer.local's log shows the pulse server's own narration too.
-
-    The type declares log_channels=("zlc_pulse.remote",): its in-process
-    server's lines belong to it, alongside the fabric lines naming it.
-    """
-
-    import logging
-
-    from zlc_atom.install import discover_device_catalog
-
-    local_type = next(
-        item
-        for item in discover_device_catalog().available
-        if item.type_id == "sequencer.local"
-    )
-    assert local_type.log_channels == ("zlc_pulse.remote",)
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="board",
-                role="sequencer",
-                type_id=local_type.type_id,
-                parameters=local_type.authoring_schema.project_values(
-                    {"port": 18899}
-                ),
-            ),
-        )
-    )
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={"board": SimpleNamespace(device=object(), admit_peers=None)}, failures={}
-        ),
-        device_use=DeviceUseCoordinator(),
-    )
-    view = _ManagerView()
-    manager = DeviceManagerPresenter(
-        view,
-        tmp_path / "apparatus.json",
-        initial_config=initial,
-        initialize_session=lambda _candidate: session,
-    )
-    assert manager.toggle_lifecycle() is True
-    try:
-        assert manager.toggle_remote("board") is True
         logging.getLogger("zlc_pulse.remote").info(
             "ZLC FIRE run_repeats=3 scan_repeats=1"
         )
@@ -1415,10 +1121,129 @@ def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) ->
         assert not any(line.startswith("SLM ") for line in tails), (
             "the SLM's narration is not the board's"
         )
+
+        assert manager.toggle_remote("board") is True
+        assert admitted == [True, False], "withdrawing closes the door on peers"
+        assert list_remote_devices("127.0.0.1", announcer.port) == ()
     finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
         manager.close()
+
+
+def test_a_refused_rejoin_still_withdraws_and_frees_the_board(tmp_path, monkeypatch) -> None:
+    """Withdrawing a local board whose own client cannot rejoin still finishes.
+
+    A peer that used the published board took it from this machine's
+    loopback client, so withdrawing asks that client to join again.  When
+    the board or its line has gone away meanwhile -- exactly when an
+    operator withdraws to look -- the takeover SAFE of that rejoin fails.
+    The withdrawal must not raise with it: the publication's claim is
+    released, so local users are not refused as busy, and the failure is
+    told in the board's own log.
+    """
+
+    import socket
+
+    from zlc_atom.install import create_installation
+    from zlc_pulse import RemoteError, connect
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    parameters = {"backend": "memory", "port": free_port}
+    installation = create_installation(
+        ({"key": "board", "type_id": "sequencer.local", "config": parameters},),
+        connect_pulse=connect,
+    )
+    try:
+        leaf = installation.devices["board"]
+        session = _session({"board": leaf}, device_use=DeviceUseCoordinator())
+        view = _ManagerView()
+        manager = DeviceManagerPresenter(
+            view,
+            tmp_path / "apparatus.json",
+            initial_config=_apparatus(("board", "sequencer", "sequencer.local", parameters)),
+            initialize_session=lambda _candidate: session,
+        )
+        assert manager.toggle_lifecycle() is True
+        try:
+            assert manager.toggle_remote("board") is True
+
+            def taken() -> None:
+                raise ConnectionError("the connection to the pulse server ended")
+
+            def refused() -> None:
+                raise RemoteError(
+                    "RuntimeError",
+                    "takeover SAFE failed: RuntimeError: SAFE readback was not stable",
+                )
+
+            monkeypatch.setattr(leaf.device, "snapshot", taken)
+            monkeypatch.setattr(leaf.device, "open", refused)
+
+            assert manager.toggle_remote("board") is True
+            assert view.remoted == ()
+            session.device_use.assert_idle()
+            assert manager.show_device_log("board") is True
+            _total, lines = view.device_logs_opened[-1][1]()
+            assert any(
+                "LOCAL CLIENT NOT REJOINED" in line and "takeover SAFE failed" in line
+                for line in lines
+            ), lines
+        finally:
+            manager.close()
+    finally:
+        installation.close()
+
+
+def test_each_published_device_reads_only_its_own_log(rf_bench) -> None:
+    """The log is the published device's own console, not a shared one.
+
+    An RF source published on the fabric shows the fabric lines that name
+    it -- and nothing from the pulse server, the SLM, or OTHER published
+    devices.  A device that is not published has no log to offer, because
+    nobody else can be on its knobs.
+    """
+
+    import logging
+
+    manager, view, source = rf_bench.manager, rf_bench.view, rf_bench.source
+    # Before any publishing, the device's OWN interactions already
+    # narrate: the contract layer tags every tune with the hardware
+    # identity, whoever called it.
+    source.tune("frequency", 1_000_000_000.0)
+    assert manager.show_device_log("rf") is True
+    (_key, local_snapshot) = view.device_logs_opened[-1]
+    _total, local_lines = local_snapshot()
+    assert any(
+        "TUNE field=frequency" in line
+        and line.endswith(f"device={source.identity}")
+        for line in local_lines
+    ), local_lines
+
+    assert manager.toggle_remote("rf") is True
+    logging.getLogger("zlc_pulse.remote").info("ZLC NOISE for the board")
+    logging.getLogger("zlc_atom.devices.remote.fabric").info(
+        "FABRIC TUNE device=rf field=frequency value=1.0"
+    )
+    logging.getLogger("zlc_atom.devices.remote.fabric").info(
+        "FABRIC TUNE device=other field=power value=2.0"
+    )
+    logging.getLogger("zlc_atom.devices.remote.fabric").info(
+        "FABRIC WITHDRAW device=rf"
+    )
+    assert manager.show_device_log("rf") is True
+    (key, snapshot) = view.device_logs_opened[-1]
+    assert key == "rf"
+    _total, lines = snapshot()
+    tails = [line.split("] ", 1)[1] for line in lines]
+    assert "FABRIC TUNE device=rf field=frequency value=1.0" in tails
+    assert "FABRIC WITHDRAW device=rf" in tails
+    assert not any("device=other" in line for line in tails), (
+        "another device's lines must not appear"
+    )
+    assert not any("ZLC NOISE" in line for line in tails), (
+        "the pulse server is not this device"
+    )
 
 
 def test_devices_from_the_fabric_or_another_machine_refuse_remote(tmp_path) -> None:
@@ -1429,43 +1254,25 @@ def test_devices_from_the_fabric_or_another_machine_refuse_remote(tmp_path) -> N
     another machine has nothing of this machine's to announce.
     """
 
-    from zlc_atom.install import discover_device_catalog
-
-    items = {
-        item.type_id: item for item in discover_device_catalog().available
-    }
-    initial = InstallationConfig(
-        (
-            DeviceInstanceConfig(
-                instance_id="borrowed",
-                role="detuning",
-                type_id="remote.tunable",
-                parameters=items["remote.tunable"].authoring_schema.draft_values(
-                    {"host": "192.0.2.9", "port": 18859, "instance_id": "rf"}
-                ),
-            ),
-            DeviceInstanceConfig(
-                instance_id="faraway",
-                role="sequencer",
-                type_id="sequencer.hardware",
-                parameters={"host": "10.0.0.7", "port": 18861},
-            ),
-        )
-    )
-    session = SimpleNamespace(
-        installation=SimpleNamespace(
-            devices={
-                "borrowed": SimpleNamespace(device=object(), admit_peers=None),
-                "faraway": SimpleNamespace(device=object(), admit_peers=None),
-            },
-            failures={},
-        )
+    session = _session(
+        {
+            "borrowed": SimpleNamespace(device=object(), admit_peers=None),
+            "faraway": SimpleNamespace(device=object(), admit_peers=None),
+        }
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
         view,
         tmp_path / "apparatus.json",
-        initial_config=initial,
+        initial_config=_apparatus(
+            (
+                "borrowed",
+                "detuning",
+                "remote.tunable",
+                {"host": "192.0.2.9", "port": 18859, "instance_id": "rf"},
+            ),
+            ("faraway", "sequencer", "sequencer.hardware", {"host": "10.0.0.7", "port": 18861}),
+        ),
         initialize_session=lambda _candidate: session,
     )
     assert manager.toggle_lifecycle() is True
@@ -1527,33 +1334,12 @@ def test_a_defective_handler_is_an_error_line_not_a_dead_bench(tmp_path) -> None
         view.device_remove_requested.emit("rf")
         severity, text = view.status[-1]
         assert severity == "error"
-        assert "internal error in remove_device" in text
+        assert "internal error: LookupError" in text
         assert "wired to fail" in text
         with pytest.raises(LookupError):
             manager.remove_device("rf")
     finally:
         del manager.remove_device
-        manager.close()
-
-
-def test_a_discovery_authored_type_is_not_in_the_hand_add_picker(tmp_path) -> None:
-    """remote.tunable is a way of REACHING a family, not a family to add.
-
-    Hand-adding it would ask the operator to type the very address the
-    fabric exists to carry, so the Add picker does not offer it -- while
-    Scan hardware still installs it, prefilled, like before.
-    """
-
-    view = _ManagerView()
-    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
-    try:
-        offered = [key for _label, key, _domain in view.choices]
-        assert "remote.tunable" not in offered
-        assert "rf.vaunix_lms" in offered, "real families still offered"
-        assert "remote.tunable" in manager.types, (
-            "the type stays in the catalog for discovery to author"
-        )
-    finally:
         manager.close()
 
 
@@ -1691,8 +1477,6 @@ def test_publication_and_local_use_exclude_each_other_device_wide(tmp_path) -> N
         assert logic("scan after withdraw").release() is True
         session.device_use.assert_idle()
     finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
         manager.close()
 
 
@@ -1748,6 +1532,4 @@ def test_a_published_device_is_not_rebuilt_under_its_peer(tmp_path) -> None:
         assert peer.tune("value", 9) == 9
         assert current.value == 9, "published again, the fabric serves the new device"
     finally:
-        if manager._announcer is not None:
-            manager._announcer.close()
         manager.close()

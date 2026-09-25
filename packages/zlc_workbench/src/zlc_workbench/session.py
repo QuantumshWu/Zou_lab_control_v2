@@ -217,11 +217,21 @@ class Workspace:
         """
 
         root = os.environ.get(cls.HOME_VARIABLE, "").strip()
-        home = (
-            Path(root).expanduser()
-            if root
-            else Path(__file__).resolve().parents[4] / cls.DEFAULT_HOME
-        )
+        if root:
+            home = Path(root).expanduser()
+        else:
+            # Only a CHECKOUT has a place beside its code, and the bootstrap
+            # is what knows whether this is one.  Installed, its ROOT is
+            # site-packages, and a workspace there would sit next to the
+            # virtual environment without a word.
+            from zou_lab_control import ROOT
+
+            if not (ROOT / "pyproject.toml").is_file():
+                raise FileNotFoundError(
+                    "no experiment folder at or above the working directory; "
+                    f"pass --workspace or set {cls.HOME_VARIABLE}"
+                )
+            home = ROOT / cls.DEFAULT_HOME
         (home / "pulses").mkdir(parents=True, exist_ok=True)
         return cls(home)
 
@@ -549,10 +559,10 @@ class ExperimentSession:
         """Classify a live apparatus edit without touching a device.
 
         Identity is the authored ``instance_id``.  A role-only edit is metadata;
-        a type/parameter edit replaces that leaf.  Dependants are rebuilt when
-        the type they were constructed from changes.  A simulation-world edit
-        rebuilds world-bound leaves and their dependants while independent
-        physical leaves retain identity.
+        a type/parameter edit replaces that leaf.  Devices do not compose, so
+        a leaf is rebuilt only for its own edit.  A simulation-world edit
+        rebuilds world-bound leaves while independent physical leaves retain
+        identity.
         """
 
         from zlc_atom.install import preflight_installation
@@ -604,17 +614,15 @@ class ExperimentSession:
             )
 
         affected: set[str] = set(closed)
-        affected_types: set[str] = set()
         all_keys = set(current_by_key) | set(wanted_by_key)
         if world_changed:
-            # Only factories owned by the simulation world, then their normal
-            # dependency closure below, must be rebuilt.  Independent physical
-            # devices retain their exact object across a virtual-world edit.
+            # Only factories owned by the simulation world must be rebuilt.
+            # Independent physical devices retain their exact object across a
+            # virtual-world edit.
             for key, item in {**current_by_key, **wanted_by_key}.items():
                 descriptor = descriptors[item.type_id]
                 if descriptor.world_config is not None:
                     affected.add(key)
-                    affected_types.add(item.type_id)
         for key in all_keys:
             before = current_by_key.get(key)
             after = wanted_by_key.get(key)
@@ -622,15 +630,10 @@ class ExperimentSession:
                 continue
             if after is None or not _same_device_setup(descriptors, before, after):
                 affected.add(key)
-                affected_types.add(before.type_id)
-                if after is not None:
-                    affected_types.add(after.type_id)
-        for key in closed:
-            affected_types.add(current_by_key[key].type_id)
 
-        # Close is an operational request, not an edit to apparatus.json.  Its
-        # dependency closure is omitted from the live target; the untouched
-        # draft remains available for an explicit Apply that opens it again.
+        # Close is an operational request, not an edit to apparatus.json.  The
+        # closed leaves are omitted from the live target; the untouched draft
+        # remains available for an explicit Apply that opens them again.
         omitted = affected if closed else set()
         target = InstallationConfig(
             tuple(item for item in config.devices if item.instance_id not in omitted),
@@ -730,11 +733,7 @@ class ExperimentSession:
                 )
                 catalog = self._device_catalog
                 assert catalog is not None
-                preflight_kwargs = {
-                    "catalog": catalog,
-                    "borrowed_from": holding,
-                    "borrowed_revision": holding.revision,
-                }
+                preflight_kwargs = {"catalog": catalog}
                 if plan.world_changed:
                     preflight_kwargs["simulation"] = _resolved_simulation(
                         self.workspace, target_config
@@ -945,11 +944,12 @@ class ExperimentSession:
                 self._close_recovery_installations()
             except BaseException as error:
                 failures.append(error)
-            if not self._recovery_installations:
-                try:
-                    self.installation.close()
-                except BaseException as error:
-                    failures.append(error)
+            # Recovery leaves are independent devices too: one that will not
+            # close is no reason to leave the installation's devices open.
+            try:
+                self.installation.close()
+            except BaseException as error:
+                failures.append(error)
             close = getattr(self.signal_plane, "close", None)
             if callable(close):
                 try:

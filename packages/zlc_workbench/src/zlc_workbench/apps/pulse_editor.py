@@ -211,10 +211,11 @@ def _guard_window_close(
 ) -> None:
     """Retire PulseGUI resources off Qt before allowing its window to vanish.
 
-    The render child goes with them, on the same worker and after the
-    presenter has closed the preview it drew in: a child told to shut down
-    exits on its own, and waiting for it here is what stops the wait from
-    landing on a Qt turn or being skipped altogether.
+    The editor's claim on its render child goes with them, on the same
+    worker and after the presenter has closed the preview it drew in.  When
+    that was the child's last claim the child is told to shut down and exits
+    on its own, and waiting for it here is what stops the wait from landing
+    on a Qt turn or being skipped altogether.
     """
     closing = False
     retired = False
@@ -246,6 +247,10 @@ def _guard_window_close(
         if retired:
             return all(close() for close in close_workers)
         if closing:
+            return False
+        # Asked before anything stops, so a Cancel leaves the window as it
+        # was: its board-status beat running and its summary untouched.
+        if not window.presenter.may_close():
             return False
         if refresh_timer is not None:
             refresh_timer.stop()
@@ -344,12 +349,18 @@ def create_bound_window(
     path: str = "",
     device_label: str = "",
     window_ratio: float | None = None,
+    render: object | None = None,
 ):
     """Open PulseGUI over a sequencer borrowed from an ExperimentSession.
 
     This entry has no dial path.  Connection controls therefore cannot replace
     the experiment's sequencer with a second client, and closing the editor
     retires only its presenter/preview -- the session remains the device owner.
+
+    ``render`` is the application's Edit/Save render child: the preview is
+    one more Edit/export host, so the editor draws there and holds a claim
+    on it until it closes, as a FigureViewer does.  With no application
+    behind it the editor starts a child of its own.
     """
 
     import zlc_plot as plot
@@ -360,14 +371,17 @@ def create_bound_window(
     from ..session import Workspace
 
     space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
-    render = plot.RenderProcess("zlc-pulse-preview-render")
+    if render is None:
+        render = plot.RenderProcess("zlc-pulse-preview-render")
+    else:
+        render.retain()
     try:
         window = open_pulse_editor(
             title=f"{device_label} Pulse Editor" if device_label else "PulseGUI@Zou lab",
             window_ratio=window_ratio,
         )
     except BaseException:
-        render.close(timeout=0.0)
+        render.release(timeout=0.0)
         raise
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
@@ -395,7 +409,7 @@ def create_bound_window(
     except BaseException:
         for close_worker in close_workers:
             close_worker()
-        render.close(timeout=0.0)
+        render.release(timeout=0.0)
         window.close()
         raise
     from ..board import attach_qt

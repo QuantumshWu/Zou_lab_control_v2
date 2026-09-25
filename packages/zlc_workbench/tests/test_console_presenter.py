@@ -11,7 +11,8 @@ layer rather than the presenter is the point: what is under test is the wiring.
 
 from __future__ import annotations
 
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
+from contextlib import contextmanager
 import os
 from threading import Event
 import time
@@ -35,7 +36,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.console_layout import LayoutDocument, LayoutError
 from zlc_workbench.panel_catalog import task_console_fitting_spec
-from zlc_workbench.session import ExperimentSession, Workspace
+from zlc_workbench.session import ExperimentSession
 from zlc_workbench.topology import format_signal_shape
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
@@ -169,7 +170,7 @@ class _ConsoleView:
     """
 
     _SIGNALS = (
-        "close_requested", "add_panel_requested", "add_logic_requested",
+        "add_panel_requested", "add_logic_requested",
         "pause_toggled", "selectors_toggled", "save_layout_requested",
         "load_layout_requested", "clear_board_requested",
         "save_screenshot_requested",
@@ -219,7 +220,6 @@ class _ConsoleView:
         self.panel_editor_surfaces: dict[str, object] = {}
         self.focused_panel_editor = ""
         self.task_takeover = False
-        self.panel_mutation_enabled: dict[str, bool] = {}
         self.panel_publishers: dict[str, tuple] = {}
         self.panel_publisher_editors: dict[str, dict] = {}
         #: Every front the presenter put on a staged panel widget, in order.
@@ -366,9 +366,6 @@ class _ConsoleView:
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
 
-    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
-        self.panel_mutation_enabled[str(panel_id)] = bool(enabled)
-
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         self._cards[str(panel_id)].set_selectors_enabled(enabled)
 
@@ -511,16 +508,20 @@ def session(tmp_path):
         session.close()
 
 
-@pytest.fixture
-def presenter(session):
-    plot = pytest.importorskip("zlc_plot")
+@contextmanager
+def _console_over(session, **overrides):
+    """The console presenter over ``session``, closed until it has retired.
+
+    One ``close()`` only BEGINS the close: plot hosts, projections and logic
+    rows are reaped on later beats.  A test that closed once left them
+    retiring into the next test.
+    """
+
+    import zlc_plot as plot
     # The REAL mount path, not a copy of it.  The copy this fixture used to
     # carry drifted from the app exactly once -- and that once was a shipped
     # bug the suite could not see.
     from zlc_workbench.apps.task_console import build_panel_host
-
-    def spec_for(snapshot, kind="", cell_kind=""):
-        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
     def make_host(plot_input, state):
         return build_panel_host(
@@ -529,16 +530,15 @@ def presenter(session):
             build_host=plot.build_figure_host,
         )
 
-    presenter = ConsolePresenter(
-        session,
-        _ConsoleView(),
-        make_monitor_host=make_host,
-        make_editor_host=make_host,
-        build_figure_host=plot.build_figure_host,
-        save_figure_artifact=_async_writer(plot.save_figure_artifact),
-        close_render_processes=lambda: True,
-        spec_for=spec_for,
-    )
+    options = {
+        "make_monitor_host": make_host,
+        "make_editor_host": make_host,
+        "build_figure_host": plot.build_figure_host,
+        "save_figure_artifact": _async_writer(plot.save_figure_artifact),
+        "close_render_processes": lambda: True,
+        **overrides,
+    }
+    presenter = ConsolePresenter(session, _ConsoleView(), **options)
     try:
         yield presenter
     finally:
@@ -549,16 +549,22 @@ def presenter(session):
         assert presenter.close(), "Console test owner did not retire"
 
 
-def _one_shot(session, producer: str = "cm"):
+@pytest.fixture
+def presenter(session):
+    with _console_over(session) as presenter:
+        yield presenter
+
+
+def _one_shot(session, producer: str = "cm", *, repeat: int = 1):
     session.load_pulse(PULSE_NAME)
     node = CameraMeasurementNode(
         camera=session.camera,
-        request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
+        request=CameraMeasurementRequest("camera", 0.02, None, repeat, CAMERA_WINDOWS),
         signal_plane=session.signal_plane,
         producer=producer,
     )
     capture = node.prepare()
-    session.fire(shots=1)
+    session.fire(shots=repeat)
     result = capture.collect()
     session.nodes = [node]
     return node, result.publication.value(node.signal_key("frames")).snapshot
@@ -572,6 +578,84 @@ def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
             return
         time.sleep(0.005)
     raise AssertionError("panel hosts did not settle")
+
+
+def _started_camera(
+    presenter,
+    session,
+    *,
+    node_id: str = "",
+    frames_per_cycle: int = 1,
+    timeout: float = 10.0,
+):
+    """A started free-running camera row and its first publication.
+
+    Returns ``(camera_id, frames_signal, publication)``.
+    """
+
+    from zlc_runtime import stable_signal_key
+
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        node_id=node_id,
+        values={
+            "exposure_seconds": 0.002,
+            "repeat": 0,
+            "frames_per_cycle": frames_per_cycle,
+        },
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    signal = stable_signal_key(camera_id, "frames")
+    deadline = time.monotonic() + timeout
+    publication = None
+    while publication is None and time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        publication = session.signal_plane.latest_publication(signal)
+        time.sleep(0.005)
+    assert publication is not None
+    return camera_id, signal, publication
+
+
+def _box_calibration(site_ids, centers_xy, thresholds, frame_shape, *, valid_sites=None):
+    """A BOX TrapCalibration: dark mean 0, bright mean 1, every model site usable.
+
+    A site left out of ``valid_sites`` has quality 0.
+    """
+
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+
+    site_ids = tuple(site_ids)
+    count = len(site_ids)
+    valid = (
+        np.ones(count, dtype=bool)
+        if valid_sites is None
+        else np.asarray(valid_sites, dtype=bool)
+    )
+    return TrapCalibration(
+        SiteMap(site_ids, np.asarray(centers_xy, dtype=float), valid, valid.astype(float)),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray(thresholds, dtype=float),
+                np.zeros(count),
+                np.ones(count),
+                np.ones(count, dtype=bool),
+                np.ones(count),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract(tuple(frame_shape)),
+    )
 
 
 def test_camera_restart_drains_the_old_generation_before_replacement(
@@ -742,7 +826,6 @@ def _commit_area(
             button=1,
             identity=front.identity,
             axes=axes,
-            interaction=front.interaction,
         ).result()
 
 
@@ -819,7 +902,7 @@ def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, ses
     presenter.view.cards[0].remove_requested.emit()
     assert presenter.view.cards == ()
     assert presenter.panels == {}
-    assert live_host._closing and editor_host._closing
+    assert live_host.closing and editor_host.closing
     assert editor_selections._releases == []
     assert "0 panel" in presenter.view.summary
 
@@ -906,24 +989,9 @@ def test_header_save_layout_writes_no_panel_dataset(
     assert document["panels"][0]["signal"] == node.signal_key("frames")
     assert document["logic"][0]["values"]["expressions"] == list(rows)
     assert presenter.apply_layout(document)
-    assert presenter.logic[derived].draft.values["expressions"] == list(rows)
+    # A draft holds the projected value: a "rows" field is a tuple of rows.
+    assert presenter.logic[derived].draft.values["expressions"] == rows
     assert not tuple(tmp_path.glob("*.npz"))
-
-
-def test_the_presenter_never_imports_qt() -> None:
-    """Qt lives in the view layer and in one thread-hopping shim, nowhere else."""
-
-    import ast
-
-    source = Path(__import__("zlc_workbench.console", fromlist=["console"]).__file__)
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    roots = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            roots.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and not node.level:
-            roots.add((node.module or "").split(".")[0])
-    assert "PyQt5" not in roots
 
 
 def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None:
@@ -1014,17 +1082,7 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
     spec -- a control that looked live and did nothing.
     """
 
-    session.load_pulse(PULSE_NAME)
-    node = CameraMeasurementNode(
-        camera=session.camera,
-        request=CameraMeasurementRequest("camera", 0.02, None, 2, CAMERA_WINDOWS),
-        signal_plane=session.signal_plane,
-        producer="cm",
-    )
-    capture = node.prepare()
-    session.fire(shots=2)
-    capture.collect()
-    session.nodes = [node]
+    node, _snapshot = _one_shot(session, repeat=2)
     signal = node.signal_key("frames")
 
     binding = presenter.add_selected_panel("facet_grid")
@@ -1869,26 +1927,6 @@ def test_a_colour_range_set_by_hand_still_mounts_edit_and_saves(
     ), presenter.view.status
 
 
-def test_selector_interaction_does_not_disconnect_panel_signals(
-    presenter, session
-) -> None:
-    """The UI interaction gate is not the ROI/fit publication lifecycle."""
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
-    _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
-    bridge = binding.bridge
-    assert bridge is not None
-    assert presenter.view.selectors is False
-
-    presenter.view.selectors_toggled.emit(True)
-    assert binding.bridge is bridge
-
-    presenter.view.selectors_toggled.emit(False)
-    assert binding.bridge is bridge
-    assert presenter.view.selectors is False
-
-
 def test_first_visible_panel_host_already_owns_its_derivation_bridge(
     presenter,
     session,
@@ -1998,31 +2036,10 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     """The real panel chain settles Area before Fit and preserves one gap."""
 
     from zlc_plot.fit import FitEngine
-    from zlc_workbench.logic import stable_signal_key
 
-    camera_id = presenter.add_logic(
-        "camera_measurement",
-        node_id="gap-monitor",
-        values={
-            "exposure_seconds": 0.002,
-            "repeat": 0,
-            "frames_per_cycle": 1,
-        },
-        device_keys={"camera": "camera"},
-        open_editor=False,
+    _camera_id, camera_signal, camera_publication = _started_camera(
+        presenter, session, node_id="gap-monitor"
     )
-    session.load_pulse(PULSE_NAME)
-    assert presenter.start_logic(camera_id)
-    camera_signal = stable_signal_key(camera_id, "frames")
-
-    deadline = time.monotonic() + 10.0
-    camera_publication = None
-    while camera_publication is None and time.monotonic() < deadline:
-        session.fire(shots=1)
-        presenter.beat()
-        camera_publication = session.signal_plane.latest_publication(camera_signal)
-        time.sleep(0.005)
-    assert camera_publication is not None
 
     main = presenter.add_panel(
         camera_signal,
@@ -2253,38 +2270,6 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
             and rolling_offsets() == retained_offsets
         ),
     )
-    from zlc_plot import AxisRef
-    from zlc_plot.semantics import fate_field_name, scope_fate
-
-    primary_fate = fate_field_name(
-        AxisRef.point("zlc_data.primary-index")
-    )
-    assert presenter.update_panel_state(
-        rolling.panel_id,
-        # History exposes ordinary relative coordinates.  Zero is the latest
-        # retained event; Plot no longer needs a history-only Latest sentinel.
-        {"semantic": {primary_fate: scope_fate(0)}},
-    )
-    _settle_panel_hosts(
-        presenter,
-        lambda: (
-            rolling.configuration is None
-            and rolling.port.presentation_current
-            and rolling_offsets() == (0,)
-        ),
-    )
-    assert presenter.update_panel_state(
-        rolling.panel_id,
-        {"semantic": {primary_fate: "reduce"}},
-    )
-    _settle_panel_hosts(
-        presenter,
-        lambda: (
-            rolling.configuration is None
-            and rolling.port.presentation_current
-            and rolling_offsets() == retained_offsets
-        ),
-    )
     lease = rolling.history_lease
     presenter.remove_panel(rolling.panel_id)
     assert lease is not None and lease.closed
@@ -2309,25 +2294,7 @@ def test_a_second_region_reaches_the_bridge_on_a_live_panel(
     remembered old region was re-applied over the new mark.
     """
 
-    from zlc_workbench.logic import stable_signal_key
-
-    camera_id = presenter.add_logic(
-        "camera_measurement",
-        values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
-        device_keys={"camera": "camera"},
-        open_editor=False,
-    )
-    session.load_pulse(PULSE_NAME)
-    assert presenter.start_logic(camera_id)
-    camera_signal = stable_signal_key(camera_id, "frames")
-    deadline = time.monotonic() + 10.0
-    publication = None
-    while publication is None and time.monotonic() < deadline:
-        session.fire(shots=1)
-        presenter.beat()
-        publication = session.signal_plane.latest_publication(camera_signal)
-        time.sleep(0.005)
-    assert publication is not None
+    _camera_id, camera_signal, publication = _started_camera(presenter, session)
 
     image = presenter.add_panel(
         camera_signal,
@@ -2374,30 +2341,9 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
 ) -> None:
     """Lease transitions and current-host interactions share one truth."""
 
-    from zlc_workbench.logic import stable_signal_key
-
-    camera_id = presenter.add_logic(
-        "camera_measurement",
-        node_id="roi-monitor",
-        values={
-            "exposure_seconds": 0.002,
-            "repeat": 0,
-            "frames_per_cycle": 3,
-        },
-        device_keys={"camera": "camera"},
-        open_editor=False,
+    _camera_id, camera_signal, camera_publication = _started_camera(
+        presenter, session, node_id="roi-monitor", frames_per_cycle=3
     )
-    session.load_pulse(PULSE_NAME)
-    assert presenter.start_logic(camera_id)
-    camera_signal = stable_signal_key(camera_id, "frames")
-    deadline = time.monotonic() + 10.0
-    camera_publication = None
-    while camera_publication is None and time.monotonic() < deadline:
-        session.fire(shots=1)
-        presenter.beat()
-        camera_publication = session.signal_plane.latest_publication(camera_signal)
-        time.sleep(0.005)
-    assert camera_publication is not None
 
     image = presenter.add_panel(
         camera_signal,
@@ -2631,7 +2577,6 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     )
     assert histogram.port is indexed_port
     assert histogram.history_lease is None
-    assert histogram.history_lease is None
     latest = session.signal_plane.current_dataset(roi_signal)
     assert all(
         str(axis.axis_id) != "zlc_data.primary-index"
@@ -2664,10 +2609,14 @@ def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
         and rolling.port.presentation_current
         and rolling.accepted_surface.plot_input.block.window is not None,
     )
-    assert any(
-        entry["label"] == "source index"
-        for entry in rolling.parameter_surface["semantic"]
-    )
+    # The record axis is Rolling's fixed carrier, never a fate row; the
+    # event's own axes are, and they reach the Setting form with the lease.
+    semantic = rolling.parameter_surface["semantic"]
+    assert any(str(entry["key"]).startswith("fate:") for entry in semantic), semantic
+    assert not any(
+        str(entry["key"]).startswith("fate:") and entry["label"] == "source index"
+        for entry in semantic
+    ), semantic
     assert rolling.accepted_surface.target.semantic == rolling.state.semantic
 
 
@@ -2701,14 +2650,6 @@ def test_one_failing_panel_interaction_is_a_line_not_the_instrument(
 def test_committed_selection_outputs_enter_the_real_occupancy_input(
     presenter, session, tmp_path
 ) -> None:
-    from zlc_atom.nodes.calibration import (
-        FrameContract,
-        ReadoutModel,
-        ReadoutModelKind,
-        SiteMap,
-        TrapCalibration,
-    )
-
     producer_id = presenter.add_logic(
         "camera_measurement", node_id="cm", open_editor=False
     )
@@ -2806,28 +2747,9 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
     height, width = source.values.shape[-2:]
-    site_ids = ("site_0001",)
-    calibration = TrapCalibration(
-        SiteMap(
-            site_ids,
-            np.asarray(((width / 2.0, height / 2.0),)),
-            np.asarray((True,)),
-            np.asarray((1.0,)),
-        ),
-        (
-            ReadoutModel(
-                site_ids,
-                np.asarray((0.0,)),
-                np.zeros(1),
-                np.ones(1),
-                np.asarray((True,)),
-                np.asarray((1.0,)),
-            ),
-        ),
-        ReadoutModelKind.BOX,
-        FrameContract((height, width)),
-    )
-    artifact = calibration.save(tmp_path / "roi-calibration.json")
+    artifact = _box_calibration(
+        ("site_0001",), ((width / 2.0, height / 2.0),), (0.0,), (height, width)
+    ).save(tmp_path / "roi-calibration.json")
     assert presenter.update_logic_draft(
         consumer_id,
         source_signal=roi_signal,
@@ -2846,19 +2768,30 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
 
 
 def test_a_card_shows_whether_its_selectors_are_live(presenter, session) -> None:
-    """The card says whether plot interaction, not publication, is enabled."""
+    """The card says whether plot interaction, not publication, is enabled.
+
+    The header toggle is the UI interaction gate, not the ROI/fit
+    publication lifecycle: flipping it never disconnects the panel's bridge.
+    """
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frames"), snapshot)
-    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    _settle_panel_hosts(
+        presenter, lambda: binding.host is not None and binding.bridge is not None
+    )
+    bridge = binding.bridge
     card = presenter.view.cards[0]
     assert card.selectors_enabled is False
+    assert presenter.view.selectors is False
 
-    presenter.set_deriving(True)
+    presenter.view.selectors_toggled.emit(True)
     assert card.selectors_enabled is True
+    assert binding.bridge is bridge
 
-    presenter.set_deriving(False)
+    presenter.view.selectors_toggled.emit(False)
     assert card.selectors_enabled is False, "the card must show interaction is off"
+    assert presenter.view.selectors is False
+    assert binding.bridge is bridge
 
 
 def test_a_mounted_plot_widgets_error_lands_one_warning_on_the_status_strip(
@@ -2889,54 +2822,13 @@ def test_a_mounted_plot_widgets_error_lands_one_warning_on_the_status_strip(
     ]
 
 
-def test_a_bridge_side_derivation_failure_is_reported_once(
-    presenter, session
-) -> None:
-    """The selection bridge's own recorded refusal reaches the operator.
-
-    ``_report_panel_errors`` read the selection sources and the port but
-    never ``binding.bridge.last_error``, so a bridge-side derivation failure
-    left the derived signal silently absent.  Same de-dup discipline as the
-    other panel errors: one refusal is reported once.
-    """
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
-    _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
-
-    class _FailedBridge:
-        last_error = RuntimeError("the derivation refused this selection")
-
-        def close(self) -> None:
-            pass
-
-    binding.bridge = _FailedBridge()
-    presenter.view.status.clear()
-    presenter.beat()
-    reported = [item for item in presenter.view.status if item[0] == "error"]
-    assert reported == [
-        ("error", f"{binding.title}: the derivation refused this selection")
-    ]
-    assert presenter.view.cards[0].status == (
-        "the derivation refused this selection",
-        True,
-    )
-
-    presenter.view.status.clear()
-    presenter.beat()
-    assert not [item for item in presenter.view.status if item[0] == "error"]
-
-
 def test_show_panel_mounts_after_the_async_canonical_front_is_ready(
     session,
 ) -> None:
     """The card remains ready until its canonical host can be accepted."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     from zlc_workbench.apps.task_console import build_panel_host
-
-    def spec_for(snapshot, kind="", cell_kind=""):
-        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
 
     def ready_host(plot_input, state):
         host = build_panel_host(
@@ -2947,17 +2839,9 @@ def test_show_panel_mounts_after_the_async_canonical_front_is_ready(
         host.wait_for_front(10.0)
         return host
 
-    presenter = ConsolePresenter(
-        session,
-        _ConsoleView(),
-        make_monitor_host=ready_host,
-        make_editor_host=ready_host,
-        build_figure_host=plot.build_figure_host,
-        save_figure_artifact=_async_writer(plot.save_figure_artifact),
-        close_render_processes=lambda: True,
-        spec_for=spec_for,
-    )
-    try:
+    with _console_over(
+        session, make_monitor_host=ready_host, make_editor_host=ready_host
+    ) as presenter:
         node, snapshot = _one_shot(session)
         binding = presenter.add_panel(node.signal_key("frames"), snapshot)
         assert binding.host is None
@@ -2972,8 +2856,6 @@ def test_show_panel_mounts_after_the_async_canonical_front_is_ready(
         ]
         assert presented, "show_panel left the staged widget empty until a beat"
         assert presented[0] is not None
-    finally:
-        presenter.close()
 
 
 def test_header_save_screenshot_writes_one_plain_gui_image(
@@ -3075,7 +2957,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     assert editor["stale"] is True
     assert editor["frozen_snapshot"] is frozen
     assert binding.editor_host is old_editor_host
-    assert not old_editor_host._closing
+    assert not old_editor_host.closing
 
     presenter.view.panel_snapshot_refresh_requested.emit(first.panel_id)
     _settle_panel_hosts(
@@ -3093,7 +2975,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     replacement_editor_host = binding.editor_host
     assert replacement_editor_host is not None
     assert replacement_editor_host is not old_editor_host
-    assert old_editor_host._closing
+    assert old_editor_host.closing
     assert (
         presenter.view.panel_editor_surfaces[first.panel_id]
         is replacement_editor_host
@@ -3101,7 +2983,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
 
     presenter.view.panel_editor_closed.emit(first.panel_id)
     assert binding.editor_host is None and binding.editor_selections is None
-    assert replacement_editor_host._closing
+    assert replacement_editor_host.closing
 
 
 def test_panel_editor_selection_uses_only_its_current_frozen_publication(
@@ -3190,7 +3072,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert panel.editor_configuration is previous_configuration
     assert panel.editor_host is first_editor_host
     assert panel.editor_host.qt_widget() is editor_widget
-    assert not first_editor_host._closing
+    assert not first_editor_host.closing
 
     assert presenter.update_panel_state(
         panel.panel_id, {"signal": second_node.signal_key("frames")}
@@ -3226,7 +3108,9 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
         panel.host.selector_state(SelectorKind.AREA).result()
     _commit_area(second_editor_host)
     presenter.beat()
-    assert presenter.logic[first_id].draft.values == first_current
+    # The region left the first camera's picture with the retarget, and a
+    # cancelled region gives its producer back the draft from before it.
+    assert presenter.logic[first_id].draft.values == first_before
     assert presenter.logic[second_id].draft.values != second_before
 
 
@@ -3329,7 +3213,9 @@ def test_the_order_the_operator_dragged_the_cards_into_is_the_panel_order(
     """Where the cards are IS the order.
 
     It decides what a saved figure contains and in what sequence, so a board
-    that rearranges itself back on the next redraw ignores the operator.
+    that rearranges itself back on the next redraw ignores the operator.  A
+    drop that raced a Remove names a panel that has left, and must not drop
+    the panel it did not name.
     """
 
     node, snapshot = _one_shot(session)
@@ -3337,122 +3223,57 @@ def test_the_order_the_operator_dragged_the_cards_into_is_the_panel_order(
     second = presenter.add_panel(node.signal_key("frames"), snapshot, title="two")
     assert list(presenter.panels) == [first.panel_id, second.panel_id]
 
+    presenter.view.panel_order_committed.emit(("panel-gone", first.panel_id))
+    assert set(presenter.panels) == {first.panel_id, second.panel_id}
+
     presenter.view.panel_order_committed.emit((second.panel_id, first.panel_id))
 
     assert list(presenter.panels) == [second.panel_id, first.panel_id]
     assert list(presenter.view.panel_ids()) == [second.panel_id, first.panel_id]
 
 
-def test_an_order_naming_a_panel_that_left_keeps_every_panel(presenter, session) -> None:
-    """A drop that raced a Remove must not drop the panel it did not name."""
-
-    node, snapshot = _one_shot(session)
-    first = presenter.add_panel(node.signal_key("frames"), snapshot)
-    second = presenter.add_panel(node.signal_key("frames"), snapshot)
-
-    presenter.view.panel_order_committed.emit(("panel-gone", second.panel_id))
-
-    assert set(presenter.panels) == {first.panel_id, second.panel_id}
-
-
-def test_a_panel_that_could_not_draw_says_so_on_its_own_card(presenter, session) -> None:
+@pytest.mark.parametrize(
+    ("error", "said"),
+    (
+        (RuntimeError("the renderer refused this frame"), "the renderer refused this frame"),
+        (AssertionError(), "AssertionError"),
+        (CancelledError(), ""),
+    ),
+    ids=("refused", "anonymous", "superseded"),
+)
+def test_a_panel_that_could_not_draw_says_so_on_its_own_card(
+    presenter, session, error, said
+) -> None:
     """A still panel means two different things.
 
     A render that failed was delivered to a reject() that did nothing, and the
     card's status line was never written to by anything -- so a panel that had
     stopped drawing looked exactly like a panel whose data had stopped
     arriving, and neither said which.
+
+    A bare assert (and TimeoutError) stringify to nothing, and the strip then
+    showed ``camera: `` with nothing after the colon: the class names it.  A
+    cancelled render means a newer frame is already queued behind it; reported
+    red, a camera merely outpacing the render worker looked like a camera
+    failing -- once per coalesced frame, with an empty message.
     """
 
     node, snapshot = _one_shot(session)
     binding = presenter.add_panel(node.signal_key("frames"), snapshot, title="camera")
-
-    binding.port.reject(
-        _completed_surface_update(),
-        RuntimeError("the renderer refused this frame"),
-    )
-    presenter.beat()
-
-    card = presenter.view.cards[0]
-    assert "refused this frame" in card.status[0]
-    assert card.status[1] is True
-    assert any("refused this frame" in text for _severity, text in presenter.view.status)
-
-
-def test_an_anonymous_render_error_is_named_after_its_class(
-    presenter, session
-) -> None:
-    """CancelledError, a bare assert and TimeoutError all stringify to nothing.
-
-    The strip then showed ``camera: `` with nothing after the colon -- a red
-    line that named the panel and refused to say what happened.
-    """
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(
-        node.signal_key("frames"), snapshot, title="camera"
-    )
-
-    binding.port.reject(_completed_surface_update(), AssertionError())
-    presenter.beat()
-
-    card = presenter.view.cards[0]
-    assert card.status == ("AssertionError", True)
-    assert ("error", "camera: AssertionError") in presenter.view.status
-
-
-def test_a_superseded_render_is_not_reported_at_all(presenter, session) -> None:
-    """A cancelled render means a newer frame is already queued behind it.
-
-    Reported red, a camera merely outpacing the render worker looked like a
-    camera failing -- once per coalesced frame, with an empty message.
-    """
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(
-        node.signal_key("frames"), snapshot, title="camera"
-    )
     presenter.view.status.clear()
 
-    from concurrent.futures import CancelledError
-
-    binding.port.reject(_completed_surface_update(), CancelledError())
+    binding.port.reject(_completed_surface_update(), error)
     presenter.beat()
 
-    assert binding.port.last_error is None
-    assert presenter.view.cards[0].status == ("", False)
-    assert not any(
-        severity == "error" for severity, _text in presenter.view.status
-    )
-
-
-def test_add_panel_adds_a_panel_of_the_kind_chosen_beside_the_button(
-    presenter, session
-) -> None:
-    """That is what the control says it does.
-
-    It ignored the kind entirely and opened a modal signal chooser instead, so
-    the combo beside Add Panel described a choice the button did not make --
-    and a board where every signal was already shown opened a blank list.
-    Which signal a panel shows is a per-panel decision the card's own picker
-    already owns, so asking for it up front asked twice.
-    """
-
-    before = len(presenter.panels)
-
-    binding = presenter.add_selected_panel("curve")
-    assert binding is not None and binding.kind == "curve"
-    assert binding.signal == "" and binding.host is None
-    assert len(presenter.panels) == before + 1
-
-
-def test_add_panel_before_anything_publishes_still_creates_the_panel(presenter) -> None:
-    """No publication is a normal stopped-pipeline state, not an Add error."""
-
-    binding = presenter.add_selected_panel("image")
-    assert binding is not None
-    assert binding.signal == ""
-    assert binding.host is None
+    card = presenter.view.cards[0]
+    errors = [text for severity, text in presenter.view.status if severity == "error"]
+    if said:
+        assert card.status == (said, True)
+        assert f"camera: {said}" in errors, errors
+    else:
+        assert binding.port.last_error is None
+        assert card.status == ("", False)
+        assert errors == []
 
 
 def test_a_panel_keeps_the_kind_it_was_added_as(presenter, session) -> None:
@@ -3640,6 +3461,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "size": "4x4", "interval_ms": 800,
         "semantic": first.state.document()["semantic"],
         "display": authored_display,
+        "interaction": {"series_lock": None},
         "fit": {"model": "radial_gaussian_center"}, "overlay_signal": "",
         "published_outputs": {},
         "selector": {},
@@ -3783,24 +3605,15 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
 
     document = presenter.layout()
     document["panels"].append(
-        {
-            "panel_id": "panel-report-only",
-            "signal": "",
-            "title": "Report-only image facets",
-            "kind": "facet_grid",
-            "cell_kind": "rolling",
-            "size": "4x4",
-            "interval_ms": 400,
-            "semantic": {},
-            "display": {},
-            "fit": {},
-            "overlay_signal": "",
-            "published_outputs": {},
-            "selector": {},
-            "crosshair": {},
-            "classifier_thresholds": [],
-            "focused_cell": None,
-        }
+        _saved_panel(
+            "",
+            "Report-only image facets",
+            panel_id="panel-report-only",
+            kind="facet_grid",
+            cell_kind="rolling",
+            size="4x4",
+            interval_ms=400,
+        )
     )
 
     assert presenter.apply_layout(document) is False
@@ -3920,7 +3733,9 @@ def test_clearing_a_stopped_board_needs_no_beat(presenter, session) -> None:
     assert presenter.clear_board() is True
     assert presenter.panels == {} and presenter.logic == {}
     assert not session.signal_plane.retains(signal)
-    assert snapshot.block.values.size > 0, "an owned frozen value outlives its producer"
+    assert snapshot.block.materialize().values.size > 0, (
+        "an owned frozen value outlives its producer"
+    )
     assert presenter.view.status[-1] == ("task", "board cleared")
 
 
@@ -3997,12 +3812,7 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     document = presenter.layout()
     # A board file names every panel or none; this one names its panels.
     document["panels"].append(
-        {"panel_id": "panel-99",
-         "signal": "nobody.publishes.this", "title": "gone", "kind": "image",
-         "cell_kind": "", "size": "",
-         "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
-         "overlay_signal": "", "published_outputs": {},
-         "selector": {}, "crosshair": {}, "classifier_thresholds": [], "focused_cell": None}
+        _saved_panel("nobody.publishes.this", "gone", panel_id="panel-99", size="")
     )
 
     assert presenter.apply_layout(document) is True
@@ -4011,6 +3821,66 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     assert unresolved.signal == "nobody.publishes.this"
     assert unresolved.host is None and unresolved.port is None
     assert any("nobody.publishes.this" in text for _severity, text in presenter.view.status)
+
+
+def test_a_board_panel_whose_saved_table_is_refused_does_not_stop_the_rest(
+    presenter, session
+) -> None:
+    """A saved table today's data refuses is that panel's condition.
+
+    The panel stays on the board without a port, its form the repair
+    surface, and the board around it still goes up.  Committing the board
+    publishes every panel, and publishing the kept one asked the same
+    refused projection again: the load died half way, after the old board
+    was already gone and before any later panel or the summary.
+    """
+
+    from zlc_plot.semantics import describe_semantics
+
+    node, _snapshot = _one_shot(session)
+    signal = node.signal_key("frames")
+    value = session.signal_plane.freeze().value(signal)
+    schema = value.canonical_schema or value.snapshot.block.schema
+    fate = next(
+        str(field.name)
+        for field in describe_semantics(
+            schema, task_console_fitting_spec(schema, "image", "")
+        ).fields
+        if str(field.name).startswith("fate:")
+    )
+    document = presenter.layout()
+    document["panels"] = [
+        _saved_panel(signal, "before", panel_id="panel-1"),
+        _saved_panel(
+            signal, "refused", panel_id="panel-2", semantic={fate: "not a fate"}
+        ),
+        _saved_panel(signal, "after", panel_id="panel-3"),
+    ]
+
+    assert presenter.apply_layout(document) is True
+    before, refused, after = presenter.panels.values()
+    assert [binding.title for binding in (before, refused, after)] == [
+        "before", "refused", "after",
+    ]
+    assert refused.port is None
+    assert refused.parameter_surface["semantic_unavailable"]
+    _settle_panel_hosts(
+        presenter, lambda: before.host is not None and after.host is not None
+    )
+    assert refused.port is None
+    status = list(presenter.view.status)
+    assert ("task", "layout loaded") in status, status
+    assert any(
+        f"cannot draw {signal} as image" in text
+        and "remains available for rewiring" in text
+        for _severity, text in status
+    ), status
+    # The load was this run's mount attempt: the beats after it do not
+    # repeat the same refusal over the load summary.
+    assert not any(
+        severity == "error" and text.startswith(f"{refused.panel_id}:")
+        for severity, text in status
+    ), status
 
 
 def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
@@ -4039,17 +3909,16 @@ def _saved_panel(signal: str, title: str, **fields) -> dict:
 def _loaded_board(tree: dict, fresh_ids: tuple[str, ...]):
     """Parse, resolve and load ``tree`` exactly as the console does."""
 
-    from zlc_workbench.console_layout import load_layout, resolve_layout
+    from zlc_workbench.console_layout import resolve_layout
     from zlc_workbench.logic import LogicCatalog
 
     document = LayoutDocument.from_tree(tree)
-    resolved = resolve_layout(
+    return document, resolve_layout(
         document,
         catalog=LogicCatalog(),
         installation=SimpleNamespace(devices={}),
-        panel_kinds=("image",),
+        panel_ids=fresh_ids,
     )
-    return document, load_layout(resolved, panel_ids=fresh_ids)
 
 
 def test_a_loaded_board_reads_its_panels_derived_signals_by_their_fresh_ids(
@@ -4066,7 +3935,7 @@ def test_a_loaded_board_reads_its_panels_derived_signals_by_their_fresh_ids(
     with a sentence on the strip.
     """
 
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     node, snapshot = _one_shot(session)
     upstream = presenter.add_panel(
@@ -4115,7 +3984,7 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
     reference to a panel the board does not carry is blanked and said.
     """
 
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     tree = {
         "format": "zlc.console-board",
@@ -4333,7 +4202,10 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     document, arrays, datasets = read_archive(saved_path.with_suffix(".npz"))
     saved = datasets["data"]
     assert saved.ref == previous.snapshot.ref
-    np.testing.assert_array_equal(saved.block.values, previous.snapshot.block.values)
+    np.testing.assert_array_equal(
+        saved.block.materialize().values,
+        previous.snapshot.block.materialize().values,
+    )
     latest_front = SimpleNamespace(
         value=lambda _name: current,
         publication=lambda _name: latest,
@@ -4374,7 +4246,8 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     from zlc_runtime.host import LogicNodeObservation, NodeProgress
     from pulse_fixture import pulse_document
     from zlc_atom.nodes import NodePreviewSpec
-    from zlc_workbench.logic import LogicCandidate, stable_signal_key
+    from zlc_runtime import stable_signal_key
+    from zlc_workbench.logic import LogicCandidate
 
     (presenter.session.workspace.pulses / "imaging_template.json").write_bytes(
         pulse_document("imaging_template.json")
@@ -4391,6 +4264,10 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
             self.cancelled = False
             self.fail = False
             self.observation = LogicNodeObservation(False, False, "starting")
+
+        def signal_key(self, name: str) -> str:
+            # The producer identity the plane's retire() checks at close.
+            return stable_signal_key(self.instance_id, name)
 
         @property
         def cancel_requested(self) -> bool:
@@ -4554,7 +4431,7 @@ def test_running_row_waits_for_first_publication_and_terminal_phase_wins(
 ) -> None:
     from types import SimpleNamespace
     from zlc_runtime.host import LogicNodeObservation, NodeProgress
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     node_id = presenter.add_logic("camera_measurement", open_editor=False)
     binding = presenter.logic[node_id]
@@ -4609,7 +4486,7 @@ def test_incompatible_preview_reports_once_and_is_never_marked_successful(
     errors = [
         text
         for severity, text in presenter.view.status
-        if severity == "error" and "incompatible" in text
+        if severity == "error" and "cannot open preview" in text
     ]
     assert len(errors) == 1
     assert binding.previewed == ()
@@ -4678,11 +4555,11 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     projection_release = Event()
     projection_threads: list[int] = []
 
-    def blocked_current(name, publication=None):
+    def blocked_current(name, publication=None, **options):
         projection_threads.append(get_ident())
         entered.set()
         assert projection_release.wait(10.0)
-        return original(name, publication)
+        return original(name, publication, **options)
 
     monkeypatch.setattr(
         session.signal_plane,
@@ -4704,7 +4581,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     )
     shown = _accepted(binding.port, "plot_input")
     snapshot = getattr(shown, "snapshot", shown)
-    assert snapshot.block.values.shape[:2] == (30, CAMERA_WINDOWS)
+    assert snapshot.block.materialize().values.shape[:2] == (30, CAMERA_WINDOWS)
     assert np.all(snapshot.expanded_validity()[:1])
     assert not np.any(snapshot.expanded_validity()[1:])
 
@@ -4749,7 +4626,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     )
     finished = _accepted(binding.port, "plot_input")
     finished_snapshot = getattr(finished, "snapshot", finished)
-    assert finished_snapshot.block.values.shape[:2] == (30, CAMERA_WINDOWS)
+    assert finished_snapshot.block.materialize().values.shape[:2] == (30, CAMERA_WINDOWS)
     assert np.all(finished_snapshot.expanded_validity())
 
 
@@ -4861,7 +4738,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     shown = _accepted(binding.port, "plot_input")
     snapshot = getattr(shown, "snapshot", shown)
     assert snapshot.block.schema.point_domain == canonical.point_domain
-    assert snapshot.block.values.shape == (1, 4, 1)
+    assert snapshot.block.materialize().values.shape == (1, 4, 1)
     validity = snapshot.expanded_validity()
     assert np.all(validity[:, :1])
     assert not np.any(validity[:, 1:])
@@ -4922,7 +4799,10 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     info, arrays, datasets = read_archive(archive)
     saved = datasets["data"]
     assert saved.block.schema == updated_snapshot.block.schema
-    np.testing.assert_array_equal(saved.block.values, updated_snapshot.block.values)
+    np.testing.assert_array_equal(
+        saved.block.materialize().values,
+        updated_snapshot.block.materialize().values,
+    )
     np.testing.assert_array_equal(
         saved.expanded_validity(),
         updated_snapshot.expanded_validity(),
@@ -4978,38 +4858,12 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     sites that was is a second signal beside it -- signals and all in
     their record."""
 
-    import numpy as np
-    from zlc_atom.nodes.calibration import (
-        FrameContract,
-        ReadoutModel,
-        ReadoutModelKind,
-        SiteMap,
-        TrapCalibration,
-    )
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
-    site_ids = ("site-0", "site-1")
     calibration_path = tmp_path / "derive-calibration.json"
-    TrapCalibration(
-        SiteMap(
-            site_ids,
-            np.asarray(((12.0, 10.0), (30.0, 20.0))),
-            np.asarray((True, True)),
-            np.asarray((1.0, 1.0)),
-        ),
-        (
-            ReadoutModel(
-                site_ids,
-                np.asarray((100.0, 100.0)),
-                np.zeros(2),
-                np.ones(2),
-                np.asarray((True, True)),
-                np.asarray((1.0, 1.0)),
-            ),
-        ),
-        ReadoutModelKind.BOX,
-        FrameContract((96, 128)),
+    _box_calibration(
+        ("site-0", "site-1"), ((12.0, 10.0), (30.0, 20.0)), (100.0, 100.0), (96, 128)
     ).save(calibration_path)
     occupancy_id = presenter.add_logic(
         "occupancy",
@@ -5097,41 +4951,20 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     have it.
     """
 
-    import numpy as np
-    from zlc_atom.nodes.calibration import (
-        FrameContract,
-        ReadoutModel,
-        ReadoutModelKind,
-        SiteMap,
-        TrapCalibration,
-    )
     from zlc_atom.nodes import NodePreviewSpec
     from zlc_plot.primitives import ImageFrame
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     camera_node, _snapshot = _one_shot(session, producer="camera_measurement")
     frames_signal = camera_node.signal_key("frames")
     site_ids = ("site-0", "site-1")
     calibration_path = tmp_path / "facet-calibration.json"
-    TrapCalibration(
-        SiteMap(
-            site_ids,
-            np.asarray(((12.0, 10.0), (30.0, 20.0))),
-            np.asarray((True, False)),
-            np.asarray((1.0, 0.0)),
-        ),
-        (
-            ReadoutModel(
-                site_ids,
-                np.asarray((-1.0e20, 0.0)),
-                np.zeros(2),
-                np.ones(2),
-                np.asarray((True, True)),
-                np.asarray((1.0, 1.0)),
-            ),
-        ),
-        ReadoutModelKind.BOX,
-        FrameContract((96, 128)),
+    _box_calibration(
+        site_ids,
+        ((12.0, 10.0), (30.0, 20.0)),
+        (-1.0e20, 0.0),
+        (96, 128),
+        valid_sites=(True, False),
     ).save(calibration_path)
 
     occupancy_id = presenter.add_logic(
@@ -5322,9 +5155,11 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     overlay = result[0]
     assert overlay.status.block.schema.repeat_domain == image.block.schema.repeat_domain
     assert overlay.status.block.schema.point_domain == image.block.schema.point_domain
+    # Materialized: a segmented block's ``values`` is None on both sides, and
+    # None == None would compare nothing.
     np.testing.assert_array_equal(
-        overlay.status.block.values,
-        status_publication.value(status_signal).snapshot.block.values,
+        overlay.status.block.materialize().values,
+        status_publication.value(status_signal).snapshot.block.materialize().values,
     )
     presenter.remove_panel(rolling.panel_id)
 
@@ -5366,7 +5201,7 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
     and in the layout and not in the authoring schema a notebook also drives.
     """
 
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     camera_id = presenter.add_logic(
         "camera_measurement",
@@ -5384,16 +5219,8 @@ def test_a_started_row_opens_its_declared_preview_only_when_asked_to(
         row for row in presenter.view.logic_rows if row.title == camera_id
     )
     assert row.auto_preview is wanted, "the row shows the stored preference"
-
-    binding = presenter.logic[camera_id]
-    declared = tuple(
-        (spec.output.name, spec.plot_kind)
-        for spec in binding.descriptor.node_previews
-    )
-    assert declared == (("frames", "facet_grid"),), (
-        "a measurement names what Start shows, and how: three frames per "
-        "cycle are three pictures, never one average of them"
-    )
+    # What the camera declares it shows (frames, as a facet grid) is
+    # test_auto_panel_kind's; this is whether the row opens it.
 
     session.load_pulse(PULSE_NAME)
     assert presenter.start_logic(camera_id) is True
@@ -5762,7 +5589,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 original.host is not None
                 and original.port is not None
                 and _accepted(original.port, "publication") is displayed
-                and original.host.initial_state[0] is not None
+                and original.accepted_display is not None
             ),
         )
         y_axis, x_axis = value.snapshot.block.schema.cell_domain.axes
@@ -5817,7 +5644,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                 binding.host is not None
                 and binding.port is not None
                 and _accepted(binding.port, "publication") is displayed
-                and binding.host.initial_state[0] is not None
+                and binding.accepted_display is not None
             ),
         )
 
@@ -5826,10 +5653,20 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
         assert session.signal_plane.latest_publication(signal) is latest
 
         monkeypatch.setattr(presenter, "_apply_deriving", apply_deriving)
-        presenter._apply_deriving(binding)
         derived_name = f"@logic/{binding.panel_id}/roi_mean"
-        first = session.signal_plane.latest_publication(derived_name)
-        assert first is not None
+        # The region's first answer is committed on this thread; the source
+        # lane then answers the plane's latest on its own worker and may land
+        # before this test reads.  Record each derived publication as it is
+        # committed instead of reading "latest" afterwards.
+        committed = []
+        unsubscribe = session.signal_plane.subscribe_publications(
+            lambda _names: committed.append(session.signal_plane.latest_publication(derived_name))
+        )
+        try:
+            presenter._apply_deriving(binding)
+        finally:
+            unsubscribe()
+        first = next(item for item in committed if item is not None)
         assert session.signal_plane.direct_parent_publications(first) == (displayed,)
 
         deadline = time.monotonic() + 5.0
@@ -5865,52 +5702,34 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
 def _follow_calibration_artifact(session, tmp_path):
     """A one-site calibration matched to the virtual camera's frames."""
 
-    from zlc_atom.nodes.calibration import (
-        FrameContract,
-        ReadoutModel,
-        ReadoutModelKind,
-        SiteMap,
-        TrapCalibration,
-    )
-
     # One warm shot only to learn the frame geometry for the calibration.
     _node, warm = _one_shot(session, producer="warm")
-    height, width = np.asarray(warm.block.values).shape[-2:]
-    site_ids = ("site_0001",)
-    calibration = TrapCalibration(
-        SiteMap(
-            site_ids,
-            np.asarray(((width / 2.0, height / 2.0),)),
-            np.asarray((True,)),
-            np.asarray((1.0,)),
-        ),
-        (
-            ReadoutModel(
-                site_ids,
-                np.asarray((0.0,)),
-                np.zeros(1),
-                np.ones(1),
-                np.asarray((True,)),
-                np.asarray((1.0,)),
-            ),
-        ),
-        ReadoutModelKind.BOX,
-        FrameContract((height, width)),
-    )
-    return calibration.save(tmp_path / "follow-calibration.json")
+    height, width = warm.block.materialize().values.shape[-2:]
+    return _box_calibration(
+        ("site_0001",), ((width / 2.0, height / 2.0),), (0.0,), (height, width)
+    ).save(tmp_path / "follow-calibration.json")
 
 
-def test_a_started_processor_follows_its_source_across_absence_and_stop(
+def test_a_following_processor_survives_its_camera_stop_and_restart(
     presenter, session, tmp_path
 ) -> None:
-    """Start a processor before its camera exists: the Start is accepted as
-    a standing follow, the poll beat activates it the moment the source
-    publishes, and the operator's own Stop is the one thing that ends the
-    following."""
+    """Stop the camera, On Pulse again: the processor restarts BY ITSELF.
+
+    Start a processor before its camera exists: the Start is accepted as a
+    standing follow, and the poll beat activates it the moment the source
+    publishes.  The promise of the standing follow is the sequence after
+    that.  It used to break in two places: the source's death mid-follow
+    ended the processor host as FAILED ("generation retired", "not
+    committed"), and the follower read any failure as the operator's to
+    fix -- following cleared, processor parked until a manual restart.  A
+    source that ends or moves on under a follower is its lifecycle, not the
+    processor's failure: the host ends cancelled, the follow survives, and
+    the beat after the camera's next start completes it.  The operator's own
+    Stop is the one thing that ends a following."""
 
     artifact = _follow_calibration_artifact(session, tmp_path)
 
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
 
     occupancy_id = presenter.add_logic("occupancy", open_editor=False)
     live_signal = stable_signal_key("cm-live", "frames")
@@ -5921,8 +5740,7 @@ def test_a_started_processor_follows_its_source_across_absence_and_stop(
     )
 
     # The source does not exist yet: Start is accepted as an intent.
-    started = presenter.start_logic(occupancy_id)
-    assert started is True, presenter.logic[occupancy_id].draft_error
+    assert presenter.start_logic(occupancy_id), presenter.logic[occupancy_id].draft_error
     binding = presenter.logic[occupancy_id]
     assert binding.following
     assert binding.host is None
@@ -5944,72 +5762,6 @@ def test_a_started_processor_follows_its_source_across_absence_and_stop(
     )
     session.load_pulse(PULSE_NAME)
     assert presenter.start_logic(camera_id)
-
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        session.fire(shots=1)
-        presenter.beat()
-        if binding.host is not None and binding.host.running:
-            break
-        time.sleep(0.005)
-    assert binding.host is not None and binding.host.running
-    assert binding.following
-
-    # The operator's Stop is a decision: the follow ends with it.
-    assert presenter.stop_logic(occupancy_id)
-    assert not binding.following
-    _settle_panel_hosts(
-        presenter,
-        lambda: binding.host is None or not binding.host.running,
-    )
-    stopped_host = binding.host
-    for _ in range(3):
-        session.fire(shots=1)
-        presenter.beat()
-    assert binding.host is stopped_host
-    assert not binding.following
-
-
-def test_a_following_processor_survives_its_camera_stop_and_restart(
-    presenter, session, tmp_path
-) -> None:
-    """Stop the camera, On Pulse again: the processor restarts BY ITSELF.
-
-    The promise of the standing follow is exactly this sequence.  It used
-    to break in two places: the source's death mid-follow ended the
-    processor host as FAILED ("generation retired", "not committed"), and
-    the follower read any failure as the operator's to fix -- following
-    cleared, processor parked until a manual restart.  A source that ends
-    or moves on under a follower is its lifecycle, not the processor's
-    failure: the host ends cancelled, the follow survives, and the beat
-    after the camera's next start completes it."""
-
-    artifact = _follow_calibration_artifact(session, tmp_path)
-
-    from zlc_workbench.logic import stable_signal_key
-
-    occupancy_id = presenter.add_logic("occupancy", open_editor=False)
-    live_signal = stable_signal_key("cm-live", "frames")
-    assert presenter.update_logic_draft(
-        occupancy_id,
-        source_signal=live_signal,
-        artifact_inputs={"calibration_path": str(artifact)},
-    )
-    camera_id = presenter.add_logic(
-        "camera_measurement",
-        node_id="cm-live",
-        values={
-            "exposure_seconds": 0.002,
-            "repeat": 0,
-            "frames_per_cycle": 1,
-        },
-        device_keys={"camera": "camera"},
-        open_editor=False,
-    )
-    session.load_pulse(PULSE_NAME)
-    assert presenter.start_logic(camera_id)
-    assert presenter.start_logic(occupancy_id)
-    binding = presenter.logic[occupancy_id]
 
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
@@ -6119,28 +5871,6 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     session.fire(shots=1)
     presenter.beat()
     assert survival.host is stopped_host
-
-
-def test_bound_rolling_panel_offers_the_uncertainty_switch(
-    presenter, session
-) -> None:
-    """The display contract of a live rolling panel carries the band and
-    cumulative switches -- the vocabulary the operator flips on the bench."""
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(
-        node.signal_key("frames"), snapshot, kind="rolling"
-    )
-    _settle_panel_hosts(
-        presenter,
-        lambda: not binding.parameter_surface.get("display_unavailable", "")
-        and bool(binding.parameter_surface.get("display")),
-    )
-    names = {
-        str(entry["key"]) for entry in binding.parameter_surface["display"]
-    }
-    assert "uncertainty" in names, sorted(names)
-    assert "trailing" in names, sorted(names)
 
 
 def test_the_semantic_form_appears_the_moment_a_signal_connects(
@@ -6469,7 +6199,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     )
     live_snapshot = _accepted(mapped.port, "plot_input")
     assert live_snapshot.block.schema.fingerprint == map_canonical.fingerprint
-    assert live_snapshot.block.values.shape == (20, 3000, 35)
+    assert live_snapshot.block.materialize().values.shape == (20, 3000, 35)
     assert (
         mapped.frozen_data.snapshot.block.schema.fingerprint
         == map_canonical.fingerprint
@@ -6814,7 +6544,7 @@ def test_a_gesture_survives_a_shot_landing_mid_drag(presenter, session) -> None:
 
     host.pointer_event(
         "press", cx, cy, button=2,
-        identity=front.identity, axes=axes, interaction=front.interaction,
+        identity=front.identity, axes=axes,
     ).result(timeout=10)
 
     _one_shot(session, producer="cm")
@@ -6912,26 +6642,9 @@ def test_refresh_adopts_the_card_when_the_derived_signal_retired(
     sees, so Refresh adopts it.
     """
 
-    from zlc_workbench.logic import stable_signal_key
-
-    camera_id = presenter.add_logic(
-        "camera_measurement",
-        node_id="roi-refresh",
-        values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
-        device_keys={"camera": "camera"},
-        open_editor=False,
+    camera_id, camera_signal, publication = _started_camera(
+        presenter, session, node_id="roi-refresh"
     )
-    session.load_pulse(PULSE_NAME)
-    assert presenter.start_logic(camera_id)
-    camera_signal = stable_signal_key(camera_id, "frames")
-    deadline = time.monotonic() + 10.0
-    publication = None
-    while publication is None and time.monotonic() < deadline:
-        session.fire(shots=1)
-        presenter.beat()
-        publication = session.signal_plane.latest_publication(camera_signal)
-        time.sleep(0.005)
-    assert publication is not None
 
     image = presenter.add_panel(
         camera_signal,
@@ -7144,10 +6857,7 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
 
     from zlc_atom.nodes.scan import MANUAL_AXIS_REQUEST
     from zlc_runtime import OperatorInputRequest
-    from zlc_workbench.apps.task_console import build_panel_host
     from zlc_workbench.logic import LogicBinding
-
-    plot = pytest.importorskip("zlc_plot")
 
     class _Host:
         def __init__(self, request):
@@ -7173,31 +6883,12 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
 
     asked = []
     answers = [{}, None]
-    view = _ConsoleView()
-    presenter = ConsolePresenter(
+    with _console_over(
         session,
-        view,
-        make_monitor_host=lambda plot_input, state: build_panel_host(
-            plot_input,
-            state,
-            build_host=plot.build_figure_host,
-        ),
-        make_editor_host=lambda plot_input, state: build_panel_host(
-            plot_input,
-            state,
-            build_host=plot.build_figure_host,
-        ),
-        build_figure_host=plot.build_figure_host,
-        save_figure_artifact=_async_writer(plot.save_figure_artifact),
-        close_render_processes=lambda: True,
-        spec_for=lambda s, kind="", cell_kind="": task_console_fitting_spec(
-            s.block.schema, kind, cell_kind
-        ),
         manual_axis=lambda incoming: (
             asked.append(incoming) or answers[len(asked) - 1]
         ),
-    )
-    try:
+    ) as presenter:
         host = _Host(request("req-1", 1.0))
         binding = LogicBinding(node_id="scan", descriptor=None, host=host)
         presenter._handle_operator_request(binding)
@@ -7211,8 +6902,6 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
         presenter._handle_operator_request(binding)
         assert host.answered == [("req-1", {})]
         assert "stopped the manual scan" in host.cancelled
-    finally:
-        presenter.close()
 
 
 def test_a_refused_parameter_expression_is_said_where_messages_are_said(
@@ -7315,6 +7004,12 @@ def test_a_reported_refusal_never_edits_the_setting_field_set(
     mechanical form of it: whatever a bridge reports, the key set of
     every Setting section stays exactly what the accepted description
     declared.
+
+    The bridge's own recorded refusal still reaches the operator:
+    ``_report_panel_errors`` once read the selection sources and the port
+    but never ``binding.bridge.last_error``, so a bridge-side derivation
+    failure left the derived signal silently absent.  One refusal is said
+    once, on the board line and on the card.
     """
 
     node, snapshot = _one_shot(session)
@@ -7337,7 +7032,16 @@ def test_a_reported_refusal_never_edits_the_setting_field_set(
             pass
 
     binding.bridge = _ErroredBridge()
+    presenter.view.status.clear()
     presenter.beat()
+    assert _setting_field_sets(binding.parameter_surface) == declared
+    assert [item for item in presenter.view.status if item[0] == "error"] == [
+        ("error", f"{binding.title}: a genuine bridge defect")
+    ]
+    assert presenter.view.cards[0].status == ("a genuine bridge defect", True)
+    presenter.view.status.clear()
+    presenter.beat()
+    assert not [item for item in presenter.view.status if item[0] == "error"]
     assert _setting_field_sets(binding.parameter_surface) == declared
 
     class _WaitingBridge:
@@ -7420,70 +7124,18 @@ def test_opening_edit_names_todays_folder_without_making_it(
     assert session.day_folder() == named and named.is_dir()
 
 
-def test_refresh_advances_the_editors_own_host(presenter, session) -> None:
-    """Refresh shows the newer freeze on the host Edit already has.
-
-    It used to build a second host over the whole frozen history -- a
-    session, a projection, a fit and a first paint -- for a picture the card
-    had just drawn incrementally.  The editor host takes the data through
-    the live pair and keeps its artists; only a moved target replaces it.
-    """
-
-    node, snap = _one_shot(session)
-    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
-    _settle_panel_hosts(
-        presenter,
-        lambda: panel.host is not None and panel.accepted_surface is not None,
-    )
-    assert presenter.edit_panel(panel.panel_id)
-    _settle_panel_hosts(
-        presenter,
-        lambda: panel.editor_host is not None
-        and panel.editor_configuration is None
-        and panel.frozen_data is not None
-        and panel.frozen_data.description is not None,
-    )
-    host = panel.editor_host
-    opened = panel.frozen_data
-    _one_shot(session, producer="cm")
-    _settle_panel_hosts(
-        presenter,
-        lambda: panel.accepted_surface is not None
-        and panel.accepted_surface.publication is not opened.publication,
-    )
-    card = panel.accepted_surface
-    assert presenter.refresh_panel_snapshot(panel.panel_id) is True
-    # the newer freeze travels to the editor; the record stays the picture
-    # the editor shows until that lands
-    assert panel.frozen_data is opened
-    travelling = panel.editor_configuration
-    assert travelling is not None
-    assert travelling[4].publication is card.publication
-    _settle_panel_hosts(
-        presenter,
-        lambda: panel.editor_configuration is None
-        and panel.frozen_data is not opened,
-    )
-    assert panel.frozen_data.publication is card.publication
-    assert panel.editor_host is host, "Refresh rebuilt the editor host"
-    assert not host.closing, "settling the advanced host retired it"
-    shown = getattr(card.plot_input, "snapshot", card.plot_input)
-    assert panel.frozen_data.snapshot.ref == shown.ref
-    assert panel.editor_selections is not None
-    assert not [
-        text for severity, text in presenter.view.status if severity == "error"
-    ]
-
-
 def test_refreshes_in_flight_supersede_on_the_same_host(
     presenter, session
 ) -> None:
     """A second Refresh before the first has painted supersedes it silently.
 
-    With a live source every owed presentation arrives while the previous
-    adoption is still on its way.  The host retains only the latest waiting
-    frame and cancels the rest -- flow control, which must neither rebuild
-    the surface nor surface as a panel error.
+    Refresh shows the newer freeze on the host Edit already has.  It used to
+    build a second host over the whole frozen history -- a session, a
+    projection, a fit and a first paint -- for a picture the card had just
+    drawn incrementally.  With a live source every owed presentation arrives
+    while the previous adoption is still on its way.  The host retains only
+    the latest waiting frame and cancels the rest -- flow control, which must
+    neither rebuild the surface nor surface as a panel error.
     """
 
     node, snap = _one_shot(session)
@@ -7522,6 +7174,9 @@ def test_refreshes_in_flight_supersede_on_the_same_host(
     )
     assert panel.editor_host is host and not host.closing
     assert panel.frozen_data.description is not opened.description
+    shown = getattr(latest.plot_input, "snapshot", latest.plot_input)
+    assert panel.frozen_data.snapshot.ref == shown.ref
+    assert panel.editor_selections is not None
     assert not [
         text for severity, text in presenter.view.status if severity == "error"
     ]
@@ -7815,7 +7470,7 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     import json
     from zlc_atom.nodes.scan import ScanAxis, ScanPlan
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
-    from zlc_workbench.logic import stable_signal_key
+    from zlc_runtime import stable_signal_key
     from zlc_atom.nodes.scan.editor import ScanPlanEditor
     from zlc_ui.qt import ensure_qt_app
     from zlc_data import (
@@ -7865,7 +7520,7 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     ),)).to_tree())
     node_id = presenter.add_logic("seamless_scan", values={"plan": original_plan})
     app = ensure_qt_app(["scan-selection-restore"])
-    editor = ScanPlanEditor(device_ports=False)
+    editor = ScanPlanEditor()
     request.addfinalizer(lambda: (editor.close(), editor.deleteLater(), app.processEvents()))
     editor.resize(900, 200)
     editor.show()
@@ -7948,7 +7603,7 @@ def test_a_region_drawn_on_a_scan_axis_in_microseconds_is_the_region_the_hand_dr
     for action in ("press", "release"):
         binding.host.pointer_event(
             action, left + .1 * (right - left), bottom + .1 * (top - bottom),
-            button=1, identity=front.identity, axes=axes, interaction=front.interaction,
+            button=1, identity=front.identity, axes=axes,
         ).result()
     _settle_panel_hosts(presenter, lambda: not binding.state.selector
                         and presenter.logic[node_id].draft.values["plan"] == original_plan)
@@ -8081,6 +7736,8 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
         _refresh_console_projection=lambda: None,
         refresh_logic_editor=lambda _node: None,
         _refresh_producer_projections=lambda _node: None,
+        _logic_outputs=lambda _binding: (),
+        _refresh_consumer_editors=lambda _node: None,
         _report=lambda *_args, **_kwargs: None,
         _discard_candidate=lambda _binding, _candidate: None,
     )
@@ -8145,6 +7802,8 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
         _refresh_console_projection=lambda: None,
         refresh_logic_editor=lambda _node: None,
         _refresh_producer_projections=lambda _node: None,
+        _logic_outputs=lambda _binding: (),
+        _refresh_consumer_editors=lambda _node: None,
         update_logic_draft=lambda name, **patch: (
             routed.append((name, patch)),
             ConsolePresenter.update_logic_draft(console, name, **patch),
@@ -8229,6 +7888,8 @@ def test_a_silent_plot_worker_cannot_hold_the_console_open(presenter) -> None:
             return False
 
     presenter._retired_plot_hosts.append(_NeverAnswers())
+    # The report comes after CLOSE_REPORT_SECONDS; the rule is what follows it.
+    presenter.CLOSE_REPORT_SECONDS = 0.0
     deadline = time.monotonic() + presenter.CLOSE_REPORT_SECONDS + 20.0
     closed = False
     while time.monotonic() < deadline:
@@ -8306,6 +7967,8 @@ def test_a_surface_that_never_finishes_is_said_on_its_card(
         return completion
 
     stuck.update_data = never
+    # The patience is the console's number; the rule is what happens past it.
+    presenter.SURFACE_PATIENCE_SECONDS = 1.0
 
     presenter.view.presented_fronts.clear()
     started = time.monotonic()

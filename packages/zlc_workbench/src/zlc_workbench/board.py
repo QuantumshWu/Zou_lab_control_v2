@@ -110,6 +110,7 @@ class LiveBoard:
         subscribe = getattr(plane, "subscribe_publications", None)
         if not callable(subscribe):
             raise TypeError("live board requires publication subscription")
+        self._plane = plane
         self._closed = False
         self._closing = False
         self._rearm_deadline: Callable[[], None] | None = None
@@ -133,9 +134,23 @@ class LiveBoard:
             self._arbiter,
             ports,
         )
-        self._unsubscribe_publications = subscribe(
-            self.wake.request_owner_wake,
-        )
+        self._unsubscribe_publications = subscribe(self._published)
+
+    def _published(self, names: frozenset[str]) -> None:
+        """Wake the owner for a publication this board shows.
+
+        The plane calls this after every commit of every producer.  A signal
+        no panel reads -- a node's raw stream nobody plots, a derived output
+        feeding only another node -- has nothing to stage, and its turn would
+        walk every panel for nothing at the bench's publication rate.  What
+        the board shows is the set its scheduler last declared to the plane:
+        every panel's front signals, so both ends of any follower edge on the
+        board.  A panel added since joins it at the next beat, which stages
+        that panel anyway: a panel that never staged is due at once.
+        """
+
+        if not self._plane.front_signals.isdisjoint(names):
+            self.wake.request_owner_wake()
 
     @property
     def intervals(self) -> tuple[int, ...]:

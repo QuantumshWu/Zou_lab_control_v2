@@ -11,7 +11,7 @@ producer -- its Bridge publishes the ROI and fit outputs it derives under
 that producer by that spelling; a document that kept the downstream name and
 dropped the upstream identity could not say which panel it was reading.
 Loading never reuses a written identity: the console mints fresh ones and
-:func:`load_layout` respells every reference in the document to them.
+:func:`resolve_layout` respells every reference in the document to them.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from zlc_durable import write_readable_json
+from zlc_runtime import split_signal_key, stable_signal_key
 
 from .logic import (
     LogicBinding,
@@ -31,9 +32,8 @@ from .logic import (
     dataset_inputs,
     device_key_options,
     draft_devices,
-    split_signal_key,
-    stable_signal_key,
 )
+from .panel_catalog import task_console_panel_kind
 from .panel_state import PanelState
 
 
@@ -182,19 +182,6 @@ class LayoutDocument:
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedLayout:
-    """All stopped row drafts after catalog/schema/contract resolution.
-
-    The panels still carry the document's own identities and spellings;
-    :func:`load_layout` puts them onto the identities of one load.
-    """
-
-    logic: tuple[LogicBinding, ...]
-    panels: tuple[PanelState, ...]
-    panel_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class LoadedLayout:
     """A resolved board on fresh panel identities, ready to prepare."""
 
@@ -211,17 +198,29 @@ def resolve_layout(
     *,
     catalog: object,
     installation: object,
-    panel_kinds: Sequence[str],
+    panel_ids: Sequence[str],
     external_outputs: Sequence[tuple[str, str]] = (),
-) -> ResolvedLayout:
-    """Resolve every entry without changing the current board or a device.
+) -> LoadedLayout:
+    """Resolve every entry onto fresh panel identities, touching no device.
 
     A named device or signal which is absent on today's apparatus remains an
     unresolved stopped draft, as a reusable layout requires.  A name which can
     be resolved and contradicts its declared capability/contract is an invalid
     document and rejects the whole candidate.
+
+    ``panel_ids`` are the identities the console minted for this load, in
+    saved order.  Every ``@logic/<saved panel id>/<output>`` in the document
+    -- a panel's signal, its overlay, a logic row's source -- is respelled to
+    the fresh identity, because the producer behind such a signal is the
+    loaded panel's own Bridge, and it publishes under the fresh one.  A
+    reference to a panel the board does not carry cannot be resolved: it is
+    dropped (the field left blank, the panel or row kept for rewiring) and
+    said in ``notes``.
     """
 
+    fresh = tuple(str(panel_id).strip() for panel_id in panel_ids)
+    if len(fresh) != len(document.panels):
+        raise LayoutError("a load mints one fresh panel_id per saved panel")
     bindings: list[LogicBinding] = []
     installed = getattr(installation, "devices", {})
     installed_keys = set(installed) if isinstance(installed, Mapping) else set()
@@ -317,39 +316,16 @@ def resolve_layout(
                 f"{', '.join(expected) if expected else 'a compatible Dataset'}"
             )
 
-    offered_kinds = {str(kind) for kind in panel_kinds}
     for index, state in enumerate(document.panels):
-        if state.kind not in offered_kinds:
-            raise LayoutError(
-                f"panel {index + 1}: plot kind {state.kind!r} is not available"
-            )
-    return ResolvedLayout(tuple(bindings), document.panels, document.panel_ids)
+        try:
+            task_console_panel_kind(state.kind)
+        except ValueError as error:
+            raise LayoutError(f"panel {index + 1}: {error}") from error
 
-
-def load_layout(
-    resolved: ResolvedLayout,
-    *,
-    panel_ids: Sequence[str],
-) -> LoadedLayout:
-    """Put a resolved board onto fresh panel identities.
-
-    ``panel_ids`` are the identities the console minted for this load, in
-    saved order.  Every ``@logic/<saved panel id>/<output>`` in the document
-    -- a panel's signal, its overlay, a logic row's source -- is respelled to
-    the fresh identity, because the producer behind such a signal is the
-    loaded panel's own Bridge, and it publishes under the fresh one.  A
-    reference to a panel the board does not carry cannot be resolved: it is
-    dropped (the field left blank, the panel or row kept for rewiring) and
-    said in ``notes``.
-    """
-
-    fresh = tuple(str(panel_id).strip() for panel_id in panel_ids)
-    if len(fresh) != len(resolved.panels):
-        raise LayoutError("a load mints one fresh panel_id per saved panel")
-    renamed = dict(zip(resolved.panel_ids, fresh, strict=True))
+    renamed = dict(zip(document.panel_ids, fresh, strict=True))
     notes: list[str] = []
     panels: list[PanelState] = []
-    for state in resolved.panels:
+    for state in document.panels:
         who = f"panel {state.title!r}"
         signal = _respelled_reference(state.signal, renamed, who, notes)
         overlay_signal = _respelled_reference(
@@ -375,7 +351,7 @@ def load_layout(
                 ),
             ),
         )
-        for binding in resolved.logic
+        for binding in bindings
     )
     return LoadedLayout(logic, tuple(panels), fresh, tuple(notes))
 
@@ -485,8 +461,6 @@ __all__ = [
     "LayoutError",
     "LoadedLayout",
     "LogicLayoutEntry",
-    "ResolvedLayout",
-    "load_layout",
     "panel_id_for",
     "resolve_layout",
 ]

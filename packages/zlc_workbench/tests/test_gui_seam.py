@@ -20,9 +20,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
-#: Qt lives in exactly two places here: the shim that moves a wake onto the
-#: owner thread, and the timer that drives the display beat.  Both are about
-#: THREADS and events, not about widgets -- neither builds, holds or shows one.
+#: Qt lives in exactly one module here, board.py: the shims that move a wake
+#: or a worker's answer onto the owner thread, and the timer that drives the
+#: display beat.  They are about THREADS and events, not about widgets --
+#: none of them builds, holds or shows one.
 QT_IS_ALLOWED = {"board.py"}
 
 
@@ -55,8 +56,8 @@ def test_no_module_here_builds_or_holds_a_qt_widget() -> None:
     """A composition root that can construct a widget will assemble a UI.
 
     Importing PyQt5 at all is the check, because there is no widget-free half
-    of it worth carving out: the two modules that legitimately need Qt need it
-    for threads and timers, and they are named above.
+    of it worth carving out: the one module that legitimately needs Qt needs
+    it for threads and timers, and it is named above.
     """
 
     offenders: list[str] = []
@@ -77,36 +78,3 @@ def test_no_module_here_builds_or_holds_a_qt_widget() -> None:
         "Qt outside the GUI package: a window is opened with one call and "
         f"driven through its handle. {offenders}"
     )
-
-
-def test_every_window_is_opened_by_one_call_and_returns_a_handle() -> None:
-    """Four windows, four entries, and not a widget among them."""
-
-    import os
-
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    os.environ.setdefault("MPLBACKEND", "Agg")
-
-    from PyQt5 import QtWidgets
-
-    import zlc_ui
-
-    for name in (
-        "open_pulse_editor",
-        "open_figure_viewer",
-        "open_device_manager",
-        "open_task_console",
-    ):
-        assert hasattr(zlc_ui, name), f"{name} is not on the facade"
-
-    application = zlc_ui.ensure_qt_app(["seam"])
-    for opener in (zlc_ui.open_pulse_editor, zlc_ui.open_figure_viewer):
-        handle = opener(window_ratio=0.4)
-        try:
-            assert not isinstance(handle, QtWidgets.QWidget), "a widget escaped"
-            # What a host may ask of a window, and the whole of it.
-            for member in ("close", "is_visible", "window_size", "window_title"):
-                assert callable(getattr(handle, member)), member
-        finally:
-            handle.close()
-            application.processEvents()

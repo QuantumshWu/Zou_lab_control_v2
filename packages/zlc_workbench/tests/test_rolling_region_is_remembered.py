@@ -12,42 +12,21 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from test_console_presenter import (  # noqa: F401 -- fixtures
-    PULSE_NAME,
     _commit_area,
     _settle_panel_hosts,
+    _started_camera,
     presenter,
     session,
 )
-from zlc_workbench.logic import stable_signal_key
-from zlc_workbench.selection import panel_selection_binds_a_revision
 
 
 def test_a_rolling_region_is_remembered_and_derives_nothing(
     presenter, session
 ) -> None:
-    from zlc_runtime.selection_bridge import SelectionRange, SelectionState
-
-    camera_id = presenter.add_logic(
-        "camera_measurement",
-        node_id="roll-cam",
-        values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
-        device_keys={"camera": "camera"},
-        open_editor=False,
+    _camera_id, signal, publication = _started_camera(
+        presenter, session, node_id="roll-cam", timeout=20.0
     )
-    session.load_pulse(PULSE_NAME)
-    assert presenter.start_logic(camera_id)
-    signal = stable_signal_key(camera_id, "frames")
-    publication = None
-    deadline = time.monotonic() + 20.0
-    while publication is None and time.monotonic() < deadline:
-        session.fire(shots=1)
-        presenter.beat()
-        publication = session.signal_plane.latest_publication(signal)
-        time.sleep(0.005)
-    assert publication is not None
 
     binding = presenter.add_panel(
         signal, publication.value(signal).snapshot, kind="rolling"
@@ -69,32 +48,5 @@ def test_a_rolling_region_is_remembered_and_derives_nothing(
     assert document["plot_kind"] == "rolling"
     domains = [str(item["domain"]) for item in document["ranges"]]
     assert domains == ["shot", "value"], domains
-
-    # It cuts the signal like any other region -- a shot window decides
-    # which publications answer -- but it names no axis, so it means the
-    # same thing on every revision and is not tied to the picture it was
-    # drawn on.
-    marked = SelectionState(
-        plot_kind="rolling",
-        selector_kind="x_range",
-        ranges=(
-            SelectionRange(
-                axis="", lower=1.0, upper=5.0, domain="shot"
-            ),
-        ),
-    )
-    assert panel_selection_binds_a_revision(marked) is False
-
-
-def test_the_reportable_kinds_are_a_superset_of_the_derivable_ones() -> None:
-    """The two vocabularies are related, and the relation is stated once.
-
-    Every kind that can derive must be reportable; the extra reportable
-    kind is exactly the one whose region is the panel's own.
-    """
-
-    from zlc_runtime.selection_bridge import SELECTION_PLOT_KINDS
-    from zlc_workbench.selection import _PLOT_KINDS
-
-    assert set(_PLOT_KINDS) == set(SELECTION_PLOT_KINDS)
-    assert "rolling" in SELECTION_PLOT_KINDS
+    # That a shot range names no axis, so it binds no revision and derives
+    # nothing, is test_selection's rolling-viewport test, on a real gesture.

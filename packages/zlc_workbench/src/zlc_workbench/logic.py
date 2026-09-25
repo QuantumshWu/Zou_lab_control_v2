@@ -41,8 +41,6 @@ __all__ = [
     "build_arguments",
     "device_key_options",
     "finalize_logic_draft",
-    "split_signal_key",
-    "stable_signal_key",
     "task_input_summary",
 ]
 
@@ -187,32 +185,6 @@ class LogicBinding:
     selection_restore: dict[str, tuple[str, Any]] = field(default_factory=dict)
 
 
-_SIGNAL_KEY_PREFIX = "@logic/"
-
-
-def stable_signal_key(node_id: str, output_name: str) -> str:
-    """The stable signal spelling shared by stopped drafts and NodeHost."""
-
-    return f"{_SIGNAL_KEY_PREFIX}{str(node_id)}/{str(output_name)}"
-
-
-def split_signal_key(signal: str) -> tuple[str, str] | None:
-    """The ``(producer, output)`` a stable signal key spells, else None.
-
-    The inverse of :func:`stable_signal_key`, and the one reader of its
-    grammar: a producer is everything between the prefix and the last
-    slash, so an output name never has to be guessed at from the middle.
-    """
-
-    text = str(signal)
-    if not text.startswith(_SIGNAL_KEY_PREFIX):
-        return None
-    producer, separator, output = text[len(_SIGNAL_KEY_PREFIX):].rpartition("/")
-    if not separator or not producer or not output:
-        return None
-    return producer, output
-
-
 def task_input_summary(
     descriptor: Any,
     finalization: LogicDraftFinalization,
@@ -349,8 +321,17 @@ def finalize_logic_draft(
     workspace: Any,
     source_options: Sequence[str] = (),
     acquisition_options: Sequence[str] = (),
+    previous: LogicDraftFinalization | None = None,
 ) -> LogicDraftFinalization:
-    """Resolve every Start admission fact without building or acquiring a run."""
+    """Resolve every Start admission fact without building or acquiring a run.
+
+    ``previous`` is this row's last finalization: a file it decoded is taken
+    from it again while the draft still names the same path.  Files are read
+    at the explicit boundaries -- opening Edit, Refresh, Start -- which pass
+    none; a keystroke in an unrelated field re-decoded an SLM-sized context
+    and every calibration the row names, and quietly picked up whatever had
+    changed on disk.
+    """
 
     from zlc_atom.nodes import ResolvedArtifact, split_artifact_input_key
 
@@ -360,7 +341,9 @@ def finalize_logic_draft(
     # The workspace resources come first: what a draft is given (the pulse a
     # calibration will play) decides the defaults of the fields the operator
     # left empty, so the resources are known before the draft is projected.
-    resources, resource_issues = _resolve_workspace_resources(descriptor, draft, workspace)
+    resources, resource_issues = _resolve_workspace_resources(
+        descriptor, draft, workspace, {} if previous is None else previous.resources
+    )
     issues.extend(resource_issues)
     raw_values, defaulted = _defaults_from_resources(descriptor, draft.values, resources)
     authored = True
@@ -523,7 +506,11 @@ def finalize_logic_draft(
     data_root = Path(getattr(workspace, "data", Path.cwd())).resolve()
     # One decode per file: several frames naming the same calibration read
     # it once, and the processor then holds one object for all of them.
-    decoded: dict[Path, ResolvedArtifact] = {}
+    decoded: dict[Path, ResolvedArtifact] = (
+        {}
+        if previous is None
+        else {Path(item.path): item for item in previous.artifacts.values()}
+    )
     for spec in artifact_specs:
         for frame, key in ((None, spec.name), *sorted(frame_keys[spec.name])):
             raw = offered_artifacts.get(key, "")
@@ -575,8 +562,13 @@ def _resolve_workspace_resources(
     descriptor: Any,
     draft: LogicDraft,
     workspace: Any,
+    held: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    """Each declared workspace resource the draft names, decoded, and why not."""
+    """Each declared workspace resource the draft names, decoded, and why not.
+
+    ``held`` are the resources already decoded for this row; one whose path
+    the draft still names is kept rather than read again.
+    """
 
     resources: dict[str, Any] = {}
     issues: list[str] = []
@@ -595,6 +587,10 @@ def _resolve_workspace_resources(
             issues.append(
                 f"{spec.field_name} must choose a file from {directory}"
             )
+            continue
+        kept = held.get(spec.field_name)
+        if kept is not None and Path(kept.path) == selected:
+            resources[spec.field_name] = kept
             continue
         try:
             resources[spec.field_name] = spec.resolve(selected)

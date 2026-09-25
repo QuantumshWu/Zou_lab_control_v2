@@ -4,8 +4,9 @@ An image and the judgement annotating it are two signals of one shot.  The
 plane already guarantees they freeze together -- but only for signals the
 board DECLARES it displays.  An annotation left out of that declaration
 floats at its own latest publication, so on a free-running camera the rings
-describe a cycle the picture never showed.  These guards pin both halves:
-the declaration, and the reading.
+describe a cycle the picture never showed.  This guard pins the declaration;
+the reading -- the projection takes the companion from the very front it was
+prepared from -- is test_presentation's companion-only change test.
 """
 
 from __future__ import annotations
@@ -110,56 +111,3 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
         "@logic/camera/frames",
         "@logic/occupancy/occupied",
     }, "the annotation never reached the plane's coherent set"
-
-
-def test_the_projection_is_handed_the_front_it_was_prepared_from() -> None:
-    """``prepare`` gives the projection the exact freeze, not a lookup key.
-
-    The projection used to receive only one publication, so an annotation on
-    a different publication had to be FETCHED -- and the only thing available
-    to fetch was the plane's latest.
-    """
-
-    seen: list[object] = []
-    front = object()
-    from test_signal_front import _publication
-
-    publication = _publication(
-        "camera",
-        "generation",
-        1,
-        "camera/frames",
-    )
-    value = publication.value("camera/frames")
-    assert value is not None
-
-    class _Reached(Exception):
-        """Raised once the projection has been handed its front."""
-
-    def project(
-        _value: object,
-        _publication: object,
-        given: object,
-        _target: object,
-    ) -> object:
-        seen.append(given)
-        raise _Reached
-
-    host = _Host()
-    port = PlotPanelPort(
-        "panel-1",
-        "camera/frames",
-        display_interval_ms=100,
-        submit_projection=_submit_now,
-        replace_host=_stage_on(host),
-        project_input=project,
-    )
-
-    update = port.prepare(value, publication, front)
-    assert update is not None
-    try:
-        update.future.result()
-    except _Reached:
-        pass
-
-    assert seen == [front], "the projection was not given the prepared front"

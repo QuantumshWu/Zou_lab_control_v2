@@ -139,7 +139,7 @@ def test_a_saved_layout_keeps_each_frames_artifact() -> None:
     )
     document = LayoutDocument.from_tree(LayoutDocument((), (entry,), ()).to_tree())
     resolved = resolve_layout(
-        document, catalog=LogicCatalog(), installation=SimpleNamespace(devices={}), panel_kinds=(),
+        document, catalog=LogicCatalog(), installation=SimpleNamespace(devices={}), panel_ids=(),
     )
     (binding,) = resolved.logic
     assert binding.draft.artifact_inputs == {

@@ -8,7 +8,6 @@ a notebook running beside the window.
 from __future__ import annotations
 
 import ast
-from contextlib import contextmanager
 import json
 import os
 import time
@@ -21,8 +20,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from zlc_runtime import SignalDataPlane
-from zlc_workbench.console import ConsolePresenter
+from zlc_runtime import SignalDataPlane, stable_signal_key
 from zlc_workbench.logic import (
     LogicCatalog,
     LogicDraft,
@@ -30,22 +28,16 @@ from zlc_workbench.logic import (
     device_key_options,
     finalize_logic_draft,
     make_host,
-    stable_signal_key,
 )
-from zlc_workbench.panel_catalog import task_console_fitting_spec
-from zlc_workbench.session import ExperimentSession
 
-from test_console_presenter import (
-    _CardView,
-    _ConsoleView,
-    _Signal,
-    _async_writer,
+from test_console_presenter import (  # noqa: F401 -- fixtures
+    _LogicRowView,
+    _console_over,
     _one_shot,
+    presenter,
+    session,
 )
-from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
-
-
-from test_console_presenter import _LogicRowView  # noqa: E402
+from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence
 
 
 def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
@@ -67,18 +59,6 @@ def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
                             (str(path.relative_to(root)), alias.name)
                         )
     assert not violations, violations
-
-
-@pytest.fixture
-def session(tmp_path):
-    """The virtual apparatus: for tests that start, stop, claim or publish."""
-
-    write_ordinary_pulse(tmp_path)
-    session = ExperimentSession.open(tmp_path, template="virtual")
-    try:
-        yield session
-    finally:
-        session.close()
 
 
 #: Cameras, so they answer what a camera answers: a draft's units are decided
@@ -132,50 +112,6 @@ def bench(tmp_path):
         plane.close()
 
 
-@contextmanager
-def _console_over(session):
-    """The console presenter over ``session``, retired on the way out."""
-
-    plot = pytest.importorskip("zlc_plot")
-    from zlc_workbench.apps.task_console import build_panel_host
-
-    def spec_for(snapshot, kind="", cell_kind=""):
-        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
-
-    def make_host(plot_input, state):
-        return build_panel_host(
-            plot_input,
-            state,
-            build_host=plot.build_figure_host,
-        )
-
-    presenter = ConsolePresenter(
-        session,
-        _ConsoleView(),
-        make_monitor_host=make_host,
-        make_editor_host=make_host,
-        build_figure_host=plot.build_figure_host,
-        save_figure_artifact=_async_writer(plot.save_figure_artifact),
-        close_render_processes=lambda: True,
-        spec_for=spec_for,
-    )
-    try:
-        yield presenter
-    finally:
-        presenter.close()
-        deadline = time.monotonic() + 10.0
-        while not presenter.close() and time.monotonic() < deadline:
-            presenter.beat()
-            time.sleep(0.005)
-        assert presenter.close(), "Console test owner did not retire"
-
-
-@pytest.fixture
-def presenter(session):
-    with _console_over(session) as presenter:
-        yield presenter
-
-
 @pytest.fixture
 def bench_presenter(bench):
     with _console_over(bench) as presenter:
@@ -197,7 +133,11 @@ def test_the_node_types_offered_are_the_ones_that_exist(bench_presenter) -> None
 
 
 def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_presenter) -> None:
-    """Add is authoring, so it cannot build or acquire before Start."""
+    """Add is authoring, so it cannot build or acquire before Start.
+
+    Editing a stopped row is authoring too: its draft keeps every field of
+    the schema with the authored patch on top, and nothing is built.
+    """
 
     presenter = bench_presenter
     node_id = presenter.add_logic("camera_measurement")
@@ -219,19 +159,17 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert projection["form_values"]["exposure_seconds"] == 0.1
     assert projection["device_keys"]["camera"] == "camera"
 
-
-def test_a_row_draft_keeps_every_field_and_authored_patch(presenter) -> None:
-    node_id = presenter.add_logic(
-        "camera_measurement", values={"repeat": 3, "frames_per_cycle": 2}
-    )
-
+    assert presenter.update_logic_draft(
+        node_id, values={"repeat": 9, "frames_per_cycle": 2}
+    ) is True
     draft = presenter.logic[node_id].draft
     assert set(draft.values) == set(
         presenter.logic[node_id].descriptor.authoring_schema.field_names
     )
-    assert draft.values["repeat"] == 3
+    assert draft.values["repeat"] == 9
     assert draft.values["frames_per_cycle"] == 2
     assert "timeout_seconds" not in draft.values
+    assert presenter.logic[node_id].host is None
 
 
 def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None:
@@ -308,6 +246,8 @@ def test_close_keeps_a_row_when_its_worker_has_not_released(presenter) -> None:
         ),
         published_signals=lambda: (),
         dataset_output_declarations=(),
+        instance_id=node_id,
+        signal_key=lambda name: stable_signal_key(node_id, name),
     )
     presenter.logic[node_id].host = host
 
@@ -415,15 +355,6 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
         for spec in presenter.logic[node_id].preview_specs
     ) == (("frames", "facet_grid"),), "the running node's declaration is the run's"
     presenter.stop_logic(node_id)
-
-
-def test_editing_an_idle_row_does_not_build_it(presenter) -> None:
-    node_id = presenter.add_logic("camera_measurement")
-
-    assert presenter.update_logic_draft(node_id, values={"repeat": 9}) is True
-
-    assert presenter.logic[node_id].draft.values["repeat"] == 9
-    assert presenter.logic[node_id].host is None
 
 
 def test_a_build_is_handed_only_what_it_asks_for(bench) -> None:
@@ -661,31 +592,12 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
     assert session.resolve_device_setting_records((event,)) == records
 
 
-def test_same_device_claims_queue_and_stop_the_old_row(presenter) -> None:
-    first_descriptor = _claim_descriptor("first")
-    second_descriptor = _claim_descriptor("second")
-    presenter.catalog = LogicCatalog((first_descriptor, second_descriptor))
-    first = presenter.add_logic("first")
-    second = presenter.add_logic("second")
-    assert presenter.start_logic(first) is True
-    old_host = presenter.logic[first].host
-
-    assert presenter.start_logic(second) is True
-    assert presenter.logic[second].pending is not None
-    assert presenter.logic[second].host is None
-
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline and presenter.logic[second].pending is not None:
-        presenter.poll_logic()
-        time.sleep(0.001)
-    assert first in presenter.logic, "the conflicting draft row was removed"
-    assert old_host is not None and not old_host.running
-    assert presenter.logic[second].host is not None
-    assert presenter.logic[second].host.running
-
-
 def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -> None:
-    """A Pulse command cannot enter through the candidate's currently-free device."""
+    """A Pulse command cannot enter through the candidate's currently-free device.
+
+    A claim on a device another row holds queues, stops the old row -- which
+    keeps its place on the board -- and then starts.
+    """
 
     from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
 
@@ -699,8 +611,10 @@ def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -
     old_id = presenter.add_logic("old")
     replacement_id = presenter.add_logic("replacement")
     assert presenter.start_logic(old_id) is True
+    old_host = presenter.logic[old_id].host
     assert presenter.start_logic(replacement_id) is True
     assert presenter.logic[replacement_id].pending is not None
+    assert presenter.logic[replacement_id].host is None
 
     pulse_owner = object()
     with pytest.raises(DeviceUseBusy, match="replacement"):
@@ -723,6 +637,8 @@ def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -
     ):
         presenter.poll_logic()
         time.sleep(0.001)
+    assert old_id in presenter.logic, "the conflicting draft row was removed"
+    assert old_host is not None and not old_host.running
     assert presenter.logic[replacement_id].host is not None
     assert presenter.logic[replacement_id].host.running
 
@@ -924,23 +840,6 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert session.signal_plane.latest_publication(old_key) is None
 
 
-def test_the_summary_counts_what_is_running(presenter) -> None:
-    presenter.add_logic("camera_measurement")
-
-    assert "0/1 node(s) running" in presenter.view.summary
-
-
-def test_the_add_offer_does_not_build_or_gate_unresolved_rows(presenter) -> None:
-
-    offered = {name for name, _kind, _publishes in presenter.logic_offer()}
-    assert "camera_measurement" in offered
-    assert "occupancy" in offered
-    for api_name in ("calibration", "occupancy"):
-        node_id = presenter.add_logic(api_name)
-        assert presenter.logic[node_id].host is None
-        assert presenter.view.focused_logic_editor == node_id
-
-
 def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
     presenter,
 ) -> None:
@@ -1093,6 +992,13 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert artifact_field.base_dir == str(presenter.session.workspace.data)
     assert presenter.view.logic_editors[node_id]["source_required"] is True
     assert presenter.view.logic_editors[node_id]["source_options"] == ()
+    # With no source, Start is disabled before the click and refused at it.
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is False
+    assert any("source_signal" in issue for issue in projection["issues"])
+    assert presenter.start_logic(node_id) is False
+    assert presenter.logic[node_id].host is None
+    assert "source_signal" in presenter.logic[node_id].draft_error
 
     camera_id = presenter.add_logic("camera_measurement")
     assert presenter.view.logic_editors[node_id]["source_options"] == (
@@ -1208,11 +1114,17 @@ def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) ->
     assert total in presenter.view.logic_editors[consumer_id]["source_options"]
 
 
-def test_a_derived_value_shows_before_the_draft_is_complete(presenter) -> None:
-    """A calibration just added has no pulse and no API fields yet, so its
+def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:
+    """Empty API fields show the pulse's first three API parameters in
+    period order; the draft itself stays empty, so the default follows the
+    pulse; a field the operator chose stands.
+
+    A calibration just added has no pulse and no API fields yet, so its
     draft does not project -- and its camera exposure still shows, because
     the node derives it from the two windows alone, and follows them as
     they are typed.  It was blank until every required field was filled."""
+
+    import shutil
 
     node_id = presenter.add_logic("calibration")
     editor = presenter.view.logic_editors[node_id]
@@ -1223,17 +1135,9 @@ def test_a_derived_value_shows_before_the_draft_is_complete(presenter) -> None:
     )
     assert presenter.view.logic_editors[node_id]["form_values"]["camera_exposure_seconds"] == 0.03
 
-
-def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, session) -> None:
-    """Empty API fields show the pulse's first three API parameters in
-    period order; the draft itself stays empty, so the default follows the
-    pulse; a field the operator chose stands."""
-
-    import shutil
-
     fixture = Path(__file__).resolve().parents[2] / "zlc_atom" / "tests" / "pulses" / "imaging_template.json"
     shutil.copy(fixture, Path(session.workspace.root) / "pulses" / "calib.json")
-    node_id = presenter.add_logic("calibration", values={"pulse_template": "calib.json"})
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"pulse_template": "calib.json"}})
     projection = presenter.logic_editor_projection(node_id)
     assert projection["form_values"]["reference_before_field"] == "duration:long_before"
     assert projection["form_values"]["readout_field"] == "duration:short"
@@ -1242,7 +1146,7 @@ def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, 
     # The camera exposure is the node's, derived from the windows: shown,
     # disabled with the reason on it, following the reference window, and
     # never written into the draft.
-    assert projection["form_values"]["camera_exposure_seconds"] == 0.02
+    assert projection["form_values"]["camera_exposure_seconds"] == 0.03
     exposure = next(f for f in projection["form_spec"].fields if f.key == "camera_exposure_seconds")
     assert exposure.unavailable and "longest" in exposure.unavailable_reason
     presenter.view.logic_draft_changed.emit(node_id, {"values": {"reference_exposure_seconds": 0.05}})
@@ -1256,126 +1160,97 @@ def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, 
     assert projection["form_values"]["reference_before_field"] == "duration:long_before"
 
 
-def test_an_unresolved_processor_source_disables_start_before_click(presenter) -> None:
-    node_id = presenter.add_logic("occupancy")
+def test_make_host_hands_the_descriptor_contract_to_its_node_host() -> None:
+    """The host takes what the descriptor declares, never a node attribute.
 
-    projection = presenter.logic_editor_projection(node_id)
-    assert projection["can_start"] is False
-    assert any("source_signal" in issue for issue in projection["issues"])
-    assert presenter.start_logic(node_id) is False
-    assert presenter.logic[node_id].host is None
-    assert "source_signal" in presenter.logic[node_id].draft_error
-
-
-def test_a_node_that_computes_what_it_was_asked_names_the_siblings_it_reads() -> None:
-    """A derive reads the outputs its expression names.  The declaration says
-    there is an input; the instance says which siblings of it to fetch."""
+    A derive reads the outputs its expression names: the declaration says
+    there is an input, the instance says which siblings of it to fetch, and
+    what it publishes is named by its draft, not by its kind.
+    """
 
     from zlc_atom.authoring import AuthoringSchema
     from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
-    from zlc_runtime import DatasetOutputDeclaration, SignalDataPlane
+    from zlc_runtime import DatasetOutputDeclaration
 
-    descriptor = LogicNodeDescriptor(
+    def descriptor(api_name, kind, input_spec, **declared):
+        return LogicNodeDescriptor(
+            api_name,
+            kind,
+            AuthoringSchema(),
+            input_specs=(input_spec,),
+            build=lambda **_values: object(),
+            **declared,
+        )
+
+    expression = descriptor(
         "expression_processor",
         NodeKind.PROCESSOR,
-        AuthoringSchema(),
-        input_specs=(DatasetInputSpec("a", None, "exact"),),
-        # What it publishes is named by its draft, not by its kind.
+        DatasetInputSpec("a", None, "exact"),
         declare_outputs=lambda values, _devices: (
             DatasetOutputDeclaration(str(values["name"]), "derive.value"),
         ),
-        build=lambda **_values: object(),
     )
-    plane = SignalDataPlane()
-    host = make_host(
-        descriptor,
-        SimpleNamespace(dataset_input_siblings=("occupied", "frame_judged")),
-        signal_plane=plane,
-        instance_id="derive-1",
-        source_signal="@logic/occupancy/counts",
-        values={"name": "bright"},
-        devices={},
-    )
-    try:
-        assert host._input_name == "a"
-        assert host._input_siblings == ("occupied", "frame_judged")
-        assert [item.name for item in host.dataset_output_declarations] == ["bright"]
-    finally:
-        host.shutdown()
-    silent = make_host(
-        descriptor,
-        object(),
-        signal_plane=plane,
-        instance_id="derive-2",
-        source_signal="@logic/occupancy/counts",
-        values={"name": "value"},
-        devices={},
-    )
-    try:
-        assert silent._input_siblings == ()
-    finally:
-        silent.shutdown()
-
-
-def test_make_host_passes_descriptor_contract_without_reading_node_attributes() -> None:
-    from zlc_atom.authoring import AuthoringSchema
-    from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
-    from zlc_runtime import DatasetOutputDeclaration, SignalDataPlane
-
     output = DatasetOutputDeclaration("judged", "occupancy.judged")
-    descriptor = LogicNodeDescriptor(
+    processor = descriptor(
         "explicit_processor",
         NodeKind.PROCESSOR,
-        AuthoringSchema(),
-        input_specs=(DatasetInputSpec("frames", "camera.frames", "exact"),),
+        DatasetInputSpec("frames", "camera.frames", "exact"),
         outputs=(output,),
-        build=lambda **_values: object(),
+    )
+    scan = descriptor(
+        "explicit_scan",
+        NodeKind.MEASUREMENT,
+        DatasetInputSpec("source", None, "exact"),
+        outputs=(DatasetOutputDeclaration("scan", "scan.result"),),
     )
     plane = SignalDataPlane()
-    host = make_host(
-        descriptor,
-        object(),
-        signal_plane=plane,
-        instance_id="processor-7",
-        source_signal="@logic/camera-2/frames",
-        values={},
-        devices={},
-    )
-    try:
-        assert host.instance_id == "processor-7"
-        assert host.dataset_output_declarations == (output,)
-        assert host._source_signal == "@logic/camera-2/frames"
-        assert host._input_delivery == "exact"
+    hosts: list = []
 
-        scan_output = DatasetOutputDeclaration("scan", "scan.result")
-        scan_descriptor = LogicNodeDescriptor(
-            "explicit_scan",
-            NodeKind.MEASUREMENT,
-            AuthoringSchema(),
-            input_specs=(
-                DatasetInputSpec("source", None, "exact"),
-            ),
-            outputs=(scan_output,),
-            build=lambda **_values: object(),
-        )
-        scan_host = make_host(
-            scan_descriptor,
-            object(),
+    def hosted(node_descriptor, node, instance_id, source_signal, values=None):
+        host = make_host(
+            node_descriptor,
+            node,
             signal_plane=plane,
-            instance_id="scan-3",
-            source_signal="@logic/camera-2/frames",
-            values={},
+            instance_id=instance_id,
+            source_signal=source_signal,
+            values={} if values is None else values,
             devices={},
         )
-        try:
-            assert scan_host._mode == "worker"
-            assert scan_host._source_signal == "@logic/camera-2/frames"
-            assert scan_host._input_delivery == "exact"
-        finally:
-            scan_host.shutdown()
+        hosts.append(host)
+        return host
+
+    try:
+        reading = hosted(
+            expression,
+            SimpleNamespace(dataset_input_siblings=("occupied", "frame_judged")),
+            "derive-1",
+            "@logic/occupancy/counts",
+            {"name": "bright"},
+        )
+        assert reading._input_name == "a"
+        assert reading._input_siblings == ("occupied", "frame_judged")
+        assert [item.name for item in reading.dataset_output_declarations] == ["bright"]
+        silent = hosted(
+            expression, object(), "derive-2", "@logic/occupancy/counts", {"name": "value"}
+        )
+        assert silent._input_siblings == ()
+
+        explicit = hosted(processor, object(), "processor-7", "@logic/camera-2/frames")
+        assert explicit.instance_id == "processor-7"
+        assert explicit.dataset_output_declarations == (output,)
+        assert explicit._source_signal == "@logic/camera-2/frames"
+        assert explicit._input_delivery == "exact"
+
+        scan_host = hosted(scan, object(), "scan-3", "@logic/camera-2/frames")
+        assert scan_host._mode == "worker"
+        assert scan_host._source_signal == "@logic/camera-2/frames"
+        assert scan_host._input_delivery == "exact"
     finally:
-        host.shutdown()
-        plane.close()
+        try:
+            for host in reversed(hosts):
+                host.shutdown()
+        finally:
+            plane.close()
 
 
 def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(

@@ -120,6 +120,64 @@ def build_panel_host(
     )
 
 
+def panel_host_factories(view, monitor_render, editor_render):
+    """One window's Monitor and Edit/Save host factories.
+
+    Both mount through :func:`build_panel_host` at the window's CURRENT
+    screen scale, read per host: the Monitor factory runs on the projection
+    lane, so it must not touch Qt, and it must not keep the scale of the
+    screen the window first opened on.
+    """
+
+    def monitor(plot_input, state, **initial):
+        return build_panel_host(
+            plot_input,
+            state,
+            build_host=monitor_render.build_host,
+            device_pixel_ratio=float(view.device_pixel_ratio()),
+            **initial,
+        )
+
+    def editor(plot_input, state):
+        return build_panel_host(
+            plot_input,
+            state,
+            build_host=editor_render.build_host,
+            device_pixel_ratio=float(view.device_pixel_ratio()),
+        )
+
+    return monitor, editor
+
+
+def render_processes_closer(monitor_render, editor_render):
+    """Let go of one window's claim on the Monitor pool and Edit/Save process.
+
+    The returned call never blocks by default and may be repeated: the first
+    releases both claims, and each answers True once every service this
+    window was the last to hold has closed.  A ``timeout`` waits that long
+    for them instead -- the abandon path of a window that failed to open.
+    """
+
+    released = False
+    monitor_shutdown = editor_shutdown = False
+
+    def close(timeout: float = 0.0) -> bool:
+        nonlocal released, monitor_shutdown, editor_shutdown
+        if not released:
+            monitor_shutdown = not monitor_render.release(timeout=0.0)
+            editor_shutdown = not editor_render.release(timeout=0.0)
+            released = True
+        monitor_closed = (
+            monitor_render.close(timeout=timeout) if monitor_shutdown else True
+        )
+        editor_closed = (
+            editor_render.close(timeout=timeout) if editor_shutdown else True
+        )
+        return bool(monitor_closed and editor_closed)
+
+    return close
+
+
 def staged_panel_surface(host):
     """A board panel's widget STAGES its fronts; the board presents them.
 
@@ -149,7 +207,6 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
 
     from ..board import attach_qt_owner_turn, attach_qt_worker
     from ..console import ConsolePresenter
-    from ..panel_catalog import task_console_fitting_spec
 
     # One call, one handle: this layer never names a widget class.
     view = open_task_console(
@@ -165,52 +222,16 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
         view.close()
         raise
 
-    render_release_started = False
-    monitor_shutdown = editor_shutdown = False
+    close_renders = render_processes_closer(monitor_render, editor_render)
     close_device_read = None
 
     def _close_render_processes() -> bool:
-        nonlocal render_release_started, monitor_shutdown, editor_shutdown
         reads_closed = close_device_read is None or close_device_read()
-        if not render_release_started:
-            monitor_shutdown = not monitor_render.release(timeout=0.0)
-            editor_shutdown = not editor_render.release(timeout=0.0)
-            render_release_started = True
-        monitor_closed = (
-            monitor_render.close(timeout=0.0) if monitor_shutdown else True
-        )
-        editor_closed = (
-            editor_render.close(timeout=0.0) if editor_shutdown else True
-        )
-        return bool(reads_closed and monitor_closed and editor_closed)
+        return bool(close_renders() and reads_closed)
 
-    def _build_monitor_host(plot_input, state, **initial):
-        return build_panel_host(
-            plot_input,
-            state,
-            build_host=monitor_render.build_host,
-            # The handle is a thread-safe snapshot of the window's current
-            # screen scale.  Host replacement runs on the projection lane, so
-            # it must not touch Qt here; it must also not retain the scale of
-            # the screen on which the console originally opened.
-            device_pixel_ratio=float(view.device_pixel_ratio()),
-            **initial,
-        )
-
-    def _build_editor_host(plot_input, state):
-        return build_panel_host(
-            plot_input,
-            state,
-            build_host=editor_render.build_host,
-            device_pixel_ratio=float(view.device_pixel_ratio()),
-        )
-
-    def _spec_for(snapshot, kind: str = "", cell_kind: str = ""):
-        """The spec this data admits, as the chosen kind or as its own shape."""
-
-        return task_console_fitting_spec(
-            snapshot.block.schema, kind, cell_kind
-        )
+    build_monitor_host, build_editor_host = panel_host_factories(
+        view, monitor_render, editor_render
+    )
 
     def _review_points(host, overlay, request):
         point_ids = tuple(overlay.point_ids or ())
@@ -260,15 +281,15 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
         presenter = ConsolePresenter(
             session,
             view,
-            make_monitor_host=_build_monitor_host,
-            make_editor_host=_build_editor_host,
+            make_monitor_host=build_monitor_host,
+            make_editor_host=build_editor_host,
             build_figure_host=editor_render.build_host,
             save_figure_artifact=editor_render.save_figure_artifact,
             close_render_processes=_close_render_processes,
-            spec_for=_spec_for,
             open_saved=lambda start: _open_saved_figure(
                 view,
                 start,
+                workspace=session.workspace.root,
                 monitor_render=monitor_render,
                 editor_render=editor_render,
             ),
@@ -289,6 +310,9 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
     presenter.board.wake.set_notify(
         attach_qt_owner_turn(presenter.commit_surfaces)
     )
+    # The window's Edit/Save render child, for the device editors opened
+    # beside it: each holds its own claim, as a FigureViewer does.
+    view.editor_render = editor_render
     return view, presenter
 
 
@@ -357,8 +381,10 @@ class ExperimentGuiFlow:
         self._device_worker_close = None
         self._device_tune_active: str | None = None
         self._device_tune_pending: dict[tuple[str, str], object] = {}
+        #: Everything one open control knows -- its reading, its drafts and
+        #: the risk the operator accepted ("risk": (device session, owner
+        #: revision) or None) -- keyed by device.
         self._device_control_models: dict[str, dict[str, object]] = {}
-        self._device_control_risk: dict[str, tuple[str, int] | None] = {}
         self._device_refresh_active: set[str] = set()
         self._device_refresh_pending: set[str] = set()
         #: Devices whose control is being read for its first frame.
@@ -523,10 +549,14 @@ class ExperimentGuiFlow:
         if descriptor.control_factory is None:
             self._open_generic_control(key, leaf.device)
             return None
+        # A device editor's plots are Edit/export hosts: they draw in the
+        # console's Edit/Save child, never here and never in a child of
+        # their own.
         control = descriptor.control_factory(
             session,
             key,
             window_ratio=self.window_ratio,
+            render=self.console.editor_render,
         )
         self._adopt_device_control(key, leaf.device, control)
         return control
@@ -540,17 +570,21 @@ class ExperimentGuiFlow:
 
         def released() -> None:
             if self.device_controls.get(key) is control:
-                self.device_controls.pop(key, None)
-                self._device_control_devices.pop(key, None)
-                self._device_control_models.pop(key, None)
-                self._device_control_risk.pop(key, None)
-                self._device_refresh_active.discard(key)
-                self._device_refresh_pending.discard(key)
-                for pending in tuple(self._device_tune_pending):
-                    if pending[0] == key:
-                        self._device_tune_pending.pop(pending, None)
+                self._forget_device_control(key)
 
         control.closed.connect(released)
+
+    def _forget_device_control(self, key: str) -> None:
+        """Drop everything kept for one device's control, in one place."""
+
+        self.device_controls.pop(key, None)
+        self._device_control_devices.pop(key, None)
+        self._device_control_models.pop(key, None)
+        self._device_refresh_active.discard(key)
+        self._device_refresh_pending.discard(key)
+        for pending in tuple(self._device_tune_pending):
+            if pending[0] == key:
+                self._device_tune_pending.pop(pending, None)
 
     def _open_generic_control(self, key: str, device: object) -> None:
         """Read the device, then open its control on what it said.
@@ -591,10 +625,10 @@ class ExperimentGuiFlow:
                     "live": {},
                     "status": {},
                     "device_session_id": "",
+                    "risk": None,
                 }
                 self._adopt_device_reading(key, model, result)
                 self._device_control_models[key] = model
-                self._device_control_risk[key] = None
                 control = open_device_control(
                     title=f"{self.session.device_labels.get(key, key)} control",
                     spec=model["spec"],
@@ -602,7 +636,6 @@ class ExperimentGuiFlow:
                 )
             except BaseException as error:
                 self._device_control_models.pop(key, None)
-                self._device_control_risk.pop(key, None)
                 self._report_device(f"{key}: {error}", "error")
                 return
             model["control"] = control
@@ -692,12 +725,16 @@ class ExperimentGuiFlow:
     ) -> tuple[tuple[object, ...], dict[str, object], dict[str, object]]:
         """What the device declares and holds right now; runs on the worker."""
 
-        from zlc_atom.authoring import TunableField, read_tunable_in_unit, refresh_tunable_fields
+        from zlc_atom.authoring import (
+            TunableField,
+            is_tunable,
+            read_tunable_in_unit,
+            refresh_tunable_fields,
+        )
 
-        declare = getattr(device, "tunable_fields", None)
-        if not callable(declare):
+        if not is_tunable(device):
             return (), {}, {}
-        fields = refresh_tunable_fields(device) if refresh else tuple(declare())
+        fields = refresh_tunable_fields(device) if refresh else tuple(device.tunable_fields())
         if any(not isinstance(field, TunableField) for field in fields):
             raise TypeError("device tunable_fields must contain TunableField values")
         if units:
@@ -706,16 +743,10 @@ class ExperimentGuiFlow:
                 if units.get(field.metadata.name) and units[field.metadata.name] != field.metadata.unit
                 else field for field in fields
             )
-        tune = getattr(device, "tune", None)
-        provenance_reader = getattr(device, "settings_provenance", None)
-        if fields and (not callable(tune) or not callable(provenance_reader)):
-            raise TypeError(
-                "a tunable device must provide tune and settings_provenance"
-            )
         current = {
             field.metadata.name: field.current for field in fields
         }
-        provenance = {} if not fields else dict(provenance_reader())
+        provenance = {} if not fields else dict(device.settings_provenance())
         session_id = str(provenance.get("device_session_id", "")).strip()
         epoch = provenance.get("settings_epoch")
         if fields and (
@@ -752,7 +783,7 @@ class ExperimentGuiFlow:
             model["desired"] = commandable
             model["unit_drafts"] = set()
             model["live"] = {name: False for name in names}
-            self._device_control_risk[key] = None
+            model["risk"] = None
         else:
             desired = dict(model.get("desired", {}))
             model["desired"] = {
@@ -858,17 +889,17 @@ class ExperimentGuiFlow:
             key, names, dependency_groups=groups
         )
         session_id = str(model.get("device_session_id", ""))
-        accepted = self._device_control_risk.get(key) == (session_id, revision)
+        accepted = model.get("risk") == (session_id, revision)
         if not owners or not accepted:
             if not owners:
-                self._device_control_risk[key] = None
+                model["risk"] = None
             accepted = False
         risk_possible = bool(owners) and any(
             not blockers[field.metadata.name] and field.live_write
             for field in tunables
         )
         if accepted and not risk_possible:
-            self._device_control_risk[key] = None
+            model["risk"] = None
             accepted = False
         current = dict(model.get("current", {}))
         desired = dict(model.get("desired", {}))
@@ -990,12 +1021,12 @@ class ExperimentGuiFlow:
             return
         if accepted:
             projection = self._device_control_projection(str(key))
-            self._device_control_risk[str(key)] = (
+            model["risk"] = (
                 str(model.get("device_session_id", "")),
                 int(projection["owner_revision"]),
             )
         else:
-            self._device_control_risk[str(key)] = None
+            model["risk"] = None
         self._project_device_control(str(key))
 
     def _set_device_control_desired(
@@ -1326,15 +1357,7 @@ class ExperimentGuiFlow:
             if self.device_controls.get(key) is control:
                 if control.is_visible():
                     raise RuntimeError(f"{key} control refused to close")
-                self.device_controls.pop(key, None)
-                self._device_control_devices.pop(key, None)
-                self._device_control_models.pop(key, None)
-                self._device_control_risk.pop(key, None)
-                self._device_refresh_active.discard(key)
-                self._device_refresh_pending.discard(key)
-                for pending in tuple(self._device_tune_pending):
-                    if pending[0] == key:
-                        self._device_tune_pending.pop(pending, None)
+                self._forget_device_control(key)
 
     def _prepare_session_reconcile(
         self,
@@ -1615,10 +1638,11 @@ def _open_saved_figure(
     parent: object,
     start: str,
     *,
+    workspace: object,
     monitor_render: object,
     editor_render: object,
 ) -> object | None:
-    """Open one saved figure in its own window, over today's data folder.
+    """Open one saved figure in its own window, over the console's workspace.
 
     The console does not become a viewer; it asks for one.  What a saved figure
     is, and how to read it, belongs to the viewer -- which needs no session and
@@ -1637,6 +1661,7 @@ def _open_saved_figure(
     # one the viewer's launcher opens.
     return create_viewer_window(
         path=path,
+        workspace=workspace,
         monitor_render=monitor_render,
         editor_render=editor_render,
     ).presenter

@@ -34,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
 def build(
     view: object,
     *,
-    workspace: object | None = None,
+    workspace: object,
     run_off_thread,
     close_worker,
     request_close,
@@ -50,25 +50,15 @@ def build(
     from datetime import date
     from types import SimpleNamespace
 
-    from zlc_durable import day_folder, day_folder_path
+    from zlc_durable import day_folder_path
     from zlc_runtime import SignalDataPlane
     from ..console import ConsolePresenter
     from ..device_use import DeviceUseCoordinator
-    from ..panel_catalog import task_console_fitting_spec
     from functools import partial
 
     from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
     from ..viewer import FigureViewerPresenter
-
-    if workspace is None:
-        from ..session import Workspace
-
-        space = Workspace.discover().prepare()
-        workspace = SimpleNamespace(
-            root=space.root,
-            data=space.data,
-            today=day_folder(space.data, date.today()),
-        )
+    from .task_console import panel_host_factories
 
     plane = SignalDataPlane()
     session = SimpleNamespace(
@@ -80,34 +70,9 @@ def build(
         resolve_device_setting_records=lambda _records: (),
     )
 
-    def make_monitor_host(plot_input, state, **initial):
-        from .task_console import build_panel_host
-
-        return build_panel_host(
-            plot_input,
-            state,
-            build_host=monitor_render.build_host,
-            device_pixel_ratio=float(view.device_pixel_ratio()),
-            **initial,
-        )
-
-    def make_editor_host(plot_input, state):
-        from .task_console import build_panel_host
-
-        return build_panel_host(
-            plot_input,
-            state,
-            build_host=editor_render.build_host,
-            device_pixel_ratio=float(view.device_pixel_ratio()),
-        )
-
-    def spec_for(snapshot, kind: str = "", cell_kind: str = ""):
-        return task_console_fitting_spec(
-            snapshot.block.schema,
-            kind,
-            cell_kind,
-        )
-
+    make_monitor_host, make_editor_host = panel_host_factories(
+        view, monitor_render, editor_render
+    )
     panels = ConsolePresenter(
         session,
         view,
@@ -115,7 +80,6 @@ def build(
         make_editor_host=make_editor_host,
         save_figure_artifact=editor_render.save_figure_artifact,
         close_render_processes=close_render_processes,
-        spec_for=spec_for,
         panel_only=True,
     )
 
@@ -167,11 +131,7 @@ def create_window(
         else Workspace(workspace)
     ).prepare()
     today = day_folder(space.data, date.today())
-    viewer_workspace = SimpleNamespace(
-        root=space.root,
-        data=space.data,
-        today=today,
-    )
+    viewer_workspace = SimpleNamespace(root=space.root, data=space.data)
 
     if (monitor_render is None) != (editor_render is None):
         raise ValueError(
@@ -195,34 +155,11 @@ def create_window(
             monitor_render.release(timeout=0.0)
             raise
 
-    render_release_started = False
-    monitor_shutdown = editor_shutdown = False
-
-    def close_render_processes() -> bool:
-        nonlocal render_release_started, monitor_shutdown, editor_shutdown
-        if not render_release_started:
-            monitor_shutdown = not monitor_render.release(timeout=0.0)
-            editor_shutdown = not editor_render.release(timeout=0.0)
-            render_release_started = True
-        monitor_closed = (
-            monitor_render.close(timeout=0.0) if monitor_shutdown else True
-        )
-        editor_closed = (
-            editor_render.close(timeout=0.0) if editor_shutdown else True
-        )
-        return bool(monitor_closed and editor_closed)
-
-    def abandon_render_processes() -> None:
-        if close_render_processes():
-            return
-        if monitor_shutdown:
-            monitor_render.close(timeout=30.0)
-        if editor_shutdown:
-            editor_render.close(timeout=30.0)
-
     # One call, one handle: this layer never names a widget class.  The
     # panels are a console board, so they get the console's staging policy.
-    from .task_console import staged_panel_surface
+    from .task_console import render_processes_closer, staged_panel_surface
+
+    close_render_processes = render_processes_closer(monitor_render, editor_render)
 
     try:
         window = open_figure_viewer(
@@ -232,7 +169,7 @@ def create_window(
             plot_surface=staged_panel_surface,
         )
     except BaseException:
-        abandon_render_processes()
+        close_render_processes(30.0)
         raise
     run_off_thread, close_worker = attach_qt_worker("zlc-figure-viewer")
     try:
@@ -248,7 +185,7 @@ def create_window(
         )
     except BaseException:
         close_worker()
-        abandon_render_processes()
+        close_render_processes(30.0)
         window.close()
         raise
     window.set_close_guard(window.presenter._guarded(window.presenter.close))

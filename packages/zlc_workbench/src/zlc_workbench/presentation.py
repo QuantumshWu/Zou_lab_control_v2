@@ -22,6 +22,7 @@ from threading import Lock
 from time import monotonic
 from typing import Any, Callable
 
+from zlc_data.snapshot_projection import indexed_schemas_compatible
 from zlc_runtime import SurfaceUpdate
 
 
@@ -65,38 +66,52 @@ class PendingProjection:
     age_seconds: float
 
 
+def _ref_of(carrier: object) -> object | None:
+    """The Dataset ref a signal value or plot input carries."""
+
+    snapshot = getattr(carrier, "snapshot", carrier)
+    return getattr(snapshot, "ref", None)
+
+
 def _revision_of(snapshot: object) -> object | None:
     """The data revision a snapshot carries, or None when it carries none."""
 
-    snapshot = getattr(snapshot, "snapshot", snapshot)
-    return getattr(getattr(snapshot, "ref", None), "revision", None)
+    return getattr(_ref_of(snapshot), "revision", None)
 
 
-def _schema_fingerprint_of(carrier: object) -> str | None:
-    """The dataset GEOMETRY a publication or plot input describes."""
+def _schema_of(carrier: object) -> object | None:
+    """The dataset schema a signal value or plot input carries.
 
+    A finite run's value is one event chunk of a run whose panel draws the
+    canonical prefix, so its canonical schema is the one a host holds: read
+    as the chunk's, every restart of a same-shape run looked like new
+    geometry at the prepare gate.
+    """
+
+    canonical = getattr(carrier, "canonical_schema", None)
+    if canonical is not None:
+        return canonical
     snapshot = getattr(carrier, "snapshot", carrier)
-    block = getattr(snapshot, "block", None)
-    schema = getattr(block, "schema", None)
-    if schema is None:
-        return None
-    fingerprint = getattr(schema, "fingerprint", None)
-    if callable(fingerprint):
-        fingerprint = fingerprint()
-    return None if fingerprint is None else str(fingerprint)
+    return getattr(getattr(snapshot, "block", None), "schema", None)
 
 
-def _same_geometry(left: str | None, right: str | None) -> bool:
-    """UNKNOWN geometry is not the same geometry: only two provable
-    fingerprints suppress a generation replacement."""
+def _same_geometry(left: object, right: object) -> bool:
+    """Whether a host holding ``right`` takes ``left`` as new data.
 
-    return left is not None and left == right
+    The host's own rule, not a stricter one: the same schema, or an indexed
+    history whose retained window moved.  A full fingerprint also names the
+    coordinates, and a bounded history slides those every shot, so it called
+    every standing Rolling window a new geometry and rebuilt its host on each
+    run restart.  UNKNOWN geometry is not the same geometry.
+    """
+
+    if left is None or right is None:
+        return False
+    return left == right or indexed_schemas_compatible(left, right)
 
 
 def _generation_of(snapshot: object) -> object | None:
-    snapshot = getattr(snapshot, "snapshot", snapshot)
-    ref = getattr(snapshot, "ref", None)
-    return getattr(ref, "stream_generation", None)
+    return getattr(_ref_of(snapshot), "stream_generation", None)
 
 
 def _generation_value(generation: object) -> object:
@@ -547,8 +562,8 @@ class PlotPanelPort:
                 surface is not None
                 and publication_generation != shown_generation
                 and not _same_geometry(
-                    _schema_fingerprint_of(publication),
-                    _schema_fingerprint_of(surface.plot_input),
+                    _schema_of(value),
+                    _schema_of(surface.plot_input),
                 )
             )
             replacing_presentation = (
@@ -710,13 +725,17 @@ class PlotPanelPort:
                 # epoch says RE-PROJECT; the geometry says what came out.
                 # A host holds a shape, so the shape decides, whichever
                 # trigger asked.
-                same_shape = surface is not None and _same_geometry(
-                    _schema_fingerprint_of(plot_input),
-                    _schema_fingerprint_of(surface.plot_input),
-                )
-                replace_current_host = surface is None or not same_shape and (
-                    publication_generation != shown_generation
-                    or presentation_epoch != surface.presentation_epoch
+                # Asked only when a trigger asks: comparing geometry on every
+                # shot of a standing run is work with a known answer.
+                replace_current_host = surface is None or (
+                    (
+                        publication_generation != shown_generation
+                        or presentation_epoch != surface.presentation_epoch
+                    )
+                    and not _same_geometry(
+                        _schema_of(plot_input),
+                        _schema_of(surface.plot_input),
+                    )
                 )
                 shown = None if surface is None else surface.plot_input
 
@@ -783,7 +802,24 @@ class PlotPanelPort:
                         surface is None
                         or front_refs[1:] != surface.front_refs[1:]
                     )
+                    held_input = self._held_input(
+                        host, held_generation, held_revision, shown
+                    )
                     if (
+                        held_input is not None
+                        and _ref_of(plot_input) != _ref_of(held_input)
+                        and callable(getattr(host, "configure", None))
+                    ):
+                        # One revision, another Dataset: a history lease that
+                        # shrank re-materializes the SAME publication under a
+                        # new ref.  Re-describing left the host on the longer
+                        # history, cut to the new window only on screen, and
+                        # widening the window again brought back the shots
+                        # Runtime had released.  The host takes a same-revision
+                        # Dataset only through configure.
+                        rendered = host.configure(data=plot_input)
+                        handed_to = host
+                    elif (
                         companions_moved
                         and hasattr(plot_input, "overlay")
                         and callable(getattr(host, "configure", None))
@@ -975,6 +1011,34 @@ class PlotPanelPort:
             _generation_value(_generation_of(shown)),
             cls._revision_value(_revision_of(shown)),
         )
+
+    def _held_input(
+        self,
+        host: object,
+        generation: object,
+        revision: int,
+        shown: object,
+    ) -> object | None:
+        """The plot input a host holds at ``(generation, revision)``, if known.
+
+        The newest hand-over at that identity, else the shown surface's input
+        when it is that identity; None when neither says.
+        """
+
+        with self._state_lock:
+            record = self._handed.get((generation, revision))
+        held = (
+            record.plot_input
+            if record is not None and record.host is host
+            else shown
+        )
+        if (
+            held is None
+            or _generation_value(_generation_of(held)) != generation
+            or self._revision_value(_revision_of(held)) != revision
+        ):
+            return None
+        return held
 
     def _forget_handed_locked(
         self,

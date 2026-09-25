@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
@@ -31,7 +32,6 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_runtime.plane import SignalDataPlane, SignalFront
-from zlc_runtime.streams import EventRef
 from zlc_runtime.presentation import (
     BoardScheduler,
     HarmonicClock,
@@ -215,8 +215,8 @@ class _ClosingHost:
         return True
 
 
-@pytest.fixture
-def live_bench(tmp_path):
+@contextmanager
+def _live_camera(workspace):
     """A camera monitoring live, with its frames on the plane."""
 
     plane = SignalDataPlane()
@@ -227,10 +227,10 @@ def live_bench(tmp_path):
         sequencer = installation.device("sequencer")
         from zlc_pulse import compile_sequence, load_streamer_config
 
-        sequence = read_pulse(write_ordinary_pulse(tmp_path)).sequence
+        sequence = read_pulse(write_ordinary_pulse(workspace)).sequence
         config = load_streamer_config()
         program = compile_sequence(sequence, config["params"], config["clock_hz"])
-        sequencer.camera_trigger_channel = "emCCD"
+        sequencer.streamer.camera_trigger_channel = "emCCD"
         sequencer.load(program, source=sequence)
 
         node = CameraMeasurementNode(
@@ -253,8 +253,36 @@ def live_bench(tmp_path):
         plane.close()
 
 
+@pytest.fixture
+def live_bench(tmp_path):
+    """A camera monitoring live, for the tests that drive the real scheduler."""
+
+    with _live_camera(tmp_path) as bench:
+        yield bench
+
+
+@pytest.fixture(scope="module")
+def frame(tmp_path_factory):
+    """One camera frame on a frozen front: ``(signal, front, value, publication)``.
+
+    Captured once for the module, and the installation is closed before any
+    test reads it: a port driven by hand needs only an immutable front, so
+    one virtual installation serves every such test.
+    """
+
+    with _live_camera(tmp_path_factory.mktemp("frame")) as (plane, node, _sequencer, _monitor):
+        signal = node.signal_key("frames")
+        front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None, (
+        "the monitor published nothing to present"
+    )
+    return signal, front, value, publication
+
+
 def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     plane, node, sequencer, monitor = live_bench
 
     signal = node.signal_key("frames")
@@ -278,18 +306,8 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
             submit_projection=_submit_now,
             replace_host=_initial_then(host),
         )
-        class _Wake:
-            """The shape a Qt shim implements: coalesce, then wake the owner."""
-
-            def __init__(self) -> None:
-                self.pending = Event()
-
-            def request_owner_wake(self) -> None:
-                self.pending.set()
-
-        wake = _Wake()
-        channels = wake
-        arbiter = SurfaceBatchArbiter(channels)
+        # The owner drains on its own below; nobody needs waking.
+        arbiter = SurfaceBatchArbiter(SimpleNamespace(request_owner_wake=lambda: None))
         clock = HarmonicClock((100, 200, 400, 800))
         scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 
@@ -344,7 +362,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
         host.close()
 
 
-def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> None:
+def test_a_panel_refuses_a_surface_prepared_for_a_different_host(frame) -> None:
     """Board coherence: a reconfigured panel abandons the batch, not just itself.
 
     Showing one stale panel beside fresh ones is worse than showing nothing --
@@ -352,15 +370,8 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     data.
     """
 
-    plot = pytest.importorskip("zlc_plot")
-    plane, node, _sequencer, _monitor = live_bench
-
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    assert value is not None
-    publication = plane.latest_publication(signal)
-    assert publication is not None
+    import zlc_plot as plot
+    signal, front, value, publication = frame
 
     spec = _camera_image_spec(
         plot,
@@ -395,7 +406,7 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
 
 
 def test_publication_for_identity_requires_generation_and_bare_revision(
-    live_bench,
+    frame,
 ) -> None:
     """A fit event names its parent by bare int; snapshots carry DatasetRevision.
 
@@ -407,12 +418,7 @@ def test_publication_for_identity_requires_generation_and_bare_revision(
 
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     publication = replace(
         publication,
         event_ref=replace(
@@ -453,15 +459,10 @@ def test_publication_for_identity_requires_generation_and_bare_revision(
     assert port.publication_for_identity(generation, revision_number) is publication
 
 
-def test_closing_a_port_cancels_queued_projection(live_bench) -> None:
+def test_closing_a_port_cancels_queued_projection(frame) -> None:
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     queued = Future()
     port = PlotPanelPort(
         "panel",
@@ -479,15 +480,10 @@ def test_closing_a_port_cancels_queued_projection(live_bench) -> None:
     assert update.future.cancelled()
 
 
-def test_close_does_not_wait_for_initial_host_staging(live_bench) -> None:
+def test_close_does_not_wait_for_initial_host_staging(frame) -> None:
     from concurrent.futures import Future, ThreadPoolExecutor
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     entered = Event()
     release = Event()
     staged = SimpleNamespace(host_id=object())
@@ -526,15 +522,10 @@ def test_close_does_not_wait_for_initial_host_staging(live_bench) -> None:
         projector.shutdown(wait=True, cancel_futures=True)
 
 
-def test_close_does_not_wait_for_running_projection(live_bench) -> None:
+def test_close_does_not_wait_for_running_projection(frame) -> None:
     from concurrent.futures import Future, ThreadPoolExecutor
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     entered = Event()
     release = Event()
 
@@ -572,17 +563,12 @@ def test_close_does_not_wait_for_running_projection(live_bench) -> None:
         projector.shutdown(wait=True, cancel_futures=True)
 
 
-def test_already_completed_render_does_not_reenter_state_lock(live_bench) -> None:
+def test_already_completed_render_does_not_reenter_state_lock(frame) -> None:
     from concurrent.futures import Future
     import gc
     import weakref
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     rendered = Future()
     operation = _operation("update")
     rendered.set_result(operation)
@@ -622,16 +608,11 @@ def test_already_completed_render_does_not_reenter_state_lock(live_bench) -> Non
 
 
 def test_already_completed_replacement_does_not_reenter_state_lock(
-    live_bench,
+    frame,
 ) -> None:
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     old = SimpleNamespace(host_id=object())
     replacement = SimpleNamespace(host_id=object())
     rendered = Future()
@@ -664,19 +645,14 @@ def test_already_completed_replacement_does_not_reenter_state_lock(
 
 
 def test_companion_only_change_updates_overlay_and_composite_currency(
-    live_bench,
+    frame,
 ) -> None:
     from concurrent.futures import Future
     from zlc_plot.primitives import ImageFrame, ImagePointOverlay
     from zlc_runtime.plane import SignalFront
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
+    signal, front, value, publication = frame
     companion = "@logic/occupancy/occupied"
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
     companion_value = replace(value, name=companion)
 
     def with_companion(sequence: int) -> tuple[SignalFront, object]:
@@ -751,7 +727,7 @@ def test_companion_only_change_updates_overlay_and_composite_currency(
 
 
 def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
-    live_bench,
+    frame,
 ) -> None:
     """The host committed the frame even though its shot was abandoned.
 
@@ -766,12 +742,7 @@ def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
 
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
 
     renders: list[Future] = []
     host = SimpleNamespace(
@@ -803,18 +774,13 @@ def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
 
 
 def test_one_publication_is_submitted_once_while_its_surface_is_pending(
-    live_bench,
+    frame,
 ) -> None:
     """A display beat cannot enqueue the same immutable publication twice."""
 
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
 
     calls: list[object] = []
     host = SimpleNamespace(
@@ -856,7 +822,7 @@ def test_one_publication_is_submitted_once_while_its_surface_is_pending(
 
 
 def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
-    live_bench,
+    frame,
 ) -> None:
     """Latest-only coalescing is flow control, not failure.
 
@@ -870,13 +836,8 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
 
     from zlc_runtime.plane import SignalFront
 
-    plot = pytest.importorskip("zlc_plot")
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    import zlc_plot as plot
+    signal, front, value, publication = frame
 
     host = plot.RasterPlotHost.from_plot(
         value.snapshot,
@@ -932,18 +893,13 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
 
 
 def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
-    live_bench,
+    frame,
 ) -> None:
     """Whatever path hands reject() a CancelledError, it is not a failure."""
 
     from concurrent.futures import CancelledError, Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
 
     host = SimpleNamespace(
         host_id=object(),
@@ -971,18 +927,13 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
 
 
 def test_an_evicted_history_publication_keeps_the_last_panel_surface(
-    live_bench,
+    frame,
 ) -> None:
     """History backpressure cancels one queued render without degrading UI."""
 
     from zlc_runtime import RetainedPublicationExpired
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     calls = 0
 
     def project(plot_value, selected, _front, _target):
@@ -1019,18 +970,13 @@ def test_an_evicted_history_publication_keeps_the_last_panel_surface(
 
 
 def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
-    live_bench,
+    frame,
 ) -> None:
     """A terminal publication reusing committed bytes only reanchors identity."""
 
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
 
     calls: list[object] = []
     completion: Future[object] = Future()
@@ -1088,7 +1034,7 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
 
 
 def test_a_new_generation_replaces_the_host_only_when_the_geometry_moved(
-    live_bench,
+    frame,
 ) -> None:
     """Revision orders one run; generation separates two runs both at one.
 
@@ -1098,13 +1044,8 @@ def test_a_new_generation_replaces_the_host_only_when_the_geometry_moved(
     whenever a shot landed mid-drag.
     """
 
-    plot = pytest.importorskip("zlc_plot")
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    import zlc_plot as plot
+    signal, front, value, publication = frame
     spec = _camera_image_spec(plot, value)
     first = plot.RasterPlotHost.from_plot(value.snapshot, spec)
     replacements: list[object] = []
@@ -1152,19 +1093,14 @@ def test_a_new_generation_replaces_the_host_only_when_the_geometry_moved(
 
 
 def test_same_geometry_image_frame_generation_restart_updates_in_place(
-    live_bench,
+    frame,
 ) -> None:
     """An overlay wrapper cannot turn a new run's reset revision into stale flow."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     from zlc_plot.primitives import ImageFrame, ImagePointOverlay
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     spec = _camera_image_spec(plot, value)
     overlay = ImagePointOverlay(0, np.empty((0, 2), dtype=float))
     first = plot.RasterPlotHost.from_plot(
@@ -1205,7 +1141,7 @@ def test_same_geometry_image_frame_generation_restart_updates_in_place(
 
 
 def test_a_panel_names_the_publications_its_projections_have_yet_to_read(
-    live_bench,
+    frame,
 ) -> None:
     """A restart waits for exactly these.  Until the board's worker has run
     a projection its publication must stay readable on the plane; once it
@@ -1215,13 +1151,8 @@ def test_a_panel_names_the_publications_its_projections_have_yet_to_read(
 
     from concurrent.futures import Future
 
-    plot = pytest.importorskip("zlc_plot")
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    import zlc_plot as plot
+    signal, front, value, publication = frame
     host = plot.RasterPlotHost.from_plot(
         value.snapshot, _camera_image_spec(plot, value),
     )
@@ -1272,16 +1203,11 @@ def test_a_panel_names_the_publications_its_projections_have_yet_to_read(
 
 
 def test_atomic_surface_advances_only_after_its_front_is_presented(
-    live_bench,
+    frame,
 ) -> None:
     from zlc_plot.selectors import NumericRange, SelectorKind, SelectorState
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
 
     second = SimpleNamespace(spec="second")
     shown = _ClosingHost("shown")
@@ -1337,17 +1263,12 @@ def test_atomic_surface_advances_only_after_its_front_is_presented(
 
 
 def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
-    live_bench,
+    frame,
 ) -> None:
     from concurrent.futures import Future
     from zlc_runtime.plane import SignalFront
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     restarted_value, restarted, restarted_front = _regenerated(
         value,
         publication,
@@ -1417,17 +1338,12 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
 
 
 def test_two_panel_replacement_staging_failure_swaps_neither_host(
-    live_bench,
+    frame,
 ) -> None:
     from concurrent.futures import Future
     from zlc_runtime.plane import SignalFront
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     restarted_value, restarted, restarted_front = _regenerated(
         value,
         publication,
@@ -1476,176 +1392,75 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
     assert all(host.closed for host in staged)
 
 
-@pytest.mark.parametrize("ending", ("finish", "reject"))
+@pytest.mark.parametrize(
+    "ending", ("finish", "reject", "port_close", "board_close", "retire")
+)
 def test_abandoned_generation_replacement_closes_only_the_staged_host(
-    live_bench,
+    frame,
     ending,
 ) -> None:
+    """A host staged for a new run and then abandoned is released; the shown
+    host and its publication stay.
+
+    However the replacement ends -- the cohort finishes without it, its
+    render fails, the panel is removed, the board closes -- only the staged
+    host goes, and a pending operation is cancelled.  A port given a
+    retired-host path hands the staged host there instead of closing it,
+    for a host that cannot close immediately.
+    """
+
     from concurrent.futures import Future
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
     restarted_value, restarted, restarted_front = _regenerated(
         value,
         publication,
         signal,
-        "abandoned-replacement-run",
-    )
-
-    old = _ClosingHost("old")
-    staged = _ClosingHost("staged")
-    completion = Future()
-    later = lambda _input, _value, _publication, _target: (staged, completion)
-    port = PlotPanelPort(
-        "panel",
-        signal,
-        display_interval_ms=100,
-        submit_projection=_submit_now,
-        replace_host=_initial_then(old, later),
-    )
-    _mount(port, value, publication, front)
-    update = port.prepare(restarted_value, restarted, restarted_front)
-    assert update is not None
-    completion.set_result(_operation("ready"))
-    if ending == "finish":
-        port.finish_unpresented(update)
-    else:
-        port.reject(update, RuntimeError("staged render failed"))
-    assert _accepted(port, "host") is old
-    assert _accepted(port, "publication") is publication
-    assert not old.closed
-    assert staged.closed
-
-
-def test_releasing_port_cancels_pending_replacement_without_swapping_host(
-    live_bench,
-) -> None:
-    from concurrent.futures import Future
-
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
-    restarted_value, restarted, restarted_front = _regenerated(
-        value,
-        publication,
-        signal,
-        "removed-panel-replacement",
+        f"abandoned-replacement-{ending}",
     )
 
     old = _ClosingHost("shown")
     staged = _ClosingHost("staged")
-    operation = Future()
-    later = lambda _input, _value, _publication, _target: (staged, operation)
-    port = PlotPanelPort(
-        "panel",
-        signal,
-        display_interval_ms=100,
-        submit_projection=_submit_now,
-        replace_host=_initial_then(old, later),
-    )
-    _mount(port, value, publication, front)
-    update = port.prepare(restarted_value, restarted, restarted_front)
-    assert update is not None
-
-    port.close()
-
-    assert operation.cancelled()
-    assert staged.closed
-    assert _accepted(port, "host") is old
-    assert _accepted(port, "publication") is publication
-    assert not old.closed
-
-
-def test_board_close_releases_pending_generation_replacement(
-    live_bench,
-) -> None:
-    from concurrent.futures import Future
-    from zlc_runtime.plane import SignalFront
-
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
-    restarted_value, restarted, restarted_front = _regenerated(
-        value,
-        publication,
-        signal,
-        "closed-board-replacement",
-    )
-
-    old = _ClosingHost("shown")
-    staged = _ClosingHost("staged")
-    operation = Future()
-    later = lambda _input, _value, _publication, _target: (staged, operation)
-    port = PlotPanelPort(
-        "panel",
-        signal,
-        display_interval_ms=100,
-        submit_projection=_submit_now,
-        replace_host=_initial_then(old, later),
-    )
-    _mount(port, value, publication, front)
-    arbiter = SurfaceBatchArbiter(
-        SimpleNamespace(request_owner_wake=lambda: None)
-    )
-    assert arbiter.enqueue_group((port,), restarted_front)
-
-    arbiter.close()
-
-    assert operation.cancelled()
-    assert staged.closed
-    assert _accepted(port, "host") is old
-    assert _accepted(port, "publication") is publication
-    assert not old.closed
-
-
-def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(
-    live_bench,
-) -> None:
-    from concurrent.futures import Future
-
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
-    restarted_value, restarted, restarted_front = _regenerated(
-        value,
-        publication,
-        signal,
-        "retired-staged-host",
-    )
-
-    staged = SimpleNamespace(host_id="staged")
     operation = Future()
     retired: list[object] = []
-    old = SimpleNamespace(host_id="shown")
-    later = lambda _input, _value, _publication, _target: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
         display_interval_ms=100,
         submit_projection=_submit_now,
-        replace_host=_initial_then(old, later),
-        retire_host=retired.append,
+        replace_host=_initial_then(
+            old, lambda _input, _value, _publication, _target: (staged, operation)
+        ),
+        retire_host=retired.append if ending == "retire" else None,
     )
     _mount(port, value, publication, front)
-    assert port.prepare(restarted_value, restarted, restarted_front) is not None
+    if ending == "board_close":
+        arbiter = SurfaceBatchArbiter(
+            SimpleNamespace(request_owner_wake=lambda: None)
+        )
+        assert arbiter.enqueue_group((port,), restarted_front)
+        arbiter.close()
+    else:
+        update = port.prepare(restarted_value, restarted, restarted_front)
+        assert update is not None
+        if ending == "finish":
+            operation.set_result(_operation("ready"))
+            port.finish_unpresented(update)
+        elif ending == "reject":
+            operation.set_result(_operation("ready"))
+            port.reject(update, RuntimeError("staged render failed"))
+        else:
+            port.close()
 
-    port.close()
-
-    assert retired == [staged]
     assert _accepted(port, "host") is old
+    assert _accepted(port, "publication") is publication
+    assert not old.closed
+    if ending == "retire":
+        assert retired == [staged] and not staged.closed
+    else:
+        assert staged.closed and not retired
+    if ending in ("port_close", "board_close", "retire"):
+        assert operation.cancelled()
 
 
 def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
@@ -1666,7 +1481,7 @@ def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
     assert len(notifications) == 2, "a wake after a turn must notify again"
 
 
-def _committed_behind_a_cancelled_consumer(plot, live_bench, work):
+def _committed_behind_a_cancelled_consumer(plot, frame, work):
     """Drive one render whose host commit lands before its consumer settles.
 
     The gate sits INSIDE the session's own publish, after the frame is
@@ -1678,12 +1493,7 @@ def _committed_behind_a_cancelled_consumer(plot, live_bench, work):
 
     from unittest.mock import patch
 
-    plane, node, _sequencer, _monitor = live_bench
-    signal = node.signal_key("frames")
-    front = plane.freeze()
-    value = front.value(signal)
-    publication = front.publication(signal)
-    assert value is not None and publication is not None
+    signal, front, value, publication = frame
 
     host = plot.RasterPlotHost.from_plot(
         value.snapshot, _camera_image_spec(plot, value)
@@ -1731,7 +1541,7 @@ def _committed_behind_a_cancelled_consumer(plot, live_bench, work):
 
 
 def test_a_render_the_host_committed_lands_on_the_configure_that_follows(
-    live_bench,
+    frame,
 ) -> None:
     """A retarget cancels a render's CONSUMER, never the host's commit.
 
@@ -1745,7 +1555,7 @@ def test_a_render_the_host_committed_lands_on_the_configure_that_follows(
     already held.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     changed = object()
 
     def retarget_then_configure(port, host, travelling, *_front):
@@ -1756,7 +1566,7 @@ def test_a_render_the_host_committed_lands_on_the_configure_that_follows(
         return configured
 
     port, host, configured = _committed_behind_a_cancelled_consumer(
-        plot, live_bench, retarget_then_configure
+        plot, frame, retarget_then_configure
     )
     try:
         operation = configured.result(timeout=15)
@@ -1782,7 +1592,7 @@ def test_a_render_the_host_committed_lands_on_the_configure_that_follows(
 
 
 def test_data_the_host_already_holds_is_re_presented_not_cancelled(
-    live_bench,
+    frame,
 ) -> None:
     """The re-offer of a committed-but-unpresented revision reaches the screen.
 
@@ -1794,14 +1604,14 @@ def test_data_the_host_already_holds_is_re_presented_not_cancelled(
     stood.  The host's current front, re-described, is what the panel owes.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
 
     def abandon(port, _host, travelling, *_front):
         port.retarget(object())
         port.finish_unpresented(travelling)
 
     port, host, _outcome = _committed_behind_a_cancelled_consumer(
-        plot, live_bench, abandon
+        plot, frame, abandon
     )
     try:
         # a later serial control proves the host's update has ended
@@ -1833,7 +1643,7 @@ def test_a_stale_refusal_is_flow_control_not_a_panel_error(live_bench) -> None:
     recorded as "plot surface did not accept the rendered front", so a
     zoom or a drag streamed red errors while behaving correctly."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     plane, node, sequencer, monitor = live_bench
 
     signal = node.signal_key("frames")
@@ -1870,14 +1680,7 @@ def test_a_stale_refusal_is_flow_control_not_a_panel_error(live_bench) -> None:
             present=_present,
         )
 
-        class _Wake:
-            def __init__(self) -> None:
-                self.pending = Event()
-
-            def request_owner_wake(self) -> None:
-                self.pending.set()
-
-        arbiter = SurfaceBatchArbiter(_Wake())
+        arbiter = SurfaceBatchArbiter(SimpleNamespace(request_owner_wake=lambda: None))
         clock = HarmonicClock((100, 200, 400, 800))
         scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
 

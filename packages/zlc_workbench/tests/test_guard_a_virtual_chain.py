@@ -1,5 +1,3 @@
-import zou_lab_control
-
 """Guard A: the formal headless virtual Calibration -> frames -> Occupancy chain."""
 
 import json
@@ -14,11 +12,7 @@ from zlc_atom.nodes import (
     ResolvedArtifact,
     ResolvedWorkspaceResource,
 )
-from zlc_atom.nodes.calibration import logic_node as calibration_logic_node
-from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
-from zlc_atom.nodes.occupancy import logic_node as occupancy_logic_node
-from zlc_runtime import DatasetCoverage, MonitorCoverage, SignalDataPlane
-import zlc_runtime.host as runtime_host
+from zlc_runtime import DatasetCoverage, MonitorCoverage, SignalDataPlane, stable_signal_key
 from zlc_data.figure_archive import read_archive
 from zlc_workbench.logic import (
     LogicCatalog,
@@ -26,11 +20,27 @@ from zlc_workbench.logic import (
     build_arguments,
     finalize_logic_draft,
     make_host,
-    stable_signal_key,
 )
-import zlc_plot.primitives as overlay_contract_module
 from zlc_workbench.session import Workspace
 from zlc_workbench.viewer import describe_archive
+
+
+#: What one calibration run draws, each figure beside its data archive:
+#: what it measured, first -- a run that cannot draw has still measured it,
+#: and these are the numbers an operator judges the calibration by.
+_CALIBRATION_FIGURES = frozenset(
+    f"{name}.{suffix}"
+    for name in (
+        "site_map",
+        "actual_fidelity",
+        "gaussian_fidelity",
+        "box",
+        "psf",
+        "uniform_psf",
+        "psf_kernels",
+    )
+    for suffix in ("npz", "png")
+)
 
 
 def _one_camera_window_program():
@@ -126,12 +136,6 @@ def _cleanup_host(host: object) -> None:
 def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
     """All P0 nodes run through catalog, descriptor, and NodeHost seams."""
 
-    print(calibration_logic_node.__file__)
-    print(camera_logic_node.__file__)
-    print(occupancy_logic_node.__file__)
-    print(runtime_host.__file__)
-    print(overlay_contract_module.__file__)
-
     catalog = LogicCatalog()
     installation = create_installation("virtual")
     plane = SignalDataPlane()
@@ -148,7 +152,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         )
         camera = installation.capability("camera.adapter", key="camera")
         sequencer = installation.device("sequencer")
-        assert sequencer.world is installation.world
+        assert sequencer.streamer.world is installation.world
 
         calibration_descriptor = catalog.get("calibration")
         assert calibration_descriptor is not None
@@ -232,25 +236,9 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             (output.name, output.contract_id)
             for output in calibration_descriptor.outputs
         ) == (("capture_preview", "calibration.capture-preview"),)
-        assert {path.name for path in (run_folder / "figures").iterdir()} == {
-            # What it measured, first: a run that cannot draw has still
-            # measured it, and these are the numbers an operator judges the
-            # calibration by.
-            "site_map.npz",
-            "site_map.png",
-            "actual_fidelity.npz",
-            "actual_fidelity.png",
-            "gaussian_fidelity.npz",
-            "gaussian_fidelity.png",
-            "box.npz",
-            "box.png",
-            "psf.npz",
-            "psf.png",
-            "uniform_psf.npz",
-            "uniform_psf.png",
-            "psf_kernels.npz",
-            "psf_kernels.png",
-        }
+        assert {
+            path.name for path in (run_folder / "figures").iterdir()
+        } == _CALIBRATION_FIGURES
         for figure_path in (run_folder / "figures").glob("*.npz"):
             info, arrays, datasets = read_archive(figure_path)
             assert describe_archive(info, arrays).dataset_keys == ("data",)
@@ -298,22 +286,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             for path in (
                 second_calibration.artifact_path.parents[1] / "figures"
             ).iterdir()
-        } == {
-            "site_map.npz",
-            "site_map.png",
-            "actual_fidelity.npz",
-            "actual_fidelity.png",
-            "gaussian_fidelity.npz",
-            "gaussian_fidelity.png",
-            "box.npz",
-            "box.png",
-            "psf.npz",
-            "psf.png",
-            "uniform_psf.npz",
-            "uniform_psf.png",
-            "psf_kernels.npz",
-            "psf_kernels.png",
-        }
+        } == _CALIBRATION_FIGURES
         # Retained at seal, like every sealed monitor publication.
         assert preview_signal in plane.freeze().signals
 
@@ -373,7 +346,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert isinstance(frames_value.coverage, DatasetCoverage)
         assert frames_value.coverage.complete
         assert frames_value.shape[:2] == (1, 1)
-        frames_snapshot = plane.current_dataset(frames_signal)
+        frames_snapshot = plane.current_dataset(frames_signal).materialize()
         # (repeat, frame): three cycles of one frame each on the point axis.
         assert frames_snapshot.block.values.shape[:2] == (3, 1)
         assert not plane.is_generation_live(frames_signal)
@@ -401,9 +374,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         )
         assert set(occupancy_arguments) == {
             "calibration",
+            "calibration_by_frame",
             "source_signal",
             "model_kind",
         }
+        assert not occupancy_arguments["calibration_by_frame"], "one shared calibration"
         assert isinstance(occupancy_arguments["calibration"], ResolvedArtifact)
         assert occupancy_arguments["calibration"].path == (
             first_calibration.artifact_path.resolve()

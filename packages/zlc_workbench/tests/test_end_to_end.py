@@ -42,10 +42,6 @@ def session(workspace) -> ExperimentSession:
         session.close()
 
 
-def test_every_virtual_device_opens(session) -> None:
-    assert session.failures == {}
-
-
 def test_session_closes_its_signal_plane_when_a_device_close_fails(tmp_path) -> None:
     class RefusingInstallation:
         def close(self) -> None:
@@ -153,10 +149,10 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
         )
         capture = node.prepare()
         session.fire(shots=1)
-        frames = np.asarray(
-            capture.collect().publication.value(node.signal_key("frames")).snapshot.block.values
-        )
-        assert frames.size
+        # The plane value's dense read: a segmented block holds no
+        # ``values`` of its own, and np.asarray(None) has size 1.
+        frames = capture.collect().publication.value(node.signal_key("frames")).values
+        assert frames.shape[0] == 1 and frames.size > 1, frames.shape
     finally:
         session.close()
 

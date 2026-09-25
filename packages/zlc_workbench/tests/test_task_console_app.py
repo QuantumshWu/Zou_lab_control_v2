@@ -58,6 +58,16 @@ def _subprocess_environment() -> dict[str, str]:
         )
     return environment
 
+# Every script first imports this checkout's bootstrap and names the root
+# and the workbench it tests.  The workbench is located, not imported, so a
+# script still decides what it imports first.
+_BOOTSTRAP = (
+    "import importlib.util\n"
+    "import zou_lab_control\n"
+    "print('ROOT', zou_lab_control.__file__, 'WORKBENCH', "
+    "importlib.util.find_spec('zlc_workbench').origin)\n"
+)
+
 def _run_script(
     script: str,
     *,
@@ -68,7 +78,7 @@ def _run_script(
     environment = _subprocess_environment()
     environment.update(dict(overrides or {}))
     return subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", _BOOTSTRAP + script],
         capture_output=True,
         text=True,
         env=environment,
@@ -86,9 +96,7 @@ def _run_app(
     """Run one app only after this checkout's product bootstrap is imported."""
 
     script = (
-        "import zou_lab_control\n"
         f"from zlc_workbench.apps import {app} as tested_module\n"
-        "print(tested_module.__file__)\n"
         f"raise SystemExit(tested_module.main({arguments!r}))\n"
     )
     return _run_script(script, cwd=cwd, overrides=overrides)
@@ -112,12 +120,6 @@ def test_task_console_has_no_second_display_clock_override(workspace) -> None:
     completed = _run(workspace, "--template", "virtual", "--interval-ms", "10")
     assert completed.returncode == 2
     assert "unrecognized arguments: --interval-ms 10" in completed.stderr
-
-def test_the_console_assembles_and_beats(workspace) -> None:
-    completed = _run(workspace, "--template", "virtual", "--check")
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "console ready" in completed.stdout
-    assert "0 panel" in completed.stdout
 
 def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) -> None:
     """The real card and Edit hosts present each accepted plot state once."""
@@ -327,7 +329,6 @@ def test_app_build_installs_the_plot_size_policy(
 ) -> None:
     if app_name == "task_console":
         completed = _run_script(
-        "import zou_lab_control\n"
             "import zlc_ui.board.panel_geometry as geometry\n"
             "before = geometry.panel_display_size('2x2')\n"
             "import zlc_workbench\n"
@@ -415,6 +416,7 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
     from types import SimpleNamespace
 
     from PyQt5 import QtCore
+    from zlc_runtime import stable_signal_key
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.task_console import create_window
 
@@ -457,6 +459,7 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
     host.running = True
     host.observation = observation
     host.dataset_output_declarations = ()
+    host.signal_key = lambda name: stable_signal_key(node_id, name)
     host.published_signals = lambda: ()
     host.cancel = lambda _reason: (
         setattr(host, "cancel_requested", True),
@@ -736,21 +739,6 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
             window.close()
             _wait_qt(application, lambda: not window.is_visible())
 
-def test_experiment_batch_is_one_task_console_manifest_wrapper() -> None:
-    launcher = REPO_ROOT / "bin" / "experiment.bat"
-    source = launcher.read_text(encoding="utf-8").lower()
-    assert 'set "zlc_command=task_console"' in source
-    assert 'call "%~dp0_launch.bat" %*' in source
-    assert "pulse_editor" not in source and "device_manager" not in source
-    assert "start " not in source
-
-def test_figure_viewer_batch_is_one_manifest_wrapper() -> None:
-    launcher = REPO_ROOT / "bin" / "figure_viewer.bat"
-    source = launcher.read_text(encoding="utf-8").lower()
-    assert 'set "zlc_command=figure_viewer"' in source
-    assert 'call "%~dp0_launch.bat" %*' in source
-    assert "start " not in source
-
 def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     """The first thing a new user hits must tell them what to do."""
 
@@ -767,17 +755,9 @@ def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     """One reader for pulse files, so the window cannot show a different pulse."""
 
     write_ordinary_pulse(workspace)
-    environment = _subprocess_environment()
-    script = (
-        "import zou_lab_control\n"
-        "from zlc_workbench.apps import pulse_editor as tested_module\n"
-        "print(tested_module.__file__)\n"
-        f"raise SystemExit(tested_module.main(['--workspace', {str(workspace)!r}, "
-        f"'--pulse', {PULSE_NAME!r}, '--check']))\n"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True, text=True, env=environment, timeout=300,
+    completed = _run_app(
+        "pulse_editor",
+        ["--workspace", str(workspace), "--pulse", PULSE_NAME, "--check"],
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert f"pulse ready: {PULSE_NAME!r}" in completed.stdout
@@ -797,24 +777,21 @@ def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(works
     A double-clicked launcher starts in the folder holding the launcher.  When
     that was passed as --workspace, the console looked for pulses/ inside bin\
     and reported them missing -- from a directory nobody keeps data in.
+
+    The console it finds assembles and beats: --check builds the real thing
+    and runs a few beats in a fresh process.
     """
 
-    environment = _subprocess_environment()
     deep = workspace / "data" / "2026_08_05"
     deep.mkdir(parents=True)
 
-    script = (
-        "import zou_lab_control\n"
-        "from zlc_workbench.apps import task_console as tested_module\n"
-        "print(tested_module.__file__)\n"
-        "raise SystemExit(tested_module.main(['--template', 'virtual', '--check']))\n"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True, text=True, env=environment, timeout=300, cwd=deep,
+    completed = _run_app(
+        "task_console", ["--template", "virtual", "--check"], cwd=deep
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert f"workspace: {workspace}" in completed.stdout
+    assert "console ready" in completed.stdout
+    assert "0 panel" in completed.stdout
 
 def test_no_nearby_experiment_uses_the_one_configured_default(tmp_path) -> None:
     """A launch directory never becomes an accidental second workspace."""
@@ -851,14 +828,11 @@ def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) ->
 def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace) -> None:
     """The combined Add Panel control reaches both current endpoints."""
 
-    environment = _subprocess_environment()
     script = """import time
-import zou_lab_control
 from zlc_ui import ensure_qt_app
 application = ensure_qt_app([])
 from PyQt5 import QtCore, QtTest
 from zlc_workbench.apps import task_console as tested_module
-print(tested_module.__file__)
 space, session = tested_module.open_experiment(r'%s', 'virtual')
 view, presenter = tested_module.build_console(session)
 assert presenter.panels == {}
@@ -924,10 +898,7 @@ assert site_grid.parameter_surface['display_unavailable'] == ''
 print('STOPPED_DRAFT')
 """ + _FORMAL_CONSOLE_EPILOGUE
     script %= workspace
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True, text=True, env=environment, timeout=300,
-    )
+    completed = _run_script(script)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "STOPPED_DRAFT" in completed.stdout
@@ -941,13 +912,10 @@ def test_task_takeover_and_live_preview_follow_the_real_buttons(workspace) -> No
         pulse_document("imaging_template.json")
     )
 
-    environment = _subprocess_environment()
     script = """import time
-import zou_lab_control
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
 from zlc_workbench.apps import task_console as tested_module
-print(tested_module.__file__)
 application = ensure_qt_app([])
 space, session = tested_module.open_experiment(r'%s', 'virtual')
 view, presenter = tested_module.build_console(session)
@@ -971,7 +939,6 @@ QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
 application.processEvents()
 editor = view._logic_editors['calibration']
 editor.form.widget_for('pulse_template').setText('imaging_template.json')
-editor.form.widget_for('repeats').setValue(200)
 application.processEvents()
 until(editor.start_button.isEnabled)
 
@@ -985,6 +952,10 @@ assert not view._rows['calibration'].start_button.isEnabled()
 assert not view._rows['calibration'].stop_button.isVisible()
 assert 'calibration:' in view._view.status_strip.text()
 
+# A board nobody is looking at draws nothing: the preview mounts once the
+# operator is on the Monitor page, not while the Task's Edit is in front.
+view._view.tabs.setCurrentIndex(0)
+application.processEvents()
 preview_signal = '@logic/calibration/capture_preview'
 until(lambda: any(
     panel.state.signal == preview_signal
@@ -1010,24 +981,14 @@ assert all(panel.state.signal != preview_signal for panel in presenter.panels.va
 print('TASK_TAKEOVER_PREVIEW_OK')
 """ + _FORMAL_CONSOLE_EPILOGUE
     script %= workspace
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=300,
-    )
+    completed = _run_script(script)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
 
 def test_device_controls_open_on_demand_over_the_one_experiment_session(workspace) -> None:
     """Init opens only Console; loaded-card Control owns every device window."""
 
-    environment = _subprocess_environment()
-    script = """import zou_lab_control
-from zlc_workbench.apps import task_console as tested_module
-print(zou_lab_control.__file__)
-print(tested_module.__file__)
+    script = """from zlc_workbench.apps import task_console as tested_module
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
 application = ensure_qt_app([])
@@ -1177,6 +1138,12 @@ try:
     application.processEvents()
     slm_control = flow.device_controls['slm']
     assert slm_control.is_visible()
+    slm_hosts = (
+        slm_control._target_host, slm_control._phase_host, slm_control._wavefront_host,
+    )
+    assert {host.process_pid for host in slm_hosts} == {flow.console.editor_render.pid}, (
+        'the SLM Editor draws in the console Edit/Save child'
+    )
     assert solve_started.wait(2.0)
     assert flow.devices.presenter.shutdown_active() is False
     assert flow.session is first_session
@@ -1238,10 +1205,7 @@ finally:
         QtTest.QTest.qWait(10)
 print('SHARED_EXPERIMENT_FLOW')
 """ % (workspace, workspace)
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True, text=True, env=environment, timeout=300,
-    )
+    completed = _run_script(script)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "SHARED_EXPERIMENT_FLOW" in completed.stdout
@@ -1249,8 +1213,7 @@ print('SHARED_EXPERIMENT_FLOW')
 def test_live_device_close_and_reopen_preserve_session_and_unchanged_devices(
     workspace,
 ) -> None:
-    script = r"""import zou_lab_control
-from PyQt5 import QtCore, QtTest
+    script = r"""from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
 from zlc_workbench.apps import task_console as tested_module
 
@@ -1314,10 +1277,7 @@ print('LIVE_DEVICE_RECONCILE_OK')
 def test_generic_device_tune_keeps_qt_live_and_refuses_false_close(workspace) -> None:
     script = """import time, threading
 from types import SimpleNamespace
-import zou_lab_control
 from zlc_workbench.apps import task_console as tested_module
-print(zou_lab_control.__file__)
-print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_ui import ensure_qt_app
@@ -1535,6 +1495,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
         read_tunable_in_unit=read,
         tune=lambda _name, _value: pytest.fail("native unit write was bypassed"), tune_in_unit=tune,
         convert_tunable_value=lambda _name, value, source, target: float(registry.convert(value, source, target)),
+        tunable_values=lambda: {"power": fields()[0].current},
         settings_provenance=lambda: {"device_session_id": "rf", "settings_epoch": state["epoch"]})
     control = _RecordingControl()
     control.show_status = lambda *_: None
@@ -1606,7 +1567,10 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
         flow._device_worker_run = lambda work, done, _failed: done(work())
         instrument.log.clear()
         flow._adopt_device_reading("rigol", rf_model, flow._read_device_controls(source))
-        assert len(instrument.log) == 16, "Open reads each channel's eight current facts once"
+        opened = len(instrument.log)
+        assert opened == 22, (
+            "Open reads each channel's eight current facts and three FSK-hop facts once"
+        )
         flow._device_control_models["rigol"] = rf_model
         flow.device_controls["rigol"] = rf_control
         instrument.log.clear()
@@ -1622,7 +1586,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
                     if item.metadata.name == "ch1_power").metadata.unit == "mVpp"
         instrument.log.clear()
         flow._request_device_control_refresh("rigol")
-        assert len(instrument.log) == 16, "explicit Refresh reads the device once"
+        assert len(instrument.log) == opened, "explicit Refresh reads the device once"
         assert rf_model["current"]["ch1_power"] is not None
         flow.session.device_use.assert_idle()
     finally:
@@ -1683,7 +1647,7 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
     locked = flow._device_control_projection("camera")
     assert locked["fields"]["exposure"]["editable"] is False
     assert locked["fields"]["gain"]["editable"] is False
-    flow._device_control_risk["camera"] = (
+    flow._device_control_models["camera"]["risk"] = (
         "camera-session",
         locked["owner_revision"],
     )

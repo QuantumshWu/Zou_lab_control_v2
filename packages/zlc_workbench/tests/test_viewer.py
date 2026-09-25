@@ -47,7 +47,6 @@ from zlc_data import (
     owned_snapshot_from_arrays,
 )
 from zlc_plot import (
-    AxisRef,
     NumericRange,
     SelectorKind,
     build_figure_host,
@@ -111,13 +110,19 @@ def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None
         published_outputs={"roi_mean": True},
         focused_cell=1,
     )
+    # A document restores with the kind's own defaults filled in, so the
+    # restored state is the canonical one -- and it round-trips unchanged.
     restored = PanelState.from_document(state.document())
 
-    assert restored == state
-
-def test_panel_state_rejects_incomplete_or_historical_documents() -> None:
-    with pytest.raises(ValueError, match="panel state fields differ"):
-        PanelState.from_document({"signal": "frame", "site_overlay": "off"})
+    assert (
+        restored.signal,
+        restored.kind,
+        restored.cell_kind,
+        restored.title,
+        restored.focused_cell,
+        dict(restored.published_outputs),
+    ) == ("report/distribution", "facet_grid", cell_kind, "Calibration report", 1, {"roi_mean": True})
+    assert PanelState.from_document(restored.document()) == restored
 
 class _Signal:
     def __init__(self) -> None:
@@ -247,9 +252,6 @@ class _ViewerView:
     def set_panel_selectors_enabled(self, panel_id, enabled) -> None:
         self.panels[str(panel_id)]["selectors_enabled"] = bool(enabled)
 
-    def set_panel_mutation_enabled(self, panel_id, enabled) -> None:
-        self.panels[str(panel_id)]["mutation_enabled"] = bool(enabled)
-
     def present_panel_front(self, panel_id: str, front: object) -> bool:
         del panel_id, front
         return True
@@ -360,18 +362,10 @@ def _wait_until(predicate, *, timeout: float = 10.0) -> None:
         time.sleep(0.005)
     assert predicate(), "timed out waiting for the FigureViewer owner turn"
 
-def _display_description(plot_input, recipe):
-    import zlc_plot
-
-    probe = zlc_plot.open_figure_host(plot_input, recipe)
-    try:
-        return probe.describe_display().result().value
-    finally:
-        probe.close(timeout=10)
-
 def _built_presenter(view) -> FigureViewerPresenter:
     from zlc_workbench.apps.figure_viewer import build
     from zlc_workbench.board import attach_qt_owner_turn, attach_qt_worker
+    from zlc_workbench.session import Workspace
     from zlc_ui.qt import ensure_qt_app
     from test_console_presenter import _async_writer
 
@@ -383,8 +377,10 @@ def _built_presenter(view) -> FigureViewerPresenter:
         build_host=build_figure_host,
         save_figure_artifact=_async_writer(save_figure_artifact),
     )
+    space = Workspace.discover().prepare()
     presenter = build(
         view,
+        workspace=SimpleNamespace(root=space.root, data=space.data),
         run_off_thread=run_off_thread,
         close_worker=close_worker,
         request_close=lambda: None,
@@ -412,7 +408,6 @@ def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
 def _formal_viewer_window(saved, build_host):
     """The product window over ``saved``, drawing with ``build_host``."""
 
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtCore
     from zlc_ui.qt import ensure_qt_app
     from zlc_workbench.apps.figure_viewer import create_window
@@ -440,10 +435,15 @@ def _formal_viewer_window(saved, build_host):
     timer.start()
     return application, QtCore, window, owner_turns, timer
 
-@pytest.fixture
-def saved(tmp_path):
-    """One real typed run in the formal figure archive."""
+@pytest.fixture(scope="module")
+def saved(tmp_path_factory):
+    """One real typed run in the formal figure archive.
 
+    Taken once per module, and the session is closed before any test reads
+    it: every consumer reads only the archive file and the owned snapshot.
+    """
+
+    tmp_path = tmp_path_factory.mktemp("saved")
     write_ordinary_pulse(tmp_path)
     session = ExperimentSession.open(tmp_path, template="virtual")
     try:
@@ -474,9 +474,9 @@ def saved(tmp_path):
             frozen=frozen,
             writer=save_figure_artifact,
         )
-        yield written.archive, snapshot
     finally:
         session.close()
+    return written.archive, snapshot
 
 @pytest.fixture
 def presenter():
@@ -888,21 +888,12 @@ def test_extending_a_numeric_axis_advances_by_its_step_or_refuses() -> None:
     assert draft["point_axes"][0].size == 2, "a refused growth changed the axis"
 
 def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> None:
+    """Projecting the Data editor for an ordinary interaction stays lazy:
+    it neither rebuilds Domain codes nor spells out an implicit axis."""
+
     import zlc_workbench.viewer as viewer_module
 
-    snapshot = viewer_module._new_manual_snapshot()
-    draft = viewer_module._draft_from_snapshot(
-        snapshot,
-        editor_id="projection-check",
-        producer_serial=1,
-        name="manual",
-        note="",
-        source_text="manual",
-        source_path=None,
-        source_dataset="",
-        recipe=None,
-        overlay=None,
-    )
+    draft = _manual_draft("projection-check")
     point = draft["point_axes"][0]
     draft["point_axes"][0] = AxisSpec(
         point.axis_id, point.name, point.role, point.size
@@ -1135,25 +1126,6 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     finally:
         _close_presenter(presenter)
 
-def test_a_played_pulse_is_named_on_the_device_tab_not_dumped() -> None:
-    """The Device tab says which pulse played and how many periods it has;
-    the document itself -- every period, slot and bracket -- and the scan
-    table are read where a pulse is drawn, not as hundreds of rows here."""
-
-    from zlc_workbench.viewer import _device_tab_snapshot
-
-    snapshot = {
-        "description": {"clock_hz": 5e7},
-        "program": {"digest": "abc", "duration_seconds": 0.5, "rows": [[1, 2], [3, 4]]},
-        "pulse": {"name": "scan", "periods": [{"name": "p1"}, {"name": "p2"}], "slots": []},
-    }
-    shown = _device_tab_snapshot(snapshot)
-    assert shown["pulse"] == {"name": "scan", "periods": 2}
-    assert shown["program"] == {"digest": "abc", "duration_seconds": 0.5, "rows": 2}
-    assert shown["description"] == {"clock_hz": 5e7}
-    assert snapshot["program"]["rows"] == [[1, 2], [3, 4]], "the record itself is untouched"
-
-
 def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved) -> None:
     """The Devices page names the pulse a run played and offers to draw it;
     the tab draws the recorded document through the editor's own preview
@@ -1195,6 +1167,9 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
         "periods": len(played_sequence.periods),
     }
     assert shown["program"] == {"digest": "abc", "rows": 2}
+    assert record["device_snapshots"]["sequencer"]["program"]["rows"] == [[1, 2], [3, 4]], (
+        "the record itself is untouched"
+    )
 
     view = _ViewerView()
     presenter = _built_presenter(view)
@@ -1274,9 +1249,24 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
         _close_presenter(presenter)
 
 
-def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
+def test_the_description_reports_only_facts_saved_in_the_archive(saved, monkeypatch) -> None:
+    """What a panel showed is a fact about its recipe, not its Dataset.
+
+    ``describe_archive`` used to read each recipe through
+    ``read_figure_plot``, which validates and materialises the Dataset
+    beside it -- a full copy of every array, thrown away -- before the
+    open path built the same Dataset again to keep.
+    """
+
+    import zlc_workbench.viewer as viewer_module
+
     path, _snapshot = saved
     info, arrays, datasets = read_archive(path)
+
+    def rebuilt(*_args, **_kwargs):
+        raise AssertionError("describe_archive rebuilt a Dataset")
+
+    monkeypatch.setattr(viewer_module, "read_figure_plot", rebuilt)
     description = describe_archive(info, arrays)
     tabs = dict(description.tabs)
     assert tuple(tabs) == ("Plot", "Logic", "Devices", "Flow", "Raw")
@@ -1327,30 +1317,6 @@ def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
         "calibration", "camera", "sequencer"
     ]
     assert len(task.flow["edges"]) == 2
-
-def test_describing_an_archive_reads_recipes_without_rebuilding_datasets(
-    saved, monkeypatch
-) -> None:
-    """What a panel showed is a fact about its recipe, not its Dataset.
-
-    ``describe_archive`` used to read each recipe through
-    ``read_figure_plot``, which validates and materialises the Dataset
-    beside it -- a full copy of every array, thrown away -- before the
-    open path built the same Dataset again to keep.
-    """
-
-    import zlc_workbench.viewer as viewer_module
-
-    path, _snapshot = saved
-    info, arrays, datasets = read_archive(path)
-
-    def rebuilt(*_args, **_kwargs):
-        raise AssertionError("describe_archive rebuilt a Dataset")
-
-    monkeypatch.setattr(viewer_module, "read_figure_plot", rebuilt)
-    description = describe_archive(info, arrays)
-    plot_rows = dict(dict(description.tabs)["Plot"])
-    assert plot_rows["plot data"].startswith("image")
 
 def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     path, _snapshot = saved
@@ -2029,13 +1995,16 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         plane = real_presenter._signal_plane
         offset_signal = fit_center.rsplit("/", 1)[0] + "/offset"
-        before_offset = plane.current_dataset(offset_signal).block.values.item()
+        # A plane Dataset may be held in segments; materialize() is the one
+        # explicit request for its contiguous values.
+        before_offset = plane.current_dataset(offset_signal).block.materialize().values.item()
         previous = plane.latest_publication(source_signal)
+        dense = snapshot.block.materialize()
         shifted = owned_snapshot_from_arrays(
-            snapshot.block.schema,
-            snapshot.block.values + np.asarray(7, dtype=snapshot.block.values.dtype),
+            dense.schema,
+            dense.values + np.asarray(7, dtype=dense.values.dtype),
             2,
-            validity=snapshot.block.validity,
+            validity=dense.validity,
         )
         producer = _ArchiveDatasetProducer(
             1, 0, "data", ImageFrame(shifted, overlay), archive,
@@ -2061,7 +2030,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         _wait_until(refitted)
         assert real_presenter.panels[source_panel_id].host is host
-        after_offset = plane.current_dataset(offset_signal).block.values.item()
+        after_offset = plane.current_dataset(offset_signal).block.materialize().values.reshape(-1)[-1]
         assert after_offset == pytest.approx(before_offset + 7.0, abs=1e-3)
         assert real_presenter.panels[source_panel_id].state.selector
         roi_publication = plane.latest_publication(derived_roi)
@@ -2440,6 +2409,19 @@ def test_panel_save_does_not_render_when_the_archive_fails(
     assert not (tmp_path / "failed-archive.png").exists()
 
 
+def _dirty_draft() -> dict:
+    """An applied, unsaved working copy: what makes closing ask."""
+
+    return {
+        "name": "Manual data 1",
+        "modified": True,
+        "unsaved": False,
+        "message": "",
+        "producer": None,
+        "publication": None,
+    }
+
+
 def test_unsaved_edits_are_asked_about_rather_than_locked_in() -> None:
     """A door that only opens from the inside is not a safeguard.
 
@@ -2448,6 +2430,13 @@ def test_unsaved_edits_are_asked_about_rather_than_locked_in() -> None:
     go.  The work is theirs, so they are asked once and the answer is
     honoured -- and with nobody to ask (a headless host, a test), nothing
     is discarded and the old refusal stands.
+
+    Closing takes several passes, and the decision is not one of them:
+    ``close`` is a retry loop -- panels first, then the IO worker, each
+    pass returning False and asking to be called again -- and the dirty
+    check sat inside it, so the operator was asked once per PASS.  A
+    decision about losing work belongs to the gesture, not to the
+    plumbing that carries it out.
     """
 
     view = _ViewerView()
@@ -2456,14 +2445,7 @@ def test_unsaved_edits_are_asked_about_rather_than_locked_in() -> None:
     view.confirm_discard = lambda text: asked.append(text) or answer["value"]
     presenter = _built_presenter(view)
     try:
-        presenter._data_drafts["data-1"] = {
-            "name": "Manual data 1",
-            "modified": True,
-            "unsaved": False,
-            "message": "",
-            "producer": None,
-            "publication": None,
-        }
+        presenter._data_drafts["data-1"] = _dirty_draft()
 
         # Declining keeps the working copy and says so.
         answer["value"] = False
@@ -2472,10 +2454,21 @@ def test_unsaved_edits_are_asked_about_rather_than_locked_in() -> None:
         assert "Save or discard" in view.status[-1][0], view.status[-1]
         assert "data-1" in presenter._data_drafts
 
-        # Agreeing closes: the refusal is not repeated.
+        # Agreeing closes, over a close that takes two passes: the question
+        # is asked once for the gesture, and the refusal is not repeated.
         answer["value"] = True
         before = len(asked)
+        passes = {"count": 0}
+        finished = presenter._panel_presenter.close
+
+        def staged_close() -> bool:
+            passes["count"] += 1
+            return bool(passes["count"] > 1 and finished())
+
+        presenter._panel_presenter.close = staged_close
         presenter.close()
+        presenter.close()
+        assert passes["count"] >= 2, "the test needs a close that takes two passes"
         assert len(asked) == before + 1, asked
         assert "Save or discard" not in view.status[-1][0], view.status[-1]
     finally:
@@ -2490,59 +2483,9 @@ def test_a_presenter_with_nobody_to_ask_never_discards_on_its_own() -> None:
     presenter = _built_presenter(view)
     try:
         assert presenter._confirm_discard is None
-        presenter._data_drafts["data-1"] = {
-            "name": "Manual data 1",
-            "modified": True,
-            "unsaved": False,
-            "message": "",
-            "producer": None,
-            "publication": None,
-        }
+        presenter._data_drafts["data-1"] = _dirty_draft()
         assert presenter.close() is False
         assert "Save or discard" in view.status[-1][0], view.status[-1]
-    finally:
-        presenter._data_drafts.clear()
-        _close_presenter(presenter)
-
-
-def test_the_close_question_is_asked_once_per_gesture() -> None:
-    """Closing takes several passes; the decision is not one of them.
-
-    ``close`` is a retry loop -- panels first, then the IO worker, each
-    pass returning False and asking to be called again -- and the dirty
-    check sat inside it, so the operator was asked once per PASS.  A
-    first close wanted two passes and asked twice; after declining, the
-    pass already spent made the next close want one, and it asked once.
-    A decision about losing work belongs to the gesture, not to the
-    plumbing that carries it out.
-    """
-
-    view = _ViewerView()
-    asked: list[str] = []
-    view.confirm_discard = lambda text: asked.append(text) or True
-    presenter = _built_presenter(view)
-    try:
-        presenter._data_drafts["data-1"] = {
-            "name": "Manual data 1",
-            "modified": True,
-            "unsaved": False,
-            "message": "",
-            "producer": None,
-            "publication": None,
-        }
-        passes = {"count": 0}
-        finished = presenter._panel_presenter.close
-
-        def staged_close() -> bool:
-            passes["count"] += 1
-            return bool(passes["count"] > 1 and finished())
-
-        presenter._panel_presenter.close = staged_close
-
-        presenter.close()
-        presenter.close()
-        assert passes["count"] >= 2, "the test needs a close that takes two passes"
-        assert len(asked) == 1, asked
     finally:
         presenter._data_drafts.clear()
         _close_presenter(presenter)

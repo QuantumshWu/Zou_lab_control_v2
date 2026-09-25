@@ -25,14 +25,11 @@ the last good state.
 from __future__ import annotations
 
 import logging
-import math
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
-from functools import wraps as _wraps
 from pathlib import Path
-from weakref import ref as _weak_ref
 from threading import Event
 from typing import Any
 
@@ -86,6 +83,7 @@ from zlc_ui import (
     ScheduleVM,
 )
 
+from .board import _guarded_slot
 from .device_use import DeviceClaim, DeviceLease, DeviceUseBusy, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse, write_pulse
 from zlc_ui import bracket_post_key, schedule_item_order
@@ -372,7 +370,6 @@ def project_target(
                     if clock_key is None
                     else _endpoint(clock_lane.get(clock_key, clock_key))
                 ),
-                lane_order=tuple(range(len(port.lanes))),
             )
         )
     return tuple(records)
@@ -489,6 +486,12 @@ def project_period(
     )
 
 
+def _visible_text(ports: Sequence[PortRowVM]) -> str:
+    """How many of the board's ports have rows, worded once for the page."""
+
+    return f"{sum(1 for port in ports if port.visible)}/{len(ports)} ports"
+
+
 def project_schedule(
     sequence: PulseSequence | None,
     *,
@@ -567,7 +570,7 @@ def project_schedule(
             else ""
         ),
         period_count=len(authored),
-        visible_text=f"{sum(1 for port in ports if port.visible)}/{len(ports)} ports",
+        visible_text=_visible_text(ports),
         summary_text=(
             (Path(path).name if path else sequence.name)
             if sequence is not None
@@ -772,9 +775,7 @@ def _delay_row(
             allow_any=False,
         ),
         unit=unit,
-        unit_quantums=tuple(
-            (name, float(nanoseconds_per(name))) for name in _TIME_UNITS
-        ),
+        units=tuple(_TIME_UNITS),
     )
 
 
@@ -1080,6 +1081,9 @@ class PulseEditorPresenter:
             tuple[tuple[float, ...], ...],
         ] | None = None
         self._held_point: int | None = None
+        #: What the last Hold or Step left playing: the revision its row was
+        #: resolved from and the digest the board reported for it.
+        self._held_program: tuple[int, str] | None = None
         # An editor with a sequencer can fire what it is showing; without one
         # it is a viewer, and says so rather than offering a dead button.
         if sequencer is not None and device_use is None:
@@ -1167,45 +1171,40 @@ class PulseEditorPresenter:
 
         if candidate == self._state:
             return
+        if candidate.scan_rows != self._state.scan_rows:
+            # A held row is an index into the table it was held in.
+            self._held_point = None
         self._state = candidate
         self.revision += 1
         self._digest_revision = -1
 
     def _edit_state(self, **changes: Any) -> None:
+        sequence = changes.get("sequence")
+        visible = self._state.visible_ports
+        if visible is not None and sequence is not None and "visible_ports" not in changes:
+            # The shown set names ports of one target.  Across a target
+            # change (Target page, Connect, Sync) it keeps the ports the new
+            # target still has, and shows the ones it did not have before --
+            # nobody chose to hide a port that did not exist.
+            before = self._state.sequence.target.by_key if self._state.sequence is not None else {}
+            changes["visible_ports"] = frozenset(
+                key for key in sequence.target.by_key if key in visible or key not in before
+            )
         self._accept_state(replace(self._state, **changes))
 
     # --------------------------------------------------------------- wiring
 
     def _guarded(self, handler):
-        """Wrap one view-signal handler so a defect cannot kill the bench.
+        """Wrap one view-signal handler at the one Qt-slot boundary owner.
 
-        Same law as the console's guard: an exception leaving a Qt slot is
-        qFatal -- the process dies with the experiment.  Crossing into Qt it
-        becomes a warning in the editor and a stderr traceback, and the window keeps running.  Called directly
-        (as the tests call them) these methods still raise.
+        Wire bound methods, not lambdas: the boundary holds a lambda strongly,
+        and one closing over this presenter would keep it alive with the view.
         """
 
-        name = handler.__name__
-        # A WEAK reference, deliberately: Qt strong-refs a plain callable,
-        # so a closure over the bound method would make the view keep this
-        # presenter -- and everything it owns -- alive with the window.
-        reference = _weak_ref(self)
+        return _guarded_slot(handler, handler.__name__, on_error=self._slot_error)
 
-        @_wraps(handler)
-        def guarded(*args, **kwargs):
-            presenter = reference()
-            if presenter is None:
-                return None
-            try:
-                return getattr(presenter, name)(*args, **kwargs)
-            except Exception as error:  # noqa: BLE001 -- the boundary IS total
-                _LOG.exception("pulse editor handler %s failed", name)
-                presenter._warn(
-                    f"internal error in {name}: {type(error).__name__}: {error}"
-                )
-                return None
-
-        return guarded
+    def _slot_error(self, error: Exception) -> None:
+        self._warn(f"internal error: {type(error).__name__}: {error}")
 
     def _connect(self) -> None:
         view = self.view
@@ -1256,7 +1255,7 @@ class PulseEditorPresenter:
         view.config_load_requested.connect(self._guarded(self.load_config_values))
         view.config_refresh_requested.connect(self._guarded(self.refresh_config_values))
         view.config_save_requested.connect(self._guarded(self.save_config_values))
-        view.config_save_as_requested.connect(self._guarded(lambda: self.save_config_values(save_as=True)))
+        view.config_save_as_requested.connect(self._guarded(self._save_config_as))
         view.config_unload_requested.connect(self._guarded(self.unload_config))
         view.config_entries_edited.connect(self._guarded(self.edit_config_entries))
         view.config_binding_committed.connect(self._guarded(self.set_config_binding))
@@ -1457,14 +1456,20 @@ class PulseEditorPresenter:
         return self._config_file_operation("", load_draft=False)
 
     def save_config_values(self, *, save_as: bool = False) -> bool:
+        # Only what a mapping cannot say is checked here; the codec's entry
+        # rule (a Config name, a finite number, a unit) runs when the file is
+        # written, and its refusal reaches the operator as "cannot update".
         entries = {}
         for name, text, unit in self._config_rows:
-            key = config_parameter_key(name.strip())
+            key = name.strip()
             if key in entries:
-                raise ValueError(f"duplicate Config name: {key}")
-            value = float(text)
-            if not math.isfinite(value):
-                raise ValueError(f"Config {key} must have a finite value")
+                self._warn(f"duplicate Config name: {key}")
+                return False
+            try:
+                value = float(text)
+            except ValueError:
+                self._warn(f"Config {key}: value must be a number")
+                return False
             entries[key] = (value, unit.strip())
         target = self._config_path
         if save_as or not target:
@@ -1476,6 +1481,9 @@ class PulseEditorPresenter:
             if not target:
                 return False
         return self._config_file_operation(str(Path(target).with_suffix(".json").resolve()), entries=entries)
+
+    def _save_config_as(self) -> bool:
+        return self.save_config_values(save_as=True)
 
     def _effective_sequence(self, sequence: PulseSequence) -> PulseSequence:
         """Preview uses saved active values, never the Config editor draft."""
@@ -1508,7 +1516,8 @@ class PulseEditorPresenter:
             # files while a different board is connected compiles and then does
             # nothing recognisable.
             target = self._board_target or pulse_target_from_xdc()
-            step_ns = self._board_step_ns or 20.0
+            # The clock the compiler will be held to, not a copy of it.
+            step_ns = self._board_step_ns or 1e9 / self._compiler_target()[1]
             safe = (0,) * len(target.raw_lanes)
             # The first digital output high in P1, everything safe in P2: the
             # smallest thing that is actually a pulse, so the preview draws an
@@ -1833,7 +1842,9 @@ class PulseEditorPresenter:
         docs/pulse-views.md and never called, so every Hide Off went through a
         whole re-projection instead.  The model this presenter believes is on
         screen is kept in step, or the next full push would not recognise
-        itself as different.
+        itself as different.  The view re-flags its rows; the count it shows
+        is the projection's wording, pushed with the summary as a value edit
+        pushes it.
         """
 
         visible = None if ports is None else frozenset(str(key) for key in ports)
@@ -1848,13 +1859,13 @@ class PulseEditorPresenter:
         )
         self.view.set_visible_ports(keys)
         shown = set(keys)
-        self._shown = replace(
-            self._shown,
-            ports=tuple(
-                replace(port, visible=port.key in shown) for port in self._shown.ports
-            ),
-            visible_text=f"{len(shown)}/{len(self._shown.ports)}",
+        flagged = tuple(
+            replace(port, visible=port.key in shown) for port in self._shown.ports
         )
+        self._shown = replace(
+            self._shown, ports=flagged, visible_text=_visible_text(flagged)
+        )
+        self._refresh_summary()
         self._render_run_state()
 
     def fill_port(self, port_key: str) -> None:
@@ -2005,6 +2016,9 @@ class PulseEditorPresenter:
             self.sequencer = self._dial(mode, endpoint)
         except Exception as error:
             self._dial_failed(mode, endpoint, error)
+            # The previous board was already forgotten; its ports must not
+            # stay on screen (the worker path does the same).
+            self.refresh()
             return False
         self._owns_sequencer = True
         self.connection = (mode, endpoint)
@@ -2272,8 +2286,6 @@ class PulseEditorPresenter:
         dropped quietly.
         """
 
-        from zlc_pulse import PulsePeriod
-
         current = self.sequence
         board_lanes = board.target.raw_lanes
         was = {lane: index for index, lane in enumerate(current.target.raw_lanes)}
@@ -2293,11 +2305,11 @@ class PulseEditorPresenter:
             }
         )
 
+        # replace(), so every other field of a period -- its kind above all:
+        # a spacer must stay a spacer -- rides along without being listed.
         periods = tuple(
-            PulsePeriod(
-                period_id=period.period_id,
-                duration=period.duration,
-                unit=period.unit,
+            replace(
+                period,
                 states=tuple(
                     period.states[was[lane]] if lane in was else 0
                     for lane in board_lanes
@@ -2305,7 +2317,6 @@ class PulseEditorPresenter:
                 analog_steps=tuple(
                     step for step in period.analog_steps if step.port in ports
                 ),
-                name=period.name,
             )
             for period in current.periods
         )
@@ -2491,27 +2502,53 @@ class PulseEditorPresenter:
             self._remember_applied_scan(program, source, wire_rows, digest=program.digest)
         else:
             self._applied_scan = None
-        # EVERY execution fact the sync point later compares is adopted
-        # here, because this is the one door the board's answer comes through.
-        # The scan repeat count was not: it stayed whatever the editor last
-        # held, so a board playing two sweeps against an editor holding one
-        # reported "not synchronized" -- and pressing Sync could not fix it,
-        # because the comparison read a field the adoption never wrote.
-        self._accept_state(
-            replace(
-                self._state,
-                sequence=source,
+        # The document as it was handed to the board, before the board's
+        # Config set filled it: adopting the filled one baked each Config
+        # value into the draft as its authored default.
+        adopted = getattr(state, "authored_source", None) or source
+        held = None
+        if self.sequence is not None:
+            execution = self._execution_sequence()
+            if adopted == execution:
+                # The board is playing this very draft, resolved for execution
+                # (API values and an unarmed scan point written in).  Adopting
+                # that would erase the marks the draft is authored with.
+                adopted = self.sequence
+            elif self._held_point is not None and self._scan_armed():
+                # The board may hold one row of this draft's scan, as Hold and
+                # Step resolved it.  Adopting that would bake the row into the
+                # fields as their authored values and empty the table: the
+                # draft, its scan binding and its table stay as they are.
+                try:
+                    rows = self._prepared_scan(execution)[0]
+                    point = resolve_scan_point(execution, rows[self._held_point])
+                except Exception:  # noqa: BLE001 -- a table that no longer prepares holds nothing
+                    point = None
+                if adopted == point:
+                    held = self._held_point
+        if held is None:
+            # EVERY execution fact the sync point later compares is adopted
+            # here, because this is the one door the board's answer comes
+            # through.  The scan repeat count was not: it stayed whatever the
+            # editor last held, so a board playing two sweeps against an
+            # editor holding one reported "not synchronized" -- and pressing
+            # Sync could not fix it, because the comparison read a field the
+            # adoption never wrote.
+            self._edit_state(
+                sequence=adopted,
                 scan_rows=authored_rows,
                 scan_source_dirty=bool(self._state.scan_source),
                 scan_repeats=int(getattr(state, "scan_repeats", 0) or 0),
             )
-        )
         self.refresh()
         # What came back IS what the board holds, so the dot must stop saying
         # the board is playing something older the moment it no longer is.
         self._adopt_board_state(board_state)
         self._done(
-            f"synced from the board - {len(source.periods)} period(s)"
+            f"the board is holding scan point {held} of this pulse; "
+            "the draft and its scan table are kept"
+            if held is not None
+            else f"synced from the board - {len(source.periods)} period(s)"
             + (f", {len(wire_rows)} scan point(s)" if wire_rows else "")
         )
         return True
@@ -2676,6 +2713,9 @@ class PulseEditorPresenter:
             )
             self._board_state = state
             if error is None:
+                # The board plays the pulse (or its scan from row 0) again;
+                # Step no longer starts from a row it was holding.
+                self._held_point = None
                 self._remember_applied_scan(program, source, rows, digest=state.applied_digest)
                 self._digest_revision = -1
                 if self.revision == authored_revision:
@@ -2744,11 +2784,16 @@ class PulseEditorPresenter:
         def finished(result: object, error: BaseException | None) -> None:
             self._device_done = None
             self._device_busy = False
-            if operation == self._device_operation:
-                delivered(result, error)
-            self._refresh_config_page()
-            self._run_status_followups()
-            self._wake_close_guard()
+            try:
+                if operation == self._device_operation:
+                    delivered(result, error)
+            finally:
+                # A delivery that raised (its error is reported at the Qt
+                # boundary) must still leave the Config page usable, the
+                # status line current and a waiting close woken.
+                self._refresh_config_page()
+                self._run_status_followups()
+                self._wake_close_guard()
 
         return self._submit_work(
             runner,
@@ -2868,6 +2913,7 @@ class PulseEditorPresenter:
             self._watch_completion()
             self._digest_revision = -1
             self._poll_board()
+            self._held_point = None
             self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
             self.refresh_preview()
         except Exception as error:
@@ -3031,6 +3077,11 @@ class PulseEditorPresenter:
         so an edit re-answers it without anyone being asked anything.
         """
 
+        # A board holding nothing (or none attached, the usual authoring
+        # case) cannot match, and the digest behind the other side costs a
+        # compile -- and offline a read of the streamer config.
+        if not self._board_state.applied_digest:
+            return False
         shown = self._shown_digest()
         if not shown or self._board_state.applied_digest != shown:
             return False
@@ -3091,7 +3142,9 @@ class PulseEditorPresenter:
             return ""
         if self._digest_revision != self.revision:
             try:
-                source, _rows, _sweeps = self._execution_request()
+                # The program alone: the board's digest names its program,
+                # so quantizing the scan table here was thrown away.
+                source = self._execution_sequence()
                 self._digest = self.compile(self._effective_sequence(source))[1].digest
             except Exception:
                 # A pulse that does not compile is not one any board can be
@@ -3367,10 +3420,29 @@ class PulseEditorPresenter:
             # editor with nothing open is exactly when pulling what the
             # hardware is holding is worth doing.
             can_sync=self.sequencer is not None,
-            can_hold=live,
-            can_step=live and bool(self._state.scan_rows),
+            can_hold=live and not self._device_busy and not self._stop_busy,
+            can_step=live and bool(self._state.scan_rows) and not self._device_busy and not self._stop_busy,
         )
         self.view.set_status_color(self._status_token())
+
+    @property
+    def _holding_this_pulse(self) -> bool:
+        """Is the board playing the row Hold or Step resolved from this draft?
+
+        A held row is a program of its own -- the row's numbers written into
+        the fields, no table, played until Stop -- so it never equals the scan
+        On Pulse would load, and ``synchronized`` rightly says no (On Pulse
+        keeps its asterisk: pressing it changes what plays).  It is still this
+        pulse, which is what Sync says and keeps the draft for, so the dot
+        must not call it something older.
+        """
+
+        state = self._board_state
+        return (
+            state.firing
+            and self._held_program == (self.revision, state.applied_digest)
+            and (state.run_repeats, state.scan_repeats) == (0, 1)
+        )
 
     def _status_token(self) -> str:
         state = self._board_state
@@ -3383,7 +3455,8 @@ class PulseEditorPresenter:
         if state.firing:
             return (
                 "running-synced"
-                if not self._device_busy and self.synchronized
+                if not self._device_busy
+                and (self.synchronized or self._holding_this_pulse)
                 else "running-stale"
             )
         return "dirty-ready" if self.sequence is not None else "idle"
@@ -3678,7 +3751,7 @@ class PulseEditorPresenter:
         so they are projected together rather than nudged one at a time.
         """
 
-        from zlc_pulse import scan_columns_for, validate_scan_table
+        from zlc_pulse import scan_columns_for
 
         view = self.view
         if self.sequence is None:
@@ -3753,8 +3826,6 @@ class PulseEditorPresenter:
         ``scan_table``, two-dimensional, one column per bound slot.
         """
 
-        import numpy as np
-
         from zlc_pulse import scan_columns_for, validate_scan_table
 
         if self.sequence is None or not self._has_scan_slots():
@@ -3817,11 +3888,6 @@ class PulseEditorPresenter:
         )
         if not chosen:
             return False
-        # A scan table off a network share takes long enough for a second click
-        # to land, and the second read would race the first into the state.
-        # The button says so while it is busy, which is also why the setter
-        # exists; nobody was calling it.
-        self.view.set_scan_busy(True)
         try:
             path = Path(chosen)
             data = np.load(path) if path.suffix == ".npy" else np.loadtxt(path, delimiter=",")
@@ -3831,8 +3897,6 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(f"cannot read {Path(chosen).name}: {error}")
             return False
-        finally:
-            self.view.set_scan_busy(False)
         self._done(
             f"loaded {len(self._state.scan_rows)} scan point(s) from {Path(chosen).name}"
         )
@@ -3939,6 +4003,9 @@ class PulseEditorPresenter:
 
         rows = self._state.scan_rows
         count = len(rows)
+        # The draft the row is resolved from: an edit made while the command
+        # runs on the worker is not what the board ends up holding.
+        revision = self.revision
         try:
             # A held point is an ORDINARY pulse whose scanned fields carry that
             # row's numbers -- not a scan of length one.  Saying it the other
@@ -3958,6 +4025,11 @@ class PulseEditorPresenter:
         def prepare(held: int) -> tuple[PulseSequence, object]:
             return self.compile(resolve_scan_point(source, effective_rows[held]))
 
+        # Refused before the lease is taken, as On Pulse is: a lease taken
+        # and then refused would hold the sequencer against every other
+        # owner with nothing playing.
+        if worker is not None and not self._device_available():
+            return False
         if not self._acquire_command():
             return False
         sequencer = self.sequencer
@@ -3968,7 +4040,9 @@ class PulseEditorPresenter:
             try:
                 resolved, program = prepare(held)
             except Exception as error:
-                self._hold_failed(held, error)
+                # Settled as the worker's delivery settles it: the lease
+                # taken above goes back unless the board still plays.
+                self._settle_hold(held, count, self.board_state(), error, revision)
                 return False
             self._finite_run = None
             error = self._drive_program(
@@ -3980,10 +4054,8 @@ class PulseEditorPresenter:
                 current=lambda: True,
                 halt_first=True,
             )
-            self._settle_hold(held, count, self.board_state(), error)
+            self._settle_hold(held, count, self.board_state(), error, revision)
             return error is None
-        if not self._device_available():
-            return False
         self._finite_run = None
 
         def work(operation: int) -> object:
@@ -4010,7 +4082,7 @@ class PulseEditorPresenter:
                 else (self._clamp_scan_point(point, count), self._board_state, failure)
             )
             self._held_point = held
-            self._settle_hold(held, count, state, error)
+            self._settle_hold(held, count, state, error, revision)
             if error is not None and state.firing and previous_run is not None:
                 self._finite_run = previous_run
                 self._watch_completion()
@@ -4054,12 +4126,20 @@ class PulseEditorPresenter:
         self._refresh_scan_page()
 
     def _settle_hold(
-        self, held: int, count: int, state: BoardState, error: BaseException | None
+        self,
+        held: int,
+        count: int,
+        state: BoardState,
+        error: BaseException | None,
+        revision: int,
     ) -> None:
         """Show what holding a point left the board doing."""
 
         if error is None:
             self._finite_run = None
+            # What the board reports for it from now on is this draft's row,
+            # for ``synchronized`` to recognise until the draft changes.
+            self._held_program = (revision, state.applied_digest)
             self._scan_progress = f"held at scan point {held} of {count}"
         else:
             self._scan_progress = f"cannot hold that point: {error}"
@@ -4239,29 +4319,6 @@ class PulseEditorPresenter:
         self._preview_selectors = bool(enabled)
         if self._preview_host is not None:
             self._preview_host.set_interaction_enabled(self._preview_selectors)
-
-    def preview_size(self) -> str:
-        """The preset this pulse should be drawn at.
-
-        A pinned choice wins; otherwise the content decides, through the one
-        rule zlc_plot owns for pulses -- the same rule the console's loaded
-        pulse panels use, so the same pulse is drawn the same size everywhere.
-        """
-
-        if self._pinned_size:
-            return self._pinned_size
-        from zlc_plot import recommended_pulse_preset
-
-        if self.sequence is None:
-            return recommended_pulse_preset(0, 0)
-        try:
-            return self._preview_candidate(
-                self._effective_sequence(self.sequence),
-                bool(self.view.preview_include_off_rows),
-                None,
-            )[1]
-        except Exception:
-            return recommended_pulse_preset(0, len(self.sequence.periods))
 
     @staticmethod
     def _preview_candidate(
@@ -4685,12 +4742,15 @@ class PulseEditorPresenter:
         if self._preview_close_requested and self._request_preview_close is not None:
             self._request_preview_close()
 
+    def may_close(self) -> bool:
+        """Whether unsaved Config edits may go; asked once per close."""
+
+        return self._preview_close_requested or self._discard_config_edits()
+
     def prepare_preview_close(self) -> bool:
         """Stop accepting work and report when every owned delivery is idle."""
 
         if not self._preview_close_requested:
-            if not self._discard_config_edits():
-                return False
             self._device_operation += 1
         self._preview_close_requested = True
         self._preview_pending = None

@@ -23,9 +23,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from zlc_plot.semantics import schema_structure
+from zlc_runtime import split_signal_key
 
 
-__all__ = ["SignalRow", "format_signal_shape", "project_signals"]
+__all__ = ["SignalRow", "format_signal_shape", "project_signals", "signal_label"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +61,7 @@ def project_signals(
     rows = [
         SignalRow(
             name=description.name,
-            label=(
-                f"{_label(description.name)}  "
-                f"[{format_signal_shape(description.schema)}]"
-            ),
+            label=signal_label(description.name, description.schema),
             producer=_producer(description.name, description.owner_id),
             state=_state(description),
             derived_from=description.source_name or "",
@@ -74,6 +72,12 @@ def project_signals(
     return tuple(
         sorted(rows, key=lambda row: (order[row.state], row.producer, row.name))
     )
+
+
+def signal_label(name: str, schema: object) -> str:
+    """What to call one signal for a person: its readable name and its shape."""
+
+    return f"{_label(name)}  [{format_signal_shape(schema)}]"
 
 
 def format_signal_shape(schema: object) -> str:
@@ -109,5 +113,5 @@ def _producer(name: str, owner_id: str) -> str:
     other way from landing in a group called nothing.
     """
 
-    parts = [part for part in name.split("/") if part and not part.startswith("@")]
-    return parts[0] if len(parts) > 1 else str(owner_id)
+    parts = split_signal_key(name)
+    return parts[0] if parts is not None else str(owner_id)

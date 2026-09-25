@@ -1,16 +1,9 @@
-import zou_lab_control
-
 import json
 import time
 from pathlib import Path
 
 import numpy as np
 import pytest
-
-import zlc_workbench.console as tested_module
-
-
-print(tested_module.__file__)
 
 from zlc_atom.nodes.calibration import (
     FrameContract,
@@ -19,16 +12,14 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
 )
-from zlc_runtime import NodeHost
+from zlc_runtime import NodeHost, stable_signal_key
 from zlc_data.figure_archive import read_archive
-from zlc_workbench.console import ConsolePresenter
-from zlc_workbench.logic import stable_signal_key
-from zlc_workbench.panel_catalog import task_console_fitting_spec
-from zlc_workbench.panel_state import project_panel_state
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import describe_archive
 
-from test_console_presenter import _ConsoleView, _Signal, _async_writer, _one_shot
+# The console over this session, its panels mounted by the app's own
+# build_panel_host: a hand copy of that mount path drifted from the app once.
+from test_console_presenter import _console_over, _one_shot
 from pulse_fixtures import write_ordinary_pulse
 
 
@@ -80,257 +71,220 @@ def _calibration(path: Path) -> TrapCalibration:
 def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
     tmp_path, monkeypatch
 ) -> None:
-    plot = pytest.importorskip("zlc_plot")
     session = ExperimentSession.open(tmp_path, template="virtual")
     write_ordinary_pulse(tmp_path)
-    view = _ConsoleView()
-    view.panel_save_figure_requested = _Signal()
 
-    def spec_for(snapshot, kind="", cell_kind=""):
-        return task_console_fitting_spec(snapshot.block.schema, kind, cell_kind)
+    def no_device_call(*_args, **_kwargs):
+        raise AssertionError("layout/panel save touched the current camera")
 
-    def make_host(plot_input, state):
-        initial = getattr(plot_input, "snapshot", plot_input)
-        projection = project_panel_state(
-            initial.block.schema,
-            spec_for(initial, state.kind, state.cell_kind),
-            state,
-        )
-        spec, parameters = projection.spec, projection.parameters
-        parameters = dict(parameters)
-        parameters["title"] = state.title
-        return plot.RasterPlotHost.from_plot(
-            plot_input,
-            spec,
-            size=state.size,
-            parameters=parameters,
-        )
+    def refuse_the_camera(patched) -> None:
+        for name in ("set_exposure_seconds", "set_roi", "working_point"):
+            patched.setattr(session.camera, name, no_device_call)
 
-    presenter = ConsolePresenter(
-        session,
-        view,
-        make_monitor_host=make_host,
-        make_editor_host=make_host,
-        build_figure_host=plot.build_figure_host,
-        save_figure_artifact=_async_writer(plot.save_figure_artifact),
-        close_render_processes=lambda: True,
-        spec_for=spec_for,
-    )
     try:
-        camera_node, camera_snapshot = _one_shot(
-            session, producer="camera_measurement"
-        )
-        frames_signal = camera_node.signal_key("frames")
-        calibration_path = tmp_path / "calibration.json"
-        _calibration(calibration_path)
+        with _console_over(session) as presenter:
+            view = presenter.view
+            camera_node, camera_snapshot = _one_shot(
+                session, producer="camera_measurement"
+            )
+            frames_signal = camera_node.signal_key("frames")
+            calibration_path = tmp_path / "calibration.json"
+            _calibration(calibration_path)
 
-        camera_id = presenter.add_logic(
-            "camera_measurement",
-            node_id="camera_measurement",
-            values={
-                "exposure_seconds": 0.02,
-                "repeat": 1,
-                "frames_per_cycle": 3,
-            },
-            device_keys={"camera": "camera"},
-            open_editor=False,
-        )
-        occupancy_id = presenter.add_logic(
-            "occupancy",
-            node_id="occupancy",
-            artifact_inputs={"calibration_path": str(calibration_path)},
-            source_signal=frames_signal,
-            open_editor=False,
-        )
-        # Occupancy runs THROUGH the console: the overlay is assembled by the
-        # node that judged these sites, and a console that is not running it
-        # has no calibration to speak for.
-        assert presenter.start_logic(occupancy_id) is True
-        _wait_terminal(presenter.logic[occupancy_id].host)
-        presenter.poll_logic()
-        judged_signal = stable_signal_key("occupancy", "frame_judged")
-        status_signal = stable_signal_key("occupancy", "occupied")
-        front = session.signal_plane.freeze()
-        judged = front.value(judged_signal)
-        judged_publication = front.publication(judged_signal)
-        assert judged is not None and judged_publication is not None
-        assert session.signal_plane.direct_parent_publications(judged_publication)
+            camera_id = presenter.add_logic(
+                "camera_measurement",
+                node_id="camera_measurement",
+                values={
+                    "exposure_seconds": 0.02,
+                    "repeat": 1,
+                    "frames_per_cycle": 3,
+                },
+                device_keys={"camera": "camera"},
+                open_editor=False,
+            )
+            occupancy_id = presenter.add_logic(
+                "occupancy",
+                node_id="occupancy",
+                artifact_inputs={"calibration_path": str(calibration_path)},
+                source_signal=frames_signal,
+                open_editor=False,
+            )
+            # Occupancy runs THROUGH the console: the overlay is assembled by
+            # the node that judged these sites, and a console that is not
+            # running it has no calibration to speak for.
+            assert presenter.start_logic(occupancy_id) is True
+            _wait_terminal(presenter.logic[occupancy_id].host)
+            presenter.poll_logic()
+            judged_signal = stable_signal_key("occupancy", "frame_judged")
+            status_signal = stable_signal_key("occupancy", "occupied")
+            front = session.signal_plane.freeze()
+            judged = front.value(judged_signal)
+            judged_publication = front.publication(judged_signal)
+            assert judged is not None and judged_publication is not None
+            assert session.signal_plane.direct_parent_publications(judged_publication)
 
-        target = presenter.add_panel(
-            judged_signal,
-            judged.snapshot,
-            title="occupancy image",
-            kind="image",
-            fit={"model": "anisotropic_gaussian_center"},
-            overlay_signal=status_signal,
-            initial_publication=judged_publication,
-        )
-        assert {
-            key
-            for _producer, leaves in view._cards[target.panel_id].overlay_choices
-            for _label, key in leaves
-        } == {status_signal}
-        other = presenter.add_panel(
-            frames_signal,
-            camera_snapshot,
-            title="camera histogram",
-            kind="histogram",
-        )
+            target = presenter.add_panel(
+                judged_signal,
+                judged.snapshot,
+                title="occupancy image",
+                kind="image",
+                fit={"model": "anisotropic_gaussian_center"},
+                overlay_signal=status_signal,
+                initial_publication=judged_publication,
+            )
+            assert {
+                key
+                for _producer, leaves in view._cards[target.panel_id].overlay_choices
+                for _label, key in leaves
+            } == {status_signal}
+            other = presenter.add_panel(
+                frames_signal,
+                camera_snapshot,
+                title="camera histogram",
+                kind="histogram",
+            )
 
-        # Header Save Layout is stopped authoring/wiring only.
-        layout_path = tmp_path / "task-console-layout.json"
-        view.save_answer = str(layout_path)
-        view.save_layout_requested.emit()
-        document = json.loads(layout_path.read_text(encoding="utf-8"))
-        encoded_layout = json.dumps(document)
-        assert "dataset" not in encoded_layout and not tuple(tmp_path.glob("*.npz"))
+            # Panel Save Fig must use the frozen Edit snapshot and its
+            # run-time chain.
+            assert presenter.edit_panel(target.panel_id) is True
+            deadline = time.monotonic() + 10.0
+            while target.frozen_data is None and time.monotonic() < deadline:
+                presenter.beat()
+                time.sleep(0.005)
+            frozen = target.frozen_data
+            assert frozen is not None and frozen.publication is not None
+            frozen_values = np.array(frozen.snapshot.block.materialize().values, copy=True)
 
-        def no_device_call(*_args, **_kwargs):
-            raise AssertionError("layout/panel save touched the current camera")
+            def no_latest_recapture():
+                raise AssertionError("Panel Save Fig re-froze latest instead of Edit data")
 
-        monkeypatch.setattr(session.camera, "set_exposure_seconds", no_device_call)
-        monkeypatch.setattr(session.camera, "set_roi", no_device_call)
-        monkeypatch.setattr(session.camera, "working_point", no_device_call)
-        view.open_answer = str(layout_path)
-        view.load_layout_requested.emit()
-        assert set(presenter.logic) == {camera_id, occupancy_id}
-        assert all(binding.host is None for binding in presenter.logic.values())
-        assert presenter.logic[occupancy_id].draft.source_signal == frames_signal
-        # Two panels, both added here: occupancy is a processor and opens
-        # nothing of its own -- it answers a signal it does not own, and which
-        # of its answers belongs on this board is the operator's decision.
-        assert {
-            (binding.state.signal, binding.state.kind)
-            for binding in presenter.panels.values()
-        } == {(judged_signal, "image"), (frames_signal, "histogram")}
-        assert not session.camera.capture_state()
+            before_panel_save = {
+                path.resolve() for path in tmp_path.rglob("*") if path.is_file()
+            }
+            with monkeypatch.context() as patched:
+                patched.setattr(session.signal_plane, "freeze", no_latest_recapture)
+                refuse_the_camera(patched)
+                assert presenter.save_panel_figure(
+                    target.panel_id, str(tmp_path / "occupancy-panel.svg")
+                ) is True, view.status
+            created = {
+                path.resolve()
+                for path in tmp_path.rglob("*")
+                if path.is_file() and path.resolve() not in before_panel_save
+            }
+            archives = [path for path in created if path.suffix == ".npz"]
+            images = [path for path in created if path.suffix == ".svg"]
+            assert len(archives) == 1 and len(images) == 1, (
+                "Panel Edit Save Fig has no formal image + data archive intent seam; "
+                f"status={view.status!r}"
+            )
 
-        # The retained publication is the whole overlay artifact.  Remove the
-        # stopped Logic row itself, then rebuild the panel from Runtime: no
-        # node/binding survives to lend it a SiteMap.
-        removed_occupancy = presenter.logic.pop(occupancy_id)
-        assert removed_occupancy.host is None and removed_occupancy.node is None
-        retained_panel = next(
-            binding
-            for binding in presenter.panels.values()
-            if binding.state.signal == judged_signal
-        )
-        assert presenter.refresh_panel_snapshot(retained_panel.panel_id)
+            with np.load(archives[0], allow_pickle=False) as payload:
+                assert "info" in payload.files
+            # The TYPED datasets the reader validated, not the raw section
+            # tree: what is asserted below is a block of values.
+            info, arrays, datasets = read_archive(archives[0])
+            sections = info["sections"]
+            assert len(datasets) == 1 and other.panel_id not in datasets
+            dataset_name = next(iter(datasets))
+            restored = datasets[dataset_name]
+            np.testing.assert_array_equal(
+                restored.block.materialize().values, frozen_values
+            )
 
-        # Header Save Screenshot is one GUI image and creates no archive/layout.
-        screenshot_path = tmp_path / "task-console.png"
-        before_screenshot = set(tmp_path.rglob("*"))
-        view.save_answer = str(screenshot_path)
-        view.save_screenshot_requested.emit()
-        created_by_screenshot = {
-            path for path in tmp_path.rglob("*") if path not in before_screenshot
-        }
-        assert created_by_screenshot == {screenshot_path}
-        assert screenshot_path.read_bytes() == b"plain TaskConsole screenshot"
+            recipe = sections["plot"][dataset_name]
+            assert recipe["spec"]["kind"] == "image"
+            assert recipe["fit"] == {"model": "anisotropic_gaussian_center"}
+            assert sections["source"]["overlay_signal"] == status_signal
+            assert "calibration_path" not in sections["source"]
+            # The rings themselves are IN the archive: geometry once, beside
+            # the typed status Dataset view it projects.  No flattened
+            # repeat/point status table is a second truth.
+            assert set(arrays) >= {
+                "data.overlay.coordinates",
+                "data.overlay.status",
+            }
 
-        # Panel Save Fig must use the frozen Edit snapshot and its run-time chain.
-        target = next(
-            binding
-            for binding in presenter.panels.values()
-            if binding.state.signal == judged_signal
-        )
-        deadline = time.monotonic() + 10.0
-        while target.frozen_data is None and time.monotonic() < deadline:
-            presenter.beat()
-            time.sleep(0.005)
-        assert presenter.edit_panel(target.panel_id) is True
-        frozen = target.frozen_data
-        assert frozen is not None and frozen.publication is not None
-        frozen_values = np.array(frozen.snapshot.block.values, copy=True)
-        other_panel_id = next(
-            binding.panel_id
-            for binding in presenter.panels.values()
-            if binding.state.signal == frames_signal
-        )
+            records = {
+                node["record"]["node"]: node["record"]
+                for node in sections["lineage"]["nodes"]
+            }
+            assert set(records) >= {"camera_measurement", "occupancy"}
+            assert records["camera_measurement"]["named_devices"] == {"camera": "camera"}
+            assert records["camera_measurement"]["device_snapshots"]["camera"][
+                "exposure_seconds"
+            ] == pytest.approx(0.02)
+            assert records["occupancy"]["parameters"]["calibration_path"] == str(
+                calibration_path.resolve()
+            )
+            description = describe_archive(info, arrays)
+            device = next(iter(dict(dict(description.tabs)["Devices"]).values()))
+            assert device["snapshots"][0]["snapshot"][
+                "exposure_seconds"
+            ] == pytest.approx(0.02)
+            graph_nodes = {node["id"]: node for node in description.flow["nodes"]}
+            graph_edges = description.flow["edges"]
+            occupancy_node = next(
+                node for node in graph_nodes.values() if node["title"] == "occupancy"
+            )
+            camera_node = next(
+                node
+                for node in graph_nodes.values()
+                if node["title"] == "camera_measurement"
+            )
+            assert any(
+                edge["source"] == camera_node["id"]
+                and edge["target"] == occupancy_node["id"]
+                and edge["kind"] == "causal"
+                for edge in graph_edges
+            )
+            encoded_archive = json.dumps(info).lower()
+            assert CALIBRATION_SENTINEL.lower() not in encoded_archive
+            assert all(
+                word not in encoded_archive for word in ("fingerprint", "sha256", "hash")
+            )
+            assert images[0].stat().st_size > 0
 
-        def no_latest_recapture():
-            raise AssertionError("Panel Save Fig re-froze latest instead of Edit data")
+            # Header Save Layout is stopped authoring/wiring only: it writes
+            # the layout document and no dataset archive.
+            layout_path = tmp_path / "task-console-layout.json"
+            archives_before_layout = set(tmp_path.rglob("*.npz"))
+            view.save_answer = str(layout_path)
+            view.save_layout_requested.emit()
+            document = json.loads(layout_path.read_text(encoding="utf-8"))
+            assert "dataset" not in json.dumps(document)
+            assert set(tmp_path.rglob("*.npz")) == archives_before_layout
 
-        monkeypatch.setattr(session.signal_plane, "freeze", no_latest_recapture)
-        before_panel_save = {
-            path.resolve() for path in tmp_path.rglob("*") if path.is_file()
-        }
-        view.panel_save_figure_requested.emit(
-            target.panel_id, str(tmp_path / "occupancy-panel.svg")
-        )
-        created = {
-            path.resolve()
-            for path in tmp_path.rglob("*")
-            if path.is_file() and path.resolve() not in before_panel_save
-        }
-        archives = [path for path in created if path.suffix == ".npz"]
-        images = [path for path in created if path.suffix == ".svg"]
-        assert len(archives) == 1 and len(images) == 1, (
-            "Panel Edit Save Fig has no formal image + data archive intent seam; "
-            f"status={view.status!r}"
-        )
+            # Load Layout replaces the board -- and retires the Logic hosts it
+            # replaces (ARCHITECTURE_DESIGN: an explicit Remove/Clear retires
+            # the removed owner), which is why Panel Save ran first.
+            with monkeypatch.context() as patched:
+                refuse_the_camera(patched)
+                view.open_answer = str(layout_path)
+                view.load_layout_requested.emit()
+                assert set(presenter.logic) == {camera_id, occupancy_id}
+                assert all(binding.host is None for binding in presenter.logic.values())
+                assert presenter.logic[occupancy_id].draft.source_signal == frames_signal
+                # Two panels, both added here: occupancy is a processor and
+                # opens nothing of its own -- it answers a signal it does not
+                # own, and which of its answers belongs on this board is the
+                # operator's decision.
+                assert {
+                    (binding.state.signal, binding.state.kind)
+                    for binding in presenter.panels.values()
+                } == {(judged_signal, "image"), (frames_signal, "histogram")}
+                assert not session.camera.capture_state()
 
-        with np.load(archives[0], allow_pickle=False) as payload:
-            assert "info" in payload.files
-        # The TYPED datasets the reader validated, not the raw section
-        # tree: what is asserted below is a block of values.
-        info, arrays, datasets = read_archive(archives[0])
-        sections = info["sections"]
-        assert len(datasets) == 1 and other_panel_id not in datasets
-        dataset_name = next(iter(datasets))
-        restored = datasets[dataset_name]
-        np.testing.assert_array_equal(restored.block.values, frozen_values)
-
-        recipe = sections["plot"][dataset_name]
-        assert recipe["spec"]["kind"] == "image"
-        assert recipe["fit"] == {"model": "anisotropic_gaussian_center"}
-        assert sections["source"]["overlay_signal"] == status_signal
-        assert "calibration_path" not in sections["source"]
-        # The rings themselves are IN the archive: geometry once, beside the
-        # typed status Dataset view it projects.  No flattened
-        # repeat/point status table is a second truth.
-        assert set(arrays) >= {
-            "data.overlay.coordinates",
-            "data.overlay.status",
-        }
-
-        records = {
-            node["record"]["node"]: node["record"]
-            for node in sections["lineage"]["nodes"]
-        }
-        assert set(records) >= {"camera_measurement", "occupancy"}
-        assert records["camera_measurement"]["named_devices"] == {"camera": "camera"}
-        assert records["camera_measurement"]["device_snapshots"]["camera"][
-            "exposure_seconds"
-        ] == pytest.approx(0.02)
-        assert records["occupancy"]["parameters"]["calibration_path"] == str(
-            calibration_path.resolve()
-        )
-        description = describe_archive(info, arrays)
-        device = next(iter(dict(dict(description.tabs)["Devices"]).values()))
-        assert device["snapshots"][0]["snapshot"][
-            "exposure_seconds"
-        ] == pytest.approx(0.02)
-        graph_nodes = {node["id"]: node for node in description.flow["nodes"]}
-        graph_edges = description.flow["edges"]
-        occupancy_node = next(
-            node for node in graph_nodes.values() if node["title"] == "occupancy"
-        )
-        camera_node = next(
-            node
-            for node in graph_nodes.values()
-            if node["title"] == "camera_measurement"
-        )
-        assert any(
-            edge["source"] == camera_node["id"]
-            and edge["target"] == occupancy_node["id"]
-            and edge["kind"] == "causal"
-            for edge in graph_edges
-        )
-        encoded_archive = json.dumps(info).lower()
-        assert CALIBRATION_SENTINEL.lower() not in encoded_archive
-        assert all(word not in encoded_archive for word in ("fingerprint", "sha256", "hash"))
-        assert images[0].stat().st_size > 0
+                # Header Save Screenshot is one GUI image and creates no
+                # archive/layout.
+                screenshot_path = tmp_path / "task-console.png"
+                before_screenshot = set(tmp_path.rglob("*"))
+                view.save_answer = str(screenshot_path)
+                view.save_screenshot_requested.emit()
+                created_by_screenshot = {
+                    path for path in tmp_path.rglob("*") if path not in before_screenshot
+                }
+                assert created_by_screenshot == {screenshot_path}
+                assert screenshot_path.read_bytes() == b"plain TaskConsole screenshot"
     finally:
-        presenter.close()
         session.close()

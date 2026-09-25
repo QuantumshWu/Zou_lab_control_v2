@@ -23,14 +23,12 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from functools import wraps as _wraps
-from threading import Lock
-from weakref import ref as _weak_ref
+from threading import Lock, Thread
 import logging
 import time
 
+from zlc_atom.authoring import is_tunable
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
     InstallationConfig,
@@ -44,6 +42,7 @@ from zlc_atom.install import (
     installation_template_names,
 )
 from .authoring_form import display_value, project_schema
+from .board import _guarded_slot
 from .device_use import DeviceClaim, DeviceUseBusy
 
 
@@ -206,8 +205,8 @@ class DeviceManagerPresenter:
         self.busy = False
         self._closed = False
         self._scan_lock = Lock()
-        self._scan_pool: ThreadPoolExecutor | None = None
-        self._scan_pending: set[object] = set()
+        #: Families whose scan thread has not answered yet, by type id.
+        self._scan_pending: set[str] = set()
         self._initial_config = initial_config
         self._initialize_session = initialize_session
         self._on_initialized = on_initialized
@@ -234,36 +233,15 @@ class DeviceManagerPresenter:
     # ------------------------------------------------------------------ wiring
 
     def _guarded(self, handler):
-        """Wrap one view-signal handler so a defect cannot kill the bench.
+        return _guarded_slot(
+            handler, handler.__name__, on_error=self._slot_error
+        )
 
-        Same law as the console's guard: an exception leaving a Qt slot is
-        qFatal -- the process dies with the experiment.  Crossing into Qt it
-        becomes an error line on the status strip and a stderr traceback, and the window keeps running.  Called directly
-        (as the tests call them) these methods still raise.
-        """
-
-        name = handler.__name__
-        # A WEAK reference, deliberately: Qt strong-refs a plain callable,
-        # so a closure over the bound method would make the view keep this
-        # presenter -- and everything it owns -- alive with the window.
-        reference = _weak_ref(self)
-
-        @_wraps(handler)
-        def guarded(*args, **kwargs):
-            presenter = reference()
-            if presenter is None:
-                return None
-            try:
-                return getattr(presenter, name)(*args, **kwargs)
-            except Exception as error:  # noqa: BLE001 -- the boundary IS total
-                _LOG.exception("device manager handler %s failed", name)
-                presenter._report(
-                    f"internal error in {name}: {type(error).__name__}: {error}",
-                    severity="error",
-                )
-                return None
-
-        return guarded
+    def _slot_error(self, error: Exception) -> None:
+        self._report(
+            f"internal error: {type(error).__name__}: {_one_line(error)}",
+            severity="error",
+        )
 
     def _connect(self) -> None:
         self.view.device_add_requested.connect(self._guarded(self.add_device))
@@ -333,9 +311,12 @@ class DeviceManagerPresenter:
                 if _use_initial and self._initial_config is not None
                 else None
             )
-            self.devices = list(
-                () if initial is None else initial.devices
-            )
+            # The same editable truth a file load makes: every known type's
+            # defaults materialized, so each form row has a value to show.
+            self.devices = [
+                self._canonical_device(item)
+                for item in (() if initial is None else initial.devices)
+            ]
             self.simulation = {} if initial is None else initial.simulation
             self._baseline_devices = tuple(self.devices)
             self._baseline_simulation = self.simulation
@@ -454,7 +435,7 @@ class DeviceManagerPresenter:
         if self._closed:
             self._report("device manager is closed", severity="error")
             return False
-        if self.busy or self._scan_active():
+        if self.busy or self._still_scanning():
             return False
         self.busy = True
         self._show()
@@ -488,6 +469,8 @@ class DeviceManagerPresenter:
         the deadline is reported as such and the scan goes on; its thread is
         left to finish on its own, because a blocked vendor call cannot be
         cancelled and pretending otherwise would misreport what stopped.
+        That thread is a daemon: a vendor call that never returns must not
+        also keep the process from exiting once every window is closed.
 
         Nothing here touches the view: this half is what runs off the GUI
         thread, and the deliver callback above is what runs back on it.
@@ -502,50 +485,77 @@ class DeviceManagerPresenter:
         failures: list[str] = []
         if not descriptors:
             return found, failures
-        pool = ThreadPoolExecutor(
-            max_workers=len(descriptors), thread_name_prefix="zlc-scan"
-        )
-        pending = {
-            pool.submit(descriptor.discover): descriptor
-            for descriptor in descriptors
-        }
+        answers: dict[str, object] = {}
         with self._scan_lock:
             if self._scan_pending:
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise RuntimeError("a previous hardware scan is still running")
-            self._scan_pool = pool
-            self._scan_pending = set(pending)
-        for future in pending:
-            future.add_done_callback(self._scan_finished)
-        done, unfinished = wait(
-            tuple(pending),
-            timeout=_FAMILY_SCAN_DEADLINE_SECONDS,
-        )
-        for future, descriptor in pending.items():
-            if future in unfinished:
-                failures.append(
-                    f"{descriptor.type_id}: no answer within "
-                    f"{_FAMILY_SCAN_DEADLINE_SECONDS:g}s"
+                raise RuntimeError(
+                    "a previous hardware scan is still running: "
+                    + ", ".join(sorted(self._scan_pending))
                 )
-                continue
+            self._scan_pending = {descriptor.type_id for descriptor in descriptors}
+
+        def ask(descriptor) -> None:
+            answer: object = ()
             try:
-                found.extend(future.result())
-            except Exception as error:
-                failures.append(f"{descriptor.type_id}: {error}")
+                answer = descriptor.discover()
+            except Exception as error:  # noqa: BLE001 -- reported per family
+                answer = error
+            finally:
+                with self._scan_lock:
+                    answers[descriptor.type_id] = answer
+                    self._scan_pending.discard(descriptor.type_id)
+
+        threads = [
+            Thread(
+                target=ask,
+                args=(descriptor,),
+                name=f"zlc-scan-{descriptor.type_id}",
+                daemon=True,
+            )
+            for descriptor in descriptors
+        ]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + _FAMILY_SCAN_DEADLINE_SECONDS
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        with self._scan_lock:
+            answered = dict(answers)
+        # One line per REASON, naming every family that gave it: the Rigol
+        # and Tek scans walk the same VISA bus, and a bus that lists nothing
+        # made both say the same paragraph -- twice, over the failure that
+        # was actually news.
+        reasons: dict[str, list[str]] = {}
+        for descriptor in descriptors:
+            if descriptor.type_id not in answered:
+                reason = f"no answer within {_FAMILY_SCAN_DEADLINE_SECONDS:g}s"
+            elif isinstance(answered[descriptor.type_id], Exception):
+                reason = str(answered[descriptor.type_id])
+            else:
+                found.extend(answered[descriptor.type_id])
+                continue
+            reasons.setdefault(reason, []).append(descriptor.type_id)
+        failures.extend(
+            f"{', '.join(families)}: {reason}"
+            for reason, families in reasons.items()
+        )
         return found, failures
 
-    def _scan_finished(self, future: object) -> None:
-        pool = None
-        with self._scan_lock:
-            self._scan_pending.discard(future)
-            if not self._scan_pending:
-                pool, self._scan_pool = self._scan_pool, None
-        if pool is not None:
-            pool.shutdown(wait=False)
+    def _still_scanning(self) -> bool:
+        """Whether a family that missed the scan deadline is still answering.
 
-    def _scan_active(self) -> bool:
+        Init, Apply and another scan wait for it, and say so by name: a
+        refusal with no line reads as a button that does nothing.
+        """
+
         with self._scan_lock:
-            return bool(self._scan_pending)
+            running = sorted(self._scan_pending)
+        if running:
+            self._report(
+                f"hardware scan still running: {', '.join(running)}",
+                severity="warning",
+            )
+        return bool(running)
 
 
     def add_discovered(self, instance_id: str) -> str:
@@ -739,9 +749,9 @@ class DeviceManagerPresenter:
         device with everything it needs to connect -- no address typed.  A
         device that speaks the tunable quartet is served by the fabric's
         generic data plane; one with its own server (the pulse streamer,
-        the SLM) is announced with its endpoint parameters, this machine's
-        LAN address substituted for any loopback, and the existing client
-        protocol stays the data plane it always was.
+        the SLM) is announced with its authored loopback endpoint, which the
+        discovering peer re-addresses to the announcer address it reached,
+        and the existing client protocol stays the data plane it always was.
 
         Published means handed over: the peer owns the device for as long
         as it is out.  So publication is a device-level claim in the
@@ -755,6 +765,15 @@ class DeviceManagerPresenter:
         """
 
         key = str(instance_id)
+        if self.busy:
+            # A withdrawal runs on the device worker, as Init, Apply and
+            # Shutdown do; none of them starts under another.
+            self._report(
+                "finish the current device change before publishing or "
+                "withdrawing a device",
+                severity="warning",
+            )
+            return False
         session = self._active_session
         if session is None:
             self._report("initialize devices before publishing one", severity="warning")
@@ -763,16 +782,39 @@ class DeviceManagerPresenter:
         if leaf is None:
             self._report(f"no loaded device {key!r}", severity="warning")
             return False
-        from zlc_atom.devices.remote.fabric import (
-            DeviceAnnouncer,
-            PublishedDevice,
-            local_lan_ip,
-        )
+        from zlc_atom.devices.remote.fabric import DeviceAnnouncer, PublishedDevice
 
         if key in self._remoted:
-            self._withdraw(key, leaf)
-            self.view.set_remoted(tuple(sorted(self._remoted)))
-            self._report(f"{key}: withdrawn from the bench fabric", severity="task")
+            # Withdrawing can wait on the device: a local pulse board's own
+            # client joins again behind the SAFE of the peer just dropped,
+            # several SAFE deadlines on a board that stopped answering.  So
+            # the whole withdrawal runs on the device worker, busy, and the
+            # window keeps painting; its claim is still released last.
+            self.busy = True
+            self._show()
+            self._report(f"{key}: withdrawing from the bench fabric")
+
+            def withdrawn(_result: object) -> None:
+                self.busy = False
+                self._show()
+                self._report(f"{key}: withdrawn from the bench fabric", severity="task")
+
+            def failed(error: BaseException) -> None:
+                self.busy = False
+                self._show()
+                _LOG.error("%s was not withdrawn cleanly", key, exc_info=error)
+                self._report(
+                    f"{key}: withdrawal did not finish cleanly: {_one_line(error)}",
+                    severity="error",
+                )
+
+            try:
+                self._run_off_thread(
+                    lambda: self._withdraw(key, leaf), withdrawn, failed
+                )
+            except BaseException as error:
+                failed(error)
+                return False
             return True
         accepted = self._active_config
         config = (
@@ -798,15 +840,7 @@ class DeviceManagerPresenter:
             )
             return False
         device = leaf.device
-        speaks_tunable = all(
-            callable(getattr(device, name, None))
-            for name in (
-                "tunable_fields",
-                "tune",
-                "tunable_values",
-                "settings_provenance",
-            )
-        )
+        speaks_tunable = is_tunable(device)
         announced_type = config.type_id
         parameters = dict(config.parameters)
         descriptor = self.types.get(config.type_id)
@@ -837,8 +871,8 @@ class DeviceManagerPresenter:
                 )
                 return False
             # The authored host is where THIS machine dials its own server
-            # (loopback); a peer needs this machine's address.
-            parameters["host"] = local_lan_ip()
+            # (loopback).  A peer replaces it with the address it reached
+            # this machine's announcer at, the one address known to work.
         record = PublishedDevice(
             instance_id=key,
             role=config.role,
@@ -885,17 +919,24 @@ class DeviceManagerPresenter:
         The announcement goes first, so no new peer finds the device; the
         server this machine holds for it then refuses peers and drops the
         ones connected, so no peer keeps it; the claim that kept local
-        users off it is released after.  ``leaf`` is None when the device
-        has already left the session, and its server with it.
+        users off it is released after, whatever the steps before it did:
+        the key has left the published set, and a claim nobody holds any
+        more would refuse every local user until devices were initialised
+        again.  Closing that door can wait on the device, so with a ``leaf``
+        this runs on the device worker.  ``leaf`` is None when the device
+        has already left the session, and its server with it: nothing is
+        left to wait on.
         """
 
         lease = self._remoted.pop(key)
-        if self._announcer is not None:
-            self._announcer.withdraw(key)
-        admit_peers = None if leaf is None else leaf.admit_peers
-        if admit_peers is not None:
-            admit_peers(False)
-        lease.release()
+        try:
+            if self._announcer is not None:
+                self._announcer.withdraw(key)
+            admit_peers = None if leaf is None else leaf.admit_peers
+            if admit_peers is not None:
+                admit_peers(False)
+        finally:
+            lease.release()
 
     def close_device(self, instance_id: str) -> bool:
         """Request retirement of exactly one currently loaded device."""
@@ -951,7 +992,7 @@ class DeviceManagerPresenter:
         if self._closed:
             self._report("device manager is closed", severity="error")
             return False
-        if self.device_operation_active or self._scan_active():
+        if self.device_operation_active or self._still_scanning():
             return False
         session = self._active_session
         if session is None:
@@ -1078,7 +1119,7 @@ class DeviceManagerPresenter:
         if self._closed:
             self._report("device manager is closed", severity="error")
             return False
-        if self.busy or self._scan_active():
+        if self.busy or self._still_scanning():
             return False
         if self._initialize_session is None:
             self._report(
@@ -1200,10 +1241,6 @@ class DeviceManagerPresenter:
                 return False
             if not prepared:
                 return False
-        # Nothing stays published that this machine is about to stop
-        # serving -- and the session's close insists that no claim is left.
-        for key in tuple(self._remoted):
-            self._withdraw(key, session.installation.devices.get(key))
         self.busy = True
         self._show()
         self._report("shutting down devices")
@@ -1211,6 +1248,12 @@ class DeviceManagerPresenter:
         completed = False
 
         def work() -> object:
+            # Nothing stays published that this machine is about to stop
+            # serving -- and the session's close insists that no claim is
+            # left.  Withdrawn here, on the worker and right before that
+            # close, because a withdrawal can wait on the device.
+            for key in tuple(self._remoted):
+                self._withdraw(key, session.installation.devices.get(key))
             self._retire_session(session)
             return session
 
@@ -1426,9 +1469,12 @@ class DeviceManagerPresenter:
             else frozenset(self._active_session.installation.devices)
         )
         # A device that left the session leaves the fabric with it: nothing
-        # may stay published that this machine can no longer serve.
-        for stale in tuple(key for key in self._remoted if key not in loaded_keys):
-            self._withdraw(stale)
+        # may stay published that this machine can no longer serve.  Read
+        # off a copy: a withdrawal on the device worker takes its own key
+        # out of the published set while this window repaints.
+        for stale in tuple(self._remoted):
+            if stale not in loaded_keys:
+                self._withdraw(stale)
         self.view.set_remoted(tuple(sorted(self._remoted)))
         active_devices = tuple(
             (item.instance_id, item.role, item.type_id)
@@ -1521,11 +1567,28 @@ class DeviceManagerPresenter:
         if self.busy:
             self._report("device operation is still running", severity="warning")
             return False
-        if self._scan_active():
-            self._report("vendor hardware scan is still running", severity="warning")
-            return False
+        # A family still answering past the scan deadline does not hold the
+        # close: its daemon thread is abandoned by design, and nothing would
+        # ever come back to finish a close it had refused.  When devices are
+        # about to shut down it is named, on the strip and in the log: that
+        # vendor's SDK may still be enumerating -- an overlap no vendor
+        # documents -- and a crash from here on must be attributable to it.
+        with self._scan_lock:
+            scanning = ", ".join(sorted(self._scan_pending))
+        if scanning and self._active_session is not None:
+            _LOG.warning("closing while the hardware scan of %s is still answering", scanning)
+            self._report(
+                f"closing while the hardware scan of {scanning} is still answering",
+                severity="warning",
+            )
         if not self.shutdown_active():
             return False
+        # Nothing is published any more; the fabric's connection threads
+        # are joined at exit, so a peer still connected would keep this
+        # process alive after its last window closed.
+        if self._announcer is not None:
+            self._announcer.close()
+            self._announcer = None
         try:
             worker_closed = self._close_worker()
         except Exception as error:

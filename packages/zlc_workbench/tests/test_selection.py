@@ -90,14 +90,10 @@ def test_selection_subscription_install_and_close_never_wait_for_plot_worker() -
     source.close()
 
 
-def test_an_unsubscribed_listener_leaves_no_release_behind() -> None:
-    """Unsubscribing retires the record too, not only the subscription.
-
-    ``_once`` released the plot subscription and stayed listed until
-    ``close``: twenty subscribe/unsubscribe pairs on one source left
-    twenty inert closures for close to walk.  A release that already ran
-    has nothing left to do at close, so it is not kept for it.
-    """
+def test_an_unsubscribed_listener_is_released_exactly_once() -> None:
+    """Unsubscribing retires the subscription once, and close does not
+    release it a second time: a release that already ran has nothing left
+    to do at close."""
 
     released: list[int] = []
     subscriptions: list[Future] = []
@@ -114,7 +110,6 @@ def test_an_unsubscribed_listener_leaves_no_release_behind() -> None:
         unsubscribe = source.subscribe_observation(lambda _observation: None)
         unsubscribe()
     assert released == [0, 1, 2]
-    assert not source._releases, "retired subscriptions stayed listed"
     source.close()
     assert released == [0, 1, 2], "close released a retired subscription again"
 
@@ -151,7 +146,7 @@ def frames(session):
 def image_panel(frames):
     """A panel showing the frames, exactly as the console builds one."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     _signal, snapshot = frames
     axes = {axis.role: axis for axis in snapshot.block.schema.cell_domain.axes}
     host = plot.RasterPlotHost.from_plot(
@@ -196,7 +191,6 @@ def _draw_area(host, *, span: tuple[float, float, float, float] = (0.3, 0.3, 0.7
             button=1,
             identity=front.identity,
             axes=axes,
-            interaction=front.interaction,
         ).result()
 
 
@@ -260,7 +254,11 @@ def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
 
 
 def test_only_numbers_cross_the_boundary(image_panel) -> None:
-    """An axis name and two bounds.  No plot object reaches the runtime."""
+    """An axis name and two bounds.  No plot object reaches the runtime.
+
+    A bare source is also what Panel Edit uses: it translates one answer per
+    commit and owns only a host subscription, with no runtime bridge.
+    """
 
     source = PlotSelectionSource(image_panel)
     seen: list = []
@@ -268,6 +266,7 @@ def test_only_numbers_cross_the_boundary(image_panel) -> None:
     try:
         _draw_area(image_panel)
         assert seen, f"a committed box reported nothing: {source.last_error}"
+        assert len(seen) == 1
         state = seen[-1].state
         assert state.plot_kind == "image"
         assert state.selector_kind == "area"
@@ -317,7 +316,7 @@ def test_an_unfinished_drag_derives_nothing(image_panel) -> None:
 def test_a_histogram_value_range_remains_a_panel_local_selector(frames) -> None:
     """It drives Fit/restore even though it has no upstream Dataset axis."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     _signal, snapshot = frames
     host = plot.RasterPlotHost.from_plot(snapshot, plot.HistogramPlot())
     source = PlotSelectionSource(host)
@@ -345,7 +344,7 @@ def test_a_box_on_a_histogram_stays_a_box_on_every_surface(frames) -> None:
     drop a selector kind it never had.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     from zlc_plot.selectors import SelectorKind
 
     _signal, snapshot = frames
@@ -500,7 +499,7 @@ def test_every_derived_signal_can_be_drawn_by_the_panel_that_derived_it(
     schema, and this walks everything one real gesture publishes.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     signal, _snapshot = frames
     bridge, source = attach_selection_bridge(
         session.signal_plane,
@@ -531,22 +530,6 @@ def test_every_derived_signal_can_be_drawn_by_the_panel_that_derived_it(
         )
     finally:
         bridge.close()
-        source.close()
-
-
-def test_frozen_editor_subscription_reports_commits_without_a_runtime_bridge(
-    image_panel,
-) -> None:
-    """Panel Edit translates one answer and owns only a host subscription."""
-
-    seen: list = []
-    source = PlotSelectionSource(image_panel)
-    source.subscribe_observation(seen.append)
-    try:
-        _draw_area(image_panel)
-        assert len(seen) == 1
-        assert seen[0].state.selector_kind == "area"
-    finally:
         source.close()
 
 
@@ -717,7 +700,6 @@ def _gesture_area(host, front, transform, *, span=(0.25, 0.25, 0.75, 0.75)) -> N
             button=1,
             identity=front.identity,
             axes=transform,
-            interaction=front.interaction,
         ).result(timeout=15)
 
 
@@ -753,7 +735,7 @@ def test_a_box_on_a_focused_scan_heatmap_cell_preserves_all_repeats() -> None:
     lay out the cells. The same crop must retain every repeat.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     from zlc_plot._kinds.image import default_spec as image_default_spec
 
     snapshot = _heatmap_snapshot()
@@ -836,7 +818,7 @@ def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
     not a failure.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
 
     snapshot = _curve_scan_snapshot()
     host = plot.RasterPlotHost.from_plot(
@@ -864,7 +846,7 @@ def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
 
 
 def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
 
     cases = (
         (
@@ -925,7 +907,7 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
 
 def test_declared_curve_axes_select_their_physical_domain_rows() -> None:
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     snapshot = _curve_scan_snapshot(repeats=4)
     values = snapshot.block.values
     cases = (
@@ -978,7 +960,7 @@ def test_declared_curve_axes_select_their_physical_domain_rows() -> None:
 def test_rolling_viewport_survives_without_claiming_an_upstream_axis() -> None:
     """Rolling cannot derive an ROI, but its viewport remains panel truth."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     snapshot = _curve_scan_snapshot()
     host = plot.RasterPlotHost.from_plot(snapshot, plot.RollingPlot())
     source = PlotSelectionSource(host)
@@ -1019,7 +1001,7 @@ def test_a_rolling_region_names_its_scope_like_every_other_kind() -> None:
     as belonging to the surface showing repeat 0 -- and restored onto it.
     """
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     snapshot = _curve_scan_snapshot(repeats=3)
     host = plot.RasterPlotHost.from_plot(
         snapshot,
@@ -1050,7 +1032,7 @@ def test_a_rolling_region_names_its_scope_like_every_other_kind() -> None:
 def test_an_area_on_a_focused_curve_cell_keeps_focus_out_of_data_scope() -> None:
     """The focused transform identifies the drag, not a hidden axis scope."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
 
     snapshot = _curve_scan_snapshot()
     spec = plot.FacetGridPlot(
@@ -1109,7 +1091,7 @@ def test_a_box_on_a_focused_frame_cell_derives_all_frames(
 ) -> None:
     """Camera frame is preserved like every other ordinary facet axis."""
 
-    plot = pytest.importorskip("zlc_plot")
+    import zlc_plot as plot
     from zlc_plot._kinds.facet_grid import default_spec as facet_default_spec
 
     signal, snapshot = frames

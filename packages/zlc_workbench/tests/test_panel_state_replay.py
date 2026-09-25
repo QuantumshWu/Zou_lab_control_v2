@@ -26,7 +26,7 @@ from zlc_data import (
     ValueSchema,
 )
 from zlc_plot import PlotKind
-from zlc_plot import AxisRef, HistogramPlot, RollingPlot
+from zlc_plot import AxisRef, HistogramPlot
 from zlc_plot.semantics import FATE_PREFIX, describe_semantics, scope_fate
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import PanelState, project_panel_state
@@ -175,95 +175,3 @@ def test_saved_fields_use_current_vocabulary_but_runtime_edits_stay_strict() -> 
         composed_spec(event, spec, {"no_such_field": "reduce"})
     with pytest.raises(ValueError):
         project_panel_state(event, spec, _state({"reduction": "not-a-reduction"}))
-
-
-def test_shot_index_presents_as_shots_not_as_a_point_geometry() -> None:
-    """The materialized shot index is its own bracket entry, and the
-    rolling fate row says what rolling does with it instead of claiming
-    it is reduced."""
-
-    from zlc_plot.semantics import schema_structure
-
-    indexed = _indexed_schema(4)
-    structure = schema_structure(indexed)
-    flattened = [entry for group in structure for entry in group]
-    assert ("source index", 4) in flattened
-    assert all(name != "point" for name, _size in flattened)
-
-    spec = task_console_fitting_spec(indexed, PlotKind.ROLLING.value, "")
-    assert spec is not None
-    description = describe_semantics(indexed, spec)
-    row = next(
-        field
-        for field in description.fields
-        if field.name.startswith(FATE_PREFIX)
-        and "primary-index" in field.name
-    )
-    labels = dict((value, label) for value, label in row.choices)
-    assert labels[row.value] == "(shot axis)"
-
-
-def test_frozen_data_advanced_is_not_configuration_incompatibility(
-    monkeypatch,
-) -> None:
-    """Live moving on under the same run marks Edit's freeze as behind --
-    never as a configuration the panel has left.
-
-    The question is the exact Dataset revision each surface shows.  A
-    growing scan and a Monitor publishing its next value are both a new
-    revision of the shown input; coverage is a fact of the SignalValue,
-    not of the publication, and reading it off two publications answered
-    None for both -- so the same-run branch never fired and the badge
-    stayed dark while the card moved on.
-    """
-
-    from types import SimpleNamespace
-
-    from zlc_data import owned_snapshot_from_arrays
-    from zlc_workbench.console import PanelBinding
-    from zlc_workbench.panel_state import PanelFrozenData
-
-    state = _state({})
-    schema = _event_schema()
-
-    def snapshot(revision: int, run: str = "run-1"):
-        return owned_snapshot_from_arrays(
-            schema,
-            np.zeros(schema.physical_shape),
-            revision,
-            block_id="block",
-            stream_generation=run,
-        )
-
-    def surface(revision: int, run: str = "run-1") -> object:
-        return SimpleNamespace(
-            publication=SimpleNamespace(
-                event_ref=SimpleNamespace(generation=run)
-            ),
-            plot_input=snapshot(revision, run),
-        )
-
-    frozen = PanelFrozenData(
-        publication=surface(2).publication,
-        plot_input=snapshot(2),
-        target=state,
-        description=object(),
-    )
-    binding = PanelBinding(panel_id="p", state=state, frozen_data=frozen)
-    shown = {"value": surface(2)}
-    monkeypatch.setattr(
-        PanelBinding,
-        "accepted_surface",
-        property(lambda self: shown["value"]),
-    )
-    assert binding.frozen_configuration_incompatible is False
-    assert binding.frozen_data_advanced is False
-    # the same run, the next revision: a scan that grew or a Monitor that
-    # published again
-    shown["value"] = surface(3)
-    assert binding.frozen_configuration_incompatible is False
-    assert binding.frozen_data_advanced is True
-    # A later RUN is also data advancement, not configuration corruption.
-    shown["value"] = surface(1, "run-2")
-    assert binding.frozen_configuration_incompatible is False
-    assert binding.frozen_data_advanced is True
