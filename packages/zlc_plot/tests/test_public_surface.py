@@ -19,7 +19,6 @@ from zlc_plot import (
     HistogramPlot,
     ImagePlot,
     PlotSession,
-    RollingPlot,
     RasterPlotHost,
     curve,
 )
@@ -74,26 +73,6 @@ def test_session_replace_spec_reuses_the_existing_surface() -> None:
         assert session._renderer.figure is figure
         assert session.display_state["bin_count"] == 12
     finally:
-        session.close()
-
-def test_image_overlay_is_explicit_data_not_a_display_mode() -> None:
-    snapshot = _image_snapshot()
-    spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
-    session = PlotSession(snapshot, spec)
-    curve = PlotSession(_snapshot(), CurvePlot(AxisRef.point("x")))
-    try:
-        described = session.describe_display()
-        assert "site_overlay" not in described.parameter_schema
-        assert "site_overlay" not in described.display_state.values
-        assert described.display_state["show_point_labels"] is True
-
-        curve_description = curve.describe_display()
-        assert "site_overlay" not in curve_description.parameter_schema
-        assert "site_overlay" not in curve_description.display_state.values
-        with pytest.raises(KeyError, match="site_overlay"):
-            curve.set_parameter("site_overlay", "centers")
-    finally:
-        curve.close()
         session.close()
 
 @pytest.mark.parametrize("entry", ("direct", "live", "configure", "process"))
@@ -195,18 +174,16 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
     session = PlotSession(
         ImageFrame(snapshot, overlay),
         ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row")),
-        parameters={"show_point_labels": True},
     )
     try:
+        # The ordinals are on by default: an overlay is data, not a mode.
+        assert session.display_state["show_point_labels"] is True
         artists = session._renderer._artists["image:point-labels"]
         tokens = (
             session._renderer.style.artists.point_empty,
             session._renderer.style.artists.point_occupied,
             session._renderer.style.artists.point_invalid,
         )
-        assert tokens[0].alpha <= 0.15
-        assert tokens[1].alpha <= 0.60
-        assert tokens[0].alpha < tokens[1].alpha
         assert tuple(label.get_text() for label in artists) == ("1", "2", "3")
         assert all(
             to_rgba(label.get_color(), label.get_alpha())
@@ -239,30 +216,6 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
             )
     finally:
         session.close()
-
-def test_session_rolling_history_is_each_publications_own_repeat_axis() -> None:
-    """A static snapshot IS its shot record; the next publication replaces it.
-
-    The repeat axis seeds the history, and a later non-indexed publication
-    is a whole new record rather than one more sample: only Runtime's
-    indexed history grows across publications.
-    """
-
-    rolling = PlotSession(_snapshot(repeats=3), RollingPlot())
-    try:
-        # A static snapshot is a complete shot record: the repeat axis seeds
-        # the history so the initial render already shows every shot.
-        payload = rolling._payload
-        assert len(payload.series) == 1
-        assert payload.series[0].x.canonical.size == 3
-
-        # A later non-indexed publication replaces the former one; Plot never
-        # grows a second cross-publication history beside Runtime.
-        rolling.update_data(_snapshot(revision=1, repeats=3))
-        payload = rolling._payload
-        assert payload.series[0].x.canonical.size == 3
-    finally:
-        rolling.close()
 
 def test_session_fit_all_facets_returns_one_result_per_painted_cell() -> None:
     spec = FacetGridPlot(

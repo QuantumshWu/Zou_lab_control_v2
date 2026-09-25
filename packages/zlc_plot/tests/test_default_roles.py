@@ -122,21 +122,34 @@ def test_families_are_read_by_role_never_by_name() -> None:
     assert history.history == (P("shot"), 40)
     assert history.events == ((P("frame"), 1),)
 
+    # A one-value dimension is still declared, but it is invisible to inference.
+    degenerate = classify_axes(_scan({"a": 1, "b": 4, "c": 5}))
+    assert [ref.axis_id for ref, _size in degenerate.scan] == ["a", "b", "c"]
+    assert [ref.axis_id for ref, _size in degenerate.live_scan()] == ["b", "c"]
+
 
 # ------------------------------------------------------------- the table
 def test_a_three_dimension_scalar_scan_facets_the_outer_dimension_over_a_heatmap() -> None:
-    schema = _scan({"a": 3, "b": 4, "c": 5})
-    grid = default_spec(schema, PlotKind.FACET_GRID)
-    assert grid == FacetGridPlot(DIM("a"), ImagePlot(DIM("c"), DIM("b")))
-    assert default_spec(schema, PlotKind.IMAGE) == ImagePlot(DIM("c"), DIM("b"))
-    assert default_spec(schema, PlotKind.CURVE) == CurvePlot(DIM("c"))
+    # Repeats reduce into the heatmap: per-sweep stays one edit away.
+    for repeats in (1, 6):
+        schema = _scan({"a": 3, "b": 4, "c": 5}, repeats=repeats)
+        grid = default_spec(schema, PlotKind.FACET_GRID)
+        assert grid == FacetGridPlot(DIM("a"), ImagePlot(DIM("c"), DIM("b")))
+        assert default_spec(schema, PlotKind.IMAGE) == ImagePlot(DIM("c"), DIM("b"))
+        assert default_spec(schema, PlotKind.CURVE) == CurvePlot(DIM("c"))
 
 
 def test_a_two_dimension_scalar_scan_is_one_heatmap_whatever_the_repeats() -> None:
     for repeats in (1, 6):
         schema = _scan({"a": 3, "b": 4}, repeats=repeats)
         assert default_spec(schema, PlotKind.FACET_GRID) == FacetGridPlot(None, ImagePlot(DIM("b"), DIM("a")))
+        assert default_spec(schema, PlotKind.IMAGE) == ImagePlot(DIM("b"), DIM("a"))
         assert default_spec(schema, PlotKind.CURVE) == CurvePlot(DIM("b"))
+    # A degenerate cell axis does not make repeat a facet either.
+    pairs = _scan({"a": 3, "b": 4}, repeats=5, cell_axes=(axis("pair", size=1),))
+    grid = default_spec(pairs, PlotKind.FACET_GRID)
+    assert grid.facet is None
+    assert isinstance(grid.cell, ImagePlot)
 
 
 def test_a_scanned_picture_facets_the_scan_and_reduces_the_repeats() -> None:
@@ -231,6 +244,10 @@ def test_a_site_resolved_scan_spends_position_before_content() -> None:
     assert fitting_spec(three, PlotKind.FACET_GRID, cell=PlotKind.CURVE) == (
         FacetGridPlot(DIM("a"), CurvePlot(DIM("c")))
     )
+    # The per-site view is one cell-kind switch away: a named curve cell
+    # walks the inner dimension and groups the sites.
+    curves = fitting_spec(schema, PlotKind.FACET_GRID, cell=PlotKind.CURVE)
+    assert (curves.facet, curves.cell.x, curves.cell.group) == (DIM("a"), DIM("b"), D("site"))
 
     # One scan dimension: the curve IS the walk and nothing is left to face.
     one = _scan({"t": 6}, repeats=10, cell_axes=_sites(7))

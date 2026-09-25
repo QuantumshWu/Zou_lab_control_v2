@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-matplotlib = pytest.importorskip("matplotlib")
+import matplotlib
 matplotlib.use("Agg")
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: E402

@@ -20,7 +20,6 @@ from zlc_plot import (
     describe_semantics,
     updated_spec,
 )
-from zlc_plot._kinds import default_spec
 from data_factory import (
     axis,
     make_dataset_schema,
@@ -104,23 +103,8 @@ def test_every_offered_option_succeeds(
             finally:
                 probe.close()
 
-def test_axis_identities_are_deduplicated() -> None:
+def test_only_declared_point_axes_are_offered_each_once() -> None:
     """Each axis in the producer's Point domain appears exactly once."""
-
-    snapshot = _grid_snapshot()
-    session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
-    try:
-        description = session.describe_semantics()
-        assert description.axis_choices.count(AxisRef.point("row")) == 1
-        assert description.axis_choices.count(AxisRef.point("col")) == 1
-        labels = [description.field(name).label for _axis, name in description.fate_rows]
-        assert len(labels) == len(set(labels))
-    finally:
-        session.close()
-
-def test_only_declared_point_axes_are_offered() -> None:
-
-    registry_default = default_spec
 
     snapshot = _grid_snapshot()
     session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
@@ -129,11 +113,12 @@ def test_only_declared_point_axes_are_offered() -> None:
         assert set(
             ref for ref in description.axis_choices if ref.domain.value == "point"
         ) == {AxisRef.point("row"), AxisRef.point("col")}
+        assert description.axis_choices.count(AxisRef.point("row")) == 1
+        assert description.axis_choices.count(AxisRef.point("col")) == 1
+        labels = [description.field(name).label for _axis, name in description.fate_rows]
+        assert len(labels) == len(set(labels))
     finally:
         session.close()
-    # The histogram default has no axis declaration at all: it pools the box.
-    histogram = registry_default(snapshot.block.schema, PlotKind.HISTOGRAM)
-    assert histogram == registry_default(snapshot.block.schema, PlotKind.HISTOGRAM)
 
     # A flat table whose one column names every row: the column IS the
     # point domain, and the ordinal would be a second name for it.
@@ -159,7 +144,8 @@ def test_curve_x_repeat_is_offered_and_draws() -> None:
     snapshot = _grid_snapshot()
     session = PlotSession(snapshot, CurvePlot(AxisRef.point("col")))
     try:
-        offering = session.describe_semantics().axes_offering("x")
+        description = session.describe_semantics()
+        offering = tuple(axis for axis, name in description.fate_rows if "x" in description.field(name).choice_values)
         assert AxisRef.repeat("repeat") in offering
         assert AxisRef.point("row") in offering
         session.replace_spec(
@@ -191,7 +177,8 @@ def test_facet_vocabulary_does_not_predict_layout_capacity() -> None:
         FacetGridPlot(AxisRef.point("few"), CurvePlot(AxisRef.point("big"))),
     )
     try:
-        offering = session.describe_semantics().axes_offering("facet")
+        description = session.describe_semantics()
+        offering = tuple(axis for axis, name in description.fate_rows if "facet" in description.field(name).choice_values)
         assert AxisRef.repeat("repeat") in offering
         assert AxisRef.point("big") in offering
         assert AxisRef.point("few") in offering
@@ -231,7 +218,7 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
         assert "reduce" in description.field(
             dict(description.fate_rows)[AxisRef.cell_data("site")]
         ).choice_values
-        assert AxisRef.repeat("repeat") in description.axes_offering("group")
+        assert AxisRef.repeat("repeat") in tuple(axis for axis, name in description.fate_rows if "group" in description.field(name).choice_values)
 
         session.replace_spec(
             updated_spec(

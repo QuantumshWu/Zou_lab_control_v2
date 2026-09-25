@@ -41,16 +41,34 @@ def _reference(values, usable, codes, bucket_count, reduction):
 ALL_REDUCTIONS = tuple(item for item in Reduction if item is not Reduction.LAST)
 
 
-@pytest.mark.parametrize("reduction", ALL_REDUCTIONS)
-def test_uneven_unsorted_groups_match_the_plain_loop(reduction) -> None:
+def _code_cases():
+    """(values, usable, codes, bucket count) for every grouping shape a
+    projection hands the kernel."""
+
+    # Uneven, unsorted groups, some samples in no group at all.
     rng = np.random.default_rng(7)
     codes = rng.integers(-1, 6, size=200).astype(np.int64)
     values = rng.normal(size=200)
-    usable = rng.random(200) > 0.2
-    output, counts = _aggregate_by_codes(values, usable, codes, 6, reduction)
-    expected_output, expected_counts = _reference(values, usable, codes, 6, reduction)
-    np.testing.assert_array_equal(counts, expected_counts)
-    np.testing.assert_allclose(output, expected_output)
+    yield values, rng.random(200) > 0.2, codes, 6
+    # The dense image case: one sample per pixel, in scrambled order.
+    rng = np.random.default_rng(3)
+    order = rng.permutation(50).astype(np.int64)
+    yield rng.normal(size=50), np.ones(50, dtype=bool), order, 50
+    # One bucket pools everything usable.
+    rng = np.random.default_rng(11)
+    values = rng.normal(size=64)
+    yield values, rng.random(64) > 0.3, np.zeros(64, dtype=np.int64), 1
+
+
+@pytest.mark.parametrize("reduction", ALL_REDUCTIONS)
+def test_every_grouping_matches_the_plain_loop(reduction) -> None:
+    for values, usable, codes, bucket_count in _code_cases():
+        output, counts = _aggregate_by_codes(values, usable, codes, bucket_count, reduction)
+        expected_output, expected_counts = _reference(
+            values, usable, codes, bucket_count, reduction
+        )
+        np.testing.assert_array_equal(counts, expected_counts)
+        np.testing.assert_allclose(output, expected_output)
 
 
 @pytest.mark.parametrize("reduction", (Reduction.SUM, Reduction.MEAN))
@@ -64,28 +82,3 @@ def test_uint8_groups_do_not_wrap_at_256(reduction) -> None:
     expected = 800.0 if reduction is Reduction.SUM else 200.0
     np.testing.assert_array_equal(counts, [4, 4, 4])
     np.testing.assert_allclose(output, [expected] * 3)
-
-
-@pytest.mark.parametrize("reduction", ALL_REDUCTIONS)
-def test_single_member_groups_are_the_values_themselves(reduction) -> None:
-    """The dense image case: one sample per pixel, every reduction identity."""
-
-    rng = np.random.default_rng(3)
-    order = rng.permutation(50).astype(np.int64)
-    values = rng.normal(size=50)
-    usable = np.ones(50, dtype=bool)
-    output, counts = _aggregate_by_codes(values, usable, order, 50, reduction)
-    np.testing.assert_array_equal(counts, np.ones(50, dtype=np.int64))
-    np.testing.assert_allclose(output[order], values)
-
-
-@pytest.mark.parametrize("reduction", ALL_REDUCTIONS)
-def test_one_bucket_pools_everything_usable(reduction) -> None:
-    rng = np.random.default_rng(11)
-    values = rng.normal(size=64)
-    usable = rng.random(64) > 0.3
-    codes = np.zeros(64, dtype=np.int64)
-    output, counts = _aggregate_by_codes(values, usable, codes, 1, reduction)
-    expected_output, expected_counts = _reference(values, usable, codes, 1, reduction)
-    np.testing.assert_array_equal(counts, expected_counts)
-    np.testing.assert_allclose(output, expected_output)

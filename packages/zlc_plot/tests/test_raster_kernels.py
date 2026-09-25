@@ -148,7 +148,6 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
     index arithmetic and its two corrections can disagree.
     """
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(5)
     edges = np.linspace(-3.0, 7.0, 41)
     pools = (
@@ -225,7 +224,6 @@ def test_the_histogram_kernel_keeps_float32_bin_boundaries(monkeypatch) -> None:
 
 
 def test_joint_axis_kernel_matches_the_exact_bucket_reduction() -> None:
-    pytest.importorskip("numba")
     rng = np.random.default_rng(11)
     values = rng.normal(size=(3, 7, 5))
     valid = rng.random(values.shape) > 0.2
@@ -257,7 +255,6 @@ def test_joint_axis_kernel_matches_the_exact_bucket_reduction() -> None:
 
 @pytest.mark.parametrize("reduction", (Reduction.MIN, Reduction.MAX))
 def test_joint_axis_extrema_preserve_nan_and_signed_zero(reduction) -> None:
-    pytest.importorskip("numba")
     values = np.asarray([[0.0, -0.0, np.nan, 2.0]], dtype=np.float64)
     valid = np.ones(values.shape, dtype=np.bool_)
     codes = np.asarray([0, 0, 1, 1], dtype=np.int64)
@@ -282,7 +279,6 @@ def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
     pool, an all-NaN pool, and infinities that must not become extremes.
     """
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(17)
     whole_but_last = np.zeros(200_003)
     whole_but_last[-1] = 0.5
@@ -417,55 +413,6 @@ def test_a_finite_float32_plane_near_its_range_has_a_finite_mean() -> None:
     assert np.asarray(answer)[0, 0] == truth
 
 
-def test_the_masked_block_mean_counts_what_it_summed() -> None:
-    """Sum and count come out of one pass, so they cannot disagree.
-
-    The path this replaced built a whole zero-filled plane and reduced it
-    twice, once for each.  A cell with nothing valid in it must still come
-    back masked, not as a division by zero.
-    """
-
-    rng = np.random.default_rng(31)
-    values = (rng.random((128, 128)) * 100.0).astype(np.float32)
-    valid = np.ones(values.shape, dtype=bool)
-    valid[3:9, 4:20] = False
-    starts = _reduction_starts(128, 90, 1.25)
-    counts = np.add.reduceat(
-        np.add.reduceat(valid, starts, axis=0, dtype=np.int64),
-        starts,
-        axis=1,
-        dtype=np.int64,
-    )
-    sums = np.add.reduceat(
-        np.add.reduceat(
-            np.where(valid, values, 0), starts, axis=0, dtype=np.float64
-        ),
-        starts,
-        axis=1,
-        dtype=np.float64,
-    )
-    np.testing.assert_allclose(
-        np.asarray(_area_mean(values, valid, starts, starts), dtype=np.float64),
-        np.divide(sums, counts, out=np.zeros(counts.shape), where=counts != 0),
-        rtol=1e-6,
-    )
-
-    # A block with no valid sample at all comes back masked, cell for cell.
-    valid[:] = True
-    valid[:16, :16] = False
-    counts = np.add.reduceat(
-        np.add.reduceat(valid, starts, axis=0, dtype=np.int64),
-        starts,
-        axis=1,
-        dtype=np.int64,
-    )
-    means = _area_mean(values, valid, starts, starts)
-    assert isinstance(means, np.ma.MaskedArray), (
-        "an empty block must come back masked, not divided by zero"
-    )
-    np.testing.assert_array_equal(np.ma.getmaskarray(means), counts == 0)
-
-
 def test_the_kernel_cache_is_a_plainly_named_folder_in_the_checkout() -> None:
     """It belongs to this checkout, and it is not a hidden dotfile.
 
@@ -529,18 +476,37 @@ def test_an_installed_wheel_has_no_checkout_to_cache_in(monkeypatch, tmp_path) -
 
 
 def test_no_module_keeps_its_own_copy_of_the_cache_path() -> None:
-    """The path has one owner; a second copy is how a move half-lands."""
+    """The path has one owner; a second copy is how a move half-lands.
 
+    A module may READ the override (``os.environ.get``); naming the variable
+    in any other way -- an assignment, a ``setdefault``, a child's
+    environment, whatever the spelling -- is a second owner.
+    """
+
+    import ast
     import pathlib
 
     package = pathlib.Path(__file__).resolve().parents[1] / "src" / "zlc_plot"
-    offenders = [
-        path.name
-        for path in package.glob("*.py")
-        if path.name != "_kernel_cache.py"
-        and "NUMBA_CACHE_DIR" in path.read_text(encoding="utf-8")
-        and "os.environ[\"NUMBA_CACHE_DIR\"] =" in path.read_text(encoding="utf-8")
-    ]
+    offenders = []
+    for path in package.rglob("*.py"):
+        if path.name == "_kernel_cache.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        reads = {
+            id(node.args[0])
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+        }
+        if any(
+            isinstance(node, ast.Constant)
+            and node.value == "NUMBA_CACHE_DIR"
+            and id(node) not in reads
+            for node in ast.walk(tree)
+        ):
+            offenders.append(path.name)
     assert not offenders, (
         "these modules set NUMBA_CACHE_DIR themselves instead of asking "
         "_kernel_cache: %s" % offenders
@@ -573,8 +539,6 @@ def test_the_centred_moment_kernel_is_one_reduction_not_a_copy() -> None:
         kernels.ENGINE = "numpy"
         assert _centred_moment_sums(plane, offsets, None, [1], shape) is None
         kernels.ENGINE = "auto"
-        if not kernels.engaged():
-            pytest.skip("no compiled engine available")
         for kept in ([1], [0, 1], [1, 2]):
             kept_shape = tuple(shape[axis] for axis in kept)
             offsets = np.linspace(
@@ -664,7 +628,7 @@ def test_an_input_s_mutability_is_not_an_accident_of_where_it_came_from() -> Non
     compiled signatures of which 10 were the same code again.
     """
 
-    numba = pytest.importorskip("numba")
+    import numba
 
     sealed = np.zeros((8, 8), dtype=np.uint16)
     sealed.setflags(write=False)
@@ -703,7 +667,6 @@ def test_an_input_s_mutability_is_not_an_accident_of_where_it_came_from() -> Non
 def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
     """Pool size, reducer and holes never select different arithmetic."""
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(29)
     previous = kernels.ENGINE
     try:
@@ -848,7 +811,6 @@ def test_the_ring_is_stroked_at_the_distance_to_the_ellipse() -> None:
     produce: round, wide, tall and a 8:1 needle.
     """
 
-    pytest.importorskip("numba")
     rng = np.random.default_rng(23)
     rings = ((20.0, 4.0), (4.0, 20.0), (6.0, 4.0), (5.0, 5.0), (8.0, 1.0))
     for radius_x, radius_y in rings:

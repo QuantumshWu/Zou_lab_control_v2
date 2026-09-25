@@ -27,7 +27,6 @@ from data_factory import (
 
 
 from zlc_plot import AxisRef, ImagePlot, PlotSession
-from zlc_plot.config import DEFAULTS
 
 def _empty_image_session(size: int = 48) -> PlotSession:
     """One image panel whose every sample is missing."""
@@ -85,15 +84,6 @@ def test_a_missing_pixel_is_the_same_colour_as_the_space_beside_it() -> None:
         )
     finally:
         session.close()
-
-def test_the_style_declares_no_second_colour_for_absence() -> None:
-    """The colormap's bad colour was that second answer; it is gone."""
-
-    palette = DEFAULTS.style.palette
-    assert not hasattr(palette, "bad"), (
-        "a palette token for missing data is a second source of truth for "
-        "what absence looks like"
-    )
 
 def test_an_image_with_no_valid_pixel_has_an_empty_distribution() -> None:
     """The side histogram of an all-invalid image counts nothing.

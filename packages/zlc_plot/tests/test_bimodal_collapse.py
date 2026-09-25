@@ -95,7 +95,6 @@ def test_a_live_classifier_leaves_an_early_wrong_answer_behind() -> None:
             else tuple(float(value) for value in result.parameter_values)
         )
         thresholds.append(_bimodal_classifier_metrics(result, None)[0])
-        assert min(_named(result).values(), default=1.0) is not None
 
     assert thresholds[0] is None, thresholds
     assert thresholds[-1] is not None

@@ -116,37 +116,11 @@ def test_a_kind_owned_default_implies_admission_never_the_reverse() -> None:
                 assert handler_for(inferred).kind is handler.kind
 
 
-def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
-    """Axis order convention: dimensions are slowest-first, so the trailing
-    dimension is the axis one sweep walks — curve x and image x."""
+def test_an_authored_repeat_facet_remains_valid() -> None:
+    """A default never guesses repeat (the default table pins that); an
+    authored repeat facet still works, over a heatmap and over a flat curve."""
 
-    _, topology_schema, dense_schema, _renamed = _schema_families()
-    curve = next(h for h in HANDLERS if h.kind is PlotKind.CURVE)
-    image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
-    facet = next(h for h in HANDLERS if h.kind is PlotKind.FACET_GRID)
-
-    inferred_curve = curve.default_spec(topology_schema)
-    assert inferred_curve.x == AxisRef.point("y")
-
-    inferred_image = image.default_spec(topology_schema)
-    assert inferred_image.x == AxisRef.point("y")
-    assert inferred_image.y == AxisRef.point("x")
-
-    dense_image = image.default_spec(dense_schema)
-    assert dense_image.x == AxisRef.cell_data("column")
-    assert dense_image.y == AxisRef.cell_data("row")
-
-    # FacetGrid on a scalar two-dimension scan has no automatic facet left:
-    # the heatmap consumes both scan dimensions, while repeat is acquisition
-    # history and may become a facet only through an explicit operator edit.
-    inferred_facet = facet.default_spec(topology_schema)
-    assert isinstance(inferred_facet, FacetGridPlot)
-    assert inferred_facet.facet is None
-    assert isinstance(inferred_facet.cell, ImagePlot)
-
-
-def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None:
-    """A default never guesses repeat; an authored repeat facet still works."""
+    from zlc_plot.data_view import DataView
 
     points = mapped_domain_from_columns(
         {
@@ -158,34 +132,18 @@ def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None
         repeat_domain(size=1),
         points,
     )
-    facet = next(h for h in HANDLERS if h.kind is PlotKind.FACET_GRID)
-    image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
-    curve = next(h for h in HANDLERS if h.kind is PlotKind.CURVE)
-    assert facet.admits(schema)
-    inferred = facet.default_spec(schema)
-    assert isinstance(inferred, FacetGridPlot)
-    assert inferred.facet is None
-    heatmap = image.default_spec(schema)
-    assert heatmap.x == AxisRef.point("y")
-    assert heatmap.y == AxisRef.point("x")
-    explicit = FacetGridPlot(AxisRef.repeat("repeat"), heatmap)
-    from zlc_plot.data_view import DataView
+    explicit = FacetGridPlot(
+        AxisRef.repeat("repeat"), ImagePlot(AxisRef.point("y"), AxisRef.point("x"))
+    )
     DataView(
         make_snapshot(schema, np.zeros(schema.physical_shape, dtype=np.float64), revision=0)
     ).validate_facet(explicit)
 
-    # A flat Point domain with a single repeat has nothing to face either: the
-    # curve IS the picture, and the grid asked for holds it in one cell.
     flat = make_dataset_schema(
         repeat_domain(size=1),
         mapped_domain_from_columns({"x": np.arange(4.0)}),
     )
-    assert facet.admits(flat)
-    inferred_flat = facet.default_spec(flat)
-    assert isinstance(inferred_flat, FacetGridPlot)
-    assert inferred_flat.facet is None
-    assert isinstance(inferred_flat.cell, CurvePlot)
-    explicit_flat = FacetGridPlot(AxisRef.repeat("repeat"), curve.default_spec(flat))
+    explicit_flat = FacetGridPlot(AxisRef.repeat("repeat"), CurvePlot(AxisRef.point("x")))
     DataView(
         make_snapshot(flat, np.zeros(flat.physical_shape, dtype=np.float64), revision=0)
     ).validate_facet(explicit_flat)

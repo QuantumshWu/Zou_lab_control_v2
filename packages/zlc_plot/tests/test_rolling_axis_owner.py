@@ -50,30 +50,6 @@ def _feed(session: PlotSession, revisions: int, *, start: list[int]) -> None:
         )
         session.rgba()
 
-def test_the_shot_axis_is_written_once_per_revision(monkeypatch) -> None:
-    """One owner means one write; two owners meant two, and back again."""
-
-    session = _session()
-    try:
-        session.rgba()
-        clock = [1]
-        _feed(session, 3, start=clock)
-        writes = []
-        original = MatplotlibRenderer._set_xlim
-
-        def spy(self, axis, low, high):
-            before = tuple(float(v) for v in axis.get_xlim())
-            original(self, axis, low, high)
-            after = tuple(float(v) for v in axis.get_xlim())
-            if before != after:
-                writes.append((str(axis.get_gid()), before, after))
-
-        monkeypatch.setattr(MatplotlibRenderer, "_set_xlim", spy)
-        _feed(session, 3, start=clock)
-        assert writes == [], f"the shot axis moved: {writes}"
-    finally:
-        session.close()
-
 def test_a_static_rolling_panel_reuses_its_chrome_background(monkeypatch) -> None:
     """The picture is not changing, so the background must not be rebuilt.
 

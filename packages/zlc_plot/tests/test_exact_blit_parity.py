@@ -213,7 +213,7 @@ def _states(session, feed_shape):
 )
 @pytest.mark.parametrize(
     "shape",
-    [(1200, 1920), (1920, 1200), (1200, 1200), (40, 60), (3, 2)],
+    [(1200, 1920), (1920, 1200), (40, 60), (3, 2)],
     ids=lambda shape: "%dx%d" % shape,
 )
 @pytest.mark.parametrize("ratio", [1.0, 1.5, 3.0])

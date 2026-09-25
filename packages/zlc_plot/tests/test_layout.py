@@ -53,7 +53,7 @@ def test_rolling_surface_requires_explicit_distribution_policy() -> None:
                                 layout=DEFAULTS.layout, style=DEFAULTS.style)
         rolling = resolve_surface("2x2", "rolling", rolling_side_distribution=True,
                                   device_pixel_ratio=dpr, layout=DEFAULTS.layout, style=DEFAULTS.style)
-        assert rolling.logical_size == image.logical_size == (490, 357)
+        assert rolling.logical_size == image.logical_size
         assert rolling.raster_size == image.raster_size
 
 

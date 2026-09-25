@@ -4,138 +4,19 @@
 bands so a lane with few peers still fills the pool.  A band may not change
 a pixel: every band replays every primitive in painter order over its own
 columns, so the blend sequence any one pixel sees is the one the serial
-kernel produced.  The reference here IS that serial kernel -- the
-one-lane, one-band algorithm kept in plain Python as the specification --
-and the compiled kernels must reproduce it bit for bit at every band
-count, including counts that do not divide the lane evenly.
+kernel produced.  The polylines are held to the kernel's own one-lane,
+one-band picture, bit for bit, at every band count -- including counts that
+do not divide the lane evenly.  What that serial picture should BE is held
+against Agg in test_stroke_kernel_vs_agg.py: a copy of the kernel written
+here could only agree with it.  The error bars keep an independent
+reference, an inclusion-exclusion of each bar's rectangles.
 """
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
-import pytest
 
 from zlc_plot import _raster_kernels as kernels
-
-if not kernels.HAVE_NUMBA:  # pragma: no cover - the kernels are the subject
-    pytest.skip("compiled stroke kernels are absent", allow_module_level=True)
-
-
-def _clamped_line_integral(value):
-    if value <= 0.0:
-        return 0.0
-    if value <= 1.0:
-        return 0.5 * value * value
-    return value - 0.5
-
-
-def _slanted_cover(depth, grade):
-    if grade <= 1.0e-9:
-        return min(1.0, max(0.0, depth))
-    half = 0.5 * grade
-    return (_clamped_line_integral(depth + half) - _clamped_line_integral(depth - half)) / grade
-
-
-def _disc_cover(px, py, x, y, radius):
-    return min(1.0, max(0.0, radius + 0.5 - math.hypot(px - x, py - y)))
-
-
-def _segment_cover(px, py, x0, y0, x1, y1, nxt, radius, cap_start, cap_end):
-    """One piece's contribution: its band (intersection of the two slanted
-    edges), a projecting cap at a polyline end, and the round join's disc
-    for the wedge beyond this piece and before the next."""
-
-    dx, dy = x1 - x0, y1 - y0
-    length2 = dx * dx + dy * dy
-    if length2 <= 0.0:
-        return 0.0
-    along = ((px - x0) * dx + (py - y0) * dy) / length2
-    length = math.sqrt(length2)
-    beyond = 0.0
-    if along < 0.0:
-        if not cap_start:
-            return 0.0
-        beyond = -along * length
-    elif along > 1.0:
-        if not cap_end:
-            if nxt is not None:
-                nx, ny = nxt[0] - x1, nxt[1] - y1
-                next2 = nx * nx + ny * ny
-                if next2 > 0.0 and ((px - x1) * nx + (py - y1) * ny) / next2 >= 0.0:
-                    return 0.0
-            return _disc_cover(px, py, x1, y1, radius)
-        beyond = (along - 1.0) * length
-    if beyond > radius + 0.5:
-        return 0.0
-    if abs(dy) > abs(dx):
-        grade = abs(dx / dy)
-        centre = x0 + (py - y0) * dx / dy
-        half = radius * math.sqrt(1.0 + grade * grade)
-        cover = _slanted_cover(px - (centre - half) + 0.5, grade) + _slanted_cover((centre + half) - px + 0.5, grade) - 1.0
-    else:
-        grade = abs(dy / dx)
-        centre = y0 + (px - x0) * dy / dx
-        half = radius * math.sqrt(1.0 + grade * grade)
-        cover = _slanted_cover(py - (centre - half) + 0.5, grade) + _slanted_cover((centre + half) - py + 0.5, grade) - 1.0
-    if cover <= 0.0:
-        return 0.0
-    if beyond > 0.0:
-        cover *= min(1.0, radius + 0.5 - beyond)
-    return cover
-
-
-def _reference_polylines(vertices, offsets, colours, widths, clips, out):
-    """The serial stroke: every pixel of the clip against every segment of
-    the line, the most any segment gives it, blended once per line."""
-
-    height, width = out.shape[:2]
-    for line in range(offsets.size - 1):
-        start, stop = int(offsets[line]), int(offsets[line + 1])
-        if stop - start < 2:
-            continue
-        clip_left = max(0, int(clips[line, 0]))
-        clip_top = max(0, int(clips[line, 1]))
-        clip_right = min(width, int(clips[line, 2]))
-        clip_bottom = min(height, int(clips[line, 3]))
-        if clip_right <= clip_left or clip_bottom <= clip_top:
-            continue
-        radius = max(0.5, float(widths[line]) * 0.5)
-        finite_segments = [
-            (float(vertices[p, 0]), float(vertices[p, 1]), float(vertices[p + 1, 0]), float(vertices[p + 1, 1]))
-            for p in range(start, stop - 1)
-            if np.all(np.isfinite(vertices[p : p + 2]))
-        ]
-        # Agg snaps a rectilinear path of fewer than 1024 vertices to pixel centres.
-        snap = stop - start < 1024 and all(x0 == x1 or y0 == y1 for x0, y0, x1, y1 in finite_segments)
-        placed = vertices[start:stop].astype(float)
-        if snap:
-            offset = 0.5 if int(math.floor(float(widths[line]) + 0.5)) % 2 == 1 else 0.0
-            placed = np.where(np.isfinite(placed), np.floor(placed + 0.5) + offset, placed)
-        segments = []
-        for point in range(start, stop - 1):
-            x0, y0 = float(placed[point - start, 0]), float(placed[point - start, 1])
-            x1, y1 = float(placed[point - start + 1, 0]), float(placed[point - start + 1, 1])
-            if not all(map(np.isfinite, (x0, y0, x1, y1))):
-                continue
-            cap_start = point == start or not np.all(np.isfinite(vertices[point - 1]))
-            cap_end = point + 2 >= stop or not np.all(np.isfinite(vertices[point + 2]))
-            segments.append((x0, y0, x1, y1, bool(cap_start), bool(cap_end)))
-        alpha_code = float(colours[line, 3]) / 255.0
-        for column in range(clip_left, clip_right):
-            px = column + 0.5
-            for row in range(clip_top, clip_bottom):
-                py = row + 0.5
-                amount = 0.0
-                for index, (x0, y0, x1, y1, cap_start, cap_end) in enumerate(segments):
-                    nxt = None
-                    if not cap_end and index + 1 < len(segments):
-                        nxt = segments[index + 1][2:4]
-                    amount += _segment_cover(px, py, x0, y0, x1, y1, nxt, radius, cap_start, cap_end)
-                amount = min(1.0, amount)
-                if amount > 1.0e-6:
-                    _blend(out, row, column, colours[line], alpha_code * amount)
 
 
 def _reference_error_bars(
@@ -236,25 +117,30 @@ def _error_bar_scene(rng):
 _BAND_COUNTS = (1, 2, 3, 5, 8, 16)
 
 
-def test_polylines_match_the_serial_reference_at_every_band_count() -> None:
+def _polylines(canvas, vertices, offsets, colours, widths, clips, lanes, bands):
+    out = canvas.copy()
+    kernels.raster_polylines(
+        kernels.readable(vertices),
+        kernels.readable(offsets),
+        kernels.readable(colours),
+        kernels.readable(widths),
+        kernels.readable(clips),
+        kernels.readable(lanes),
+        bands,
+        out,
+    )
+    return out
+
+
+def test_polylines_match_the_serial_kernel_at_every_band_count() -> None:
     rng = np.random.default_rng(3)
     vertices, offsets, colours, widths, clips, lanes = _polyline_scene(rng)
     canvas = _canvas(rng)
-    expected = canvas.copy()
-    _reference_polylines(vertices, offsets, colours, widths, clips, expected)
+    scene = (vertices, offsets, colours, widths, clips)
+    expected = _polylines(canvas, *scene, lanes, 1)
     assert (expected != canvas).any(), "the scene must paint something"
-    for bands in _BAND_COUNTS:
-        out = canvas.copy()
-        kernels.raster_polylines(
-            kernels.readable(vertices),
-            kernels.readable(offsets),
-            kernels.readable(colours),
-            kernels.readable(widths),
-            kernels.readable(clips),
-            kernels.readable(lanes),
-            bands,
-            out,
-        )
+    for bands in _BAND_COUNTS[1:]:
+        out = _polylines(canvas, *scene, lanes, bands)
         np.testing.assert_array_equal(out, expected, err_msg=f"bands={bands}")
 
 
@@ -295,30 +181,10 @@ def test_disjoint_lanes_paint_their_own_boxes_only() -> None:
     vertices[4 * 9 :, 0] = np.clip(48.0 + vertices[4 * 9 :, 0] * 0.5, 50.0, 94.0)
     lanes = np.asarray((0, 4, 7), dtype=np.int64)
     canvas = _canvas(rng)
-    expected = canvas.copy()
-    _reference_polylines(vertices, offsets, colours, widths, clips, expected)
+    scene = (vertices, offsets, colours, widths, clips)
+    # The serial picture: every line in one lane, one band.
+    expected = _polylines(canvas, *scene, np.asarray((0, 7), dtype=np.int64), 1)
+    assert (expected != canvas).any(), "the scene must paint something"
     for bands in _BAND_COUNTS:
-        out = canvas.copy()
-        kernels.raster_polylines(
-            kernels.readable(vertices),
-            kernels.readable(offsets),
-            kernels.readable(colours),
-            kernels.readable(widths),
-            kernels.readable(clips),
-            kernels.readable(lanes),
-            bands,
-            out,
-        )
+        out = _polylines(canvas, *scene, lanes, bands)
         np.testing.assert_array_equal(out, expected, err_msg=f"bands={bands}")
-
-
-def test_stroke_bands_share_the_pool_without_a_kernel_thread_query() -> None:
-    """A lone lane gets the pool's threads as bands, capped; a full pool of lanes gets one."""
-
-    from numba import get_num_threads
-
-    threads = int(get_num_threads())
-    assert kernels.stroke_bands(1) == max(1, min(kernels._STROKE_BAND_LIMIT, threads))
-    assert kernels.stroke_bands(threads) == 1
-    assert kernels.stroke_bands(threads + 5) == 1
-    assert kernels.stroke_bands(0) == 1

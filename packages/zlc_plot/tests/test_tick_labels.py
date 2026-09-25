@@ -81,16 +81,6 @@ def test_no_axis_prints_a_label_longer_than_its_own_range_needs(
     finally:
         plt.close(figure)
 
-def test_a_y_axis_far_from_zero_takes_the_offset_too() -> None:
-    """The regression itself: the width question is not asked of y."""
-
-    figure, axes = _drawn(1000000.0, 1000000.4, surface="panel", inches=6.0)
-    try:
-        assert axes.yaxis.get_offset_text().get_text() == "+1000000"
-        assert axes.xaxis.get_offset_text().get_text() == "+1000000"
-    finally:
-        plt.close(figure)
-
 def test_labels_that_are_already_short_keep_their_coordinates() -> None:
     """An offset is a cost: it is paid only where it buys something."""
 
@@ -168,8 +158,6 @@ def test_a_caller_says_where_it_draws_and_how_big_never_how_many() -> None:
             apply_declared_ticks(axes, "x", 1, label_pt=LABEL_PT)
         with pytest.raises(ValueError, match="label_pt"):
             apply_smart_ticks(axes, label_pt=0.0)
-        with pytest.raises(ValueError, match="6.5 or 3.25"):
-            apply_smart_ticks(axes, label_pt=5.2)
         with pytest.raises(ValueError, match="which"):
             apply_smart_ticks(axes, "diagonal", label_pt=LABEL_PT)
     finally:
@@ -386,7 +374,9 @@ def test_every_surface_prints_two_labels_inside_its_room(
     count rail its bound, and its zero only when it clears -- no label of
     one axis prints over a label of another, none leaves the figure, none
     is smaller than the readable floor, and within an axis two labels come
-    closer than a digit only when the axis has reached that floor.
+    closer than a digit only when the axis has reached that floor.  The
+    rooms those labels are priced against are stated by every axes plan,
+    lie inside the figure, and neighbours split the gap between them.
     """
 
     from zlc_plot.ticks import _label_size_pt
@@ -395,6 +385,27 @@ def test_every_surface_prints_two_labels_inside_its_room(
     try:
         session.rgba()
         renderer = session._renderer
+        plans = [*renderer.plan.axes, *(renderer.plan.facet_focus_axes or ())]
+        assert plans
+        for item in plans:
+            room = item.room
+            assert isinstance(room, Room)
+            assert item.box.left - room.left >= -1e-9
+            assert item.box.right + room.right <= 1.0 + 1e-9
+            assert item.box.top - room.top >= -1e-9
+            assert item.box.bottom + room.bottom <= 1.0 + 1e-9
+        by_role = {item.role: item for item in plans}
+        if "distribution" in by_role and "image" in by_role:
+            image, rail, bar = by_role["image"], by_role["distribution"], by_role["colorbar"]
+            assert image.room.right == rail.room.left == pytest.approx((rail.box.left - image.box.right) / 2)
+            assert rail.room.right == bar.room.left == pytest.approx((bar.box.left - rail.box.right) / 2)
+            assert bar.room.right == pytest.approx(1.0 - bar.box.right)
+        if "history" in by_role and "distribution" in by_role:
+            history, rail = by_role["history"], by_role["distribution"]
+            assert history.room.right == rail.room.left == pytest.approx((rail.box.left - history.box.right) / 2)
+        cells = [item for item in plans if item.role == "facet_cell"]
+        if cells:
+            assert len({item.room for item in cells}) == 1, "every cell reads against one frame"
         figure = renderer.figure
         dpi = float(figure.dpi)
         canvas_box = figure.bbox

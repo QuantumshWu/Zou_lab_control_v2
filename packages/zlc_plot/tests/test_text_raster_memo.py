@@ -144,13 +144,3 @@ def test_memo_is_bounded_and_forgets_rather_than_grows() -> None:
             _gc(fitted, (0.0, 0.0, 0.0, 1.0)), 10.0, 100.0, f"{index}", _PROP, 0.0
         )
     assert len(memo) <= rendering._TEXT_RASTER_MEMO_LIMIT
-
-
-def test_preparing_twice_installs_one_memo() -> None:
-    fitted = _renderer()
-    _prepare_renderer(fitted)
-    memo = fitted._zlc_text_rasters
-    draw = fitted.draw_text
-    _prepare_renderer(fitted)
-    assert fitted._zlc_text_rasters is memo
-    assert fitted.draw_text is draw

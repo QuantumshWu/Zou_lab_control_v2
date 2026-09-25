@@ -3,8 +3,9 @@
 The occupation-rate projection attaches a standard error to every MEAN
 point; a present sigma weights the fit residuals by 1/sigma and the quality
 report becomes the chi-square.  Zero-spread endpoints (a rate of exactly 0
-or 1) take the smallest positive sigma present, and spreadless data falls
-back to the ordinary unweighted fit.
+or 1) take the smallest positive sigma present, an unmeasured NaN sigma (a
+one-shot bucket) the largest usable one, and spreadless data falls back to
+the ordinary unweighted fit.
 """
 from __future__ import annotations
 

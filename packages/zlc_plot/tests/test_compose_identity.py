@@ -702,85 +702,23 @@ def _site_grid_session(sites: int = 25, points: int = 5, repeats: int = 12):
     return session, landed
 
 
-def test_a_relayout_keeps_its_cells_and_reticks_them_as_a_new_one_would() -> None:
-    """Resizing a board moves its cells; it does not make new ones.
+def test_a_relayout_keeps_the_grids_chrome_and_paints_what_a_new_one_would() -> None:
+    """Resizing a board moves its cells and their chrome; it builds nothing.
 
     An operator drags a board more often than any other gesture, and
     rebuilding sixty-four cells was 1324 ms of a 685-1032 ms resize.  So
-    the cells are kept -- and then the SECOND half of the claim has to
-    hold: a locator carries the step it settled on so its ticks do not
-    jitter frame to frame, and carried across a resize that hysteresis is
-    the PREVIOUS layout's.  A cell twice as wide kept three labels where a
-    new one shows five.  What the kept cell must end up with is what a
-    cell built at that size gets, and that is what is asked here.
-
-    WHAT THIS CATCHES is cells rebuilt instead of moved.  What it does NOT
-    catch is the hysteresis itself: these four cells settle on the same
-    step at both presets, and an isolated locator re-judges a widened axis
-    correctly whether or not it still holds one, so no fixture here
-    discriminates.  The case that does is a histogram grid with a LIVE fit,
-    resized away and back, compared byte for byte against another
-    checkout -- that found 1317-2504 pixels different on four of the
-    catalogue's grids, and it is the gate this half rests on.
+    the cells and the chrome group -- the frames, marks and titles the grid
+    paints for them -- are the same objects after every resize, and the
+    picture, ticks included, is the one a session opened at the new size
+    paints: a kept cell must not carry the previous layout's tick policy.
     """
 
-    def read(session) -> tuple:
-        cells = session._renderer._axes["facet_cell"]
-        return (
-            [id(axis) for axis in cells],
-            tuple(
-                (
-                    tuple(np.round(axis.xaxis.get_ticklocs(), 9)),
-                    tuple(np.round(axis.yaxis.get_ticklocs(), 9)),
-                )
-                for axis in cells
-            ),
-        )
-
-    # FOUR cells resized between two presets that price their labels the
-    # same: a size that changed the label size would reinstall the policy
-    # anyway and hide the point.
-    session, _landed = _site_grid_session(sites=4)
-    try:
-        session.configure(size="2x2")
-        session.rgba()
-        before, _ticks = read(session)
-        session.configure(size="4x4")
-        session.rgba()
-        after, resized = read(session)
-    finally:
-        session.close()
-
-    fresh, _landed = _site_grid_session(sites=4)
-    try:
-        fresh.configure(size="4x4")
-        fresh.rgba()
-        _identities, built = read(fresh)
-    finally:
-        fresh.close()
-
-    assert after == before, (
-        "a relayout built new cells instead of moving them"
-    )
-    assert resized == built, (
-        "a kept cell carried the previous layout's tick policy: "
-        f"{resized[0]} against {built[0]} on the first cell"
-    )
-
-
-def test_a_relayout_keeps_the_grids_chrome_and_paints_what_a_new_one_would() -> None:
-    """The chrome group -- the frames, marks and titles the grid paints for
-    its cells -- has the same shape after every resize, so a resize moves
-    it and builds nothing: the artists are the same objects, and the
-    picture is the one a session opened at the new size paints.
-    """
-
-    def chrome(session) -> list[int]:
-        artists = session._renderer._artists
-        return [
+    def chrome(session) -> tuple[list[int], list[int]]:
+        renderer = session._renderer
+        return [id(axis) for axis in renderer._axes["facet_cell"]], [
             id(artist)
             for key in ("facet:chrome_marks", "facet:chrome_spines", "facet:chrome_titles")
-            for artist in artists[key]
+            for artist in renderer._artists[key]
         ]
 
     session, _landed = _site_grid_session(sites=4)
@@ -796,9 +734,9 @@ def test_a_relayout_keeps_the_grids_chrome_and_paints_what_a_new_one_would() -> 
         returned = chrome(session)
     finally:
         session.close()
-    assert before, "a grid draws its chrome as a group"
+    assert before[1], "a grid draws its chrome as a group"
     assert after == before and returned == before, (
-        "a relayout rebuilt the grid's chrome instead of moving it"
+        "a relayout rebuilt the grid's cells or chrome instead of moving them"
     )
 
     fresh, _landed = _site_grid_session(sites=4)
@@ -1369,6 +1307,11 @@ def test_a_selector_gesture_never_erases_the_scene_below_it(
     Ink is the operator's own measure, so it is the one asserted here, and
     it holds for every kind and every gesture rather than for the one that
     was reported.
+
+    The cheap move path restores the capture and repaints only the tail, so
+    the capture has to be everything below it -- the kernel-stroked data
+    included: an area moved over it lands on the pixels a compose with the
+    capture thrown away paints.
     """
 
     points, repeats = 160, 6
@@ -1401,52 +1344,19 @@ def test_a_selector_gesture_never_erases_the_scene_below_it(
             f"the {gesture.value} gesture erased the {spec_kind} scene: "
             f"{_ink(before)} inked pixels before, {_ink(during)} during"
         )
+
+        if gesture is SelectorKind.AREA:
+            moved = SelectorState(
+                SelectorKind.AREA,
+                RectangleRange(NumericRange(-2.0, -0.5), NumericRange(5.0, 25.0)),
+            )
+            renderer.preview_selector(moved)
+            cheap = np.array(session.rgba(), copy=True)
+            renderer._forget_gesture_region()
+            renderer.preview_selector(moved)
+            assert np.array_equal(cheap, np.array(session.rgba(), copy=True))
     finally:
         session.close()
-
-
-@pytest.mark.parametrize("spec_kind", ("curve", "facet_curve"))
-def test_a_gesture_move_repaints_the_scene_a_compose_paints(spec_kind: str) -> None:
-    """The captured frame a move restores is the frame a compose would draw.
-
-    The cheap move path restores the capture and repaints only the tail, so
-    the capture has to be everything below it -- the kernel-stroked data
-    included.  Composing the same candidate with the capture thrown away
-    must therefore land on the same pixels.
-    """
-
-    points, repeats = 160, 6
-    schema = _curve_contract(points, repeats)
-    spec = (
-        CurvePlot(AxisRef.point("x"))
-        if spec_kind == "curve"
-        else FacetGridPlot(AxisRef.repeat("repeat"), CurvePlot(AxisRef.point("x")))
-    )
-    session = PlotSession(
-        _curve_snapshot(schema, points, repeats, 1, seed=72),
-        spec,
-        parameters={"uncertainty": spec_kind == "curve"},
-    )
-    try:
-        renderer = session._renderer
-        session.rgba()
-        renderer.begin_selector_gesture(SelectorKind.AREA)
-        candidate = _gesture_candidate(SelectorKind.AREA)
-        renderer.preview_selector(candidate)
-        moved = SelectorState(
-            SelectorKind.AREA,
-            RectangleRange(NumericRange(-2.0, -0.5), NumericRange(5.0, 25.0)),
-        )
-        renderer.preview_selector(moved)
-        cheap = np.array(session.rgba(), copy=True)
-
-        renderer._forget_gesture_region()
-        renderer.preview_selector(moved)
-        expensive = np.array(session.rgba(), copy=True)
-        assert np.array_equal(cheap, expensive)
-    finally:
-        session.close()
-
 
 
 @pytest.mark.parametrize("ratio", [1.0, 3.0])

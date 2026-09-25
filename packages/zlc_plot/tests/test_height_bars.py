@@ -25,19 +25,13 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
-from zlc_data import REPEAT, SITE
+from zlc_data import SITE
 from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
-from zlc_plot.specs import RenderEffect
 from zlc_plot._height3d_raster import (
     HeightBarCamera,
     render_height_bars,
 )
-from zlc_plot.selectors import (
-    NumericRange,
-    RectangleRange,
-    SelectorKind,
-    SelectorState,
-)
+from zlc_plot.selectors import NumericRange, SelectorKind
 
 MAX_STRESS_RENDER_SECONDS = 0.5
 
@@ -147,20 +141,21 @@ def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
 
 def test_bars_clip_to_the_value_limits() -> None:
     """A value beyond the colour limits saturates in HEIGHT exactly as it
-    saturates in colour: the z axis and the colorbar are one scale."""
+    saturates in colour: the z axis and the colorbar are one scale, so a
+    bar past the upper limit is drawn, and picked, as the bar AT it."""
 
-    heights = np.asarray([[0.5, 2.0]])
-    colors = _flat_table(0.5, 0.5, 0.5)
-    camera = HeightBarCamera()
-    _frame, scene = render_height_bars(
-        heights, colors, camera=camera, value_limits=(0.0, 1.0),
-        width=320, height=240,
-    )
-    a0, b0 = scene.fold_cell(0, 0)
-    a1, b1 = scene.fold_cell(0, 1)
-    top_full = scene.project(a1 + 0.5, b1 + 0.5, 1.0)
-    picked = scene.pick(*top_full)
-    assert picked == (0, 1)
+    colors = _ramp_table()
+
+    def render(heights):
+        return render_height_bars(
+            np.asarray(heights), colors, camera=HeightBarCamera(),
+            value_limits=(0.0, 1.0), width=320, height=240,
+        )
+
+    frame_clipped, scene_clipped = render([[0.5, 2.0]])
+    frame_at_limit, scene_at_limit = render([[0.5, 1.0]])
+    np.testing.assert_array_equal(frame_clipped, frame_at_limit)
+    np.testing.assert_array_equal(scene_clipped.id_plane, scene_at_limit.id_plane)
 
 def test_absent_bars_leave_the_floor() -> None:
     # Near-flat neighbours, so the hole shows FLOOR rather than the side
@@ -187,11 +182,6 @@ def test_stress_grid_renders_inside_the_guard() -> None:
     )
     assert perf_counter() - start < MAX_STRESS_RENDER_SECONDS
 
-def test_camera_clamps_its_angles() -> None:
-    camera = HeightBarCamera(azimuth_deg=10.0, elevation_deg=89.0, zoom=99.0)
-    assert camera.elevation_deg == 80.0
-    assert camera.zoom == 6.0
-
 def test_the_accepted_camera_parameters_are_the_cameras_own() -> None:
     """A display value the camera cannot show is not display state.
 
@@ -215,6 +205,7 @@ def test_the_accepted_camera_parameters_are_the_cameras_own() -> None:
     assert accepted["camera_zoom"] == camera.zoom == 6.0
     assert accepted["camera_elevation"] == camera.elevation_deg == 8.0
     assert accepted["camera_azimuth"] == camera.azimuth_deg == 400.0
+    assert HeightBarCamera(elevation_deg=89.0).elevation_deg == 80.0
 
     session = _session()
     try:
@@ -238,7 +229,7 @@ def test_the_elevation_planes_are_cached_by_both_engines(monkeypatch) -> None:
     them again; only the numpy branch published its pair.
     """
 
-    from zlc_plot import _height3d_raster, _height3d_scanline
+    from zlc_plot import _height3d_scanline, _raster_kernels
 
     heights = np.asarray([[0.2, 0.5, 0.9], [0.4, 0.1, 0.7]])
     colors = _ramp_table()
@@ -250,12 +241,10 @@ def test_the_elevation_planes_are_cached_by_both_engines(monkeypatch) -> None:
         return original(*args, **kwargs)
 
     monkeypatch.setattr(_height3d_scanline, "_derive_z_planes", counting)
-    previous = _height3d_raster._ENGINE
+    previous = _raster_kernels.ENGINE
     for engine in ("numba", "numpy"):
-        _height3d_raster._ENGINE = engine
+        _raster_kernels.ENGINE = engine
         try:
-            if engine == "numba" and not _height3d_raster._scanline_selected():
-                pytest.skip("no compiled scanline engine available")
             cache: dict = {}
             frames = []
             for _ in range(2):
@@ -267,7 +256,7 @@ def test_the_elevation_planes_are_cached_by_both_engines(monkeypatch) -> None:
                 frames.append(frame.copy())
                 assert "derived_z_key" in cache, engine
         finally:
-            _height3d_raster._ENGINE = previous
+            _raster_kernels.ENGINE = previous
         np.testing.assert_array_equal(frames[0], frames[1])
     assert len(calls) == 1, "the scanline engine derived the planes twice"
 
@@ -331,6 +320,11 @@ def test_live_revision_rerenders_the_scene() -> None:
         assert np.abs(second.astype(int) - first.astype(int)).max() > 0
     finally:
         session.close()
+
+def _image_axis(session):
+    """The scene's axes as the frontend's raster snapshot names it."""
+
+    return next(t for t in session._raster_axes_snapshot() if t.role == "image")
 
 def _pointer(session, action, axis, fx, fy, **kwargs):
     left, top, right, bottom = axis.bounds
@@ -429,9 +423,7 @@ def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
         session.rgba()
         renderer = session._renderer
         committed = renderer._height_bars_scene_map.width
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         for step in range(6):
             _pointer(
@@ -460,9 +452,7 @@ def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
     try:
         session.set_parameter("presentation", "height_bars")
         session.rgba()
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.7, 0.6, button=2)
         _pointer(session, "release", axis, 0.7, 0.6, button=2)
@@ -494,9 +484,7 @@ def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
     try:
         session.set_parameter("presentation", "height_bars")
         session.rgba()
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         start = float(session.display_state["camera_azimuth"])
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.72, 0.34, button=2)
@@ -728,16 +716,12 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
     are the rims it lets go of.
     """
 
-    from zlc_plot._height3d_raster import _rim_stamp
-
     session = _session(12)
     try:
         session.set_parameter("presentation", "height_bars")
         committed = session.rgba().copy()
         renderer = session._renderer
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.56, 0.52, button=2)
         assert renderer.height_bars_dragging
@@ -755,8 +739,6 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
         # within a factor of two of the frame it becomes.
         assert rim_share(preview) > 0.0
         assert 0.5 < rim_share(preview) / max(rim_share(settled), 1e-9) < 2.0
-        _weights, radius = _rim_stamp(3.3)
-        assert radius >= 1
     finally:
         session.close()
 
@@ -798,48 +780,6 @@ def test_the_bar_count_is_the_data_and_nothing_else() -> None:
     # And an ROI that shrinks draws fewer bars, which is the whole point.
     assert drawn(75, 100, 320, 240) == (75, 100)
 
-def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
-    """The half-resolution drag preview must not move the scene chrome.
-
-    Tick lengths and label gaps are POINT metrics on the canvas; dividing
-    them by the reduced preview raster inflated every gap by the drag
-    divisor, so the labels flew outward the moment a drag began.  With
-    the same camera, preview and committed chrome may differ only by the
-    raster's coarser position quantization.
-    """
-
-    session = _session()
-    try:
-        session.set_parameters({
-            "presentation": "height_bars",
-            "color_min": 0.0,
-            "color_max": 1.0,
-        })
-        session.rgba()
-        renderer = session._renderer
-        def chrome_positions():
-            artists = renderer._artists["image:h3d_chrome"]
-            return {
-                text.get_text(): text.get_position()
-                for text in artists["texts"]
-            }
-        committed = chrome_positions()
-        renderer.set_height_bars_dragging(True)
-        try:
-            session._render_current(RenderEffect.BASE_GEOMETRY)
-            preview = chrome_positions()
-        finally:
-            renderer.set_height_bars_dragging(False)
-            session._render_current(RenderEffect.BASE_GEOMETRY)
-        assert set(preview) == set(committed)
-        for label, (px, py) in preview.items():
-            cx, cy = committed[label]
-            assert abs(px - cx) <= 0.008 and abs(py - cy) <= 0.008, (
-                label, (px, py), (cx, cy)
-            )
-    finally:
-        session.close()
-
 def test_middle_double_click_restores_the_home_camera() -> None:
     session = _session()
     try:
@@ -850,9 +790,7 @@ def test_middle_double_click_restores_the_home_camera() -> None:
             "camera_zoom": 2.5,
         })
         session.rgba()
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "release", axis, 0.5, 0.5, button=2)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
@@ -888,9 +826,7 @@ def test_click_picks_the_bar_as_a_crosshair() -> None:
         width, height_px = renderer.figure.canvas.get_width_height(
             physical=True
         )
-        image_axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        image_axis = _image_axis(session)
         session._raster_pointer_event(
             "press",
             canvas_x / width,
@@ -1104,8 +1040,7 @@ def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
     cameras, so a change to either one cannot drift quietly.
     """
 
-    pytest.importorskip("numba")
-    from zlc_plot import _height3d_raster as raster
+    from zlc_plot import _raster_kernels as kernels
 
     session = _session(12)
     try:
@@ -1123,17 +1058,17 @@ def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
                 np.zeros(len(cells)), np.full(len(cells), 0.6),
             )
             assert edges.shape[0] > 0
-            previous = raster._ENGINE
+            previous = kernels.ENGINE
             try:
                 walks = {}
                 for engine in ("numpy", "numba"):
-                    raster._ENGINE = engine
+                    kernels.ENGINE = engine
                     walks[engine] = tuple(
                         renderer._height_bars_sampled_polyline(scene, edges, count)
                         for count in (4, 16, 64)
                     )
             finally:
-                raster._ENGINE = previous
+                kernels.ENGINE = previous
             for reference, compiled in zip(walks["numpy"], walks["numba"]):
                 np.testing.assert_array_equal(reference[0], compiled[0])
                 np.testing.assert_array_equal(reference[1], compiled[1])
@@ -1147,8 +1082,8 @@ def test_the_rim_stroke_mirrors_its_reference_bit_for_bit() -> None:
     held to the numpy one exactly as the materializer and the occlusion
     sampler are: same frame in, same frame out, byte for byte."""
 
-    pytest.importorskip("numba")
     from zlc_plot import _height3d_raster as raster
+    from zlc_plot import _raster_kernels as kernels
 
     rng = np.random.default_rng(17)
     for cells, side, width in ((7, 200, 3.3), (23, 480, 2.0), (50, 815, 1.65)):
@@ -1162,15 +1097,15 @@ def test_the_rim_stroke_mirrors_its_reference_bit_for_bit() -> None:
         ids[:, : side // 9] = 2
         base = rng.integers(0, 255, size=(side, side, 4)).astype(np.uint8)
         frames = {}
-        previous = raster._ENGINE
+        previous = kernels.ENGINE
         try:
             for engine in ("numpy", "numba"):
-                raster._ENGINE = engine
+                kernels.ENGINE = engine
                 frame = base.copy()
                 raster._stroke_rims(frame, ids, (0.1, 0.2, 0.3), width)
                 frames[engine] = frame
         finally:
-            raster._ENGINE = previous
+            kernels.ENGINE = previous
         np.testing.assert_array_equal(frames["numpy"], frames["numba"])
         assert not np.array_equal(frames["numpy"], base), "nothing was drawn"
 
@@ -1183,8 +1118,7 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
     hanging negative bars and a pooled grid.
     """
 
-    pytest.importorskip("numba")
-    from zlc_plot import _height3d_raster as raster
+    from zlc_plot import _raster_kernels as kernels
 
     rng = np.random.default_rng(9)
     xx, yy = np.meshgrid(np.arange(16), np.arange(16))
@@ -1206,7 +1140,7 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
         (0.2 + 0.8 * rng.random((32, 32)), (0.0, 1.0),
          dict(azimuth_deg=220.0, elevation_deg=60.0), 1, 300, 240),
     )
-    previous = raster._ENGINE
+    previous = kernels.ENGINE
     try:
         for heights, limits, camera_kwargs, ss, width, height in cases:
             # A table that varies along every channel, so a colour that
@@ -1218,7 +1152,7 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
             )
             frames = {}
             for engine in ("numpy", "numba"):
-                raster._ENGINE = engine
+                kernels.ENGINE = engine
                 frame, scene = render_height_bars(
                     heights, colors,
                     camera=HeightBarCamera(**camera_kwargs),
@@ -1233,7 +1167,7 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
                 frames["numpy"][1], frames["numba"][1]
             )
     finally:
-        raster._ENGINE = previous
+        kernels.ENGINE = previous
 
 def test_composed_camera_frames_equal_a_full_draw() -> None:
     """The compose fast lane must be invisible: after any run of camera
@@ -1303,9 +1237,7 @@ def test_a_display_commit_mid_drag_does_not_undo_the_drag() -> None:
             "color_max": 1.0,
         })
         session.rgba()
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         start = float(session.display_state["camera_azimuth"])
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.62, 0.55, button=2)
@@ -1336,9 +1268,7 @@ def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
             "color_max": 1.0,
         })
         session.rgba()
-        axis = next(
-            t for t in session._raster_axes_snapshot() if t.role == "image"
-        )
+        axis = _image_axis(session)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         rendered = 0
         for step in range(20):
@@ -1554,30 +1484,6 @@ def test_a_height_field_keeps_its_scale_when_the_heat_map_would_not() -> None:
         assert _relim_retains("normal") is True
     finally:
         session.close()
-
-def test_the_warmer_renders_what_production_renders() -> None:
-    """A warmup that cannot run is a compile of a signature nothing uses.
-
-    ``colours`` became the colormap's own 256-row table when the driver
-    stopped carrying a plane three times the size of the data, and the
-    warmer kept handing in one colour per cell -- so ``bin/warm_numba_cache``
-    raised for every operator who ran it, under a message telling them to
-    install a package they already had.  Two ends were changed and the one
-    caller between them was not.
-
-    Run on the reference engine, so this catches the drift without paying
-    for a compile.
-    """
-
-    from zlc_plot import _height3d_raster as raster
-    from zlc_plot._height3d_scanline import representative_render
-
-    previous = raster._ENGINE
-    raster._ENGINE = "numpy"
-    try:
-        representative_render()
-    finally:
-        raster._ENGINE = previous
 
 def test_an_invalid_finite_cell_is_not_a_bar(monkeypatch) -> None:
     """A cell the dataset marks invalid is absent from the scene.

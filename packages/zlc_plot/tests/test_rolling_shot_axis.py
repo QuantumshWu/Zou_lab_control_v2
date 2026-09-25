@@ -8,10 +8,12 @@ single revision, so a full window never held still.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
-from zlc_data import PRIMARY_INDEX
+from zlc_data import INVALID, PRIMARY_INDEX
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_plot import AxisRef, PlotSession, Reduction, RollingPlot
 from zlc_plot.data_view import DataView
@@ -81,23 +83,6 @@ def test_area_selector_display_coordinates_are_identity() -> None:
     finally:
         session.close()
 
-def test_a_full_window_holds_the_same_coordinates_as_it_slides() -> None:
-    window = 100
-    total = window + 8
-    session = PlotSession(
-        _snapshot(0, repeats=total),
-        RollingPlot(),
-        parameters={"window": window},
-    )
-    try:
-        x = np.asarray(session._payload.series[0].x.canonical)
-        assert x.size == min(window, total)
-        # The window shows the most recent shots, the newest at zero -- the
-        # same coordinates however far the run has got.
-        np.testing.assert_array_equal(x, np.arange(1.0 - x.size, 1.0))
-    finally:
-        session.close()
-
 def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
     """The axis spans exactly ``window`` shots and then stands still.
 
@@ -157,8 +142,9 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     finally:
         session.close()
 
-@pytest.mark.parametrize("dtype", (np.float32, np.float64))
-def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypatch, dtype) -> None:
+def _primary_index_snapshots(dtype) -> tuple:
+    """One primary-index record whose first shot is absent: dense and segmented."""
+
     source = [-2, -2, 0, 0]
     indexed_schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -179,9 +165,6 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
         revision=9,
         validity=indexed_valid,
     )
-    from dataclasses import replace
-    from zlc_data import INVALID
-
     child_schema = make_dataset_schema(
         repeat_domain(size=1), mapped_domain_from_columns({"category": [0.0, 1.0]}),
         cell_axes=indexed_schema.cell_domain.axes, dtype=dtype,
@@ -196,6 +179,11 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
         segment_origins=np.asarray(((0, 0), (0, 2)), dtype=np.int64),
         segment_shapes=np.asarray(((1, 2), (1, 2)), dtype=np.int64),
     ))
+    return indexed_schema, indexed_values, indexed_valid, snapshot, child_schema, segmented
+
+@pytest.mark.parametrize("dtype", (np.float32, np.float64))
+def test_primary_index_history_is_one_answer_per_engine_and_storage(monkeypatch, dtype) -> None:
+    _schema, _values, _valid, snapshot, _child, segmented = _primary_index_snapshots(dtype)
     from zlc_plot import _raster_kernels as kernels
 
     # The same authored cells must survive both execution engines, including
@@ -225,9 +213,16 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
             repeated = inherited.rolling_history(group=group, aggregation=reduction)
             np.testing.assert_array_equal(repeated.values, actual.values)
             assert inherited._samples is None
-            assert inherited._rolling_carry[1] == segmented_view._rolling_carry[1]
+            np.testing.assert_array_equal(inherited._rolling_carry[1], segmented_view._rolling_carry[1])
             assert inherited._rolling_carry[-1] is segmented
             assert segmented.block._materialized is None
+
+def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypatch) -> None:
+    indexed_schema, indexed_values, indexed_valid, snapshot, child_schema, segmented = (
+        _primary_index_snapshots(np.float64)
+    )
+    from zlc_plot import _raster_kernels as kernels
+
     grouped = DataView(segmented)
     grouped.rolling_history(group=AxisRef.point("category"))
     point = indexed_schema.point_domain
@@ -254,27 +249,31 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
     history = DataView(snapshot).rolling_history(
         group=AxisRef.cell_data("site"), aggregation=Reduction.MEAN
     )
-    assert tuple(sample.source_index for sample in history) == (-2, 0)
-    assert all(sample.revision == 9 for sample in history)
-    assert all(
-        sample.generation == snapshot.ref.stream_generation.value
-        for sample in history
-    )
-    assert tuple(key[0].canonical for key in history[0].group_keys) == (
+    assert tuple(history.source_indices) == (-2, 0)
+    assert history.revision == 9
+    assert history.generation == snapshot.ref.stream_generation.value
+    assert tuple(key[0].canonical for key in history.group_keys) == (
         0.0,
         1.0,
         2.0,
     )
-    np.testing.assert_allclose(history[0].values, [np.nan] * 3, equal_nan=True)
-    np.testing.assert_array_equal(history[0].valid, [False] * 3)
-    np.testing.assert_array_equal(history[0].counts, [0] * 3)
-    np.testing.assert_allclose(history[1].values, [7.5, 8.5, 9.5])
-    np.testing.assert_array_equal(history[1].valid, [True] * 3)
-    np.testing.assert_array_equal(history[1].counts, [2] * 3)
-    np.testing.assert_allclose(history[1].sem, [1.5] * 3)
-    last = DataView(snapshot).rolling_history(
-        group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
-    )
+    np.testing.assert_allclose(history.values[0], [np.nan] * 3, equal_nan=True)
+    np.testing.assert_array_equal(history.valid[0], [False] * 3)
+    np.testing.assert_array_equal(history.counts[0], [0] * 3)
+    np.testing.assert_allclose(history.values[1], [7.5, 8.5, 9.5])
+    np.testing.assert_array_equal(history.valid[1], [True] * 3)
+    np.testing.assert_array_equal(history.counts[1], [2] * 3)
+    np.testing.assert_allclose(history.sem[1], [1.5] * 3)
+    # Last is the Scope every panel applies before its view: the record's
+    # category pinned to its last coordinate, then the ordinary mean.
+    last_spec = RollingPlot(group=AxisRef.cell_data("site"), reduction=Reduction.LAST)
+    session = PlotSession(snapshot, last_spec)
+    try:
+        last = session._view.rolling_history(
+            group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
+        )
+    finally:
+        session.close()
     assert tuple(last.source_indices) == (-2, 0)
     np.testing.assert_array_equal(last.valid[0], [False] * 3)
     np.testing.assert_allclose(last.values[1], [9.0, 10.0, 11.0])
@@ -284,11 +283,15 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
     stated = make_snapshot(indexed_schema, indexed_values, revision=9,
                            validity=indexed_valid, sigma=np.full(indexed_values.shape, 2.0))
     for engine in ("numpy", "auto"):
-        with monkeypatch.context() as active:
-            active.setattr(kernels, "ENGINE", engine)
-            result = DataView(stated).rolling_history(
-                group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
-            )
+        session = PlotSession(stated, last_spec)
+        try:
+            with monkeypatch.context() as active:
+                active.setattr(kernels, "ENGINE", engine)
+                result = session._view.rolling_history(
+                    group=AxisRef.cell_data("site"), aggregation=Reduction.LAST,
+                )
+        finally:
+            session.close()
         np.testing.assert_array_equal(result.sem[1], [2.0] * 3)
 
     # Flat storage carries only declared component masks and sample sigma;
@@ -325,16 +328,9 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups(monkeypa
     assert component_flat.block._materialized is None
 
     repeat = DataView(_snapshot(0, repeats=3)).rolling_history()
-    np.testing.assert_allclose(
-        [sample.values[0] for sample in repeat], [1.5, 5.5, 9.5]
-    )
-    np.testing.assert_array_equal(
-        [sample.counts[0] for sample in repeat], [4, 4, 4]
-    )
-    assert all(
-        sample.source_index is None and sample.group_keys == ((),)
-        for sample in repeat
-    )
+    np.testing.assert_allclose(repeat.values[:, 0], [1.5, 5.5, 9.5])
+    np.testing.assert_array_equal(repeat.counts[:, 0], [4, 4, 4])
+    assert repeat.source_indices is None and repeat.group_keys == ((),)
 
     # Record rows are already Rolling's X. Grouping by them used to allocate
     # records squared buckets, only the diagonal of which could be valid.

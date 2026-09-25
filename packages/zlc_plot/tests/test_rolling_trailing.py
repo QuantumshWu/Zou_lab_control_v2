@@ -12,7 +12,6 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-from matplotlib.collections import PolyCollection
 
 from data_factory import (
     axis,
@@ -25,8 +24,6 @@ from data_factory import (
 from zlc_data import DatasetSchema, OwnedSnapshot
 from zlc_plot import AxisRef, PlotSession, RollingPlot
 from zlc_plot.specs import Reduction
-
-import pytest
 
 def _schema(sites: int, repeats: int = 1) -> DatasetSchema:
     return make_dataset_schema(
@@ -55,59 +52,6 @@ def _trailing_mean(shots: np.ndarray, span: int) -> np.ndarray:
             for index in range(len(shots))
         ]
     )
-
-@pytest.mark.parametrize("uncertainty", (False, True))
-def test_a_trailing_point_is_the_mean_of_the_last_n_shots(uncertainty) -> None:
-    """Feed 0/1 occupancy shot by shot; each drawn point must equal the
-    mean over every sample the last N shots pooled, and its sem the sample
-    standard error of those -- which for booleans IS the binomial error."""
-
-    sites = 8
-    span = 10
-    rng = np.random.default_rng(21)
-    shots = (rng.random((30, sites)) < 0.4).astype(np.float64)
-    session = PlotSession(
-        _shots(shots),
-        RollingPlot(reduction=Reduction.MEAN),
-        parameters={"trailing": span, "uncertainty": uncertainty},
-    )
-    try:
-        series = session._projection._payload.series[0]
-        y = np.asarray(series.y.canonical)
-        np.testing.assert_allclose(y, _trailing_mean(shots, span), rtol=1e-12)
-        window = shots[-span:].reshape(-1)
-        expected_sem = float(np.std(window, ddof=1) / np.sqrt(window.size))
-        if uncertainty:
-            np.testing.assert_allclose(series.sem[-1], expected_sem, rtol=1e-12)
-        else:
-            assert series.sem is None
-    finally:
-        session.close()
-
-def test_a_span_longer_than_the_run_is_the_running_mean() -> None:
-    """The window fills from empty, so a trailing mean nobody has enough
-    shots for yet IS the mean of everything so far -- the trace settles
-    into its window with no discontinuity."""
-
-    sites = 4
-    rng = np.random.default_rng(7)
-    shots = (rng.random((9, sites)) < 0.5).astype(np.float64)
-    session = PlotSession(
-        _shots(shots),
-        RollingPlot(reduction=Reduction.MEAN),
-        parameters={"trailing": 1000, "uncertainty": True},
-    )
-    try:
-        series = session._projection._payload.series[0]
-        pooled = shots.reshape(-1)
-        k = np.arange(1, len(shots) + 1) * sites
-        running = np.cumsum(pooled)[k - 1] / k
-        np.testing.assert_allclose(
-            np.asarray(series.y.canonical), running, rtol=1e-12
-        )
-    finally:
-        session.close()
-
 
 def test_a_constant_trailing_window_has_exactly_zero_sem() -> None:
     """Combining shot moments must not resurrect roundoff as uncertainty."""
@@ -218,6 +162,9 @@ def test_trailing_matches_a_random_brute_force_oracle() -> None:
                         atol=3e-14,
                         equal_nan=True,
                     )
+                # Switched off, the band is not even computed.
+                session.set_parameter("uncertainty", False)
+                assert session._projection._payload.series[0].sem is None
             finally:
                 session.close()
     finally:
@@ -300,7 +247,7 @@ def test_window_bounds_the_samples_used_by_the_trailing_mean_and_sem() -> None:
             pooled.mean(), np.std(pooled, ddof=1) / np.sqrt(pooled.size),
         ), rtol=1e-12)
 
-def test_the_trailing_band_renders(tmp_path) -> None:
+def test_the_trailing_band_renders(error_bars) -> None:
     sites = 6
     rng = np.random.default_rng(3)
     shots = (rng.random((12, sites)) < 0.5).astype(np.float64)
@@ -311,17 +258,7 @@ def test_the_trailing_band_renders(tmp_path) -> None:
     )
     try:
         session._renderer.draw()
-        # A native prepared scene rasters the bars without artists; the
-        # curve band tests set the precedent -- materialize first, then
-        # assert on the public artists it builds back.
-        session._renderer._materialize_prepared_curve()
-        bands = [
-            artist
-            for axes in session._renderer.figure.axes
-            for artist in axes.collections
-            if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer")
-        ]
-        assert bands, "a trailing rolling trace must draw its sem bars"
+        assert error_bars(session), "a trailing rolling trace must draw its sem bars"
     finally:
         session.close()
 
@@ -349,7 +286,7 @@ def test_trailing_is_inert_on_a_non_mean_reduction() -> None:
     finally:
         session.close()
 
-def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
+def test_plain_rolling_uncertainty_is_each_shot_pooled_error(error_bars) -> None:
     """The survival-panel shape: uncertainty WITHOUT trailing draws each
     shot's own pooled standard error."""
 
@@ -370,181 +307,7 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
             )
             np.testing.assert_allclose(series.sem[index], expected, rtol=1e-12)
         session._renderer.draw()
-        # A native prepared scene rasters the bars without artists; the
-        # curve band tests set the precedent -- materialize first, then
-        # assert on the public artists it builds back.
-        session._renderer._materialize_prepared_curve()
-        bands = [
-            artist
-            for axes in session._renderer.figure.axes
-            for artist in axes.collections
-            if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer")
-        ]
-        assert bands, "plain rolling with uncertainty must draw the bars"
-    finally:
-        session.close()
-
-def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
-    """Three brackets: (repeat) x (points) x (data).
-
-    Pair and site are both dimensions of one atomic cell payload, so they
-    share the third bracket.  A READOUT_EVENT cell axis is instead a fact
-    about WHEN within one point, so it joins the points bracket after the
-    scan dimensions: (20) x (10x10x10x3) x (34).
-    """
-
-    from zlc_data import (
-        COMPONENT,
-        DomainSpec,
-        READOUT_EVENT,
-        SITE,
-        AxisId,
-        AxisSpec,
-        DatasetSchema as Schema,
-        REPEAT,
-        SCALAR_DOMAIN,
-        SPATIAL_X,
-        SPATIAL_Y,
-        ValidityContract,
-        ValueSchema,
-    )
-    from zlc_plot.semantics import schema_structure
-
-    def _schema_for(axes):
-        return Schema(
-            DomainSpec(
-                (1,),
-                (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 1),),
-                ((0,),),
-            ),
-            DomainSpec((1,), (), ()),
-            DomainSpec(tuple(axis.size for axis in axes), axes),
-            ValueSchema(
-                ValidityContract.components(axes[0].axis_id),
-                np.dtype("<f8"),
-                "1",
-            ),
-        )
-
-    categorical = _schema_for(
-        (
-            AxisSpec(AxisId("fs.pair"), "pair", COMPONENT, 3),
-            AxisSpec(AxisId("occ.site"), "site", SITE, 33),
-        )
-    )
-    groups = schema_structure(categorical)
-    assert tuple(tuple(name for name, _size in group) for group in groups) == (
-        ("cycle",),
-        (),
-        ("pair", "site"),
-    )
-
-    scanned = Schema(
-        DomainSpec(
-            (20,),
-            (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 20),),
-            (tuple(range(20)),),
-        ),
-        DomainSpec(
-            (8,),
-            tuple(
-                AxisSpec(AxisId(name), name, COMPONENT, 2, (0.0, 1.0))
-                for name in ("ax", "ay", "az")
-            ),
-            tuple(
-                tuple(cell[position] for cell in tuple(
-                    (i % 2, (i // 2) % 2, i // 4) for i in range(8)
-                ))
-                for position in range(3)
-            ),
-        ),
-        DomainSpec(
-            (3, 34),
-            (
-                AxisSpec(AxisId("cm.frame"), "frame", READOUT_EVENT, 3),
-                AxisSpec(AxisId("occ.site"), "site", SITE, 34),
-            ),
-        ),
-        ValueSchema(
-            ValidityContract.components(AxisId("occ.site")),
-            np.dtype("<f8"),
-            "1",
-        ),
-    )
-    groups = schema_structure(scanned)
-    assert tuple(tuple(name for name, _size in group) for group in groups) == (
-        ("cycle",),
-        ("ax", "ay", "az"),
-        ("frame", "site"),
-    )
-
-    picture = _schema_for(
-        (
-            AxisSpec(AxisId("cam.y"), "y", SPATIAL_Y, 4),
-            AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 5),
-        )
-    )
-    groups = schema_structure(picture)
-    assert tuple(tuple(name for name, _size in group) for group in groups) == (
-        ("cycle",),
-        (),
-        ("y", "x"),
-    )
-
-def test_labelled_axis_ticks_by_name() -> None:
-    """A pair/model axis ticks by its declared names -- the same names the
-    legend, hover and scope rows use -- never by bare indices."""
-
-    from zlc_data import (
-        COMPONENT,
-        SITE,
-        AxisId,
-        AxisSpec,
-        DatasetSchema as Schema,
-        DomainSpec,
-        REPEAT,
-        ValidityContract,
-        ValueSchema,
-        owned_snapshot_from_arrays,
-    )
-    from zlc_plot import CurvePlot
-
-    pair = AxisSpec(
-        AxisId("fs.pair"), "pair", COMPONENT, 3,
-        coordinate_labels=("0-1", "0-2", "1-2"),
-    )
-    site = AxisSpec(AxisId("occ.site"), "site", SITE, 5)
-    schema = Schema(
-        DomainSpec(
-            (8,),
-            (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 8),),
-            (tuple(range(8)),),
-        ),
-        DomainSpec((1,), (), ()),
-        DomainSpec((3, 5), (pair, site)),
-        ValueSchema(
-            ValidityContract.components(pair.axis_id, site.axis_id),
-            np.dtype("<f8"),
-            "1",
-        ),
-    )
-    rng = np.random.default_rng(0)
-    snapshot = owned_snapshot_from_arrays(
-        schema, (rng.random((8, 1, 3, 5)) < 0.5).astype("<f8"), 0
-    )
-    session = PlotSession(
-        snapshot,
-        CurvePlot(AxisRef.cell_data("fs.pair")),
-        parameters={"uncertainty": True},
-    )
-    try:
-        session._renderer.draw()
-        axes = session._renderer.figure.axes[0]
-        labels = [tick.get_text() for tick in axes.get_xticklabels()]
-        assert labels == ["0-1", "0-2", "1-2"]
-        series = session._projection._payload.series[0]
-        assert series.x_labels == ("0-1", "0-2", "1-2")
-        assert series.sem is not None
+        assert error_bars(session), "plain rolling with uncertainty must draw the bars"
     finally:
         session.close()
 
@@ -621,29 +384,6 @@ def test_trailing_only_uses_this_panels_window_even_when_more_is_retained() -> N
                 np.testing.assert_allclose(session._projection._payload.series[0].y.canonical, y)
                 own.resize(history_window_requirement(mean, {"window": 10, "trailing": 50}))
                 assert own.window == 10
-                if retained == 10:
-                    from zlc_plot.data_view import DataView
-
-                    previous = session._projection._view
-                    assert previous._rolling_carry is not None
-                    previous._segment_arrays()
-                    own.resize(1)
-                    latest = plane.current_dataset("rolling/value")
-                    assert indexed_history_layout(latest.block.schema).shot_count == 1
-                    current = DataView(latest, inherit_domains_from=previous)
-                    history = current.rolling_history(uncertainty=previous._rolling_carry[0][2])
-                    np.testing.assert_array_equal(history.values, [[19.0]])
-                    assert current._rolling_carry[-1] is current._snapshot
-                    assert len(current._snapshot.block.segments) == 1
-                    assert current._packed_carry is None
-                    assert current._packed_segments is None  # All statistics were reused.
-                    current._segment_arrays()
-                    own.close()
-                    latest = plane.current_dataset("rolling/value")
-                    assert indexed_history_layout(latest.block.schema) is None
-                    current = DataView(latest, inherit_domains_from=current)
-                    assert current._rolling_carry is None
-                    assert current._packed_carry is None
             finally:
                 session.close()
             other.close()
@@ -673,7 +413,7 @@ def test_a_window_with_no_valid_shot_has_an_empty_distribution() -> None:
         ]
         assert counts and max(counts) == 0.0
         readout = next(value for key, value in renderer._artists.items() if key.endswith(":latest"))
-        assert readout.get_text() == ""
+        assert readout.get_text() == "\N{EM DASH}"
         session.update_data(_shots(np.asarray([[1.0], [3.0], [np.nan]]), revision=1))
         assert readout.get_text() == "3"
     finally:

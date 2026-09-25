@@ -90,6 +90,13 @@ def test_controller_cancel_restores_committed_and_allows_one_kind_each() -> None
     assert controller.candidate_state() is None
     with pytest.raises(KeyError):
         controller.state(SelectorKind.THRESHOLD)
+    # Taking the committed geometry away -- how the threshold classifier
+    # repaints its line every frame -- never ends a drag of it.
+    controller.pointer_down(SelectorKind.AREA, 1.5, 3.5, handle=DragHandle.BODY)
+    controller.remove(SelectorKind.AREA)
+    assert controller.pointer_move(
+        4, 5, x_bounds=NumericRange(0, 10), y_bounds=NumericRange(0, 10)
+    ) is not None
 
 def test_backend_neutral_gesture_geometry_has_one_authority() -> None:
     value = NumericRange(2.0, 8.0)

@@ -182,11 +182,7 @@ def test_replacing_the_spec_keeps_the_promise_too() -> None:
         # carry, then ask for the replacement every kind change performs.
         held = dict(session.display_state.values)
         held["color_max"] = None
-        prepared = session._prepare_replacement(
-            session._spec,
-            held,
-            session._size or session.surface_plan.preset,
-        )
+        prepared = session._prepare_replacement(session._spec, held)
         store = prepared[2]
         assert store.state.values["color_max"] is not None, (
             "the replacement store took a gap the picture could have filled"

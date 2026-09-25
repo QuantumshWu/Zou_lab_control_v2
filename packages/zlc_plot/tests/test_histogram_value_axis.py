@@ -43,20 +43,7 @@ def _edges(session: PlotSession) -> np.ndarray:
     return np.asarray(session._payload.edges.display)
 
 
-def test_a_fixed_value_axis_is_not_widened_by_the_data() -> None:
-    session = PlotSession(_snapshot(1, 10.0), HistogramPlot())
-    try:
-        session.set_parameters(
-            {"bin_count": 10, "x_relim_mode": "fixed", "x_min": 0.0, "x_max": 100.0}
-        )
-        assert (_edges(session)[0], _edges(session)[-1]) == (0.0, 100.0)
-        session.update_data(_snapshot(2, 500.0))
-        assert (_edges(session)[0], _edges(session)[-1]) == (0.0, 100.0)
-    finally:
-        session.close()
-
-
-def test_a_fixed_value_axis_takes_a_new_limit_afterwards() -> None:
+def test_a_fixed_value_axis_is_not_widened_and_takes_a_new_limit_afterwards() -> None:
     """Retention is what NORMAL means; written as "not tight" it ate this."""
 
     session = PlotSession(_snapshot(1, 10.0), HistogramPlot())
@@ -64,7 +51,10 @@ def test_a_fixed_value_axis_takes_a_new_limit_afterwards() -> None:
         session.set_parameters(
             {"bin_count": 10, "x_relim_mode": "fixed", "x_min": 0.0, "x_max": 100.0}
         )
+        assert (_edges(session)[0], _edges(session)[-1]) == (0.0, 100.0)
         session.update_data(_snapshot(2, 500.0))
+        # The data outgrew the fixed axis; the axis keeps its word.
+        assert (_edges(session)[0], _edges(session)[-1]) == (0.0, 100.0)
         session.set_parameters(
             {"bin_count": 10, "x_relim_mode": "fixed", "x_min": 0.0, "x_max": 20.0}
         )
@@ -102,6 +92,9 @@ def test_a_written_limit_means_the_number_on_the_axis() -> None:
             }
         )
         assert (_edges(session)[0], _edges(session)[-1]) == (0.0, 10.0)
+        # A later unit change keeps the same physical range: ten ms is 0.01 s.
+        session.set_parameters({"value_display_unit": "s"})
+        assert np.allclose((_edges(session)[0], _edges(session)[-1]), (0.0, 0.01))
     finally:
         session.close()
 

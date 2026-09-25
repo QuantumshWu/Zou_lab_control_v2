@@ -120,16 +120,3 @@ def test_semantic_spec_has_one_authority() -> None:
     # The authority itself must still be found: a guard that passes because
     # its detector matches nothing at all guards nothing.
     assert [(site[0], site[2]) for site in sites] == [AUTHORITY], sites
-
-
-def test_the_authority_is_what_every_owner_delegates_to() -> None:
-    """Renderer, session and projection expose it; none re-implement it."""
-
-    from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, ImagePlot
-    from zlc_plot.specs import semantic_spec
-
-    cell = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
-    grid = FacetGridPlot(AxisRef.repeat("repeat"), cell)
-    curve = CurvePlot(AxisRef.point("x"))
-    assert semantic_spec(grid) is cell
-    assert semantic_spec(curve) is curve

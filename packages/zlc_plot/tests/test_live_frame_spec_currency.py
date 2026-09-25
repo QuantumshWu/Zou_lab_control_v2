@@ -18,7 +18,6 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-import pytest
 
 from data_factory import (
     axis,
@@ -27,7 +26,7 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
-from zlc_data import REPEAT, SITE
+from zlc_data import SITE
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, HistogramPlot, PlotSession
 
 def _snapshot(revision: int):
@@ -58,7 +57,7 @@ def test_a_frame_prepared_under_the_old_spec_is_refused() -> None:
 
         # Then they hand x to another axis: a NEW spec, and with it a new
         # projection and payload.
-        session.apply_semantic("fate:point:ay", "x")
+        session.configure(semantic={"fate:point:ay": "x"})
         current_spec = session.spec
 
         # The in-flight frame must not land its old-spec payload here.
@@ -67,23 +66,6 @@ def test_a_frame_prepared_under_the_old_spec_is_refused() -> None:
 
         # And the session is still one accepted view: the thing that used to
         # break -- asking for the selection subject -- works.
-        session._selection_subject()
-    finally:
-        session.close()
-
-def test_a_frame_prepared_under_the_current_spec_still_commits() -> None:
-    """The refusal is about the SPEC, not about live frames."""
-
-    session = PlotSession(
-        _snapshot(1),
-        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("ax"))),
-    )
-    try:
-        prepared = session.prepare_live_frame(_snapshot(2)).result(timeout=20)
-        finalization = session.commit_live_frame(prepared)
-        assert finalization is not None
-        session.publish_live_frame(finalization)
-        assert session.data_revision == 2
         session._selection_subject()
     finally:
         session.close()

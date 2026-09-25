@@ -188,7 +188,11 @@ CASES = [
     [(factory, spec) for _, factory, spec in CASES],
     ids=[case_id for case_id, _, _ in CASES],
 )
-def test_passing_validate_implies_the_projection_builds(make_snapshot, spec) -> None:
+def test_passing_validate_implies_the_projection_and_a_session_build(make_snapshot, spec) -> None:
+    """One ruling, three authorities: whatever validation admits, the
+    DataView projection builds and a full session constructs and renders;
+    whatever it refuses, both refuse."""
+
     snapshot = make_snapshot()
     view = DataView(snapshot)
 
@@ -198,31 +202,13 @@ def test_passing_validate_implies_the_projection_builds(make_snapshot, spec) -> 
     except (DataViewError, TypeError, ValueError):
         admitted = False
 
-    if admitted:
-        _project(view, spec)  # must not raise: admission IS buildability
-        return
-    with pytest.raises((DataViewError, TypeError, ValueError)):
-        _project(view, spec)
-
-@pytest.mark.parametrize(
-    "make_snapshot, spec",
-    [(factory, spec) for _, factory, spec in CASES],
-    ids=[case_id for case_id, _, _ in CASES],
-)
-def test_passing_validate_implies_a_session_constructs(make_snapshot, spec) -> None:
-    """The same contract one level up: the session builds and renders."""
-
-    snapshot = make_snapshot()
-    admitted = True
-    try:
-        _validate(DataView(snapshot), spec)
-    except (DataViewError, TypeError, ValueError):
-        admitted = False
-
     if not admitted:
+        with pytest.raises((DataViewError, TypeError, ValueError)):
+            _project(view, spec)
         with pytest.raises((DataViewError, TypeError, ValueError)):
             PlotSession(make_snapshot(), spec).close()
         return
+    _project(view, spec)  # must not raise: admission IS buildability
     session = PlotSession(snapshot, spec)
     try:
         assert session.rgba().size

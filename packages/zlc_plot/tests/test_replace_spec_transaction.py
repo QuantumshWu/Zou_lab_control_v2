@@ -18,6 +18,7 @@ from data_factory import (
     mapped_domain_from_columns,
     repeat_domain,
 )
+from zlc_plot.data_view import DataViewError
 from zlc_plot.kinds import PlotKind
 from zlc_plot.selectors import NumericRange
 
@@ -123,7 +124,7 @@ def test_projection_rejected_replace_is_untouched_precommit(logical_shape) -> No
         # projection layer rejects before any state is touched.  (x=repeat
         # is NOT a rejection any more: an axis this spec does not name pools
         # under the declared reduction, point axis included.)
-        with pytest.raises(Exception):
+        with pytest.raises(DataViewError, match="undeclared"):
             session.replace_spec(CurvePlot(AxisRef.point("undeclared")))
         description = session.describe_display()
         assert description.semantics.kind is PlotKind.CURVE

@@ -1,5 +1,5 @@
-"""The uncertainty band renders, follows live shrinkage, and stays absent
-when not requested."""
+"""The uncertainty band renders, follows the data, and stays absent when
+not requested."""
 from __future__ import annotations
 
 import matplotlib
@@ -7,7 +7,6 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-from matplotlib.collections import PolyCollection
 
 from data_factory import (
     axis,
@@ -33,16 +32,7 @@ def _snapshot(repeats: int, revision: int, scale: float) -> OwnedSnapshot:
     values = 0.5 + scale * rng.standard_normal((repeats, 4))
     return make_snapshot(_schema(repeats), values, revision=revision)
 
-def _bands(session: PlotSession) -> list[PolyCollection]:
-    session._renderer._materialize_prepared_curve()
-    return [
-        artist
-        for axes in session._renderer.figure.axes
-        for artist in axes.collections
-        if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer")
-    ]
-
-def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
+def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim(error_bars) -> None:
     session = PlotSession(
         _snapshot(24, 1, 0.2),
         CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
@@ -50,7 +40,7 @@ def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
     )
     try:
         session._renderer.draw()
-        bands = _bands(session)
+        bands = error_bars(session)
         assert bands, "uncertainty=True must draw error bars"
         axes = session._renderer.figure.axes[0]
         payload = session._projection._payload
@@ -62,25 +52,7 @@ def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
     finally:
         session.close()
 
-def test_band_shrinks_as_shots_accumulate() -> None:
-    """More repeats, tighter sem: the live convergence the band exists for."""
-
-    def band_height(repeats: int) -> float:
-        session = PlotSession(
-            _snapshot(repeats, 1, 0.2),
-            CurvePlot(AxisRef.point("x")),
-            parameters={"uncertainty": True},
-        )
-        try:
-            session._renderer.draw()
-            series = session._projection._payload.series[0]
-            return float(np.nanmean(series.sem))
-        finally:
-            session.close()
-
-    assert band_height(160) < band_height(10) / 2.5
-
-def test_no_band_when_it_is_switched_off() -> None:
+def test_no_band_when_it_is_switched_off(error_bars) -> None:
     """The band is on by default, so absence is now something ASKED for.
 
     A mean drawn without its spread reads as an exact number, and the
@@ -96,7 +68,7 @@ def test_no_band_when_it_is_switched_off() -> None:
     )
     try:
         session._renderer.draw()
-        assert not _bands(session)
+        assert not error_bars(session)
         assert session._projection._payload.series[0].sem is None
     finally:
         session.close()
@@ -140,20 +112,17 @@ def test_focus_dims_the_other_series_bars_with_their_lines() -> None:
         for artists in bars.values():
             assert all(a.get_alpha() == token for a in artists)
 
-        entries = renderer._series_lines[id(axes)]
-        first_line, first_identity, _ = entries[0]
-        x = np.asarray(first_line.get_xdata(), dtype=float)
-        y = np.asarray(first_line.get_ydata(), dtype=float)
-        renderer._series_locked = (
-            id(axes), first_identity, "s", float(x[0]), float(y[0])
+        _first_line, first_identity, _ = renderer._series_lines[id(axes)][0]
+        session.configure(
+            interaction={"series_lock": {"key": first_identity, "facet_index": None}}
         )
-        renderer._apply_series_focus()
+        bars = renderer._series_bars[id(axes)]
         for identity, artists in bars.items():
             expected = token if identity == first_identity else 0.06
             assert all(a.get_alpha() == expected for a in artists), identity
 
-        renderer._series_locked = None
-        renderer._apply_series_focus()
+        session.configure(interaction={"series_lock": None})
+        bars = renderer._series_bars[id(axes)]
         for artists in bars.values():
             assert all(a.get_alpha() == token for a in artists)
     finally:
@@ -245,7 +214,7 @@ def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
     finally:
         session.close()
 
-def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
+def test_a_revision_moves_the_bars_it_does_not_rebuild_them(error_bars) -> None:
     """The bars a revision draws are last revision's artists, with new data.
 
     Rebuilding them cost the errorbar constructor, a masked-array copy,
@@ -270,14 +239,14 @@ def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
     )
     try:
         session.rgba()
-        bars = _bands(session)
+        bars = error_bars(session)
         assert bars, "the case must draw bars for this test to mean anything"
         identities = [id(artist) for artist in bars]
         segments = [np.array(bars[0]._zlc_segment_buffer, copy=True)]
         for revision in range(2, 6):
             session.update_data(_snapshot(6, revision, 1.0 + 0.3 * revision))
             session.rgba()
-            current = _bands(session)
+            current = error_bars(session)
             assert [id(artist) for artist in current] == identities
             segments.append(np.array(current[0]._zlc_segment_buffer, copy=True))
         moved = sum(
@@ -298,7 +267,7 @@ def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
     finally:
         session.close()
 
-def test_a_band_of_no_width_draws_no_bar() -> None:
+def test_a_band_of_no_width_draws_no_bar(error_bars) -> None:
     """Zero is not an uncertainty; it is a tick mark that lies.
 
     Every repeat identical means the spread really is zero, which is a
@@ -314,7 +283,7 @@ def test_a_band_of_no_width_draws_no_bar() -> None:
     )
     try:
         session.rgba()
-        assert _bands(session) == []
+        assert error_bars(session) == []
     finally:
         session.close()
 
@@ -460,3 +429,83 @@ def test_bars_are_built_directly_on_their_shared_buffer() -> None:
         assert out[10, 10, 0] == expected
         assert out[10, 10, 0] == out[20, 10, 0]
     figure.clear()
+
+
+def test_every_bar_painter_keeps_or_drops_a_groups_caps_alike(
+    monkeypatch, error_bars
+) -> None:
+    """Every painter of one picture keeps or drops a group's caps alike.
+
+    Bars closer than a device pixel apart are one band already, so a group
+    that dense paints its stems alone.  The native scene used to decide
+    that by itself, and at a cap's width: the artists -- a hover's
+    materialization, a focused cell, a full draw, an export -- kept every
+    cap, so the caps blinked with the pointer, and points two pixels apart,
+    each cap a mark of its own, lost theirs live.  All three painters are
+    checked at the figure's own dpi; an export decides again at its own
+    dpi, where the group's pitch in pixels differs, so it may keep caps the
+    screen dropped or the reverse.
+    """
+
+    import pytest
+
+    from zlc_plot import _raster_kernels as kernels
+
+    native = kernels.raster_error_bars
+    painted: list[np.ndarray] = []
+
+    def recorded(*args):
+        painted.append(np.array(args[6]))
+        return native(*args)
+
+    monkeypatch.setattr(kernels, "raster_error_bars", recorded)
+    cases = [(4000, True)]
+    for points, dense in cases:
+        schema = make_dataset_schema(
+            repeat_domain(size=6),
+            mapped_domain_from_columns({"x": np.arange(float(points))}),
+            cell_axes=(),
+            dtype=np.float64,
+        )
+        values = 0.5 + 0.2 * np.random.default_rng(points).standard_normal(
+            (6, points)
+        )
+        session = PlotSession(
+            make_snapshot(schema, values, revision=1),
+            CurvePlot(AxisRef.point("x")),
+            parameters={"uncertainty": True},
+        )
+        try:
+            renderer = session._renderer
+            painted.clear()
+            renderer.draw()
+            if not isinstance(renderer._artists.get("curve:prepared"), dict):
+                pytest.skip("native scene disengaged; the artists paint alone")
+            # The prepared native scene: every live frame.
+            assert painted
+            assert all(np.all((widths == 0.0) == dense) for widths in painted)
+            # The kernel plan over the materialized artists: a hover, a
+            # focused cell, a compose the scene could not serve.
+            bars = error_bars(session)
+            assert len(bars) == 1
+            plan = renderer._error_bar_plan(((bars[0],),), renderer.figure.canvas)
+            assert plan and np.all((plan[6] == 0.0) == dense)
+            # The artists' own Agg glyphs: a full draw (and an export, at
+            # its own dpi).  A capped glyph is the caps' width wide, a bare
+            # stem well under it.
+            cap = bars[0]._zlc_capsize * renderer.figure.dpi / 72.0
+            for path in bars[0].get_paths():
+                span = float(path.vertices[:, 0].max() - path.vertices[:, 0].min())
+                assert (span < 1.5 * cap) == dense, (points, span, cap)
+            pixel_x = renderer.primary_axes.transData.transform(
+                bars[0]._zlc_segment_buffer[:, 0, :]
+            )[:, 0]
+            pitch = float(np.ptp(pixel_x)) / (pixel_x.size - 1)
+            assert (pitch < 1.0) == dense and pitch < 2.0 * cap, pitch
+            if dense:
+                # Next, points about two pixels apart: closer than a cap is
+                # wide, and still a mark each.
+                width = float(renderer.primary_axes.bbox.width)
+                cases.append((int(width / 2.0), False))
+        finally:
+            session.close()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import time
 
 import numpy as np
 import pytest
@@ -45,15 +44,17 @@ class _RecordingFitEngine(FitEngine):
         return super().fit(model, coordinates, observations, **kwargs)
 
 
-class _FailOnceFitEngine(_RecordingFitEngine):
+class _RaiseOnceFitEngine(_RecordingFitEngine):
+    """Raise the armed error for exactly one solve, then delegate."""
+
     def __init__(self) -> None:
         super().__init__()
-        self.fail_next = False
+        self.raise_next: BaseException | None = None
 
     def fit(self, model, coordinates, observations=None, **kwargs):  # type: ignore[no-untyped-def]
-        if self.fail_next:
-            self.fail_next = False
-            raise RuntimeError("forced warm-start failure")
+        error, self.raise_next = self.raise_next, None
+        if error is not None:
+            raise error
         return super().fit(model, coordinates, observations, **kwargs)
 
 
@@ -234,26 +235,17 @@ def test_live_fit_overlay_lands_in_the_same_committed_front() -> None:
         session.close()
 
 
-class _DeadlineOnceFitEngine(_RecordingFitEngine):
-    """Raise FitDeadlineExceeded for exactly one solve, then delegate."""
+@pytest.mark.parametrize(
+    "error_type", (RuntimeError, FitDeadlineExceeded), ids=("solver-exception", "deadline")
+)
+def test_a_failed_pair_is_loud_and_keeps_the_previous_pair(error_type) -> None:
+    """A failed solve cannot turn an armed revision into an unpaired data front.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.deadline_next = False
+    A solver exception also drops the warm start it may have come from; a
+    deadline says nothing against the start, so it stays a candidate.
+    """
 
-    def fit(self, model, coordinates, observations=None, **kwargs):  # type: ignore[no-untyped-def]
-        if self.deadline_next:
-            self.deadline_next = False
-            from zlc_plot.fit import FitDeadlineExceeded
-
-            raise FitDeadlineExceeded("forced live-fit deadline")
-        return super().fit(model, coordinates, observations, **kwargs)
-
-
-def test_deadline_exceeded_pair_is_loud_and_keeps_the_previous_pair() -> None:
-    """A deadline cannot turn an armed revision into an unpaired data front."""
-
-    engine = _DeadlineOnceFitEngine()
+    engine = _RaiseOnceFitEngine()
     session = PlotSession(
         _dense_facet_snapshot(),
         CurvePlot(AxisRef.point("x")),
@@ -262,14 +254,15 @@ def test_deadline_exceeded_pair_is_loud_and_keeps_the_previous_pair() -> None:
     try:
         first = session.fit("gaussian_offset", live=True)
         assert first.success
-        engine.deadline_next = True
+        engine.raise_next = error_type("forced pair failure")
         prepared = session.prepare_live_frame(
             _dense_facet_snapshot(revision=1, scale=1.001)
         ).result(timeout=10.0)
         solve = session.solve_live_frame(prepared)
         assert solve is not None
-        with pytest.raises(FitDeadlineExceeded, match="forced live-fit deadline"):
+        with pytest.raises(error_type, match="forced pair failure"):
             solve.result(timeout=10.0)
+        assert engine.raise_next is None
         assert session.data_revision == 0
         assert session.last_fit is first
         _present_and_wait(
@@ -277,6 +270,7 @@ def test_deadline_exceeded_pair_is_loud_and_keeps_the_previous_pair() -> None:
             _dense_facet_snapshot(revision=1, scale=1.002),
             1,
         )
+        assert (engine.warm_starts[-1] is None) == (error_type is RuntimeError)
     finally:
         session.close()
 
@@ -436,25 +430,66 @@ def test_bad_accepted_image_seed_still_competes_with_current_data() -> None:
         session.close()
 
 
-def test_failed_fit_result_drops_the_remembered_seed() -> None:
-    """An unsuccessful result leaves no candidate for the next solve."""
+def test_warm_start_is_extra_candidate_not_an_early_success_exit(monkeypatch) -> None:
+    """The SciPy route: a successful warm seed that fits badly still competes."""
 
-    session = PlotSession(
-        _blob_image_snapshot(((64.0, 48.0, 3000.0),), revision=0),
-        _image_spec(),
+    from importlib import import_module
+    from types import SimpleNamespace
+
+    from zlc_plot.fit import FitModelSpec, FitParameterSpec, FitTarget, VALUE
+
+    def evaluator(x, value):
+        return np.asarray(x, dtype=float) * float(value)
+
+    def initializer(_coordinates, _values):
+        return (0.0,)
+
+    def candidates(_coordinates, _values):
+        return ((1.0,), (0.0,))
+
+    model = FitModelSpec(
+        "warm_candidate_test",
+        "Warm candidate test",
+        1,
+        (FitParameterSpec("value", VALUE),),
+        "value",
+        evaluator,
+        initializer,
+        (FitTarget.SERIES,),
+        candidate_initializer=candidates,
     )
-    try:
-        accepted = session.fit("radial_gaussian_center", live=True)
-        assert accepted.success
-        generation = session._fit_request_generation
-        key = (generation, "radial_gaussian_center", None)
-        assert key in session._fit_warm_starts
-        session._remember_fit_warm_starts(
-            replace(accepted, success=False), request_generation=generation,
+
+    def fake_least_squares(_residual, x0, **_kwargs):
+        x0 = np.asarray(x0, dtype=float)
+        good = np.isclose(x0[0], 1.0)
+        fun = np.zeros(5) if good else np.ones(5)
+        # SciPy's result carries the minimised cost beside the residual;
+        # candidates compete on it, so the double reports it the same way.
+        return SimpleNamespace(
+            success=True,
+            message="ok",
+            x=x0,
+            fun=fun,
+            cost=0.5 * float(np.dot(fun, fun)),
+            jac=np.ones((5, 1)),
         )
-        assert key not in session._fit_warm_starts
-    finally:
-        session.close()
+
+    # Where the solver LIVES: the engine imports it inside the function
+    # that solves, so that reading the catalogue costs no scipy, and there
+    # is no copy bound onto the engine's module to replace instead.
+    monkeypatch.setattr(
+        import_module("scipy.optimize"), "least_squares", fake_least_squares
+    )
+    fit_module = import_module("zlc_plot.fit")
+    registry = fit_module.FitModelRegistry((model,))
+    result = FitEngine(registry).fit(
+        model,
+        (np.ones(5),),
+        np.zeros(5),
+        warm_start=(0.0,),
+    )
+    assert result.success
+    assert np.allclose(result.parameter_values, [1.0])
 
 
 # --- the pair solve runs unbudgeted; only caller deadlines apply -------------
@@ -508,36 +543,5 @@ def test_pair_solves_carry_no_library_deadline() -> None:
             2,
         )
         assert engine.deadlines[-1] == 2.5
-    finally:
-        session.close()
-
-
-def test_fit_warm_cache_is_cleared_after_solver_exception() -> None:
-    engine = _FailOnceFitEngine()
-    session = PlotSession(
-        _dense_facet_snapshot(),
-        CurvePlot(AxisRef.point("x")),
-        fit_engine=engine,
-    )
-    try:
-        first = session.fit("gaussian_offset", live=True)
-        assert first.success
-        engine.fail_next = True
-        prepared = session.prepare_live_frame(
-            _dense_facet_snapshot(revision=1, scale=1.001)
-        ).result(timeout=10.0)
-        solve = session.solve_live_frame(prepared)
-        assert solve is not None
-        with pytest.raises(RuntimeError, match="forced warm-start failure"):
-            solve.result(timeout=10.0)
-        assert not engine.fail_next
-        assert session.data_revision == 0
-        assert session.last_fit is first
-        _present_and_wait(
-            session,
-            _dense_facet_snapshot(revision=1, scale=1.002),
-            1,
-        )
-        assert engine.warm_starts[-1] is None
     finally:
         session.close()

@@ -160,22 +160,3 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     assert dense is not None, "a tensor/factored path must actually engage here"
     generic = _numpy_projection(view, "facet", spec)
     _assert_facets_equal(dense, generic)
-
-@pytest.mark.parametrize(
-    "spec,bins",
-    [
-        (FacetGridPlot(AxisRef.point("bias_x"), _IMAGE_CELL), None),
-        (FacetGridPlot(AxisRef.cell_data("sy"), HistogramPlot()), _EDGES),
-    ],
-)
-def test_facet_projection_takes_the_dense_tensor_path(
-    monkeypatch, spec, bins
-) -> None:
-    """facet() must use a tensor/factored owner, not materialize positions."""
-
-    view = DataView(_scan_of_frames())
-
-    view.facet(spec, bins=bins)
-    for resolved in view._axis_cache.values():
-        if resolved.retained_domain is not None:
-            assert resolved.retained_domain.codes.size == view._schema.physical_shape[resolved.dimension]

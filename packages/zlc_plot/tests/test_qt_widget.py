@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,87 +15,18 @@ from data_factory import (
     repeat_domain,
 )
 
-from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import (
     AxisRef,
     CurvePlot,
     FacetGridPlot,
     Qt5PlotWidget,
-    ensure_qt5_application,
 )
 from zlc_plot.raster import RasterPlotHost
 
 @pytest.mark.gui
-def test_bound_plot_controls_never_wait_for_the_raster_worker() -> None:
-    from concurrent.futures import Future
-    from threading import Thread, get_ident
-    from types import SimpleNamespace
-
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5 import QtCore
-        from zlc_plot.qt_controls import _qt5_bound_controls_class
-    except Exception as error:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
-
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"x": (0.0, 1.0)}),
-        dtype=np.float64,
-    )
-    host = RasterPlotHost.from_plot(
-        make_snapshot(schema, np.asarray([[0.0, 1.0]]), 0),
-        CurvePlot(AxisRef.point("x")),
-    )
-
-    owner_thread = get_ident()
-
-    class GuardedFuture(Future):
-        def result(self, *args, **kwargs):
-            assert get_ident() != owner_thread, (
-                "Qt owner resolved a plot operation instead of receiving plain data"
-            )
-            return super().result(*args, **kwargs)
-
-    pending = GuardedFuture()
-    proxy = SimpleNamespace(
-        describe_display=lambda: pending,
-        set_parameter=lambda _name, _value: GuardedFuture(),
-        apply_semantic=lambda _name, _value: GuardedFuture(),
-    )
-    controls = None
-    try:
-        description = host.describe_display().result(timeout=10).value
-        controls = _qt5_bound_controls_class()(proxy)
-        owner_turned: list[bool] = []
-        QtCore.QTimer.singleShot(0, lambda: owner_turned.append(True))
-        app.processEvents()
-        assert owner_turned
-        assert controls.panel is None
-
-        resolver = Thread(
-            target=lambda: pending.set_result(SimpleNamespace(value=description))
-        )
-        resolver.start()
-        resolver.join()
-        deadline = time.monotonic() + 2.0
-        while controls.panel is None and time.monotonic() < deadline:
-            app.processEvents()
-            time.sleep(0.005)
-        assert controls.panel is not None
-    finally:
-        if controls is not None:
-            controls.close()
-        host.close(timeout=10)
-
-@pytest.mark.gui
-def test_qt_widget_receives_front_and_commits_area_drag() -> None:
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5.QtCore import QEvent, QPoint, Qt
-        from PyQt5.QtTest import QTest
-    except Exception as error:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+def test_qt_widget_receives_front_and_commits_area_drag(qt_app, pump_until) -> None:
+    from PyQt5.QtCore import QEvent, QPoint, Qt
+    from PyQt5.QtTest import QTest
 
     # TWO series on purpose.  The hover below is here to prove a pointer
     # event round-trips to the worker and comes back as a new front, and
@@ -128,10 +58,7 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         host.wait_for_front = forbidden_wait
         widget = Qt5PlotWidget(host)
         widget.show()
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and widget.presented_front is None:
-            app.processEvents()
-            time.sleep(0.005)
+        pump_until(lambda: widget.presented_front is not None, 10.0)
         assert widget.presented_front is not None
 
         class WheelEvent:
@@ -160,22 +87,12 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         hover = QPoint(round(nx * width), round(ny * height))
         sequence = widget.presented_front.identity.sequence
         QTest.mouseMove(widget, hover, delay=10)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            app.processEvents()
-            if widget.presented_front.identity.sequence > sequence:
-                break
-            time.sleep(0.01)
+        pump_until(lambda: widget.presented_front.identity.sequence > sequence, 3.0)
         assert widget.presented_front.identity.sequence > sequence
 
         sequence = widget.presented_front.identity.sequence
-        app.sendEvent(widget, QEvent(QEvent.Leave))
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            app.processEvents()
-            if widget.presented_front.identity.sequence > sequence:
-                break
-            time.sleep(0.01)
+        qt_app.sendEvent(widget, QEvent(QEvent.Leave))
+        pump_until(lambda: widget.presented_front.identity.sequence > sequence, 3.0)
         assert widget.presented_front.identity.sequence > sequence
 
         start = QPoint(max(2, width // 3), max(2, height // 3))
@@ -183,13 +100,13 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         QTest.mousePress(widget, Qt.LeftButton, pos=start)
         QTest.mouseMove(widget, end, delay=10)
         QTest.mouseRelease(widget, Qt.LeftButton, pos=end)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            app.processEvents()
-            current = widget.presented_front
-            if current is not None and any(item.kind.value == "area" for item in current.interaction.selectors):
-                break
-            time.sleep(0.01)
+        pump_until(
+            lambda: widget.presented_front is not None and any(
+                item.kind.value == "area"
+                for item in widget.presented_front.interaction.selectors
+            ),
+            3.0,
+        )
         current = widget.presented_front
         assert current is not None
         assert any(item.kind.value == "area" for item in current.interaction.selectors)
@@ -199,12 +116,8 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         host.close(timeout=10)
 
 @pytest.mark.gui
-def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5 import QtCore, QtGui, QtTest
-    except Exception as error:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+def test_staged_widget_accepts_its_exact_current_front_idempotently(qt_app) -> None:
+    from PyQt5 import QtCore, QtGui, QtTest
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -234,7 +147,7 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
         assert widget.present_front(current) is False
         assert widget.presented_front is newer
 
-        widget.show(); app.processEvents()
+        widget.show(); qt_app.processEvents()
         nx, ny = newer.interaction.axes[0].display_to_normalized(1.0, 2.0)
         start = QtCore.QPointF(nx * widget.width(), ny * widget.height())
         end = start + QtCore.QPointF(12.0, 8.0)
@@ -242,7 +155,7 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
             (QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.MiddleButton),
             (QtCore.QEvent.MouseMove, end, QtCore.Qt.NoButton),
         ):
-            app.sendEvent(widget, QtGui.QMouseEvent(
+            qt_app.sendEvent(widget, QtGui.QMouseEvent(
                 kind, point, button, QtCore.Qt.MiddleButton, QtCore.Qt.NoModifier))
         host.describe_display().result(timeout=10); QtTest.QTest.qWait(20)
         panned = widget.presented_front
@@ -256,10 +169,10 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
         )).result(timeout=10).front
         QtTest.QTest.qWait(20)
         assert widget.presented_front.identity.data_revision == 0
-        app.sendEvent(widget, QtGui.QMouseEvent(
+        qt_app.sendEvent(widget, QtGui.QMouseEvent(
             QtCore.QEvent.MouseButtonRelease, end, QtCore.Qt.MiddleButton,
             QtCore.Qt.NoButton, QtCore.Qt.NoModifier))
-        app.sendEvent(widget, QtGui.QWheelEvent(
+        qt_app.sendEvent(widget, QtGui.QWheelEvent(
             end, QtCore.QPointF(widget.mapToGlobal(end.toPoint())),
             QtCore.QPoint(), QtCore.QPoint(0, 120), QtCore.Qt.NoButton,
             QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False))
@@ -274,7 +187,7 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently() -> None:
         host.close(timeout=10)
 
 @pytest.mark.gui
-def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
+def test_qt_double_click_focus_repaints_a_static_facet_host(qt_app, pump_until) -> None:
     """The focus-rendered front supersedes the in-flight gesture's surface.
 
     ``_install_front`` used to drop the focused front because the layout
@@ -285,12 +198,8 @@ def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
     gesture front's is the focus transition itself and must repaint.
     """
 
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5.QtCore import QPoint, Qt
-        from PyQt5.QtTest import QTest
-    except Exception as error:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+    from PyQt5.QtCore import QPoint, Qt
+    from PyQt5.QtTest import QTest
 
     from zlc_data import SPATIAL_X, SPATIAL_Y
     from data_factory import (
@@ -330,10 +239,7 @@ def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
     try:
         widget = Qt5PlotWidget(host)
         widget.show()
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and widget.presented_front is None:
-            app.processEvents()
-            time.sleep(0.005)
+        pump_until(lambda: widget.presented_front is not None, 10.0)
         overview = widget.presented_front
         assert overview is not None
         assert overview.interaction.facet_focus_index is None
@@ -350,16 +256,11 @@ def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
             int((top + bottom) / 2.0 * widget.height()),
         )
         QTest.mouseDClick(widget, Qt.LeftButton, pos=target)
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            app.processEvents()
-            current = widget.presented_front
-            if (
-                current is not None
-                and current.interaction.facet_focus_index == 1
-            ):
-                break
-            time.sleep(0.01)
+        pump_until(
+            lambda: widget.presented_front is not None
+            and widget.presented_front.interaction.facet_focus_index == 1,
+            10.0,
+        )
         current = widget.presented_front
         assert current is not None
         assert current.interaction.facet_focus_index == 1
@@ -369,19 +270,8 @@ def test_qt_double_click_focus_repaints_a_static_facet_host() -> None:
             widget.close_adapter()
         host.close(timeout=10)
 
-def test_qt_raster_host_accepts_facet_grid_spec() -> None:
-    spec = facet_spec()
-    assert isinstance(spec, FacetGridPlot)
-    host = RasterPlotHost.from_plot(_facet_snapshot(), spec)
-    try:
-        front = host.wait_for_front(timeout=10)
-        assert front.identity.kind == "facet_grid"
-        assert len(front.interaction.axes) >= 2
-    finally:
-        host.close(timeout=10)
-
 @pytest.mark.gui
-def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
+def test_the_widget_asks_the_screen_before_it_subscribes(qt_app, pump_until) -> None:
     """The correction starts at construction, not one render later.
 
     Nothing tells a host what screen it is for, so its opening frame is
@@ -397,11 +287,6 @@ def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
     console panel is presented exactly once, and a refusal there is read as
     a stale race -- the port closes the host and the panel never appears.
     """
-
-    try:
-        ensure_qt5_application([])
-    except Exception as error:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -451,12 +336,9 @@ def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
             # and the widget still SHOWS the opening frame it was handed,
             # whatever density it was rendered at
             assert widget.presented_front is not None
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline:
-                ensure_qt5_application([]).processEvents()
-                if float(widget.presented_front.device_pixel_ratio) == 2.0:
-                    break
-                time.sleep(0.005)
+            pump_until(
+                lambda: float(widget.presented_front.device_pixel_ratio) == 2.0, 30.0
+            )
             assert float(widget.presented_front.device_pixel_ratio) == 2.0
         finally:
             widget.close_adapter()
@@ -496,7 +378,7 @@ def test_a_bare_hover_is_not_a_hand_but_every_part_of_a_drag_is() -> None:
     assert _is_a_hand("cancel", False) is True
 
 @pytest.mark.gui
-def test_a_drag_stays_a_hand_from_press_to_release() -> None:
+def test_a_drag_stays_a_hand_from_press_to_release(qt_app, pump_until) -> None:
     """Every move of a drag must reach the host carrying its button.
 
     The hand is decided from the button the widget reports, so anything that
@@ -506,12 +388,8 @@ def test_a_drag_stays_a_hand_from_press_to_release() -> None:
     real widget and asserts the classification for every event the host saw.
     """
 
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5.QtCore import QPointF, Qt
-        from PyQt5.QtGui import QMouseEvent
-    except Exception as error:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+    from PyQt5.QtCore import QPointF, Qt
+    from PyQt5.QtGui import QMouseEvent
 
     from zlc_plot.raster import _is_a_hand
 
@@ -521,11 +399,11 @@ def test_a_drag_stays_a_hand_from_press_to_release() -> None:
     # file run.  A QMouseEvent sent to the widget is the same event the
     # platform would deliver and depends on nothing outside it.
     def send(kind, position, button, buttons):
-        app.sendEvent(
+        qt_app.sendEvent(
             widget,
             QMouseEvent(kind, QPointF(*position), button, buttons, Qt.NoModifier),
         )
-        app.processEvents()
+        qt_app.processEvents()
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -546,10 +424,7 @@ def test_a_drag_stays_a_hand_from_press_to_release() -> None:
     try:
         widget = Qt5PlotWidget(host)
         widget.show()
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and widget.presented_front is None:
-            app.processEvents()
-            time.sleep(0.005)
+        pump_until(lambda: widget.presented_front is not None, 10.0)
         assert widget.presented_front is not None
 
         width, height = widget.width(), widget.height()

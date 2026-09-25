@@ -199,33 +199,6 @@ def test_an_image_names_both_axes_its_area_cuts() -> None:
     finally:
         session.close()
 
-def test_a_histogram_reports_no_axis_because_its_bounds_cut_values() -> None:
-    """The case that makes re-asking the session wrong instead of merely late.
-
-    The same gesture on the same data means a different thing here, and the
-    honest answer is that there is no upstream axis to name.
-    """
-
-    snapshot = _curve_snapshot()
-    spec = HistogramPlot()
-    session = PlotSession(snapshot, spec)
-    try:
-        assert session.describe_display().selection_subject == SelectionSubject(
-            PlotKind.HISTOGRAM,
-            None,
-            None,
-        )
-        subject = _subjects(
-            session,
-            lambda: session.set_x_selector(1.0, 3.0),
-        )[-1]
-        assert subject.plot_kind is PlotKind.HISTOGRAM
-        assert subject.x is None
-        assert subject.y is None
-        assert session.describe_display().selection_subject == subject
-    finally:
-        session.close()
-
 def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
     snapshot = _curve_snapshot()
     spec = RollingPlot()
@@ -239,20 +212,6 @@ def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
             lambda: session.set_x_selector(0.0, 2.0),
         )[-1]
         assert subject == expected
-    finally:
-        session.close()
-
-def test_pure_subject_keeps_the_explicit_scope_coordinate() -> None:
-    snapshot = _named_facet_snapshot()
-    site = AxisRef.point("site")
-    spec = CurvePlot(
-        AxisRef.point("detuning"),
-        scope=((site, 20),),
-    )
-    session = PlotSession(snapshot, spec)
-    try:
-        subject = session.describe_display().selection_subject
-        assert subject.scope == ((site, 20),)
     finally:
         session.close()
 
@@ -301,9 +260,12 @@ def test_the_subject_follows_a_semantic_edit_within_one_session() -> None:
         first = _subjects(session, lambda: session.set_x_selector(1.0, 3.0))[-1]
         assert first.x == AxisRef.point("detuning")
         session.replace_spec(HistogramPlot())
+        # The same gesture on the same data now cuts values: there is no
+        # upstream axis to name, which re-asking the session would get wrong.
         second = _subjects(session, lambda: session.set_x_selector(1.0, 3.0))[-1]
         assert second.plot_kind is PlotKind.HISTOGRAM
         assert second.x is None
+        assert second.y is None
         assert session.describe_display().selection_subject == second
     finally:
         session.close()

@@ -22,20 +22,15 @@ from zlc_plot.fit import (
 )
 
 
-def test_every_parameter_is_written_in_its_own_formula() -> None:
-    """The whole rule, over every model, as one assertion each."""
+def test_every_model_writes_a_formula_to_agree_with() -> None:
+    """A model builds only when every symbol it asks for is in its formula
+    (the refusal is pinned below) -- a rule a model without a formula would
+    slip past, so every model there is has one."""
 
     models = builtin_fit_models()
     assert models, "there are no fit models to check"
     for model in models:
         assert model.formula, f"{model.model_id} has no formula to agree with"
-        printed = formula_symbols(model.formula)
-        for parameter in model.parameters:
-            assert parameter.symbol, parameter.name
-            assert parameter.symbol in printed, (
-                "%s asks for %r, which its formula never writes: %s"
-                % (model.model_id, parameter.symbol, model.formula)
-            )
 
 
 def test_the_catalogue_writes_e_to_a_power_and_sizes_tall_parentheses() -> None:
@@ -68,11 +63,32 @@ def test_the_catalogue_writes_e_to_a_power_and_sizes_tall_parentheses() -> None:
 
 
 def test_no_two_parameters_of_one_model_share_a_symbol() -> None:
-    """Two boxes with one name is a box the operator cannot address."""
+    """Two boxes with one name is a box the operator cannot address, so a
+    model that would offer one refuses to exist."""
 
-    for model in builtin_fit_models():
-        symbols = list(model.symbols)
-        assert len(symbols) == len(set(symbols)), (model.model_id, symbols)
+    from zlc_plot.fit import FitModelSpec, FitTarget
+
+    def evaluate(x, *values):
+        return x
+
+    def initialise(coords, values):
+        return (1.0, 1.0)
+
+    with pytest.raises(ValueError, match="unique within a model"):
+        FitModelSpec(
+            "twins",
+            "Twins",
+            1,
+            (
+                FitParameterSpec("left", UnitRelation.VALUE, display_label=r"$A$"),
+                FitParameterSpec("right", UnitRelation.VALUE, display_label=r"$A$"),
+            ),
+            "left",
+            evaluate,
+            initialise,
+            (FitTarget.SERIES,),
+            formula=r"$f(x)=A$",
+        )
 
 
 def test_a_model_refuses_to_disagree_with_its_own_formula() -> None:

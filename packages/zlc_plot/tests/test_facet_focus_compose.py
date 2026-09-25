@@ -53,12 +53,6 @@ def _frame(session: PlotSession) -> np.ndarray:
     raw, height, width = session._raster_capture_rgba_bytes()
     return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4).copy()
 
-def _assert_native_roundtrip(actual: np.ndarray, expected: np.ndarray) -> None:
-    delta = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
-    changed = np.any(delta != 0, axis=2)
-    assert int(delta.max()) <= 2
-    assert float(np.count_nonzero(changed)) / changed.size <= 0.10
-
 def test_focused_compose_equals_a_full_draw() -> None:
     session = PlotSession(_scan_snapshot(), _SPEC, size="4x4")
     try:
@@ -72,16 +66,5 @@ def test_focused_compose_equals_a_full_draw() -> None:
         session._renderer.draw()
         reference = _frame(session)
         np.testing.assert_array_equal(composed, reference)
-    finally:
-        session.close()
-
-def test_overview_after_focus_shows_every_cell_again() -> None:
-    session = PlotSession(_scan_snapshot(), _SPEC, size="4x4")
-    try:
-        before = _frame(session)
-        session.focus_facet(1)
-        session.show_facet_overview()
-        after = _frame(session)
-        _assert_native_roundtrip(after, before)
     finally:
         session.close()

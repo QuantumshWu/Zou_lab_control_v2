@@ -16,11 +16,9 @@ from data_factory import (
     repeat_domain,
 )
 
-from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import (
     AxisRef,
     CurvePlot,
-    FacetGridPlot,
     NumericRange,
     PlotSession,
     RasterPlotHost,
@@ -60,17 +58,6 @@ def test_front_selector_state_json_preserves_display_geometry_for_browser_previe
         "facet_index": 2,
     }
 
-def test_notebook_front_packet_accepts_jupyter_dataview_buffers() -> None:
-    """The browser adapter must decode one complete DataView frame packet."""
-
-    assert "export default" in _WIDGET_ESM
-    assert "render({ model, el })" in _WIDGET_ESM
-    assert "ArrayBuffer.isView(value)" in _WIDGET_ESM
-    assert "value.byteOffset, value.byteLength" in _WIDGET_ESM
-    assert "change:frame_packet" in _WIDGET_ESM
-    assert "_decodeFrame" in _WIDGET_ESM
-    assert "define(" not in _WIDGET_ESM
-
 def test_notebook_widget_uses_anywidget_registry_not_a_stale_matplotlib_module() -> None:
     """A saved notebook must resolve the current AnyWidget view class.
 
@@ -98,6 +85,14 @@ def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     scene painting would reintroduce a second renderer that can drift.
     """
 
+    # An ES module that decodes one complete Jupyter DataView frame packet.
+    assert "export default" in _WIDGET_ESM
+    assert "render({ model, el })" in _WIDGET_ESM
+    assert "ArrayBuffer.isView(value)" in _WIDGET_ESM
+    assert "value.byteOffset, value.byteLength" in _WIDGET_ESM
+    assert "change:frame_packet" in _WIDGET_ESM
+    assert "_decodeFrame" in _WIDGET_ESM
+    assert "define(" not in _WIDGET_ESM
     # No scene traffic, no browser text, no second canvas.
     assert "scene_json" not in _WIDGET_ESM
     assert "overlay" not in _WIDGET_ESM
@@ -108,11 +103,9 @@ def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     assert "this.surface" in _WIDGET_ESM
     assert "this.el.style.display" not in _WIDGET_ESM
     assert "this.el.style.width" not in _WIDGET_ESM
-    # Input normalization contract: strict-mode-safe sends, one primary
-    # pointer, buttons 1..3, drag-gated wheel, synthesized left doubles,
-    # JupyterLab context menu opt-out, environment reporting.
-    assert "e.button=null" not in _WIDGET_ESM
-    assert "e.button = null" not in _WIDGET_ESM
+    # Input normalization contract: one primary pointer, buttons 1..3,
+    # drag-gated wheel, synthesized left doubles, JupyterLab context menu
+    # opt-out, environment reporting.
     assert "e.isPrimary" in _WIDGET_ESM
     assert "e.button > 2" in _WIDGET_ESM
     assert "this._dragging || !e.deltaY" in _WIDGET_ESM
@@ -268,19 +261,6 @@ def test_session_mutation_republishes_front_and_keeps_pointer_compatible() -> No
         unsubscribe()
         host.close(timeout=5.0)
 
-def test_notebook_host_presents_facet_grid_front() -> None:
-    """The notebook transport uses the same multi-axis host path as GUI."""
-
-    spec = facet_spec()
-    assert isinstance(spec, FacetGridPlot)
-    host = RasterPlotHost.from_plot(_facet_snapshot(), spec)
-    try:
-        front = host.wait_for_front(timeout=5.0)
-        assert front.identity.kind == "facet_grid"
-        assert len(front.interaction.axes) >= 2
-    finally:
-        host.close(timeout=5.0)
-
 def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
     """Double middle-click zooms to the committed range; without one it homes."""
 
@@ -310,7 +290,6 @@ def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
             double=True,
             identity=front.identity,
             axes=axis,
-            interaction=front.interaction,
         ).result(timeout=5.0)
         viewport = session.viewport
         assert viewport is not None
@@ -328,7 +307,6 @@ def test_middle_double_click_zooms_to_area_selection_then_resets() -> None:
             double=True,
             identity=front.identity,
             axes=front.interaction.axes[0],
-            interaction=front.interaction,
         ).result(timeout=5.0)
         assert session.viewport is None
     finally:
@@ -369,7 +347,6 @@ def test_pulse_selectors_paint_in_source_units_and_fit_catalogue_is_empty() -> N
             button=3,
             identity=front.identity,
             axes=axis,
-            interaction=front.interaction,
         ).result(timeout=5.0)
         released = host.pointer_event(
             "release",
@@ -628,7 +605,12 @@ def test_snapshot_display_data_encodes_front_as_png_at_logical_size() -> None:
 def test_display_publishes_widget_view_with_png_fallback_through_display_id(
     monkeypatch,
 ) -> None:
-    """The bundle must carry the widget view, a PNG fallback and a handle."""
+    """The bundle must carry the widget view, a PNG fallback and a handle.
+
+    A closed view must leave the last frame in the cell, not a blank output:
+    close replaces the widget view through that handle with the final
+    frame's PNG, once.
+    """
 
     import IPython.core.interactiveshell as interactiveshell
     import IPython.display as ipython_display
@@ -657,8 +639,10 @@ def test_display_publishes_widget_view_with_png_fallback_through_display_id(
         view.display()
         model_id = view.widget.model_id
         assert view._display_handle is handle
+        front = view.host.wait_for_front(timeout=5.0)
     finally:
         view.close()
+    view.close()
     data = recorded["data"]
     assert recorded["raw"] is True
     assert recorded["display_id"] is True
@@ -670,9 +654,13 @@ def test_display_publishes_widget_view_with_png_fallback_through_display_id(
     assert base64.b64decode(data["image/png"]).startswith(b"\x89PNG\r\n\x1a\n")
     assert set(recorded["metadata"]["image/png"]) == {"width", "height"}
     assert len(handle.calls) == 1
-    final_data, _ = handle.calls[0]
+    final_data, final_metadata = handle.calls[0]
     assert "application/vnd.jupyter.widget-view+json" not in final_data
     assert base64.b64decode(final_data["image/png"]).startswith(b"\x89PNG\r\n\x1a\n")
+    assert final_metadata["image/png"] == {
+        "width": front.logical_size[0],
+        "height": front.logical_size[1],
+    }
 
 def test_display_without_running_shell_keeps_compact_widget_repr(
     monkeypatch, capsys
@@ -692,41 +680,13 @@ def test_display_without_running_shell_keeps_compact_widget_repr(
         view.close()
     assert "image/png" not in capsys.readouterr().out
 
-def test_close_replaces_widget_output_with_final_frame_png() -> None:
-    """A closed view must leave the last frame in the cell, not a blank output."""
-
-    class _Handle:
-        def __init__(self) -> None:
-            self.calls: list[tuple[dict, dict]] = []
-
-        def update(self, data: object, *, raw: bool, metadata: object) -> None:
-            assert raw is True
-            self.calls.append((data, metadata))
-
-    view = NotebookView(_session(), close_session_on_close=True)
-    handle = _Handle()
-    try:
-        front = view.host.wait_for_front(timeout=5.0)
-        view._front = front
-        view._display_handle = handle
-    finally:
-        view.close()
-    assert len(handle.calls) == 1
-    data, metadata = handle.calls[0]
-    assert base64.b64decode(data["image/png"]).startswith(b"\x89PNG\r\n\x1a\n")
-    assert metadata["image/png"] == {
-        "width": front.logical_size[0],
-        "height": front.logical_size[1],
-    }
-    view.close()
-    assert len(handle.calls) == 1
-
 def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
     """Every frontend blits fronts; one renderer draws transient candidates.
 
     A drag must publish a fresh raster per preview (the matplotlib artists
     bake the candidate), and the committed selector must land in the released
-    front's interaction map.  There is no frontend vector scene.
+    front's interaction map.  There is no frontend vector scene, and no step
+    of the gesture over a fitted curve promotes a blank front.
     """
 
     session = _session()
@@ -742,7 +702,6 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
             button=1,
             identity=front.identity,
             axes=axis,
-            interaction=front.interaction,
         ).result()
         assert pressed.front is front
         assert pressed.value.candidate is None
@@ -769,6 +728,8 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
         assert tuple(state.kind for state in committed.front.interaction.selectors) == (
             SelectorKind.AREA,
         )
+        for operation in (pressed, moved, committed):
+            assert np.asarray(operation.front.buffer.as_rgba()).std() > 0.0
     finally:
         host.close(timeout=5.0)
 
@@ -800,7 +761,6 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
                 double=double,
                 identity=front.identity,
                 axes=axis,
-                interaction=front.interaction if action == "press" else None,
             ).result(timeout=5.0)
 
         for double in (False, True):
@@ -834,7 +794,6 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
             button=1,
             identity=area_front.identity,
             axes=area_axis,
-            interaction=area_front.interaction,
         ).result(timeout=5.0)
         released = host.pointer_event(
             "release",
@@ -858,7 +817,6 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
             button=1,
             identity=area_front.identity,
             axes=area_axis,
-            interaction=area_front.interaction,
         ).result(timeout=5.0)
         host.pointer_event(
             "release",
@@ -873,60 +831,3 @@ def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None
     finally:
         unsubscribe()
         host.close(timeout=5.0)
-
-def test_fit_area_pointer_sequence_never_promotes_a_blank_front() -> None:
-    session = _session()
-    session.fit("gaussian_offset")
-    host = RasterPlotHost.from_session(session)
-    try:
-        front = host.wait_for_front(timeout=5.0)
-        axis = front.interaction.axes[0]
-        operations = [
-            host.pointer_event(
-                "press",
-                0.32,
-                0.35,
-                button=1,
-                identity=front.identity,
-                axes=axis,
-                interaction=front.interaction,
-            ),
-            host.pointer_event(
-                "move",
-                0.72,
-                0.75,
-                button=1,
-                identity=front.identity,
-                axes=axis,
-            ),
-            host.pointer_event(
-                "release",
-                0.72,
-                0.75,
-                button=1,
-                identity=front.identity,
-                axes=axis,
-            ),
-        ]
-        for operation in operations:
-            rgba = np.asarray(operation.result(timeout=5.0).front.buffer.as_rgba())
-            assert rgba.std() > 0.0
-            assert np.count_nonzero(rgba) > 0
-    finally:
-        host.close(timeout=5.0)
-
-def test_the_device_pixel_ratio_has_one_entry() -> None:
-    """A DPR change goes through the public entry alone.
-
-    The private variant it wrapped preserved an attached native canvas that
-    no caller attaches any more; a flag every caller passed as False is a
-    branch nobody can reach.
-    """
-
-    session = _session()
-    try:
-        assert not hasattr(session, "_set_device_pixel_ratio")
-        assert session.set_device_pixel_ratio(2.0).device_pixel_ratio == 2.0
-        assert session.surface_plan.device_pixel_ratio == 2.0
-    finally:
-        session.close()

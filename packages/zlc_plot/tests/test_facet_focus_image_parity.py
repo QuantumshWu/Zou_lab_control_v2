@@ -255,7 +255,7 @@ def test_focused_cell_colour_limit_drag_moves_the_cell_clim() -> None:
         session.focus_facet(1)
         renderer = session._renderer
         distribution = renderer.axes["distribution"][0]
-        transform = session._axis_transform_for_axis(distribution)
+        transform = session._axis_transform_for_axis(distribution, session._projected)
         low, high = renderer.resolved_color_limits()
         left, top, right, bottom = transform.bounds
         y_low, y_high = transform.y_limits
@@ -515,11 +515,18 @@ def test_color_limit_pointer_gates_on_the_cell_spec() -> None:
     finally:
         curve_facet.close()
 
-def test_image_admits_scans_of_frames_and_builds() -> None:
+@pytest.mark.parametrize("source", ("scan", "camera_cycle"))
+def test_image_admits_scans_of_frames_and_builds(source: str) -> None:
     """admits == buildable: the projections image.default_spec admits must
-    construct and render, pooling point rows under the declared reduction."""
+    construct and render, pooling point rows under the declared reduction --
+    a scan of frames, and a camera cycle that publishes its frames as points
+    and draws as one standalone image."""
 
-    scan = _frames_scan_snapshot(repeats=2)
+    scan = (
+        _frames_scan_snapshot(repeats=2)
+        if source == "scan"
+        else _cycle_frames_on_point_axis_snapshot()
+    )
     spec = image_default(scan.block.schema)
     assert isinstance(spec, ImagePlot)
     session = PlotSession(scan, spec, size="4x4")
@@ -528,21 +535,6 @@ def test_image_admits_scans_of_frames_and_builds() -> None:
         payload = session._payload
         expected = np.asarray(scan.block.values).mean(axis=(0, 1))
         np.testing.assert_allclose(np.asarray(payload.z.canonical), expected)
-    finally:
-        session.close()
-
-def test_frames_on_point_axis_cycle_draws_as_a_standalone_image() -> None:
-    cycle = _cycle_frames_on_point_axis_snapshot()
-    spec = image_default(cycle.block.schema)
-    assert isinstance(spec, ImagePlot)
-    session = PlotSession(cycle, spec, size="4x4")
-    try:
-        assert session.rgba().size
-        payload = session._payload
-        np.testing.assert_allclose(
-            np.asarray(payload.z.canonical),
-            np.full((40, 60), 1.0),  # frames 0, 1, 2 meaned
-        )
     finally:
         session.close()
 

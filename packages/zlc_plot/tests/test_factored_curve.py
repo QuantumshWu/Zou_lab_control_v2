@@ -101,6 +101,14 @@ def _assert_same(fast, slow):
                 ours.sem, theirs.sem, equal_nan=True, rtol=1e-12, atol=1e-12
             )
 
+def _assert_same_cells(fast, slow, same) -> None:
+    """Cell for cell: label, position and payload (``same`` compares it)."""
+    assert len(fast.cells) == len(slow.cells)
+    for ours, theirs in zip(fast.cells, slow.cells):
+        assert ours.label == theirs.label
+        assert ours.facet_index == theirs.facet_index
+        same(ours.payload, theirs.payload)
+
 GROUPINGS = (
     (),
     (AxisRef.cell_data("site"),),
@@ -470,9 +478,7 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
         AxisRef.cell_data("frame"), group=AxisRef.cell_data("site"), reduction=aggregation,
     ))
     actual, expected = DataView(segmented).facet(spec), _numpy_projection(view, "facet", spec)
-    for left, right in zip(actual.cells, expected.cells, strict=True):
-        assert left.label == right.label
-        _assert_same(left.payload, right.payload)
+    _assert_same_cells(actual, expected, _assert_same)
 
 def test_configurations_the_path_does_not_own_fall_through() -> None:
     view = DataView(_snapshot(seed=3))
@@ -495,10 +501,6 @@ def test_the_public_curve_entry_uses_the_lattice_path(monkeypatch) -> None:
     monkeypatch.setattr(DataView, "_factored_curve", spy)
     view.curve(AxisRef.point("ax"), group_by=(AxisRef.cell_data("site"),))
     assert calls == [True]
-
-    view.curve(
-        AxisRef.cell_data("frame"), group_by=(AxisRef.cell_data("site"),)
-    )
 
 @pytest.mark.parametrize("holes", [0.0, 0.3, 0.995])
 @pytest.mark.parametrize("dtype", [np.float64, np.uint8])
@@ -582,11 +584,7 @@ def test_factored_facet_matches_the_generic_path(holes, uncertainty) -> None:
         fast = view._factored_facet(spec, uncertainty)
         assert fast is not None, (facet, group)
         slow = _numpy_projection(view, "facet", spec, uncertainty=uncertainty)
-        assert len(fast.cells) == len(slow.cells)
-        for ours, theirs in zip(fast.cells, slow.cells):
-            assert ours.label == theirs.label
-            assert ours.facet_index == theirs.facet_index
-            _assert_same(ours.payload, theirs.payload)
+        _assert_same_cells(fast, slow, _assert_same)
 
     spec = FacetGridPlot(
         AxisRef.cell_data("site"), CurvePlot(AxisRef.cell_data("frame"))
@@ -594,11 +592,7 @@ def test_factored_facet_matches_the_generic_path(holes, uncertainty) -> None:
     fast = view._factored_facet(spec, uncertainty)
     assert fast is not None
     slow = _numpy_projection(view, "facet", spec, uncertainty=uncertainty)
-    assert len(fast.cells) == len(slow.cells)
-    for ours, theirs in zip(fast.cells, slow.cells):
-        assert ours.label == theirs.label
-        assert ours.facet_index == theirs.facet_index
-        _assert_same(ours.payload, theirs.payload)
+    _assert_same_cells(fast, slow, _assert_same)
 
 @pytest.mark.parametrize("holes", [0.0, 0.3])
 @pytest.mark.parametrize("uncertainty", [False, True])
@@ -620,11 +614,7 @@ def test_factored_row_facet_matches_the_generic_path(
         fast = view._factored_facet(spec, uncertainty)
         assert fast is not None, group
         slow = _numpy_projection(view, "facet", spec, uncertainty=uncertainty)
-        assert len(fast.cells) == len(slow.cells)
-        for ours, theirs in zip(fast.cells, slow.cells):
-            assert ours.label == theirs.label
-            assert ours.facet_index == theirs.facet_index
-            _assert_same(ours.payload, theirs.payload)
+        _assert_same_cells(fast, slow, _assert_same)
 
     spec = FacetGridPlot(
         AxisRef.point("ax"),
@@ -635,11 +625,7 @@ def test_factored_row_facet_matches_the_generic_path(
     fast = view._factored_facet(spec, uncertainty)
     assert fast is not None
     slow = _numpy_projection(view, "facet", spec, uncertainty=uncertainty)
-    assert len(fast.cells) == len(slow.cells)
-    for ours, theirs in zip(fast.cells, slow.cells):
-        assert ours.label == theirs.label
-        assert ours.facet_index == theirs.facet_index
-        _assert_same(ours.payload, theirs.payload)
+    _assert_same_cells(fast, slow, _assert_same)
 
 def _assert_same_image(ours, theirs) -> None:
     np.testing.assert_array_equal(
@@ -685,11 +671,7 @@ def test_factored_facet_image_cells_match_the_generic_path(
         fast = view._factored_facet(spec, False)
         assert fast is not None
         slow = _numpy_projection(view, "facet", spec, uncertainty=False)
-        assert len(fast.cells) == len(slow.cells)
-        for ours, theirs in zip(fast.cells, slow.cells):
-            assert ours.label == theirs.label
-            assert ours.facet_index == theirs.facet_index
-            _assert_same_image(ours.payload, theirs.payload)
+        _assert_same_cells(fast, slow, _assert_same_image)
 
 def test_factored_row_facet_image_cells_compress_to_their_used_sets() -> None:
     """A scan-dimension facet of heatmap cells over a HOLED topology: each
@@ -728,10 +710,7 @@ def test_factored_row_facet_image_cells_compress_to_their_used_sets() -> None:
     fast = view._factored_facet(spec, False)
     assert fast is not None
     slow = _numpy_projection(view, "facet", spec, uncertainty=False)
-    assert len(fast.cells) == len(slow.cells)
-    for ours, theirs in zip(fast.cells, slow.cells):
-        assert ours.label == theirs.label
-        _assert_same_image(ours.payload, theirs.payload)
+    _assert_same_cells(fast, slow, _assert_same_image)
 
 
 def test_the_public_curve_sums_a_float32_stack_in_float64() -> None:

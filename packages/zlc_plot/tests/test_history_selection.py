@@ -77,9 +77,9 @@ def test_the_window_mask_selects_the_shots_the_rolling_trace_draws() -> None:
     history = view.rolling_history(group=AxisRef.cell_data("site"))
     assert history.source_indices.tolist() == [-4, -3, -2, -1, 0]
     for window in (1, 2, 5, 9):
-        mask = view.history_validity(window)
-        assert mask.shape == (1, 5 * FRAMES, SITES)
-        rows = np.flatnonzero(mask[0, :, 0])
+        mask = view._history_layout.row_mask(window)
+        assert mask.shape == (5 * FRAMES,)
+        rows = np.flatnonzero(mask)
         shots_kept = history.source_indices[-window:]
         # Every row of a kept shot, and only those, is inside the window.
         assert rows.tolist() == [
@@ -88,13 +88,6 @@ def test_the_window_mask_selects_the_shots_the_rolling_trace_draws() -> None:
         # And the trace's shot planes are the same rows, reduced per site.
         expected = view.samples.value.canonical[0].reshape(5, FRAMES, SITES).mean(axis=1)
         np.testing.assert_allclose(np.asarray(history.values), expected)
-
-
-def test_the_mask_is_built_once_per_view_however_many_projections_ask() -> None:
-    view = _history(4)
-    first = view.history_validity(3)
-    assert view.history_validity(3) is first
-    assert view.history_validity(2) is not first
 
 
 def test_a_labelled_point_axis_names_each_distinct_value_from_its_first_row() -> None:

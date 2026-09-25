@@ -37,8 +37,7 @@ from zlc_data import OwnedSnapshot
 from zlc_plot._kinds import HANDLERS
 from zlc_plot.selectors import NumericRange
 from zlc_plot.specs import parameter_schema_for
-from zlc_plot.session_policy import replace_spec_initial_state
-from zlc_plot.ui import semantic_controls
+from zlc_plot.session import _retained_parameters, _viewport_roles
 
 def _snapshot() -> OwnedSnapshot:
     schema = make_dataset_schema(
@@ -50,7 +49,7 @@ def _snapshot() -> OwnedSnapshot:
     )
     return make_snapshot(schema, np.arange(8.0).reshape(2, 4), revision=0)
 
-def test_describe_semantics_is_registry_derived_and_marks_rebuild() -> None:
+def test_describe_semantics_is_registry_derived() -> None:
     snapshot = _snapshot()
     description = describe_semantics(
             snapshot.block.schema,
@@ -58,16 +57,13 @@ def test_describe_semantics_is_registry_derived_and_marks_rebuild() -> None:
     )
     assert PlotKind.CURVE in description.kind_choices
     assert AxisRef.repeat("repeat") in description.axis_choices
-    assert description.fate(AxisRef.repeat("repeat")) == "reduce"
-    assert all(field.rebuild for field in description.fields)
-    controls = semantic_controls(description)
+    assert description.field(dict(description.fate_rows)[AxisRef.repeat("repeat")]).value == "reduce"
     # The editor IS the table: the kind, one row per axis, and how the axes
     # nobody drew along are collapsed.
-    names = tuple(control.name for control in controls)
+    names = tuple(field.name for field in description.fields)
     assert names[0] == "kind" and names[-1] == "reduction"
     assert tuple(name for _axis, name in description.fate_rows) == names[1:-1]
-    assert description.fate(AxisRef.point("x")) == "x"
-    assert all(control.semantic and control.rebuild for control in controls)
+    assert description.field(dict(description.fate_rows)[AxisRef.point("x")]).value == "x"
 
 def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
     """"Row 1, please" -- and the fit sees row 1 as well.
@@ -95,7 +91,7 @@ def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
 
     session = PlotSession(snapshot, spec)
     try:
-        seen = np.asarray(session._view._samples.value.canonical).reshape(-1)
+        seen = np.asarray(session._view.samples.value.canonical).reshape(-1)
         assert sorted(seen.tolist()) == [2.0, 3.0, 6.0, 7.0]
         assert int(np.asarray(session._payload.counts).sum()) == 4
     finally:
@@ -182,9 +178,9 @@ def test_a_choice_composes_typed_or_as_a_record_holds_it() -> None:
 
     A choice travels as the typed member here and as the plain value a
     record holds everywhere else -- the panel state, the saved layout, the
-    editor row a frontend hands back.  The Figure Viewer routes that row
-    straight to apply_semantic, so a plain "sum" reached CurvePlot.reduction
-    and the dataclass refused an edit made from this module's own list.
+    editor row a frontend hands back.  Handed back as offered, a plain "sum"
+    reached CurvePlot.reduction and the dataclass refused an edit made from
+    this module's own list.
     """
 
     points = mapped_domain_from_columns(
@@ -239,7 +235,7 @@ def test_the_facet_role_is_offered_by_the_same_rule_as_every_other_role() -> Non
         repeat_domain(size=1), points, dtype=np.float64
     )
     description = describe_semantics(schema, spec)
-    facet_values = description.axes_offering("facet")
+    facet_values = tuple(axis for axis, name in description.fate_rows if "facet" in description.field(name).choice_values)
     assert AxisRef.point("x") in facet_values
     assert AxisRef.point("row") in facet_values
     # and the swap is what makes it legal: the cell keeps an x axis.
@@ -380,7 +376,8 @@ def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
             scope_fate(coordinate),
         )
         assert selected.scope == ((ref, coordinate),)
-        assert describe_semantics(schema, selected).fate(ref) == scope_fate(
+        description = describe_semantics(schema, selected)
+        assert description.field(dict(description.fate_rows)[ref]).value == scope_fate(
             coordinate
         )
 
@@ -403,24 +400,14 @@ def test_every_axis_may_take_every_role_its_kind_declares() -> None:
 
     schema = _camera_frame_schema()
     description = describe_semantics(schema, CurvePlot(AxisRef.point("frame")))
-    x_values = description.axes_offering("x")
+    x_values = tuple(axis for axis, name in description.fate_rows if "x" in description.field(name).choice_values)
     assert AxisRef.point("frame") in x_values
     assert AxisRef.repeat("repeat") in x_values
     assert AxisRef.cell_data("spatial-y") in x_values
     assert AxisRef.cell_data("spatial-x") in x_values
-    group_values = description.axes_offering("group")
+    group_values = tuple(axis for axis, name in description.fate_rows if "group" in description.field(name).choice_values)
     assert AxisRef.repeat("repeat") in group_values
     assert description.axis_choices.count(AxisRef.point("frame")) == 1
-
-def test_non_series_kinds_keep_degenerate_axes_where_legitimate() -> None:
-    schema = _camera_frame_schema()
-    description = describe_semantics(
-        schema,
-        ImagePlot(AxisRef.cell_data("spatial-x"), AxisRef.cell_data("spatial-y")),
-    )
-    # An image is not a series; its axis domains stay the schema's own.
-    x_values = description.axes_offering("x")
-    assert AxisRef.cell_data("spatial-x") in x_values
 
 def test_facet_grid_series_cell_offers_every_axis_for_x() -> None:
     points = mapped_domain_from_columns(
@@ -434,7 +421,7 @@ def test_facet_grid_series_cell_offers_every_axis_for_x() -> None:
         schema,
         FacetGridPlot(AxisRef.point("row"), CurvePlot(AxisRef.point("x"))),
     )
-    x_values = description.axes_offering("x")
+    x_values = tuple(axis for axis, name in description.fate_rows if "x" in description.field(name).choice_values)
     assert AxisRef.repeat("repeat") in x_values  # a size-one axis is still offered
     assert AxisRef.point("x") in x_values
 
@@ -443,7 +430,6 @@ def test_pulse_semantics_has_the_same_frontend_contract_without_dataset_axes() -
     assert description.kind is PlotKind.PULSE_TIMELINE
     assert description.kind_choices == (PlotKind.PULSE_TIMELINE,)
     assert description.axis_choices == ()
-    assert description.field("kind").rebuild
 
 def test_replace_spec_policy_revalidates_and_retains_only_valid_state() -> None:
     old = CurvePlot(AxisRef.point("x"), reduction=Reduction.SUM)
@@ -452,19 +438,11 @@ def test_replace_spec_policy_revalidates_and_retains_only_valid_state() -> None:
     new_schema = parameter_schema_for(new, style=DEFAULTS.style)
     values = dict(old_schema.initial_values())
     values.update({"title": "kept", "x_display_unit": "mV"})
-    viewport = (NumericRange(0.0, 1.0), NumericRange(0.0, 1.0))
-    result = replace_spec_initial_state(
-        old,
-        new,
-        values,
-        new_schema,
-        size="4x4",
-        viewport=viewport,
-    )
-    assert result.parameters["title"] == "kept"
-    assert "x_display_unit" not in result.parameters
-    assert result.size == "4x4"
-    assert result.viewport is None
+    retained = _retained_parameters(values, new_schema)
+    assert retained["title"] == "kept"
+    assert "x_display_unit" not in retained
+    # A curve's x axis is not a histogram's: the viewport does not survive.
+    assert _viewport_roles(old) != _viewport_roles(new)
 
 def test_replace_spec_policy_keeps_viewport_for_reduction_only_change() -> None:
     snapshot = _snapshot()
@@ -501,16 +479,6 @@ def test_replace_spec_policy_keeps_a_fixed_range_for_a_reduction_only_change() -
 def test_a_camera_cycle_names_its_rows_frames_and_nothing_else() -> None:
     """What an operator reads for the three shapes a bench produces."""
 
-    from data_factory import (
-        axis,
-        make_dataset_schema,
-        make_snapshot,
-        mapped_domain_from_columns,
-        repeat_domain,
-    )
-
-    from zlc_data import OwnedSnapshot
-
     camera = describe_semantics(_camera_frame_schema(), CurvePlot(AxisRef.point("frame")))
     assert [ref for ref, _name in camera.fate_rows] == [
         AxisRef.repeat("repeat"),
@@ -542,17 +510,6 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
 
     import itertools
 
-    from data_factory import (
-        axis,
-        make_dataset_schema,
-        make_snapshot,
-        mapped_domain_from_columns,
-        repeat_domain,
-    )
-
-    from zlc_data import OwnedSnapshot
-    from zlc_plot import FacetGridPlot
-
     values = [0.0, 1.0, 2.0]
     rows = list(itertools.product(values, values))
     table = mapped_domain_from_columns(
@@ -567,7 +524,7 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
         AxisRef.point("coil_x"), CurvePlot(AxisRef.point("coil_y"))
     )
     description = describe_semantics(schema, spec)
-    assert description.fate(AxisRef.point("coil_x")) == "facet"
+    assert description.field(dict(description.fate_rows)[AxisRef.point("coil_x")]).value == "facet"
     assert description.fate_rows[0][0] == AxisRef.repeat("repeat")
     assert fate_field_name(AxisRef.point("coil_x")) in [
         name for _ref, name in description.fate_rows
@@ -584,16 +541,6 @@ def test_a_whole_fate_table_moves_dense_image_roles_to_scan_axes_atomically() ->
     """Settling the old dense axes cannot overwrite pending scan-axis roles."""
 
     import itertools
-
-    from data_factory import (
-        axis,
-        make_dataset_schema,
-        make_snapshot,
-        mapped_domain_from_columns,
-        repeat_domain,
-    )
-
-    from zlc_data import OwnedSnapshot
 
     domain = np.arange(10.0)
     rows = tuple(itertools.product(domain, domain, domain))
@@ -627,8 +574,8 @@ def test_a_whole_fate_table_moves_dense_image_roles_to_scan_axes_atomically() ->
     assert selected.cell.x == AxisRef.point("field.z")
     assert selected.cell.y == AxisRef.point("field.y")
     description = describe_semantics(schema, selected)
-    assert description.fate(AxisRef.cell_data("pair")) == "reduce"
-    assert description.fate(AxisRef.cell_data("site")) == "reduce"
+    assert description.field(dict(description.fate_rows)[AxisRef.cell_data("pair")]).value == "reduce"
+    assert description.field(dict(description.fate_rows)[AxisRef.cell_data("site")]).value == "reduce"
 
 def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
     """A thousand rows, ten coordinates: the pinnable set is the DISTINCT one.
@@ -724,7 +671,7 @@ def test_taking_an_occupied_role_swaps_fates_never_repairs() -> None:
     assert promoted.x == AxisRef.point("row")
     description = describe_semantics(schema, promoted)
     # the displaced axis inherits the taker's former fate: reduced
-    assert description.fate(AxisRef.point("x")) == "reduce"
+    assert description.field(dict(description.fate_rows)[AxisRef.point("x")]).value == "reduce"
 
 def test_vacating_a_required_role_is_a_state_not_a_repair() -> None:
     """Demoting the x holder leaves x VACANT: nothing is drafted, the

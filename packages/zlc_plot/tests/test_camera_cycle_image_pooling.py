@@ -33,17 +33,17 @@ from data_factory import (
 CYCLES, FRAMES, HEIGHT, WIDTH = 3, 4, 5, 6
 
 
-def _camera_cycle():
+def _camera_cycle(cycles: int = CYCLES, frame_count: int = FRAMES):
     """The reference shape, built the way the producer builds it."""
 
-    from zlc_data import READOUT_EVENT, REPEAT, SPATIAL_X, SPATIAL_Y
+    from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
 
     frames = mapped_domain_from_columns(
-        {"frame": list(range(FRAMES))},
+        {"frame": list(range(frame_count))},
         roles={"frame": READOUT_EVENT},
     )
     schema = make_dataset_schema(
-        repeat_domain(size=CYCLES),
+        repeat_domain(size=cycles),
         frames,
         cell_axes=(
             axis("y", size=HEIGHT, role=SPATIAL_Y),
@@ -51,7 +51,7 @@ def _camera_cycle():
         ),
         dtype=np.float64,
     )
-    assert schema.physical_shape == (CYCLES, FRAMES, HEIGHT, WIDTH)
+    assert schema.physical_shape == (cycles, frame_count, HEIGHT, WIDTH)
     rng = np.random.default_rng(11)
     values = rng.normal(size=schema.physical_shape)
     return make_snapshot(schema, values, revision=0), values
@@ -65,10 +65,14 @@ def _camera_cycle():
     ],
     ids=["mean", "max"],
 )
+# A single-frame cycle takes the identical path, no branch of its own.
+@pytest.mark.parametrize(
+    "cycles, frame_count", [(CYCLES, FRAMES), (1, 1)], ids=["cycle", "one-frame"]
+)
 def test_a_camera_cycle_draws_as_one_image_with_its_frames_pooled(
-    reduction, pool
+    reduction, pool, cycles, frame_count
 ) -> None:
-    snapshot, values = _camera_cycle()
+    snapshot, values = _camera_cycle(cycles, frame_count)
     view = DataView(snapshot)
 
     # No refusal: the two named axes are cell data axes, and the cycles and
@@ -86,42 +90,12 @@ def test_a_camera_cycle_draws_as_one_image_with_its_frames_pooled(
 def test_the_pooled_cycle_image_actually_renders() -> None:
     """Drawable, not merely projectable: the session builds and paints."""
 
-    snapshot, values = _camera_cycle()
+    snapshot, _values = _camera_cycle()
     spec = ImagePlot(
         AxisRef.cell_data("x"), AxisRef.cell_data("y"), reduction=Reduction.MEAN
     )
     session = PlotSession(snapshot, spec)
     try:
-        rgba = session.rgba()
-        assert rgba.size
-        np.testing.assert_allclose(
-            np.asarray(session._payload.z.canonical), values.mean(axis=(0, 1))
-        )
+        assert session.rgba().size
     finally:
         session.close()
-
-
-def test_one_frame_is_not_a_special_case_of_the_same_rule() -> None:
-    """A single-frame cycle takes the identical path, no branch of its own."""
-
-    from zlc_data import READOUT_EVENT, REPEAT, SPATIAL_X, SPATIAL_Y
-
-    frames = mapped_domain_from_columns(
-        {"frame": [0]}, roles={"frame": READOUT_EVENT}
-    )
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        frames,
-        cell_axes=(
-            axis("y", size=HEIGHT, role=SPATIAL_Y),
-            axis("x", size=WIDTH, role=SPATIAL_X),
-        ),
-        dtype=np.float64,
-    )
-    values = np.arange(HEIGHT * WIDTH, dtype=np.float64).reshape(schema.physical_shape)
-    payload = DataView(make_snapshot(schema, values, revision=0)).image(
-        AxisRef.cell_data("x"), AxisRef.cell_data("y")
-    )
-    np.testing.assert_allclose(
-        np.asarray(payload.z.canonical), values[0, 0]
-    )

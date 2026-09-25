@@ -270,7 +270,7 @@ def test_overview_cell_ticks_have_one_owner_across_frames(monkeypatch) -> None:
             assert len({round(float(axis.bbox.width), 6) for axis in cells}) == 1
             assert all(abs(axis.bbox.width - axis.bbox.height) < 1e-6 for axis in cells)
             for axis in cells:
-                transform = session._axis_transform_for_axis(axis)
+                transform = session._axis_transform_for_axis(axis, session._projected)
                 nx, ny = transform.display_to_normalized(0.0, 0.0)
                 point = transform.canonical_from_normalized(nx, ny)
                 assert abs(point.x) < 1e-8 and abs(point.y) < 1e-8
@@ -387,5 +387,62 @@ def test_declared_coordinate_names_survive_the_overview_and_the_focus() -> None:
         assert names(0) == ["zero", "one", "two"]
         session.show_facet_overview()
         assert names(1) == ["zero", "one", "two"]
+    finally:
+        session.close()
+
+def test_labelled_axis_ticks_by_name() -> None:
+    """A pair/model axis ticks by its declared names -- the same names the
+    legend, hover and scope rows use -- never by bare indices."""
+
+    from zlc_data import (
+        COMPONENT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema as Schema,
+        DomainSpec,
+        REPEAT,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+    from zlc_plot import CurvePlot
+
+    pair = AxisSpec(
+        AxisId("fs.pair"), "pair", COMPONENT, 3,
+        coordinate_labels=("0-1", "0-2", "1-2"),
+    )
+    site = AxisSpec(AxisId("occ.site"), "site", SITE, 5)
+    schema = Schema(
+        DomainSpec(
+            (8,),
+            (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 8),),
+            (tuple(range(8)),),
+        ),
+        DomainSpec((1,), (), ()),
+        DomainSpec((3, 5), (pair, site)),
+        ValueSchema(
+            ValidityContract.components(pair.axis_id, site.axis_id),
+            np.dtype("<f8"),
+            "1",
+        ),
+    )
+    rng = np.random.default_rng(0)
+    snapshot = owned_snapshot_from_arrays(
+        schema, (rng.random((8, 1, 3, 5)) < 0.5).astype("<f8"), 0
+    )
+    session = PlotSession(
+        snapshot,
+        CurvePlot(AxisRef.cell_data("fs.pair")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        session._renderer.draw()
+        axes = session._renderer.figure.axes[0]
+        labels = [tick.get_text() for tick in axes.get_xticklabels()]
+        assert labels == ["0-1", "0-2", "1-2"]
+        series = session._projection._payload.series[0]
+        assert series.x_labels == ("0-1", "0-2", "1-2")
+        assert series.sem is not None
     finally:
         session.close()

@@ -76,6 +76,36 @@ def test_plot_recipe_round_trip_keeps_view_and_rejects_unknown_fields(viewport) 
         decode_plot_recipe({**document, "unexpected": True})
 
 
+def test_the_uncertainty_switches_survive_the_archive_and_default_from_the_schema() -> None:
+    """The band and the trailing span are panel parameters: they travel in
+    the recipe's parameters block, and a recipe that omits one is completed
+    from the parameter schema's own default by the writer, never by a second
+    default kept here.
+
+    The band is ON by default: a mean shown without its spread is a number
+    presented as if it were exact.  A trailing span of one averages nothing,
+    which is the off state a count-valued parameter has instead of a False.
+    """
+
+    from zlc_plot.config import DEFAULTS
+    from zlc_plot.specs import Reduction, parameter_schema_for
+
+    def declared(spec) -> dict:
+        return dict(parameter_schema_for(spec, style=DEFAULTS.style).initial_values({}))
+
+    def saved(spec, parameters) -> dict:
+        document = encode_plot_recipe(spec, parameters=parameters, size="2x2")
+        return decode_plot_recipe(document)["parameters"]
+
+    curve = CurvePlot(AxisRef.point("x"))
+    rolling = RollingPlot(reduction=Reduction.MEAN)
+    assert declared(curve)["uncertainty"] is True
+    assert declared(rolling)["trailing"] == 1
+    for spec, name, authored in ((curve, "uncertainty", False), (rolling, "trailing", 50)):
+        assert saved(spec, {})[name] == declared(spec)[name]
+        assert saved(spec, {name: authored})[name] == authored
+
+
 def test_saved_value_name_is_used_when_the_figure_is_redrawn(tmp_path) -> None:
     from data_factory import make_dataset_schema, make_snapshot, mapped_domain_from_columns, repeat_domain
     from zlc_data.figure_archive import read_archive

@@ -14,7 +14,6 @@ from data_factory import (
 from zlc_data import OwnedSnapshot, PRIMARY_INDEX, REPEAT, SITE, SPATIAL_X, SPATIAL_Y
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_plot import HistogramPlot, PlotSession
-from zlc_plot.data_view import DataView
 
 
 def _snapshot(revision: int = 0) -> OwnedSnapshot:
@@ -26,13 +25,6 @@ def _snapshot(revision: int = 0) -> OwnedSnapshot:
     )
     values = np.arange(8, dtype=np.float64).reshape(schema.physical_shape)
     return make_snapshot(schema, values, revision=revision)
-
-
-def test_histogram_pools_the_whole_box() -> None:
-    """Repeat x points x data axes all land in the pool: 8 values, 8 counts."""
-
-    histogram = DataView(_snapshot()).histogram(bins=4)
-    assert int(np.asarray(histogram.counts).sum()) == 8
 
 
 def test_a_steady_bin_grid_moves_its_bars_instead_of_rebuilding_them() -> None:
@@ -94,7 +86,7 @@ def test_histogram_spec_needs_no_axis_declaration() -> None:
             description.field(name).value == "pool"
             for _axis, name in description.fate_rows
         )
-        assert description.axes_offering("x") == ()
+        assert tuple(axis for axis, name in description.fate_rows if "x" in description.field(name).choice_values) == ()
     finally:
         session.close()
 

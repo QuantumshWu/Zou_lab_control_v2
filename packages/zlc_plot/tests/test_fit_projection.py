@@ -434,7 +434,6 @@ def test_last_reduction_replays_the_same_scope_for_payload_and_selection(kind, h
 
 def test_last_on_a_missing_sparse_end_is_the_same_empty_scope() -> None:
     from zlc_data import EmptySelection
-    from zlc_plot.data_view import DataView
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -445,7 +444,6 @@ def test_last_on_a_missing_sparse_end_is_the_same_empty_scope() -> None:
     spec = CurvePlot(AxisRef.cell_data("x"), reduction=Reduction.LAST)
     for build in (
         lambda: _projection(spec, snapshot=snapshot),
-        lambda: DataView(snapshot).curve(spec.x, aggregation=Reduction.LAST),
         lambda: _projection(replace(spec, reduction=Reduction.MEAN, scope=(
             (AxisRef.point("a"), 1), (AxisRef.point("b"), 1))), snapshot=snapshot),
     ):
@@ -489,10 +487,13 @@ def test_a_kind_with_no_run_answers_none_rather_than_refusing() -> None:
     """
 
     session = _pulse_timeline_session()
-    assert session.data_generation is None
-    # The projection owns the data, so it owns the answer; the session says
-    # the same thing because it asks the projection.
-    assert session._projection.data_generation is None
+    try:
+        assert session.data_generation is None
+        # The projection owns the data, so it owns the answer; the session
+        # says the same thing because it asks the projection.
+        assert session._projection.data_generation is None
+    finally:
+        session.close()
 
 
 def test_resizing_a_pulse_timeline_keeps_drawing_it() -> None:

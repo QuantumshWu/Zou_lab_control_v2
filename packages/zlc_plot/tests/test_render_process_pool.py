@@ -33,8 +33,6 @@ import pytest
 
 from zlc_plot.render_process import (
     _CHILD_NAME_PREFIX,
-    DEFAULT_RENDER_SETTLED_SPARES,
-    DEFAULT_RENDER_SPARES,
     RenderProcessPool,
 )
 
@@ -46,6 +44,7 @@ class _Member:
         self.name = name
         self.hosts: list[object] = []
         self.host_retired = host_retired
+        self.built = False
         self.releases = 0
         self.closes = 0
 
@@ -53,8 +52,13 @@ class _Member:
     def host_count(self) -> int:
         return len(self.hosts)
 
+    @property
+    def fresh(self) -> bool:
+        return not self.built
+
     def build_host(self, tag: object) -> object:
         self.hosts.append(tag)
+        self.built = True
         return (self.name, tag)
 
     def retire_host(self) -> None:
@@ -119,12 +123,12 @@ def _settled(pool: RenderProcessPool, warm: int, timeout: float = 5.0) -> None:
     while time.monotonic() < deadline:
         members = list(pool._members)
         if not pool._starting and len(
-            [member for member in members if member.host_count == 0]
+            [member for member in members if member.fresh]
         ) == warm:
             return
         time.sleep(0.005)
     raise AssertionError(
-        f"warm={len([m for m in pool._members if m.host_count == 0])} "
+        f"warm={len([m for m in pool._members if m.fresh])} "
         f"total={len(pool._members)} starting={len(pool._starting)}"
     )
 
@@ -217,11 +221,14 @@ def test_panels_arriving_together_each_get_a_child_of_their_own(spawned) -> None
     assert sorted(member.host_count for member in spawned) == [0, 1, 1, 1, 1]
 
 
-def test_a_child_whose_panel_closed_is_warm_again(spawned) -> None:
-    """And the surplus is let go, not kept for ever.
+def test_a_child_whose_panel_closed_is_let_go(spawned) -> None:
+    """Spent, not warm: a child builds one panel, and spares stay untouched.
 
-    A board that opens three panels and closes them again would otherwise
-    hold three children plus the spares, for ever, with nothing drawing.
+    Its grid cell reserve and its panel's fit warm went to that panel, so
+    kept as a spare it would hand the next panel a used child while a clean
+    one stood idle.  And a board that opens three panels and closes them
+    again would otherwise hold three children plus the spares, for ever,
+    with nothing drawing.
     """
 
     pool = RenderProcessPool("test", spares=2)
@@ -239,6 +246,7 @@ def test_a_child_whose_panel_closed_is_warm_again(spawned) -> None:
             break
         time.sleep(0.005)
     assert len(pool._members) == 2
+    assert all(member.fresh for member in pool._members)
     # Told to go, not waited for: the reclaim can run on the very reader
     # thread a close would wait for.
     assert sum(member.releases for member in spawned) == 3
@@ -362,15 +370,6 @@ def test_a_board_that_has_arrived_stops_holding_a_board_in_reserve(
     for member in [item for item in spawned if item.host_count]:
         member.retire_host()
     _settled(pool, warm=4)
-
-
-def test_the_defaults_are_a_board_then_what_an_operator_adds() -> None:
-    """Four warm, because a board is four cards; two once one is drawing,
-    because a board grows one panel at a time."""
-
-    assert DEFAULT_RENDER_SPARES == 4
-    assert DEFAULT_RENDER_SETTLED_SPARES == 2
-    assert DEFAULT_RENDER_SETTLED_SPARES < DEFAULT_RENDER_SPARES
 
 
 def _child_report(connection) -> None:

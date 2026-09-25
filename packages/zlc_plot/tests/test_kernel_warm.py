@@ -55,7 +55,6 @@ def test_every_module_that_defines_a_kernel_is_looked_in() -> None:
 def test_the_warmer_finds_every_kernel_it_looks_for() -> None:
     """Every declared production dispatcher is visible to the warmer."""
 
-    pytest.importorskip("numba")
     found = _kernel_warm.kernel_dispatchers()
     declared = 0
     for module in _kernel_warm.kernel_modules():
@@ -83,17 +82,14 @@ def test_the_work_the_warmer_runs_is_work_the_product_can_do() -> None:
     operator who ran the tool, under a message about a missing dependency.
     """
 
-    from zlc_plot import _height3d_raster, _raster_kernels
+    from zlc_plot import _raster_kernels
 
     previous_plot = _raster_kernels.ENGINE
-    previous_h3d = _height3d_raster._ENGINE
     _raster_kernels.ENGINE = "numpy"
-    _height3d_raster._ENGINE = "numpy"
     try:
         _kernel_warm.representative_work(include_compiled_fit=False)
     finally:
         _raster_kernels.ENGINE = previous_plot
-        _height3d_raster._ENGINE = previous_h3d
 
 
 def test_the_representative_work_reaches_every_kernel() -> None:
@@ -108,32 +104,15 @@ def test_the_representative_work_reaches_every_kernel() -> None:
     the compile the warmer exists to take.
     """
 
-    pytest.importorskip("numba")
-    from zlc_plot import _height3d_raster, _raster_kernels
+    from zlc_plot import _raster_kernels
 
     previous_plot = _raster_kernels.ENGINE
-    previous_h3d = _height3d_raster._ENGINE
     _raster_kernels.ENGINE = "numba"
-    _height3d_raster._ENGINE = "numba"
     try:
         _kernel_warm.representative_work()
     finally:
         _raster_kernels.ENGINE = previous_plot
-        _height3d_raster._ENGINE = previous_h3d
     assert _kernel_warm.cold_kernels() == ()
-
-
-def test_a_missing_numba_is_reported_not_raised() -> None:
-    """The one cause the launcher used to name is the one that cannot fail."""
-
-    from zlc_plot import _raster_kernels
-
-    previous = _raster_kernels.HAVE_NUMBA
-    _raster_kernels.HAVE_NUMBA = False
-    try:
-        assert "numba is not installed" in _kernel_warm.warm()
-    finally:
-        _raster_kernels.HAVE_NUMBA = previous
 
 
 class _FakeIndex:
@@ -223,6 +202,7 @@ def test_distinct_dtypes_and_a_repeated_exact_signature_are_not_twins() -> None:
         (None, None, False, None),
         (None, None, True, (True, True)),
         ("toolchain", None, False, (True, True)),
+        ("warm_list", None, False, (True, True)),
     ),
 )
 def test_warm_runs_only_changed_or_cold_groups(
@@ -247,10 +227,12 @@ def test_warm_runs_only_changed_or_cold_groups(
     if cold == "missing_data":
         index = dispatchers["_raster_kernels.kernel"]._cache._cache_file
         index._data_path = lambda name: str(tmp_path / "missing.nbc")
-    previous = "python|numpy|numba|" + "|".join(f"zlc_plot.{name}:old" for name in modules)
+    previous = "python|numpy|numba|warm|" + "|".join(f"zlc_plot.{name}:old" for name in modules)
     current = previous.replace(f"{changed}:old", f"{changed}:new")
     if changed == "toolchain":
         current = current.replace("numba|", "new-numba|")
+    if changed == "warm_list":
+        current = current.replace("|warm|", "|new-warm|")
     marker = tmp_path / "zlc_kernels.marker"
     marker.write_text(previous, encoding="utf-8")
     monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
@@ -310,7 +292,7 @@ def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> Non
     place of the one they do."""
 
     import zlc_plot
-    from zlc_plot import _height3d_raster, _raster_kernels, AxisRef, ImagePlot
+    from zlc_plot import _raster_kernels, AxisRef, ImagePlot
 
     viewports = []
     original = zlc_plot.PlotSession.set_viewport
@@ -321,9 +303,7 @@ def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> Non
 
     monkeypatch.setattr(zlc_plot.PlotSession, "set_viewport", recording)
     previous_plot = _raster_kernels.ENGINE
-    previous_h3d = _height3d_raster._ENGINE
     _raster_kernels.ENGINE = "numpy"
-    _height3d_raster._ENGINE = "numpy"
     try:
         snapshot = _kernel_warm._image_snapshot(3, 5, np.float64)
         assert np.asarray(snapshot.block.values).shape == (1, 1, 3, 5)
@@ -334,7 +314,6 @@ def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> Non
         )
     finally:
         _raster_kernels.ENGINE = previous_plot
-        _height3d_raster._ENGINE = previous_h3d
     assert len(viewports) == 1
     x, y = viewports[0]
     assert (x.low + x.high) / 2.0 == 2.5
@@ -348,6 +327,10 @@ def test_the_cells_follow_the_last_grid_and_the_scene_comes_last(monkeypatch) ->
     child taken at two seconds used to be taken before it ran.  The 3D
     scene buys nothing for a panel that is not one, so it stays at the end,
     where a child taken early simply never reaches it.
+
+    A request shares the process with the warming, so the warming asks
+    before every picture whether it may go on and stops the moment the
+    answer is no; what it did not reach is paid by the panel that needs it.
     """
 
     from zlc_plot.config import DEFAULTS
@@ -385,6 +368,16 @@ def test_the_cells_follow_the_last_grid_and_the_scene_comes_last(monkeypatch) ->
     answers = iter((True,) * 4 + (False,))
     _kernel_warm.warm_process(proceed=lambda: next(answers, False))
     assert events == grids
+
+    # Stopped before its first picture, it does not even build the data.
+    def no_data(*_args, **_kwargs):
+        raise AssertionError("a stopped warm-up created data")
+
+    events.clear()
+    monkeypatch.setattr(_kernel_warm, "_image_snapshot", no_data)
+    monkeypatch.setattr(_kernel_warm, "_series_snapshot", no_data)
+    _kernel_warm.warm_process(proceed=lambda: False)
+    assert events == []
 
 
 def test_a_fresh_process_is_warmed_before_its_first_request() -> None:
@@ -480,46 +473,6 @@ print(solvers_loaded_by_a_spare)
     assert set(eval(scipy_loaded)) <= {"scipy.version", "scipy.linalg"}, (
         f"a render child imported {scipy_loaded}"
     )
-
-
-def test_the_warming_stops_before_its_next_picture_once_a_panel_asks(monkeypatch) -> None:
-    """A request shares the process with the warming, so the warming asks
-    before every picture whether it may go on, and stops the moment the
-    answer is no -- what it did not reach is paid by the panel that needs
-    it, as before.
-
-    The order is asserted, not just the stopping, because the order is what
-    decides which costs a cut-off child has already paid.  The opening
-    picture comes first, then the other grid, and only then the cells and
-    the plots that are fitted.
-    """
-
-    rendered: list[str] = []
-    constructed = []
-    image_snapshot = _kernel_warm._image_snapshot
-
-    def make_image(*args, **kwargs):
-        constructed.append(args)
-        return image_snapshot(*args, **kwargs)
-
-    monkeypatch.setattr(_kernel_warm, "_image_snapshot", make_image)
-    monkeypatch.setattr(
-        _kernel_warm, "_render",
-        lambda snapshot, spec, parameters=None, **kw: rendered.append(type(spec).__name__),
-    )
-    answers = iter((True, True, False))
-    _kernel_warm.warm_process(proceed=lambda: next(answers))
-    assert rendered == ["FacetGridPlot", "FacetGridPlot"]
-    assert len(constructed) == 2
-    rendered.clear()
-    constructed.clear()
-    monkeypatch.setattr(
-        _kernel_warm, "_series_snapshot",
-        lambda *args: (_ for _ in ()).throw(AssertionError("stopped warmup created data")),
-    )
-    _kernel_warm.warm_process(proceed=lambda: False)
-    assert rendered == []
-    assert constructed == []
 
 
 def test_the_fit_is_warmed_for_the_panels_kind_and_shape_alone(monkeypatch) -> None:

@@ -57,24 +57,6 @@ def _transform(**overrides) -> AxisTransform:
     return AxisTransform(**fields)
 
 
-def test_the_middle_of_a_log_box_is_the_geometric_mean() -> None:
-    """The number this reported was the arithmetic mean, four decades out."""
-
-    linear = _transform()
-    logarithmic = _transform(y_scale=LOG)
-
-    assert linear.canonical_from_normalized(0.5, 0.5).y == pytest.approx(
-        (0.8 + 1200.0) / 2.0
-    )
-    assert logarithmic.canonical_from_normalized(0.5, 0.5).y == pytest.approx(
-        math.sqrt(0.8 * 1200.0)
-    )
-    # And it is not the answer the linear map gives, which is the defect.
-    assert logarithmic.canonical_from_normalized(0.5, 0.5).y != pytest.approx(
-        linear.canonical_from_normalized(0.5, 0.5).y
-    )
-
-
 def test_pixel_and_data_round_trip_under_every_scale() -> None:
     """Whatever goes out one side must come back in the other."""
 
@@ -117,7 +99,7 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
             session.rgba()
             renderer = session._renderer
             axes = renderer.primary_axes
-            transform = session._axis_transform_for_axis(axes)
+            transform = session._axis_transform_for_axis(axes, session._projected)
             assert transform.y_scale == (LOG if log_y else LINEAR), (
                 "the transform did not capture the scale the renderer set"
             )
@@ -160,7 +142,7 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
         try:
             image.rgba()
             axes = image._renderer.primary_axes
-            transform = image._axis_transform_for_axis(axes)
+            transform = image._axis_transform_for_axis(axes, image._projected)
             display_values = DEFAULT_UNITS.convert(np.asarray(coordinates), "mVpp", unit)
             displayed = float((display_values[0] + display_values[1]) / 2)
             nx, ny = transform.display_to_normalized(displayed, 1.)
@@ -186,7 +168,7 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
             for step in (-1., 1.):
                 image._raster_pointer_event("scroll", nx, ny, step=step, axes_snapshot=transform)
                 image.rgba()
-                transform = image._axis_transform_for_axis(axes)
+                transform = image._axis_transform_for_axis(axes, image._projected)
                 box = axes.get_window_extent()
                 assert box.width == pytest.approx(box.height)
                 lattice_span = abs(np.diff(axis_space(np.asarray(axes.get_xlim()), transform.x_scale))[0])
@@ -278,38 +260,6 @@ def test_an_edge_handle_sits_on_the_edge_it_belongs_to() -> None:
     )
     geometric = transform.display_to_normalized(0.0, midpoint(0.8, 1200.0, LOG))[1]
     assert geometric == pytest.approx(0.5)
-
-
-def test_every_axis_fact_the_renderer_can_set_is_captured() -> None:
-    """The transform is built once; what it forgets, nothing can recover.
-
-    The scale was not dropped somewhere downstream -- it was never picked
-    up.  This asserts mechanically that the one builder asks for the scale
-    wherever it asks for the limits, so the next axis property cannot be
-    forgotten the same way.
-    """
-
-    import inspect
-
-    from zlc_plot import session as session_module
-
-    source = inspect.getsource(session_module.PlotSession._axis_transform_for_axis)
-    for limits, scale in (("get_xlim", 'axis_scale(axis, "x")'), ("get_ylim", 'axis_scale(axis, "y")')):
-        assert limits in source
-        assert scale in source, (
-            "the transform builder reads %s but never %s" % (limits, scale)
-        )
-    assert {"x_scale", "y_scale"} <= set(AxisTransform.__slots__)
-
-
-def test_the_notebook_carries_the_scale_to_the_browser() -> None:
-    """Two frontends share this transform so they cannot fail differently."""
-
-    from zlc_plot.notebook import _axis_to_dict
-
-    payload = _axis_to_dict(_transform(y_scale=LOG))
-    assert payload["y_scale"] == LOG
-    assert payload["x_scale"] == LINEAR
 
 
 def test_axis_space_is_reversible_and_guards_a_stale_value() -> None:

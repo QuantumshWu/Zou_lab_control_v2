@@ -5,6 +5,7 @@ import threading
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
+import pytest
 
 import zlc_plot.backends as backends
 
@@ -120,7 +121,8 @@ def test_a_shell_that_is_already_there_still_gets_the_hook(monkeypatch) -> None:
     assert backends._IPYTHON_QT_LOOP_ENABLED is True
 
 
-def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
+@pytest.mark.gui
+def test_a_widget_outliving_its_host_refuses_input_instead_of_raising(qt_app) -> None:
     """An exception out of a Qt handler kills the application, silently.
 
     The console retires a plot host whenever a panel retargets, and the
@@ -146,12 +148,7 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
         repeat_domain,
     )
     from zlc_data import REPEAT, SPATIAL_X, SPATIAL_Y
-    from zlc_plot import (
-        AxisRef,
-        ImagePlot,
-        RasterPlotHost,
-        ensure_qt5_application,
-    )
+    from zlc_plot import AxisRef, ImagePlot, RasterPlotHost
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -164,7 +161,6 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
     )
     values = np.arange(24 * 32, dtype=np.uint8).reshape(1, 1, 24, 32)
 
-    ensure_qt5_application([])
     host = RasterPlotHost.from_plot(
         make_snapshot(schema, values, revision=1),
         ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
@@ -224,7 +220,8 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
     assert not escaped, "an exception escaped a Qt handler: %r" % (escaped[0],)
 
 
-def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
+@pytest.mark.gui
+def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes(qt_app) -> None:
     """Turning a scene must not stop it turning.
 
     A camera drag WRITES display state, so every frame it causes carries a
@@ -250,12 +247,7 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
         repeat_domain,
     )
     from zlc_data import REPEAT, SPATIAL_X, SPATIAL_Y
-    from zlc_plot import (
-        AxisRef,
-        ImagePlot,
-        RasterPlotHost,
-        ensure_qt5_application,
-    )
+    from zlc_plot import AxisRef, ImagePlot, RasterPlotHost
 
     rows, columns = 40, 60
     schema = make_dataset_schema(
@@ -276,11 +268,10 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
             revision=revision,
         )
 
-    app = ensure_qt5_application([])
     # The screen's OWN ratio: a widget that observes a scale different from
     # its host's rightly cancels the gesture, since the surface really did
     # change under it.  That is a different question from this one.
-    screen = app.primaryScreen()
+    screen = qt_app.primaryScreen()
     host = RasterPlotHost.from_plot(
         snapshot(1),
         ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
@@ -295,7 +286,7 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
         widget.resize(480, 360)
         widget.show()
         for _ in range(40):
-            app.processEvents()
+            qt_app.processEvents()
         widget.set_interaction_enabled(True)
 
         def azimuth() -> float:
@@ -315,7 +306,7 @@ def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
                 ),
             )
             for _ in range(10):
-                app.processEvents()
+                qt_app.processEvents()
 
         send(QtCore.QEvent.MouseButtonPress, at(0.5, 0.5),
              QtCore.Qt.MiddleButton, QtCore.Qt.MiddleButton)

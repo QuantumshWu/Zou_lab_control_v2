@@ -25,7 +25,6 @@ from data_factory import (
 )
 from zlc_data import DatasetSchema, REPEAT
 from zlc_plot.kinds import PlotKind
-from zlc_plot.session_policy import merge_labels
 
 
 def _schema() -> DatasetSchema:
@@ -97,16 +96,6 @@ def test_facet_cell_edit_carries_by_cell_roles() -> None:
     assert edited.cell.labels.y == "Signal (mV)"
     histogram = updated_spec(_schema(), edited, "kind", PlotKind.HISTOGRAM)
     assert histogram.labels == PlotLabels(title="Grid", x="Signal (mV)")
-
-
-def test_merge_labels_never_copies_by_slot() -> None:
-    histogram_labels = merge_labels(
-        _CURVE,
-        updated_spec(_schema(), _CURVE, "kind", PlotKind.HISTOGRAM),
-    )
-    assert histogram_labels.x == "Signal (mV)"
-    assert histogram_labels.title == "Loading curve"
-    assert histogram_labels.y is None
 
 
 @pytest.mark.parametrize("spec", (

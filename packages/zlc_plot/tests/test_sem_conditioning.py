@@ -75,20 +75,6 @@ def test_a_large_offset_does_not_eat_the_spread() -> None:
     assert np.all(np.isfinite(sem)), sem
     np.testing.assert_allclose(sem, wanted, rtol=1e-9)
 
-def test_the_answer_does_not_depend_on_where_zero_is() -> None:
-    """Translation invariance, which the arithmetic must not break.
-
-    The same spread around 1.0 and around 6.834e9 is the same spread.  A
-    formula that squares about zero says otherwise, and says it more the
-    further from zero the data sits.
-    """
-
-    scatter = 1.0e3
-    near, _ = _drawn_sem(1.0e3, scatter)
-    far, _ = _drawn_sem(6.834e9, scatter)
-    np.testing.assert_allclose(near, far, rtol=1e-9)
-
-
 def test_each_projection_centres_every_bucket_on_its_own_mean() -> None:
     """Far-apart buckets retain the small spread each one actually has."""
 

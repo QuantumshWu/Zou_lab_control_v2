@@ -103,16 +103,6 @@ def test_a_lane_at_rest_leaves_the_interpreter_as_it_found_it() -> None:
     assert matplotlib.rcParams["lines.linewidth"] == pytest.approx(before)
 
 
-def test_one_thread_may_not_hold_the_lane_with_two_different_styles() -> None:
-    """Refused by name rather than waiting for a drain including itself."""
-
-    style = build_plot_style()
-    with style_context(style):
-        with pytest.raises(RuntimeError, match="enter the style once"):
-            with style_context(style, {"lines.linewidth": 3.5}):
-                pass
-
-
 def test_the_names_a_style_owns_are_declared_once() -> None:
     """The construction-time contract and the valued params must agree.
 

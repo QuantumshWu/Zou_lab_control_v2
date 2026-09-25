@@ -7,6 +7,7 @@ from dataclasses import replace
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, PlotSession
 from zlc_plot._fit_projection import FitScope
 from zlc_plot.fit import FacetFitBatchResult, FitEngine
+from zlc_plot.rendering import _FIT_DIAGNOSTIC_FACET_MAX_CHARS
 from zlc_plot.selectors import NumericRange
 from data_factory import (
     axis,
@@ -135,34 +136,6 @@ def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation(tmp_path) -
         session.close()
 
 
-def test_facet_fit_overview_keeps_failure_diagnostic_inside_cell() -> None:
-    session = PlotSession(_facet_snapshot(), _spec())
-    try:
-        result = session.fit("gaussian_offset", live=True)
-        assert isinstance(result, FacetFitBatchResult)
-        # Replace the accepted result with a deliberately bounded failure overlay
-        # through the renderer's public presentation transaction.
-        from zlc_plot._fit_scene import FitOverlay
-
-        failure = FitOverlay(
-            success=False,
-            diagnostic="this diagnostic is intentionally much longer than one cell",
-            facet_index=0,
-        )
-        session._renderer._update_facet_fit_overview(
-            (failure, *result.overlays[1:]),
-            "gaussian_offset",
-        )
-        axis = session._renderer.axes["facet_cell"][0]
-        assert axis.texts
-        assert len(axis.texts[0].get_text()) <= 24
-        inset = session._defaults.style.render.axes_text_inset_fraction
-        assert axis.texts[0].get_position() == (inset, 1.0 - inset)
-        assert "headline=" not in axis.get_title()
-    finally:
-        session.close()
-
-
 class _FailFirstFitEngine(FitEngine):
     def __init__(self) -> None:
         super().__init__()
@@ -207,6 +180,18 @@ def test_facet_result_publishes_mixed_success_and_explicit_error_validity(factor
             assert np.isnan(result.parameter_errors[name][0])
             assert not bool(result.parameter_error_validity[name][0])
             assert bool(result.parameter_error_validity[name][1])
+        # The failed cell's diagnostic stays inside its cell: one bounded line
+        # at the text inset, never the headline title.
+        cell = session._renderer.axes["facet_cell"][0]
+        (diagnostic,) = (
+            text for text in cell.texts
+            if text.get_visible() and text.get_text().startswith("fit: ")
+        )
+        assert len(diagnostic.get_text()) <= len("fit: ") + _FIT_DIAGNOSTIC_FACET_MAX_CHARS
+        assert diagnostic.get_text().endswith("...")
+        inset = session._defaults.style.render.axes_text_inset_fraction
+        assert diagnostic.get_position() == (inset, 1.0 - inset)
+        assert "headline=" not in cell.get_title()
     finally:
         session.close()
 

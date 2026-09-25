@@ -181,6 +181,12 @@ def test_one_population_stands_with_its_components_coinciding() -> None:
     assert not result.parameter_error_validity["ratio"]
     assert "one population" in result.message
     assert _bimodal_classifier_metrics(result)[0] is None
+    # An operator who fixed a pinned parameter already asserted two
+    # populations: the one-population answer never overwrites that value.
+    asserted = engine.fit(
+        "bimodal_gaussian", (centres,), counts, bounds={"delta_center": (5.0, 5.0)}
+    )
+    assert not asserted.reduced and asserted.parameters["delta_center"] == 5.0
 
 
 def test_the_evidence_the_operator_demands_decides() -> None:

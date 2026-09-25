@@ -50,7 +50,12 @@ def _samples(session, viewport):
     return counts
 
 def test_a_snapped_viewport_is_square_in_cell_units() -> None:
-    """Every zoom keeps equal whole-cell spans inside the square frame."""
+    """Every zoom keeps equal whole-cell spans inside the square frame.
+
+    Growing to square never loses part of the requested rectangle:
+    outward, and outward only, so the requested view stays wholly visible,
+    which is the reason the snap rounds the way it does in the first place.
+    """
 
     session = PlotSession(
         _square_field_snapshot(),
@@ -66,15 +71,14 @@ def test_a_snapped_viewport_is_square_in_cell_units() -> None:
             (5.5, 6.5, 5.5, 6.5),
             (12.49, 34.51, 12.51, 34.49),
         ):
-            x_count, y_count = _samples(
-                session,
-                (
-                    NumericRange(low_x, high_x), NumericRange(low_y, high_y)
-                ),
-            )
+            asked = (NumericRange(low_x, high_x), NumericRange(low_y, high_y))
+            x_count, y_count = _samples(session, asked)
             assert x_count == y_count, (
                 (low_x, high_x, low_y, high_y), x_count, y_count
             )
+            got = session._image_viewport_on_pixel_grid(asked)
+            assert got[0].low <= low_x + 1e-9 and got[0].high >= high_x - 1e-9
+            assert got[1].low <= low_y + 1e-9 and got[1].high >= high_y - 1e-9
     finally:
         session.close()
 
@@ -118,31 +122,5 @@ def test_unequal_scan_steps_still_draw_square_cells_and_keep_the_zoom_box() -> N
         )
         after = tuple(map(float, axes.bbox.bounds))
         assert after == pytest.approx(before, abs=1.0e-9)
-    finally:
-        session.close()
-
-def test_the_snap_still_contains_what_was_asked_for() -> None:
-    """Growing to square never loses part of the requested rectangle.
-
-    Outward, and outward only: the requested view stays wholly visible,
-    which is the reason the snap rounds the way it does in the first place.
-    """
-
-    session = PlotSession(
-        _square_field_snapshot(),
-        ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
-    )
-    try:
-        for low_x, high_x, low_y, high_y in (
-            (10.3, 30.1, 10.0, 30.0),
-            (10.7, 29.2, 10.2, 30.8),
-            (12.49, 34.51, 12.51, 34.49),
-        ):
-            asked = (
-                NumericRange(low_x, high_x), NumericRange(low_y, high_y)
-            )
-            got = session._image_viewport_on_pixel_grid(asked)
-            assert got[0].low <= low_x + 1e-9 and got[0].high >= high_x - 1e-9
-            assert got[1].low <= low_y + 1e-9 and got[1].high >= high_y - 1e-9
     finally:
         session.close()

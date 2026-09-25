@@ -172,7 +172,6 @@ def test_the_threshold_follows_the_pointer_and_commits_on_release() -> None:
                     for item in current.interaction.axes
                     if item.role == "main"
                 ),
-                interaction=current.interaction,
             ).result(timeout=20)
 
         settled = host.selector_state(SelectorKind.THRESHOLD, display=False).result(
@@ -530,7 +529,7 @@ def test_a_wheel_notch_zooms_the_committed_view_not_the_drawn_one(kind) -> None:
     session = PlotSession(snapshot, spec, parameters={"window": 4}, size="2x2")
     try:
         session.rgba()
-        transform = session._axis_transform_for_axis(session._renderer.primary_axes)
+        transform = session._axis_transform_for_axis(session._renderer.primary_axes, session._projected)
         session.set_area_selector(NumericRange(0.0, 3.0), NumericRange(-100.0, 100.0))
         selectors = session.selectors
         session.set_viewport(NumericRange(0.0, 100.0), None)

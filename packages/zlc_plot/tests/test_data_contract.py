@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from zlc_data import AxisId, DatasetSchema, DomainSpec, REPEAT, SCAN_POINT
+from zlc_data import DatasetSchema
 
 from data_factory import (
     axis,
-    cartesian_domain,
     make_dataset_schema,
     make_snapshot,
     mapped_domain_from_columns,
@@ -30,14 +29,6 @@ def schema() -> DatasetSchema:
         cell_axes=(scan,),
         dtype=np.float32,
     )
-
-
-def test_schema_exposes_fixed_r_p_data_geometry(schema: DatasetSchema) -> None:
-    assert schema.physical_shape == (2, 3, 2)
-    assert len(schema.physical_shape) == 3
-    assert schema.repeat_domain.size == 2
-    assert schema.point_domain.size == 3
-    assert schema.value_schema.dtype == np.dtype(np.float32)
 
 
 def test_snapshot_makes_owned_readonly_arrays_and_validity(
@@ -85,23 +76,6 @@ def test_snapshot_rejects_invalid_shape_dtype_validity_and_revision(
         factory(schema)
 
 
-def test_point_domain_codes_are_explicit_and_readonly() -> None:
-    bx = axis("b_x", values=[-1.0, 1.0], role=SCAN_POINT)
-    by = axis("b_y", values=[0.0, 2.0], role=SCAN_POINT)
-    points = cartesian_domain((bx, by))
-    assert points.logical_shape == (2, 2)
-    assert points.codes(AxisId("b_x")).tolist() == [0, 0, 1, 1]
-    assert points.codes(AxisId("b_y")).tolist() == [0, 1, 0, 1]
-    assert not points.codes(AxisId("b_x")).flags.writeable
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        points,
-    )
-    assert schema.point_domain is points
-    with pytest.raises(ValueError):
-        DomainSpec((1,), (bx,), ((2,),))
-
-
 def test_scalar_carrier_is_not_an_authored_plot_axis() -> None:
     scalar = make_dataset_schema(
         repeat_domain(size=1),
@@ -112,6 +86,114 @@ def test_scalar_carrier_is_not_an_authored_plot_axis() -> None:
         name != "value"
         for group in schema_structure(scalar)
         for name, _size in group
+    )
+
+
+def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
+    """Three brackets: (repeat) x (points) x (data).
+
+    Pair and site are both dimensions of one atomic cell payload, so they
+    share the third bracket.  A READOUT_EVENT cell axis is instead a fact
+    about WHEN within one point, so it joins the points bracket after the
+    scan dimensions: (20) x (10x10x10x3) x (34).
+    """
+
+    from zlc_data import (
+        COMPONENT,
+        DomainSpec,
+        READOUT_EVENT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema as Schema,
+        REPEAT,
+        SCALAR_DOMAIN,
+        SPATIAL_X,
+        SPATIAL_Y,
+        ValidityContract,
+        ValueSchema,
+    )
+    from zlc_plot.semantics import schema_structure
+
+    def _schema_for(axes):
+        return Schema(
+            DomainSpec(
+                (1,),
+                (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 1),),
+                ((0,),),
+            ),
+            DomainSpec((1,), (), ()),
+            DomainSpec(tuple(axis.size for axis in axes), axes),
+            ValueSchema(
+                ValidityContract.components(axes[0].axis_id),
+                np.dtype("<f8"),
+                "1",
+            ),
+        )
+
+    categorical = _schema_for(
+        (
+            AxisSpec(AxisId("fs.pair"), "pair", COMPONENT, 3),
+            AxisSpec(AxisId("occ.site"), "site", SITE, 33),
+        )
+    )
+    groups = schema_structure(categorical)
+    assert tuple(tuple(name for name, _size in group) for group in groups) == (
+        ("cycle",),
+        (),
+        ("pair", "site"),
+    )
+
+    scanned = Schema(
+        DomainSpec(
+            (20,),
+            (AxisSpec(AxisId("cycle"), "cycle", REPEAT, 20),),
+            (tuple(range(20)),),
+        ),
+        DomainSpec(
+            (8,),
+            tuple(
+                AxisSpec(AxisId(name), name, COMPONENT, 2, (0.0, 1.0))
+                for name in ("ax", "ay", "az")
+            ),
+            tuple(
+                tuple(cell[position] for cell in tuple(
+                    (i % 2, (i // 2) % 2, i // 4) for i in range(8)
+                ))
+                for position in range(3)
+            ),
+        ),
+        DomainSpec(
+            (3, 34),
+            (
+                AxisSpec(AxisId("cm.frame"), "frame", READOUT_EVENT, 3),
+                AxisSpec(AxisId("occ.site"), "site", SITE, 34),
+            ),
+        ),
+        ValueSchema(
+            ValidityContract.components(AxisId("occ.site")),
+            np.dtype("<f8"),
+            "1",
+        ),
+    )
+    groups = schema_structure(scanned)
+    assert tuple(tuple(name for name, _size in group) for group in groups) == (
+        ("cycle",),
+        ("ax", "ay", "az"),
+        ("frame", "site"),
+    )
+
+    picture = _schema_for(
+        (
+            AxisSpec(AxisId("cam.y"), "y", SPATIAL_Y, 4),
+            AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 5),
+        )
+    )
+    groups = schema_structure(picture)
+    assert tuple(tuple(name for name, _size in group) for group in groups) == (
+        ("cycle",),
+        (),
+        ("y", "x"),
     )
 
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from matplotlib.collections import PolyCollection
 
 from data_factory import (
     make_dataset_schema,
@@ -57,7 +56,7 @@ def _one_fit_per_point(*, with_sigma: bool) -> OwnedSnapshot:
         sigma=ERRORS.reshape(1, POINTS) if with_sigma else None,
     )
 
-def _curve_sem(snapshot: OwnedSnapshot) -> np.ndarray:
+def _curve_sem(snapshot: OwnedSnapshot, error_bars) -> np.ndarray:
     session = PlotSession(
         snapshot,
         CurvePlot(AxisRef.point("x")),
@@ -67,13 +66,7 @@ def _curve_sem(snapshot: OwnedSnapshot) -> np.ndarray:
         session._renderer.draw()
         series = session._projection._payload.series[0]
         sem = np.asarray(series.sem, dtype=float)
-        session._renderer._materialize_prepared_curve()
-        bars = [
-            artist
-            for axes in session._renderer.figure.axes
-            for artist in axes.collections
-            if isinstance(artist, PolyCollection) and hasattr(artist, "_zlc_segment_buffer") and artist.get_visible()
-        ]
+        bars = error_bars(session, visible_only=True)
         assert any(len(artist._zlc_segment_buffer) for artist in bars) == bool(
             np.any(np.isfinite(sem) & (sem > 0.0))
         ), "a finite stated error must reach the rendered single-sample band"
@@ -81,13 +74,13 @@ def _curve_sem(snapshot: OwnedSnapshot) -> np.ndarray:
     finally:
         session.close()
 
-def test_one_fit_per_point_draws_its_own_error() -> None:
+def test_one_fit_per_point_draws_its_own_error(error_bars) -> None:
     """The band over a bucket of one is that sample's stated error."""
 
-    sem = _curve_sem(_one_fit_per_point(with_sigma=True))
+    sem = _curve_sem(_one_fit_per_point(with_sigma=True), error_bars)
     assert np.allclose(sem, ERRORS, rtol=0, atol=0)
 
-def test_without_a_stated_error_a_bucket_of_one_still_has_no_band() -> None:
+def test_without_a_stated_error_a_bucket_of_one_still_has_no_band(error_bars) -> None:
     """The sigma is what produces it -- not some default that hides a NaN.
 
     Guards the test above against passing for the wrong reason: if a
@@ -95,10 +88,10 @@ def test_without_a_stated_error_a_bucket_of_one_still_has_no_band() -> None:
     tests could not both hold.
     """
 
-    sem = _curve_sem(_one_fit_per_point(with_sigma=False))
+    sem = _curve_sem(_one_fit_per_point(with_sigma=False), error_bars)
     assert np.all(np.isnan(sem))
 
-def test_a_scatter_of_several_ignores_the_stated_errors() -> None:
+def test_a_scatter_of_several_ignores_the_stated_errors(error_bars) -> None:
     """Two or more samples: the band is the scatter, sigma or no sigma.
 
     A scatter already contains the measurement error.  Adding the stated
@@ -121,8 +114,8 @@ def test_a_scatter_of_several_ignores_the_stated_errors() -> None:
         sigma=np.full((repeats, POINTS), 3.0),
     )
     expected = values.std(axis=0, ddof=1) / np.sqrt(repeats)
-    assert np.allclose(_curve_sem(bare), expected, rtol=1e-12)
-    assert np.allclose(_curve_sem(stated), expected, rtol=1e-12)
+    assert np.allclose(_curve_sem(bare, error_bars), expected, rtol=1e-12)
+    assert np.allclose(_curve_sem(stated, error_bars), expected, rtol=1e-12)
 
 def test_a_rolling_shot_of_one_fit_carries_its_error() -> None:
     """One fit per shot: each drawn point's band is that fit's error."""
@@ -144,8 +137,8 @@ def test_a_rolling_shot_of_one_fit_carries_its_error() -> None:
             aggregation=Reduction.MEAN, uncertainty=True
         )
         assert len(history) == 1
-        assert history[0].sem is not None
-        assert float(history[0].sem[0]) == pytest.approx(error, rel=0, abs=0)
+        assert history.sem is not None
+        assert float(history.sem[0, 0]) == pytest.approx(error, rel=0, abs=0)
 
 def test_a_grouped_rolling_shot_carries_the_error_of_each_group() -> None:
     """Per-site rolling: one sample per site per shot, each with its own."""
@@ -166,24 +159,4 @@ def test_a_grouped_rolling_shot_carries_the_error_of_each_group() -> None:
         uncertainty=True,
     )
     assert len(history) == 1
-    assert np.allclose(np.asarray(history[0].sem, dtype=float), errors[0])
-
-def test_the_whole_revision_pooled_uses_its_one_samples_error() -> None:
-    """The ungrouped whole-revision reduction takes the same route."""
-
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"x": np.arange(1, dtype=np.int64)}),
-        cell_axes=(),
-        dtype=np.float64,
-    )
-    view = DataView(
-        make_snapshot(
-            schema,
-            np.asarray([[7.5]]),
-            revision=0,
-            sigma=np.asarray([[0.25]]),
-        )
-    )
-    sample = view.rolling_history(aggregation=Reduction.MEAN)[0]
-    assert float(sample.sem[0]) == pytest.approx(0.25, rel=0, abs=0)
+    assert np.allclose(np.asarray(history.sem[0], dtype=float), errors[0])

@@ -52,7 +52,7 @@ def test_the_shot_time_axis_is_an_x_fate_of_a_rolling_plot() -> None:
     assert len(description.fate_rows) == 1  # Repeat only; the record X is fixed.
     assert not description.declares(fate_field)
     assert description.field(coordinate_field).label == "X coordinate"
-    assert not description.axes_offering("x")
+    assert not tuple(axis for axis, name in description.fate_rows if "x" in description.field(name).choice_values)
     along_time = updated_spec(schema, RollingPlot(), coordinate_field, time_ref.axis_id)
     assert along_time == RollingPlot(x=time_ref, coordinates=(time_ref,))
     for fate in ("reduce", "group", "x", scope_fate(0.1)):

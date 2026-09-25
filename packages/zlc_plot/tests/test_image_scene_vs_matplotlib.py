@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-matplotlib = pytest.importorskip("matplotlib")
+import matplotlib
 matplotlib.use("Agg")
 
 from matplotlib import colormaps  # noqa: E402
@@ -72,6 +72,11 @@ def _scene(rng, dtype):
         float(rng.uniform(40.0, 130.0)),
     )
     origin = "upper" if rng.random() < 0.5 else "lower"
+    if values.dtype.kind == "f":
+        # Non-finite samples the validity does not mask (a display unit's
+        # log of a non-positive power): imshow masks them itself.
+        values.flat[::7] = np.nan
+        values.flat[3::11] = np.inf
     return values, valid, extent, xlim, ylim, box, origin, vmin, vmax
 
 

@@ -206,8 +206,7 @@ def test_a_window_and_a_reduction_compose() -> None:
         np.testing.assert_allclose(np.sort(pool), np.sort(expected[row]))
 
 
-@pytest.mark.parametrize("reduction", (Reduction.MEAN, Reduction.LAST))
-def test_the_grid_and_the_single_panel_reduce_the_same_way(reduction) -> None:
+def test_the_grid_and_the_single_panel_reduce_the_same_way() -> None:
     """A faceted cell is the standalone kind, one slice at a time."""
 
     rng = np.random.default_rng(5)
@@ -215,17 +214,14 @@ def test_the_grid_and_the_single_panel_reduce_the_same_way(reduction) -> None:
     view = _view(values)
     refs = (AxisRef.repeat("repeat"),)
 
-    whole, whole_valid = view.histogram_pool(
-        reduce_axes=refs, aggregation=reduction
-    )
-    single = np.sort(np.asarray(whole)[np.asarray(whole_valid)].reshape(-1))
+    plan = view._histogram_plan((), refs, Reduction.MEAN, 1)
+    whole = np.asarray(plan.values)
+    single = np.sort(whole[np.broadcast_to(plan.valid, whole.shape)].reshape(-1))
 
     grid_pool, grid_valid = view.facet_histogram_pool(
-        _grid(reduced=refs, reduction=reduction)
+        _grid(reduced=refs, reduction=Reduction.MEAN)
     )
     np.testing.assert_allclose(np.sort(grid_pool[grid_valid].reshape(-1)), single)
-    if reduction is Reduction.LAST:
-        np.testing.assert_allclose(single, np.sort(values[-1].reshape(-1)))
 
 
 def _two_column_view(values: np.ndarray) -> DataView:
@@ -303,34 +299,14 @@ def test_a_reduced_point_axis_groups_the_rows_inside_each_cell() -> None:
         np.testing.assert_allclose(np.sort(pools[frame]), np.sort(mine.reshape(-1)))
 
 
-def test_both_reduction_routes_agree_on_a_reduction_they_share(monkeypatch) -> None:
-    """Reducing the repeat axis is expressible either way; they must match."""
-
-    from zlc_plot.data_view import _axis_aggregate
+def test_a_partial_segmented_carrier_reduces_like_its_dense_copy(monkeypatch) -> None:
+    """Every reduction route reads a partial, interleaved carrier without
+    filling its holes or asking for the sample sigma a Histogram never
+    consumes.  The routes themselves are held to hand computations above."""
 
     repeats, rows, sites = 4, 6, 2
     values = np.arange(repeats * rows * sites, dtype=float).reshape(repeats, rows, sites)
-    view = _two_column_view(values)
     refs = (AxisRef.repeat("repeat"),)
-
-    # Explicit caller-owned arrays use the ordinary tensor reduction.
-    valid = np.ones(values.shape, dtype=bool)
-    quick, present = view._collapse_axes(values, valid, refs, Reduction.MEAN)
-
-    # The route a point-axis reduction is forced to take, on the same
-    # reduction: compact codes per retained physical axis.
-    dimensions, coordinates = view._reduction_plan(refs)
-    buckets = view._reduction_buckets(dimensions, coordinates)
-    scattered, counts, _presence = _axis_aggregate(
-        values, valid, buckets.codes, buckets.axes, buckets.shape, Reduction.MEAN,
-    )
-    np.testing.assert_allclose(
-        quick[present], scattered.reshape(buckets.shape)[counts.reshape(buckets.shape) > 0]
-    )
-    np.testing.assert_allclose(scattered.reshape(buckets.shape), values.mean(axis=0))
-
-    # The same plan must read a partial, interleaved carrier without filling
-    # its holes or asking for the sample sigma a Histogram never consumes.
     values[..., 0] = 0.0
     values[0, 0, 0] = -0.0
     values[2, 2, 1] = np.nan
@@ -370,5 +346,7 @@ def test_both_reduction_routes_agree_on_a_reduction_they_share(monkeypatch) -> N
                 assert not actual.cells[1].payload.counts.any(), "the absent frame remains an empty cell"
                 assert observed_view._samples is None and expected_view._samples is None
                 if reduction is Reduction.FIRST and reduced == (*refs, detuning) and window == 1:
-                    pool, valid = observed_view.histogram_pool(reduce_axes=reduced, aggregation=reduction)
-                    assert np.signbit(pool[valid][0]), "FIRST keeps the first physical -0.0"
+                    plan = observed_view._histogram_plan((), reduced, reduction, 1)
+                    pool = np.asarray(plan.values)
+                    first = pool[np.broadcast_to(plan.valid, pool.shape)][0]
+                    assert np.signbit(first), "FIRST keeps the first physical -0.0"

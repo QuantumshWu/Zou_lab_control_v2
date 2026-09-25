@@ -12,7 +12,6 @@ was a selection that would not open.
 from __future__ import annotations
 
 import os
-import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -46,15 +45,9 @@ def _schema(sites: int) -> DatasetSchema:
     "spec_name", ("rolling", "curve"), ids=("rolling", "dynamic-curve")
 )
 def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
-    spec_name,
+    spec_name, qt_app, pump_until,
 ) -> None:
-    from zlc_plot import ensure_qt5_application
-
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5 import QtCore, QtGui
-    except Exception as error:  # pragma: no cover - environment dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+    from PyQt5 import QtCore, QtGui
 
     sites = 6
     schema = _schema(sites)
@@ -76,16 +69,10 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
     widget = Qt5PlotWidget(host)
     widget.show()
 
-    def pump(seconds: float) -> None:
-        deadline = time.perf_counter() + seconds
-        while time.perf_counter() < deadline:
-            app.processEvents()
-            time.sleep(0.002)
-
     try:
         for revision in range(2, 8):
             host.update_data(shot(revision)).result(timeout=20)
-        pump(0.5)
+        pump_until(None, 0.5)
         front = widget.presented_front
         assert front is not None
         axis = front.interaction.axes[0]
@@ -98,7 +85,7 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
             )
 
         def send(kind, point, button, buttons) -> None:
-            app.sendEvent(
+            qt_app.sendEvent(
                 widget,
                 QtGui.QMouseEvent(
                     kind, point, button, buttons, QtCore.Qt.NoModifier
@@ -111,7 +98,7 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
             QtCore.Qt.LeftButton,
             QtCore.Qt.LeftButton,
         )
-        pump(0.3)
+        pump_until(None, 0.3)
         pressed_revision = widget.presented_front.identity.data_revision
 
         # The bench keeps running while the button is down.
@@ -123,7 +110,7 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
                 QtCore.Qt.NoButton,
                 QtCore.Qt.LeftButton,
             )
-            pump(0.25)
+            pump_until(None, 0.25)
 
         shown = widget.presented_front.identity.data_revision
         assert shown > pressed_revision, (
@@ -169,17 +156,14 @@ def _sliding_history(_first_shot: int, rows: int = 5):
 
 
 @pytest.mark.gui
-def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
+def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag(
+    qt_app, pump_until,
+) -> None:
     """A new generation over the same relative history keeps its gesture."""
 
-    from zlc_data.value import owned_snapshot_from_arrays
-    from zlc_plot import RollingPlot, ensure_qt5_application
+    from PyQt5 import QtCore, QtGui
 
-    try:
-        app = ensure_qt5_application([])
-        from PyQt5 import QtCore, QtGui
-    except Exception as error:  # pragma: no cover - environment dependent
-        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+    from zlc_data.value import owned_snapshot_from_arrays
 
     rng = np.random.default_rng(3)
     rows = 5
@@ -201,14 +185,8 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
     widget.resize(520, 380)
     widget.show()
 
-    def pump(seconds: float) -> None:
-        deadline = time.perf_counter() + seconds
-        while time.perf_counter() < deadline:
-            app.processEvents()
-            time.sleep(0.002)
-
     try:
-        pump(0.4)
+        pump_until(None, 0.4)
         front = widget.presented_front
         assert front is not None
         axis = front.interaction.axes[0]
@@ -222,7 +200,7 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
             )
 
         def send(kind, point, button, buttons) -> None:
-            app.sendEvent(
+            qt_app.sendEvent(
                 widget,
                 QtGui.QMouseEvent(
                     kind, point, button, buttons, QtCore.Qt.NoModifier
@@ -233,7 +211,7 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
             QtGui.QMouseEvent.MouseButtonPress, at(0.2, 0.2),
             QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
         )
-        pump(0.3)
+        pump_until(None, 0.3)
         assert widget._candidate is None, "press rendered an unmoved selector"
 
         for step in range(4):
@@ -243,7 +221,7 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
                 at(0.2 + 0.12 * (step + 1), 0.2 + 0.12 * (step + 1)),
                 QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
             )
-            pump(0.25)
+            pump_until(None, 0.25)
             assert widget._candidate is not None, (
                 f"the drag was cancelled by shot {step + 1}: a sliding shot "
                 "history was read as a new geometry"
@@ -261,7 +239,7 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
             QtGui.QMouseEvent.MouseButtonRelease, at(0.85, 0.85),
             QtCore.Qt.LeftButton, QtCore.Qt.NoButton,
         )
-        pump(0.4)
+        pump_until(None, 0.4)
         committed = host.selectors().result(timeout=20).value
         assert [item.kind.value for item in committed] == ["area"], committed
     finally:

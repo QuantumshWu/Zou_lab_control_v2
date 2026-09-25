@@ -121,22 +121,6 @@ def mapped_domain_from_columns(
     return DomainSpec((row_count,), tuple(axes), tuple(codes))
 
 
-def cartesian_domain(axes: Sequence[AxisSpec]) -> DomainSpec:
-    """Flatten one Cartesian set of production axes into a mapped domain."""
-
-    selected = tuple(axes)
-    shape = tuple(int(item.size) for item in selected)
-    rows = tuple(np.ndindex(*shape))
-    return DomainSpec(
-        (int(np.prod(shape, dtype=np.int64)),),
-        selected,
-        tuple(
-            tuple(int(row[position]) for row in rows)
-            for position in range(len(selected))
-        ),
-    )
-
-
 def make_dataset_schema(
     repeat_domain: DomainSpec,
     point_domain: DomainSpec,
@@ -204,21 +188,10 @@ def make_snapshot(
     )
 
 
-def snapshot_values(snapshot: OwnedSnapshot) -> np.ndarray:
-    return snapshot.block.values
-
-
-def snapshot_validity(snapshot: OwnedSnapshot) -> np.ndarray:
-    return snapshot.expanded_validity()
-
-
 __all__ = [
     "axis",
-    "cartesian_domain",
     "make_dataset_schema",
     "make_snapshot",
     "mapped_domain_from_columns",
     "repeat_domain",
-    "snapshot_validity",
-    "snapshot_values",
 ]

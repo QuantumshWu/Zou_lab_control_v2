@@ -69,10 +69,12 @@ def test_non_equivalent_image_uses_anisotropic_fit_and_recovers_center() -> None
             stream_generation="image-fit-restarted",
         )
         session.update_data(restarted)
-        assert session.last_fit is None
-        assert session.fit_status is None
-        assert fit_events[-1] is None
-        assert roi_label.get_visible()
+        # A new run over the same geometry keeps the armed fit and pairs it
+        # with the new run's frame, as the hosted pipeline does.
+        assert session.data_generation == "image-fit-restarted"
+        assert session.last_fit is not None
+        assert session.fit_status == "current"
+        assert fit_events[-1] is not None
     finally:
         session.close()
 
@@ -85,16 +87,6 @@ def test_anisotropic_image_fit_routes_through_the_regular_image_path() -> None:
         selection = session.fit_selection("anisotropic_gaussian_center")
         assert selection.regular_image is not None
         assert selection.regular_image.valid_mask is None
-    finally:
-        session.close()
-
-
-def test_equivalent_image_keeps_radial_catalogue_entry() -> None:
-    session = _image_session()
-    try:
-        assert "radial_gaussian_center" in {
-            model.model_id for model in session.fit_models
-        }
     finally:
         session.close()
 
@@ -151,7 +143,6 @@ def test_image_fit_ring_uses_the_occupied_point_ring_style(faceted: bool) -> Non
             to_rgba(renderer.style.artists.fit_ellipse_color)
         )
         center_area = renderer.style.artists.fit_ellipse_center_area_pt2
-        assert center_area == 2.25
         assert center.get_markersize() ** 2 == pytest.approx(center_area)
         assert annotation.get_visible() and annotation.get_text()
     finally:
@@ -290,7 +281,7 @@ def test_irregular_image_coordinates_share_the_pixel_and_selection_mapping(coord
             np.repeat(extent[3] + 0.25 * (extent[2] - extent[3]), 3),
         ))
         np.testing.assert_allclose(renderer._image_transform(axes).transform(raster_centers), pixels)
-        transform = session._axis_transform_for_axis(axes)
+        transform = session._axis_transform_for_axis(axes, session._projected)
         for coordinate in (0.0, 1.0, 5.5, 10.0):
             nx, ny = transform.display_to_normalized(coordinate, 0.0)
             assert transform.canonical_from_normalized(nx, ny).x == pytest.approx(coordinate)

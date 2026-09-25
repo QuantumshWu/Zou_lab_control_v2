@@ -69,6 +69,34 @@ def _site_distribution_snapshot() -> OwnedSnapshot:
     )
     return make_snapshot(schema, values, revision=0)
 
+def _two_site_curve():
+    """Two sites of seven candidates, 1..7 and 11..17, one curve per site."""
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({
+            "candidate": np.tile(np.arange(7.0), 2),
+            "site": np.repeat((17.0, 23.0), 7),
+        }),
+        dtype=np.float64,
+    )
+    values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
+    return schema, values, CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site"))
+
+def _pointer_at(session, role, action, x, y, **kwargs):
+    """One raster pointer event at data coordinate (x, y) of the primary axes,
+    carrying the ``role`` axes snapshot the frontend would send with it."""
+
+    renderer = session._renderer
+    width, height = canvas_physical_size(renderer.figure.canvas)
+    px, py = renderer.primary_axes.transData.transform((x, y))
+    transform = next(
+        item for item in session._raster_axes_snapshot() if item.role == role
+    )
+    return session._raster_pointer_event(
+        action, px / width, 1.0 - py / height, axes_snapshot=transform, **kwargs
+    )
+
 def _fit_curve_series(generation: str, *, offset: float = 0.0):
     """Revisions of one Gaussian stream, each stamped with its generation.
 
@@ -294,10 +322,7 @@ def test_render_process_preserves_host_front_events_and_pixel_leases(
         configured = remote.configure(
             parameter_updates={"title": "Remote title"}
         ).result(timeout=30)
-        initial_metadata, initial_error = remote.initial_state
-        assert initial_error is None
-        assert initial_metadata is not None
-        assert initial_metadata[0].display_state == configured.value.display_state
+        assert configured.value.display_state["title"] == "Remote title"
 
         # Keep only a derived ndarray view of the old shared front.  Producing
         # more same-sized fronts must not let the child recycle its block while
@@ -640,90 +665,56 @@ def test_close_cancels_queued_tasks() -> None:
         gate.set()
         host.close(timeout=10)
 
-def test_press_lands_on_the_painted_transform_it_carries() -> None:
-    """The front a press arrives with IS what the operator saw.
+def test_a_pointer_event_on_an_older_front_is_accepted() -> None:
+    """The front a pointer event arrives with IS what the operator saw.
 
     The widget swaps pixels and identity atomically, so the transform in
     the event always matches the picture that was pressed on, and the
-    gesture layer interprets the press THROUGH it into canonical
-    coordinates.  Even after live autoscale moved the current limits,
-    the stale-front press is self-consistent and must be accepted --
-    rejecting it bounced the first press after every commit for as long
-    as the frontend ran one front behind.
+    gesture layer interprets the event THROUGH it.  The frontend runs one
+    front behind: whatever moved the current front since -- live autoscale
+    moving the limits, a live revision that held the geometry still, a
+    pick painting its crosshair, a resize -- a press or wheel step carrying
+    the older front is self-consistent and must be accepted.  Rejecting it
+    bounced the first press after every commit, froze every orbit after a
+    pick and stalled continuous zooming.
     """
 
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
-        dtype=np.float64,
-    )
-    first_data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
-    next_data = make_snapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
-    host = RasterPlotHost.from_plot(first_data, CurvePlot(AxisRef.point("x")))
+    first = _snapshot()
+    schema = first.block.schema
+    host = RasterPlotHost.from_plot(first, CurvePlot(AxisRef.point("x")))
     try:
         stale = host.wait_for_front(timeout=10)
         before = host.describe_display().result(timeout=10).value
-        updated = host.update_data(next_data).result(timeout=10)
+        moved = host.update_data(
+            make_snapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
+        ).result(timeout=10)
+        assert moved.value.limits != before.limits
+        host.update_data(
+            make_snapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=2)
+        ).result(timeout=10)
+        host.set_crosshair_selector(1.0, 2.0).result(timeout=10)
+        host.set_size("4x4").result(timeout=10)
         latest = host.front
         assert latest is not None
-        assert updated.front is latest
-        assert updated.value == host.describe_display().result(timeout=10).value
-        assert updated.value.limits != before.limits
-        assert latest.identity.sequence > stale.identity.sequence
+        assert latest.identity != stale.identity
 
-        state = host.pointer_event(
-            "press",
-            0.45,
-            0.45,
-            button=1,
-            identity=stale.identity,
-            axes=stale.interaction.axes[0],
-            interaction=stale.interaction,
-        ).result(timeout=10)
-        assert state is not None
-        host.pointer_event("cancel", 0.45, 0.45, button=1).result(timeout=10)
-    finally:
-        host.close(timeout=10)
-
-def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
-    """A live frame that moves no limits must not reject the press.
-
-    This is the acquisition steady state: data revisions advance with
-    every published frame, retention holds the view still, and the
-    operator's press lands on exactly the geometry they saw.  Rejecting
-    it made selectors and camera gestures unusable during live runs.
-    """
-
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
-        dtype=np.float64,
-    )
-    first_data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
-    same_data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=1)
-    host = RasterPlotHost.from_plot(first_data, CurvePlot(AxisRef.point("x")))
-    try:
-        stale = host.wait_for_front(timeout=10)
-        host.update_data(same_data).result(timeout=10)
-        latest = host.front
-        assert latest is not None
-        assert latest.identity.data_revision != stale.identity.data_revision
-
-        state = host.pointer_event(
-            "press",
-            0.45,
-            0.45,
-            button=1,
-            identity=stale.identity,
-            axes=stale.interaction.axes[0],
-            interaction=stale.interaction,
-        ).result(timeout=10)
-        assert state is not None
+        for button in (1, 2):
+            host.pointer_event(
+                "press",
+                0.45,
+                0.45,
+                button=button,
+                identity=stale.identity,
+                axes=stale.interaction.axes[0],
+            ).result(timeout=10)
+            host.pointer_event("cancel", 0.45, 0.45, button=button).result(timeout=10)
         host.pointer_event(
-            "cancel",
+            "scroll",
             0.45,
             0.45,
-            button=1,
+            step=1.0,
+            identity=stale.identity,
+            axes=stale.interaction.axes[0],
         ).result(timeout=10)
     finally:
         host.close(timeout=10)
@@ -755,6 +746,9 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future(grouped_histogr
     host = RasterPlotHost.from_plot(source, spec)
     try:
         first = host.wait_for_front(timeout=10)
+        # One multi-axis front, the path every frontend (Qt or notebook) reads.
+        assert first.identity.kind == "facet_grid"
+        assert len(first.interaction.axes) >= 2
         operation = host.fit(model, live=True).result(timeout=30)
         assert isinstance(operation.value, FacetFitBatchResult)
         assert operation.value.source_revision == operation.front.identity.data_revision
@@ -967,6 +961,7 @@ def test_active_fit_times_out_without_a_successor_and_recovers(
 ) -> None:
     """Only solve has a deadline; slow data prepare completes normally."""
 
+    monkeypatch.setattr(RasterPlotHost, "ACTIVE_FIT_TIMEOUT_SECONDS", 0.2)
     snapshot, host, first_started, release_first, solved = blocked_fit_host(
         "active-fit-deadline", block_revision=2
     )
@@ -993,7 +988,7 @@ def test_active_fit_times_out_without_a_successor_and_recovers(
             lambda _session, _data, **_kwargs: slow_prepare,
         )
         data_only = host.update_data(snapshot(1))
-        time.sleep(1.1)
+        time.sleep(0.3)
         assert not data_only.done()
         slow_prepare.set_result(prepared)
         data_only.result(timeout=10)
@@ -1010,7 +1005,7 @@ def test_active_fit_times_out_without_a_successor_and_recovers(
         with pytest.raises(RuntimeError, match="active deadline"):
             first.result(timeout=2.0)
         elapsed = time.monotonic() - started_at
-        assert 0.9 <= elapsed < 1.8, elapsed
+        assert 0.2 <= elapsed < 1.0, elapsed
         assert not release_first.is_set()
         latest = host.update_data(snapshot(3))
         latest.result(timeout=10)
@@ -1034,6 +1029,7 @@ def test_active_fit_times_out_without_a_successor_and_recovers(
             release_subscription().result(timeout=10)
 
 def test_a_timed_out_fit_is_reported_against_the_frame_that_timed_out(
+    monkeypatch,
     blocked_fit_host,
 ) -> None:
     """The failed FitEvent's generation is the timed-out input's own.
@@ -1045,6 +1041,7 @@ def test_a_timed_out_fit_is_reported_against_the_frame_that_timed_out(
     run-a.
     """
 
+    monkeypatch.setattr(RasterPlotHost, "ACTIVE_FIT_TIMEOUT_SECONDS", 0.2)
     snapshot, host, started, release, _solved = blocked_fit_host(
         "run-a", block_revision=1
     )
@@ -1253,32 +1250,6 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         from zlc_plot import RenderProcess, open_figure_host, save_figure_artifact
         from zlc_plot.figure_artifact import encode_plot_recipe, decode_plot_recipe
 
-        presentations, restores, captures, export_chrome = [], [], [], []
-        original_present, original_draw = MatplotlibRenderer.present, MatplotlibRenderer.draw
-        original_capture = RasterPlotHost._capture_front
-
-        def present_final(self, frame, **kwargs):
-            presentations.append(kwargs.get("compose", True))
-            result = original_present(self, frame, **kwargs)
-            if not kwargs.get("compose", True):
-                export_chrome.append((
-                    len(self._artists.get("facet:chrome_spines", ())),
-                    len(self._artists.get("facet:chrome_titles", ())),
-                ))
-            return result
-
-        def capture_front(self, *args, **kwargs):
-            captures.append(True)
-            return original_capture(self, *args, **kwargs)
-
-        def restore_display(self):
-            restores.append(True)
-            return original_draw(self)
-
-        monkeypatch.setattr(MatplotlibRenderer, "present", present_final)
-        monkeypatch.setattr(MatplotlibRenderer, "draw", restore_display)
-        monkeypatch.setattr(RasterPlotHost, "_capture_front", capture_front)
-
         targets = configured.value.classifier_thresholds
         snapshot = _site_distribution_snapshot()
         spec = FacetGridPlot(AxisRef.point("site"), HistogramPlot())
@@ -1290,12 +1261,8 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         restored = open_figure_host(snapshot, recipe)
         try:
             assert restored.describe_display().result(timeout=10).value.classifier_thresholds == targets
-            assert presentations == [True]
         finally:
             restored.close(timeout=10)
-        presentations.clear()
-        restores.clear()
-        captures.clear()
         save_figure_artifact(
             tmp_path / "known-model.png", plot_input=snapshot, spec=spec,
             parameters=configured.value.display_state.values,
@@ -1304,14 +1271,10 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         assert (tmp_path / "known-model.png").is_file()
         assert (tmp_path / "known-model.npz").is_file()
         assert unnecessary_solves == []
-        assert presentations == [False]
-        assert export_chrome == [(8, 2)], "shared preparation must include all cell frames and titles before Save"
-        assert restores == []
-        assert captures == []
-        monkeypatch.setattr(MatplotlibRenderer, "present", original_present)
-        monkeypatch.setattr(MatplotlibRenderer, "draw", original_draw)
-        monkeypatch.setattr(RasterPlotHost, "_capture_front", original_capture)
 
+        # The file a Save writes is, pixel for pixel, what a screen session
+        # prepared with the same thresholds draws -- every cell frame and
+        # title included.
         from PIL import Image
         from zlc_plot.config import DEFAULTS
         reference = PlotSession(
@@ -1880,33 +1843,15 @@ def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
 def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
     monkeypatch, tmp_path,
 ) -> None:
-    candidate = np.tile(np.arange(7.0), 2)
-    site = np.repeat((17.0, 23.0), 7)
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"candidate": candidate, "site": site}),
-        dtype=np.float64,
-    )
-    values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
-    session = PlotSession(
-        make_snapshot(schema, values, 0),
-        CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site")),
-    )
+    schema, values, spec = _two_site_curve()
+    session = PlotSession(make_snapshot(schema, values, 0), spec)
     try:
         renderer = session._renderer
         shared_states = []
         session.subscribe_display(shared_states.append)
-        axes = renderer.primary_axes
-        width, height = canvas_physical_size(renderer.figure.canvas)
 
-        def pointer(action, x, y, *, button=None, key=None):
-            px, py = axes.transData.transform((x, y))
-            transform = next(item for item in session._raster_axes_snapshot()
-                             if item.role == "main")
-            return session._raster_pointer_event(
-                action, px / width, 1.0 - py / height,
-                button=button, key=key, axes_snapshot=transform,
-            )
+        def pointer(action, x, y, **kwargs):
+            return _pointer_at(session, "main", action, x, y, **kwargs)
 
         renderer._materialize_prepared_curve()
         lines = renderer._artists["curve"]
@@ -2115,31 +2060,14 @@ def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
         session.close()
 
 def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
-    candidate = np.tile(np.arange(7.0), 2)
-    site = np.repeat((17.0, 23.0), 7)
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"candidate": candidate, "site": site}),
-        dtype=np.float64,
-    )
-    values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
-    session = PlotSession(
-        make_snapshot(schema, values, 0),
-        CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site")),
-    )
+    schema, values, spec = _two_site_curve()
+    session = PlotSession(make_snapshot(schema, values, 0), spec)
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
-        width, height = canvas_physical_size(renderer.figure.canvas)
 
-        def event(action, x, y, *, button=None, step=0.0):
-            px, py = axes.transData.transform((x, y))
-            transform = next(item for item in session._raster_axes_snapshot()
-                             if item.role == "main")
-            return session._raster_pointer_event(
-                action, px / width, 1.0 - py / height,
-                button=button, step=step, axes_snapshot=transform,
-            )
+        def event(action, x, y, **kwargs):
+            return _pointer_at(session, "main", action, x, y, **kwargs)
 
         event("move", 2.0, 13.0)
         event("press", 2.0, 13.0, button=1)
@@ -2192,22 +2120,9 @@ def test_locked_rolling_wheel_steps_group_series_without_zoom(tmp_path) -> None:
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
-        width, height = canvas_physical_size(renderer.figure.canvas)
 
-        def event(action, x, y, *, button=None, step=0.0):
-            px, py = axes.transData.transform((x, y))
-            transform = next(
-                item for item in session._raster_axes_snapshot()
-                if item.role == "history"
-            )
-            return session._raster_pointer_event(
-                action,
-                px / width,
-                1.0 - py / height,
-                button=button,
-                step=step,
-                axes_snapshot=transform,
-            )
+        def event(action, x, y, **kwargs):
+            return _pointer_at(session, "history", action, x, y, **kwargs)
 
         event("press", -4.0, 13.0, button=1)
         event("release", -4.0, 13.0, button=1)
@@ -2290,73 +2205,6 @@ def test_axis_resolution_grabs_what_is_visible() -> None:
     # Beyond the radius resolves to nothing, exactly as before.
     assert _axis_at_normalized(front, 0.75, 0.05, tolerance_px=10.0) is None
     assert _axis_at_normalized(front, 0.75, 0.099, tolerance_px=0.0) is None
-
-def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None:
-    """A pick republishes a front carrying its crosshair; the NEXT press
-    arrives with the previous front for as long as the frontend lags one
-    behind.  The crosshair is a marker nothing can grab, so it is not
-    part of press currency -- rejecting on it froze every orbit that
-    followed a pick."""
-
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
-        dtype=np.float64,
-    )
-    data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
-    host = RasterPlotHost.from_plot(data, CurvePlot(AxisRef.point("x")))
-    try:
-        stale = host.wait_for_front(timeout=10)
-        host.set_crosshair_selector(1.0, 2.0).result(timeout=10)
-        latest = host.front
-        assert latest is not None
-        assert latest.interaction.selectors != stale.interaction.selectors
-
-        state = host.pointer_event(
-            "press",
-            0.45,
-            0.45,
-            button=2,
-            identity=stale.identity,
-            axes=stale.interaction.axes[0],
-            interaction=stale.interaction,
-        ).result(timeout=10)
-        assert state is not None
-        host.pointer_event("cancel", 0.45, 0.45, button=2).result(timeout=10)
-    finally:
-        host.close(timeout=10)
-
-def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
-    """A 3D wheel tick commits the camera and bumps the display revision;
-    the frontend is one front behind for a beat, and demanding identity
-    currency on the NEXT tick bounced continuous zooming.  A scroll is
-    self-relative view navigation: it rides whatever front it saw."""
-
-    schema = make_dataset_schema(
-        repeat_domain(size=1),
-        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0]}),
-        dtype=np.float64,
-    )
-    data = make_snapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
-    host = RasterPlotHost.from_plot(data, CurvePlot(AxisRef.point("x")))
-    try:
-        stale = host.wait_for_front(timeout=10)
-        host.set_size("4x4").result(timeout=10)
-        latest = host.front
-        assert latest is not None
-        assert latest.identity != stale.identity
-
-        state = host.pointer_event(
-            "scroll",
-            0.45,
-            0.45,
-            step=1.0,
-            identity=stale.identity,
-            axes=stale.interaction.axes[0],
-        ).result(timeout=10)
-        assert state is not None
-    finally:
-        host.close(timeout=10)
 
 def test_a_moving_hand_stands_down_every_speculative_frame() -> None:
     """One machine: the drag wins while it moves, on every surface.
