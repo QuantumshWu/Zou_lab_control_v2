@@ -397,23 +397,51 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
     readout: there is one physical quantity here.  The PSF extractors
     answer in the same currency (see _measure_readout_weights), so every
     readout model's signal, threshold and histogram share a meaning.
+
+    ``image`` is one ``(H, W)`` frame, answered as ``(N,)``, or a stack
+    ``(F, H, W)`` of frames, answered as ``(F, N)``.  Every window of every
+    frame is gathered in one indexing and summed in one call: an occupancy
+    reads a 42-frame cycle without 42 Python round trips, and a stack
+    answers exactly what the frames answer one at a time -- each window is
+    summed over its own contiguous pixels either way.  A pixel that is not
+    finite is left out of its window's total; a window with no finite pixel
+    has no total.
     """
 
     array = np.asarray(image.values if hasattr(image, "values") else image)
-    if array.ndim != 2:
-        raise ValueError("image must be two-dimensional")
+    if array.ndim not in (2, 3):
+        raise ValueError("image must be two-dimensional, or a stack of two-dimensional frames")
+    stacked = array.ndim == 3
+    frames = array if stacked else array[None]
     radius = int(radius)
     if radius < 0:
         raise ValueError("radius must be non-negative")
-    output = np.full(len(np.asarray(centers_xy)), np.nan, dtype="<f8")
-    for index, center in enumerate(np.asarray(centers_xy, dtype=float).reshape(-1, 2)):
-        x, y, width, height = _box_bounds(tuple(center), radius, array.shape)
-        values = array[y : y + height, x : x + width]
-        finite = values if values.dtype.kind in "biu" else values[np.isfinite(values)]
-        if not finite.size:
-            continue
-        output[index] = float(np.sum(finite, dtype=np.float64))
-    return output
+    centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
+    size = 2 * radius + 1
+    output = np.full((frames.shape[0], len(centers)), np.nan, dtype="<f8")
+    if len(centers):
+        # The one placement rule (box_fits): a rounded centre, radius each
+        # way, wholly inside the picture -- for every site at once.
+        rounded = np.rint(centers).astype(int)
+        x0 = rounded[:, 0] - radius
+        y0 = rounded[:, 1] - radius
+        fits = (
+            (x0 >= 0) & (y0 >= 0)
+            & (x0 + size <= frames.shape[2]) & (y0 + size <= frames.shape[1])
+        )
+        if not np.all(fits):
+            outside = tuple(centers[int(np.flatnonzero(~fits)[0])])
+            raise ValueError(f"site center {outside!r} with radius {radius} lies outside image")
+        yy = y0[:, None, None] + np.arange(size)[None, :, None]
+        xx = x0[:, None, None] + np.arange(size)[None, None, :]
+        windows = frames[:, yy, xx].reshape(frames.shape[0], len(centers), size * size)
+        if frames.dtype.kind in "biu":
+            output[:] = windows.sum(axis=2, dtype=np.float64)
+        else:
+            finite = np.isfinite(windows)
+            sums = np.where(finite, windows, 0).sum(axis=2, dtype=np.float64)
+            output[:] = np.where(finite.any(axis=2), sums, np.nan)
+    return output if stacked else output[0]
 
 
 def extract_psf_signals(
@@ -426,11 +454,21 @@ def extract_psf_signals(
     radius: int = 2,
     padding: int = 3,
 ) -> np.ndarray:
-    """Extract one matched-filter statistic per site."""
+    """Extract one matched-filter statistic per site.
+
+    ``image`` is one ``(H, W)`` frame, answered as ``(N,)``, or a stack
+    ``(F, H, W)``, answered as ``(F, N)``: the windows and annuli of every
+    frame are gathered in one indexing.  The matched-filter reduction of each
+    window runs over that window's own contiguous pixels, so a stack answers
+    exactly what the frames answer one at a time.
+    """
 
     array = np.asarray(image.values if hasattr(image, "values") else image)
-    if array.ndim != 2:
-        raise ValueError("image must be two-dimensional")
+    if array.ndim not in (2, 3):
+        raise ValueError("image must be two-dimensional, or a stack of two-dimensional frames")
+    stacked = array.ndim == 3
+    frames = array if stacked else array[None]
+    image_shape = frames.shape[1:]
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     size = 2 * int(radius) + 1
     if kernels is None:
@@ -442,19 +480,18 @@ def extract_psf_signals(
     if kernels.shape != (len(centers), size, size):
         raise ValueError("kernels must have shape (N, 2*radius+1, 2*radius+1)")
     if boxes_xywh is None:
-        boxes = np.asarray([_box_bounds(tuple(center), int(radius), array.shape) for center in centers], dtype=int)
+        boxes = np.asarray([_box_bounds(tuple(center), int(radius), image_shape) for center in centers], dtype=int)
     else:
         boxes = np.asarray(boxes_xywh, dtype=int)
     if boxes.shape != (len(centers), 4):
         raise ValueError("boxes_xywh must have shape (N, 4)")
-    output = np.full(len(centers), np.nan, dtype="<f8")
+    output = np.full((frames.shape[0], len(centers)), np.nan, dtype="<f8")
 
     # The normal calibrated path has equal, complete PSF boxes and complete
-    # annuli.  Gather those windows once instead of rebuilding 35 slices and
-    # annulus masks for every frame.  Keep the final matched-filter reduction
-    # site-by-site: changing that reduction order produces small float64
-    # differences, while window gathering and the median are exactly the same
-    # operations as the scalar path below.
+    # annuli.  Gather those windows once, for every frame, instead of
+    # rebuilding 35 slices and annulus masks for every frame and site.  The
+    # matched-filter reduction of each window is a sum over that window's
+    # contiguous products, the same summation the scalar path performs.
     pad = int(padding)
     heights = boxes[:, 3]
     widths = boxes[:, 2]
@@ -464,8 +501,8 @@ def extract_psf_signals(
         and np.all(heights == size)
         and np.all(boxes[:, 0] >= 0)
         and np.all(boxes[:, 1] >= 0)
-        and np.all(boxes[:, 0] + widths <= array.shape[1])
-        and np.all(boxes[:, 1] + heights <= array.shape[0])
+        and np.all(boxes[:, 0] + widths <= image_shape[1])
+        and np.all(boxes[:, 1] + heights <= image_shape[0])
     )
     complete_annuli = bool(
         background == "annulus"
@@ -473,15 +510,15 @@ def extract_psf_signals(
         and complete_boxes
         and np.all(boxes[:, 0] >= pad)
         and np.all(boxes[:, 1] >= pad)
-        and np.all(boxes[:, 0] + widths + pad <= array.shape[1])
-        and np.all(boxes[:, 1] + heights + pad <= array.shape[0])
+        and np.all(boxes[:, 0] + widths + pad <= image_shape[1])
+        and np.all(boxes[:, 1] + heights + pad <= image_shape[0])
     )
     if (background == "none" and complete_boxes) or complete_annuli:
         yy = boxes[:, 1, None, None] + np.arange(size)[None, :, None]
         xx = boxes[:, 0, None, None] + np.arange(size)[None, None, :]
-        cuts = array[yy, xx]
-        finite_cuts = np.isfinite(cuts).all(axis=(1, 2))
-        offsets = np.zeros(len(boxes), dtype="<f8")
+        cuts = np.asarray(frames[:, yy, xx], dtype=float)
+        finite_cuts = np.isfinite(cuts).all(axis=(2, 3))
+        offsets = np.zeros((frames.shape[0], len(boxes)), dtype="<f8")
         if complete_annuli and pad:
             padded_size = size + 2 * pad
             padded_yy = (
@@ -494,34 +531,30 @@ def extract_psf_signals(
                 - pad
                 + np.arange(padded_size)[None, None, :]
             )
-            padded = np.asarray(array[padded_yy, padded_xx], dtype=float)
+            padded = np.asarray(frames[:, padded_yy, padded_xx], dtype=float)
             ring_mask = np.ones((padded_size, padded_size), dtype=bool)
             ring_mask[pad : pad + size, pad : pad + size] = False
-            rings = padded[:, ring_mask]
-            finite_rings = np.isfinite(rings).any(axis=1)
+            rings = padded[:, :, ring_mask]
+            finite_rings = np.isfinite(rings).any(axis=2)
             if np.any(finite_rings):
-                offsets[finite_rings] = np.nanmedian(
-                    rings[finite_rings], axis=1
-                )
-        for index in np.flatnonzero(finite_cuts):
-            output[index] = float(
-                np.sum(
-                    np.asarray(kernels[index], dtype=float)
-                    * (np.asarray(cuts[index], dtype=float) - offsets[index])
-                )
+                offsets[finite_rings] = np.nanmedian(rings[finite_rings], axis=1)
+        products = kernels[None] * (cuts - offsets[:, :, None, None])
+        sums = np.ascontiguousarray(products).reshape(frames.shape[0], len(boxes), size * size).sum(axis=2)
+        output[finite_cuts] = sums[finite_cuts]
+        return output if stacked else output[0]
+
+    for frame_index, frame in enumerate(frames):
+        for index, (box, kernel) in enumerate(zip(boxes, kernels, strict=True)):
+            x, y, width, height = (int(value) for value in box)
+            if kernel.shape != (height, width):
+                raise ValueError("PSF kernel shape differs from box")
+            cut = frame[y : y + height, x : x + width]
+            if cut.shape != kernel.shape or not np.isfinite(cut).all():
+                continue
+            output[frame_index, index] = extract_psf_window(
+                frame, (x, y, width, height), kernel, background=background, padding=int(padding),
             )
-        return output
-
-    for index, (box, kernel) in enumerate(zip(boxes, kernels, strict=True)):
-        x, y, width, height = (int(value) for value in box)
-        if kernel.shape != (height, width):
-            raise ValueError("PSF kernel shape differs from box")
-        cut = array[y : y + height, x : x + width]
-        if cut.shape != kernel.shape or not np.isfinite(cut).all():
-            continue
-        output[index] = extract_psf_window(array, (x, y, width, height), kernel, background=background, padding=int(padding))
-    return output
-
+    return output if stacked else output[0]
 
 def _site_ids(value: object) -> tuple[str, ...]:
     result = tuple(str(item) for item in value)  # type: ignore[arg-type]
@@ -1051,6 +1084,45 @@ class TrapCalibration:
                 padding=model.psf_padding,
             )
         return np.where(self.site_map.valid_sites & model.usable_sites, values, np.nan)
+
+    def signals_of_frames(
+        self,
+        frames: object,
+        *,
+        model_kind: ReadoutModelKind | None = None,
+    ) -> np.ndarray:
+        """Every frame's site signals at once: ``(frames, sites)``.
+
+        The same numbers :meth:`signals` gives frame by frame, from one
+        gather over the whole stack -- what lets an occupancy read a
+        many-frame cycle in one call per calibration.
+        """
+
+        array = np.asarray(frames)
+        if array.ndim != 3 or tuple(array.shape[1:]) != tuple(self.frame_contract.image_shape):
+            raise ValueError(
+                f"frames must be a stack shaped (frames, {self.frame_contract.image_shape[0]}, "
+                f"{self.frame_contract.image_shape[1]}), got {array.shape}"
+            )
+        model = self.select_model(model_kind)
+        if model.kind is ReadoutModelKind.BOX:
+            values = extract_box_signals(
+                array,
+                self.site_map.centers_xy,
+                radius=model.integration_half_width,
+            )
+        else:
+            values = extract_psf_signals(
+                array,
+                self.site_map.centers_xy,
+                kernels=model.psf_weights,
+                boxes_xywh=model.psf_boxes,
+                background=model.background,
+                radius=model.integration_half_width,
+                padding=model.psf_padding,
+            )
+        usable = self.site_map.valid_sites & model.usable_sites
+        return np.where(usable[None, :], values, np.nan)
 
     def detect(
         self,

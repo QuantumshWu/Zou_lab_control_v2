@@ -349,11 +349,19 @@ class OccupancyProcessor:
         # is judged below, where every site whose count is not a finite
         # number is marked invalid, so the cast need not also warn.
         with np.errstate(over="ignore"):
-            for index in np.flatnonzero(cell_valid):
-                counts[index] = self.readout_for(int(frame_of_cell[index])).signals(
-                    flat[index],
-                    model_kind=self._model_kind,
-                )
+            # One read per calibration over every cell it reads, not one
+            # per cell: a 42-frame cycle is 42 windows gathered at once.
+            valid_cells = np.flatnonzero(cell_valid)
+            own_frames = tuple(self.calibration_by_frame)
+            frame_of_valid = frame_of_cell[valid_cells]
+            for frame, readout in self._placed.items():
+                selected = valid_cells[
+                    ~np.isin(frame_of_valid, own_frames) if frame == 0 else frame_of_valid == frame
+                ]
+                if selected.size:
+                    counts[selected] = readout.signals_of_frames(
+                        flat[selected], model_kind=self._model_kind,
+                    )
         # Every frame judges its sites by the thresholds and the usable set
         # of the calibration IT reads with: one row of each per cell.
         site_usable, thresholds = self._verdict_tables(frame_of_cell)
