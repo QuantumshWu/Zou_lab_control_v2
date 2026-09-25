@@ -63,10 +63,8 @@ def kernel_modules() -> tuple[Any, ...]:
 def kernel_dispatchers() -> dict[str, Any]:
     """Every compiled kernel this package defines -- found, never listed."""
 
-    try:
-        from numba.core.dispatcher import Dispatcher  # noqa: PLC0415
-    except Exception:  # pragma: no cover - no numba, nothing to compile
-        return {}
+    from numba.core.dispatcher import Dispatcher  # noqa: PLC0415
+
     found: dict[str, Any] = {}
     for module in kernel_modules():
         short = module.__name__.rsplit(".", 1)[-1]
@@ -564,6 +562,16 @@ def representative_work(
     series = _series_snapshot(8, 400)
     # The centred second moment and fused curve validity/bounds pass.
     _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True})
+    # The band's centred moments read a camera or derived plane in its own
+    # dtype -- a dense profile and a scan-point fold alike -- so each
+    # storage is its own compile of that kernel (float64 is the series;
+    # bool is an occupancy or survival band).
+    for dtype in (np.bool_, np.uint8, np.uint16, np.uint32, np.int16, np.int32, np.float32):
+        _render(
+            _image_snapshot(8, 16, dtype),
+            CurvePlot(AxisRef.cell_data("x")),
+            {"uncertainty": True},
+        )
     # Uniform binning and the masked extrema that choose its domain -- and
     # the fit a histogram panel opens on, whose lines the kernel strokes.
     # The batch transform of the fit lines' vertices is asked only by a
@@ -906,11 +914,17 @@ def warm_fit(
 
 # ------------------------------------------------------------ the warmer
 def _fingerprint() -> str:
-    """Toolchain plus the source of every module that defines a kernel."""
+    """Toolchain, this warm list, and the source of every kernel module.
+
+    The warm list is part of the prefix that re-runs every group: a sample
+    added here (a new storage dtype, a call path's new signature) reaches
+    no kernel module's source, and a marker blind to it said "current".
+    """
 
     import numba  # noqa: PLC0415
 
-    parts = [sys.version.split()[0], np.__version__, numba.__version__]
+    warm_list = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
+    parts = [sys.version.split()[0], np.__version__, numba.__version__, warm_list]
     for module in sorted(kernel_modules(), key=lambda item: item.__name__):
         source = pathlib.Path(module.__file__).read_bytes()
         parts.append(f"{module.__name__}:{hashlib.sha256(source).hexdigest()}")
@@ -920,10 +934,7 @@ def _fingerprint() -> str:
 def warm(force: bool = False) -> str:
     """Compile (or verify) every kernel's disk cache; returns the outcome."""
 
-    from . import _height3d_raster, _raster_kernels  # noqa: PLC0415
-
-    if not _raster_kernels.HAVE_NUMBA:
-        return "numba is not installed; the numpy reference engines run"
+    from . import _raster_kernels  # noqa: PLC0415
 
     cache_dir = pathlib.Path(
         os.environ.get("NUMBA_CACHE_DIR") or _kernel_cache.kernel_cache_dir()
@@ -935,10 +946,10 @@ def warm(force: bool = False) -> str:
     previous = marker.read_text(encoding="utf-8").split("|") if marker.exists() else []
     needed = (
         set(_KERNEL_MODULE_NAMES)
-        if force or current[:3] != previous[:3]
+        if force or current[:4] != previous[:4]
         else {
             entry.split(":", 1)[0].rsplit(".", 1)[-1]
-            for entry in current[3:] if entry not in previous[3:]
+            for entry in current[4:] if entry not in previous[4:]
         }
     )
     # A matching marker is not proof that the individual caches still exist.
@@ -954,9 +965,7 @@ def warm(force: bool = False) -> str:
         for name, kernel in dispatchers.items()
     }
     previous_plot = _raster_kernels.ENGINE
-    previous_h3d = _height3d_raster._ENGINE
     _raster_kernels.ENGINE = "numba"
-    _height3d_raster._ENGINE = "numba"
     try:
         representative_work(
             include_render=bool(needed & {"_raster_kernels", "_height3d_scanline"}),
@@ -964,7 +973,6 @@ def warm(force: bool = False) -> str:
         )
     finally:
         _raster_kernels.ENGINE = previous_plot
-        _height3d_raster._ENGINE = previous_h3d
 
     total = len(dispatchers)
     twins = duplicate_signatures(dispatchers)

@@ -692,12 +692,23 @@ def fitted_facet_cell_title(
     if fitted >= typography.cell_title_min_pt:
         return label, fitted
     floor = typography.cell_title_min_pt
-    for keep in range(len(label) - 1, 0, -1):
-        shortened = label[:keep].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
-        width, height = _text_size_pt(shortened, fonts.sans_serif, floor)
+
+    def shortened(keep: int) -> str:
+        return label[:keep].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+
+    # The longest prefix that fits, by bisection: a longer prefix is never
+    # narrower or shorter.  Walked down one character at a time, a grid of
+    # long titles laid out every prefix of every one -- and evicted the
+    # tick ladder's measurements from the cache they share.
+    fits, too_long = 0, len(label)
+    while too_long - fits > 1:
+        keep = (fits + too_long) // 2
+        width, height = _text_size_pt(shortened(keep), fonts.sans_serif, floor)
         if width <= budget and (height_pt is None or height <= height_pt):
-            return shortened, floor
-    return "\N{HORIZONTAL ELLIPSIS}", floor
+            fits = keep
+        else:
+            too_long = keep
+    return (shortened(fits) if fits else "\N{HORIZONTAL ELLIPSIS}"), floor
 
 
 def _facet_typography(

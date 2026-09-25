@@ -392,24 +392,17 @@ def _stroke_rims(
     ).astype(np.uint8)
 
 
-_ENGINE = os.environ.get("ZLC_H3D_ENGINE", "auto")
-
-
 def _scanline_selected() -> bool:
     """Whether the numba scanline engine renders this frame.
 
-    ``ZLC_H3D_ENGINE`` forces ``numpy`` (the reference) or ``numba``;
-    ``auto`` uses the scanline engine whenever numba imports.  Both
-    engines are bit-identical by contract (test_height_bars pins it).
+    The one compiled-or-reference switch every kernel follows
+    (``ZLC_PLOT_KERNELS``): ``numpy`` renders the reference.  Both engines
+    are bit-identical by contract (test_height_bars pins it).
     """
 
-    if _ENGINE == "numpy":
-        return False
-    try:
-        from . import _height3d_scanline as scanline
-    except Exception:
-        return False
-    return scanline.HAVE_NUMBA
+    from . import _raster_kernels
+
+    return _raster_kernels.engaged()
 
 
 def render_height_bars(

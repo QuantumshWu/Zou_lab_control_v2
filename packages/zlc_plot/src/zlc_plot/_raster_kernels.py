@@ -36,47 +36,23 @@ from . import _kernel_cache
 # built, so a later assignment is ignored in silence.
 _kernel_cache.install()
 
-try:  # pragma: no cover - absence is exercised by the dispatch fallback
-    from numba import config, get_num_threads, njit, prange, set_num_threads
-
-    HAVE_NUMBA = True
-except Exception:  # pragma: no cover
-    HAVE_NUMBA = False
-    config = None
-    set_num_threads = None
-
-    def get_num_threads() -> int:  # type: ignore[misc]
-        return 1
-
-    def njit(*args, **kwargs):  # type: ignore[misc]
-        def wrap(fn):
-            return fn
-
-        return wrap
-
-    prange = range  # type: ignore[assignment]
+from numba import config, get_num_threads, njit, prange, set_num_threads
 
 
-#: ``numpy`` forces every reference path; ``numba`` demands the kernels;
-#: ``auto`` uses them when they compiled.  Mirrors ``ZLC_H3D_ENGINE``.
+#: ``numpy`` forces every reference path -- these kernels' and the 3D
+#: scan-line engine's alike; anything else uses the compiled kernels.
 ENGINE = os.environ.get("ZLC_PLOT_KERNELS", "auto")
 
 
 def engaged() -> bool:
     """Whether the compiled kernels answer, rather than their references."""
 
-    if ENGINE == "numpy":
-        return False
-    if ENGINE == "numba":
-        return True
-    return HAVE_NUMBA
+    return ENGINE != "numpy"
 
 
 def configure_worker_threads() -> int:
     """Mask one ZLC worker's native team without shrinking the process pool."""
 
-    if not HAVE_NUMBA:
-        return 1
     maximum = int(config.NUMBA_NUM_THREADS)
     requested = int(os.environ.get("ZLC_NUMBA_WORKER_THREADS", maximum))
     selected = max(1, min(requested, maximum))
@@ -84,11 +60,12 @@ def configure_worker_threads() -> int:
     return selected
 
 
-#: The most column bands one stroke lane is cut into.  The pool is not one
-#: panel's: a four-panel console launches from four workers at once, each
-#: masked to the whole pool by default, and cutting a lone lane into all
+#: The most column bands one stroke lane is cut into.  The machine is not
+#: one panel's: a four-panel console strokes from four workers at once, and
+#: when each was masked to the whole pool, cutting a lone lane into all
 #: sixteen bands moved the four-panel critical path from 83 to 105 ms --
-#: every panel's work inflated under the oversubscription.  Four bands
+#: every panel's work inflated under the oversubscription.  (A worker's
+#: team is four by default now, which this limit also is.)  Four bands
 #: left the critical path where it was (84 ms) and still took the curve
 #: panel's compose from 15.1 to 11.9 ms; in isolation a forty-series
 #: curve's error bars go 6.0 -> 1.9 ms at four bands against 0.9 at
@@ -108,7 +85,7 @@ def stroke_bands(lane_count: int) -> int:
     seconds before the first curve.
     """
 
-    threads = int(get_num_threads()) if HAVE_NUMBA else 1
+    threads = int(get_num_threads())
     if 0 < lane_count < threads:
         return min(_STROKE_BAND_LIMIT, threads // lane_count)
     return 1
@@ -312,10 +289,6 @@ def aggregate_axis_codes(
 
 def histogram_threads() -> int:
     """How many lanes :func:`uniform_histogram` should be given."""
-
-    if not HAVE_NUMBA:
-        return 1
-    from numba import get_num_threads
 
     return int(get_num_threads())
 
@@ -763,11 +736,7 @@ def masked_finite_extrema(
             return None
     else:
         mask = readable(np.zeros(1, dtype=np.bool_))
-    threads = 1
-    if HAVE_NUMBA:
-        from numba import get_num_threads
-
-        threads = int(get_num_threads())
+    threads = histogram_threads()
     out = np.empty((threads + 1, 4), dtype=np.float64)
     finite_extrema(flat, mask, use_valid, out)
     return (
@@ -1190,8 +1159,9 @@ def raster_polylines(
     the two stroke the same polyline.
 
     AGG SNAPS A RECTILINEAR PATH.  A line whose every segment is level or
-    vertical, with fewer than 1024 vertices, has its vertices moved onto
-    the pixel grid before it is stroked -- to pixel centres when the
+    vertical to within 1e-4 px (``PathSnapper``'s own measure), with at
+    most 1024 vertices, has its vertices moved onto the pixel grid before
+    it is stroked -- to pixel centres when the
     rounded stroke width is odd, to pixel edges when it is even, so the
     stroke's edges land on pixel edges either way.  The export draws
     through Agg, so this stroke snaps by the same rule.
@@ -1218,7 +1188,7 @@ def raster_polylines(
     for line in prange(line_count):
         start = offsets[line]
         stop = offsets[line + 1]
-        snap = 2 <= stop - start < 1024
+        snap = 2 <= stop - start <= 1024
         if snap:
             for point in range(start, stop - 1):
                 x0 = vertices[point, 0]
@@ -1232,7 +1202,7 @@ def raster_polylines(
                     and np.isfinite(y1)
                 ):
                     continue
-                if x0 != x1 and y0 != y1:
+                if abs(x0 - x1) >= 1e-4 and abs(y0 - y1) >= 1e-4:
                     snap = False
                     break
         snaps[line] = snap
@@ -1556,8 +1526,10 @@ def raster_prepared_images(
     sample is the floor of each.  The resampled picture is then blitted at
     the truncated corner of its clipped box and cut to the graphics
     context's clip, and each sample's colour is ``Normalize`` and the
-    colormap's 256 slots in the data's promoted dtype.  Every one of those
-    steps is here, so the picture is matplotlib's byte for byte.
+    colormap's 256 slots in the data's promoted dtype.  A non-finite
+    sample is masked -- ``imshow`` masks every NaN and infinity when it
+    takes the data -- and so is one ``valid`` says is not.  Every one of
+    those steps is here, so the picture is matplotlib's byte for byte.
 
     ``blits`` holds each surface's (left, top, out_width, out_height) on
     the canvas, ``clips`` its clip box rounded as Agg rounds one, and
@@ -1629,6 +1601,8 @@ def raster_prepared_images(
             ):
                 continue
             if use_valid and not valid[cell, source_row, source_column]:
+                continue
+            if not np.isfinite(np.float64(values[cell, source_row, source_column])):
                 continue
             if single:
                 # The plane is float32; the limit and the span are float64.

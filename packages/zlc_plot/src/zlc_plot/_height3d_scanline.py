@@ -34,20 +34,7 @@ from . import _kernel_cache
 # built, so a later assignment is ignored in silence.
 _kernel_cache.install()
 
-try:  # pragma: no cover - absence is exercised by the engine fallback
-    from numba import njit, prange
-
-    HAVE_NUMBA = True
-except Exception:  # pragma: no cover
-    HAVE_NUMBA = False
-
-    def njit(*args, **kwargs):  # type: ignore[misc]
-        def wrap(fn):
-            return fn
-
-        return wrap
-
-    prange = range  # type: ignore[assignment]
+from numba import njit, prange
 
 
 @njit(cache=True, parallel=True, nogil=True)

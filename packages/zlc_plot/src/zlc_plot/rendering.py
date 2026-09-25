@@ -309,7 +309,7 @@ _UNRECORDED_DRAW_METHODS = (
     "draw_tex",
 )
 #: Stands in the dynamic-axis table for a draw that could not be recorded.
-_UNRECORDABLE: Any = ()
+_UNRECORDABLE: Any = object()
 
 
 def _frozen_draw_argument(value: Any) -> Any:
@@ -463,6 +463,30 @@ def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
 
 
 
+def _effective_cap_width(pixel_x: np.ndarray, cap_width: float) -> float:
+    """The cap width one group of error bars at ``pixel_x`` is drawn with.
+
+    ONE rule for every painter of a bar -- the prepared native scene, the
+    kernel plan over the bar artists, and those artists' own Agg paths (a
+    full draw, an export) -- so one picture never shows caps in one of them
+    and not in another.  An export decides again at its own dpi, where the
+    pitch differs.  Bars closer than one device pixel apart on average are
+    one solid band already, and their caps only thicken its edge; blending
+    every one of them (twenty thousand bars at 0.3 px: 9.9 Mpx a frame)
+    buys nothing anyone reads, so such a group paints its stems alone.  At
+    any coarser pitch each cap is a mark of its own and stays.  The mean
+    pitch decides, so an uneven scan keeps its caps.  ``cap_width`` comes
+    back unchanged, in whatever measure the caller keeps it, or as 0.0.
+    """
+
+    finite = pixel_x[np.isfinite(pixel_x)]
+    if finite.size > 1 and (
+        float(finite.max()) - float(finite.min())
+    ) < float(finite.size - 1):
+        return 0.0
+    return cap_width
+
+
 class _SegmentBuffered(PolyCollection):
     """One filled error-bar glyph per buffered pair of data endpoints.
 
@@ -497,7 +521,9 @@ class _SegmentBuffered(PolyCollection):
             low = np.min(points[..., 1], axis=1)
             high = np.max(points[..., 1], axis=1)
             radius = max(0.5, float(self.get_linewidths()[0]) * self.figure.dpi / 144.0)
-            cap = max(0.0, self._zlc_capsize * self.figure.dpi / 72.0)
+            cap = _effective_cap_width(
+                x, max(0.0, self._zlc_capsize * self.figure.dpi / 72.0)
+            )
             if cap <= 0.0:
                 vertices = np.stack((
                     np.column_stack((x - radius, low)), np.column_stack((x + radius, low)),
@@ -916,7 +942,7 @@ def _image_data_range(
 
     values = np.asarray(values)
     validity = np.broadcast_to(np.asarray(valid, dtype=np.bool_), values.shape)
-    all_valid = bool(np.all(validity))
+    all_valid = _all_true(validity)
     if values.dtype.kind in "biu":
         if not all_valid and not bool(np.any(validity)):
             return None
@@ -937,6 +963,11 @@ def _image_data_range(
             )
         return low, high
 
+    # One compiled pass answers it; the chunked scan below is its reference.
+    extrema = kernels.masked_finite_extrema(values, None if all_valid else validity)
+    if extrema is not None:
+        count, low, high, _integral = extrema
+        return (low, high) if count else None
     # Keep temporary finite masks bounded.  This matters for float camera
     # frames whose validity is sparse, while the common all-valid path still
     # scans contiguous source chunks without selecting/copying the image.
@@ -974,6 +1005,7 @@ def _image_arrays(
     y: np.ndarray,
     z: np.ndarray,
     valid: np.ndarray | None,
+    scales: tuple[str | tuple[float, ...], str | tuple[float, ...]],
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float, float, float]]:
     x = np.asarray(x, dtype=float).reshape(-1)
     y = np.asarray(y, dtype=float).reshape(-1)
@@ -991,7 +1023,7 @@ def _image_arrays(
         validity = np.broadcast_to(validity, z.shape)
     except ValueError as error:
         raise ValueError("image validity cannot broadcast to its values") from error
-    x0, x1, y0, y1 = _centers_extent(x, y)
+    x0, x1, y0, y1 = _centers_extent(x, y, scales)
     return z, validity, (x0, x1, y1, y0)
 
 
@@ -1004,19 +1036,25 @@ def _bounded_image_distribution_values(
     valid = np.broadcast_to(np.asarray(valid, dtype=bool), values.shape)
     order = "F" if values.flags.f_contiguous and not values.flags.c_contiguous else "C"
     flat_values = np.ravel(values, order=order)
-    flat_valid = np.ravel(valid, order=order)
+    # An all-valid plane is a stride-0 broadcast; ravelling it copied one
+    # bool per pixel to say nothing.
+    flat_valid = None if _all_true(valid) else np.ravel(valid, order=order)
     if flat_values.size > sample_target:
         step = flat_values.size // sample_target + 1
         sampled = flat_values[::step]
-        sampled_valid = flat_valid[::step]
+        sampled_valid = None if flat_valid is None else flat_valid[::step]
         if sampled.dtype.kind == "f":
-            sampled_valid = sampled_valid & np.isfinite(sampled)
+            finite = np.isfinite(sampled)
+            sampled_valid = finite if sampled_valid is None else sampled_valid & finite
+        if sampled_valid is None:
+            return np.asarray(sampled, dtype=float)
         if bool(np.any(sampled_valid)):
             return np.asarray(sampled[sampled_valid], dtype=float)
     full_valid = flat_valid
     if flat_values.dtype.kind == "f":
-        full_valid = full_valid & np.isfinite(flat_values)
-    if bool(np.all(full_valid)):
+        finite = np.isfinite(flat_values)
+        full_valid = finite if full_valid is None else full_valid & finite
+    if full_valid is None or bool(np.all(full_valid)):
         return np.asarray(flat_values, dtype=float)
     return np.asarray(flat_values[full_valid], dtype=float)
 
@@ -1066,12 +1104,21 @@ def _image_coordinate_scale(values: np.ndarray) -> str | tuple[float, ...]:
     return LINEAR if bool(np.all(np.abs(values - regular) <= tolerance)) else tuple(map(float, values))
 
 
-def _centers_extent(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
-    """Image extent in its affine drawing coordinates, half a cell past each end."""
+def _centers_extent(
+    x: np.ndarray,
+    y: np.ndarray,
+    scales: tuple[str | tuple[float, ...], str | tuple[float, ...]],
+) -> tuple[float, float, float, float]:
+    """Image extent in its affine drawing coordinates, half a cell past each end.
 
-    def edge(values: np.ndarray) -> tuple[float, float]:
+    ``scales`` are the two coordinates' :func:`_image_coordinate_scale`,
+    which the caller has already measured: a forty-two cell overview
+    measured every cell's twice more here, per shot.
+    """
+
+    def edge(values: np.ndarray, scale: str | tuple[float, ...]) -> tuple[float, float]:
         values = np.asarray(values, dtype=float).reshape(-1)
-        values = np.asarray(axis_space(values, _image_coordinate_scale(values)))
+        values = np.asarray(axis_space(values, scale))
         if values.size == 1:
             return (float(values[0] - 0.5), float(values[0] + 0.5))
         steps = np.diff(values)
@@ -1080,8 +1127,8 @@ def _centers_extent(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, 
             float(values[-1] + steps[-1] / 2.0),
         )
 
-    x0, x1 = edge(x)
-    y0, y1 = edge(y)
+    x0, x1 = edge(x, scales[0])
+    y0, y1 = edge(y, scales[1])
     return (x0, x1, y0, y1)
 
 
@@ -1377,15 +1424,22 @@ def _image_axis_span(coordinates: Any) -> float | None:
     return span * values.size / (values.size - 1)
 
 
-def _image_cell_aspect(x: Any, y: Any) -> float | None:
-    """Screen y/x scale that makes one x cell and one y cell equally long."""
+def _image_cell_aspect(
+    x: Any,
+    y: Any,
+    scales: tuple[str | tuple[float, ...], str | tuple[float, ...]],
+) -> float | None:
+    """Screen y/x scale that makes one x cell and one y cell equally long.
+
+    ``scales`` are the coordinates' :func:`_image_coordinate_scale`.
+    """
 
     pitches = []
-    for coordinates in (x, y):
+    for coordinates, scale in zip((x, y), scales, strict=True):
         values = np.asarray(
             getattr(coordinates, "display", coordinates), dtype=float
         ).reshape(-1)
-        values = np.asarray(axis_space(values, _image_coordinate_scale(values)))
+        values = np.asarray(axis_space(values, scale))
         if values.size == 0:
             return None
         if values.size == 1:
@@ -1693,12 +1747,17 @@ def _truncate_fit_diagnostic(message: str, maximum: int) -> str:
 
 
 def _tick_params_key(axis: Any) -> tuple[object, ...]:
-    """One axis' tick configuration, minus the label size (see the caller)."""
+    """One axis' tick configuration, minus the label size (see the caller).
+
+    Read from the dictionary ``Axis.get_tick_params`` translates: the
+    translation rebuilds it on every call, and this is asked per cell per
+    compose.
+    """
 
     return tuple(
         sorted(
             (name, value)
-            for name, value in axis.get_tick_params().items()
+            for name, value in axis._major_tick_kw.items()
             if name != "labelsize"
         )
     )
@@ -2535,6 +2594,11 @@ class MatplotlibRenderer:
             str,
             tuple[tuple[int, int, int | None], tuple[float, float] | None, tuple[object, object]],
         ] = {}
+        #: Each painted image axes' coordinate mapping (``axis_scale``), by
+        #: id(axes).  Renderer state, not an artist: kept in the artist table
+        #: it was walked on every compose, one float per coordinate of a
+        #: nonuniform scan, per cell.
+        self._coordinate_scales: dict[int, tuple[Any, Any]] = {}
         self._last_payload: Any = None
         self._last_state: DisplayState | None = None
         self._home_limits: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
@@ -3026,6 +3090,11 @@ class MatplotlibRenderer:
         self._series_hover_frozen = False
         self._boundary_chrome_cache.clear()
         self._forget_chrome_commands()
+        # The stroke masks are the one chrome recording no surface owns:
+        # they are placed where they are laid, so they outlive a focus round
+        # trip or a 2D/3D switch, and only a new dpi or new cell sizes --
+        # a new layout -- retire them.
+        self._facet_chrome_memo.clear()
         self._boundary_chrome_signature = None
         self._selector_artists.clear()
         self._selector_topologies.clear()
@@ -3043,6 +3112,10 @@ class MatplotlibRenderer:
         self._fit_source_scatter = None
         self._fit_hidden_source_lines = ()
         self._image_ranges.clear()
+        self._coordinate_scales.clear()
+        # The stashed scene calls name the Axes just dropped (a colour-limit
+        # preview would paint into one) and the ranges just cleared.
+        self._height_bars_calls.clear()
         # THE BOXES TOO.  These are keyed by id(axes), and relayout is
         # exactly where the old Axes are dropped -- so a later generation
         # could be allocated at a freed address, read installed=True out of
@@ -3184,6 +3257,16 @@ class MatplotlibRenderer:
                 # heatmap restores the 3D background and only the next
                 # revision repairs it.
                 self._retire_composition_epoch()
+                if not scene_3d:
+                    # And the scene's working set goes with it: its derived
+                    # planes, scratch frames and height copy were ~100 MB of
+                    # a 1150x1150 ROI at DPR 3, held while a heatmap showed.
+                    # Every reader takes None as "no scene".
+                    self._artists.pop("image:h3d_cache", None)
+                    self._artists.pop("image:h3d_inputs", None)
+                    self._height_bars_values = None
+                    self._height_bars_scene_map = None
+                    self._height_bars_data_frame = None
             self._height_bars_scene = scene_3d
             # Every painted surface honours the requested view, not just the
             # selected one: a FacetGrid overview shows N cells of the same
@@ -3385,7 +3468,7 @@ class MatplotlibRenderer:
     def axis_scale(self, axis: Any, name: str) -> str | tuple[float, ...]:
         """The accepted display-coordinate mapping of this painted axis."""
 
-        scales = self._artists.get(f"image:coordinate_scales:{id(axis)}")
+        scales = self._coordinate_scales.get(id(axis))
         actual = str(axis.get_xscale() if name == "x" else axis.get_yscale())
         if scales is not None and actual == "function":
             return scales[0 if name == "x" else 1]
@@ -3442,6 +3525,16 @@ class MatplotlibRenderer:
         "image:prepared",
         "curve:prepared",
         "histogram:prepared",
+        "facet:fit_native",
+    )
+
+    #: The kernel commands that are pure data -- no artist inside -- which
+    #: the dynamic-artist walk therefore never descends into.  The histogram
+    #: command is not one: it carries the collections it paints for.
+    _DATA_COMMAND_KEYS = (
+        "image:prepared",
+        "image:prepared_signature",
+        "curve:prepared",
         "facet:fit_native",
     )
 
@@ -3554,8 +3647,10 @@ class MatplotlibRenderer:
                 if cell.isdigit() and int(cell) != self._facet_focus_index:
                     continue
             # The grid's chrome group answers the same question the boundary
-            # chrome below does, and it is asked once, there.
-            if key not in self._FACET_CHROME_KEYS:
+            # chrome below does, and it is asked once, there.  A kernel's
+            # data command holds no artist at all: walked, it was every
+            # cell, option and scan coordinate of a grid, every compose.
+            if key not in self._FACET_CHROME_KEYS and key not in self._DATA_COMMAND_KEYS:
                 add(value)
         if confined is not None and getattr(confined, "axison", True):
             # Its ticks and labels move with the view being dragged, so
@@ -3754,7 +3849,6 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands.clear()
         self._dynamic_axis_commands.clear()
         self._foreground_batches.clear()
-        self._facet_chrome_memo.clear()
 
     def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
         """Freeze Agg path commands for stable tick marks and spines."""
@@ -4234,9 +4328,12 @@ class MatplotlibRenderer:
                 elif seen[1] is not None:
                     _replay_draw(seen[1], renderer)
                 else:
+                    recorded = _record_artist_draw(artist, renderer)
+                    # Refused once, refused for good under this key: without
+                    # the mark the axis was re-recorded on every frame.
                     self._dynamic_axis_commands[id(artist)] = (
                         key,
-                        _record_artist_draw(artist, renderer),
+                        _UNRECORDABLE if recorded is None else recorded,
                     )
                 return
             self._dynamic_axis_commands[id(artist)] = (key, None)
@@ -4395,14 +4492,6 @@ class MatplotlibRenderer:
         """Raster SEM directly from the shared prepared Curve scene."""
 
         canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False
         height, width = canvas_rgba.shape[:2]
         from matplotlib.colors import to_rgba
 
@@ -4454,7 +4543,7 @@ class MatplotlibRenderer:
                 slot_colours[slot] = packed_colour
             colours.append(packed_colour)
             widths.append(bar_width)
-            cap_widths.append(cap_width)
+            cap_widths.append(_effective_cap_width(group_x, cap_width))
             clips.append(clip)
 
         for (_key, axes, _index), cell_series in zip(
@@ -4565,33 +4654,22 @@ class MatplotlibRenderer:
                 lane_offsets.append(len(xs))
         if not xs:
             return True
-        previous_threads = None
-        if len(lane_offsets) > 8 and kernels.HAVE_NUMBA:
-            from numba import config, get_num_threads, set_num_threads
-
-            previous_threads = int(get_num_threads())
-            selected_threads = min(int(config.NUMBA_NUM_THREADS), 8)
-            if selected_threads > previous_threads:
-                set_num_threads(selected_threads)
-            else:
-                previous_threads = None
-        try:
-            kernels.raster_error_bars(
-                kernels.readable(np.concatenate(xs)),
-                kernels.readable(np.concatenate(lows)),
-                kernels.readable(np.concatenate(highs)),
-                kernels.readable(np.asarray(offsets, dtype=np.int64)),
-                kernels.readable(np.asarray(colours, dtype=np.uint8)),
-                kernels.readable(np.asarray(widths, dtype=np.float64)),
-                kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
-                kernels.readable(np.asarray(clips, dtype=np.int32)),
-                kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
-                kernels.stroke_bands(len(lane_offsets) - 1),
-                canvas_rgba,
-            )
-        finally:
-            if previous_threads is not None:
-                set_num_threads(previous_threads)
+        # On the worker's own team: one render child per panel, each masked
+        # to the team the bootstrap (or the operator) set.  Widening it here
+        # for a grid ran four children at twice that on the one machine.
+        kernels.raster_error_bars(
+            kernels.readable(np.concatenate(xs)),
+            kernels.readable(np.concatenate(lows)),
+            kernels.readable(np.concatenate(highs)),
+            kernels.readable(np.asarray(offsets, dtype=np.int64)),
+            kernels.readable(np.asarray(colours, dtype=np.uint8)),
+            kernels.readable(np.asarray(widths, dtype=np.float64)),
+            kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
+            kernels.readable(np.asarray(clips, dtype=np.int32)),
+            kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+            kernels.stroke_bands(len(lane_offsets) - 1),
+            canvas_rgba,
+        )
         return True
 
     def _raster_prepared_curve_command(
@@ -4613,14 +4691,6 @@ class MatplotlibRenderer:
         if not isinstance(command, dict):
             return False
         canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False
         height, width = canvas_rgba.shape[:2]
         surfaces = self.painted_surfaces
         series_by_cell = tuple(command.get("series", ()))
@@ -4737,14 +4807,6 @@ class MatplotlibRenderer:
         if not groups:
             return ()
         canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return None
         height, width = canvas_rgba.shape[:2]
         xs: list[np.ndarray] = []
         lows: list[np.ndarray] = []
@@ -4806,9 +4868,12 @@ class MatplotlibRenderer:
                 )
             )
             cap_widths.append(
-                max(0.0, 2.0 * collection._zlc_capsize
-                    * float(self._figure.dpi)
-                    / 72.0)
+                _effective_cap_width(
+                    group_x,
+                    max(0.0, 2.0 * collection._zlc_capsize
+                        * float(self._figure.dpi)
+                        / 72.0),
+                )
             )
             box = axes.bbox
             clips.append(
@@ -4853,14 +4918,6 @@ class MatplotlibRenderer:
         from matplotlib.colors import to_rgba
 
         canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return None
         height, width = canvas_rgba.shape[:2]
         # ONE TRANSFORM FOR THE BATCH.  A line's transform is its axes'
         # data transform -- six numbers on a linear axes -- read once per
@@ -4945,14 +5002,6 @@ class MatplotlibRenderer:
         if not isinstance(command, dict):
             return False, frozenset()
         canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False, frozenset()
         height, width = canvas_rgba.shape[:2]
         surfaces = self.painted_surfaces
         values = np.asarray(command["values"])
@@ -5003,10 +5052,13 @@ class MatplotlibRenderer:
                 continue
             blits[row], clips[row], affines[row] = geometry
         single, vmin32, span32, vmin64, span64 = _normalize_arithmetic(values.dtype, low, high)
+        # An all-valid plane is a stride-0 broadcast; handed over as it is,
+        # ``readable`` copied it into a full bool plane every frame.
+        use_valid = not _all_true(valid)
         kernels.raster_prepared_images(
             kernels.readable(values),
-            kernels.readable(valid),
-            True,
+            kernels.readable(valid if use_valid else np.zeros((1, 1, 1), dtype=np.bool_)),
+            use_valid,
             kernels.readable(blits),
             kernels.readable(clips),
             kernels.readable(affines),
@@ -5137,14 +5189,6 @@ class MatplotlibRenderer:
         if not isinstance(command, dict):
             return False, frozenset()
         canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False, frozenset()
         height, width = canvas_rgba.shape[:2]
         bars = command.get("bars", {})
         surfaces = self.painted_surfaces
@@ -6187,8 +6231,6 @@ class MatplotlibRenderer:
             return False
         try:
             buffer = np.asarray(canvas.buffer_rgba())
-            if not buffer.flags.writeable:
-                return False
             row_start = buffer.shape[0] - (y_start + rows)
             if row_start < 0 or x_start < 0:
                 return False
@@ -6735,6 +6777,10 @@ class MatplotlibRenderer:
         records = self._series_lines.get(id(axes), ())
         for line, _identity, _label in records:
             line.set_visible(False)
+            # Its raw data goes with it: registered, a withdrawn line was
+            # re-enveloped on every x-limit change and pinned the revision
+            # it was built from.  A materialization registers it again.
+            self._line_sources.pop(id(line), None)
         if self._fit_hidden_source_lines:
             # A line the fit mode hid behind its source scatter is on its
             # way back: the mode ends with the focus, and its restore shows
@@ -7948,15 +7994,20 @@ class MatplotlibRenderer:
                 cmap,
                 valid_identity=valid_identity,
             )
-        if not axes.axison and key in self._height_bars_calls:
-            # Returning from the height-bar presentation restores the 2D
-            # chrome this artist path owns and hides the scene's.  Only from
-            # THERE: a facet grid cell also draws no chrome of its own, and
-            # asking the question of the axes alone turned all sixty-four of
-            # them back on -- every cell drew the chrome the grid group had
-            # already painted, and it re-dirtied its own background doing it.
-            axes.set_axis_on()
+        if self._height_bars_calls.pop(key, None) is not None:
+            # Returning from the height-bar presentation hides the scene's
+            # chrome and restores the 2D chrome this artist path owns -- once:
+            # the stashed call is consumed here.  Kept, it matched on every
+            # later render of that surface.  An overview cell draws no chrome
+            # of its own (the grid group paints it), so a cell once opened in
+            # 3D stays off; turned on, it drew the grid's chrome a second
+            # time and re-dirtied its own background doing it.
             self._hide_height_bars_chrome(key)
+            if not axes.axison and not (
+                isinstance(self.spec, FacetGridPlot)
+                and self._facet_focus_index is None
+            ):
+                axes.set_axis_on()
             self._mark_axes_chrome_dirty(axes)
 
         # The Image surface is a fixed square frame.  The picture keeps its
@@ -8122,12 +8173,22 @@ class MatplotlibRenderer:
         else:
             # Native draws the accepted scalar scene directly. Keep the real
             # source on the style/geometry artist, but do not also rasterize
-            # a fallback picture that this frame will never paint.
-            mask = np.ma.nomask if _all_true(valid) else np.logical_not(valid)
-            if values.dtype.kind == "f":
-                finite = np.isfinite(values)
-                if not bool(np.all(finite)):
-                    mask = np.logical_or(mask, np.logical_not(finite))
+            # a fallback picture -- or build a mask for one -- that this
+            # frame will never paint.
+            mask = np.ma.nomask
+            if self._exporting:
+                # Only an export draws this artist, and its front skips
+                # ``set_data``'s own mask (``_install_image_front``): an
+                # invalid pixel left unmasked is painted, and an infinity
+                # scales the whole picture to NaN.  Live, the kernel paints
+                # the picture and skips both itself, and a compose the
+                # kernel cannot serve materializes a front first.
+                if not _all_true(valid):
+                    mask = np.logical_not(valid)
+                if values.dtype.kind == "f":
+                    finite = np.isfinite(values)
+                    if not bool(np.all(finite)):
+                        mask = np.logical_or(mask, np.logical_not(finite))
             shown = np.ma.array(values, mask=mask, copy=False)
             rgba_front, drawn_extent = None, extent
             self._artists[f"{key}:color_mode"] = "scalar"
@@ -8520,12 +8581,15 @@ class MatplotlibRenderer:
                 if not usable.all():
                     heights = np.where(usable, heights, np.nan)
 
+            # The finite range of the valid values: the image range this
+            # surface measured for this very revision on its way here
+            # (``_mutate_image_artists``).  Gathered again from the height
+            # plane it was two boolean gathers of every cell, per shot.
+            data_range = self._image_ranges[key][1]
             if color_limits is not None and color_limits[1] > color_limits[0]:
                 low, high = (float(value) for value in color_limits)
             else:
-                finite = heights[np.isfinite(heights)]
-                low = float(finite.min()) if finite.size else 0.0
-                high = float(finite.max()) if finite.size else 1.0
+                low, high = (0.0, 1.0) if data_range is None else data_range
                 if high <= low:
                     high = low + 1.0
             lut = self._image_color_lut(cmap_name, cmap)
@@ -8549,10 +8613,7 @@ class MatplotlibRenderer:
             # where a 768x768 scene paid 1.9 ms to re-answer it on every
             # single camera move.  The clip against the colour limit stays
             # per frame: it is arithmetic on two numbers.
-            finite_mask = np.isfinite(heights)
-            lowest = (
-                float(heights[finite_mask].min()) if finite_mask.any() else 0.0
-            )
+            lowest = 0.0 if data_range is None else data_range[0]
             self._artists["image:h3d_inputs"] = (
                 input_key,
                 (heights, table, low, high, zero_rgb, lowest),
@@ -8583,7 +8644,7 @@ class MatplotlibRenderer:
         ny, nx = heights.shape
         coordinate_ticks = []
         coordinate_offsets = []
-        scales = self._artists.get(f"image:coordinate_scales:{id(axes)}", (LINEAR, LINEAR))
+        scales = self._coordinate_scales.get(id(axes), (LINEAR, LINEAR))
         for (count, start, end), scale in zip(((nx, left, right), (ny, top, bottom)), scales, strict=True):
             indices = sorted({int(round(v)) for v in np.linspace(0, count - 1, min(count, 6))})
             values = [
@@ -9162,7 +9223,7 @@ class MatplotlibRenderer:
         (left, right, bottom, top), source_nx, source_ny = data_frame
         x_value = left + (column + 0.5) * (right - left) / source_nx
         y_value = top + (row + 0.5) * (bottom - top) / source_ny
-        x_scale, y_scale = self._artists.get(f"image:coordinate_scales:{id(axes)}", (LINEAR, LINEAR))
+        x_scale, y_scale = self._coordinate_scales.get(id(axes), (LINEAR, LINEAR))
         return float(axis_value(x_value, x_scale)), float(axis_value(y_value, y_scale))
 
     def _height_bars_cell_of(
@@ -9174,7 +9235,7 @@ class MatplotlibRenderer:
         (left, right, bottom, top), source_nx, source_ny = data_frame
         if right == left or bottom == top:
             return None
-        x_scale, y_scale = self._artists.get(f"image:coordinate_scales:{id(self.primary_axes)}", (LINEAR, LINEAR))
+        x_scale, y_scale = self._coordinate_scales.get(id(self.primary_axes), (LINEAR, LINEAR))
         x_value, y_value = axis_space(x_value, x_scale), axis_space(y_value, y_scale)
         column = int(np.floor((x_value - left) / (right - left) * source_nx))
         row = int(np.floor((y_value - top) / (bottom - top) * source_ny))
@@ -9519,7 +9580,7 @@ class MatplotlibRenderer:
         extent = frame[0]
         row, column = cell
         z = float(values[row, column])
-        x_scale, y_scale = self._artists.get(f"image:coordinate_scales:{id(axes)}", (LINEAR, LINEAR))
+        x_scale, y_scale = self._coordinate_scales.get(id(axes), (LINEAR, LINEAR))
         xp = _selector_precision(abs(axis_value(extent[1], x_scale) - axis_value(extent[0], x_scale)))
         yp = _selector_precision(abs(axis_value(extent[3], y_scale) - axis_value(extent[2], y_scale)))
         zp = _selector_precision(abs(scene.value_high - scene.value_low))
@@ -9744,10 +9805,10 @@ class MatplotlibRenderer:
         color_limits: tuple[float, float] | None = None,
         paint_labels: bool = True,
     ) -> None:
-        scales = tuple(_image_coordinate_scale(np.asarray(_display_array(value)))
-                       for value in (payload.x, payload.y))
-        scale_key = f"image:coordinate_scales:{id(axes)}"
-        previous_scales = self._artists.get(scale_key, (None, None))
+        x = np.asarray(_display_array(payload.x))
+        y = np.asarray(_display_array(payload.y))
+        scales = (_image_coordinate_scale(x), _image_coordinate_scale(y))
+        previous_scales = self._coordinate_scales.get(id(axes), (None, None))
         height_bars = self._height_bars_active(key, state)
         for name, scale, previous in zip(("x", "y"), scales, previous_scales, strict=True):
             wanted = "function" if isinstance(scale, tuple) and not height_bars else LINEAR
@@ -9761,7 +9822,7 @@ class MatplotlibRenderer:
                 elif actual != LINEAR:
                     setter(LINEAR)
                 self._mark_axes_chrome_dirty(axes)
-        self._artists[scale_key] = scales
+        self._coordinate_scales[id(axes)] = scales
         labels = getattr(self.semantic_spec, "labels", None)
         explicit_x = _state_label(
             state,
@@ -9780,12 +9841,13 @@ class MatplotlibRenderer:
         )
         self._mutate_image_artists(
             axes,
-            np.asarray(_display_array(payload.x)),
-            np.asarray(_display_array(payload.y)),
+            x,
+            y,
             np.asarray(_display_array(payload.z)),
             getattr(payload, "valid", None),
             state,
             key,
+            coordinate_scales=scales,
             x_label=_quantity_label(payload.x, "x", explicit_x),
             y_label=_quantity_label(payload.y, "y", explicit_y),
             value_label=(
@@ -9793,7 +9855,7 @@ class MatplotlibRenderer:
                 if explicit_value and _EXPLICIT_UNIT_SUFFIX.search(explicit_value)
                 else _quantity_label(payload.z, "value", explicit_value)
             ),
-            coordinate_aspect=_image_cell_aspect(payload.x, payload.y),
+            coordinate_aspect=_image_cell_aspect(payload.x, payload.y, scales),
             color_limits=color_limits,
             paint_labels=paint_labels,
         )
@@ -9808,6 +9870,7 @@ class MatplotlibRenderer:
         state: DisplayState,
         key: str,
         *,
+        coordinate_scales: tuple[str | tuple[float, ...], str | tuple[float, ...]],
         x_label: str,
         y_label: str,
         value_label: str,
@@ -9816,7 +9879,7 @@ class MatplotlibRenderer:
         paint_labels: bool = True,
     ) -> None:
         source_values, source_valid = z, valid
-        z, valid, extent = _image_arrays(x, y, z, valid)
+        z, valid, extent = _image_arrays(x, y, z, valid, coordinate_scales)
         # Keyed on the arrays the CALLER was handed.  _image_arrays rebuilds
         # its broadcast view on every call, so keying on what it returns meant
         # the key was a fresh object each time and the cache never hit -- the
@@ -11446,6 +11509,7 @@ class MatplotlibRenderer:
         native_image_values: list[np.ndarray] = []
         native_image_valid: list[np.ndarray] = []
         native_image_extents: list[tuple[float, float, float, float]] = []
+        native_image_scales: list[tuple[Any, Any]] = []
         if isinstance(semantic, CurvePlot):
             curve_series = tuple(
                 self._prepare_curve_series(
@@ -11554,19 +11618,17 @@ class MatplotlibRenderer:
                 cell_payload = getattr(cell, "payload", cell)
                 source_values = np.asarray(_display_array(cell_payload.z))
                 source_valid = getattr(cell_payload, "valid", None)
+                cell_x = np.asarray(_display_array(cell_payload.x))
+                cell_y = np.asarray(_display_array(cell_payload.y))
+                scales = (_image_coordinate_scale(cell_x), _image_coordinate_scale(cell_y))
                 values, valid, _extent = _image_arrays(
-                    np.asarray(_display_array(cell_payload.x)),
-                    np.asarray(_display_array(cell_payload.y)),
-                    source_values,
-                    source_valid,
+                    cell_x, cell_y, source_values, source_valid, scales
                 )
                 native_image_values.append(values)
-                native_image_valid.append(
-                    valid & np.isfinite(values)
-                    if values.dtype.kind == "f"
-                    else valid
-                )
+                # Non-finite samples are the kernel's to mask, as imshow's.
+                native_image_valid.append(valid)
                 native_image_extents.append(_extent)
+                native_image_scales.append(scales)
                 # Measured under the cell surface's OWN key, so the render
                 # below reads this exact answer back out of the cache instead
                 # of rescanning every cell a second time.
@@ -11595,20 +11657,22 @@ class MatplotlibRenderer:
             cell_options = tuple({"color_limits": image_limits} for _cell in cells)
             if not focused and kernels.engaged() and native_image_values:
                 cmap_name, cmap = self._resolved_image_colormap(state)
+                stacked_values = np.stack(native_image_values)
                 self._artists["image:prepared"] = {
-                    "values": np.stack(native_image_values),
-                    "valid": np.stack(native_image_valid),
+                    "values": stacked_values,
+                    # Stacking an all-valid grid's broadcasts built one bool
+                    # per pixel of every cell, per shot, to say nothing.
+                    "valid": (
+                        np.broadcast_to(np.True_, stacked_values.shape)
+                        if all(_all_true(valid) for valid in native_image_valid)
+                        else np.stack(native_image_valid)
+                    ),
                     "extents": np.asarray(native_image_extents, dtype=np.float64),
                     "color_limits": tuple(map(float, image_limits)),
                     "lut": self._image_color_lut(cmap_name, cmap),
                     "state_revision": state.revision,
                     "view_limits": self._requested_view_limits,
-                    "coordinate_scales": tuple(
-                        tuple(_image_coordinate_scale(np.asarray(_display_array(coordinate)))
-                              for coordinate in (getattr(cell, "payload", cell).x,
-                                                 getattr(cell, "payload", cell).y))
-                        for cell in cells
-                    ),
+                    "coordinate_scales": tuple(native_image_scales),
                 }
             else:
                 self._artists.pop("image:prepared", None)
@@ -11715,9 +11779,13 @@ class MatplotlibRenderer:
             # The tick MARKS are the grid's; their label SIZE belongs to the
             # tick policy below, which may shrink it to keep two labels
             # apart and must be the last writer.
+            # Read back from the axes' own tick dictionaries (``size`` is
+            # ``length``, ``label1On`` the bottom/left label):
+            # ``get_tick_params`` rebuilds a translated copy per question,
+            # four questions per cell per shot.
             cell_tick_length = self.style.render.facet_cell_tick_length_pt
             if any(
-                item.get_tick_params().get("length") != cell_tick_length
+                item._major_tick_kw.get("size") != cell_tick_length
                 for item in (axis.xaxis, axis.yaxis)
             ):
                 axis.tick_params(axis="both", length=cell_tick_length)
@@ -11760,9 +11828,9 @@ class MatplotlibRenderer:
                 )
             else:
                 apply_smart_ticks(axis, label_pt=cell_tick_pt)
-            if axis.yaxis.get_tick_params().get("labelleft") != label_left:
+            if axis.yaxis._major_tick_kw.get("label1On") != label_left:
                 axis.tick_params(axis="y", labelleft=label_left)
-            if axis.xaxis.get_tick_params().get("labelbottom") != label_bottom:
+            if axis.xaxis._major_tick_kw.get("label1On") != label_bottom:
                 axis.tick_params(axis="x", labelbottom=label_bottom)
             # The cells share one x span and one y span, so they share
             # whatever offset the tick policy took out of their labels: it is
@@ -12207,12 +12275,14 @@ class MatplotlibRenderer:
             return None
         x_index = int(np.argmin(np.abs(x - state.value.x)))
         y_index = int(np.argmin(np.abs(y - state.value.y)))
-        valid = np.asarray(
-            getattr(payload, "valid", np.ones(z.shape, dtype=bool)), dtype=bool
+        # One sample's validity: a default plane built here was a full-frame
+        # allocation on every present and every drag move.
+        valid = getattr(payload, "valid", None)
+        usable = valid is None or bool(
+            np.broadcast_to(np.asarray(valid, dtype=bool), z.shape)[y_index, x_index]
         )
-        valid = np.broadcast_to(valid, z.shape)
         value = z[y_index, x_index]
-        if not bool(valid[y_index, x_index]) or not bool(np.isfinite(value)):
+        if not usable or not bool(np.isfinite(value)):
             return "NaN"
         return float(value)
 
@@ -12879,12 +12949,6 @@ class MatplotlibRenderer:
         if overlay.polylines:
             return "histogram" if isinstance(semantic, HistogramPlot) else "curve"
         return "annotation"
-
-    def _clear_fit_topology(self) -> None:
-        self._remove_artists(self._fit_artists)
-        self._fit_artists.clear()
-        self._fit_slots.clear()
-        self._fit_topologies.clear()
 
     def _fit_polyline_token(self, semantic: PlotSpec, polyline: FitPolyline) -> Any:
         if polyline.role == "component":

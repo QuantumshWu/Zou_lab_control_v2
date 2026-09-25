@@ -238,8 +238,8 @@ class _MeasuredLocator(ticker.Locator):
             raise ValueError("max_ticks must be a positive integer")
         if measure is not None and not callable(measure):
             raise TypeError("measure must be callable or None")
-        if float(label_pt) not in (6.5, MIN_TICK_LABEL_PT):
-            raise ValueError("tick label_pt must be 6.5 or 3.25")
+        if not float(label_pt) > 0.0:
+            raise ValueError("label_pt must be positive")
         self.max_ticks = max(int(max_ticks), 2)
         #: How a label is measured, and at what size it is drawn.  Given
         #: these, the locator spends the axis's ACTUAL extent on the labels
@@ -512,6 +512,7 @@ class _MeasuredLocator(ticker.Locator):
 
         if geometry is None:
             return None
+        scale = None if self.axis is None else self.axis.get_scale()
         return (
             type(self).__name__,
             float(vmin),
@@ -525,7 +526,10 @@ class _MeasuredLocator(ticker.Locator):
             id(self.measure),
             tuple(rcParams.get("font.sans-serif", ())),
             extra,
-            self.axis.get_transform() if self.axis is not None and self.axis.get_scale() == "function" else None,
+            # The solver reads the scale (a log axis walks decades first),
+            # so two same-named axes over one span differ by it.
+            scale,
+            self.axis.get_transform() if scale == "function" else None,
         )
 
     def _placement(
@@ -772,7 +776,8 @@ class SmartOffsetLocator(_MeasuredLocator):
             self._tick_cache_key = cache_key
             return self.ticks
         placement = self._placement(
-            self._shared_key(vmin, vmax, (self.steps, self.oom), geometry),
+            # The held unit is an input: ``_unit`` offers it first.
+            self._shared_key(vmin, vmax, (self.steps, self.oom, self._settled), geometry),
             lambda: self._unit(lower, upper),
         )
         self.adopt_layout(placement, reverse=vmin > vmax, cache_key=cache_key)
@@ -1142,6 +1147,8 @@ class DeclaredLocator(_MeasuredLocator):
                         self.text_lengths,
                         self.zero_optional,
                         self.span,
+                        # The labels are this function's spelling.
+                        self.text,
                     ),
                     geometry,
                 ),
@@ -1306,8 +1313,8 @@ def apply_named_ticks(
     if which not in {"x", "y"}:
         raise ValueError("which must be 'x' or 'y'")
     size_pt = float(label_pt)
-    if size_pt not in (6.5, MIN_TICK_LABEL_PT):
-        raise ValueError("tick label_pt must be 6.5 or 3.25")
+    if not size_pt > 0.0:
+        raise ValueError("label_pt must be positive")
     ticks = tuple(float(value) for value in positions)
     texts = tuple(str(name) for name in names)
     if len(ticks) != len(texts):
