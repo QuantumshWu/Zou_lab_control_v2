@@ -459,8 +459,8 @@ def _task(
     *,
     slm: _Slm,
     camera: object,
-    sequencer: object,
     plane: SignalDataPlane,
+    sequencer: object | None = None,
     target: np.ndarray | None = None,
     calibration: TrapCalibration | None = None,
     shots: int = 10,
@@ -472,6 +472,11 @@ def _task(
 ) -> SlmFeedbackTask:
     # Numerical-controller cases mock the measurement but still model LOAD's
     # accepted-program readback; hardware-path doubles provide AppliedState.
+    if sequencer is None:
+        sequencer = SimpleNamespace(
+            describe=lambda: object(), safe=lambda: None,
+            load=lambda *_args, **_kwargs: None,
+        )
     if isinstance(sequencer, SimpleNamespace) and not hasattr(sequencer, "applied"):
         load = getattr(sequencer, "load", None)
         if callable(load):
@@ -538,6 +543,106 @@ def _resolved_pulse(*_args, **_kwargs) -> ResolvedPulse:
 
     return ResolvedPulse("test", Path("test.json"), FEEDBACK_PULSE_SEQUENCE,
                          SimpleNamespace(digest=_PROGRAM_DIGEST))
+
+
+def _zero_batch(task: SlmFeedbackTask):
+    """A mocked shot batch: zero samples at every registered site."""
+
+    return _measured(task, (
+        np.zeros((task.shots, task._site_count)),
+        (),
+        (),
+        np.zeros(task.calibration.frame_contract.image_shape, dtype=np.float32),
+    ))
+
+
+def _patch_numeric_run(monkeypatch, *, solve, fit, on_measure=None) -> None:
+    """A numerical-controller run: the pulse is resolved, and the solver, the
+    batch fit and the (zero) shot batch are the test's.
+
+    ``on_measure(task)`` sees each measurement before its batch is returned.
+    """
+
+    monkeypatch.setattr(feedback_module, "resolve_pulse", _resolved_pulse)
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
+    monkeypatch.setattr(feedback_module, "_fit_contrasts", fit)
+
+    def measure(task, context, iteration):
+        del context, iteration
+        if on_measure is not None:
+            on_measure(task)
+        return _zero_batch(task)
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+
+
+class _BoardDouble:
+    """The board's surface over a virtual camera: a fire triggers its frames.
+
+    ``reports`` queues what ``wait_done`` answers, in order, and ``None``
+    once it is empty; without a queue every shot reports a plain DONE.
+    ``trigger_limit`` is how many triggers the next fire plays before the
+    board stops.
+    """
+
+    def __init__(self, camera, *, reports: list[DoneReport] | None = None) -> None:
+        self.camera = camera
+        self.reports = reports
+        self.trigger_limit: int | None = None
+        self.loaded = None
+        self.loads = 0
+        self.fires: list[int | None] = []
+        self._applied = None
+
+    def describe(self):
+        return object()
+
+    def load(self, program, *, source=None, rows=()) -> None:
+        self.loaded = (program, source)
+        self.loads += 1
+        self._applied = AppliedState(program, source, tuple(rows), 0, 1, 0.0)
+
+    def applied(self):
+        return self._applied
+
+    def fire(self, *, run_repeats, scan_repeats=1):
+        assert scan_repeats == 1
+        self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
+        self.fires.append(run_repeats)
+        played = int(run_repeats) if self.trigger_limit is None else self.trigger_limit
+        self.trigger_limit = None
+        self.camera.trigger(played)
+        return self._applied
+
+    def wait_done(self, timeout=None):
+        del timeout
+        if self.reports is None:
+            return DoneReport(status=STATUS_DONE, cursor=0, underflow=False, elapsed_seconds=0.0)
+        return self.reports.pop(0) if self.reports else None
+
+    def config_values(self):
+        return {}
+
+    def safe(self):
+        return None
+
+    def snapshot(self):
+        return {"loaded": self.loaded is not None, "firing": False}
+
+
+def _virtual_pulse() -> ResolvedPulse:
+    """The feedback pulse resolved on the virtual board's own sequencer."""
+
+    installation = create_installation("virtual")
+    try:
+        return resolve_pulse(
+            FEEDBACK_PULSE_SEQUENCE,
+            path=IMAGING_PULSE_RESOURCE.path,
+            sequencer=installation.device("sequencer"),
+            api_values={},
+        )
+    finally:
+        installation.close()
 
 
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
@@ -646,7 +751,6 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         np.ones(35, dtype=bool),
         rows,
         columns,
-        reference_valid=np.ones(35, dtype=bool),
         feedback_gain=0.25,
         plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -667,7 +771,6 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         np.ones(35, dtype=bool),
         rows,
         columns,
-        reference_valid=np.ones(35, dtype=bool),
         feedback_gain=0.25,
         plant_slope=2.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -683,7 +786,6 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
             np.ones(35, dtype=bool),
             rows,
             columns,
-            reference_valid=np.ones(35, dtype=bool),
             feedback_gain=0.25,
             plant_slope=-2.0, plant_sign=-1.0,
             maximum_weight_change=0.5,
@@ -1073,7 +1175,6 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         np.zeros(4, dtype=bool),
         rows,
         columns,
-        reference_valid=np.zeros(4, dtype=bool),
         feedback_gain=0.25,
         plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -1093,7 +1194,6 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         np.ones(4, dtype=bool),
         rows,
         columns,
-        reference_valid=np.ones(4, dtype=bool),
         feedback_gain=0.5,
         plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -1149,7 +1249,6 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         valid,
         rows,
         columns,
-        reference_valid=valid,
         feedback_gain=0.5,
         plant_slope=1.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -1162,7 +1261,6 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         valid,
         rows,
         columns,
-        reference_valid=valid,
         feedback_gain=0.5,
         plant_slope=1.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -1193,7 +1291,6 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         dark_valid,
         rows,
         columns,
-        reference_valid=dark_valid,
         feedback_gain=0.5,
         plant_slope=1.0, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -1212,7 +1309,7 @@ def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
         wrong[0] = True
         _updated_target(
             target, dark_contrast, np.zeros(35), dark_valid, rows, columns,
-            reference_valid=dark_valid, feedback_gain=0.5, plant_slope=1.0, plant_sign=-1.0,
+            feedback_gain=0.5, plant_slope=1.0, plant_sign=-1.0,
             maximum_weight_change=0.5, loading_edge=wrong,
         )
 
@@ -1411,7 +1508,6 @@ def test_every_site_moves_with_its_own_sign_or_not_at_all_over_random_rosters() 
             valid,
             rows,
             columns,
-            reference_valid=valid,
             feedback_gain=gain,
             plant_slope=slope, plant_sign=-1.0,
             maximum_weight_change=clamp,
@@ -1611,7 +1707,6 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         np.zeros(35),
         np.ones(35, dtype=bool),
         *np.nonzero(frozen_target),
-        reference_valid=np.ones(35, dtype=bool),
         feedback_gain=0.25,
         plant_slope=None, plant_sign=-1.0,
         maximum_weight_change=0.5,
@@ -1637,27 +1732,9 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
             "transform": "selected-dft",
         }
 
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
     fits = iter((_fitted_result(first_contrast), _fitted_result(np.ones(35))))
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: next(fits),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
+    _patch_numeric_run(
+        monkeypatch, solve=solve, fit=lambda samples, **_kwargs: next(fits),
     )
     plane = SignalDataPlane()
 
@@ -1759,33 +1836,14 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
         solved_targets.append(np.array(candidate, copy=True))
         return np.full(target.shape, 0.25 * len(solved_targets), dtype=np.float32), {}
 
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: next(fits),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, len(rows))),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
+    _patch_numeric_run(
+        monkeypatch, solve=solve, fit=lambda samples, **_kwargs: next(fits),
     )
     plane = SignalDataPlane()
     task = _task(
         tmp_path,
         slm=_Slm(target.shape),
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=calibration,
@@ -1800,7 +1858,6 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             np.ones(len(rows), dtype=bool),
             rows,
             columns,
-            reference_valid=np.ones(len(rows), dtype=bool),
             feedback_gain=0.25,
             plant_slope=None, plant_sign=-1.0,
             maximum_weight_change=0.5,
@@ -1842,40 +1899,19 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
             np.ones(35),
         )
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
     phases = iter((0.25, 0.5))
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda *args, **kwargs: (
             np.full(slm.shape_yx, next(phases), dtype=np.float32),
             {"method": "test"},
         ),
+        fit=lambda samples, **_kwargs: _fitted_result(next(contrasts)),
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: _fitted_result(next(contrasts)),
-    )
-    def measure(self, run_context, iteration):
-        del run_context, iteration
-        return _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ))
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -1928,22 +1964,54 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         plane.close()
 
 
-@pytest.mark.parametrize("failure", ("distortion", "ambiguous"))
-def test_sparse_geometry_refuses_distorted_or_ambiguous_calibration(
-    tmp_path: Path, failure: str
+@pytest.mark.parametrize(
+    ("shape", "rows", "columns", "centers", "match"),
+    (
+        # One site displaced (20, 15) px off the lattice the others span.
+        pytest.param(
+            (17, 23), [2, 2, 8, 8], [3, 12, 5, 15],
+            [[16.0, 21.0], [34.0, 21.0], [40.0, 54.0], [40.0, 39.0]],
+            "geometry|ambiguous", id="distortion",
+        ),
+        # Two Target sites on one camera centre.
+        pytest.param(
+            (17, 23), [2, 2, 8, 8], [3, 12, 5, 15],
+            [[16.0, 21.0], [16.0, 21.0], [20.0, 39.0], [40.0, 39.0]],
+            "geometry|ambiguous", id="ambiguous",
+        ),
+        # x = 5 + 1.5 column + row: the rows are sheared across the camera.
+        pytest.param(
+            (19, 23), [2, 2, 8, 8, 14, 14], [3, 15, 5, 17, 4, 16],
+            [[11.5, 12.0], [29.5, 12.0], [20.5, 24.0], [38.5, 24.0], [25.0, 36.0], [43.0, 36.0]],
+            "apparatus orientation", id="global-shear",
+        ),
+        # One Target row imaged along a line rising half a pixel per pixel.
+        pytest.param(
+            (23, 25), [6, 6, 6, 6], [3, 8, 14, 19],
+            [[10.0, 12.0], [20.0, 17.0], [32.0, 23.0], [42.0, 28.0]],
+            "apparatus orientation", id="row-tilt",
+        ),
+        # One Target column imaged along a line leaning half a pixel per pixel.
+        pytest.param(
+            (23, 25), [3, 8, 14, 19], [9, 9, 9, 9],
+            [[10.0, 11.0], [15.0, 21.0], [21.0, 33.0], [26.0, 43.0]],
+            "apparatus orientation", id="column-tilt",
+        ),
+    ),
+)
+def test_sparse_geometry_refuses_a_calibration_that_is_not_the_targets_geometry(
+    tmp_path: Path,
+    shape: tuple[int, int],
+    rows: list[int],
+    columns: list[int],
+    centers: list[list[float]],
+    match: str,
 ) -> None:
-    target = np.zeros((17, 23), dtype=np.float32)
-    rows = np.asarray([2, 2, 8, 8])
-    columns = np.asarray([3, 12, 5, 15])
-    target[rows, columns] = 1.0
-    centers = np.column_stack((10.0 + 2.0 * columns, 15.0 + 3.0 * rows))
-    if failure == "distortion":
-        centers[2] += (20.0, 15.0)
-    else:
-        centers[1] = centers[0]
+    target = np.zeros(shape, dtype=np.float32)
+    target[np.asarray(rows), np.asarray(columns)] = 1.0
     plane = SignalDataPlane()
     try:
-        with pytest.raises(ValueError, match="geometry|ambiguous"):
+        with pytest.raises(ValueError, match=match):
             _task(
                 tmp_path,
                 slm=_Slm(target.shape),
@@ -1951,7 +2019,7 @@ def test_sparse_geometry_refuses_distorted_or_ambiguous_calibration(
                 sequencer=object(),
                 plane=plane,
                 target=target,
-                calibration=_calibration_at(centers),
+                calibration=_calibration_at(np.asarray(centers)),
             )
     finally:
         plane.close()
@@ -2006,14 +2074,6 @@ def test_regular_nine_by_nine_grid_registers_directly_with_one_missing_site() ->
     assert len(support) == 81
     assert np.flatnonzero(~registered.valid_sites).tolist() == [missing]
     np.testing.assert_allclose(registered.centers_xy[missing], centers[missing])
-    # Target registration is the Feedback's own science: the Calibration
-    # never sees a Target, so it neither owns nor exports the registration.
-    import zlc_atom.nodes.calibration.calibration as calibration_module
-
-    assert _register_target_sites.__module__ == feedback_module.__name__
-    assert validate_target_registration.__module__ == feedback_module.__name__
-    assert not hasattr(calibration_module, "_register_target_sites")
-    assert not hasattr(calibration_module, "validate_target_registration")
 
 
 def test_feedback_reads_every_site_with_the_calibration_box_not_its_matched_filter(
@@ -2101,64 +2161,6 @@ def test_feedback_reads_every_site_with_the_calibration_box_not_its_matched_filt
         plane.close()
 
 
-def test_sparse_geometry_refuses_a_large_global_shear(
-    tmp_path: Path,
-) -> None:
-    target = np.zeros((19, 23), dtype=np.float32)
-    rows = np.asarray([2, 2, 8, 8, 14, 14])
-    columns = np.asarray([3, 15, 5, 17, 4, 16])
-    target[rows, columns] = 1.0
-    centers = np.column_stack(
-        (
-            5.0 + 1.5 * columns + rows,
-            8.0 + 2.0 * rows,
-        )
-    )
-    plane = SignalDataPlane()
-    try:
-        with pytest.raises(ValueError, match="apparatus orientation"):
-            _task(
-                tmp_path,
-                slm=_Slm(target.shape),
-                camera=object(),
-                sequencer=object(),
-                plane=plane,
-                target=target,
-                calibration=_calibration_at(centers),
-            )
-    finally:
-        plane.close()
-
-
-@pytest.mark.parametrize("orientation", ("row", "column"))
-def test_axis_aligned_sparse_geometry_refuses_a_large_cross_axis_tilt(
-    tmp_path: Path, orientation: str
-) -> None:
-    target = np.zeros((23, 25), dtype=np.float32)
-    primary = np.asarray([3, 8, 14, 19])
-    if orientation == "row":
-        rows, columns = np.full(4, 6), primary
-        centers = np.column_stack((2.0 * primary + 4.0, primary + 9.0))
-    else:
-        rows, columns = primary, np.full(4, 9)
-        centers = np.column_stack((primary + 7.0, 2.0 * primary + 5.0))
-    target[rows, columns] = 1.0
-    plane = SignalDataPlane()
-    try:
-        with pytest.raises(ValueError, match="apparatus orientation"):
-            _task(
-                tmp_path,
-                slm=_Slm(target.shape),
-                camera=object(),
-                sequencer=object(),
-                plane=plane,
-                target=target,
-                calibration=_calibration_at(centers),
-            )
-    finally:
-        plane.close()
-
-
 @pytest.mark.parametrize(
     ("rows", "columns", "centers"),
     (
@@ -2213,41 +2215,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         frame_source=frame_source,
     )
 
-    class Sequencer:
-        def __init__(self) -> None:
-            self.loaded = None
-            self._applied = None
-            self.fires: list[int | None] = []
-
-        def describe(self):
-            return object()
-
-        def load(self, program, *, source=None, rows=()) -> None:
-            assert not rows
-            self.loaded = (program, source)
-            self._applied = AppliedState(program, source, (), 0, 1, 0.0)
-
-        def applied(self):
-            return self._applied
-
-        def fire(self, *, run_repeats, scan_repeats=1):
-            assert scan_repeats == 1
-            self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
-            self.fires.append(run_repeats)
-            camera.trigger(int(run_repeats))
-            return self._applied
-
-        def wait_done(self, timeout=None):
-            del timeout
-            return DoneReport(status=STATUS_DONE, cursor=0, underflow=False, elapsed_seconds=0.0)
-
-        def safe(self):
-            return None
-
-        def snapshot(self):
-            return {"loaded": self.loaded is not None, "firing": False}
-
-    sequencer = Sequencer()
+    sequencer = _BoardDouble(camera)
     armed_buffer_sizes: list[int] = []
     original_arm = camera.arm
 
@@ -2268,18 +2236,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         calibration=_calibration(),
     )
     try:
-        from zlc_atom.install import create_installation
-
-        installation = create_installation("virtual")
-        try:
-            pulse = resolve_pulse(
-                FEEDBACK_PULSE_SEQUENCE,
-                path=IMAGING_PULSE_RESOURCE.path,
-                sequencer=installation.device("sequencer"),
-                api_values={},
-            )
-        finally:
-            installation.close()
+        pulse = _virtual_pulse()
         current_dataset = plane.current_dataset
         lookup_count = 0
 
@@ -2326,7 +2283,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             "command_revision"
         ] == slm.command_revision
         signal = "@logic/slm_feedback/camera/frames"
-        raw = plane.current_dataset(signal)
+        raw = plane.current_dataset(signal).materialize()
         first_camera_generation = raw.ref.stream_generation
         assert raw.block.values.shape == (10, 1, 5, 7)
         np.testing.assert_allclose(
@@ -2412,45 +2369,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             },
         )
 
-    class Sequencer:
-        def __init__(self, camera):
-            self.camera = camera
-            self._applied = None
-
-        def describe(self):
-            return object()
-
-        def load(self, program, *, source=None, rows=()):
-            self._applied = AppliedState(program, source, tuple(rows), 0, 1, 0.0)
-
-        def applied(self):
-            return self._applied
-
-        def fire(self, *, run_repeats, scan_repeats=1):
-            assert scan_repeats == 1
-            self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
-            self.camera.trigger(int(run_repeats))
-            return self._applied
-
-        def wait_done(self, timeout=None):
-            return DoneReport(status=STATUS_DONE, cursor=0, underflow=False, elapsed_seconds=0.0)
-
-        def safe(self):
-            return None
-
-        def snapshot(self):
-            return {"loaded": True, "firing": False}
-
-    installation = create_installation("virtual")
-    try:
-        pulse = resolve_pulse(
-            FEEDBACK_PULSE_SEQUENCE,
-            path=IMAGING_PULSE_RESOURCE.path,
-            sequencer=installation.device("sequencer"),
-            api_values={},
-        )
-    finally:
-        installation.close()
+    pulse = _virtual_pulse()
 
     def run(offset, scale, effective_photoelectrons):
         def frame_source(exposure):
@@ -2473,7 +2392,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             tmp_path,
             slm=_Slm(target.shape),
             camera=camera,
-            sequencer=Sequencer(camera),
+            sequencer=_BoardDouble(camera),
             plane=plane,
             target=target,
             calibration=calibration(),
@@ -2520,47 +2439,7 @@ def test_measure_refuses_faults_without_repeating_the_authored_batch(
             observer_error=observer_error,
         )
 
-    class Sequencer:
-        def __init__(self) -> None:
-            self.digest = None
-            self._applied = None
-            self.loads = 0
-            self.fires: list[int | None] = []
-            self.reports: list[DoneReport] = []
-            #: Triggers the next fire plays before the board "stops".
-            self.trigger_limit: int | None = None
-
-        def describe(self):
-            return object()
-
-        def load(self, program, *, source=None, rows=()) -> None:
-            self._applied = AppliedState(program, source, tuple(rows), 0, 1, 0.0)
-            self.loads += 1
-            self.digest = program.digest
-
-        def applied(self):
-            return self._applied
-
-        def fire(self, *, run_repeats, scan_repeats=1):
-            assert scan_repeats == 1
-            self._applied = replace(self._applied, run_repeats=run_repeats, scan_repeats=scan_repeats)
-            self.fires.append(run_repeats)
-            played = int(run_repeats) if self.trigger_limit is None else self.trigger_limit
-            self.trigger_limit = None
-            camera.trigger(played)
-            return self._applied
-
-        def wait_done(self, timeout=None):
-            del timeout
-            return self.reports.pop(0) if self.reports else None
-
-        def safe(self):
-            return None
-
-        def snapshot(self):
-            return {"loaded": self.digest is not None, "applied_digest": self.digest}
-
-    sequencer = Sequencer()
+    sequencer = _BoardDouble(camera, reports=[])
     plane = SignalDataPlane()
     slm = _Slm((5, 7))
     task = _task(
@@ -2572,16 +2451,7 @@ def test_measure_refuses_faults_without_repeating_the_authored_batch(
         target=np.ones((5, 7), dtype=np.float32),
         calibration=_calibration(),
     )
-    installation = create_installation("virtual")
-    try:
-        pulse = resolve_pulse(
-            FEEDBACK_PULSE_SEQUENCE,
-            path=IMAGING_PULSE_RESOURCE.path,
-            sequencer=installation.device("sequencer"),
-            api_values={},
-        )
-    finally:
-        installation.close()
+    pulse = _virtual_pulse()
     try:
         sequencer.load(pulse.program, source=pulse.sequence)
         failures = (
@@ -2633,13 +2503,6 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             candidate.shape, 0.1 * (len(solved_targets) + 1), np.float32
         ), {}
 
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
-
     valid = np.ones(35, dtype=bool)
     valid[[17, 18]] = False
     single = np.zeros(35, dtype=bool)
@@ -2679,30 +2542,22 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
         )
     )
 
-    def measure(self, context, iteration):
-        measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ))
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
-    monkeypatch.setattr(
-        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    _patch_numeric_run(
+        monkeypatch,
+        solve=solve,
+        fit=lambda samples, **_kwargs: next(fits),
+        on_measure=lambda task: measured_phases.append(
+            np.array(task.slm.last_commanded_phase, copy=True)
+        ),
     )
     monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: next(fits),
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
     )
     plane = SignalDataPlane()
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         calibration=calibration,
         science_context=context_mapping,
@@ -2755,7 +2610,6 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             valid,
             rows,
             columns,
-            reference_valid=valid,
             feedback_gain=0.25,
             plant_slope=None, plant_sign=-1.0,
             maximum_weight_change=0.5,
@@ -2834,22 +2688,16 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
     baseline_error[0] = 0.0
     fits_served: list[int] = []
     solved_targets: list[np.ndarray] = []
-    monkeypatch.setattr(feedback_module, "resolve_pulse", _resolved_pulse)
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda candidate, **_kwargs: (
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda candidate, **_kwargs: (
             solved_targets.append(np.array(candidate, copy=True))
             or np.full(
                 candidate.shape, 0.1 * (len(solved_targets) + 1), dtype=np.float32
             ),
             {},
         ),
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: (
+        fit=lambda samples, **_kwargs: (
             fits_served.append(1)
             or (
                 _fitted_result(
@@ -2862,16 +2710,6 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
                 else _fitted_result(np.ones(35))
             )
         ),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
     )
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
@@ -2958,11 +2796,6 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
     slm = _Slm(target.shape)
     solved_targets: list[np.ndarray] = []
     solve_inputs: list[tuple[np.ndarray, dict[str, object]]] = []
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
     def solve(candidate, **kwargs):
         solved_targets.append(np.array(candidate, copy=True))
         solve_inputs.append((
@@ -2974,7 +2807,6 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
             candidate.shape, 0.1 * (len(solved_targets) + 1), np.float32
         ), {}
 
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
     valid = np.ones(35, dtype=bool)
     valid[17] = False
     single = np.zeros(35, dtype=bool)
@@ -3023,19 +2855,7 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
                 after_double_single_fit(),
             )
     )
-    monkeypatch.setattr(
-        feedback_module, "_fit_contrasts", lambda samples: next(fits)
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
-    )
+    _patch_numeric_run(monkeypatch, solve=solve, fit=lambda samples: next(fits))
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
     )
@@ -3045,7 +2865,6 @@ def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=_calibration_with_unresolved_site(target, missing=17),
@@ -3106,35 +2925,17 @@ def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
     target = _asymmetric_target()
     slm = _Slm(target.shape)
     measured: list[np.ndarray] = []
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: pytest.fail("relative all-site probe must not solve"),
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples: _fitted_result(
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda *args, **kwargs: pytest.fail("relative all-site probe must not solve"),
+        fit=lambda samples: _fitted_result(
             np.full(35, np.nan),
             valid=np.zeros(35, dtype=bool),
             single_population=np.ones(35, dtype=bool),
         ),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            measured.append(np.array(self.slm.last_commanded_phase, copy=True)),
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )[1:]),
+        on_measure=lambda task: measured.append(
+            np.array(task.slm.last_commanded_phase, copy=True)
+        ),
     )
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
@@ -3144,7 +2945,6 @@ def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=_calibration_with_unresolved_site(target, missing=17),
@@ -3173,45 +2973,24 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     target = _asymmetric_target()
     slm = _Slm(target.shape)
     plane = SignalDataPlane()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda candidate, **kwargs: (
-            np.array(slm.last_commanded_phase, copy=True),
-            {},
-        ),
-    )
     valid = np.ones(35, dtype=bool)
     valid[17] = False
     single = np.zeros(35, dtype=bool)
     single[17] = True
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: _fitted_result(
+    measurements: list[int] = []
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda candidate, **kwargs: (
+            np.array(slm.last_commanded_phase, copy=True),
+            {},
+        ),
+        fit=lambda samples, **_kwargs: _fitted_result(
             np.where(valid, 1.0, np.nan),
             valid=valid,
             single_population=single,
         ),
+        on_measure=lambda task: measurements.append(task.shots),
     )
-    calls = 0
-
-    def measure(self, context, iteration):
-        nonlocal calls
-        calls += 1
-        return _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ))
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
     )
@@ -3219,14 +2998,13 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=_calibration_with_unresolved_site(target, missing=17),
     )
     try:
         result = task.execute(_Context(tmp_path))
-        assert calls == 1
+        assert len(measurements) == 1
         assert result["feedback_status"] == "stalled"
         _phase, metadata = _load_candidate(result["artifact_path"])
         assert "no different phase" in metadata["outcome"]["reason"]
@@ -3252,11 +3030,6 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
         target,
         missing=17,
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
     context = _Context(tmp_path)
     solved_targets: list[np.ndarray] = []
 
@@ -3266,32 +3039,23 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
             candidate.shape, 0.1 * (len(solved_targets) + 1), np.float32
         ), {}
 
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
     measured_phases: list[np.ndarray] = []
     valid = np.ones(35, dtype=bool)
     valid[17] = False
     single = np.zeros(35, dtype=bool)
     single[17] = True
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: _fitted_result(
+    _patch_numeric_run(
+        monkeypatch,
+        solve=solve,
+        fit=lambda samples, **_kwargs: _fitted_result(
             np.where(valid, 1.0, np.nan),
             valid=valid,
             single_population=single,
         ),
+        on_measure=lambda task: measured_phases.append(
+            np.array(task.slm.last_commanded_phase, copy=True)
+        ),
     )
-
-    def measure(self, run_context, iteration):
-        measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ))
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
     )
@@ -3300,7 +3064,6 @@ def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=target,
         calibration=calibration,
@@ -3576,29 +3339,15 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         resolved_api_values.append(dict(kwargs["api_values"]))
         return _resolved_pulse()
 
-    monkeypatch.setattr(feedback_module, "resolve_pulse", resolve_without_reauthoring)
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (next(phases), {"method": "test"}),
-    )
     requested_shots: list[int] = []
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: _fitted_result(next(fit_results)),
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda *args, **kwargs: (next(phases), {"method": "test"}),
+        fit=lambda samples, **_kwargs: _fitted_result(next(fit_results)),
+        on_measure=lambda task: requested_shots.append(task.shots),
     )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            requested_shots.append(self.shots),
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )[1:]),
-    )
+    # This run also records what the pulse was resolved with.
+    monkeypatch.setattr(feedback_module, "resolve_pulse", resolve_without_reauthoring)
     # The figures are the report, not the deliverable: a figure writer that
     # breaks at the seal leaves the run completed, final/ and the SLM on the
     # selected candidate, and the failure in the summary -- it used to seal
@@ -3614,7 +3363,6 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -3694,28 +3442,11 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         result["even_contrast"] = even
         return result
 
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    monkeypatch.setattr(feedback_module, "_fit_contrasts", fit)
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
-    )
+    _patch_numeric_run(monkeypatch, solve=solve, fit=fit)
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=base,
         updates=24,
@@ -3841,34 +3572,13 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
     wake = Event()
     save_entered = Event()
     release_save = Event()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda *args, **kwargs: (
             np.full(slm.shape_yx, 0.5, dtype=np.float32),
             {"method": "test"},
         ),
-    )
-
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: _fitted_result(np.ones(35)),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
+        fit=lambda samples, **_kwargs: _fitted_result(np.ones(35)),
     )
 
     def fail_first_checkpoint(self, context, paths, **kwargs):
@@ -3883,7 +3593,6 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
     )
@@ -3951,7 +3660,6 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         shots=100,
@@ -4058,17 +3766,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     wake = Event()
     save_entered = Event()
     release_save = Event()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
     phases = iter((first_phase, best))
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (next(phases), {"method": "test"}),
-    )
     fit_results = iter(
         (
             _fitted_result(np.concatenate(([2.0], np.ones(34)))),
@@ -4076,20 +3774,10 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
             _fitted_result(np.ones(35)),
         )
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: next(fit_results),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda *args, **kwargs: (next(phases), {"method": "test"}),
+        fit=lambda samples, **_kwargs: next(fit_results),
     )
     original_save = feedback_module.save_science_context
 
@@ -4104,7 +3792,6 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -4167,17 +3854,7 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     )
     plane = SignalDataPlane()
     wake = Event()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        _resolved_pulse,
-    )
     phases = iter((first_phase, best))
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (next(phases), {"method": "test"}),
-    )
     fit_results = iter(
         (
             _fitted_result(np.concatenate(([2.0], np.ones(34)))),
@@ -4185,26 +3862,15 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
             _fitted_result(np.ones(35)),
         )
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: next(fit_results),
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
+    _patch_numeric_run(
+        monkeypatch,
+        solve=lambda *args, **kwargs: (next(phases), {"method": "test"}),
+        fit=lambda samples, **_kwargs: next(fit_results),
     )
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -4279,7 +3945,6 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
         updates=2,
@@ -4350,15 +4015,17 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
 
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
 
-    def cancelled(self, pulse, context, iteration):
-        raise RuntimeError("SLM feedback was cancelled")
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", cancelled)
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a run stopped before its first candidate must not measure"
+        ),
+    )
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=_grid_target(slm.shape_yx),
     )
@@ -4447,7 +4114,6 @@ def test_the_plant_sign_decides_the_trusted_slopes_and_the_way_a_site_moves() ->
             valid,
             rows,
             columns,
-            reference_valid=valid,
             feedback_gain=0.4,
             plant_slope=2.0,
             plant_sign=sign,
@@ -4464,7 +4130,7 @@ def test_the_plant_sign_decides_the_trusted_slopes_and_the_way_a_site_moves() ->
     with pytest.raises(ValueError, match="plant_sign"):
         _updated_target(
             target, observed, np.zeros(35), valid, rows, columns,
-            reference_valid=valid, feedback_gain=0.4, plant_slope=2.0,
+            feedback_gain=0.4, plant_slope=2.0,
             plant_sign=0.5, maximum_weight_change=0.5,
         )
 
@@ -4511,44 +4177,34 @@ def test_loading_rate_feedback_evens_the_lattice_against_a_rising_saturating_pla
         result["even_loading"] = even
         return result
 
-    monkeypatch.setattr(feedback_module, "resolve_pulse", _resolved_pulse)
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    monkeypatch.setattr(feedback_module, "_fit_contrasts", fit)
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, context, iteration: _measured(self, (
-            np.zeros((self.shots, 35)),
-            (),
-            (),
-            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )),
-    )
+    _patch_numeric_run(monkeypatch, solve=solve, fit=fit)
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object(), safe=lambda: None, load=lambda *_args, **_kwargs: None),
         plane=plane,
         target=base,
         updates=24,
         feedback_gain=0.4,
         feedback_mode="qcmos_loading_rate",
     )
-    result = task.execute(_Context(tmp_path))
-    assert result["feedback_status"] == "completed"
-    history = _load_history(result["artifact_path"])
-    assert 6 <= len(history) < 1 + task.max_updates
-    assert "loading_rate" in history[0] and "bright_minus_dark" not in history[0]
-    assert {item["plant_slope_source"] for item in history[:2]} == {"assumed"}
-    assert "estimated" in {item["plant_slope_source"] for item in history}
-    residual = np.log(np.asarray(history[0]["loading_rate"], dtype=float))
-    residual -= np.mean(residual)
-    np.testing.assert_allclose(
-        history[0]["requested_log_correction"],
-        -0.5 * 0.4 * (1.0 - 4.0 * sigma) * residual,
-        atol=2e-3,
-    )
-    first = np.log(np.asarray(history[0]["loading_rate"], dtype=float))
-    last = np.log(np.asarray(history[-1]["loading_rate"], dtype=float))
-    assert np.std(last) < 0.25 * np.std(first)
+    try:
+        result = task.execute(_Context(tmp_path))
+        assert result["feedback_status"] == "completed"
+        history = _load_history(result["artifact_path"])
+        assert 6 <= len(history) < 1 + task.max_updates
+        assert "loading_rate" in history[0] and "bright_minus_dark" not in history[0]
+        assert {item["plant_slope_source"] for item in history[:2]} == {"assumed"}
+        assert "estimated" in {item["plant_slope_source"] for item in history}
+        residual = np.log(np.asarray(history[0]["loading_rate"], dtype=float))
+        residual -= np.mean(residual)
+        np.testing.assert_allclose(
+            history[0]["requested_log_correction"],
+            -0.5 * 0.4 * (1.0 - 4.0 * sigma) * residual,
+            atol=2e-3,
+        )
+        first = np.log(np.asarray(history[0]["loading_rate"], dtype=float))
+        last = np.log(np.asarray(history[-1]["loading_rate"], dtype=float))
+        assert np.std(last) < 0.25 * np.std(first)
+    finally:
+        plane.close()

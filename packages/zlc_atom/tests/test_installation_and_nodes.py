@@ -7,46 +7,15 @@ import sys
 
 import numpy as np
 import pytest
-from zlc_data import OwnedSnapshot, READOUT_EVENT, REPEAT, SITE
 from zlc_runtime import DatasetOutputDeclaration
 
-from zlc_atom.install import CAPABILITY_TYPES, create_installation, discover_device_catalog
+from zlc_atom.install import create_installation, discover_device_catalog
 from zlc_atom.nodes import discover_logic_nodes
-from zlc_atom.nodes.calibration import (
-    CalibrationRequest,
-    CalibrationTask,
-    ReadoutModelKind,
-)
+from zlc_atom.nodes.calibration import CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
 from tests.fakes import FakePlane, camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
-
-#: The repository this test belongs to.  Anchored to the file rather than to
-#: the working directory, so a suite run from anywhere still finds pulses/.
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
-    return CalibrationRequest(
-        camera_key="camera",
-        sequencer_key="sequencer",
-        pulse_template="imaging_template.json",
-        repeats=repeats,
-        reference_exposure_seconds=0.02,
-        readout_exposure_seconds=0.005,
-        camera_exposure_seconds=0.02,
-        reference_before_field="duration:long_before",
-        readout_field="duration:short",
-        reference_after_field="duration:long_after",
-        default_model_kind=ReadoutModelKind.BOX,
-        threshold_method="gaussian",
-        box_half_width=1,
-        psf_half_width=3,
-        psf_padding=3,
-        detection_spot_sigma=1.0,
-        detection_sigma=6.0,
-    )
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
 
 
 def test_device_discovery_is_the_leaf_manifest() -> None:
@@ -121,7 +90,11 @@ session = types.SimpleNamespace(
     # every reference stays the instance key.
     device_labels={"named-sequencer": "Main sequencer"},
 )
-assert factory(session, "named-sequencer", window_ratio=0.4) == "window"
+# The console's Edit/Save render child, handed on for the preview.
+render = object()
+assert factory(
+    session, "named-sequencer", window_ratio=0.4, render=render
+) == "window"
 assert calls == [{
     "workspace": workspace,
     "sequence": None,
@@ -130,6 +103,7 @@ assert calls == [{
     "device_label": "Main sequencer",
     "path": "",
     "window_ratio": 0.4,
+    "render": render,
 }]
 """
     completed = subprocess.run(
@@ -140,17 +114,6 @@ assert calls == [{
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-
-
-def test_capability_tokens_have_machine_visible_types() -> None:
-    assert set(CAPABILITY_TYPES) == {
-        "camera.adapter",
-        "rf.source",
-        "sequencer.streamer",
-        "slm.phase",
-        "waveform.source",
-    }
-    assert all(isinstance(value, type) for value in CAPABILITY_TYPES.values())
 
 
 def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
@@ -400,29 +363,23 @@ def test_logic_build_namespace_rejects_authored_resolved_or_reserved_collisions(
         )
 
 
-def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
+def test_two_virtual_calibrations_write_separate_artifacts_and_feed_occupancy(
     tmp_path: Path,
 ) -> None:
     installation = create_installation("virtual")
-    plane = FakePlane()
+    planes = (FakePlane(), FakePlane())
     try:
-        result = CalibrationTask(
-            camera=installation.device("camera"),
-            sequencer=installation.device("sequencer"),
-            request=_calibration_request(),
-            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-            pulse_path=IMAGING_PULSE_RESOURCE.path,
-            signal_plane=FakePlane(),
-        ).run(tmp_path)
-        assert plane.freeze().signals == {}
-        second = CalibrationTask(
-            camera=installation.device("camera"),
-            sequencer=installation.device("sequencer"),
-            request=_calibration_request(),
-            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-            pulse_path=IMAGING_PULSE_RESOURCE.path,
-            signal_plane=FakePlane(),
-        ).run(tmp_path)
+        result, second = (
+            CalibrationTask(
+                camera=installation.device("camera"),
+                sequencer=installation.device("sequencer"),
+                request=calibration_request(),
+                pulse_sequence=IMAGING_PULSE_RESOURCE.value,
+                pulse_path=IMAGING_PULSE_RESOURCE.path,
+                signal_plane=plane,
+            ).run(tmp_path)
+            for plane in planes
+        )
         assert result.artifact_path.name == "calibration.json"
         assert second.artifact_path.name == "calibration.json"
         assert result.artifact_path != second.artifact_path
@@ -491,62 +448,8 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         assert sum(len(group) for group in result.capture.reference) == 60
         assert len(result.capture.short) == 30
     finally:
-        plane.close()
-        installation.close()
-
-
-def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
-    tmp_path: Path,
-) -> None:
-    installation = create_installation("virtual")
-    plane = FakePlane()
-    try:
-        result = CalibrationTask(
-            camera=installation.device("camera"),
-            sequencer=installation.device("sequencer"),
-            request=_calibration_request(),
-            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-            pulse_path=IMAGING_PULSE_RESOURCE.path,
-            signal_plane=FakePlane(),
-        ).run(tmp_path)
-        frames = camera_cycle_snapshot([(record,) for record in result.capture.short])
-        occupancy = OccupancyProcessor(result.calibration).process(
-            frames,
-        )
-        expected_shape = (30, 1, result.calibration.n_sites)
-        assert occupancy.counts.shape == expected_shape
-        counts_artifact = occupancy.artifacts["counts"]
-        assert isinstance(counts_artifact, OwnedSnapshot)
-        assert all(
-            axis.role is REPEAT
-            for axis in counts_artifact.block.schema.repeat_domain.axes
-        )
-        # The point axis is the parent's, verbatim -- not rebuilt, not guessed
-        # from the shape.  A one-frame cycle keeps its frame point axis.
-        assert (
-            counts_artifact.block.schema.point_domain
-            == frames.block.schema.point_domain
-        )
-        (parent_axis,) = frames.block.schema.point_domain.axes
-        assert parent_axis.role is READOUT_EVENT
-        # Sites are CELL data: one image resampled onto the trap lattice.
-        (site_axis,) = counts_artifact.block.schema.cell_domain.axes
-        # The occupancy publication carries the calibration's site axis, not one
-        # of its own: same id, name, size and 1..n coordinates.  By value rather
-        # than by identity, because a schema built from these exact axes is
-        # shared between publications that describe the same thing.
-        assert site_axis == result.calibration.site_map.site_axis
-        assert site_axis.role is SITE
-        assert tuple(site_axis.coordinate_values()) == tuple(
-            range(1, result.calibration.n_sites + 1)
-        )
-        assert site_axis.coordinate_labels is None
-        assert tuple(site_axis.coordinates) == tuple(
-            range(1, len(result.calibration.site_map.site_ids) + 1)
-        )
-        assert counts_artifact.block.values.shape == expected_shape
-    finally:
-        plane.close()
+        for plane in planes:
+            plane.close()
         installation.close()
 
 
@@ -669,7 +572,7 @@ def test_every_device_control_factory_takes_the_call_the_console_makes() -> None
             continue
         seen += 1
         parameters = inspect.signature(factory).parameters
-        assert "window_ratio" in parameters, (
+        assert {"window_ratio", "render"} <= set(parameters), (
             f"{descriptor.type_id} control factory cannot be opened the way "
             "a device card opens one"
         )

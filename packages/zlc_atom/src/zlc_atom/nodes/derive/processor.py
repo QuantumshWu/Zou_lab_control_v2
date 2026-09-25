@@ -21,11 +21,8 @@ class DeriveProcessor:
 
     def __init__(
         self, *, expressions, primary_output: str, input_outputs: Sequence[str],
-        input_view: str = "event", window: int = 50, producer: str = "derive",
+        input_view: str = "event", window: int = 50,
     ):
-        self.instance_id = str(producer).strip()
-        if not self.instance_id:
-            raise ValueError("producer must be non-empty")
         self.expressions = signal_rows(expressions)
         self._programs = compiled_rows(self.expressions)
         self.primary_output = str(primary_output)
@@ -81,7 +78,6 @@ class DeriveProcessor:
     def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
         primary = inputs["a"]
         return {
-            "node": self.instance_id,
             "parameters": {
                 "expressions": self.expressions, "input_view": self.dataset_input_view,
                 "window": self.dataset_input_window if self.dataset_input_view == "window" else None,

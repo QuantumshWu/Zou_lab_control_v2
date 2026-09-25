@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from zlc_atom.nodes.scan import ScanAxis, ScanPlan, manual_axis_name
-from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
+from zlc_atom.nodes.scan.editor import ScanPlanEditor
 from zlc_atom.nodes.scan.plan import ScanPort, parse_scan_values, plan_input_rows
 from zlc_ui import ensure_qt_app
 
@@ -24,11 +24,9 @@ from zlc_ui import ensure_qt_app
 BIAS = ScanPort("pulse:param:da_bias_x", "da_bias_x", "V", -1.0, 1.0, -0.5, 0.5)
 
 
-def _editor(manual_axes: bool = True):
+def _editor():
     ensure_qt_app()
-    editor = scan_plan_editor_factory(
-        device_ports=False, manual_axes=manual_axes
-    )
+    editor = ScanPlanEditor()
     # The projection is what a node hands its editor; only the ports and the
     # authored plan matter here, so the rest of it stays out of the way.
     editor._ports = (BIAS,)
@@ -38,6 +36,10 @@ def _editor(manual_axes: bool = True):
 
 def _plan(editor) -> ScanPlan:
     return ScanPlan.from_tree(json.loads(editor._plan_text))
+
+
+def _axis(row) -> ScanAxis:
+    return ScanPlan.from_tree({"axes": [row.input_entry()]}).axes[0]
 
 
 def test_a_manual_row_authors_a_name_and_the_values_a_hand_will_set() -> None:
@@ -129,7 +131,7 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         )
         (row,) = editor._rows
         assert row.custom_label.text() == "custom values"
-        assert row.axis().values == authored
+        assert _axis(row).values == authored
         editor._emit_plan()
         assert _plan(editor).axes[0].values == authored, "re-emitted as authored"
         # A grid the spins DO describe is not custom, and an edited spin
@@ -142,18 +144,18 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
             json.dumps(ScanPlan((ScanAxis(BIAS.port, authored),)).to_tree())
         )
         row.points_spin.setValue(2)
-        assert row.axis().values == (1_000_000.0, 3_000_005.0)
+        assert _axis(row).values == (1_000_000.0, 3_000_005.0)
         # Decimal unit conversion need not reproduce linspace's last bit.
         row._show_values(ScanAxis(BIAS.port, (0.0, 0.1, 0.2, 0.3), "V"))
         assert row.custom_label.text() == ""
         assert row._show_converted(row.input_entry(), "mV", (0.0, 100.0, 200.0, 300.0))
         assert row.custom_label.text() == ""
-        assert row.axis().values == (0.0, 100.0, 200.0, 300.0)
+        assert _axis(row).values == (0.0, 100.0, 200.0, 300.0)
         # A genuinely nonuniform list remains so; bounds apply to the
         # stored list too, not only the two visible spinbox endpoints.
         row._ports = (BIAS,)
         row._show_values(ScanAxis(BIAS.port, (-2.0, 0.2, 3.0), "V"))
-        assert row.axis().values == (-1.0, 0.2, 1.0)
+        assert _axis(row).values == (-1.0, 0.2, 1.0)
         assert row.custom_label.text() == "custom values"
 
         # A projected ROI is normalized after the synchronous reconcile has
@@ -183,7 +185,7 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
 def test_host_only_scan_plans_need_no_dummy_board_axis() -> None:
     ensure_qt_app()
     device = ScanPort("device:rf:frequency", "rf.frequency", "Hz", 1e5, 5e6)
-    editor = scan_plan_editor_factory(device_ports=True, manual_axes=True)
+    editor = ScanPlanEditor()
     try:
         plan = json.dumps(ScanPlan((ScanAxis(device.port, (1e6, 2e6)),)).to_tree())
         editor._ports = (device,)
@@ -191,15 +193,6 @@ def test_host_only_scan_plans_need_no_dummy_board_axis() -> None:
         editor._refresh_summary()
         assert "2 device settings are applied" in editor.summary.text()
         assert len(editor._current_plan().axes) == 1
-    finally:
-        editor.deleteLater()
-
-
-def test_a_node_that_cannot_stop_for_a_hand_never_offers_the_button() -> None:
-    editor = _editor(manual_axes=False)
-    try:
-        assert editor.add_manual_button.isHidden()
-        assert not editor.add_manual_button.isEnabled()
     finally:
         editor.deleteLater()
 
@@ -336,7 +329,7 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
             for index in range(row.port_combo._model.rowCount())
         }
         assert row.port_combo.currentData() == "device:rf_source:power"
-        assert row.axis().values == (0.0, 1.0, 2.0)
+        assert _axis(row).values == (0.0, 1.0, 2.0)
     finally:
         row.deleteLater()
 
@@ -448,7 +441,7 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     app = ensure_qt_app(["scan-editor-values"])
     sequence = _bound_sequence()
     sequence = replace(sequence, periods=(replace(sequence.periods[0], name="MOT"), *sequence.periods[1:]))
-    editor = scan_plan_editor_factory(device_ports=False)
+    editor = ScanPlanEditor()
     editor.show()
     editor.update_projection(_projection(sequence))
     app.processEvents()
@@ -522,6 +515,19 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
     assert editor._rows == [row]
     editor.close()
     editor.deleteLater()
+    assert not [record for record in caplog.records if record.levelno >= 40]
+
+
+def test_device_port_unit_conversion_runs_off_the_qt_thread_and_never_overwrites_a_newer_draft(
+    caplog,
+) -> None:
+    """A device port's range and unit conversions are read on the device
+    worker, never on Qt; a conversion that lands after the operator edited
+    the row, switched its port or removed it changes nothing."""
+
+    from PyQt5 import QtCore
+
+    app = ensure_qt_app(["scan-editor-rows"])
 
     from zlc_data.units import DEFAULT_UNITS, Unit, UnitRegistry, VoltageIntoLoad
     from zlc_atom.authoring import AuthoringField, TunableField
@@ -567,8 +573,8 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
             app.processEvents(QtCore.QEventLoop.AllEvents, 10)
             time.sleep(0.001)
 
-    editor = scan_plan_editor_factory(device_ports=True)
-    reopened = scan_plan_editor_factory(device_ports=True)
+    editor = ScanPlanEditor()
+    reopened = ScanPlanEditor()
     initial = ScanAxis(power.port, (-20.0, -15.0, -10.0, -5.0, 0.0), "dBm")
     projection = {"form_values": {"plan": json.dumps(ScanPlan((initial,)).to_tree())},
                   "bench_extras": {"tunable_devices": {"rf": device}}, "run_device_read": run}
@@ -591,12 +597,12 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         assert row.port_combo.currentData() == "device:rf:ch1_power"
         row.values_edit.setText("-35, -13, 15")
         row.values_edit.editingFinished.emit()
-        old_values = row.axis().values
+        old_values = _axis(row).values
         row.unit_picker.unit_picked.emit("mVpp")
-        assert row.axis().unit == "dBm", "unit changed before worker accepted it"
+        assert _axis(row).unit == "dBm", "unit changed before worker accepted it"
         settled(lambda: row._unit_request is None)
-        assert tuple(units.convert(row.axis().values, "mVpp", "dBm")) == pytest.approx(old_values)
-        assert row.axis().values[-1] == pytest.approx(894.4271909999159), "used the global 50-ohm conversion"
+        assert tuple(units.convert(_axis(row).values, "mVpp", "dBm")) == pytest.approx(old_values)
+        assert _axis(row).values[-1] == pytest.approx(894.4271909999159), "used the global 50-ohm conversion"
         assert row.start_spin.valueUnit() == "mVpp"
         converted_values = parse_scan_values(row.values_edit.text())
         assert converted_values == tuple(units.convert((-30., -13., 10.), "dBm", "mVpp"))
@@ -614,14 +620,14 @@ def test_axis_rows_follow_the_ports_without_being_rebuilt(caplog) -> None:
         restored = reopened._rows[0]
         assert restored.start_spin.shownUnit() == "mVpp"
         assert restored.unit_picker.current_choice_key() == "mVpp"
-        assert restored.axis().values == plan.axes[0].values
-        assert restored.axis().unit == "mVpp"
+        assert _axis(restored).values == plan.axes[0].values
+        assert _axis(restored).unit == "mVpp"
         assert restored.start_spin.value() == 135.0 and restored.stop_spin.value() == 247.0
         assert parse_scan_values(restored.values_edit.text()) == converted_values
         restored.unit_picker.unit_picked.emit("dBm")
         settled(lambda: restored._unit_request is None)
-        assert restored.axis().unit == "dBm"
-        assert restored.axis().values == tuple(units.convert(plan.axes[0].values, "mVpp", "dBm"))
+        assert _axis(restored).unit == "dBm"
+        assert _axis(restored).values == tuple(units.convert(plan.axes[0].values, "mVpp", "dBm"))
         assert restored.custom_label.text() == "custom values"
         assert parse_scan_values(restored.values_edit.text()) == tuple(units.convert(converted_values, "mVpp", "dBm"))
         restored.mode_button.click()
@@ -709,7 +715,7 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     from PyQt5 import QtCore
 
     app = ensure_qt_app(["scan-editor-rescope"])
-    editor = scan_plan_editor_factory(device_ports=False)
+    editor = ScanPlanEditor()
     editor.show()
     drafts: list[dict] = []
     editor.draft_changed.connect(drafts.append)
@@ -781,7 +787,7 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     import json
 
     app = ensure_qt_app(["scan-editor-api-axis"])
-    editor = scan_plan_editor_factory(device_ports=False)
+    editor = ScanPlanEditor()
     editor.show()
     bound = _bound_sequence()
     plan = json.dumps({"axes": [{"port": "api:dac:p0:dac", "values": [0.0, 1.0], "unit": ""}]})

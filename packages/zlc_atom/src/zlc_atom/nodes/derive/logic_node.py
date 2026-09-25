@@ -114,8 +114,8 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
 
 
 def _editor_factory(parent=None):
-    from .editor import derive_editor_factory
-    return derive_editor_factory(parent)
+    from .editor import DeriveEditor
+    return DeriveEditor(parent)
 
 
 LOGIC_NODE = LogicNodeDescriptor(

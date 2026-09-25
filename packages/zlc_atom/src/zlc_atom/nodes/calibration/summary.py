@@ -19,28 +19,7 @@ from typing import Any
 
 import numpy as np
 
-from .calibration import CalibrationResult, ReadoutModelKind
-
-
-def _plain(value: Any) -> Any:
-    """One record as JSON holds it, with numpy scalars spelled as numbers."""
-
-    if value is None or type(value) in (str, bool, int, float):
-        return value
-    if isinstance(value, (np.integer, np.floating, np.bool_)):
-        return value.item()
-    if isinstance(value, Mapping):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            if type(key) is not str:
-                raise TypeError("summary keys must be strings")
-            result[key] = _plain(item)
-        return result
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return [_plain(item) for item in value.tolist()]
-    raise TypeError(f"summary contains non-plain {type(value).__name__}")
+from .calibration import CalibrationResult, ReadoutModelKind, _plain_json_value
 
 
 def _numbers(values: object, mask: object | None = None) -> dict[str, float | None]:
@@ -218,7 +197,9 @@ def readout_summary(
             "frame_shape_yx": list(contract.image_shape),
             "roi_xywh": None if contract.roi_xywh is None else list(contract.roi_xywh),
             "binning_yx": list(contract.binning_yx),
-            "readout_exposure_seconds": contract.exposure_seconds,
+            # What the sensor integrated (the reference window); the readout
+            # window the pulse gates stays in the request under run_chain.
+            "camera_exposure_seconds": contract.exposure_seconds,
         },
         "models": models,
         # Which one the next measurement will use, and which one this run says
@@ -226,7 +207,7 @@ def readout_summary(
         # the other is worth being told about.
         "default_model": calibration.default_model_kind.value,
         "best_model": ranked[0][-1] if ranked else None,
-        "run_chain": [_plain(record) for record in run_chain],
+        "run_chain": [_plain_json_value(record, "run_chain") for record in run_chain],
     }
 
 

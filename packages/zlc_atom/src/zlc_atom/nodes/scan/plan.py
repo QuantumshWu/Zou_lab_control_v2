@@ -104,6 +104,18 @@ class ScanPort:
         object.__setattr__(self, "seed_hi", seed_hi)
 
 
+def device_port_parts(port: str) -> tuple[str, str]:
+    """``device:<key>:<field>`` as its installed-device key and field name."""
+
+    text = str(port)
+    if not text.startswith(DEVICE_PARAM_FAMILY):
+        raise ValueError(f"{port!r} is not a device port")
+    key, separator, field = text[len(DEVICE_PARAM_FAMILY):].partition(":")
+    if not separator or not key or not field:
+        raise ValueError(f"{port!r} names no device field")
+    return key, field
+
+
 def port_label(port: str) -> str:
     """The stable axis-identity spelling derived from an authored port.
 
@@ -117,7 +129,7 @@ def port_label(port: str) -> str:
     if text.startswith(API_PARAM_FAMILY):
         return text[len(API_PARAM_FAMILY):]
     if text.startswith(DEVICE_PARAM_FAMILY):
-        return text[len(DEVICE_PARAM_FAMILY):].replace(":", ".")
+        return ".".join(device_port_parts(text))
     if text.startswith(MANUAL_PARAM_FAMILY):
         # The one definition, here with the others: labels for manual axes
         # used to be produced at a call site instead, so axis naming had two
@@ -142,7 +154,7 @@ def port_group(port: str) -> str:
     if text.startswith(API_PARAM_FAMILY):
         return "api"
     if text.startswith(DEVICE_PARAM_FAMILY):
-        return text[len(DEVICE_PARAM_FAMILY):].split(":", 1)[0]
+        return device_port_parts(text)[0]
     if text.startswith(MANUAL_PARAM_FAMILY):
         return "manual"
     raise ValueError(f"{port!r} belongs to no known port family")
@@ -153,9 +165,7 @@ def port_leaf(port: str) -> str:
 
     text = str(port)
     if text.startswith(DEVICE_PARAM_FAMILY):
-        _device, separator, field = text[len(DEVICE_PARAM_FAMILY):].partition(":")
-        if separator and field:
-            return field
+        return device_port_parts(text)[1]
     return port_label(port)
 
 
@@ -276,7 +286,7 @@ def label_device_scan_ports(
     result = []
     for port in ports:
         if port.port.startswith(DEVICE_PARAM_FAMILY):
-            key, field = port.port[len(DEVICE_PARAM_FAMILY):].split(":", 1)
+            key, field = device_port_parts(port.port)
             label = f"{labels.get(key, key)}.{field}"
             if label != port.label:
                 port = replace(port, label=label)
@@ -290,7 +300,9 @@ def scan_ports_for_devices(
 ) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
 
-    A device volunteers through ``tunable_fields()``.  A scan exposes only a
+    ``tunables`` is already the tunable set -- ``tunable_devices`` chose it
+    by ``is_tunable`` -- so each device is asked for its
+    ``tunable_fields()`` without being judged again.  A scan exposes only a
     bounded, live-writable field whose dependency group is that field alone:
     this executor advances one scalar port at a time and cannot pretend a
     coupled hardware transaction is atomic.  A field whose bounds leave no
@@ -303,10 +315,7 @@ def scan_ports_for_devices(
     ports: list[ScanPort] = []
     for key in sorted(dict(tunables or {})):
         device = tunables[key]
-        fields = getattr(device, "tunable_fields", None)
-        if not callable(fields):
-            continue
-        for tunable in fields():
+        for tunable in device.tunable_fields():
             if not isinstance(tunable, TunableField):
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
@@ -707,6 +716,7 @@ __all__ = [
     "ScanPlan",
     "ScanPort",
     "bind_plan",
+    "device_port_parts",
     "hardware_scan_ports_for",
     "plan_from_authored",
     "plan_input_rows",

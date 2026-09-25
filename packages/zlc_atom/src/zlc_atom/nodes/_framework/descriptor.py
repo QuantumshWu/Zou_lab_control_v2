@@ -9,7 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable
 
-from zlc_atom.authoring import AuthoringSchema
+from zlc_atom.authoring import AuthoringSchema, is_tunable
 from zlc_atom.install.descriptors import CAPABILITY_TYPES
 from zlc_runtime import DatasetOutputDeclaration, SelectionState
 
@@ -321,10 +321,9 @@ class DeviceRequirement:
 
         if self.protected_fields is not None:
             return self.protected_fields
-        declare = getattr(device, "tunable_fields", None)
-        if not callable(declare):
+        if not is_tunable(device):
             return ()
-        return tuple(str(field.metadata.name) for field in declare())
+        return tuple(str(field.metadata.name) for field in device.tunable_fields())
 
 
 @dataclass(frozen=True)

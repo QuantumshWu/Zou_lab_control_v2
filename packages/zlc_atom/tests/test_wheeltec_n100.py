@@ -12,19 +12,16 @@ what says a rate is stored as a ladder index.
 from __future__ import annotations
 
 import struct
-import sys
 import threading
 import time
 from collections import deque
-from pathlib import Path
 
+import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 from zlc_atom.authoring import TuneRefused
+from zlc_atom.devices import RecordQueue
+from zlc_atom.devices.waveform.contract import WaveformRecord
 from zlc_atom.devices.waveform.wheeltec_n100 import (
     FRAME_HEAD,
     FRAME_TAIL,
@@ -34,6 +31,7 @@ from zlc_atom.devices.waveform.wheeltec_n100 import (
     FdiConfigConsole,
     WheeltecN100Config,
     WheeltecN100WaveformSource,
+    drain_imu_samples,
     header_crc8,
     payload_crc16,
     rate_ladder_index,
@@ -45,6 +43,13 @@ from zlc_atom.devices.waveform.wheeltec_n100.source import _listen_for_packets
 
 
 def _frame(kind: int, payload: bytes, serial: int = 0) -> bytes:
+    """One FDILink frame, checks and all, exactly as the module sends it.
+
+    The two checks are not decoration: the reader refuses a frame whose
+    header CRC8 or payload CRC16 disagrees, so a test that filled them with
+    zeroes would be testing a stream no module produces.
+    """
+
     head = bytes((FRAME_HEAD, kind, len(payload), serial))
     check = payload_crc16(payload)
     return (
@@ -276,6 +281,91 @@ def _source(module: _FakeModule) -> WheeltecN100WaveformSource:
     )
 
 
+# ------------------------------------------------------------------- stream
+def _imu_packet(
+    *,
+    gyro: tuple[float, float, float],
+    accel: tuple[float, float, float],
+    mag_milligauss: tuple[float, float, float],
+    celsius: float,
+    microseconds: int,
+    serial: int = 0,
+) -> bytes:
+    payload = struct.pack(
+        "<12fq", *gyro, *accel, *mag_milligauss, celsius, 1013.0, 24.5, microseconds
+    )
+    return _frame(IMU_PACKET, payload, serial)
+
+
+def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
+    """Whole IMU packets come out in order; noise, other packets and a torn
+    tail do not: the tail waits for the bytes that complete it."""
+
+    assert payload_crc16(b"123456789") == 0x31C3
+    first = _imu_packet(
+        gyro=(0.1, 0.2, 0.3),
+        accel=(0.0, 0.0, 9.8),
+        mag_milligauss=(200.0, -50.0, 450.0),
+        celsius=26.85,
+        microseconds=1_000_000,
+    )
+    second = _imu_packet(
+        gyro=(0.0, 0.0, 0.0),
+        accel=(0.0, 0.0, 9.8),
+        mag_milligauss=(201.0, -49.0, 449.0),
+        celsius=26.85,
+        microseconds=1_002_500,
+    )
+    # Two packets this driver does not publish: an AHRS frame whose length
+    # it does know, and a local-magnetic-field frame whose length it has
+    # never been told.  Both are stepped over by the length the module
+    # itself stated, so neither needs a table here.
+    ahrs = _frame(0x41, bytes(48), serial=1)
+    local_field = _frame(0x6E, struct.pack("<3f", 1.0, 2.0, 3.0), serial=2)
+    buffer = bytearray(b"\xfc\x99" + first + ahrs + local_field + second[:20])
+    samples = drain_imu_samples(buffer)
+
+    assert [stamp for stamp, _values in samples] == [1.0]
+    values = samples[0][1]
+    assert values[0:3] == pytest.approx((20.0, -5.0, 45.0))
+    assert values[3:6] == pytest.approx((0.1, 0.2, 0.3))
+    assert values[6:9] == pytest.approx((0.0, 0.0, 9.8))
+    assert values[9] == pytest.approx(300.0)
+    assert bytes(buffer) == second[:20]
+
+    buffer += second[20:]
+    (stamp, values), = drain_imu_samples(buffer)
+    assert stamp == pytest.approx(1.0025)
+    assert values[0] == pytest.approx(20.1)
+    assert not buffer
+
+
+def test_a_frame_that_does_not_check_out_is_not_a_magnetic_field() -> None:
+    """One flipped bit anywhere in a packet drops it, rather than publishing it.
+
+    A serial line at 100 Hz and up carries far more frames than anyone
+    inspects, and the one number this bench takes from them is a magnetic
+    field. A frame whose payload lost a bit would otherwise arrive as a
+    perfectly plausible reading, which is the worst kind of wrong.
+    """
+
+    good = _imu_packet(
+        gyro=(0.0, 0.0, 0.0),
+        accel=(0.0, 0.0, 9.8),
+        mag_milligauss=(200.0, -50.0, 450.0),
+        celsius=26.85,
+        microseconds=5_000_000,
+    )
+    assert len(drain_imu_samples(bytearray(good))) == 1
+
+    for position in (1, 3, 8, 30, len(good) - 2):
+        torn = bytearray(good)
+        torn[position] ^= 0x01
+        assert drain_imu_samples(bytearray(torn)) == [], (
+            f"a bit flipped at byte {position} was published as data"
+        )
+
+
 # ------------------------------------------------------------------ console
 def test_the_console_is_this_bench_s_own_text_link() -> None:
     """Entering is the stream stopping; every value comes back read."""
@@ -400,22 +490,32 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
     finally:
         source.close()
 
-    # Capture boundaries reset stream continuity; all frame kinds participate
-    # in the serial counter, and native device timestamps remain untouched.
-    class _ControlledModule(_FakeModule):
-        read_error = None
 
-        def read(self, size=1):
-            if self.read_error is not None:
-                raise self.read_error
-            return super().read(size)
+class _ControlledModule(_FakeModule):
+    """A module that stops sending on its own after 40 packets, and whose
+    port can be made to fail -- so a test places every later frame itself."""
 
-        def _fill(self):
-            if self._packets < 40:
-                super()._fill()
+    read_error = None
 
-    def packet(serial, stamp):
-        return _frame(IMU_PACKET, struct.pack("<12fq", *([0.0] * 12), stamp), serial)
+    def read(self, size=1):
+        if self.read_error is not None:
+            raise self.read_error
+        return super().read(size)
+
+    def _fill(self):
+        if self._packets < 40:
+            super()._fill()
+
+
+def _packet(serial: int, stamp: int) -> bytes:
+    """One IMU packet with a chosen frame serial and device timestamp (us)."""
+
+    return _frame(IMU_PACKET, struct.pack("<12fq", *([0.0] * 12), stamp), serial)
+
+
+def test_each_capture_starts_its_own_stream_continuity() -> None:
+    """Capture boundaries reset stream continuity; all frame kinds participate
+    in the serial counter, and native device timestamps remain untouched."""
 
     module = _ControlledModule(rate_hz=400)
     source = _source(module)
@@ -423,27 +523,32 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
         assert source.working_point().time_basis == "device_clock"
         source.arm(2, buffer_record_count=4)
         with module._lock:
-            module._out += (packet(255, 1_000_000) + _frame(0x41, bytes(48), 0)
-                            + packet(1, 1_002_500))
+            module._out += (_packet(255, 1_000_000) + _frame(0x41, bytes(48), 0)
+                            + _packet(1, 1_002_500))
         records = source.read_records(2, timeout=1, exact=True)
         assert [record.source_ordinal for record in records] == [0, 1]
         assert [record.time_seconds for record in records] == pytest.approx([1.0, 1.0025])
         assert source.finish_record_capture().produced_count == 2
         source.arm(1, buffer_record_count=1)
         with module._lock:
-            module._out += packet(18, 8_000_000)
+            module._out += _packet(18, 8_000_000)
         record, = source.read_records(1, timeout=1, exact=True)
         assert record.source_ordinal == 0 and record.time_seconds == 8.0
         source.finish_record_capture()
     finally:
         source.close()
 
-    damaged = bytearray(packet(1, 1_002_500))
+
+def test_a_broken_stream_fails_the_capture_and_only_a_lost_port_ends_the_reader() -> None:
+    """A gap, a stall or a damaged frame fails the capture it happened in and
+    the next capture reads again; a port that fails ends the reader."""
+
+    damaged = bytearray(_packet(1, 1_002_500))
     damaged[20] ^= 1
     for next_frame, error in (
-        (packet(2, 1_002_500), "sequence gap"),
-        (packet(1, 1_007_500), "timestamp gap"),
-        (packet(1, 1_000_000), "timestamp did not advance"),
+        (_packet(2, 1_002_500), "sequence gap"),
+        (_packet(1, 1_007_500), "timestamp gap"),
+        (_packet(1, 1_000_000), "timestamp did not advance"),
         (damaged, "damaged FDILink"),
     ):
         module = _ControlledModule(rate_hz=400)
@@ -451,7 +556,7 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
         try:
             source.arm(None, buffer_record_count=4)
             with module._lock:
-                module._out += packet(0, 1_000_000) + next_frame
+                module._out += _packet(0, 1_000_000) + next_frame
             with pytest.raises(RuntimeError, match=error):
                 source.read_records(2, timeout=1, exact=True)
             # Even the valid first record cannot hide the later stream fault.
@@ -462,7 +567,7 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
             assert source._reader.is_alive(), "capture data errors do not close the serial device"
             source.arm(1, buffer_record_count=4)
             with module._lock:
-                module._out += packet(18, 8_000_000)
+                module._out += _packet(18, 8_000_000)
             record, = source.read_records(1, timeout=1, exact=True)
             assert record.source_ordinal == 0 and record.time_seconds == 8.0
             assert source.finish_record_capture().produced_count == 1
@@ -485,11 +590,12 @@ def test_settings_cannot_move_under_a_running_capture() -> None:
     finally:
         source.close()
 
-    # The shared FIFO retains every accepted record and fails instead of
-    # replacing its oldest entry, even when the caller asks for only one.
-    import numpy as np
-    from zlc_atom.devices import RecordQueue
-    from zlc_atom.devices.waveform.contract import WaveformRecord
+
+def test_record_queue_retains_every_record_and_fails_on_overflow() -> None:
+    """The shared FIFO behind every camera and waveform source retains every
+    accepted record and fails instead of replacing its oldest entry, even
+    when the caller asks for only one."""
+
     queue = RecordQueue("test capture", join_timeout_seconds=1)
     queue.arm(3, buffer_record_count=1)
     queue.mark_ready()
@@ -562,36 +668,6 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
 
 
 # ------------------------------------------------------ leaving the console
-def test_every_way_out_of_the_console_is_checked_by_whole_packets() -> None:
-    """A parameter write that left the module silent used to report success."""
-
-    class _StaysQuiet(_FakeModule):
-        """Acknowledges everything, and never comes back on the air.
-
-        Both ways out matter: a settings write leaves through the restart,
-        and a plain read leaves through #fdeconfig.
-        """
-
-        armed = False
-
-        def _answer(self, line: str) -> None:
-            super()._answer(line)
-            if line in ("#fdeconfig", "y") and self.armed:
-                self.streaming = False
-
-    module = _StaysQuiet()
-    source = _source(module)
-    try:
-        module.armed = True
-        # The write reaches the module; what fails is that it never comes
-        # back on the air, and the driver says so rather than reporting the
-        # write as done.
-        with pytest.raises(RuntimeError, match="stopped it sending"):
-            source.tune(IMU_PACKET_NAME, 50.0)
-    finally:
-        source.close()
-
-
 def test_a_heartbeat_is_not_a_navigating_module() -> None:
     """The module emits a 1 Hz heartbeat whose first byte is a frame header.
 
@@ -707,53 +783,31 @@ def test_the_module_says_how_often_its_magnetic_field_changes() -> None:
         source.close()
 
 
-def test_a_module_that_takes_its_time_is_still_answering() -> None:
-    """A pause before a reply is not a reply that will not come.
+def test_a_slow_console_is_waited_for_and_never_reads_the_previous_reply(
+    monkeypatch,
+) -> None:
+    """A pause before a reply is not a reply that will not come, and a reply
+    that arrives late must not be read as the next one's answer.
 
-    "#fmsg" prints some 1900 bytes and takes its time about starting. The
-    console used to give up after its quiet window even when NOTHING had
-    arrived yet, read that as "the module said nothing", and hand back an
-    empty settings list -- which is why Device Control opened empty against
-    a module that was answering perfectly well.
-    """
-
-    module = _FakeModule(rate_hz=10.0)
-    module.reply_delay = 0.6          # a long pause before it starts
-    # The window has to outlast what the module takes to start talking:
-    # that is the rule on the real one too, where it is two seconds.
-    console_module.REPLY_QUIET_SECONDS = 0.3
-    console_module.REPLY_TIMEOUT_SECONDS = 4.0
-    source = _source(module)
-    try:
-        values = source.tunable_values()
-        assert values[IMU_PACKET_NAME] == "10"
-    finally:
-        source.close()
-
-
-def test_a_slow_console_never_reads_the_previous_reply() -> None:
-    """A reply that arrives late must not be read as the next one's answer.
-
-    The console has no sequence numbers. Returning from a command before
-    its answer arrives puts that answer inside the NEXT command's window,
-    and every command after it reads the previous one's reply -- so every
-    "#fparam get X" comes back about some other parameter and is scored as
-    "this firmware does not have X". That is how Device Control came up
-    empty against a module that was answering every question correctly.
+    The console used to give up after its quiet window even when NOTHING
+    had arrived yet and read that as "the module said nothing".  It has no
+    sequence numbers either, so returning from a command before its answer
+    arrives puts that answer inside the NEXT command's window, and every
+    command after it reads the previous one's reply -- every "#fparam get X"
+    comes back about some other parameter and is scored as "this firmware
+    does not have X".  That is how Device Control came up empty against a
+    module that was answering every question correctly.
     """
 
     module = _FakeModule(rate_hz=10.0)
     module.reply_delay = 0.9          # far longer than the quiet window
     # The window has to outlast what the module takes to start talking:
     # that is the rule on the real one too, where it is two seconds.
-    console_module.REPLY_QUIET_SECONDS = 0.3
-    console_module.REPLY_TIMEOUT_SECONDS = 4.0
-    source = _source(module)
-    try:
-        values = source.tunable_values()
-        assert values[IMU_PACKET_NAME] == "10"
-    finally:
-        source.close()
+    monkeypatch.setattr(console_module, "REPLY_QUIET_SECONDS", 0.3)
+    monkeypatch.setattr(console_module, "REPLY_TIMEOUT_SECONDS", 4.0)
+    with FdiConfigConsole(module) as console:
+        assert console.get_parameter(IMU_PACKET_NAME) == "4", "rung 4 is 10 Hz"
+        assert console.get_parameter("AID_MAG_V_MAGNETIC") == "1"
 
 
 def test_a_heartbeat_does_not_block_entering_config_mode() -> None:

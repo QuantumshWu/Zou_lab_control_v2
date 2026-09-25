@@ -7,7 +7,7 @@ import math
 import re
 from typing import Any, Callable, Mapping
 
-from zlc_data.units import parse_quantity, resolve_unit
+from zlc_data.units import DEFAULT_UNITS, resolve_unit
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -239,6 +239,36 @@ class TunableField:
         object.__setattr__(self, "dependency_group", group)
 
 
+def is_tunable(device: object) -> bool:
+    """Whether ``device`` speaks the whole tunable quartet.
+
+    ``tunable_fields`` declares its knobs, ``tune`` moves one,
+    ``tunable_values`` reads them all and ``settings_provenance`` names the
+    session and epoch a reading belongs to -- the surface ``RfSource``
+    spells out in ``devices/rf/contract.py``.  A scan records the values,
+    Device Control checks the provenance and the bench fabric serves all
+    four, so a device with only part of the set is tunable nowhere: five
+    separately spelled checks used to offer it as a scan axis, then raise
+    on its Control page.
+    """
+
+    return all(
+        callable(getattr(device, name, None))
+        for name in ("tunable_fields", "tune", "tunable_values", "settings_provenance")
+    )
+
+
+def _converted(value: Any, source: str, target: str) -> float:
+    """One device value between units, by the registry's own conversion.
+
+    The same conversion the forms show a value through: exact decimal
+    shifts within a unit family, and never a reading of typed text, where
+    a bare prefix letter or a float32's short spelling would decide it.
+    """
+
+    return float(DEFAULT_UNITS.convert_decimal(value, source, target))
+
+
 def refresh_tunable_fields(device: object) -> tuple[TunableField, ...]:
     """Read current device fields once through the adapter's refresh entry."""
     refresh = getattr(device, "refresh_tunable_fields", None)
@@ -263,7 +293,7 @@ def read_tunable_in_unit(device: object, name: str, unit: str = "") -> TunableFi
         return field
 
     def converted(value):
-        return None if value is None else parse_quantity(f"{value} {source}", target)
+        return None if value is None else _converted(value, source, target)
 
     return replace(
         field,
@@ -290,11 +320,11 @@ def tune_in_unit(device: object, name: str, value: Any, unit: str) -> Any:
     source = unit or target
     if source == target:
         return device.tune(name, value)
-    requested = parse_quantity(f"{value} {source}", target)
+    requested = _converted(value, source, target)
     if field.metadata.value_type == "int" and requested.is_integer():
         requested = int(requested)
     actual = device.tune(name, requested)
-    return parse_quantity(f"{actual} {target}", source)
+    return _converted(actual, target, source)
 
 
 def convert_tunable_value(
@@ -307,8 +337,8 @@ def convert_tunable_value(
     if callable(native):
         return native(name, value, source_unit, target_unit)
     if isinstance(value, (tuple, list)):
-        return tuple(parse_quantity(f"{item} {source_unit or '1'}", target_unit or "1") for item in value)
-    return parse_quantity(f"{value} {source_unit or '1'}", target_unit or "1")
+        return tuple(_converted(item, source_unit or "1", target_unit or "1") for item in value)
+    return _converted(value, source_unit or "1", target_unit or "1")
 
 
 @dataclass(frozen=True)
@@ -508,5 +538,5 @@ def _project_integer(value: object, *, label: str) -> int:
 
 
 __all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",
-           "TuneRefused", "refresh_tunable_fields", "read_tunable_in_unit",
+           "TuneRefused", "is_tunable", "refresh_tunable_fields", "read_tunable_in_unit",
            "tune_in_unit", "convert_tunable_value"]

@@ -25,13 +25,14 @@ from zlc_runtime import (
     LiveDatasetOutput,
     SignalValue,
 )
-from zlc_runtime import SignalPublication
+from zlc_runtime import SignalPublication, stable_signal_key
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
+    roi_request,
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
@@ -149,6 +150,21 @@ def _pixel_axes(
     )
 
 
+def photoelectron_frame(counts: object, point: CameraWorkingPoint) -> np.ndarray:
+    """Counts as photoelectrons through the camera's stated conversion.
+
+    One allocation: the subtraction widens straight into float32 and the
+    scale lands in place.  It is also the ONE spelling of the arithmetic --
+    a saturation level is a count pushed through this same expression, and
+    comparing two spellings for equality holds only while they agree to the
+    last bit.
+    """
+
+    image = np.subtract(counts, np.float32(point.offset_counts), dtype=np.float32)
+    image *= np.float32(point.electrons_per_count)
+    return image
+
+
 def frames_snapshot(
     cycles: "Sequence[Sequence[CameraFrameRecord]]",
     *,
@@ -172,15 +188,25 @@ def frames_snapshot(
     sizes = {len(cycle) for cycle in frames}
     if len(sizes) != 1 or not sizes.pop():
         raise ValueError("every published camera cycle must have the same frames")
+    # Every record already owns its frame as contiguous immutable bytes, which
+    # the Dataset keeps as it is.  One frame is handed on as that view; several
+    # are joined with the one copy the Dataset needs.  Stacking them into a
+    # writable array first was a copy the Dataset then made again to own it.
+    images = [record.image for cycle in frames for record in cycle]
+    first = images[0]
+    values = (
+        first
+        if len(images) == 1
+        else np.frombuffer(b"".join(images), dtype=first.dtype)
+    )
     return snapshot_from_array(
-        np.stack([np.asarray(record.image) for cycle in frames for record in cycle], axis=0)
-        .reshape(len(frames), len(frames[0]), *np.asarray(frames[0][0].image).shape),
+        values.reshape(len(frames), len(frames[0]), *first.shape),
         producer=producer,
         signal=CAMERA_FRAMES_OUTPUT.name,
         point_axes=(_frame_point_axis(producer, len(frames[0])),),
         cell_axes=_pixel_axes(
             working_point,
-            np.asarray(frames[0][0].image).shape,
+            first.shape,
             producer=producer,
         ),
         value_unit=value_unit,
@@ -299,9 +325,8 @@ def _strict_terminal(
 def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
     """Return the adapter readback as plain, archive-ready run metadata."""
 
-    mode = getattr(point.acquisition_mode, "value", point.acquisition_mode)
     return {
-        "acquisition_mode": str(mode),
+        "acquisition_mode": point.acquisition_mode,
         "frame_shape_yx": [int(value) for value in point.frame_shape_yx],
         "sensor_shape_yx": [int(value) for value in point.sensor_shape_yx],
         "roi_origin_yx": [int(value) for value in point.roi_origin_yx],
@@ -361,20 +386,9 @@ class CameraMeasurementRequest:
             raise ValueError("repeat must be non-negative")
         if frames_per_cycle <= 0:
             raise ValueError("frames_per_cycle must be positive")
-        roi = self.roi_xywh
-        if roi is not None:
-            try:
-                roi = tuple(int(value) for value in roi)
-            except (TypeError, ValueError) as exc:
-                raise TypeError("roi_xywh must contain four integers or be None") from exc
-            if len(roi) != 4:
-                raise ValueError("roi_xywh must contain four integers or be None")
-            x, y, width, height = roi
-            if x < 0 or y < 0 or width <= 0 or height <= 0:
-                raise ValueError("roi_xywh must have a non-negative origin and positive size")
         object.__setattr__(self, "camera_key", camera_key)
         object.__setattr__(self, "exposure_seconds", exposure)
-        object.__setattr__(self, "roi_xywh", roi)
+        object.__setattr__(self, "roi_xywh", roi_request(self.roi_xywh))
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
@@ -654,19 +668,12 @@ class MonitorCapture:
     def _accept_record(self, record: CameraFrameRecord) -> None:
         """Publish only a physically aligned, contiguous camera cycle."""
 
-        cycle_size = self.node.frames_per_cycle
-        ordinal = int(record.source_ordinal)
+        # ``read_records`` refuses any gap in the ordinals from the first frame
+        # on, so consecutive records ARE the aligned cycle.
         pending = self._pending_records
-        expected = self._revision * cycle_size + len(pending)
-        if ordinal != expected:
-            raise RuntimeError(f"camera frame sequence gap: expected {expected}, received {ordinal}")
         pending.append(record)
-        if len(pending) == cycle_size:
-            cycle = _strict_cycle_ordinals(
-                pending,
-                expected_start=int(pending[0].source_ordinal),
-                frames_per_cycle=cycle_size,
-            )
+        if len(pending) == self.node.frames_per_cycle:
+            cycle = tuple(pending)
             pending.clear()
             self._revision += 1
             self._commit_live(
@@ -696,14 +703,21 @@ class MonitorCapture:
             return self.terminal
         terminal = self.camera.finish_record_capture()
         self.closed = True
-        if drain:
-            remaining = terminal.produced_count - self.node._next_record_ordinal
-            for _ in range(remaining):
-                record, = self.node.read_records(1, timeout=0.0, exact=True)
-                self._accept_record(record)
-            # A partial cycle is counted but is not a scientific publication.
-            self._pending_records.clear()
-            terminal = replace(terminal, no_more_frames=True)
+        try:
+            if drain:
+                remaining = terminal.produced_count - self.node._next_record_ordinal
+                for _ in range(remaining):
+                    record, = self.node.read_records(1, timeout=0.0, exact=True)
+                    self._accept_record(record)
+                # A partial cycle is counted but is not a scientific publication.
+                self._pending_records.clear()
+                terminal = replace(terminal, no_more_frames=True)
+        except BaseException:
+            # The device has finished; a drain that failed must not leave the
+            # generation open, or this node could never begin another.
+            if self.owns_generation:
+                self.node.signal_plane.retire(self.node)
+            raise
         self.terminal = terminal
         if self.owns_generation:
             if self._revision:
@@ -802,7 +816,7 @@ class CameraMeasurementNode:
             declaration.name for declaration in self.dataset_output_declarations
         }:
             raise KeyError(f"unknown camera output {output_name!r}")
-        return f"@logic/{self.instance_id}/{name}"
+        return stable_signal_key(self.instance_id, name)
 
     def _configure_for_run(self) -> CameraWorkingPoint:
         self._actual_working_point = None
@@ -906,13 +920,10 @@ class CameraMeasurementNode:
             return records
         point = self._actual_working_point
         assert point is not None and point.electrons_per_count is not None
-        offset = np.float32(point.offset_counts)
-        scale = np.float32(point.electrons_per_count)
+        # The record owns the converted frame as bytes: that copy and the one
+        # allocation of the conversion are all a frame costs here.
         return tuple(
-            replace(
-                record,
-                image=(np.asarray(record.image, dtype=np.float32) - offset) * scale,
-            )
+            replace(record, image=photoelectron_frame(record.image, point))
             for record in records
         )
 
@@ -922,7 +933,6 @@ class CameraMeasurementNode:
         self._actual_working_point = point
         photoelectrons = self.reads_photoelectrons
         record = {
-            "node": self.instance_id,
             "parameters": {
                 "exposure_seconds": self.request.exposure_seconds,
                 "roi_xywh": (
@@ -1073,6 +1083,9 @@ class CameraMeasurementNode:
         bench and a real one start to disagree.
         """
 
+        # The host owns this run's identity as it owns its generation: its
+        # Logic row, not this node's type, names the signals and the evidence.
+        self.instance_id = context.instance_id
         self._generation = context.generation
         if self.repeat == 0:
             capture = self.monitor(
@@ -1185,4 +1198,5 @@ __all__ = [
     "FiniteCapture",
     "MeasurementResult",
     "MonitorCapture",
+    "photoelectron_frame",
 ]

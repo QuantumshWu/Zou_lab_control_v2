@@ -12,14 +12,14 @@ from functools import lru_cache
 from math import ceil
 from time import monotonic, time_ns
 
-import numpy as np
-from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DomainSpec, OwnedSnapshot
+from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DatasetSchema, DomainSpec, OwnedSnapshot
 from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
     LiveDatasetOutput,
     MonitorCoverage,
     SignalValue,
+    stable_signal_key,
 )
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
@@ -297,6 +297,13 @@ class MonitorCapture:
         self.terminal: WaveformCaptureTerminalRecord | None = None
         self._revision = 0
         self._deadline = monotonic() + _record_seconds(node) + node.sampler.timeout
+        #: Silence is a fault only for a source that samples on its own
+        #: clock; a triggered one waits for its trigger, however long the
+        #: pulse that fires it is stopped or being edited.
+        self._free_running = (
+            node.working_point.acquisition_mode
+            == WaveformAcquisitionMode.FREE_RUNNING.value
+        )
         if self.owns_generation:
             if commit_live is not None:
                 raise ValueError("a direct monitor cannot use a host commit function")
@@ -316,7 +323,7 @@ class MonitorCapture:
             raise RuntimeError("monitor capture is closed")
         records = self.node.sampler.read_records(1, timeout=_CANCEL_RESPONSE_SECONDS, exact=False)
         if not records:
-            if monotonic() >= self._deadline:
+            if self._free_running and monotonic() >= self._deadline:
                 raise TimeoutError("waveform source stopped delivering records")
             return 0
         self._publish(records[0])
@@ -384,6 +391,11 @@ class WaveformMeasurementNode:
         self._time_origin: float | None = None
         self._last_time: float | None = None
         self._next_ordinal = 0
+        #: Per output: the event schema a finite run's canonical schema was
+        #: built from, and that canonical schema.  The event schema is one
+        #: cached object for the whole run, so the canonical one is built once
+        #: rather than from an O(repeat) code vector on every record.
+        self._canonical: dict[str, tuple[DatasetSchema, DatasetSchema]] = {}
 
     @property
     def request(self) -> WaveformMeasurementRequest:
@@ -425,7 +437,7 @@ class WaveformMeasurementNode:
         name = str(output_name)
         if name not in {declaration.name for declaration in self._outputs}:
             raise KeyError(f"unknown waveform output {output_name!r}")
-        return f"@logic/{self.instance_id}/{name}"
+        return stable_signal_key(self.instance_id, name)
 
     # ------------------------------------------------------------ freezing
     def _configure(self) -> WaveformWorkingPoint:
@@ -438,8 +450,8 @@ class WaveformMeasurementNode:
         self._time_origin = None
         self._last_time = None
         self._next_ordinal = 0
+        self._canonical = {}
         self._run_record = {
-            "node": self.instance_id,
             "parameters": {
                 "repeat": self.repeat,
             },
@@ -497,20 +509,23 @@ class WaveformMeasurementNode:
                 )
                 continue
             schema = snapshot.block.schema
-            (repeat_axis,) = schema.repeat_domain.axes
-            canonical = replace(
-                schema,
-                repeat_domain=DomainSpec(
-                    (self.repeat,),
-                    (replace(repeat_axis, size=self.repeat),),
-                    (tuple(range(self.repeat)),),
-                ),
-            )
+            built = self._canonical.get(declaration.name)
+            if built is None or built[0] is not schema:
+                (repeat_axis,) = schema.repeat_domain.axes
+                built = (schema, replace(
+                    schema,
+                    repeat_domain=DomainSpec(
+                        (self.repeat,),
+                        (replace(repeat_axis, size=self.repeat),),
+                        (tuple(range(self.repeat)),),
+                    ),
+                ))
+                self._canonical[declaration.name] = built
             outputs[declaration.name] = LiveDatasetOutput(
                 declaration,
                 snapshot,
                 DatasetCoverage((index + 1) * schema.point_domain.size, self.repeat * schema.point_domain.size),
-                canonical,
+                built[1],
                 (index, 0),
                 event_record=evidence,
             )
@@ -596,6 +611,9 @@ class WaveformMeasurementNode:
     def execute(self, context: object) -> dict[str, object]:
         """Hosted entry point: the same capture, published through the host."""
 
+        # The host owns this run's identity as it owns its generation: its
+        # Logic row, not this node's type, names the signals and the evidence.
+        self.instance_id = context.instance_id
         self._generation = context.generation
         signals = tuple(self.signal_key(value.name) for value in self._outputs)
         if self.repeat == 0:

@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from zlc_atom.devices.waveform.zishu_daq4211.device_types import (
     DEVICE_TYPES,
@@ -266,18 +260,10 @@ def test_only_this_model_is_offered_and_its_channels_are_declared_once() -> None
                 ),
             }
         )
+    # The form takes both readings; the source refuses the one quantity
+    # published in two units.
     with pytest.raises(ValueError, match="disagree about its unit"):
-        authored_config(
-            {
-                "serial": "x",
-                "readings": (
-                    {"channel": 0, "quantity": "field", "unit": "uT", "label": "a",
-                     "unit_per_volt": 1.0, "offset_volts": 0.0},
-                    {"channel": 1, "quantity": "field", "unit": "V", "label": "b",
-                     "unit_per_volt": 1.0, "offset_volts": 0.0},
-                ),
-            }
-        ).readings and ZishuDaq4211WaveformSource(
+        ZishuDaq4211WaveformSource(
             authored_config(
                 {
                     "serial": "x",

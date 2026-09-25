@@ -1,8 +1,11 @@
-"""Shared test doubles whose public surfaces are frozen external contracts."""
+"""Shared test doubles whose public surfaces are frozen external contracts,
+and the one import reader the source-structure tests share."""
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 import threading
 import time
 from typing import Any
@@ -11,10 +14,16 @@ import numpy as np
 from zlc_data import (
     AxisId,
     AxisSpec,
+    DatasetSchema,
+    DomainSpec,
     OwnedSnapshot,
     READOUT_EVENT,
+    REPEAT,
+    SITE,
     SPATIAL_X,
     SPATIAL_Y,
+    ValidityContract,
+    ValueSchema,
 )
 from zlc_runtime import SignalDataPlane as RuntimeSignalDataPlane
 from zlc_pulse.device import DoneReport, SafeReadback
@@ -74,6 +83,58 @@ def camera_cycle_snapshot(
     )
 
 
+def scan_source_schema(*, shots: int) -> DatasetSchema:
+    """A scan source publishing ``shots`` per event over five sites."""
+
+    repeat = AxisSpec(AxisId("shot"), "repeat", REPEAT, shots, tuple(range(shots)))
+    event = AxisSpec(AxisId("event"), "event", READOUT_EVENT, 1, (0,))
+    site = AxisSpec(AxisId("site"), "site", SITE, 5, tuple(range(5)))
+    return DatasetSchema(
+        DomainSpec((shots,), (repeat,), (tuple(range(shots)),)),
+        DomainSpec((1,), (event,), ((0,),)),
+        DomainSpec((site.size,), (site,)),
+        ValueSchema(ValidityContract.components(site.axis_id), np.dtype("<f8"), "1"),
+    )
+
+
+#: The source tree the import-structure tests read.
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+
+
+def module_name(path: Path) -> str:
+    """The dotted module one file under ``src`` is imported as."""
+
+    return ".".join(path.resolve().relative_to(SOURCE_ROOT).with_suffix("").parts)
+
+
+def imported_modules(path: Path) -> set[str]:
+    """Every module one source file imports, relative spellings resolved.
+
+    A relative import reaches exactly as far as an absolute one -- a sibling
+    is ``from ..other import x`` -- so a guard that reads only absolute ones
+    guards nothing.  ``from X import a`` may name a module too, so both
+    readings are collected and matched.
+    """
+
+    package = module_name(path).rsplit(".", 1)[0]
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not node.level:
+            target = node.module
+        else:
+            parts = package.split(".")
+            base = ".".join(parts[: len(parts) - node.level + 1])
+            target = f"{base}.{node.module}" if node.module else base
+        found.add(target)
+        found.update(f"{target}.{alias.name}" for alias in node.names)
+    return found
+
+
 class FakePlane(RuntimeSignalDataPlane):
     """Instrumented runtime plane; every method retains the frozen signature."""
 
@@ -92,6 +153,20 @@ class FakePlane(RuntimeSignalDataPlane):
     def cancel_latest_only_processor(self, control: object) -> bool:
         self.calls.append(("cancel_latest_only_processor", (control,), {}))
         return super().cancel_latest_only_processor(control)  # type: ignore[arg-type]
+
+
+def running_slm_server(adapter: object) -> tuple[Any, threading.Thread]:
+    """The SLM server over ``adapter`` on a loopback port, serving on a thread.
+
+    The caller shuts the server down, closes it and joins the thread.
+    """
+
+    from zlc_atom.devices.slm.hamamatsu_x15213.remote import _open_slm_server
+
+    server = _open_slm_server(adapter, "127.0.0.1", 0)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    return server, worker
 
 
 #: The scripted source's frame: small, because only its VALUE is under test.
@@ -120,7 +195,6 @@ class ScriptedScanBench:
     Everything else is the production path: the real virtual board compiles,
     loads, writes its scan table and fires; the real camera adapter, the real
     ``camera_measurement`` monitor and the real signal plane carry the frames.
-    The board's stops and fires are timestamped to check execution boundaries.
     """
 
     def __init__(
@@ -129,18 +203,11 @@ class ScriptedScanBench:
         plane: object,
         *,
         publications_per_fire: int,
-        paced_by_cycle: bool = False,
-        publications_per_cycle: int | None = None,
         exposure_seconds: float = 0.001,
     ) -> None:
         self._sequencer = sequencer
         self._plane = plane
         self.publications_per_fire = int(publications_per_fire)
-        self.paced_by_cycle = bool(paced_by_cycle)
-        self.publications_per_cycle = (
-            None if publications_per_cycle is None
-            else int(publications_per_cycle)
-        )
         if self.publications_per_fire < 1:
             raise ValueError("a fire produces at least one publication")
         self.camera = VirtualCamera(
@@ -170,12 +237,10 @@ class ScriptedScanBench:
         self.monitor = self._node.monitor()
         self.signal_name = self._node.signal_key("frames")
         self.published: list[int] = []
-        self.events: list[tuple[str, float]] = []
         self.loads = 0
         self.loaded_loop_counts: list[int] = []
         self.loaded_sources: list[object | None] = []
         self._loaded_program = None
-        self._publisher: threading.Thread | None = None
         self.scan_tables: list[np.ndarray] = []
         self.fired_repeats: list[tuple[int, int]] = []
         self._next_value = 0
@@ -197,9 +262,6 @@ class ScriptedScanBench:
         self._plane.freeze()
 
     def close(self) -> None:
-        publisher = self._publisher
-        if publisher is not None:
-            publisher.join(timeout=2.0)
         self.monitor.close()
 
     # --------------------------------------------- the sequencer surface
@@ -244,54 +306,18 @@ class ScriptedScanBench:
         self._sequencer.load(prog, source=source, rows=normalized)
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1):
-        self.events.append(("fire", time.monotonic()))
         self.fired_repeats.append((int(run_repeats), int(scan_repeats)))
         execution = self._sequencer.fire(
             run_repeats=run_repeats,
             scan_repeats=scan_repeats,
         )
-        if not self.paced_by_cycle:
-            for _ in range(self.publications_per_fire):
-                self.publish(self._next_value)
-                self._next_value += 1
-            return execution
-        program = self._loaded_program
-        if run_repeats == 0 or scan_repeats == 0:
-            raise AssertionError("scripted scan tests require a finite fire")
-        executions = (
-            run_repeats
-            * scan_repeats
-            * (len(self._loaded_rows) if self._loaded_rows else 1)
-        )
-        per_cycle = (
-            self.publications_per_fire // executions
-            if self.publications_per_cycle is None
-            else self.publications_per_cycle
-        )
-        period = float(getattr(program, "duration_seconds"))
-        started = time.monotonic()
-
-        def publish_cycles() -> None:
-            for shot in range(executions):
-                deadline = started + shot * period + min(0.01, period * 0.25)
-                remaining = deadline - time.monotonic()
-                if remaining > 0.0:
-                    time.sleep(remaining)
-                for _ in range(per_cycle):
-                    self.publish(self._next_value)
-                    self._next_value += 1
-                    time.sleep(0.004)
-
-        self._publisher = threading.Thread(target=publish_cycles, daemon=True)
-        self._publisher.start()
+        for _ in range(self.publications_per_fire):
+            self.publish(self._next_value)
+            self._next_value += 1
         return execution
 
     def wait_done(self, timeout: float | None = None) -> DoneReport | None:
-        report = self._sequencer.wait_done(timeout)
-        if report is not None and self._publisher is not None:
-            self._publisher.join(timeout=2.0)
-            self._publisher = None
-        return report
+        return self._sequencer.wait_done(timeout)
 
     def snapshot(self) -> Mapping[str, object]:
         # A scan that is still waiting for a report asks the board whether
@@ -302,27 +328,16 @@ class ScriptedScanBench:
         return self._sequencer.applied()
 
     def safe(self) -> SafeReadback:
-        self.events.append(("safe", time.monotonic()))
         return self._sequencer.safe()
-
-    # ------------------------------------------------------- the record
-
-    def stop_intervals(self) -> tuple[float, ...]:
-        """How long the board stayed stopped before each fire that followed."""
-
-        intervals: list[float] = []
-        stopped_at: float | None = None
-        for kind, when in self.events:
-            if kind == "safe":
-                stopped_at = when
-            elif stopped_at is not None:
-                intervals.append(when - stopped_at)
-                stopped_at = None
-        return tuple(intervals)
 
 
 __all__ = [
     "SCRIPTED_SEED_VALUE",
+    "SOURCE_ROOT",
     "FakePlane",
+    "running_slm_server",
     "ScriptedScanBench",
+    "imported_modules",
+    "module_name",
+    "scan_source_schema",
 ]

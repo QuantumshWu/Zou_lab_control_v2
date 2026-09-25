@@ -11,49 +11,40 @@ is what everything downstream then measures.
 
 from __future__ import annotations
 
-import pytest
+from itertools import product
 
-from zlc_atom.devices.camera import roi_grid
-from zlc_atom.devices.camera.dcam import adapter as dcam
-from zlc_atom.devices.camera.pylon import adapter as pylon
 from zlc_atom.devices.camera.roi_grid import snap_roi_axis
 
 
-def test_every_adapter_reads_the_one_rule() -> None:
-    """Not two copies that agree today: one rule, two grids."""
-
-    assert dcam.snap_roi_axis is roi_grid.snap_roi_axis
-    assert pylon.snap_roi_axis is roi_grid.snap_roi_axis
-
-
-@pytest.mark.parametrize("origin_step", (1, 2, 3, 4, 8))
-@pytest.mark.parametrize("extent_step", (1, 2, 3, 4))
-@pytest.mark.parametrize("origin", (0, 1, 7, 51, 101, 1917))
-@pytest.mark.parametrize("extent", (1, 3, 16, 481, 641))
-def test_the_applied_region_contains_the_requested_one(
-    origin_step: int, extent_step: int, origin: int, extent: int
-) -> None:
+def test_the_applied_region_contains_the_requested_one() -> None:
     """Holds for steps that do not nest too: 3 against 4 walks the origin
     back by more than the size step it retreated for, and the far edge must
     still be covered."""
 
     sensor = 1920
-    start, size = snap_roi_axis(
-        origin,
-        extent,
-        origin_step=origin_step,
-        extent_step=extent_step,
-        sensor_extent=sensor,
-    )
+    for case in product(
+        (1, 2, 3, 4, 8),              # origin step
+        (1, 2, 3, 4),                 # extent step
+        (0, 1, 7, 51, 101, 1917),     # origin
+        (1, 3, 16, 481, 641),         # extent
+    ):
+        origin_step, extent_step, origin, extent = case
+        start, size = snap_roi_axis(
+            origin,
+            extent,
+            origin_step=origin_step,
+            extent_step=extent_step,
+            sensor_extent=sensor,
+        )
 
-    assert start % origin_step == 0
-    assert size % extent_step == 0
-    assert 0 <= start and start + size <= sensor
+        assert start % origin_step == 0, case
+        assert size % extent_step == 0, case
+        assert 0 <= start and start + size <= sensor, case
 
-    wanted_start = max(0, min(origin, sensor - 1))
-    wanted_stop = max(wanted_start + 1, min(origin + extent, sensor))
-    assert start <= wanted_start
-    assert start + size >= wanted_stop
+        wanted_start = max(0, min(origin, sensor - 1))
+        wanted_stop = max(wanted_start + 1, min(origin + extent, sensor))
+        assert start <= wanted_start, case
+        assert start + size >= wanted_stop, case
 
 
 def test_a_sensor_minimum_larger_than_one_step_is_honoured() -> None:

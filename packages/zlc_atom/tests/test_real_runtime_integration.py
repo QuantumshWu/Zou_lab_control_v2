@@ -1,10 +1,15 @@
+"""The runtime, pulse and atom packages run the virtual chain together.
+
+The installed-product evidence lane (``zou_lab_control.__main__``) runs this
+file against a fresh wheel: the packages resolve, arm, fire, publish and
+calibrate.  How well the readout then recovers the atoms is asked on frozen
+frames by test_readout_against_known_truth.py.
+"""
+
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import zlc_pulse
-from zlc_pulse.wire import build_fingerprint
 from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
@@ -13,55 +18,19 @@ from zlc_atom.nodes.camera_measurement import (
     CameraMeasurementRequest,
     MonitorCapture,
 )
-from zlc_atom.nodes.calibration import (
-    CalibrationRequest,
-    CalibrationTask,
-    ReadoutModelKind,
-)
+from zlc_atom.nodes.calibration import CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from tests.fakes import camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
-
-#: The repository this test belongs to.  Anchored to the file rather than to
-#: the working directory, so a suite run from anywhere still finds pulses/.
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
 
 
-FIXTURES = Path(__file__).parent / "fixtures"
-
-
-def _calibration_request() -> CalibrationRequest:
-    return CalibrationRequest(
-        camera_key="camera",
-        sequencer_key="sequencer",
-        pulse_template="imaging_template.json",
-        repeats=30,
-        reference_exposure_seconds=0.02,
-        readout_exposure_seconds=0.005,
-        camera_exposure_seconds=0.02,
-        reference_before_field="duration:long_before",
-        readout_field="duration:short",
-        reference_after_field="duration:long_after",
-        default_model_kind=ReadoutModelKind.BOX,
-        threshold_method="gaussian",
-        box_half_width=1,
-        psf_half_width=3,
-        psf_padding=3,
-        detection_spot_sigma=1.0,
-        detection_sigma=6.0,
-    )
-
-
-def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_oracle(
+def test_the_packages_run_the_virtual_chain_from_fire_to_calibration(
     tmp_path: Path,
 ) -> None:
-    assert callable(build_fingerprint)
-    manifest = json.loads((FIXTURES / "main_readout_oracle.json").read_text(encoding="utf-8"))
-    assert manifest["format"] == "readout-known-truth-run"
-
     installation = create_installation("virtual")
     plane = SignalDataPlane()
+    task_plane = SignalDataPlane()
     try:
         measurement = CameraMeasurementNode(
             camera=installation.device("camera"),
@@ -92,10 +61,10 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         task_result = CalibrationTask(
             camera=installation.device("camera"),
             sequencer=sequencer,
-            request=_calibration_request(),
+            request=calibration_request(),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
-            signal_plane=SignalDataPlane(),
+            signal_plane=task_plane,
         ).run(tmp_path)
         figure_directory = task_result.artifact_path.parents[1] / "figures"
         report_images = tuple(sorted(figure_directory.glob("*.png")))
@@ -125,15 +94,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             1,
             task_result.calibration.n_sites,
         )
-
-        # What this test is for ends here: that the INSTALLED packages
-        # resolve, arm, fire, publish and calibrate.  How well the readout
-        # then recovers the atoms is a different question, asked on the same
-        # frozen frames by test_readout_against_known_truth.py against a
-        # floor that moved when the answer did -- and this second copy of it
-        # did not, so it went on demanding 0.90 of a threshold fit that had
-        # stopped reading the truth labels and settled at 0.869.  One claim,
-        # one owner.
     finally:
+        task_plane.close()
         plane.close()
         installation.close()

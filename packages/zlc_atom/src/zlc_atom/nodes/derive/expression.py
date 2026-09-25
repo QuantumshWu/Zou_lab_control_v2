@@ -53,10 +53,14 @@ class Operand(NDArrayOperatorsMixin):
         values = np.asarray(self.values)
         if values.shape != self.schema.physical_shape or values.dtype.kind not in "biuf":
             raise ValueError("numeric values must match the three-domain physical shape")
-        valid = np.ones(values.shape, bool) if self.valid is None else np.asarray(self.valid)
+        valid = np.asarray(True if self.valid is None else self.valid)
         if valid.dtype != np.dtype(bool):
             raise TypeError("validity must be boolean")
-        valid = np.broadcast_to(valid, values.shape) & np.isfinite(values)
+        valid = np.broadcast_to(valid, values.shape)
+        # Only a float can hold a value that is not a number; an integer
+        # frame or a boolean mask is not scanned pixel by pixel to learn so.
+        if values.dtype.kind == "f":
+            valid = valid & np.isfinite(values)
         values = values.view()
         values.setflags(write=False)
         valid.setflags(write=False)

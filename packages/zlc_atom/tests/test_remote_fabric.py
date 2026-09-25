@@ -142,9 +142,11 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer, monke
             remote.tune("power", -5.0)
     assert source.tunable_values()["power"] == -5.0
     assert len(connections) == 2, "the failed write was not retried on a new connection"
+    assert remote.tunable_values()["power"] == -5.0
+    assert len(connections) == 3, "the next request dials the device again"
+    remote.close()
     with pytest.raises(ConnectionError, match="closed"):
         remote.tunable_values()
-    remote.close()
 
     peer = RemoteTunableDevice(host="127.0.0.1", port=announcer.port, instance_id="rf_main")
     announcer.close()
@@ -222,7 +224,10 @@ def test_withdrawing_removes_the_record(announcer) -> None:
             tunable=source,
         )
     )
-    assert announcer.published_ids() == ("rf_7",)
+    assert [
+        record["instance_id"]
+        for record in list_remote_devices("127.0.0.1", announcer.port)
+    ] == ["rf_7"]
     announcer.withdraw("rf_7")
     assert list_remote_devices("127.0.0.1", announcer.port) == ()
 

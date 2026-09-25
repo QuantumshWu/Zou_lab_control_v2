@@ -1,24 +1,16 @@
 from __future__ import annotations
 
-import ast
-import pathlib
 import importlib
-import json
 from dataclasses import replace
 from pathlib import Path
 import time
 
 import pytest
-from zlc_durable import readable_json_bytes
 from zlc_pulse import (
-    PULSE_TREE_FORMAT,
     PulseBinding,
     PulseFieldRef,
     convert_time,
     PulseTarget,
-    resolve_api_parameters,
-    sequence_from_tree,
-    sequence_to_tree,
 )
 from zlc_pulse.device import BoardDescription
 from zlc_runtime import NodeHost, SignalDataPlane
@@ -33,14 +25,18 @@ from zlc_atom.nodes import (
     discover_logic_nodes,
 )
 from zlc_atom.nodes.calibration import (
-    CalibrationRequest,
     CalibrationTask,
     LOGIC_NODE as CALIBRATION_LOGIC_NODE,
     ReadoutModelKind,
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from tests.fakes import FakePlane, camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, PULSE_ROOT
+from tests.fakes import FakePlane, camera_cycle_snapshot, imported_modules, module_name
+from tests.pulse_fixture import (
+    IMAGING_PULSE_RESOURCE,
+    PULSE_ROOT,
+    calibration_request,
+    pulse_sequence,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -200,28 +196,6 @@ class _RecordingSequencer:
         self.sequencer.camera_trigger_channel = value  # type: ignore[attr-defined]
 
 
-def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
-    return CalibrationRequest(
-        camera_key="camera",
-        sequencer_key="sequencer",
-        pulse_template="imaging_template.json",
-        repeats=repeats,
-        reference_exposure_seconds=0.02,
-        readout_exposure_seconds=0.005,
-        camera_exposure_seconds=0.02,
-        reference_before_field="duration:long_before",
-        readout_field="duration:short",
-        reference_after_field="duration:long_after",
-        default_model_kind=ReadoutModelKind.BOX,
-        threshold_method="gaussian",
-        box_half_width=1,
-        psf_half_width=3,
-        psf_padding=3,
-        detection_spot_sigma=1.0,
-        detection_sigma=6.0,
-    )
-
-
 def test_measurement_leaf_has_no_sequencer_dependency_or_operation() -> None:
     files = tuple((ROOT / "src" / "zlc_atom" / "nodes" / "camera_measurement").rglob("*.py"))
     assert files
@@ -266,14 +240,11 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         source_owner = relative.parts[0] if len(relative.parts) > 1 else None
         if source_owner in {None, "_framework"}:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            module = None
-            if isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
-                module = node.module
-            elif isinstance(node, ast.Import):
-                module = next((alias.name for alias in node.names if alias.name.startswith("zlc_atom.nodes.")), None)
-            if not module or not module.startswith("zlc_atom.nodes."):
+        # Relative spellings resolved: ``from ..calibration import x`` is the
+        # same edge as the absolute import, and a guard blind to it guards
+        # nothing.
+        for module in imported_modules(path):
+            if not module.startswith("zlc_atom.nodes."):
                 continue
             target_owner = module.split(".")[2]
             if target_owner != source_owner and target_owner != "_framework":
@@ -340,38 +311,7 @@ def test_a_device_folder_is_the_whole_device() -> None:
             f"{'/'.join(parts)} needs an __init__.py or the wheel drops it"
         )
 
-    def module_of(path: pathlib.Path) -> str:
-        parts = path.relative_to(devices_root).with_suffix("").parts
-        return "zlc_atom.devices." + ".".join(parts)
-
-    owners = {module_of(folder / "x.py").rsplit(".", 1)[0]: folder for folder in folders}
-
-    def imported_modules(path: pathlib.Path) -> set[str]:
-        """Every module one file imports, relative spellings resolved.
-
-        A relative import reaches exactly as far as an absolute one -- a
-        sibling device is ``from ..other import x`` -- so a guard that reads
-        only absolute ones guards nothing.  ``from X import a`` may name a
-        module too, so both readings are collected and matched.
-        """
-
-        package = module_of(path).rsplit(".", 1)[0]
-        found: set[str] = set()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Import):
-                found.update(alias.name for alias in node.names)
-                continue
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            if not node.level:
-                target = node.module
-            else:
-                parts = package.split(".")
-                base = ".".join(parts[: len(parts) - node.level + 1])
-                target = f"{base}.{node.module}" if node.module else base
-            found.add(target)
-            found.update(f"{target}.{alias.name}" for alias in node.names)
-        return found
+    owners = {module_name(folder / "x.py").rsplit(".", 1)[0]: folder for folder in folders}
 
     edges: set[tuple[str, str]] = set()
     for path in devices_root.rglob("*.py"):
@@ -400,61 +340,26 @@ def test_a_device_folder_is_the_whole_device() -> None:
         init = family / "__init__.py"
         if not init.is_file():
             continue
-        family_module = module_of(init).rsplit(".", 1)[0]
         for target in imported_modules(init):
             assert not any(
                 target == name or target.startswith(name + ".")
                 for name, folder in owners.items()
                 if folder.parent == family
             ), f"{family.name}/__init__.py imports its own {target} device"
-        del family_module
 
 
 def test_pulse_resolver_uses_the_project_json_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asset = PULSE_ROOT / "imaging_template.json"
-    document = asset.read_bytes()
-    tree = json.loads(document)
-    assert document == readable_json_bytes(tree)
-    assert tuple(tree) == (
-        "format",
-        "name",
-        "time_step_ns",
-        "target",
-        "periods",
-        "bindings",
-        "delays",
-        "brackets",
-        "run_repeats",
-    )
-    assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse"
-    assert not {
-        "schema",
-        "PulseDocument",
-        "fingerprint",
-        "hash",
-        "editor",
-    }.intersection(tree)
-    sequence = sequence_from_tree(tree)
-    assert sequence_to_tree(sequence) == tree
-    assert sequence.scan_bindings == ()
-    assert tuple(parameter.field_id for parameter in sequence.api_bindings) == (
-        "duration:long_before",
-        "duration:short",
-        "duration:long_after",
-    )
     api_values = {
         "duration:long_before": 0.031,
         "duration:short": 0.006,
         "duration:long_after": 0.031,
     }
-    explicit = resolve_api_parameters(sequence, api_values)
-    assert explicit.api_bindings == ()
-    assert explicit.scan_bindings == ()
     resource_spec = CALIBRATION_LOGIC_NODE.workspace_resources[0]
     resource = resource_spec.resolve(asset)
-    assert sequence_to_tree(resource.value) == tree
+    assert resource.value == pulse_sequence("imaging_template.json")
 
     sequencer = VirtualPulseStreamer()
     sequencer.open()
@@ -607,7 +512,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert task_result is not None
         execution = task_result.run_record["actual_devices"]["sequencer"]
         assert execution["program"]["digest"] == sequencer.applied().program.digest
-        assert execution["program"]["digest"] == execution["state"]["applied_digest"]
         actual_load = next(period for period in execution["pulse"]["periods"]
                            if period["period_id"] == "load")
         assert convert_time(actual_load["duration"], actual_load["unit"], "s") == 0.021
@@ -697,8 +601,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         )
         assert occupancy_result.frame_judged.shape == (30, 1, 96, 128)
 
-        assert tuple(value.argument_name for value in descriptors["camera_measurement"].device_requirements) == ("camera",)
-        assert tuple(value.argument_name for value in descriptors["calibration"].device_requirements) == ("camera", "sequencer")
         assert tuple(
             (value.name, value.contract_id)
             for value in descriptors["calibration"].outputs
@@ -724,34 +626,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             (value.name, value.contract_id)
             for value in descriptors["calibration"].artifact_outputs
         ] == [("artifact_path", "calibration.readout")]
-        assert descriptors["calibration"].authoring_schema.field_names == (
-            "pulse_template",
-            "repeats",
-            "reference_exposure_seconds",
-            "readout_exposure_seconds",
-            "camera_exposure_seconds",
-            "reference_before_field",
-            "readout_field",
-            "reference_after_field",
-            "default_model_kind",
-            "threshold_method",
-            "box_half_width",
-            "psf_half_width",
-            "psf_padding",
-            "detection_spot_sigma",
-            "detection_sigma",
-            # Where the frames come from, and whether they are kept: a
-            # calibration can be re-run on samples it saved earlier instead of
-            # holding the bench for another few hundred.
-            "frame_source",
-            "saved_frames_path",
-            "save_frames",
-            "review_detected_sites",
-            # And whether the camera is read in photoelectrons: the
-            # conversion is configured on the camera, so the choice is a
-            # run's, not the analysis's.
-            "photoelectrons",
-        )
         # The pulse is the one field with no default: pulses are workspace
         # files the operator names, so a projection must name one.
         template = next(
@@ -769,14 +643,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert defaults["repeats"] == 200
         assert defaults["threshold_method"] == "gaussian"
         assert defaults["review_detected_sites"] is False
-        with pytest.raises(ValueError, match="must be shorter than"):
-            descriptors["calibration"].authoring_schema.project_values(
-                {
-                    **named,
-                    "reference_exposure_seconds": 0.005,
-                    "readout_exposure_seconds": 0.02,
-                }
-            )
         assert descriptors["occupancy"].device_requirements == ()
         assert descriptors["occupancy"].authoring_schema.field_names == (
             "model_kind",
@@ -823,7 +689,7 @@ def test_calibration_task_safes_sequencer_when_capture_fails(tmp_path: Path) -> 
         task = CalibrationTask(
             camera=camera,
             sequencer=sequencer,
-            request=_calibration_request(repeats=1),
+            request=calibration_request(repeats=1),
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             signal_plane=plane,

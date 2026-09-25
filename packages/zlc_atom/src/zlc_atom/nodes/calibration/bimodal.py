@@ -67,18 +67,6 @@ def normal_cdf(x: object, mu: float = 0.0, sigma: float = 1.0) -> np.ndarray | f
     return float(result) if result.ndim == 0 else result
 
 
-def finite_mean(values: object, axis: int | tuple[int, ...] | None = None) -> np.ndarray:
-    """Mean finite values without warnings for all-invalid slices."""
-
-    array = np.asarray(values, dtype=float)
-    valid = np.isfinite(array)
-    count = np.count_nonzero(valid, axis=axis)
-    total = np.sum(np.where(valid, array, 0.0), axis=axis)
-    output = np.full(np.shape(count), np.nan, dtype=float)
-    np.divide(total, count, out=output, where=count > 0)
-    return output
-
-
 def _threshold_error(
     threshold: float,
     dark_mean: float,
@@ -301,6 +289,13 @@ def _em_two_state(
         total = joint.sum(axis=1)
         if not np.all(np.isfinite(total)) or np.any(total <= 0.0):
             return means, sigmas, weights, -np.inf
+        # This E-step's total IS the likelihood of the parameters it used, so
+        # convergence is read from it rather than from every density
+        # evaluated a second time after the M-step.
+        current = float(np.sum(np.log(total)))
+        if abs(current - likelihood) <= tolerance * max(1.0, abs(current)):
+            return means, sigmas, weights, current
+        likelihood = current
         responsibility = joint / total[:, None]
         counts = responsibility.sum(axis=0)
         weights = np.maximum(counts / values.size, weight_min)
@@ -311,14 +306,7 @@ def _em_two_state(
             responsibility * (values[:, None] - means[None, :]) ** 2
         ).sum(axis=0) / counts
         sigmas = np.maximum(np.sqrt(np.maximum(variances, 0.0)), sigma_min)
-        current = _log_likelihood(values, means, sigmas, weights)
-        if not isfinite(current):
-            return means, sigmas, weights, -np.inf
-        if abs(current - likelihood) <= tolerance * max(1.0, abs(current)):
-            likelihood = current
-            break
-        likelihood = current
-    return means, sigmas, weights, likelihood
+    return means, sigmas, weights, _log_likelihood(values, means, sigmas, weights)
 
 
 def _split_start(
@@ -522,11 +510,22 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     dark_mean, dark_sigma = float(means[dark]), float(sigmas[dark])
     bright_mean, bright_sigma = float(means[bright]), float(sigmas[bright])
     fraction = float(weights[bright])
+    # The crossing of the curves as the shots populate them, not as if each
+    # state held half: the minimum-error cut, and the one every other reader
+    # of a readout histogram draws.  An equal-prior cut sat several widths
+    # low at low loading and counted dark shots as loaded.
     threshold, bright_above = optimal_gaussian_threshold(
-        dark_mean, dark_sigma, bright_mean, bright_sigma
+        dark_mean, dark_sigma, bright_mean, bright_sigma, 1.0 - fraction, fraction
     )
     dark_fidelity, bright_fidelity, fidelity = gaussian_fidelity(
-        dark_mean, dark_sigma, bright_mean, bright_sigma, threshold, bright_above
+        dark_mean,
+        dark_sigma,
+        bright_mean,
+        bright_sigma,
+        threshold,
+        bright_above,
+        1.0 - fraction,
+        fraction,
     )
     bic_gain = _bic_gain(samples, likelihood) if isfinite(likelihood) else float("nan")
     separation = (bright_mean - dark_mean) / max(
@@ -612,7 +611,6 @@ class PerSiteConfusion:
 __all__ = [
     "BimodalFit",
     "PerSiteConfusion",
-    "finite_mean",
     "fit_bimodal",
     "gaussian_fidelity",
     "normal_cdf",

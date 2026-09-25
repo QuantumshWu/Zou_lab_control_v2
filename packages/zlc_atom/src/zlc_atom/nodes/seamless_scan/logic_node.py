@@ -23,7 +23,7 @@ from zlc_atom.nodes._framework.descriptor import (
     ResolvedWorkspaceResource,
 )
 from zlc_atom.nodes.scan import (
-    watched_signal_source,
+    PublishedSignalSource,
     SCAN_PLAN_SELECTIONS,
     MANUAL_PARAM_FAMILY,
     SCAN_OUTPUT,
@@ -150,7 +150,7 @@ def _build(
     return SeamlessScanMeasurement(
         sequencer=sequencer,
         sequencer_key=sequencer_key,
-        source=watched_signal_source(signal_plane, source_signal),
+        source=PublishedSignalSource(signal_plane, source_signal),
         sequence=sequence,
         pulse_path=pulse_resource.path,
         plan=parsed,
@@ -164,16 +164,14 @@ def _build(
 
 
 def _editor_factory(parent=None):
-    from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
+    from zlc_atom.nodes.scan.editor import ScanPlanEditor
 
     # The board axes are the template's own hardware slots: the board plays
     # the slots selected by the plan; omitted slots keep their Pulse values.
     # Manual, device AND API axes are offered because this node can stop
     # between fires -- for a hand on a thumbscrew, a tune() call on an
     # installed device or a new value in the pulse alike.
-    return scan_plan_editor_factory(
-        parent, device_ports=True, manual_axes=True
-    )
+    return ScanPlanEditor(parent)
 
 
 LOGIC_NODE = LogicNodeDescriptor(

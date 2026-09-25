@@ -25,7 +25,7 @@ from zlc_atom.nodes.scan import (
 )
 from zlc_atom.nodes.scan.plan import plan_from_authored, plan_input_rows, scan_axis_ids
 from zlc_atom.nodes.seamless_scan import LOGIC_NODE as SEAMLESS_NODE
-from test_scan_repeat_domain import _source_schema
+from tests.fakes import scan_source_schema
 
 
 BIAS_PORTS = tuple(
@@ -251,7 +251,7 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     labels = ("bias", "bias")
     assert scan_axis_ids(labels) == ("scan.bias", "scan.bias.2")
     schema = scan_dataset_schema(
-        _source_schema(shots=1), plan.rows(), (("bias", "1"), ("bias", "code")),
+        scan_source_schema(shots=1), plan.rows(), (("bias", "1"), ("bias", "code")),
         axis_names=("bias", "MOT.duration"),
     )
     assert schema.point_domain.axes[-1].name == "MOT.duration"
@@ -276,7 +276,15 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     assert narrowed.axes[0].values == (1.25, 1.75)
     assert narrowed.axes[1].values == (12.0, 18.0)
 
+
+def test_a_range_drawn_in_a_shown_power_unit_reaches_the_plan_in_its_unit() -> None:
+    """A range drawn on a power axis the panel shows in mVpp or Vpp reaches
+    the plan in the Dataset's own mVpp; an explicitly authored list keeps
+    its text, and a draft whose unit changed since gets the range converted.
+    """
+
     import numpy as np
+    from zlc_runtime import SelectionRange, SelectionState
     from zlc_data import owned_snapshot_from_arrays
     from zlc_data.units import DEFAULT_UNITS
     from zlc_plot import DEFAULTS, AxisRef, CurvePlot
@@ -293,7 +301,7 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
     assert ScanPlan.from_tree(saved_plan).axes == (power,)
     power_id = scan_axis_ids(("rf.ch1_power",))[0]
     assert power_id == "scan.rf.ch1_power"
-    schema = scan_dataset_schema(_source_schema(shots=1), ScanPlan((power,)).rows(), (("rf.ch1_power", "mVpp"),))
+    schema = scan_dataset_schema(scan_source_schema(shots=1), ScanPlan((power,)).rows(), (("rf.ch1_power", "mVpp"),))
     saved_axis = next(axis for axis in schema.point_domain.axes if axis.axis_id.value == power_id)
     assert saved_axis.unit == "mVpp" and tuple(saved_axis.coordinates) == power.values
     snapshot = owned_snapshot_from_arrays(schema, np.zeros(schema.physical_shape), 0)

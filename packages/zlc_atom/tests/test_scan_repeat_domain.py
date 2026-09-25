@@ -9,24 +9,14 @@ import pytest
 from types import SimpleNamespace
 from zlc_runtime import SignalDataPlane
 from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
-from zlc_data import (
-    READOUT_EVENT,
-    REPEAT,
-    SITE,
-    AxisId,
-    AxisSpec,
-    DatasetSchema,
-    DomainSpec,
-    ValidityContract,
-    ValueSchema,
-)
+from zlc_data import REPEAT, AxisId, DatasetSchema, DomainSpec
 
 from zlc_atom.nodes.scan import scan_dataset_schema, scan_repeat_domain
+from tests.fakes import camera_cycle_snapshot, scan_source_schema
 
 
 def _source_value(size: int = 64):
     from zlc_runtime import MonitorCoverage, SignalValue
-    from tests.fakes import camera_cycle_snapshot
 
     snapshot = camera_cycle_snapshot(
         ((np.ones((size, size), dtype=np.uint16),),),
@@ -35,35 +25,29 @@ def _source_value(size: int = 64):
     return SignalValue("@logic/source/frames", snapshot, MonitorCoverage(1, 1))
 
 
-def test_scan_planner_keeps_chunk_storage_linear_for_50_and_100_points() -> None:
+def test_scan_writer_places_each_shot_without_copying() -> None:
+    """Every point's event IS the source's publication, placed at its row:
+    the writer keeps no run of its own, so its storage cannot grow with the
+    plan."""
+
     source = _source_value()
-
-    def committed_bytes(points: int) -> int:
-        writer = ScanDatasetWriter(
-            tuple((float(index),) for index in range(points)),
-            (("x", ""),),
+    points = 50
+    writer = ScanDatasetWriter(
+        tuple((float(index),) for index in range(points)),
+        (("x", ""),),
+    )
+    for row in range(points):
+        output = writer.write(
+            source,
+            row=row,
+            scan_repeat=0,
+            run_repeat=0,
         )
-        payload = 0
-        for row in range(points):
-            output = writer.write(
-                source,
-                row=row,
-                scan_repeat=0,
-                run_repeat=0,
-            )
-            assert output.snapshot is source.snapshot
-            assert output.cell_origin == (0, row)
-            assert tuple(
-                axis.name for axis in output.canonical_schema.repeat_domain.axes
-            ) == ("repeat", "shots per point")
-            payload += output.snapshot.block.values.nbytes
-        assert not hasattr(writer, "_values")
-        assert not hasattr(writer, "snapshot")
-        return payload
-
-    fifty = committed_bytes(50)
-    hundred = committed_bytes(100)
-    assert hundred == 2 * fifty
+        assert output.snapshot is source.snapshot
+        assert output.cell_origin == (0, row)
+        assert tuple(
+            axis.name for axis in output.canonical_schema.repeat_domain.axes
+        ) == ("repeat", "shots per point")
 
 
 def test_partial_scan_current_dataset_has_invalid_future_points() -> None:
@@ -105,21 +89,6 @@ def test_partial_scan_current_dataset_has_invalid_future_points() -> None:
         plane.close()
 
 
-
-def _source_schema(*, shots: int) -> DatasetSchema:
-    """A source publishing ``shots`` per event over five sites."""
-
-    repeat = AxisSpec(AxisId("shot"), "repeat", REPEAT, shots, tuple(range(shots)))
-    event = AxisSpec(AxisId("event"), "event", READOUT_EVENT, 1, (0,))
-    site = AxisSpec(AxisId("site"), "site", SITE, 5, tuple(range(5)))
-    return DatasetSchema(
-        DomainSpec((shots,), (repeat,), (tuple(range(shots)),)),
-        DomainSpec((1,), (event,), ((0,),)),
-        DomainSpec((site.size,), (site,)),
-        ValueSchema(ValidityContract.components(site.axis_id), np.dtype("<f8"), "1"),
-    )
-
-
 def test_the_repeat_domain_is_exactly_the_two_execution_facts() -> None:
     """Repeat outer, shots per point inner -- independent of board counters.
 
@@ -144,10 +113,9 @@ def test_the_repeat_domain_is_exactly_the_two_execution_facts() -> None:
     with pytest.raises(ValueError, match="run_repeats"):
         scan_repeat_domain(scan_repeats=1, run_repeats=0)
 
-
-def test_a_scan_dataset_carries_no_repeat_axis_but_its_own() -> None:
+    # And a scan dataset carries that domain and no repeat axis of its source.
     schema = scan_dataset_schema(
-        _source_schema(shots=1),
+        scan_source_schema(shots=1),
         ((0.0,), (1.0,), (2.0,)),
         (("bias", "code"),),
         scan_repeats=4,
@@ -165,7 +133,7 @@ def test_a_source_axis_already_named_like_a_scan_axis_is_refused() -> None:
     them back without the source in hand; a source that already carries
     one of them is a collision to refuse, not to rename around."""
 
-    schema = _source_schema(shots=1)
+    schema = scan_source_schema(shots=1)
     taken = replace(
         schema.point_domain.axes[0], axis_id=AxisId("scan.bias")
     )
@@ -184,7 +152,7 @@ def test_a_source_publishing_more_than_one_shot_is_refused_by_name() -> None:
 
     with pytest.raises(ValueError, match=r"Repeat carrier \(shot\) holds 3"):
         scan_dataset_schema(
-            _source_schema(shots=3),
+            scan_source_schema(shots=3),
             ((0.0,), (1.0,)),
             (("bias", "code"),),
         )

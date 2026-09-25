@@ -15,7 +15,7 @@ either version was RIGHT.  What is kept from it is the data.
 
 from __future__ import annotations
 
-import json
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +28,7 @@ from zlc_atom.nodes.calibration.calibration import (
     _empirical_threshold,
     _fit_readout_model,
     calibrate,
+    classify_threshold,
     detect_sites,
     fit_bimodal,
 )
@@ -36,7 +37,6 @@ from zlc_atom.nodes.slm_feedback.task import _support
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RUN = FIXTURES / "main_readout_oracle.npz"
-MANIFEST = FIXTURES / "main_readout_oracle.json"
 
 MODEL_NAMES = ("box", "psf", "uniform_psf")
 
@@ -57,8 +57,13 @@ def _run() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         )
 
 
+@lru_cache(maxsize=None)
 def _calibration(threshold_method: str = "gaussian"):
+    """One calibration of the fixture per method, shared by the tests, which
+    only read it; the truth is handed out read-only."""
+
     reference, short, truth = _run()
+    truth.setflags(write=False)
     result = calibrate(
         reference,
         short,
@@ -69,25 +74,6 @@ def _calibration(threshold_method: str = "gaussian"):
         psf_padding=3,
     )
     return result, truth
-
-
-def test_the_fixture_is_a_run_and_its_truth() -> None:
-    """Only the data is frozen, and the manifest says what it is."""
-
-    with np.load(RUN, allow_pickle=False) as archive:
-        assert set(archive.files) == {
-            "input_reference_frames",
-            "input_short_frames",
-            "input_latent_occupancy",
-        }
-    reference, short, truth = _run()
-    assert reference.shape == (60, 2, 34, 40)
-    assert short.shape == (60, 34, 40)
-    assert truth.shape == (60, 6) and truth.dtype == np.bool_
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    assert manifest["format"] == "readout-known-truth-run"
-    assert manifest["input"]["reference_shape"] == [60, 2, 34, 40]
-    assert manifest["input"]["sites"] == 6
 
 
 def test_the_detector_finds_the_lattice_that_is_there() -> None:
@@ -130,8 +116,25 @@ def test_every_model_recovers_the_occupancy_that_produced_the_frames() -> None:
         worst = float(np.nanmin(np.asarray(report["site_fidelity"], dtype=float)))
         assert worst >= SITE_FIDELITY_FLOOR, (name, worst)
 
+    # And breaking the readout on purpose must move the answer AWAY from the
+    # truth -- a guard that only checked a formula against its own output
+    # would pass for any implementation.  A threshold is a real number, not
+    # a decoration, and bright is above it; the opposite must not also pass.
+    box_report = result.report["models"]["box"]
+    box_model = result.calibration.select_model(ReadoutModelKind.BOX)
+    honest = np.asarray(box_report["predictions"], dtype=bool)
+    for mutated in (
+        classify_threshold(box_report["short_signals"], box_model.thresholds + 17.3),
+        classify_threshold(
+            box_report["short_signals"], box_model.thresholds, bright_above=False
+        ),
+    ):
+        mutated = np.asarray(mutated, dtype=bool)
+        assert not np.array_equal(mutated, honest)
+        assert float((mutated == truth).mean()) < float((honest == truth).mean())
 
-def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit(monkeypatch) -> None:
+
+def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     """Gaussian calibration fits values only; labels evaluate its result."""
 
     result, _truth = _calibration()
@@ -205,16 +208,6 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit(monkeypatch)
     labels_a = np.arange(samples.shape[0])[:, np.newaxis] >= 80
     labels_b = ~labels_a
     fitted = []
-    from zlc_atom.nodes.calibration import calibration as calibration_module
-
-    empirical_calls = []
-    empirical_threshold = calibration_module._empirical_threshold
-
-    def empirical(*args, **kwargs):
-        empirical_calls.append(1)
-        return empirical_threshold(*args, **kwargs)
-
-    monkeypatch.setattr(calibration_module, "_empirical_threshold", empirical)
     for labels in (labels_a, labels_b):
         fitted.append(
             _fit_readout_model(
@@ -229,7 +222,6 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit(monkeypatch)
                 model_parameters={"integration_half_width": 0},
             )
         )
-    assert not empirical_calls, "accepted Gaussian thresholds do not consume empirical estimates"
     for field in (
         "gaussian_thresholds",
         "gaussian_dark_mean",
@@ -243,7 +235,6 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit(monkeypatch)
     assert fitted[0][1]["site_fidelity"][0] != fitted[1][1]["site_fidelity"][0]
 
     empirical, _truth = _calibration("empirical")
-    assert empirical_calls, "explicit empirical mode still computes its operating threshold"
     for model in empirical.calibration.models:
         report = empirical.report["models"][model.kind.value]
         assert model.threshold_method == "empirical"

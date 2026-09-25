@@ -8,11 +8,7 @@ import pytest
 
 from zlc_atom.devices.camera import CameraAdapter
 from zlc_atom.devices.camera.dcam._dcam_driver import DcamProperty, DcamValue
-from zlc_atom.devices.camera.dcam import (
-    DcamCameraAdapter,
-    DcamCameraConfig,
-    DcamCaptureInterrupted,
-)
+from zlc_atom.devices.camera.dcam import DcamCameraAdapter, DcamCameraConfig
 
 
 class _FakeDcamDevice:
@@ -174,9 +170,6 @@ class _FakeDcamDriver:
         self.calls.append(("initialize", threading.get_ident()))
         return True
 
-    def uninitialize(self) -> None:
-        self.calls.append(("uninitialize", threading.get_ident()))
-
     def open_device(self, index: int) -> _FakeDcamDevice:
         self.calls.append((f"open:{index}", threading.get_ident()))
         return self.device
@@ -264,6 +257,7 @@ def test_working_point_reuses_applied_readback_and_all_sdk_calls_share_owner(mon
         assert sum(name == 'get:EXPOSURE_TIME' for name, _ in driver.calls) == 1
         with pytest.raises(RuntimeError, match="while armed"):
             adapter.set_roi(None)
+        with pytest.raises(RuntimeError, match="while armed"):
             adapter.set_exposure_seconds(0.02)
         adapter.finish_record_capture()
         getter = driver.device.get_property
@@ -557,41 +551,6 @@ def test_a_refused_handle_release_keeps_the_handle_for_the_next_close() -> None:
     assert frame() is None and adapter._records.pending_count == 0
     adapter.close()
     assert closes() == 2
-
-
-def test_the_binding_identity_is_the_device_index_not_the_logical_key() -> None:
-    """Two keys opening one DCAM index are one camera, and the broker must know.
-
-    The identity used to be the logical key, so the same physical device
-    under a second name was accepted as a second device.
-    """
-
-    from zlc_atom.devices.camera.binding import bind_camera
-    from zlc_atom.execution import DeviceBroker
-    from zlc_atom.install import InstallationFactoryContext
-
-    broker = DeviceBroker()
-    context = InstallationFactoryContext(None, broker, {})
-    first = bind_camera(
-        context,
-        "first-name",
-        DcamCameraAdapter(_config(), driver=_FakeDcamDriver()),
-        "dcam-camera:index=0",
-        "camera.dcam",
-    )
-    try:
-        assert first.physical_identity.stable_device_identity == "dcam-camera:index=0"
-        with pytest.raises(RuntimeError, match="already bound"):
-            bind_camera(
-                context,
-                "second-name",
-                DcamCameraAdapter(_config(), driver=_FakeDcamDriver()),
-                "dcam-camera:index=0",
-                "camera.dcam",
-            )
-    finally:
-        first.close()
-        broker.unbind(first.binding)
 
 
 def test_the_default_driver_takes_the_dll_from_the_camera_vendor_folder_only(

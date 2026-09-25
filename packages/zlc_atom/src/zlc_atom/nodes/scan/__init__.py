@@ -38,13 +38,11 @@ from .source import (
     PublishedSignalSource,
     check_cancelled,
     wait_for_board,
-    watched_signal_source,
 )
 
 __all__ = [
     "SCAN_PLAN_SELECTIONS",
     "PublishedSignalSource",
-    "watched_signal_source",
     "check_cancelled",
     "wait_for_board",
     "API_PARAM_FAMILY",

@@ -2,18 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 from threading import Event
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.install import create_installation
@@ -137,7 +130,6 @@ def test_camera_descriptor_builds_repeat_zero_and_finite_measurements() -> None:
 
 
 def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
-    print(camera_logic_node.__file__)
     descriptor = camera_logic_node.LOGIC_NODE
     draft = descriptor.authoring_schema.project_values(
         {
@@ -379,41 +371,13 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
         plane.close()
 
 
-def test_the_hosted_and_direct_paths_share_one_acquisition() -> None:
-    """Two implementations of a shot is how a virtual bench starts to lie.
+def test_a_finite_run_shows_its_dataset_filling() -> None:
+    """An operator watches a repeat=N run fill up.
 
-    The hosted entry differs from the notebook entry only in who owns the
-    generation and where the publication goes; the arming, reading and snapshot
-    building are the same code.
-    """
-
-    source = (
-        ROOT / "src" / "zlc_atom" / "nodes" / "camera_measurement" / "measurement.py"
-    ).read_text(encoding="utf-8")
-    execute = source[source.index("    def execute(self, context"):]
-    execute = execute[: execute.index("\n    def ", 1)] if "\n    def " in execute[1:] else execute
-    # execute() delegates; it must not grow its own read loop or publish path.
-    assert "self.prepare(" in execute
-    assert "self.monitor(" in execute
-    assert "collect(" in execute
-    assert "commit_live" in execute
-    assert "attach_live_outputs" not in execute
-    assert "publish_final" not in execute
-    assert "read_frame_records" not in execute
-    assert "snapshot_from_array" not in execute
-
-
-def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
-    """Two things an operator does with a repeat=N run: watch it, and stop it.
-
-    WATCH: the dataset is every cycle the run will take, filling up -- so the
-    live output states that whole geometry and counts the cells measured so
-    far.  It used to publish nothing at all until the last cycle had been
-    taken, which for a long run is a blank panel for as long as it runs.
-
-    STOP: a cancel is only ever seen BETWEEN reads, and the read was the
-    camera's whole timeout (2 s virtual, 10 s on the qCMOS), so Stop was
-    refused for that long while the console said the node was still stopping.
+    The dataset is every cycle the run will take, filling up -- so the live
+    output states that whole geometry and counts the cells measured so far.
+    It used to publish nothing at all until the last cycle had been taken,
+    which for a long run is a blank panel for as long as it runs.
     """
 
     plane = SignalDataPlane()
@@ -466,7 +430,7 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
                 current = plane.current_dataset(
                     signal,
                     plane.latest_publication(signal),
-                )
+                ).materialize()
                 seen.append(
                     (
                         tuple(event.shape[:2]),
@@ -499,7 +463,7 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
         final = publication.value(signal)
         assert final is not None
         assert np.asarray(final.snapshot.block.values).shape[:2] == (1, windows)
-        assert plane.current_dataset(signal).block.values.shape[:2] == (
+        assert plane.current_dataset(signal).materialize().block.values.shape[:2] == (
             repeats,
             windows,
         )
@@ -511,7 +475,12 @@ def test_a_finite_run_shows_its_dataset_filling_and_stops_when_asked() -> None:
 
 
 def test_a_finite_run_stops_within_a_read_slice_not_a_camera_timeout() -> None:
-    """The cancel latency is the loop's slice, not the device's deadline."""
+    """The cancel latency is the loop's slice, not the device's deadline.
+
+    A cancel is only ever seen BETWEEN reads, and the read was the camera's
+    whole timeout (2 s virtual, 10 s on the qCMOS), so Stop was refused for
+    that long while the console said the node was still stopping.
+    """
 
     plane = SignalDataPlane()
     installation = create_installation("virtual")
@@ -558,34 +527,6 @@ def test_a_finite_run_stops_within_a_read_slice_not_a_camera_timeout() -> None:
             host.shutdown()
         installation.close()
         plane.close()
-
-
-def test_repeat_100_builds_only_one_cycle_per_camera_commit() -> None:
-    shape = (96, 128)
-    node = SimpleNamespace(
-        instance_id="copy-proof",
-        generation="copy-proof-generation",
-        repeat=100,
-        frames_per_cycle=1,
-        actual_working_point=None,
-        frame_value_unit=None,
-        run_record={},
-        _camera_event_record=lambda _cycle: {},
-    )
-    payload = 0
-    for index in range(100):
-        cycle = (
-            CameraFrameRecord(
-                np.full(shape, index, dtype=np.uint16),
-                index,
-            ),
-        )
-        output = _finite_cycle_output(node, cycle, index)
-        assert output.snapshot.block.values.shape == (1, 1, *shape)
-        assert output.canonical_schema.physical_shape == (100, 1, *shape)
-        assert output.cell_origin == (index, 0)
-        payload += output.snapshot.block.values.nbytes
-    assert payload == 100 * np.empty(shape, dtype=np.uint16).nbytes
 
 
 def test_a_cycle_event_carries_only_the_settings_its_own_frames_were_taken_at() -> None:

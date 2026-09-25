@@ -11,12 +11,9 @@ port. Manual and device rows move automatically ahead of board rows,
 preserving their relative order: their points advance BETWEEN plays of
 the inner table, so they stand outside it by construction.
 
-Ports are read from the projection -- the resolved pulse template's API
-parameters, plus the bench's tunable devices for a node that can move them --
-the same set that node's binding enforces.  A board-advanced scan cannot make
-a host call between two rows of one table, so its editor never offers a
-device port: the form shows what the node would accept, not what some scan
-somewhere could.  An axis whose values are not a uniform grid (authored in a
+Ports are read from the projection -- the resolved pulse template's slots and
+API parameters, plus the bench's tunable devices -- the same set the node's
+binding enforces.  An axis whose values are not a uniform grid (authored in a
 notebook, say) is shown as "custom" and left untouched until a spin is edited,
 at which point it becomes the uniform grid the spins describe.
 """
@@ -35,7 +32,6 @@ from zlc_ui.fluent import (
     ACCENT,
     GREY,
     FluentButton,
-    FluentComboBox,
     FluentDoubleSpinBox,
     FluentTreeComboBox,
     FluentLineEdit,
@@ -68,6 +64,7 @@ from .plan import (
     plan_input_rows,
     parse_scan_values,
     DEVICE_PARAM_FAMILY,
+    device_port_parts,
     scan_ports_for_devices,
     label_device_scan_ports,
 )
@@ -437,9 +434,6 @@ class _AxisRow(QtWidgets.QWidget):
     def manual(self) -> bool:
         return False
 
-    def axis(self) -> ScanAxis:
-        return ScanPlan.from_tree({"axes": [self.input_entry()]}).axes[0]
-
 
 class _ManualAxisRow(_AxisRow):
     """One manual axis: a name, its values, and the remove button.
@@ -498,18 +492,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
     draft_changed = QtCore.pyqtSignal(object)
     managed_fields = ("plan", "api_values")
 
-    def __init__(
-        self,
-        parent=None,
-        *,
-        device_ports: bool = True,
-        manual_axes: bool = False,
-    ) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._device_ports = bool(device_ports)
-        # Only a node that can STOP between plays can offer one, so the
-        # editor shows the button exactly where the node would honour it.
-        self._manual_axes = bool(manual_axes)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
@@ -520,10 +504,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self.add_button)
-        if self._manual_axes:
-            header.addWidget(self.add_manual_button)
-        else:
-            self.add_manual_button.hide()
+        header.addWidget(self.add_manual_button)
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         column.addLayout(self.rows_layout)
@@ -567,12 +548,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._tunable_devices = {}
         self._port_read_request = None
         self._port_read_pending = False
+        #: The projection a device read in flight is for: its template
+        #: ports, pulse, plan and API values, adopted when the read lands;
+        #: None once this editor has emitted a newer draft.
+        self._port_read_projection = None
+        #: (devices and device-axis units, the ports those devices answered)
+        #: of the last read that landed.
+        self._device_scan_ports = None
         self.add_button.clicked.connect(self._add_axis)
         self.add_manual_button.clicked.connect(self._add_manual_axis)
-        # Whether a hand can be waited for is a fact about the NODE, known
-        # at construction; the projection only ever changes which ports a
-        # machine offers.
-        self.add_manual_button.setEnabled(self._manual_axes)
 
     # ------------------------------------------------------- host contract
 
@@ -640,16 +624,31 @@ class ScanPlanEditor(QtWidgets.QWidget):
             else ()
         )
         values_text = str(values.get("api_values") or "") if isinstance(values, Mapping) else ""
-        if self._device_ports and self._tunable_devices:
-            units = {axis["port"]: axis["unit"] for axis in axes}
-            key = (id(sequence), plan_text, values_text,
-                   tuple((name, id(device)) for name, device in sorted(self._tunable_devices.items())))
+        if self._tunable_devices:
+            # What the devices answer depends on the devices and on the unit
+            # each device axis is read in, and on nothing else: an edit to a
+            # spin, a pulse axis or an API value reuses the ports already read
+            # instead of asking every device again on the shared worker.
+            units = {
+                axis["port"]: axis["unit"]
+                for axis in axes
+                if axis["port"].startswith(DEVICE_PARAM_FAMILY)
+            }
+            key = (
+                tuple((name, id(device)) for name, device in sorted(self._tunable_devices.items())),
+                tuple(sorted(units.items())),
+            )
+            self._port_read_projection = (template_ports, sequence, plan_text, values_text)
+            if self._device_scan_ports is not None and self._device_scan_ports[0] == key:
+                self._port_read_request = None
+                self._apply_projection(
+                    template_ports + self._device_scan_ports[1], sequence, plan_text, values_text,
+                )
+                return
             if (labels_changed and self._port_read_request is not None
                     and self._port_read_request[0] == key):
                 return
-            self._port_read_request = (
-                key, sequence, template_ports, self._tunable_devices, plan_text, values_text, units,
-            )
+            self._port_read_request = (key, self._tunable_devices, units)
             if callable(self._run_device_read):
                 self._start_port_read()
                 return
@@ -663,13 +662,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
         request = self._port_read_request
         if request is None or self._port_read_pending:
             return
-        key, sequence, template_ports, devices, plan_text, values_text, units = request
+        key, devices, units = request
         self._port_read_pending = True
         self.summary.setText("Reading device ranges…")
         owner_ref = weakref(self)
 
         def work():
-            return template_ports + scan_ports_for_devices(devices, units=units)
+            return scan_ports_for_devices(devices, units=units)
 
         def finish(ports=None, error=None):
             owner = owner_ref()
@@ -685,7 +684,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if error is not None:
                 owner.summary.setText(f"Cannot read device ranges: {error}")
                 return
-            owner._apply_projection(ports, sequence, plan_text, values_text)
+            owner._port_read_request = None
+            owner._device_scan_ports = (key, tuple(ports))
+            # A draft emitted since this read began has its own projection
+            # coming, and that one finds these ports already read; the one
+            # this read began under would put the old draft back.
+            if owner._port_read_projection is not None:
+                template_ports, sequence, plan_text, values_text = owner._port_read_projection
+                owner._apply_projection(
+                    template_ports + tuple(ports), sequence, plan_text, values_text,
+                )
 
         try:
             self._run_device_read(work, finish, lambda error: finish(error=error))
@@ -712,7 +720,6 @@ class ScanPlanEditor(QtWidgets.QWidget):
     @QtCore.pyqtSlot(object, object, str)
     def _convert_axis_unit(self, row, entry: Mapping, unit: str) -> None:
         from zlc_atom.authoring import convert_tunable_value
-        from .devices import device_port_parts
 
         key, field = device_port_parts(entry["port"])
         device = self._tunable_devices.get(key)
@@ -949,7 +956,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _emit_values(self, *, normalized: bool = False) -> None:
         self._values_text = api_overrides_to_authored(self._overrides())
-        self._port_read_request = None
+        self._port_read_projection = None
         patch = {"values": {"api_values": self._values_text}}
         if normalized:
             patch["normalized"] = True
@@ -1145,7 +1152,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
             for index, row in enumerate(ordered):
                 self.rows_layout.insertWidget(index, row)
         self._plan_text = json.dumps({"axes": [row.input_entry() for row in self._rows]})
-        self._port_read_request = None
+        self._port_read_projection = None
         # The host's draft contract: a patch under "values", the same shape
         # the auto-generated form emits.
         patch = {"values": {"plan": self._plan_text}}
@@ -1202,16 +1209,3 @@ class ScanPlanEditor(QtWidgets.QWidget):
             "outermost first; each point resolves the template, plays it, and "
             f"captures one measurement.{by_hand}{by_device}"
         )
-
-
-def scan_plan_editor_factory(
-    parent=None,
-    *,
-    device_ports: bool = True,
-    manual_axes: bool = False,
-) -> ScanPlanEditor:
-    return ScanPlanEditor(
-        parent,
-        device_ports=device_ports,
-        manual_axes=manual_axes,
-    )

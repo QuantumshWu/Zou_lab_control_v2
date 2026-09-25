@@ -6,6 +6,8 @@ import re
 import subprocess
 import sys
 
+from tests.fakes import imported_modules
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "zlc_atom"
@@ -185,22 +187,10 @@ def test_simulation_devices_are_a_separate_device_family() -> None:
             # import x`` names the same module an absolute import does, and a
             # driver written against the world is a driver written to please
             # it whichever spelling it used.
-            module = ".".join(
-                ("zlc_atom", *path.relative_to(SRC).with_suffix("").parts)
-            ).rsplit(".", 1)[0]
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                targets = []
-                if isinstance(node, ast.Import):
-                    targets = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and not node.level:
-                    targets = [node.module]
-                elif isinstance(node, ast.ImportFrom):
-                    parts = module.split(".")
-                    base = ".".join(parts[: len(parts) - node.level + 1])
-                    targets = [f"{base}.{node.module}" if node.module else base]
-                assert not any(
-                    target.startswith("zlc_atom.devices.simulation") for target in targets
-                ), path
+            assert not any(
+                target.startswith("zlc_atom.devices.simulation")
+                for target in imported_modules(path)
+            ), path
         assert not any(
             "virtual" in part or "world" in part
             for path in package.rglob("*.py")

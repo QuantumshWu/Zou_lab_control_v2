@@ -1,8 +1,8 @@
 """Scan schema and placement planning over Runtime-owned committed chunks.
 
-Both scan engines -- the board-advanced one and the host-advanced one -- write
-here, because the dataset is the same object either way.  What differs is who
-moves the plan from point to point; what a point MEANS in the data does not.
+Seamless Scan writes here.  Its board axes advance inside a fire and its host
+axes between fires; who moves the plan from point to point differs, what a
+point MEANS in the data does not.
 
 The plan's coordinates are known before any data.  Once the first source event
 supplies its schema, this module computes the fixed scan schema and the slice

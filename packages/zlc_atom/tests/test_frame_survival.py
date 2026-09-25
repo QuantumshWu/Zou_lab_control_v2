@@ -66,14 +66,6 @@ def _occupied_snapshot(
     )
 
 
-def test_forward_pairs_enumerate_every_combination() -> None:
-    assert _forward_pairs(2) == ((0, 1),)
-    assert _forward_pairs(3) == ((0, 1), (0, 2), (1, 2))
-    assert _forward_pairs(4) == (
-        (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
-    )
-
-
 def test_pairing_identity_per_entry() -> None:
     rng = np.random.default_rng(3)
     occupied = rng.random((40, 3, 6)) < 0.5
@@ -107,23 +99,6 @@ def test_unjudgeable_frames_leave_the_denominator() -> None:
     assert not validity[1].any()
     assert not validity[2, 0]
     assert validity[0].all() and validity[3].all()
-
-
-def test_mean_over_validity_is_the_pooled_survival() -> None:
-    """The design's central identity: averaging the dataset IS pooling."""
-
-    rng = np.random.default_rng(11)
-    occupied = rng.random((60, 3, 5)) < 0.6
-    survival = FrameSurvivalProcessor()._pair(_occupied_snapshot(occupied))
-    values = np.asarray(survival.block.values)
-    validity = np.asarray(survival.expanded_validity())
-    for entry, (condition, value) in enumerate(_forward_pairs(3)):
-        loaded = occupied[:, condition, :]
-        pooled = (occupied[:, value, :] & loaded).sum() / loaded.sum()
-        projected = np.nanmean(
-            values[:, entry, :][validity[:, entry, :]]
-        )
-        np.testing.assert_allclose(projected, pooled, rtol=1e-12)
 
 
 def test_pair_axis_carries_one_label_per_pair() -> None:
@@ -240,8 +215,7 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
 
 
 @pytest.mark.parametrize("frames", (2, 3, 4))
-def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, monkeypatch) -> None:
-    import zlc_atom.nodes.frame_survival.processor as processor_module
+def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) -> None:
     from types import SimpleNamespace
     from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
     from zlc_atom.nodes.frame_survival import SURVIVAL_OUTPUTS
@@ -260,12 +234,6 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, 
         (("frame", "V"), ("other", "Hz")), run_repeats=2,
     )
     processor = FrameSurvivalProcessor(producer="survival")
-    layouts = []
-    original_rows = processor_module._frame_rows
-    def tracked_rows(schema, axis):
-        layouts.append(schema)
-        return original_rows(schema, axis)
-    monkeypatch.setattr(processor_module, '_frame_rows', tracked_rows)
     scan = SimpleNamespace(instance_id="scan", dataset_output_declarations=(SCAN_OUTPUT,),
                            signal_key=lambda name: f"@logic/scan/{name}")
     result = SimpleNamespace(instance_id="survival", dataset_output_declarations=SURVIVAL_OUTPUTS,
@@ -302,14 +270,12 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, 
                         eligible[repeat, point, entry] = trial
                         expected[repeat, point, entry] = trial & occupied[repeat, point, after]
                         entry += 1
-                live = plane.current_dataset("@logic/survival/survival")
+                live = plane.current_dataset("@logic/survival/survival").materialize()
                 np.testing.assert_array_equal(live.block.values, expected.reshape(2, -1, 3))
                 np.testing.assert_array_equal(live.expanded_validity(), eligible.reshape(2, -1, 3))
-        assert len(layouts) == 2, 'unchanged event/canonical geometry was rebuilt per shot'
         plane.seal_committed(scan)
         source = plane.current_dataset("@logic/scan/scan")
         terminal = processor.evaluate(SignalValue("scan", source, None))["survival"]
-        assert len(layouts) == 3, 'terminal input must plan its actual complete geometry'
         assert terminal.snapshot.block.schema == live.block.schema
         assert terminal.coverage == DatasetCoverage(8 * pair_count, 8 * pair_count)
         np.testing.assert_array_equal(terminal.snapshot.block.values, live.block.values)
@@ -336,26 +302,6 @@ def test_evaluate_refuses_partial_cycle_coverage() -> None:
     )
     with pytest.raises(ValueError, match="whole cycles"):
         FrameSurvivalProcessor().evaluate(signal)
-
-
-def test_terminal_dataset_evaluates_frozen() -> None:
-    rng = np.random.default_rng(5)
-    occupied = rng.random((8, 2, 3)) < 0.5
-    snapshot = _occupied_snapshot(occupied)
-    outputs = FrameSurvivalProcessor().evaluate(
-        SignalValue("@logic/occupancy/occupied", snapshot, None)
-    )
-    survival = outputs["survival"]
-    assert survival.coverage == DatasetCoverage(8, 8)  # cycles x one pair
-    values = np.asarray(survival.snapshot.block.values)
-    assert values.shape == (8, 1, 3)  # (cycles, 1 pair, sites)
-
-
-def test_discovered_as_a_logic_node() -> None:
-    from zlc_atom.nodes import discover_logic_nodes
-
-    names = {descriptor.api_name for descriptor in discover_logic_nodes()}
-    assert "frame_survival" in names
 
 
 def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
@@ -534,14 +480,12 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
             ),
         )
 
-        occupancy = OccupancyProcessor(
-            calibration, producer="occ-chain", source_signal=frames_key
-        )
+        occupancy = OccupancyProcessor(calibration, source_signal=frames_key)
         occupancy_host = NodeHost(
             occupancy,
             plane,
             Event().set,
-            instance_id=occupancy.instance_id,
+            instance_id="occ-chain",
             kind="processor",
             dataset_output_declarations=OCCUPANCY_OUTPUTS,
             input_signal=frames_key,

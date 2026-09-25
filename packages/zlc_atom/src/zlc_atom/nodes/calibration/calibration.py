@@ -7,8 +7,6 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
 from math import isfinite, sqrt
-
-import json
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, ClassVar
@@ -16,13 +14,11 @@ from typing import Any, Callable, ClassVar
 import numpy as np
 
 from zlc_data import SITE, AxisId, AxisSpec
-from zlc_durable import write_readable_json
+from zlc_durable import strict_json_loads, write_readable_json
 
 from zlc_atom.authoring import AuthoringChoice
 
-from zlc_atom.authoring import AuthoringChoice
-
-from .bimodal import fit_bimodal, finite_mean, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity
+from .bimodal import fit_bimodal, per_site_fidelity
 from .psf import extract_psf_window, gaussian_psf_kernel
 
 
@@ -35,17 +31,6 @@ class ReadoutModelKind(str, Enum):
 
 
 DEFAULT_READOUT_MODEL_CHOICE = "default"
-
-#: What a node may ask a calibration for, as a form offers it: the artifact's
-#: own default, then each model by name.  Said here, beside the kinds and the
-#: resolver, because a form offering a choice this mapping cannot resolve is a
-#: form that fails at build time.
-READOUT_MODEL_CHOICES = (
-    AuthoringChoice(DEFAULT_READOUT_MODEL_CHOICE, "Calibration default"),
-    AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
-    AuthoringChoice(ReadoutModelKind.PER_SITE_PSF.value, "Per-site PSF"),
-    AuthoringChoice(ReadoutModelKind.UNIFORM_PSF.value, "Uniform PSF"),
-)
 
 #: What a node may ask a calibration for, as a form offers it: the artifact's
 #: own default, then each model by name.  Said here, beside the kinds and the
@@ -169,19 +154,6 @@ def _immutable_json_value(value: object, name: str) -> object:
     return _freeze_json_value(_plain_json_value(value, name))
 
 
-def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate key in calibration JSON: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_nonfinite_json_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON constant in calibration: {value}")
-
-
 def readout_model_kind_from_choice(
     value: object,
 ) -> ReadoutModelKind | None:
@@ -205,26 +177,21 @@ def _shape(value: object, field_name: str) -> tuple[int, int]:
     return result
 
 
-def reads_photoelectrons(calibration: object) -> bool:
+def reads_photoelectrons(calibration: "TrapCalibration") -> bool | None:
     """Whether this calibration's thresholds are numbers of photoelectrons.
 
-    Read from the run it was fitted on.  Every node that classifies frames
-    against a calibration has to take its own frames in the SAME numbers --
-    the conversion is affine, so a mismatch does not read a little wrong, it
-    reads every site the same way -- and asking here is how they agree
-    without each keeping its own switch.
+    Read from the run it was fitted on; None when its report records no run
+    (one built by hand), which says nothing either way.  Every node that
+    classifies frames against a calibration has to take its own frames in the
+    SAME numbers -- the conversion is affine, so a mismatch does not read a
+    little wrong, it reads every site the same way -- and asking here is how
+    they agree without each keeping its own switch.
     """
 
-    report = getattr(calibration, "report", None)
-    if not isinstance(report, Mapping):
-        return False
-    record = report.get("run_record")
+    record = calibration.report.get("run_record")
     if not isinstance(record, Mapping):
-        return False
-    request = record.get("request")
-    if not isinstance(request, Mapping):
-        return False
-    return bool(request.get("photoelectrons", False))
+        return None
+    return bool((record.get("request") or {}).get("photoelectrons", False))
 
 
 @dataclass(frozen=True)
@@ -403,9 +370,9 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
     frame is gathered in one indexing and summed in one call: an occupancy
     reads a 42-frame cycle without 42 Python round trips, and a stack
     answers exactly what the frames answer one at a time -- each window is
-    summed over its own contiguous pixels either way.  A pixel that is not
-    finite is left out of its window's total; a window with no finite pixel
-    has no total.
+    summed over its own contiguous pixels either way.  A window holding any
+    pixel that is not finite has no total -- the PSF readout's rule too -- so
+    a masked site is read as no number at all, never as a valid, dim one.
     """
 
     array = np.asarray(image.values if hasattr(image, "values") else image)
@@ -435,12 +402,12 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
         yy = y0[:, None, None] + np.arange(size)[None, :, None]
         xx = x0[:, None, None] + np.arange(size)[None, None, :]
         windows = frames[:, yy, xx].reshape(frames.shape[0], len(centers), size * size)
+        sums = windows.sum(axis=2, dtype=np.float64)
         if frames.dtype.kind in "biu":
-            output[:] = windows.sum(axis=2, dtype=np.float64)
+            output[:] = sums
         else:
-            finite = np.isfinite(windows)
-            sums = np.where(finite, windows, 0).sum(axis=2, dtype=np.float64)
-            output[:] = np.where(finite.any(axis=2), sums, np.nan)
+            finite = np.isfinite(windows).all(axis=2)
+            output[finite] = sums[finite]
     return output if stacked else output[0]
 
 
@@ -1064,26 +1031,8 @@ class TrapCalibration:
         *,
         model_kind: ReadoutModelKind | None = None,
     ) -> np.ndarray:
-        array = np.asarray(image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image)
-        array = self.frame_contract.assert_image(array)
-        model = self.select_model(model_kind)
-        if model.kind is ReadoutModelKind.BOX:
-            values = extract_box_signals(
-                array,
-                self.site_map.centers_xy,
-                radius=model.integration_half_width,
-            )
-        else:
-            values = extract_psf_signals(
-                array,
-                self.site_map.centers_xy,
-                kernels=model.psf_weights,
-                boxes_xywh=model.psf_boxes,
-                background=model.background,
-                radius=model.integration_half_width,
-                padding=model.psf_padding,
-            )
-        return np.where(self.site_map.valid_sites & model.usable_sites, values, np.nan)
+        array = self.frame_contract.assert_image(image)
+        return self.signals_of_frames(array[None], model_kind=model_kind)[0]
 
     def signals_of_frames(
         self,
@@ -1182,11 +1131,7 @@ class TrapCalibration:
     @classmethod
     def load(cls, path: str | Path) -> "TrapCalibration":
         return cls.from_dict(
-            json.loads(
-                Path(path).read_text(encoding="utf-8"),
-                object_pairs_hook=_reject_duplicate_json_keys,
-                parse_constant=_reject_nonfinite_json_constant,
-            )
+            strict_json_loads(Path(path).read_text(encoding="utf-8"), "calibration JSON")
         )
 
 
@@ -1829,12 +1774,16 @@ def detect_sites(
     each site, which a published site must be able to carry.
     """
 
-    stack = np.asarray(
-        frames.values if hasattr(frames, "values") else frames, dtype=float
-    )
+    # The frames' own dtype: the run is filtered in blocks, each widened to
+    # float as it is read, so the whole run is never held as float64.
+    stack = np.asarray(frames.values if hasattr(frames, "values") else frames)
     if stack.ndim == 2:
         stack = stack[np.newaxis, ...]
-    if stack.ndim != 3 or 0 in stack.shape or not np.isfinite(stack).all():
+    if (
+        stack.ndim != 3
+        or 0 in stack.shape
+        or (stack.dtype.kind in "fc" and not np.isfinite(stack).all())
+    ):
         raise ValueError("frames must be a non-empty finite stack of 2D images")
     spot_sigma = float(spot_sigma)
     detection_sigma = float(detection_sigma)
@@ -2084,21 +2033,20 @@ def _measure_readout_weights(
     )
 
 
+# Both stacks keep the frames' own dtype.  A run of large frames widened to
+# float64 up front was the whole run held twice or more at once; every step
+# that needs floats widens the block or the windows it is working on.
 def _coerce_reference_stack(reference_frames: object, frame_contract: FrameContract) -> np.ndarray:
     if isinstance(reference_frames, np.ndarray):
         raw = np.asarray(reference_frames)
         if raw.ndim == 4:
             return np.asarray(
-                [[frame_contract.assert_image(frame) for frame in group] for group in raw],
-                dtype=float,
+                [[frame_contract.assert_image(frame) for frame in group] for group in raw]
             )
         if raw.ndim == 3:
-            return np.asarray(
-                [[frame_contract.assert_image(frame)] for frame in raw],
-                dtype=float,
-            )
+            return np.asarray([[frame_contract.assert_image(frame)] for frame in raw])
         if raw.ndim == 2:
-            return np.asarray([[frame_contract.assert_image(raw)]], dtype=float)
+            return np.asarray([[frame_contract.assert_image(raw)]])
         raise ValueError("reference frames must have shape (groups, shots, y, x)")
     groups = list(reference_frames)  # type: ignore[arg-type]
     if not groups:
@@ -2106,8 +2054,7 @@ def _coerce_reference_stack(reference_frames: object, frame_contract: FrameContr
     nested = isinstance(groups[0], (tuple, list))
     grouped = groups if nested else [[item] for item in groups]
     return np.asarray(
-        [[frame_contract.assert_image(frame) for frame in group] for group in grouped],
-        dtype=float,
+        [[frame_contract.assert_image(frame) for frame in group] for group in grouped]
     )
 
 
@@ -2116,11 +2063,11 @@ def _coerce_short_stack(short_frames: object, frame_contract: FrameContract) -> 
         raw = np.asarray(short_frames)
         if raw.ndim != 3:
             raise ValueError("short frames must have shape (groups, y, x)")
-        return np.asarray([frame_contract.assert_image(frame) for frame in raw], dtype=float)
+        return np.asarray([frame_contract.assert_image(frame) for frame in raw])
     frames = list(short_frames)  # type: ignore[arg-type]
     if not frames:
         raise ValueError("calibration requires non-empty short frames")
-    return np.asarray([frame_contract.assert_image(frame) for frame in frames], dtype=float)
+    return np.asarray([frame_contract.assert_image(frame) for frame in frames])
 
 
 def _empirical_threshold(
@@ -2227,40 +2174,19 @@ def _fit_readout_model(
             dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
         gaussian_threshold = float("nan")
         mixture = fit_bimodal(short_signals[finite, site])
+        # The fit's own threshold and fidelity are already the weighted
+        # crossing and its weighted fidelity; ``ok`` includes that the
+        # crossing exists between the two means.
         if mixture.ok and mixture.bright_above:
-            dark_weight = 1.0 - float(mixture.bright_fraction)
-            bright_weight = float(mixture.bright_fraction)
-            candidate, bright_above = optimal_gaussian_threshold(
-                mixture.dark_mean,
-                mixture.dark_sigma,
-                mixture.bright_mean,
-                mixture.bright_sigma,
-                dark_weight,
-                bright_weight,
-            )
-            if (
-                bright_above
-                and np.isfinite(candidate)
-                and mixture.dark_mean < candidate < mixture.bright_mean
-            ):
-                gaussian_threshold = candidate
-                gaussian_thresholds[site] = candidate
-                gaussian_dark_means[site] = mixture.dark_mean
-                gaussian_dark_sigmas[site] = mixture.dark_sigma
-                gaussian_bright_means[site] = mixture.bright_mean
-                gaussian_bright_sigmas[site] = mixture.bright_sigma
-                gaussian_dark_weights[site] = dark_weight
-                gaussian_bright_weights[site] = bright_weight
-                site_gaussian_fidelity[site] = gaussian_fidelity(
-                    mixture.dark_mean,
-                    mixture.dark_sigma,
-                    mixture.bright_mean,
-                    mixture.bright_sigma,
-                    candidate,
-                    True,
-                    dark_weight,
-                    bright_weight,
-                )[2]
+            gaussian_threshold = mixture.threshold
+            gaussian_thresholds[site] = mixture.threshold
+            gaussian_dark_means[site] = mixture.dark_mean
+            gaussian_dark_sigmas[site] = mixture.dark_sigma
+            gaussian_bright_means[site] = mixture.bright_mean
+            gaussian_bright_sigmas[site] = mixture.bright_sigma
+            gaussian_dark_weights[site] = 1.0 - mixture.bright_fraction
+            gaussian_bright_weights[site] = mixture.bright_fraction
+            site_gaussian_fidelity[site] = mixture.fidelity
         threshold = gaussian_threshold
         if threshold_method == "empirical" or not np.isfinite(gaussian_threshold):
             threshold = (
@@ -2375,7 +2301,9 @@ def calibrate(
     shorts = _coerce_short_stack(short_frames, frame_contract)
     if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
         raise ValueError("reference and short frames must share non-empty group counts")
-    reference_average = finite_mean(references, axis=(0, 1))
+    # detect_sites refuses a stack that is not finite, so a plain mean is the
+    # mean of finite frames here.
+    reference_average = references.mean(axis=(0, 1), dtype=np.float64)
     # Sites are found from every reference frame of the run, one at a time:
     # what makes a place a site is being seen there repeatedly, and no summary
     # of the run keeps that -- an average or a quantile mixes "how bright when
@@ -2401,10 +2329,9 @@ def calibrate(
         centers,
         radius=box_half_width,
     )
-    reference_label_signals = np.asarray(
-        [[box_extractor(frame) for frame in group] for group in references],
-        dtype=float,
-    )
+    reference_label_signals = box_extractor(
+        references.reshape(-1, *references.shape[2:])
+    ).reshape(*references.shape[:2], -1)
     reference_valid = np.isfinite(reference_label_signals)
     fits = tuple(
         fit_bimodal(
@@ -2527,9 +2454,7 @@ def calibrate(
     models: list[ReadoutModel] = []
     model_reports: dict[str, dict[str, Any]] = {}
     for kind, extractor, parameters, diagnostics in feature_specs:
-        short_signals = np.asarray(
-            [extractor(frame) for frame in shorts], dtype=float
-        )
+        short_signals = extractor(shorts)
         model, model_report = _fit_readout_model(
             kind=kind,
             site_map=site_map,

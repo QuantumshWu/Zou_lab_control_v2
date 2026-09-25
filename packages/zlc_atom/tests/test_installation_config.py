@@ -18,7 +18,6 @@ import pytest
 
 from zlc_atom.install import create_installation
 from zlc_atom.install.configuration import (
-    DEVICE_ENTRY_KEYS,
     DOCUMENT_FORMAT,
     DeviceInstanceConfig,
     InstallationConfig,
@@ -127,7 +126,6 @@ def test_a_device_entry_with_the_wrong_keys_is_refused(entry) -> None:
 
     with pytest.raises(ValueError, match="exactly"):
         DeviceInstanceConfig.from_dict(entry)
-    assert DEVICE_ENTRY_KEYS == {"instance_id", "role", "type_id", "parameters"}
 
 
 def test_two_devices_may_not_share_a_name_or_a_role() -> None:

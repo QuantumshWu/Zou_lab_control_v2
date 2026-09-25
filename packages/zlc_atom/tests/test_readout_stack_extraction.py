@@ -2,15 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.nodes.calibration import (
@@ -34,9 +27,9 @@ def _reference_box(frame: np.ndarray, centers: np.ndarray, radius: int) -> np.nd
     for index, (x, y) in enumerate(centers):
         x, y = int(round(float(x))), int(round(float(y)))
         values = frame[y - radius : y + radius + 1, x - radius : x + radius + 1]
-        finite = values if values.dtype.kind in "biu" else values[np.isfinite(values)]
-        if finite.size:
-            output[index] = float(np.sum(finite, dtype=np.float64))
+        # A window with any pixel that is not finite has no total.
+        if np.isfinite(values).all():
+            output[index] = float(np.sum(values, dtype=np.float64))
     return output
 
 

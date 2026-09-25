@@ -7,13 +7,11 @@ import time
 from zlc_atom.devices.camera import CameraAdapter, CameraFrameRecord
 from zlc_atom.devices.camera.dcam import DcamCameraAdapter
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter
-from zlc_atom.devices.camera.binding import bind_camera
 from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.execution import (
-    DeviceIdentityEvidenceKind,
     DeviceBroker,
     PhysicalDeviceIdentity,
     ResourceKey,
@@ -31,11 +29,6 @@ def test_real_and_virtual_cameras_share_one_runtime_contract() -> None:
         object.__new__(PylonCameraAdapter),
     )
     assert all(isinstance(adapter, CameraAdapter) for adapter in adapters)
-
-
-def test_camera_binding_rejects_an_object_outside_the_camera_contract() -> None:
-    with pytest.raises(TypeError, match="canonical CameraAdapter"):
-        bind_camera(object(), "bad", object(), "bad", "camera.bad")  # type: ignore[arg-type]
 
 
 def test_virtual_camera_preserves_frames_and_reports_bounded_intake_failure() -> None:
@@ -163,6 +156,7 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
     camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
     with pytest.raises(RuntimeError, match="while armed"):
         camera.set_roi(None)
+    with pytest.raises(RuntimeError, match="while armed"):
         camera.set_exposure_seconds(0.01)
     camera.trigger()
     record = camera.read_frame_records(1, timeout=1.0, exact=True)[0]
@@ -368,7 +362,7 @@ def test_broker_helper_is_the_single_identity_binding_ritual() -> None:
     binding, proof = bind_verified_device(
         broker,
         key=ResourceKey.parse("device/test"),
-        identity_probe=lambda: PhysicalDeviceIdentity("test", DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT),
+        identity_probe=lambda: PhysicalDeviceIdentity("test"),
         capability_probe=lambda: {"test": "capability"},
     )
     assert proof.snapshot["test"] == "capability"

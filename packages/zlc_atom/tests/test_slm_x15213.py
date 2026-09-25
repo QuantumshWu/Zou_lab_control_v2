@@ -14,6 +14,7 @@ from zlc_atom.devices.slm.hamamatsu_x15213.remote import _RemoteSlmAdapter, _ope
 from zlc_atom.devices.slm.hamamatsu_x15213.device_types import (
     DEVICE_TYPES,
     HAMAMATSU_X15213_SCHEMA,
+    X15213_LOCAL_SCHEMA,
     X15213_SERVER_SCHEMA,
     X15213Adapter,
     _load_sdk,
@@ -22,6 +23,8 @@ from zlc_atom.devices.slm.hamamatsu_x15213.device_types import (
     _print_client_endpoints,
 )
 from zlc_atom.install import create_installation
+
+from tests.fakes import running_slm_server
 
 
 class _UsbSdk:
@@ -118,13 +121,6 @@ def _patch_usb(monkeypatch, sdk: _UsbSdk, handle: _Handle | None = None) -> _Han
     return result
 
 
-def _running_server(adapter: SlmAdapter):
-    server = _open_slm_server(adapter, "127.0.0.1", 0)
-    worker = Thread(target=server.serve_forever, daemon=True)
-    worker.start()
-    return server, worker
-
-
 def test_real_slm_descriptor_matches_the_pulse_server_endpoint_model() -> None:
     assert [item.type_id for item in DEVICE_TYPES] == [
         "slm.hamamatsu_x15213",
@@ -144,6 +140,12 @@ def test_real_slm_descriptor_matches_the_pulse_server_endpoint_model() -> None:
         "port": 18862,
     }
     assert set(X15213_SERVER_SCHEMA.field_names) == set(_config())
+    # The local head is the server's own form plus the port to serve on --
+    # the same facts the CLI takes -- so initializing it is starting the
+    # server, with nothing retyped.
+    assert [field.name for field in X15213_LOCAL_SCHEMA.fields] == [
+        field.name for field in X15213_SERVER_SCHEMA.fields
+    ] + ["port"]
 
 
 def test_profile_is_strict_and_records_physical_provenance_boundaries(
@@ -214,69 +216,6 @@ def test_the_slm_server_admits_peers_only_while_told_to(monkeypatch) -> None:
         physical.close()
 
 
-def test_real_installation_dials_its_server_endpoint_and_starts_unknown(
-    monkeypatch,
-) -> None:
-    sdk = _UsbSdk()
-    handle = _patch_usb(monkeypatch, sdk)
-    physical = X15213Adapter(_config())
-    server, worker = _running_server(physical)
-    installation = None
-    try:
-        installation = create_installation(
-            (
-                {
-                    "key": "slm",
-                    "type_id": "slm.hamamatsu_x15213",
-                    "config": {
-                        "host": "127.0.0.1",
-                        "port": server.server_address[1],
-                    },
-                },
-            )
-        )
-        assert installation.failures == {}
-        slm = installation.capability("slm.phase", key="slm")
-        assert isinstance(slm, SlmAdapter)
-        assert slm.last_commanded_phase is None
-        assert slm.command_revision == 0
-        assert slm.mapping_revision == 0
-        assert slm.last_command_receipt == {
-            "transport": "usb",
-            "identity": "hamamatsu-x15213:usb:LSH0804382",
-            "profile": "LSH0804382",
-            "model": "X15213 (exact type suffix not recorded)",
-            "serial": "LSH0804382",
-            "wavelength_nm": 852.0,
-            "flip_x": False,
-            "flip_y": False,
-            "correction_path": "",
-            "correction_enabled": False,
-            "mapping_revision": 0,
-            "settle_seconds": 0.05,
-            "settle_source": "Repository default; optical settle acceptance pending",
-            "phase_curve_source": (
-                "Repository calibration values; measurement provenance not recorded"
-            ),
-            "dvi_controller_mode_proven": False,
-            "outcome": "unknown",
-            "command_revision": 0,
-            "stage": "uncommanded",
-            "readback": "not-run",
-        }
-        assert sdk.write_count == 0
-    finally:
-        if installation is not None:
-            installation.close()
-        server.shutdown()
-        server.server_close()
-        worker.join(timeout=2.0)
-        physical.close()
-    assert not worker.is_alive()
-    assert sdk.close_count == 1
-    assert handle.close_count == 1
-
-
 def test_successful_usb_command_is_known_only_after_readback_and_settle(
     monkeypatch,
 ) -> None:
@@ -304,63 +243,64 @@ def test_successful_usb_command_is_known_only_after_readback_and_settle(
 def test_usb_failure_outcomes_preserve_old_or_become_unknown(
     monkeypatch,
 ) -> None:
-    sdk = _UsbSdk()
-    _patch_usb(monkeypatch, sdk)
-    adapter = X15213Adapter(_config())
-    old = adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
+    """Each stage of the walk -- write, display, readback, settle -- fails."""
 
-    sdk.write_updates = False
-    sdk.write_result = 0
-    with pytest.raises(RuntimeError, match="Write_FMemArray"):
-        adapter.apply_phase(np.full(adapter.shape_yx, np.pi, dtype=np.float32))
-    assert adapter.last_command_receipt["outcome"] == "known-old"
-    assert adapter.last_command_receipt["readback"] == "matched-old"
-    np.testing.assert_array_equal(adapter.last_commanded_phase, old)
-
-    sdk.write_updates = True
-    sdk.write_result = 1
-    sdk.change_result = 0
-    with pytest.raises(RuntimeError, match="Change_DispSlot"):
-        adapter.apply_phase(np.full(adapter.shape_yx, np.pi / 2.0, dtype=np.float32))
-    assert adapter.last_command_receipt["outcome"] == "unknown"
-    assert adapter.last_command_receipt["stage"] == "display"
-    assert adapter.last_command_receipt["readback"] == "matched-new"
-    assert adapter.last_commanded_phase is None
-
-    sdk.change_result = 1
-    sdk.check_result = 0
-    with pytest.raises(RuntimeError, match="Check_Disp_IMG"):
-        adapter.apply_phase(np.full(adapter.shape_yx, np.pi, dtype=np.float32))
-    assert adapter.last_commanded_phase is None
-    assert adapter.last_command_receipt["outcome"] == "unknown"
-    assert adapter.last_command_receipt["stage"] == "readback"
-    assert adapter.command_revision == 4
-    adapter.close()
-
-
-def test_settle_failure_clears_command_knowledge(monkeypatch) -> None:
     import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
 
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
     adapter = X15213Adapter(_config())
+    try:
+        old = adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
 
-    def fail_settle(_seconds: float) -> None:
-        raise RuntimeError("settle interrupted")
+        sdk.write_updates = False
+        sdk.write_result = 0
+        with pytest.raises(RuntimeError, match="Write_FMemArray"):
+            adapter.apply_phase(np.full(adapter.shape_yx, np.pi, dtype=np.float32))
+        assert adapter.last_command_receipt["outcome"] == "known-old"
+        assert adapter.last_command_receipt["readback"] == "matched-old"
+        np.testing.assert_array_equal(adapter.last_commanded_phase, old)
 
-    monkeypatch.setattr(module.time, "sleep", fail_settle)
-    with pytest.raises(RuntimeError, match="settle interrupted"):
-        adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
-    assert adapter.last_commanded_phase is None
-    assert adapter.last_command_receipt["outcome"] == "unknown"
-    assert adapter.last_command_receipt["stage"] == "settle"
-    assert adapter.last_command_receipt["readback"] == "matched-new"
-    adapter.close()
+        sdk.write_updates = True
+        sdk.write_result = 1
+        sdk.change_result = 0
+        with pytest.raises(RuntimeError, match="Change_DispSlot"):
+            adapter.apply_phase(np.full(adapter.shape_yx, np.pi / 2.0, dtype=np.float32))
+        assert adapter.last_command_receipt["outcome"] == "unknown"
+        assert adapter.last_command_receipt["stage"] == "display"
+        assert adapter.last_command_receipt["readback"] == "matched-new"
+        assert adapter.last_commanded_phase is None
+
+        sdk.change_result = 1
+        sdk.check_result = 0
+        with pytest.raises(RuntimeError, match="Check_Disp_IMG"):
+            adapter.apply_phase(np.full(adapter.shape_yx, np.pi, dtype=np.float32))
+        assert adapter.last_commanded_phase is None
+        assert adapter.last_command_receipt["outcome"] == "unknown"
+        assert adapter.last_command_receipt["stage"] == "readback"
+        assert adapter.command_revision == 4
+
+        sdk.check_result = 1
+
+        def fail_settle(_seconds: float) -> None:
+            raise RuntimeError("settle interrupted")
+
+        monkeypatch.setattr(module.time, "sleep", fail_settle)
+        with pytest.raises(RuntimeError, match="settle interrupted"):
+            adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
+        assert adapter.last_commanded_phase is None
+        assert adapter.last_command_receipt["outcome"] == "unknown"
+        assert adapter.last_command_receipt["stage"] == "settle"
+        assert adapter.last_command_receipt["readback"] == "matched-new"
+    finally:
+        adapter.close()
 
 
-def test_correction_revision_is_atomic_and_command_receipt_freezes_mapping(
+def test_command_receipt_freezes_the_authored_correction_mapping(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """The correction is an Init field; every receipt states the mapping it used."""
+
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
     correction_path = tmp_path / "CAL_LSH0804382_852nm.bmp"
@@ -368,45 +308,15 @@ def test_correction_revision_is_atomic_and_command_receipt_freezes_mapping(
     correction[0, 0] = 255
     Image.fromarray(correction, mode="L").save(correction_path)
 
-    adapter = X15213Adapter(_config())
+    adapter = X15213Adapter(_config(correction_path=str(correction_path)))
     try:
-        assert adapter.load_correction(correction_path) == 1
-        assert adapter.mapping_revision == 1
         adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
         frozen = adapter.last_command_receipt
-        assert frozen["mapping_revision"] == 1
+        assert frozen["mapping_revision"] == adapter.mapping_revision
         assert frozen["correction_enabled"] is True
         assert frozen["correction_path"] == str(correction_path.resolve())
-
-        assert adapter.set_correction_enabled(False) == 2
-        assert adapter.set_correction_enabled(False) == 2
-        assert adapter.mapping_revision == 2
-        assert adapter.last_command_receipt == frozen
-        # The frozen receipt is LEGAL state, not a contradiction: the
-        # binding validator and the remote decoder both accept a receipt
-        # older than the device's current mapping -- the picture on the
-        # head predates its configuration -- and refuse only a receipt
-        # AHEAD of it.
         from zlc_atom.devices.slm.device import _validated_state
 
-        validated = _validated_state(
-            adapter.identity,
-            adapter.shape_yx,
-            adapter.last_commanded_phase,
-            adapter.command_revision,
-            adapter.mapping_revision,
-            adapter.last_command_receipt,
-        )
-        assert validated[4] == 2 and validated[5]["mapping_revision"] == 1
-        server, worker = _running_server(adapter)
-        try:
-            remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2.0)
-            assert remote.mapping_revision == 2
-            assert remote.last_command_receipt["mapping_revision"] == 1
-        finally:
-            server.shutdown()
-            server.server_close()
-            worker.join(timeout=2.0)
         with pytest.raises(ValueError, match="newer than device truth"):
             _validated_state(
                 adapter.identity,
@@ -414,30 +324,8 @@ def test_correction_revision_is_atomic_and_command_receipt_freezes_mapping(
                 adapter.last_commanded_phase,
                 adapter.command_revision,
                 adapter.mapping_revision,
-                {**adapter.last_command_receipt, "mapping_revision": 3},
+                {**frozen, "mapping_revision": adapter.mapping_revision + 1},
             )
-        adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
-        assert adapter.last_command_receipt["mapping_revision"] == 2
-        assert adapter.last_command_receipt["correction_enabled"] is False
-
-        assert adapter.load_correction(correction_path) == 3
-        previous_phase = adapter.last_commanded_phase
-        previous_receipt = adapter.last_command_receipt
-        sdk.write_result = 0
-        sdk.write_updates = False
-        with pytest.raises(RuntimeError, match="Write_FMemArray"):
-            adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
-        assert adapter.last_command_receipt["readback"] == "matched-old"
-        assert adapter.last_command_receipt["outcome"] == "known-old"
-        assert adapter.last_command_receipt["mapping_revision"] == 2
-        assert adapter.last_command_receipt["correction_enabled"] is False
-        assert adapter.last_command_receipt["correction_path"] == str(
-            correction_path.resolve()
-        )
-        assert adapter.last_command_receipt["command_revision"] == 3
-        assert adapter.mapping_revision == 3
-        assert previous_receipt["mapping_revision"] == 2
-        np.testing.assert_array_equal(adapter.last_commanded_phase, previous_phase)
     finally:
         adapter.close()
 
@@ -553,7 +441,7 @@ def test_dvi_server_transport_needs_no_vendor_dll_and_preserves_the_raster_path(
     )
 
     adapter = X15213Adapter(_config(transport="dvi"))
-    server, worker = _running_server(adapter)
+    server, worker = running_slm_server(adapter)
     installation = None
     try:
         assert adapter.identity == r"hamamatsu-x15213:dvi-display:\\.\DISPLAY2"
@@ -654,9 +542,9 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
 
     sdk = _UsbSdk()
-    _patch_usb(monkeypatch, sdk)
+    handle = _patch_usb(monkeypatch, sdk)
     physical = X15213Adapter(_config())
-    server, worker = _running_server(physical)
+    server, worker = running_slm_server(physical)
     calls: list[str] = []
     original = device_module._rpc_call
     connections: list[socket.socket] = []
@@ -690,14 +578,38 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         )
         assert installation.failures == {}
         remote = installation.capability("slm.phase", key="slm")
+        assert isinstance(remote, SlmAdapter)
         assert calls == ["describe"]
         assert remote.identity == physical.identity
         assert remote.shape_yx == physical.shape_yx
         assert remote.last_commanded_phase is None
         assert remote.command_revision == 0
         assert remote.mapping_revision == 0
-        assert remote.last_command_receipt["outcome"] == "unknown"
+        assert remote.last_command_receipt == {
+            "transport": "usb",
+            "identity": "hamamatsu-x15213:usb:LSH0804382",
+            "profile": "LSH0804382",
+            "model": "X15213 (exact type suffix not recorded)",
+            "serial": "LSH0804382",
+            "wavelength_nm": 852.0,
+            "flip_x": False,
+            "flip_y": False,
+            "correction_path": "",
+            "correction_enabled": False,
+            "mapping_revision": 0,
+            "settle_seconds": 0.05,
+            "settle_source": "Repository default; optical settle acceptance pending",
+            "phase_curve_source": (
+                "Repository calibration values; measurement provenance not recorded"
+            ),
+            "dvi_controller_mode_proven": False,
+            "outcome": "unknown",
+            "command_revision": 0,
+            "stage": "uncommanded",
+            "readback": "not-run",
+        }
         assert calls == ["describe"]
+        assert sdk.write_count == 0
 
         normalizations = []
         original_canonical = device_module.canonical_phase
@@ -760,6 +672,8 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         worker.join(timeout=2.0)
         physical.close()
     assert not worker.is_alive()
+    assert sdk.close_count == 1
+    assert handle.close_count == 1
     assert all(connection.fileno() == -1 for connection in connections)
     assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
     with pytest.raises(RuntimeError, match="closed"):
@@ -773,7 +687,7 @@ def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
     physical = X15213Adapter(_config())
-    server, worker = _running_server(physical)
+    server, worker = running_slm_server(physical)
     first = second = None
     try:
         first = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2.0)
@@ -836,7 +750,7 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
     physical = X15213Adapter(_config())
-    server, worker = _running_server(physical)
+    server, worker = running_slm_server(physical)
     remote = None
     original = device_module._rpc_call
     try:
@@ -1045,7 +959,7 @@ def test_slm_server_prints_copyable_same_machine_and_lan_device_addresses(
 
     monkeypatch.setattr(
         module,
-        "_local_ipv4_addresses",
+        "local_ipv4_addresses",
         lambda: ("192.168.0.20", "10.0.0.5"),
     )
     _print_client_endpoints("0.0.0.0", 18862)
@@ -1141,28 +1055,6 @@ def test_slm_server_cli_validates_before_hardware_and_closes_after_bind_failure(
     with pytest.raises(OSError, match="bind failed"):
         module.main(["--host", "127.0.0.1", "--port", "18862"])
     assert adapter.closed == 1
-
-
-def test_the_local_slm_type_authors_the_server_knobs_plus_a_port() -> None:
-    """slm.hamamatsu_x15213_local is the server's own form with one addition.
-
-    Its authoring schema is the SERVER schema (transport, profile,
-    wavelength, correction, flips) plus the port to serve on -- the same
-    facts the CLI takes -- so initializing the device is starting the
-    server, with nothing retyped.
-    """
-
-    from zlc_atom.devices.slm.hamamatsu_x15213.device_types import (
-        X15213_LOCAL_SCHEMA,
-        X15213_SERVER_SCHEMA,
-    )
-
-    server_names = [field.name for field in X15213_SERVER_SCHEMA.fields]
-    local_names = [field.name for field in X15213_LOCAL_SCHEMA.fields]
-    assert local_names == server_names + ["port"]
-    assert "sdk_directory" not in server_names, (
-        "where the SDK lives is the vendor folder's fact, not a form field"
-    )
 
 
 def test_a_local_server_whose_thread_cannot_start_releases_what_it_opened(

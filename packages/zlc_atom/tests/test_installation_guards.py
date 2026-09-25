@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import threading
 import types
 
 import pytest
@@ -9,7 +8,6 @@ import pytest
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.execution import (
     DeviceBroker,
-    DeviceIdentityEvidenceKind,
     PhysicalDeviceIdentity,
     ResourceKey,
     bind_verified_device,
@@ -29,30 +27,7 @@ from zlc_atom.install import (
 from zlc_atom.install.configuration import DeviceInstanceConfig, InstallationConfig
 
 
-def test_a_failed_device_close_is_retried_before_installation_is_terminal() -> None:
-    attempts = 0
-
-    def close() -> None:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise RuntimeError("camera is still owned")
-
-    installation = Installation(
-        {
-            "camera": InstalledLeaf(
-                "camera", "test.camera", object(), {}, closer=close
-            )
-        },
-        world=None,
-    )
-    with pytest.raises(ExceptionGroup, match="installation close failed"):
-        installation.close()
-    installation.close()
-    assert attempts == 2
-
-
-def test_close_failure_keeps_every_earlier_possible_dependency_open() -> None:
+def test_one_failed_close_keeps_only_that_leaf_open() -> None:
     closed: list[str] = []
     attempts = 0
 
@@ -61,7 +36,7 @@ def test_close_failure_keeps_every_earlier_possible_dependency_open() -> None:
         attempts += 1
         closed.append(f"dependent-{attempts}")
         if attempts == 1:
-            raise RuntimeError("dependent still uses base")
+            raise RuntimeError("dependent refused its close")
 
     installation = Installation(
         {
@@ -91,11 +66,11 @@ def test_close_failure_keeps_every_earlier_possible_dependency_open() -> None:
     )
     with pytest.raises(ExceptionGroup, match="installation close failed"):
         installation.close()
-    assert closed == ["later", "dependent-1"]
-    assert tuple(installation.devices) == ("base", "dependent")
+    assert closed == ["later", "dependent-1", "base"]
+    assert tuple(installation.devices) == ("dependent",)
 
     installation.close()
-    assert closed == ["later", "dependent-1", "dependent-2", "base"]
+    assert closed == ["later", "dependent-1", "base", "dependent-2"]
 
 
 def _bound_test_leaf(
@@ -107,12 +82,10 @@ def _bound_test_leaf(
     binding, proof = bind_verified_device(
         broker,
         key=ResourceKey.parse(f"device/{key}"),
-        identity_probe=lambda: PhysicalDeviceIdentity(
-            physical_id,
-            DeviceIdentityEvidenceKind.HARDWARE_IDENTITY_READBACK,
-        ),
+        identity_probe=lambda: PhysicalDeviceIdentity(physical_id),
         capability_probe=dict,
     )
+    broker.claim(binding)
     return InstalledLeaf(
         key,
         "test.bound",
@@ -139,10 +112,7 @@ def test_installation_unbinds_only_after_a_leaf_really_closes() -> None:
         world=None,
         broker=broker,
     )
-    assert leaf.physical_identity == PhysicalDeviceIdentity(
-        "camera:serial-1",
-        DeviceIdentityEvidenceKind.HARDWARE_IDENTITY_READBACK,
-    )
+    assert leaf.physical_identity == PhysicalDeviceIdentity("camera:serial-1")
 
     with pytest.raises(ExceptionGroup, match="installation close failed"):
         installation.close()
@@ -316,61 +286,6 @@ def test_only_world_independent_leaves_can_transfer_to_a_new_world() -> None:
     target.close()
 
 
-def test_new_world_preflight_can_borrow_and_retain_independent_physical_leaf() -> None:
-    from zlc_atom.devices.simulation import SimulationWorldConfig
-
-    broker = DeviceBroker()
-    old_world = object()
-
-    def physical_factory(_context, key, _values):
-        return InstalledLeaf(key, "test.physical", object(), {})
-
-    physical = DeviceTypeDescriptor(
-        "test.physical",
-        "test",
-        AuthoringSchema(()),
-        (),
-        factory=physical_factory,
-    )
-    owner = create_installation(
-        (DeviceSpec("physical", physical.type_id),),
-        world=old_world,
-        broker=broker,
-        catalog=DeviceCatalogSnapshot((physical,), ()),
-    )
-
-    def virtual_factory(context, key, _values):
-        assert context.devices["physical"] is owner.devices["physical"]
-        return InstalledLeaf(key, "test.virtual", object(), {})
-
-    virtual = DeviceTypeDescriptor(
-        "test.virtual",
-        "test",
-        AuthoringSchema(()),
-        (),
-        factory=virtual_factory,
-        world_config=lambda _values: SimulationWorldConfig(),
-    )
-    blueprint = preflight_installation(
-        (DeviceSpec("virtual", virtual.type_id),),
-        simulation={},
-        borrowed_from=owner,
-        borrowed_revision=owner.revision,
-        catalog=DeviceCatalogSnapshot((virtual,), ()),
-    )
-    assert blueprint.world is not old_world
-    successor = create_installation(blueprint)
-    owner.transfer_leaves_to(
-        successor,
-        ("physical",),
-        source_revision=owner.revision,
-        target_revision=successor.revision,
-    )
-    assert set(successor.devices) == {"physical", "virtual"}
-    owner.close()
-    successor.close()
-
-
 def test_preflight_resolves_world_and_topology_without_running_a_factory() -> None:
     from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 
@@ -416,205 +331,12 @@ def test_template_default_simulation_does_not_conflict_with_explicit_world() -> 
     installation.close()
 
 
-def test_successor_factory_can_borrow_retained_dependency_without_owning_it() -> None:
-    broker = DeviceBroker()
-    world = object()
-    closed: list[str] = []
-    retained = _bound_test_leaf(
-        broker,
-        "camera",
-        "camera:serial-1",
-        lambda: closed.append("retained"),
-    )
-    owner = Installation(
-        {"camera": retained},
-        world=world,
-        broker=broker,
-    )
-    observed: list[object] = []
+def test_factory_admission_rejects_foreign_binding_and_recovery_owns_what_stays_open() -> None:
+    """A rejected candidate that cannot close ends the composition.
 
-    def factory(context, key, _values):
-        observed.append(context.devices["camera"])
-        return InstalledLeaf(
-            key,
-            "test.consumer",
-            object(),
-            {},
-            closer=lambda: closed.append("consumer"),
-        )
-
-    descriptor = DeviceTypeDescriptor(
-        "test.consumer",
-        "test",
-        AuthoringSchema(()),
-        (),
-        factory=factory,
-    )
-    successor = create_installation(
-        (DeviceSpec("consumer", descriptor.type_id),),
-        world=world,
-        broker=broker,
-        borrowed_from=owner,
-        borrowed_revision=owner.revision,
-        catalog=DeviceCatalogSnapshot((descriptor,), ()),
-    )
-    assert observed == [retained]
-    assert set(successor.devices) == {"consumer"}
-    assert "camera" not in successor.devices
-
-    successor.close()
-    assert closed == ["consumer"]
-    with pytest.raises(RuntimeError, match="already bound"):
-        _bound_test_leaf(broker, "duplicate", "camera:serial-1", lambda: None)
-    owner.close()
-    assert closed == ["consumer", "retained"]
-    replacement = _bound_test_leaf(
-        broker,
-        "camera-again",
-        "camera:serial-1",
-        lambda: None,
-    )
-    assert broker.unbind(replacement.binding) is True
-
-
-def test_successor_build_pins_borrowed_owner_against_close_and_transfer() -> None:
-    broker = DeviceBroker()
-    world = object()
-    entered = threading.Event()
-    release = threading.Event()
-    retained = InstalledLeaf("base", "test.base", object(), {})
-    owner = Installation(
-        {"base": retained},
-        world=world,
-        broker=broker,
-    )
-    target = Installation({}, world=world, broker=broker)
-
-    def factory(_context, key, _values):
-        entered.set()
-        assert release.wait(2.0)
-        return InstalledLeaf(key, "test.consumer", object(), {})
-
-    descriptor = DeviceTypeDescriptor(
-        "test.consumer",
-        "test",
-        AuthoringSchema(()),
-        (),
-        factory=factory,
-    )
-    catalog = DeviceCatalogSnapshot((descriptor,), ())
-    result: list[Installation] = []
-    failures: list[BaseException] = []
-
-    def build() -> None:
-        try:
-            result.append(
-                create_installation(
-                    (DeviceSpec("consumer", descriptor.type_id),),
-                    world=world,
-                    borrowed_from=owner,
-                    borrowed_revision=owner.revision,
-                    catalog=catalog,
-                )
-            )
-        except BaseException as error:
-            failures.append(error)
-
-    thread = threading.Thread(target=build)
-    thread.start()
-    assert entered.wait(2.0)
-    with pytest.raises(RuntimeError, match="leaves are borrowed"):
-        owner.close()
-    with pytest.raises(RuntimeError, match="leaves are borrowed"):
-        owner.transfer_leaves_to(
-            target,
-            ("base",),
-            source_revision=owner.revision,
-            target_revision=target.revision,
-        )
-    release.set()
-    thread.join(2.0)
-    assert not thread.is_alive() and not failures
-    assert set(result[0].devices) == {"consumer"}
-    result[0].close()
-    owner.close()
-    target.close()
-
-
-def test_borrowed_owner_and_revision_validation_precede_factory_side_effects() -> None:
-    broker = DeviceBroker()
-    world = object()
-    retained = _bound_test_leaf(
-        broker,
-        "base",
-        "base:serial-1",
-        lambda: None,
-    )
-    owner = Installation(
-        {"base": retained},
-        world=world,
-        broker=broker,
-    )
-    calls: list[str] = []
-
-    def factory(_context, key, _values):
-        calls.append(key)
-        return InstalledLeaf(key, "test.consumer", object(), {})
-
-    descriptor = DeviceTypeDescriptor(
-        "test.consumer",
-        "test",
-        AuthoringSchema(()),
-        (),
-        factory=factory,
-    )
-    catalog = DeviceCatalogSnapshot((descriptor,), ())
-    arguments = dict(world=world, catalog=catalog)
-    try:
-        with pytest.raises(ValueError, match="requires borrowed_from"):
-            create_installation(
-                (), borrowed_revision=owner.revision, **arguments
-            )
-        with pytest.raises(TypeError, match="Installation"):
-            create_installation(
-                (), borrowed_from=object(), borrowed_revision=0, **arguments
-            )
-        with pytest.raises(RuntimeError, match="revision changed"):
-            create_installation(
-                (), borrowed_from=owner, borrowed_revision=1, **arguments
-            )
-        with pytest.raises(ValueError, match="duplicate device spec"):
-            create_installation(
-                (DeviceSpec("base", descriptor.type_id),),
-                borrowed_from=owner,
-                borrowed_revision=owner.revision,
-                **arguments,
-            )
-        blueprint = preflight_installation(
-            (),
-            world=world,
-            borrowed_from=owner,
-            borrowed_revision=owner.revision,
-            catalog=catalog,
-        )
-        with pytest.raises(RuntimeError, match="borrowed installation broker"):
-            create_installation(
-                blueprint,
-                broker=DeviceBroker(),
-            )
-        assert calls == []
-    finally:
-        owner.close()
-
-
-def test_factory_admission_rejects_foreign_binding_and_keeps_its_prefix_for_recovery() -> None:
-    """A rejected candidate that cannot close keeps what it may still depend on.
-
-    ``bad`` depends on ``good``.  When bad's cleanup fails, good is NOT closed
-    by the composition: bad's retry may need it, exactly as a failed close
-    keeps its earlier possible dependencies.  Recovery owns both and closes
-    them in reverse order -- bad first, then good -- and a good that refuses
-    its own close stays owned for the next attempt.
+    Every other leaf is closed on its own -- one refusal stops nothing --
+    and recovery owns exactly the leaves that stayed open: the rejected
+    ``bad`` and a ``good`` that refused its first close.
     """
 
     broker = DeviceBroker()
@@ -645,10 +367,7 @@ def test_factory_admission_rejects_foreign_binding_and_keeps_its_prefix_for_reco
         binding, proof = bind_verified_device(
             foreign,
             key=ResourceKey.parse(f"device/{key}"),
-            identity_probe=lambda: PhysicalDeviceIdentity(
-                "foreign:device",
-                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-            ),
+            identity_probe=lambda: PhysicalDeviceIdentity("foreign:device"),
             capability_probe=dict,
         )
 
@@ -686,20 +405,19 @@ def test_factory_admission_rejects_foreign_binding_and_keeps_its_prefix_for_reco
         )
     assert isinstance(captured.value.exceptions[0], RuntimeError)
     assert "unknown" in str(captured.value.exceptions[0])
-    assert [str(error) for error in captured.value.exceptions[1:]] == ["bad cleanup failed"]
-    assert closed == ["bad-1"], "the prefix was closed before the candidate could retry"
+    assert [str(error) for error in captured.value.exceptions[1:]] == [
+        "good cleanup failed",
+        "bad cleanup failed",
+    ]
+    assert closed == ["bad-1", "good-1"]
     recovery = captured.value.recovery
     assert recovery.leaves == (accepted[0], rejected[0])
     assert foreign.verify_capability(rejected[0].binding).binding is rejected[0].binding
-    with pytest.raises(ExceptionGroup, match="recovery close failed"):
-        recovery.close()
-    assert closed == ["bad-1", "bad-2", "good-1"]
-    assert recovery.leaves == (accepted[0],)
+    recovery.close()
+    assert closed == ["bad-1", "good-1", "bad-2", "good-2"]
+    assert recovery.leaves == ()
     with pytest.raises(RuntimeError, match="unknown"):
         foreign.verify_capability(rejected[0].binding)
-    recovery.close()
-    assert closed == ["bad-1", "bad-2", "good-1", "good-2"]
-    assert recovery.leaves == ()
 
 
 @pytest.mark.parametrize(
@@ -748,10 +466,7 @@ def test_factory_binding_resource_key_must_match_the_logical_leaf_key() -> None:
         binding, proof = bind_verified_device(
             context.broker,
             key=ResourceKey.parse("device/someone-else"),
-            identity_probe=lambda: PhysicalDeviceIdentity(
-                "strict:physical",
-                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-            ),
+            identity_probe=lambda: PhysicalDeviceIdentity("strict:physical"),
             capability_probe=dict,
         )
         bindings.append(binding)
@@ -792,10 +507,7 @@ def test_discovery_automatically_collects_a_synthetic_leaf_without_graph_changes
         binding, _proof = bind_verified_device(
             context.broker,
             key=ResourceKey.parse(f"device/{key}"),
-            identity_probe=lambda: PhysicalDeviceIdentity(
-                f"synthetic:{key}",
-                DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-            ),
+            identity_probe=lambda: PhysicalDeviceIdentity(f"synthetic:{key}"),
             capability_probe=dict,
         )
         return InstalledLeaf(
@@ -857,24 +569,15 @@ def test_duplicate_device_keys_are_rejected_before_world_or_factory_side_effects
         world_config=world_config,
     )
     catalog = DeviceCatalogSnapshot((descriptor,), ())
-    installation = None
-    try:
-        installation = create_installation(
+    # On the old implementation both factories ran, the second leaf replaced
+    # the first in the dict, and close could only see leaf 1.
+    with pytest.raises(ValueError, match="duplicate device key"):
+        create_installation(
             (
                 DeviceSpec("same", descriptor.type_id),
                 DeviceSpec("same", descriptor.type_id),
             ),
             catalog=catalog,
-        )
-    except ValueError as error:
-        assert "duplicate device key" in str(error)
-    else:
-        # On the old implementation both factories ran, the second leaf
-        # replaced the first in the dict, and close could only see leaf 1.
-        installation.close()
-        pytest.fail(
-            "duplicate key was accepted: "
-            f"world_calls={world_calls}, made={made}, closed={closed}"
         )
     assert world_calls == []
     assert made == []

@@ -92,7 +92,6 @@ def test_virtual_devices_and_shared_world_have_disjoint_strict_vocabularies() ->
         "seed",
         "world_profile",
     }
-    assert "device_index" not in _fields(VIRTUAL_CAMERA_SCHEMA)
     assert _fields(VIRTUAL_MOT_CAMERA_SCHEMA) == {
         "frame_shape_yx",
         "exposure_seconds",
@@ -159,9 +158,15 @@ def test_a_configuration_is_enough_to_ask_for_a_real_board() -> None:
         installation.close()
 
 
-@pytest.mark.parametrize("config_file", ["", "values.json", "missing.json", "invalid.json"])
+@pytest.mark.parametrize("config_file", ["values.json", "missing.json"])
 def test_the_composition_root_supplies_the_dialler(tmp_path, config_file) -> None:
-    """The saved endpoint reaches one real zlc_pulse device surface."""
+    """The saved endpoint reaches one real zlc_pulse device surface.
+
+    Which config file a sequencer reads is one rule for every sequencer
+    (test_installation_config walks its four cases); what is the dialler's
+    own is that the endpoint arrives and a refused file closes the streamer
+    it dialled.
+    """
 
     from zlc_pulse.codec import write_config_values
 
@@ -255,12 +260,6 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
         mot_camera.finish_record_capture()
     finally:
         installation.close()
-    # Mixing is a list, not a mode: devices are installed one by one.
-    mixed = (
-        {"key": "camera", "type_id": "camera.virtual"},
-        {"key": "sequencer", "type_id": "sequencer.hardware", "config": {"host": "127.0.0.1"}},
-    )
-    assert len(mixed) == 2
 
 
 def test_a_local_sequencer_serves_its_own_board_and_dials_loopback(tmp_path) -> None:
@@ -275,6 +274,7 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback(tmp_path) -> 
 
     import socket
     from zlc_pulse.codec import write_config_values
+    from zlc_pulse.endpoint import local_ipv4_addresses
 
     config_path = tmp_path / "values.json"
     write_config_values(config_path, {"exposure": (120.0, "us")})
@@ -310,9 +310,7 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback(tmp_path) -> 
         # device is published: a peer's connection is accepted and shut
         # at once, before a word of the protocol.
         assert leaf.admit_peers is not None
-        from zlc_atom.devices.remote.fabric import local_lan_ip
-
-        lan = local_lan_ip()
+        lan = next(iter(local_ipv4_addresses()), "127.0.0.1")
         if lan != "127.0.0.1":
             with socket.create_connection((lan, free_port), timeout=2.0) as peer:
                 peer.settimeout(2.0)
@@ -324,8 +322,6 @@ def test_a_local_sequencer_serves_its_own_board_and_dials_loopback(tmp_path) -> 
     finally:
         installation.close()
     # The leaf's closer stops the in-process server, not just the client.
-    import pytest
-
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", free_port), timeout=0.5)
 
@@ -363,8 +359,6 @@ def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
     waits for the strict one.
     """
 
-    import pytest
-
     from zlc_atom.devices.rf.rigol_dg4000.device_types import RIGOL_DG4000_SCHEMA
 
     draft = RIGOL_DG4000_SCHEMA.draft_values({})
@@ -396,8 +390,6 @@ def test_a_field_default_must_obey_its_own_bounds() -> None:
     draft projection of the type was born refused; the declaration layer
     now refuses the CONTRADICTION instead, at import time.
     """
-
-    import pytest
 
     from zlc_atom.authoring import AuthoringField
 

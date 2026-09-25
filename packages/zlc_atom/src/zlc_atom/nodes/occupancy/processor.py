@@ -19,6 +19,7 @@ from zlc_data import (
     ValueSchema,
     owned_snapshot_from_arrays,
 )
+from zlc_data.value import dataset_validity_storage
 from zlc_runtime import DatasetCoverage
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime import SignalValue
@@ -30,7 +31,7 @@ from zlc_plot import (
 
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration import ReadoutModel, ReadoutModelKind, TrapCalibration
-from zlc_atom.nodes.calibration.calibration import classify_threshold
+from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons
 
 
 def _require_calibration(candidate: object, what: str) -> None:
@@ -96,7 +97,6 @@ class OccupancyProcessor:
         calibration_by_frame: Mapping[int, TrapCalibration] | None = None,
         calibration_path: str | Path | None = None,
         calibration_paths_by_frame: Mapping[int, str | Path] | None = None,
-        producer: str = "occupancy",
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
     ) -> None:
@@ -137,9 +137,6 @@ class OccupancyProcessor:
             int(frame): Path(path).expanduser().resolve()
             for frame, path in dict(calibration_paths_by_frame or {}).items()
         })
-        self.instance_id = str(producer).strip()
-        if not self.instance_id:
-            raise ValueError("producer must be non-empty")
         self.source_signal = None if source_signal is None else str(source_signal).strip()
 
     def readout_for(self, frame: int) -> TrapCalibration:
@@ -256,17 +253,18 @@ class OccupancyProcessor:
         are, so the mismatch is refused rather than discovered in the data.
         """
 
-        trained = self.calibration.report.get("run_record")
-        if not isinstance(trained, Mapping):
-            return
-        wanted = bool((trained.get("request") or {}).get(PHOTOELECTRONS, False))
         got = bool((record.get("parameters") or {}).get(PHOTOELECTRONS, False))
-        if wanted != got:
-            names = {True: "photoelectrons", False: "counts"}
-            raise ValueError(
-                f"these frames are in {names[got]} and the calibration was "
-                f"trained in {names[wanted]}; its thresholds do not apply"
-            )
+        names = {True: "photoelectrons", False: "counts"}
+        # Every calibration a frame is read with, not only the shared one: a
+        # frame given its own is classified by ITS thresholds.
+        for frame, calibration in ((0, self.calibration), *self.calibration_by_frame.items()):
+            wanted = reads_photoelectrons(calibration)
+            if wanted is not None and wanted != got:
+                which = "the calibration" if frame == 0 else f"frame {frame}'s calibration"
+                raise ValueError(
+                    f"these frames are in {names[got]} and {which} was "
+                    f"trained in {names[wanted]}; its thresholds do not apply"
+                )
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -333,11 +331,10 @@ class OccupancyProcessor:
         # readout-event role counts a cycle's frames, whatever else the
         # Point domain carries beside it (a scan's own axes, say).
         frame_of_cell = self._frame_numbers(frames.block.schema, repeats, points)
-        source_validity = frames.expanded_validity()
-        cell_valid = np.all(
-            source_validity,
-            axis=tuple(range(2, source_validity.ndim)),
-        ).reshape(-1)
+        # Judged on the axes validity may vary on -- a whole frame, unless the
+        # source names components -- not broadcast over every pixel first.
+        judged = dataset_validity_storage(frames.block.validity, frames.block.schema)
+        cell_valid = np.all(judged, axis=tuple(range(2, judged.ndim))).reshape(-1)
         # Single precision IS this measurement: a site's signal is a sum of
         # sensor counts, and 24 bits of mantissa resolve every one of them
         # exactly up to sixteen million.  It is also the number the verdict
@@ -359,8 +356,13 @@ class OccupancyProcessor:
                     ~np.isin(frame_of_valid, own_frames) if frame == 0 else frame_of_valid == frame
                 ]
                 if selected.size:
+                    # The readout gathers a few pixels round each site; the
+                    # whole stack is handed over as it is when this
+                    # calibration reads every frame of it, which is the
+                    # usual case, rather than copied first.
                     counts[selected] = readout.signals_of_frames(
-                        flat[selected], model_kind=self._model_kind,
+                        flat if selected.size == flat.shape[0] else flat[selected],
+                        model_kind=self._model_kind,
                     )
         # Every frame judges its sites by the thresholds and the usable set
         # of the calibration IT reads with: one row of each per cell.
@@ -481,7 +483,6 @@ class OccupancyProcessor:
     def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
         source = next(iter(inputs.values()))
         return {
-            "node": self.instance_id,
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: image_point_overlay_geometry(
                 source.snapshot,
                 self.readout.site_map.centers_xy,

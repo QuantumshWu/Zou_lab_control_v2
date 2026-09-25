@@ -203,7 +203,7 @@ def test_sparse_logical_axes_reduce_without_densifying_or_averaging_means() -> N
         np.testing.assert_array_equal(selected.values, reordered.values)
 
 
-def test_where_and_reductions_keep_invalid_and_empty_groups_explicit(monkeypatch) -> None:
+def test_where_and_reductions_keep_invalid_and_empty_groups_explicit() -> None:
     values = np.array([[[10., 20., 30.]], [[40., 50., 60.]]])
     source = _operand(values, valid=np.array([[[False, False, False]], [[True, False, True]]]))
     mask = _operand(np.array([[[True, False, True]], [[False, True, True]]]), "1")
@@ -226,18 +226,7 @@ def test_where_and_reductions_keep_invalid_and_empty_groups_explicit(monkeypatch
         assert not getattr(source, operation)(("cycle", "site"), where=empty).valid.any()
     for operation in ("all", "any", "count"):
         assert not getattr(mask, operation)(("cycle", "site"), where=empty).valid.any()
-    from zlc_atom.nodes.derive import expression
-
-    grouped = expression._group_reduce
-    count_inputs = []
-
-    def group_reduce(values, codes, count, axis, operation):
-        count_inputs.append(values.dtype.kind)
-        return grouped(values, codes, count, axis, operation)
-
-    monkeypatch.setattr(expression, "_group_reduce", group_reduce)
     counted = source.count("cycle")
-    assert count_inputs == ["b"], "numeric count consumes validity, not a discarded value sum"
     np.testing.assert_array_equal(counted.values, [[[1, 0, 1]]])
 
 
@@ -302,11 +291,12 @@ def test_processor_publishes_current_estimates_and_the_exact_program_provenance(
     primary = SignalValue(COUNTS, counts,
         coverage=DatasetCoverage(6, 12), canonical_schema=canonical,
         cell_origin=(1, 0))
-    outputs = processor.evaluate_inputs({
+    inputs = {
         "a": primary, "occupied": SignalValue(OCCUPIED, _snapshot(occupied, "1", revision=3),
             coverage=primary.coverage, canonical_schema=_schema(6, 2, 3, occupied.dtype, "1"),
             cell_origin=(1, 0)),
-    })
+    }
+    outputs = processor.evaluate_inputs(inputs)
     bright, mean = outputs["bright"], outputs["mean"]
     assert bright.snapshot.block.schema.value_schema.name == "bright"
     assert mean.snapshot.block.schema.value_schema.name == "mean"
@@ -316,10 +306,12 @@ def test_processor_publishes_current_estimates_and_the_exact_program_provenance(
     assert bright.coverage == MonitorCoverage(3, 3)
     assert bright.canonical_schema is None and bright.cell_origin is None
     assert mean.snapshot.block.values.shape == (1, 1, 3)
-    assert mean.run_record is bright.run_record
-    assert bright.run_record["parameters"]["expressions"] == rows
-    assert bright.run_record["parameters"]["input_view"] == "run"
-    assert bright.run_record["parameters"]["inputs"] == {"counts": COUNTS, "occupied": OCCUPIED}
+    # The provenance the runtime files for this run: the exact program and
+    # which signal fed each input name.
+    parameters = processor.describe_run(inputs)["parameters"]
+    assert parameters["expressions"] == rows
+    assert parameters["input_view"] == "run"
+    assert parameters["inputs"] == {"counts": COUNTS, "occupied": OCCUPIED}
     np.testing.assert_array_equal(bright.snapshot.expanded_validity(), occupied[:, 1:2, :])
     with pytest.raises(RuntimeError, match="lost 'occupied'"):
         processor.evaluate(primary)

@@ -216,7 +216,3 @@ class DeriveEditor(QtWidgets.QWidget):
         self.add_button.setEnabled(enabled)
         for frame, _name, _code, _remove in self._rows:
             frame.setEnabled(enabled)
-
-
-def derive_editor_factory(parent=None) -> DeriveEditor:
-    return DeriveEditor(parent)

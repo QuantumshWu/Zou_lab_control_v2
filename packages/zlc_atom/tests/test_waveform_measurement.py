@@ -2,18 +2,11 @@
 
 from __future__ import annotations
 
-import struct
-import sys
 import time
-from pathlib import Path
 from threading import Event
 
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from zlc_atom.devices.simulation.waveform import (
     VirtualWaveformConfig,
@@ -26,15 +19,7 @@ from zlc_atom.devices.waveform.tek_scope import (
     TekScopeWaveformSource,
     volts_per_div_field,
 )
-from zlc_atom.devices.waveform.wheeltec_n100 import (
-    FRAME_HEAD,
-    FRAME_TAIL,
-    IMU_PACKET,
-    N100_OUTPUTS,
-    drain_imu_samples,
-    header_crc8,
-    payload_crc16,
-)
+from zlc_atom.devices.waveform.wheeltec_n100 import N100_OUTPUTS
 from zlc_atom.nodes.waveform_measurement import (
     LOGIC_NODE,
     WaveformMeasurementNode,
@@ -44,108 +29,6 @@ from zlc_atom.nodes.waveform_measurement.measurement import shot_snapshot
 from zlc_data import PRIMARY_INDEX, SHOT_TIME, AxisId
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
-
-
-def _frame(kind: int, payload: bytes, serial: int = 0) -> bytes:
-    """One FDILink frame, checks and all, exactly as the module sends it.
-
-    The two checks are not decoration: the reader refuses a frame whose
-    header CRC8 or payload CRC16 disagrees, so a test that filled them with
-    zeroes would be testing a stream no module produces.
-    """
-
-    head = bytes((FRAME_HEAD, kind, len(payload), serial))
-    check = payload_crc16(payload)
-    return (
-        head
-        + bytes((header_crc8(head), check >> 8, check & 0xFF))
-        + payload
-        + bytes((FRAME_TAIL,))
-    )
-
-
-def _imu_packet(
-    *,
-    gyro: tuple[float, float, float],
-    accel: tuple[float, float, float],
-    mag_milligauss: tuple[float, float, float],
-    celsius: float,
-    microseconds: int,
-    serial: int = 0,
-) -> bytes:
-    payload = struct.pack(
-        "<12fq", *gyro, *accel, *mag_milligauss, celsius, 1013.0, 24.5, microseconds
-    )
-    return _frame(IMU_PACKET, payload, serial)
-
-
-def test_the_fdilink_stream_parses_into_samples_in_published_units() -> None:
-    """Whole IMU packets come out in order; noise, other packets and a torn
-    tail do not: the tail waits for the bytes that complete it."""
-
-    assert payload_crc16(b"123456789") == 0x31C3
-    first = _imu_packet(
-        gyro=(0.1, 0.2, 0.3),
-        accel=(0.0, 0.0, 9.8),
-        mag_milligauss=(200.0, -50.0, 450.0),
-        celsius=26.85,
-        microseconds=1_000_000,
-    )
-    second = _imu_packet(
-        gyro=(0.0, 0.0, 0.0),
-        accel=(0.0, 0.0, 9.8),
-        mag_milligauss=(201.0, -49.0, 449.0),
-        celsius=26.85,
-        microseconds=1_002_500,
-    )
-    # Two packets this driver does not publish: an AHRS frame whose length
-    # it does know, and a local-magnetic-field frame whose length it has
-    # never been told.  Both are stepped over by the length the module
-    # itself stated, so neither needs a table here.
-    ahrs = _frame(0x41, bytes(48), serial=1)
-    local_field = _frame(0x6E, struct.pack("<3f", 1.0, 2.0, 3.0), serial=2)
-    buffer = bytearray(b"\xfc\x99" + first + ahrs + local_field + second[:20])
-    samples = drain_imu_samples(buffer)
-
-    assert [stamp for stamp, _values in samples] == [1.0]
-    values = samples[0][1]
-    assert values[0:3] == pytest.approx((20.0, -5.0, 45.0))
-    assert values[3:6] == pytest.approx((0.1, 0.2, 0.3))
-    assert values[6:9] == pytest.approx((0.0, 0.0, 9.8))
-    assert values[9] == pytest.approx(300.0)
-    assert bytes(buffer) == second[:20]
-
-    buffer += second[20:]
-    (stamp, values), = drain_imu_samples(buffer)
-    assert stamp == pytest.approx(1.0025)
-    assert values[0] == pytest.approx(20.1)
-    assert not buffer
-
-
-def test_a_frame_that_does_not_check_out_is_not_a_magnetic_field() -> None:
-    """One flipped bit anywhere in a packet drops it, rather than publishing it.
-
-    A serial line at 100 Hz and up carries far more frames than anyone
-    inspects, and the one number this bench takes from them is a magnetic
-    field. A frame whose payload lost a bit would otherwise arrive as a
-    perfectly plausible reading, which is the worst kind of wrong.
-    """
-
-    good = _imu_packet(
-        gyro=(0.0, 0.0, 0.0),
-        accel=(0.0, 0.0, 9.8),
-        mag_milligauss=(200.0, -50.0, 450.0),
-        celsius=26.85,
-        microseconds=5_000_000,
-    )
-    assert len(drain_imu_samples(bytearray(good))) == 1
-
-    for position in (1, 3, 8, 30, len(good) - 2):
-        torn = bytearray(good)
-        torn[position] ^= 0x01
-        assert drain_imu_samples(bytearray(torn)) == [], (
-            f"a bit flipped at byte {position} was published as data"
-        )
 
 
 def _imu_like_source(rate_hz: float) -> VirtualWaveformSource:
@@ -297,6 +180,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         ))
         publication = plane.latest_publication(key)
         snapshot, _record = plane.current_dataset_view(key, publication)
+        snapshot = snapshot.materialize()
         source_index = snapshot.block.schema.point_domain.axis(
             AxisId("zlc_data.primary-index")
         )
@@ -353,7 +237,7 @@ def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity(
             assert publication is not None
             value = publication.value(key)
             assert value.coverage.written_cells == 12 and value.coverage.total_cells == 12
-            dataset = plane.current_dataset(key, publication)
+            dataset = plane.current_dataset(key, publication).materialize()
             assert dataset.block.schema.physical_shape == (12, 1, 3)
             assert np.asarray(dataset.block.values)[:, 0, 0].tolist() == list(range(12))
             timing = value.event_record["record_timing"]["imu-finite"]["11"]

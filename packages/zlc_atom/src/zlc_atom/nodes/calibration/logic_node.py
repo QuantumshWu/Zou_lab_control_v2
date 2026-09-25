@@ -22,7 +22,7 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_pulse import PulseSequence, api_bindings_in_period_order
 
 from .artifact import CALIBRATION_ARTIFACT_CODEC
-from .calibration import ReadoutModelKind
+from .calibration import READOUT_MODEL_CHOICES, ReadoutModelKind
 from .outputs import CAPTURE_PREVIEW_DECLARATION, SITE_REVIEW_DECLARATION
 from .pulse import load_calibration_pulse_template
 from .task import (
@@ -112,17 +112,9 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             # is for.  Box stays offered -- it is the one to fall back to
             # when the PSF fit is in doubt -- but it is not the default.
             ReadoutModelKind.PER_SITE_PSF.value,
-            choices=(
-                AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
-                AuthoringChoice(
-                    ReadoutModelKind.PER_SITE_PSF.value,
-                    "Per-site PSF",
-                ),
-                AuthoringChoice(
-                    ReadoutModelKind.UNIFORM_PSF.value,
-                    "Uniform PSF",
-                ),
-            ),
+            # Every model by name; a calibration has no default of its own
+            # to defer to while it is the one being made.
+            choices=READOUT_MODEL_CHOICES[1:],
         ),
         AuthoringField(
             "threshold_method",

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 import json
 import time
 from dataclasses import replace
@@ -13,7 +11,6 @@ from threading import Event
 import numpy as np
 import pytest
 
-from zlc_atom.install import create_installation
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
 from zlc_atom.nodes.calibration.outputs import (
     CAPTURE_PREVIEW_DECLARATION,
@@ -22,7 +19,6 @@ from zlc_atom.nodes.calibration.outputs import (
 from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
-    CalibrationRequest,
     CalibrationRunResult,
     SampleWriter,
     CalibrationTask,
@@ -36,31 +32,11 @@ from zlc_runtime.plane import SignalDataPlane
 from zlc_plot import ImageFrame, PointStatus, read_figure_plot
 
 from tests.fakes import FakePlane
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
-from test_installation_and_nodes import _calibration_request
-
-
-@contextmanager
-def _task(request: CalibrationRequest) -> Iterator[CalibrationTask]:
-    """A calibration task on a fresh virtual bench, closed when the block ends.
-
-    The installation is the owner of the devices the task borrows; a task
-    does not close them, so the helper that built the bench is the one that
-    takes it down again.
-    """
-
-    installation = create_installation("virtual")
-    try:
-        yield CalibrationTask(
-            camera=installation.device("camera"),
-            sequencer=installation.device("sequencer"),
-            request=request,
-            pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-            pulse_path=IMAGING_PULSE_RESOURCE.path,
-            signal_plane=FakePlane(),
-        )
-    finally:
-        installation.close()
+from tests.pulse_fixture import (
+    IMAGING_PULSE_RESOURCE,
+    calibration_request,
+    calibration_task,
+)
 
 
 def _sample_writer(folder: Path, *, run: str, generation: str) -> SampleWriter:
@@ -132,8 +108,8 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     run record inside is where the crop and the exposure are.
     """
 
-    request = replace(_calibration_request(repeats=12), save_frames=True)
-    with _task(request) as task:
+    request = replace(calibration_request(repeats=12), save_frames=True)
+    with calibration_task(request) as task:
         first = task.run(tmp_path)
 
     folder = first.artifact_path.parents[1] / "figures"
@@ -166,7 +142,7 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     # And calibrated again from that folder alone.  Same frames, same
     # settings, same answer -- to the pixel.
     def replay(**changes: object):
-        with _task(
+        with calibration_task(
             replace(
                 request,
                 save_frames=False,
@@ -211,14 +187,14 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
     that failure lives in the host and ``run()`` has no host.
     """
 
-    request = replace(_calibration_request(repeats=6), save_frames=True)
-    with _task(request) as task:
+    request = replace(calibration_request(repeats=6), save_frames=True)
+    with calibration_task(request) as task:
         acquired = task.run(tmp_path)
     folder = acquired.artifact_path.parents[1] / "figures"
 
     plane = SignalDataPlane()
     host = None
-    with _task(
+    with calibration_task(
         replace(
             request,
             save_frames=False,
@@ -269,8 +245,8 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
 
 
 def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path) -> None:
-    acquired_request = replace(_calibration_request(repeats=8), save_frames=True)
-    with _task(acquired_request) as task:
+    acquired_request = replace(calibration_request(repeats=8), save_frames=True)
+    with calibration_task(acquired_request) as task:
         acquired = task.run(tmp_path)
     folder = acquired.artifact_path.parents[1] / "figures"
     request = replace(
@@ -281,7 +257,7 @@ def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path
         review_detected_sites=True,
     )
     plane = SignalDataPlane()
-    with _task(request) as task:
+    with calibration_task(request) as task:
         task.signal_plane = plane
         wake = Event()
         host = NodeHost(
@@ -346,11 +322,11 @@ def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path
 def test_failed_calibration_analysis_saves_partial_capture_figure(
     tmp_path: Path, monkeypatch
 ) -> None:
-    request = replace(_calibration_request(repeats=3), save_frames=True)
-    with _task(request) as task:
+    request = replace(calibration_request(repeats=3), save_frames=True)
+    with calibration_task(request) as task:
         acquired = task.run(tmp_path)
     folder = acquired.artifact_path.parents[1] / "figures"
-    with _task(
+    with calibration_task(
         replace(
             request,
             save_frames=False,
@@ -407,7 +383,7 @@ def test_failed_calibration_analysis_saves_partial_capture_figure(
 
 
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
-    with _task(_calibration_request(repeats=8)) as task:
+    with calibration_task(calibration_request(repeats=8)) as task:
         assert list(tmp_path.iterdir()) == []
         result = task.run(tmp_path)
     run_root = result.artifact_path.parents[1]
@@ -652,7 +628,7 @@ def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
     request = replace(
-        _calibration_request(repeats=4),
+        calibration_request(repeats=4),
         frame_source=FRAMES_FROM_FOLDER,
         saved_frames_path=str(empty),
     )
@@ -704,6 +680,11 @@ def test_the_form_and_the_request_agree_that_the_readout_frame_is_the_short_one(
 
     equal = {
         "pulse_template": "imaging_template.json",
+        # The three API fields are required (the form resolves their
+        # defaults from a pulse only at finalization).
+        "reference_before_field": "duration:long_before",
+        "readout_field": "duration:short",
+        "reference_after_field": "duration:long_after",
         "reference_exposure_seconds": 0.02,
         "readout_exposure_seconds": 0.02,
     }
@@ -711,7 +692,7 @@ def test_the_form_and_the_request_agree_that_the_readout_frame_is_the_short_one(
         CALIBRATION_LOGIC_NODE.authoring_schema.project_values(equal)
     with pytest.raises(ValueError, match="shorter than the reference"):
         replace(
-            _calibration_request(),
+            calibration_request(),
             reference_exposure_seconds=0.02,
             readout_exposure_seconds=0.02,
         )
@@ -788,7 +769,7 @@ def test_a_preview_event_carries_the_settings_its_frames_were_frozen_with() -> N
 def test_calibrating_from_a_folder_needs_the_folder() -> None:
     with pytest.raises(ValueError, match="needs the folder"):
         replace(
-            _calibration_request(),
+            calibration_request(),
             frame_source=FRAMES_FROM_FOLDER,
             saved_frames_path="",
         )

@@ -9,8 +9,7 @@ Acquisition preparation happens once at Scan Start. Device writes use their
 actual readback; manual changes are controlled by the operator. No implicit
 settling delay is added to either operation.
 Committed source publications are placed in scan/repeat order by the shared
-Dataset writer. Tasks using acquire may attach typed companions to the same
-event bundle. Device knobs return to their original values and units on
+Dataset writer. Device knobs return to their original values and units on
 completion, Stop or failure through the existing cleanup path.
 """
 
@@ -20,6 +19,8 @@ import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
+
 from zlc_data.units import DEFAULT_UNITS
 
 from zlc_pulse import (
@@ -30,7 +31,7 @@ from zlc_pulse import (
 )
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
-from .devices import ScanDeviceKnobs, release_after_scan
+from .devices import ScanDeviceKnobs
 from .plan import (
     API_PARAM_FAMILY,
     DEVICE_PARAM_FAMILY,
@@ -38,6 +39,7 @@ from .plan import (
     PULSE_PARAM_FAMILY,
     ScanPlan,
     ScanPort,
+    device_port_parts,
     port_label,
     split_outer_axes,
 )
@@ -46,6 +48,16 @@ from .source import check_cancelled, wait_for_board
 #: The one operator-input kind this engine raises, and it asks the one
 #: question a machine here cannot answer: move this knob to this value.
 MANUAL_AXIS_REQUEST = "manual-axis"
+
+#: How long the source may stay silent once the board has reported the fire
+#: done, beyond three shot periods: a frame's readout and transfer and the
+#: processors between the camera and the scanned signal.  After that the
+#: frames will not come -- a trigger the camera missed -- and waiting longer
+#: is a scan that hangs with nothing on screen saying why.
+_SOURCE_GRACE_SECONDS = 5.0
+#: How often an idle wait for the source asks the board whether it is done;
+#: a remote board answers each ask over its own connection.
+_BOARD_POLL_SECONDS = 0.5
 
 
 class SeamlessScanMeasurement:
@@ -64,12 +76,9 @@ class SeamlessScanMeasurement:
         tunables: Mapping[str, object] | None = None,
         repeats: int,
         shots_per_point: int,
-        producer: str = "seamless_scan",
         acquisition_logic: str = "",
         restart_logic: object = None,
     ) -> None:
-        self.instance_id = str(producer).strip() or "seamless_scan"
-        self.producer = self.instance_id
         self.sequencer = sequencer
         self.sequencer_key = str(sequencer_key)
         self.source = source
@@ -115,11 +124,7 @@ class SeamlessScanMeasurement:
         for axis in self.outer_axes:
             if not axis.port.startswith(DEVICE_PARAM_FAMILY):
                 continue
-            key, separator, field = axis.port[
-                len(DEVICE_PARAM_FAMILY):
-            ].partition(":")
-            if not separator or not field:
-                raise ValueError(f"{axis.port!r} names no device field")
+            key, _field = device_port_parts(axis.port)
             if key not in self.tunables:
                 raise ValueError(
                     f"device axis {axis.port!r} has no installed device "
@@ -131,7 +136,6 @@ class SeamlessScanMeasurement:
         self.shots_per_point = int(shots_per_point)
         if self.shots_per_point < 1:
             raise ValueError("shots_per_point must be at least 1")
-        self._last_run_record: dict[str, object] | None = None
 
     @property
     def dataset_output_declarations(self):
@@ -217,9 +221,7 @@ class SeamlessScanMeasurement:
         for axis in self.outer_axes:
             if not axis.port.startswith(DEVICE_PARAM_FAMILY):
                 continue
-            key, _separator, field = axis.port[
-                len(DEVICE_PARAM_FAMILY):
-            ].partition(":")
+            key, field = device_port_parts(axis.port)
             selected.setdefault(key, []).append(field)
         return tuple(
             ResolvedDeviceClaim(key, self.tunables[key], tuple(fields))
@@ -316,7 +318,6 @@ class SeamlessScanMeasurement:
         program: object,
         wire: object,
         writer: ScanDatasetWriter,
-        rows: Sequence[Sequence[float]],
         inner_count: int,
         shots: int,
         sweeps: int,
@@ -325,26 +326,25 @@ class SeamlessScanMeasurement:
         progress_base: int,
         progress_total: int,
         run_record: dict,
-        on_point: object,
+        config: Mapping[str, object] | None,
         load: bool,
-    ) -> None:
+    ) -> Mapping[str, object]:
         """Play a segment of the one prepared acquisition.
 
         ``load`` says whether the program goes to the board before this
         segment: the first segment's always does, and so does one whose
         API values changed, because those live in the program.
+
+        ``config`` is the Config the run's first fire played, None for that
+        first fire; the Config this fire played is returned.  Every fire
+        reads the saved Config file again, so a Save between two points would
+        change the pulse under a run record that names the first values: the
+        scan stops instead.
         """
 
         readouts = sweeps * inner_count * shots
-        first = progress_base == 0
-        self.source.open(context, cycles=readouts)
+        self.source.open()
         try:
-            self.source.validate(
-                program,
-                wire,
-                run_repeats=shots,
-                scan_repeats=sweeps,
-            )
             if load:
                 self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
@@ -353,94 +353,104 @@ class SeamlessScanMeasurement:
                 run_repeats=shots,
                 scan_repeats=sweeps,
             )
-            if first:
+            played = self.sequencer.config_values()
+            if config is None:
                 # Complete the initial device snapshot before the first
                 # publication freezes the run record. Config is applied by
                 # LOAD/Fire, not by the pure compiler used to plan this run.
                 initial = run_record["device_snapshots"]["sequencer"]
                 initial.update(sequencer_archive_snapshot(
                     applied=execution,
-                    config=self.sequencer.config_values(),
+                    config=played,
                 ))
                 context.set_run_record(run_record)
+            elif played != config:
+                raise RuntimeError(
+                    "the Config file changed during the scan; its later points "
+                    "would play values its run record does not name"
+                )
             context.report_progress(
                 f"Scanning point {progress_base + 1}/{progress_total}; shots",
                 current=progress_base * shots,
                 total=progress_total * shots,
             )
             per_sweep = inner_count * shots
-            for played in range(readouts):
+            # Readouts are assigned by arrival, so the board's own report is
+            # the one witness that no more triggers are coming.  Once it is
+            # in, a source that falls silent gets a bounded grace instead of
+            # being waited for forever; one still delivering is behind, not
+            # stuck, so the grace runs from its latest value.
+            report = None
+            report_seen = next_ask = 0.0
+            delivered = 0
+            last_delivery = monotonic()
+
+            def watch_board() -> None:
+                nonlocal report, report_seen, next_ask
+                now = monotonic()
+                if report is None:
+                    if now < next_ask:
+                        return
+                    next_ask = now + _BOARD_POLL_SECONDS
+                    report = self.sequencer.wait_done(0.0)
+                    if report is None:
+                        return
+                    if report.fault:
+                        raise RuntimeError(f"the pulse failed: {report.fault}")
+                    report_seen = now
+                grace = _SOURCE_GRACE_SECONDS + 3.0 * report.elapsed_seconds / readouts
+                if now - max(report_seen, last_delivery) >= grace:
+                    raise RuntimeError(
+                        f"the board played {readouts} shots and the source "
+                        f"delivered {delivered}: a missed camera trigger "
+                        "leaves every later frame without its shot"
+                    )
+
+            for delivered in range(readouts):
                 check_cancelled(context)
-                sweep, rest = divmod(played, per_sweep)
+                sweep, rest = divmod(delivered, per_sweep)
                 row_index, shot = divmod(rest, shots)
-                value, source_publication = self.source.next_value(context)
-                scan_repeat = scan_repeat_base + sweep
-                row = row_offset + row_index
-                front = {
-                    SCAN_OUTPUT.name: writer.write(
-                        value,
-                        row=row,
-                        scan_repeat=scan_repeat,
-                        run_repeat=shot,
-                    )
-                }
-                if on_point is not None:
-                    # Whatever the reader made of this point travels in the
-                    # SAME front as the frames it was read from: they are one
-                    # shot, and two publications could show a panel a survival
-                    # that its own evidence has not arrived for yet.
-                    companions = on_point(
-                        value,
-                        row=row,
-                        scan_repeat=scan_repeat,
-                        run_repeat=shot,
-                        point_rows=rows,
-                    ) or {}
-                    front.update(
-                        {
-                            name: replace(
-                                output,
-                                event_record=value.event_record,
-                            )
-                            for name, output in companions.items()
-                        }
-                    )
+                value, source_publication = self.source.next_value(
+                    context, idle=watch_board
+                )
+                last_delivery = monotonic()
                 context.commit_live(
-                    front,
+                    {
+                        SCAN_OUTPUT.name: writer.write(
+                            value,
+                            row=row_offset + row_index,
+                            scan_repeat=scan_repeat_base + sweep,
+                            run_repeat=shot,
+                        )
+                    },
                     source_publication=source_publication,
                 )
                 context.report_progress(
-                    f"Scanning point {progress_base + played // shots + 1}/{progress_total}; shots",
-                    current=progress_base * shots + played + 1,
+                    f"Scanning point {progress_base + delivered // shots + 1}/{progress_total}; shots",
+                    current=progress_base * shots + delivered + 1,
                     total=progress_total * shots,
                 )
-            wait_for_board(self.sequencer, context)
+            if report is None:
+                wait_for_board(self.sequencer, context)
         except BaseException:
             self.sequencer.safe()
             raise
         finally:
             self.source.close()
+        return played
 
-    def acquire(self, context: object, *, on_point: object = None):
+    def execute(self, context: object):
         """Play the whole plan and return the dataset it filled.
 
         The live slot is attached to the caller's generation, so whoever runs
-        this loop shows the growing scan while it runs -- and then says for
-        itself what the finished dataset MEANS.
+        this loop shows the growing scan while it runs.
 
         A plan the board owns entirely plays from ONE fire.  A plan carrying a
         manual axis plays one fire per manual point instead, and ``repeats``
         walks the whole plan again rather than lengthening a fire -- the same
         sentence either way, spent where the plan leaves room for it.
-
-        ``on_point`` is how a Task reads a point AS it lands: release-recapture
-        judges each cycle against the calibration the moment the camera hands
-        it over, which is the only place the cycle still exists as one cycle --
-        the finished scan dataset has composed those frames into its Point domain.
-        What it returns, if anything, is published beside the frames.
         """
 
-        self._last_run_record = None
         board = self.sequencer.describe()
         inner_rows = tuple(itertools.product(*(axis.values for axis in self.board_axes)))
         # The board holds one row while Run repeats supplies its shots, then
@@ -493,7 +503,6 @@ class SeamlessScanMeasurement:
             )
         )
         run_record = self.run_record(effective_rows=effective_rows, board=board)
-        self._last_run_record = dict(run_record)
         writer = ScanDatasetWriter(
             effective_rows,
             axes,
@@ -507,18 +516,17 @@ class SeamlessScanMeasurement:
             program=program,
             wire=wire,
             writer=writer,
-            rows=effective_rows,
             inner_count=inner_count,
             shots=shots,
             run_record=run_record,
-            on_point=on_point,
             progress_total=self.repeats * len(effective_rows),
         )
         knobs = ScanDeviceKnobs(self.tunables)
+        # The Config the first fire played; every later fire must play it too.
+        config = None
         # The source and the board are released per fire, inside
         # ``_play_table``; what the whole plan owes the bench is the knobs
         # back where they were, however it ended.
-        release = (("restoring the scanned device fields", knobs.restore),)
         try:
             self.sequencer.safe()
             check_cancelled(context)
@@ -532,6 +540,7 @@ class SeamlessScanMeasurement:
                     row_offset=0,
                     scan_repeat_base=0,
                     progress_base=0,
+                    config=config,
                     load=True,
                     **segment,
                 )
@@ -591,22 +600,31 @@ class SeamlessScanMeasurement:
                                 segment, streamed=point_streamed, program=point_program
                             )
                         standing = outer_row
-                        self._play_table(
+                        config = self._play_table(
                             context,
                             sweeps=1,
                             row_offset=index * inner_count,
                             scan_repeat_base=sweep,
                             progress_base=done,
+                            config=config,
                             load=done == 0 or bool(api_changed),
                             **segment,
                         )
                         done += inner_count
             check_cancelled(context)
         except BaseException as error:
-            release_after_scan(release, error)
+            # The scan's own failure stays the error; a knob that would not
+            # go back is told beside it.
+            try:
+                knobs.restore()
+            except BaseException as failure:
+                error.add_note(
+                    "restoring the scanned device fields also reported: "
+                    f"{type(failure).__name__}: {failure}"
+                )
             raise
-        release_after_scan(release, None)
-        return context.current_dataset(SCAN_OUTPUT.name), run_record
+        knobs.restore()
+        return context.current_dataset(SCAN_OUTPUT.name)
 
     def run_record(
         self,
@@ -635,24 +653,13 @@ class SeamlessScanMeasurement:
                 }
             )
 
-        source_record = dict(self.source.describe())
-        raw_named = source_record.pop("named_devices", {})
-        if not isinstance(raw_named, Mapping):
-            raise TypeError("scan source named_devices must be a mapping")
         named_devices = {"sequencer": self.sequencer_key}
         for axis in self.outer_axes:
             if axis.port.startswith(DEVICE_PARAM_FAMILY):
-                key = axis.port[len(DEVICE_PARAM_FAMILY):].partition(":")[0]
+                key, _field = device_port_parts(axis.port)
                 named_devices[f"tunable:{key}"] = key
-        for role, device_key in raw_named.items():
-            if not isinstance(role, str) or not isinstance(device_key, str):
-                raise TypeError("scan source device roles and keys must be text")
-            previous = named_devices.setdefault(role, device_key)
-            if previous != device_key:
-                raise ValueError(f"scan device role {role!r} is ambiguous")
         return {
-            "node": self.instance_id,
-            **source_record,
+            **self.source.describe(),
             "named_devices": named_devices,
             "device_snapshots": {
                 "sequencer": sequencer_archive_snapshot(
@@ -664,12 +671,7 @@ class SeamlessScanMeasurement:
                         **dict(device.settings_provenance()),
                     }
                     for key, device in sorted(self.tunables.items())
-                    if any(
-                        axis.port.startswith(
-                            f"{DEVICE_PARAM_FAMILY}{key}:"
-                        )
-                        for axis in self.outer_axes
-                    )
+                    if f"tunable:{key}" in named_devices
                 },
             },
             "pulse": {"name": self.pulse_path.stem, "path": str(self.pulse_path)},
@@ -679,18 +681,6 @@ class SeamlessScanMeasurement:
             "run_repeats": self.shots_per_point,
             "acquisition_logic": self.acquisition_logic or None,
         }
-
-    @property
-    def last_run_record(self) -> Mapping[str, object] | None:
-        return (
-            None
-            if self._last_run_record is None
-            else dict(self._last_run_record)
-        )
-
-    def execute(self, context: object):
-        dataset, _run_record = self.acquire(context)
-        return dataset
 
 
 __all__ = ["SeamlessScanMeasurement"]

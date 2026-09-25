@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from threading import Event, RLock
 
 from zlc_data import canonical_text
@@ -14,14 +14,12 @@ from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
 def check_cancelled(context: object) -> None:
     """Leave now if the operator has pressed Stop.
 
-    Shared by scan and task completion waits: a scan that ends
-    because it was stopped says so the same way wherever it noticed.
+    Shared by the scan and the feedback task: a run that ends because it
+    was stopped says so the same way wherever it noticed.
     """
 
     if context.cancel_requested():
-        raise RuntimeError("the scan was cancelled")
-
-
+        raise RuntimeError("the run was cancelled")
 
 
 def wait_for_report(sequencer: object, context: object) -> object:
@@ -69,27 +67,15 @@ def wait_for_board(sequencer: object, context: object) -> None:
         raise RuntimeError(f"the pulse failed: {report.fault}")
 
 
-def watched_signal_source(
-    signal_plane: object,
-    source_signal: str,
-) -> "PublishedSignalSource":
-    """Watch the declared source, including one with no generation/data yet.
-
-    Authoring checks the declaration's contract. A configured panel fit has
-    no runtime output until its first real frame is fitted, so the source may
-    wait for that publication while Scan fires its own pulse. It never starts
-    a camera or creates an initial fit value.
-    """
-
-    return PublishedSignalSource(signal_plane, source_signal)
-
-
 class PublishedSignalSource:
     """The point's value is the next publication of a signal somebody runs.
 
     A producer commits publications independently of display.  This source
     follows that exact stream directly; it never pumps the presentation front
-    and therefore cannot make a scan's cadence depend on an open panel.
+    and therefore cannot make a scan's cadence depend on an open panel.  The
+    signal may have no generation or data yet -- a configured panel fit has
+    no output until its first real frame is fitted -- so the source waits for
+    that publication while the scan fires its own pulse.
 
     A source that restarts mid-scan is not a source with a gap; it is a
     different generation, and the scan says so instead of stitching.
@@ -108,7 +94,7 @@ class PublishedSignalSource:
         self._opened = False
         self._unsubscribe = None
 
-    def open(self, context: object, *, cycles: int) -> None:
+    def open(self) -> None:
         """Subscribe before the board is loaded, so nothing played is missed.
 
         An existing live generation binds now; a not-yet-published fit route
@@ -116,13 +102,16 @@ class PublishedSignalSource:
         Once bound, generation end stays loud through StreamEndedEarly.
         """
 
-        del context, cycles
         self.close()
         with self._lock:
             self._opened = True
             self._arrival.clear()
-            self._unsubscribe = self.signal_plane.subscribe_publications(self._bind_arrival)
+            self._unsubscribe = self.signal_plane.subscribe_publications(self._published)
             self._bind_arrival(replay=False)
+
+    def _published(self, names: frozenset[str]) -> None:
+        if self.signal_name in names:
+            self._bind_arrival()
 
     def _bind_arrival(self, *, replay: bool = True) -> None:
         # Called synchronously at publication arrival, not by polling latest:
@@ -139,18 +128,6 @@ class PublishedSignalSource:
                 return  # No live route yet; never adopt a sealed old fit.
             self._tap = tap
             self._arrival.set()
-
-    def validate(
-        self,
-        program: object,
-        table: object = None,
-        *,
-        run_repeats: int = 1,
-        scan_repeats: int = 1,
-    ) -> None:
-        """A watched signal imposes no pulse/camera compatibility constraint."""
-
-        del program, table, run_repeats, scan_repeats
 
     def arm(self) -> None:
         """Everything published so far belongs to the world before this point."""
@@ -177,23 +154,30 @@ class PublishedSignalSource:
                 ) from None
 
     def next_value(
-        self, context: object
+        self, context: object, *, idle: Callable[[], None] | None = None
     ) -> tuple[SignalValue, SignalPublication]:
-        """The next value and the exact publication the scan consumed."""
+        """The next value and the exact publication the scan consumed.
+
+        ``idle`` is called after every slice that brought nothing; it ends
+        the wait by raising.
+        """
 
         while True:
-            if context.cancel_requested():
-                raise RuntimeError("the scan was cancelled")
+            check_cancelled(context)
             with self._lock:
                 if not self._opened:
                     raise RuntimeError("the scan source was not opened")
                 tap = self._tap
             if tap is None:
                 self._arrival.wait(0.1)
+                if idle is not None:
+                    idle()
                 continue
             try:
                 publication = tap.next(0.1)
             except TimeoutError:
+                if idle is not None:
+                    idle()
                 continue
             except StreamEndedEarly:
                 raise RuntimeError(
@@ -224,5 +208,4 @@ __all__ = [
     "check_cancelled",
     "wait_for_board",
     "wait_for_report",
-    "watched_signal_source",
 ]

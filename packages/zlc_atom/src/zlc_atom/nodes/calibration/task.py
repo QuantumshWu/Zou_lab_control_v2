@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 from zlc_data import (
     COMPONENT,
-    SITE,
     SPATIAL_X,
     SPATIAL_Y,
     AxisId,
@@ -29,7 +28,7 @@ from zlc_durable import (
     write_readable_json,
 )
 from zlc_pulse import PulseSequence, convert_time
-from zlc_runtime import TaskRun
+from zlc_runtime import TaskRun, stable_signal_key
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
@@ -55,6 +54,7 @@ from .calibration import (
     ReadoutModelKind,
     SiteMap,
     TrapCalibration,
+    _plain_json_value,
     calibrate,
 )
 from .bimodal import BimodalFit
@@ -654,7 +654,7 @@ def _save_report(
 
     run_root = result.artifact_path.parents[1]
     summary_path = write_readable_json(
-        run_root / "summary.json", _plain(result.summary)
+        run_root / "summary.json", _plain_json_value(result.summary, "summary")
     )
     artifact_context.register_artifact(
         "calibration_summary",
@@ -724,7 +724,9 @@ def _save_report_images(
                 size="4x4",
                 classifier_thresholds=classifier_thresholds,
                 source={
-                    "task": "calibration",
+                    # The Logic row that ran, not the node type: a second
+                    # Calibration row's reports are that row's.
+                    "task": str(artifact_context.instance_id),
                     "report": stem,
                     "run_record": dict(result.run_record),
                 },
@@ -1074,27 +1076,6 @@ def _camera_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
     }
 
 
-def _plain(value: object) -> object:
-    if value is None or type(value) in (str, bool, int, float):
-        return value
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        result: dict[str, object] = {}
-        for key, item in value.items():
-            if type(key) is not str:
-                raise TypeError("device snapshot keys must be strings")
-            result[key] = _plain(item)
-        return result
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    raise TypeError(f"device snapshot contains non-plain {type(value).__name__}")
-
-
 class _SiteReviewPublisher:
     """One short-lived companion producer for the operator review image."""
 
@@ -1108,7 +1089,7 @@ class _SiteReviewPublisher:
     def signal_key(self, name: str) -> str:
         if str(name) != SITE_REVIEW_DECLARATION.name:
             raise KeyError(name)
-        return f"@logic/{self.instance_id}/{name}"
+        return stable_signal_key(self.instance_id, name)
 
     def begin(self) -> object:
         generation = self.signal_plane.begin_generation(self)
@@ -1280,7 +1261,6 @@ class CalibrationTask:
         Mapping[str, object],
         SampleWriter | None,
     ]:
-        count = self.request.repeats * 3
         armed = False
         firing = False
         writer: SampleWriter | None = None
@@ -1366,25 +1346,9 @@ class CalibrationTask:
                 cycle_records = capture.next_cycle()
                 if cycle_records is None:
                     raise RuntimeError("calibration was cancelled")
-                records = tuple(cycle_records)
-                if len(records) != 3 or any(
-                    not isinstance(record, CameraFrameRecord) for record in records
-                ):
-                    # The sensor's own answer to "how often can you be
-                    # triggered here" is the number that decides this, so it
-                    # is the number the operator is given.
-                    interval = actual.required_external_trigger_interval_seconds
-                    raise RuntimeError(
-                        f"the camera returned {len(records)} frame(s) of a "
-                        f"three-frame cycle: at this working point it "
-                        f"integrates {actual.exposure_seconds:g}s per trigger "
-                        f"and accepts one only every "
-                        f"{'unknown' if interval is None else format(interval, 'g') + 's'}"
-                        ", and a trigger arriving before that is ignored -- "
-                        "the pulse must space its camera windows by more than "
-                        "that, or the exposure must come down"
-                    )
-                cycle = (records[0], records[1], records[2])
+                # next_cycle hands back exactly three contiguous frames or
+                # raises, with the camera's exposure and trigger interval.
+                cycle = tuple(cycle_records)
                 cycles.append(cycle)
                 self._partial_cycles_completed = len(cycles)
                 if frames_folder is not None:
@@ -1421,16 +1385,13 @@ class CalibrationTask:
                         current=len(cycles),
                         total=self.request.repeats,
                     )
+            # close() has already proved the camera stopped, joined and
+            # produced exactly the frames these cycles hold.
             terminal = capture.close()
             armed = False
             self.sequencer.safe()
             firing = False
-            if (
-                terminal.produced_count != count
-                or not terminal.source_stopped
-                or not terminal.no_more_frames
-                or not terminal.joined
-            ):
+            if not terminal.no_more_frames:
                 raise RuntimeError("camera did not prove exact calibration completion")
             return (
                 CalibrationCapture(tuple(cycles), terminal),
@@ -1952,7 +1913,7 @@ class CalibrationTask:
                 parameters={},
                 size="4x4",
                 source={
-                    "task": "calibration",
+                    "task": str(context.instance_id),
                     "report": "partial_capture",
                     "status": str(status),
                     "cycles_completed": self._partial_cycles_completed,

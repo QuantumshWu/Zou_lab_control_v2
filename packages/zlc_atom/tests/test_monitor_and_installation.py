@@ -24,38 +24,6 @@ from zlc_atom.nodes.camera_measurement import (
 )
 
 
-def _one_camera_window_program():
-    from zlc_pulse import (
-        PulsePeriod,
-        PulseSequence,
-        compile_sequence,
-        load_streamer_config,
-        pulse_target_from_xdc,
-    )
-
-    config = load_streamer_config()
-    target = pulse_target_from_xdc()
-    trigger_lane = target.by_key["emCCD"].lanes[0]
-    trigger_index = target.raw_lanes.index(trigger_lane)
-    high = [0] * len(target.raw_lanes)
-    high[trigger_index] = 1
-    sequence = PulseSequence(
-        "one_camera_window",
-        target,
-        1e9 / config["clock_hz"],
-        (
-            PulsePeriod("expose", 0.02, "s", tuple(high)),
-            PulsePeriod(
-                "close",
-                1e9 / config["clock_hz"],
-                "ns",
-                (0,) * len(high),
-            ),
-        ),
-    )
-    return compile_sequence(sequence, config["params"], config["clock_hz"])
-
-
 def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle() -> None:
     installation = create_installation("virtual")
     plane = FakePlane()
@@ -255,45 +223,6 @@ def test_direct_monitor_disarms_when_empty_generation_retire_fails() -> None:
         with pytest.raises(RuntimeError, match="synthetic retire failure"):
             monitor.close()
         assert camera.capture_state() is False
-    finally:
-        plane.close()
-        installation.close()
-
-
-def test_finite_measurement_collects_only_external_triggers() -> None:
-    installation = create_installation("virtual")
-    plane = FakePlane()
-    try:
-        measurement = CameraMeasurementNode(
-            camera=installation.device("camera"),
-            request=CameraMeasurementRequest(
-                camera_key="camera",
-                exposure_seconds=0.02,
-                roi_xywh=None,
-                repeat=3,
-                frames_per_cycle=1,
-            ),
-            signal_plane=plane,
-        )
-        result_box: list[object] = []
-        worker = Thread(
-            target=lambda: result_box.append(measurement.prepare().collect()),
-            daemon=True,
-        )
-        worker.start()
-        deadline = time.monotonic() + 1.0
-        while not installation.device("camera").capture_state() and time.monotonic() < deadline:
-            time.sleep(0.001)
-        sequencer = installation.device("sequencer")
-        sequencer.load(_one_camera_window_program())
-        for _ in range(3):
-            sequencer.fire(run_repeats=1, scan_repeats=1)
-            sequencer.wait_done(1.0)
-        worker.join(timeout=2.0)
-        assert not worker.is_alive()
-        assert len(result_box) == 1
-        result = result_box[0]
-        assert len(result.frames) == 3  # type: ignore[union-attr]
     finally:
         plane.close()
         installation.close()

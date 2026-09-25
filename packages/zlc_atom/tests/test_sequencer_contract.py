@@ -18,16 +18,11 @@ The rules come from the hardware.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from zlc_atom.devices.sequencer import SequencerDevice
 from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
-from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer, VirtualSequencer
-
-
-def test_virtual_sequencer_is_the_canonical_sequencer_device() -> None:
-    assert isinstance(VirtualSequencer(world=SimulationWorld()), SequencerDevice)
+from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 
 
 def test_the_installed_device_forwards_the_whole_streamer_surface() -> None:
@@ -222,15 +217,15 @@ def test_safe_is_answerable_at_any_time(sequencer) -> None:
     assert streamer.safe() is not None
 
 
-def test_a_streamer_the_broker_refuses_is_closed_by_the_factory() -> None:
-    """A device that never became a leaf has nobody else to close it.
+def test_a_streamer_the_broker_refuses_is_closed() -> None:
+    """A device refused a place in the installation has nobody else to close it.
 
     The hardware factory dialled (or was handed) a streamer, opened it and
-    asked the broker to bind it; the broker refused -- the same physical
-    identity was already bound -- and the open connection was dropped on
-    the floor: not in any leaf, not in the returned Installation, not
-    closable by anyone.  The factory owns what it opened until a leaf
-    does.
+    bound it; the broker refused it -- the same physical identity was
+    already bound -- and the open connection was dropped on the floor: not
+    in any leaf, not in the returned Installation, not closable by anyone.
+    The factory owns what it opened until it returns a leaf, and the
+    admission that refuses that leaf closes it.
     """
 
     from zlc_atom.devices.sequencer.binding import bind_sequencer
@@ -250,7 +245,7 @@ def test_a_streamer_the_broker_refuses_is_closed_by_the_factory() -> None:
     existing = Installation(
         {
             "seq": bind_sequencer(
-                InstallationFactoryContext(None, broker, {}),
+                InstallationFactoryContext(None, broker),
                 "seq",
                 SequencerDevice(first),
                 "sequencer:seq",

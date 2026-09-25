@@ -8,23 +8,12 @@ set that was.  Neither is visible in a pulse file, which is the whole point.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
-from zlc_atom.devices.sequencer import sequencer_archive_snapshot
+from zlc_atom.devices.sequencer import SequencerDevice, sequencer_archive_snapshot
 from zlc_atom.devices.simulation import SimulationWorld
-from zlc_atom.devices.simulation.sequencer import VirtualSequencer
-from zlc_pulse import CURRENT_CONFIG_VALUES, read_config_values, write_config_values
-
-
-def test_a_saved_set_round_trips_through_the_shared_grammar(tmp_path) -> None:
-    path = tmp_path / CURRENT_CONFIG_VALUES
-    write_config_values(
-        path, {"trigger_delay": (40.0, "ns")}
-    )
-    entries = read_config_values(path)
-    assert entries == {"trigger_delay": (40.0, "ns")}
+from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
+from zlc_pulse import CURRENT_CONFIG_VALUES, write_config_values
 
 
 def test_the_archive_records_the_set_that_was_in_force() -> None:
@@ -36,7 +25,7 @@ def test_the_archive_records_the_set_that_was_in_force() -> None:
     pulse never held them.
     """
 
-    sequencer = VirtualSequencer(world=SimulationWorld())
+    sequencer = SequencerDevice(VirtualPulseStreamer(world=SimulationWorld()))
     sequencer.open()
     try:
         board = sequencer.describe()
@@ -71,7 +60,7 @@ def test_the_archive_carries_the_program_and_the_pulse_that_played() -> None:
     from zlc_pulse import resolve_api_parameters
     from tests.pulse_fixture import pulse_sequence
 
-    sequencer = VirtualSequencer(world=SimulationWorld())
+    sequencer = SequencerDevice(VirtualPulseStreamer(world=SimulationWorld()))
     sequencer.open()
     try:
         board = sequencer.describe()
@@ -105,32 +94,18 @@ def test_the_archive_carries_the_program_and_the_pulse_that_played() -> None:
         sequencer.close()
 
 
-def test_the_archive_keeps_config_source_in_its_whitelist() -> None:
-    """The snapshot drops any state key it was not told about, silently.
-
-    A key added to the device and forgotten here vanishes from every run
-    record with nothing failing, so the list is stated once and pinned.
-    """
-
-    state = {
-        "opened": True,
-        "loaded": True,
-        "config_source": "/bench/current.json",
-        "invented": "should not survive",
-    }
-    result = sequencer_archive_snapshot(state=state)["state"]
-    assert result["config_source"] == "/bench/current.json"
-    assert "invented" not in result
-
-
 def test_session_init_does_not_read_an_unselected_config_file(tmp_path) -> None:
-    """An old file cannot block Init; only explicit Config Load reads a file."""
+    """An old file cannot block Init; only explicit Config Load reads a file.
+
+    Opening a workspace creates a directory, not an implicitly active file.
+    """
 
     from zlc_workbench.session import ExperimentSession, Workspace
 
     (tmp_path / "pulses").mkdir()
     space = Workspace(tmp_path).prepare()
     current = space.config_values / CURRENT_CONFIG_VALUES
+    assert space.config_values.is_dir() and not current.exists()
     old = '{"format":"zlc.pulse.config_values","name":"current","source":"hand","values":{}}'
     current.write_text(old, encoding="utf-8")
 
@@ -144,23 +119,5 @@ def test_session_init_does_not_read_an_unselected_config_file(tmp_path) -> None:
         session.sequencer.load_config_file(chosen)
         assert session.sequencer.config_values() == {"trigger_delay": (40.0, "ns")}
         assert session.sequencer.config_source == str(chosen)
-    finally:
-        session.close()
-
-
-def test_a_workspace_with_no_set_is_silent(tmp_path) -> None:
-    """Opening a workspace creates a directory, not an implicitly active file."""
-
-    from zlc_workbench.session import ExperimentSession, Workspace
-
-    (tmp_path / "pulses").mkdir()
-    space = Workspace(tmp_path).prepare()
-    seeded = space.config_values / CURRENT_CONFIG_VALUES
-    assert space.config_values.is_dir()
-    assert not seeded.exists()
-
-    session = ExperimentSession.open(workspace=tmp_path, template="virtual")
-    try:
-        assert session.sequencer.config_values() == {}
     finally:
         session.close()

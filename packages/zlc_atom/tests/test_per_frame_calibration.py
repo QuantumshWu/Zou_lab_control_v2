@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.nodes import artifact_input_key, split_artifact_input_key
@@ -30,11 +24,9 @@ from zlc_atom.nodes.camera_measurement.measurement import frames_snapshot
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_NODE
 from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
 from zlc_pulse import api_bindings_in_period_order
-from zlc_pulse.codec import sequence_from_tree
 from zlc_runtime import SignalValue
 
-
-PULSES = Path(__file__).resolve().parent / "pulses"
+from tests.pulse_fixture import calibration_request, pulse_sequence
 
 
 def _calibration(threshold: float, *, sites: tuple[str, ...] = ("site-1",)) -> TrapCalibration:
@@ -97,6 +89,15 @@ def test_a_frames_calibration_must_read_the_same_sites_and_name_a_real_frame() -
     processor = OccupancyProcessor(_calibration(1.0), calibration_by_frame={3: _calibration(1e6)})
     with pytest.raises(ValueError, match="only 2 frame"):
         processor.process(_cycle(10.0, 10.0))
+    # A frame's own calibration answers for its unit as the shared one does:
+    # thresholds trained in photoelectrons do not judge frames read in counts.
+    trained = replace(_calibration(1e6), report={"run_record": {"request": {"photoelectrons": True}}})
+    counted = SignalValue(
+        "camera/frames", _cycle(10.0, 10.0), None,
+        run_record={"parameters": {"photoelectrons": False}, "device_snapshots": {"camera": {}}},
+    )
+    with pytest.raises(ValueError, match="frame 2's calibration was trained in photoelectrons"):
+        OccupancyProcessor(_calibration(1.0), calibration_by_frame={2: trained}).evaluate(counted)
 
 
 def test_the_logic_node_hands_each_frames_artifact_to_the_processor(tmp_path: Path) -> None:
@@ -141,8 +142,7 @@ def test_a_calibrations_api_fields_default_to_the_pulses_first_three_in_period_o
     readout and reference-after fields take the API parameters as the pulse
     plays them; with no pulse there is nothing to default."""
 
-    tree = json.loads((PULSES / "imaging_template.json").read_text(encoding="utf-8"))
-    sequence = sequence_from_tree(tree)
+    sequence = pulse_sequence("imaging_template.json")
     shuffled = replace(sequence, bindings=tuple(reversed(sequence.bindings)))
     assert [binding.field_id for binding in shuffled.api_bindings] == [
         "duration:long_after", "duration:short", "duration:long_before",
@@ -168,7 +168,7 @@ def test_a_calibration_arms_its_camera_with_the_longest_window_and_shows_it() ->
     and a request whose camera exposure would cut the reference window is
     refused."""
 
-    from zlc_atom.nodes.calibration.task import CalibrationRequest, camera_exposure_seconds
+    from zlc_atom.nodes.calibration.task import camera_exposure_seconds
 
     assert camera_exposure_seconds(0.02, 0.005) == 0.02
     assert CALIBRATION_NODE.resolve_defaults(
@@ -181,27 +181,7 @@ def test_a_calibration_arms_its_camera_with_the_longest_window_and_shows_it() ->
     )
     assert field.derived and not field.required
 
-    def request(camera_exposure: float) -> CalibrationRequest:
-        return CalibrationRequest(
-            camera_key="camera",
-            sequencer_key="sequencer",
-            pulse_template="imaging_template.json",
-            repeats=3,
-            reference_exposure_seconds=0.02,
-            readout_exposure_seconds=0.005,
-            camera_exposure_seconds=camera_exposure,
-            reference_before_field="duration:long_before",
-            readout_field="duration:short",
-            reference_after_field="duration:long_after",
-            default_model_kind=ReadoutModelKind.BOX,
-            threshold_method="gaussian",
-            box_half_width=1,
-            psf_half_width=3,
-            psf_padding=3,
-            detection_spot_sigma=1.0,
-            detection_sigma=6.0,
-        )
-
-    assert request(0.02).to_dict()["camera_exposure_seconds"] == 0.02
+    request = calibration_request(repeats=3)
+    assert request.to_dict()["camera_exposure_seconds"] == 0.02
     with pytest.raises(ValueError, match="cover the reference window"):
-        request(0.01)
+        replace(request, camera_exposure_seconds=0.01)

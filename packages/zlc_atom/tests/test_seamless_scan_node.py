@@ -17,6 +17,7 @@ fire repeats the fixed pulse without a scan table or a fabricated slot.
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from types import SimpleNamespace
@@ -59,8 +60,7 @@ from zlc_atom.nodes.scan import (
 )
 from zlc_atom.nodes.seamless_scan import SEAMLESS_SCAN_SCHEMA
 
-from tests.fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench
-from test_scan_repeat_domain import _source_schema
+from tests.fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench, scan_source_schema
 
 
 class _FakeSequencer(ConfigValueHolder):
@@ -97,7 +97,6 @@ class _FakeSequencer(ConfigValueHolder):
 
     def fire(self, **kwargs):
         self.fires += 1
-        from dataclasses import replace
         self._applied = replace(self._applied, run_repeats=kwargs["run_repeats"], scan_repeats=kwargs.get("scan_repeats", 1))
         return self._applied
 
@@ -117,13 +116,10 @@ class _FakeSource:
         self.fail_at = fail_at
         self.on_take = None
 
-    def open(self, *_args, **_kwargs) -> None:
+    def open(self) -> None:
         pass
 
     def close(self) -> None:
-        pass
-
-    def validate(self, *_args, **_kwargs) -> None:
         pass
 
     def arm(self) -> None:
@@ -135,12 +131,13 @@ class _FakeSource:
     def describe(self) -> dict:
         return {"source_signal": "fake"}
 
-    def next_value(self, context):
+    def next_value(self, context, *, idle=None):
+        del idle
         self.taken += 1
         check_cancelled(context)
         if self.taken == self.fail_at:
             raise RuntimeError("scripted source failed")
-        schema = _source_schema(shots=1)
+        schema = scan_source_schema(shots=1)
         snapshot = owned_snapshot_from_arrays(
             schema,
             np.zeros(schema.physical_shape),
@@ -228,7 +225,7 @@ def _scan_host(node: object, plane: SignalDataPlane) -> NodeHost:
     return NodeHost(
         node,
         plane,
-        instance_id=node.instance_id,
+        instance_id="seamless_scan",
         kind="measurement",
         dataset_output_declarations=(SCAN_OUTPUT,),
         input_signal=node.source.signal_name,
@@ -256,6 +253,64 @@ def _pulse_resource(name: str, sequence):
     return ResolvedWorkspaceResource(Path(name), SCAN_PULSE_CONTRACT, sequence)
 
 
+@contextmanager
+def _seamless_host(
+    plan: ScanPlan,
+    sequence: object,
+    *,
+    publications_per_fire: int,
+    seed: bool = True,
+    **node_kwargs,
+):
+    """The seamless node started over the scripted bench on the virtual board.
+
+    Yields the running host, the node, the plane, the bench and every run
+    record the node declared (as declared, before the plane freezes it).  On
+    the way out a host still running is cancelled, and the host, bench,
+    plane and installation are closed in that order.
+    """
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    declared: list[dict] = []
+    declare = plane.set_run_record
+    plane.set_run_record = lambda owner, record: declared.append(record) or declare(owner, record)
+    bench = None
+    host = None
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"),
+            plane,
+            publications_per_fire=publications_per_fire,
+        )
+        if seed:
+            bench.publish(SCRIPTED_SEED_VALUE)
+        descriptor = {value.api_name: value for value in discover_logic_nodes()}["seamless_scan"]
+        node = descriptor.instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(TEMPLATE_NAME, sequence),
+            plan=plan.to_tree(),
+            **node_kwargs,
+        )
+        host = _scan_host(node, plane)
+        host.start()
+        yield SimpleNamespace(host=host, node=node, plane=plane, bench=bench, declared=declared)
+    finally:
+        if host is not None and not host.observation.terminal:
+            host.cancel("test cleanup")
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not host.observation.terminal:
+                host.poll()
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+
 def _scripted_run(
     *,
     values: tuple[float, ...],
@@ -273,34 +328,15 @@ def _scripted_run(
     what a board-driven source does.
     """
 
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
-    bench = None
-    host = None
-    try:
-        bench = ScriptedScanBench(
-            installation.device("sequencer"),
-            plane,
-            publications_per_fire=repeats * len(values) * shots,
-        )
-        if seed:
-            bench.publish(SCRIPTED_SEED_VALUE)
-        plan = ScanPlan((ScanAxis(scan_port, values),))
-        node = descriptors["seamless_scan"].instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(
-                TEMPLATE_NAME,
-                _template_sequence() if sequence is None else sequence,
-            ),
-            plan=plan.to_tree(),
-            repeats=repeats,
-            shots_per_point=shots,
-        )
-        host = _scan_host(node, plane)
-        host.start()
+    with _seamless_host(
+        ScanPlan((ScanAxis(scan_port, values),)),
+        _template_sequence() if sequence is None else sequence,
+        publications_per_fire=repeats * len(values) * shots,
+        seed=seed,
+        repeats=repeats,
+        shots_per_point=shots,
+    ) as run:
+        host, plane, bench = run.host, run.plane, run.bench
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline and not host.observation.terminal:
             host.poll()
@@ -315,23 +351,11 @@ def _scripted_run(
         (parent,) = plane.direct_parent_publications(publication)
         assert parent.value(bench.signal_name) is not None
         value = plane.current_dataset(host.signal_key("scan"))
-        block = np.asarray(value.block.values, dtype=float)
+        block = np.asarray(value.block.materialize().values, dtype=float)
         # (scan repeat x run repeat, plan row, y, x): every pixel of a
         # scripted frame carries the publication's index, so the cell mean IS
         # the shot that landed there.
         return block.mean(axis=(2, 3)), bench
-    finally:
-        if host is not None and not host.observation.terminal:
-            host.cancel("test cleanup")
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline and not host.observation.terminal:
-                host.poll()
-        if host is not None:
-            host.shutdown()
-        if bench is not None:
-            bench.close()
-        plane.close()
-        installation.close()
 
 
 def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None:
@@ -367,9 +391,6 @@ def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
     """The fired table drives the frames, so the gating question cannot arise."""
 
     names = SEAMLESS_SCAN_SCHEMA.field_names
-    assert "gating" not in names
-    assert "capture" not in names
-    assert "advance" not in names
     assert set(names) == {
         "pulse_template",
         "plan",
@@ -380,49 +401,6 @@ def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
         "repeats",
         "shots_per_point",
     }
-
-
-def test_source_preflight_rejects_before_the_board_is_loaded(monkeypatch) -> None:
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    bench = None
-    host = None
-    try:
-        bench = ScriptedScanBench(
-            installation.device("sequencer"), plane, publications_per_fire=1
-        )
-        bench.publish(SCRIPTED_SEED_VALUE)
-        descriptor = {
-            value.api_name: value for value in discover_logic_nodes()
-        }["seamless_scan"]
-        node = descriptor.instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
-            plan=ScanPlan((ScanAxis(BIAS_X_PORT, (0.0,)),)).to_tree(),
-            repeats=1,
-            shots_per_point=1,
-        )
-
-        def reject(*_args, **_kwargs) -> None:
-            raise ValueError("invalid camera cadence")
-
-        monkeypatch.setattr(node.source, "validate", reject)
-        host = _scan_host(node, plane)
-        host.start()
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not host.observation.terminal:
-            host.poll()
-        assert "invalid camera cadence" in str(host.observation.error)
-        assert bench.loads == 0, "the board was mutated before source preflight"
-    finally:
-        if host is not None:
-            host.shutdown()
-        if bench is not None:
-            bench.close()
-        plane.close()
-        installation.close()
 
 
 def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> None:
@@ -712,7 +690,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         assert observed.terminal
 
         value = plane.current_dataset(host.signal_key("scan"))
-        block = np.asarray(value.block.values, dtype=float)
+        block = np.asarray(value.block.materialize().values, dtype=float)
         # (shots, t_off points x probe frames, y, x).
         assert block.shape[:2] == (shots, 2 * len(t_offs))
         sites = np.zeros(block.shape[2:], dtype=bool)
@@ -783,7 +761,7 @@ def test_a_chain_that_is_not_armed_waits_for_its_first_real_publication(sealed_b
     a prior sealed generation is never replayed as the new scan's first value.
     """
     from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput
-    from zlc_atom.nodes.scan import watched_signal_source
+    from zlc_atom.nodes.scan import PublishedSignalSource
 
     plane = SignalDataPlane()
     declaration = DatasetOutputDeclaration("parameter", "test.parameter")
@@ -793,7 +771,7 @@ def test_a_chain_that_is_not_armed_waits_for_its_first_real_publication(sealed_b
     source = None
 
     def publish(number):
-        schema = _source_schema(shots=1)
+        schema = scan_source_schema(shots=1)
         snapshot = owned_snapshot_from_arrays(schema, np.full(schema.physical_shape, float(number)),
                                               number, stream_generation="source-input")
         plane.commit_live(producer, {"parameter": LiveDatasetOutput(
@@ -806,8 +784,8 @@ def test_a_chain_that_is_not_armed_waits_for_its_first_real_publication(sealed_b
             publish(999)
             plane.seal_committed(producer)
         callbacks = len(plane._publication_callbacks)
-        source = watched_signal_source(plane, signal)
-        source.open(_Context(), cycles=2)
+        source = PublishedSignalSource(plane, signal)
+        source.open()
         source.arm()  # Still no new producer: return so the scan may FIRE.
         checks = iter((False, True))
         waiting = _Context()
@@ -841,49 +819,32 @@ def _manual_run(
     values: tuple[float, ...] | None,
     shots: int = 1,
     repeats: int = 1,
-    answer=None,
     sequence=None,
 ):
     """Walk a plan whose outer axes only a hand can move.
 
     Returns the finished dataset value, the questions the run asked, and
-    the bench.  ``answer`` overrides what the operator says, so a test can
-    refuse on purpose.
+    the bench.  Every question is answered by confirming the stop.
     """
 
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
-    bench = None
-    host = None
+    plan = ScanPlan(
+        tuple(
+            ScanAxis(MANUAL_PARAM_FAMILY + name, points)
+            for name, points in manual
+        )
+        + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
+    )
+    if sequence is None:
+        sequence = pulse_sequence(TEMPLATE_NAME) if values is None else _template_sequence()
     asked: list[object] = []
-    try:
-        bench = ScriptedScanBench(
-            installation.device("sequencer"),
-            plane,
-            publications_per_fire=(1 if values is None else len(values)) * shots,
-        )
-        bench.publish(SCRIPTED_SEED_VALUE)
-        plan = ScanPlan(
-            tuple(
-                ScanAxis(MANUAL_PARAM_FAMILY + name, points)
-                for name, points in manual
-            )
-            + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
-        )
-        node = descriptors["seamless_scan"].instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME,
-                sequence if sequence is not None else
-                pulse_sequence("mot_field_template.json") if values is None else _template_sequence()),
-            plan=plan.to_tree(),
-            repeats=repeats,
-            shots_per_point=shots,
-        )
-        host = _scan_host(node, plane)
-        host.start()
+    with _seamless_host(
+        plan,
+        sequence,
+        publications_per_fire=(1 if values is None else len(values)) * shots,
+        repeats=repeats,
+        shots_per_point=shots,
+    ) as run:
+        host = run.host
         deadline = time.monotonic() + 60.0
         served = ""
         while time.monotonic() < deadline and not host.observation.terminal:
@@ -894,40 +855,18 @@ def _manual_run(
             served = request.request_id
             asked.append(request)
             assert request.kind == MANUAL_AXIS_REQUEST
-            reply = (
-                None
-                if answer is None
-                else answer(request, len(asked) - 1)
-            )
-            if reply is None:
-                reply = {}
-            if reply == "stop":
-                host.cancel("operator stopped the manual scan")
-                continue
-            host.submit_operator_input(request.request_id, reply)
+            host.submit_operator_input(request.request_id, {})
         observed = host.observation
         assert observed.error is None, observed.error
         assert observed.terminal, (
             "the manual scan never finished; it published "
-            f"{bench.published} and kept waiting"
+            f"{run.bench.published} and kept waiting"
         )
         return (
-            plane.current_dataset(host.signal_key("scan")),
+            run.plane.current_dataset(host.signal_key("scan")),
             tuple(asked),
-            bench,
+            run.bench,
         )
-    finally:
-        if host is not None and not host.observation.terminal:
-            host.cancel("test cleanup")
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline and not host.observation.terminal:
-                host.poll()
-        if host is not None:
-            host.shutdown()
-        if bench is not None:
-            bench.close()
-        plane.close()
-        installation.close()
 
 
 def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
@@ -1000,7 +939,7 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
     )
     assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 1)
     assert schema.point_domain.size == 4
-    block = np.asarray(value.block.values, dtype=float)
+    block = np.asarray(value.block.materialize().values, dtype=float)
     # Walk 0 played publications 0-3, walk 1 played 4-7, both over the same
     # four points.
     assert block.mean(axis=(2, 3)).tolist() == [
@@ -1037,32 +976,16 @@ def test_only_the_axis_that_moves_is_asked_for() -> None:
 def test_stopping_at_the_question_stops_the_run() -> None:
     """The operator is the loop here; declining is an answer, not an error."""
 
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
-    bench = ScriptedScanBench(
-        installation.device("sequencer"), plane, publications_per_fire=1
+    plan = ScanPlan(
+        (
+            ScanAxis(MANUAL_PARAM_FAMILY + "power", (1.0, 2.0)),
+            ScanAxis(BIAS_X_PORT, (-256.0,)),
+        )
     )
-    host = None
-    try:
-        bench.publish(SCRIPTED_SEED_VALUE)
-        plan = ScanPlan(
-            (
-                ScanAxis(MANUAL_PARAM_FAMILY + "power", (1.0, 2.0)),
-                ScanAxis(BIAS_X_PORT, (-256.0,)),
-            )
-        )
-        node = descriptors["seamless_scan"].instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
-            plan=plan.to_tree(),
-            repeats=1,
-            shots_per_point=1,
-        )
-        host = _scan_host(node, plane)
-        host.start()
+    with _seamless_host(
+        plan, _template_sequence(), publications_per_fire=1, repeats=1, shots_per_point=1,
+    ) as run:
+        host = run.host
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline and host.operator_request is None:
             host.poll()
@@ -1073,13 +996,7 @@ def test_stopping_at_the_question_stops_the_run() -> None:
             host.poll()
         assert host.observation.terminal
         assert host.observation.phase == "cancelled"
-        assert bench.fired_repeats == [], "nothing fired before the hand answered"
-    finally:
-        if host is not None:
-            host.shutdown()
-        bench.close()
-        plane.close()
-        installation.close()
+        assert run.bench.fired_repeats == [], "nothing fired before the hand answered"
 
 
 @pytest.mark.parametrize("port", ("manual:power", "device:rf:power"))
@@ -1112,7 +1029,7 @@ def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
     assert tuple(axis.name for axis in schema.point_domain.axes
                  if axis.axis_id.value.startswith("scan.")) == ("power",)
     assert tuple(axis.size for axis in schema.repeat_domain.axes) == (2, 2)
-    assert np.asarray(value.block.values).mean(axis=(2, 3)).tolist() == [
+    assert np.asarray(value.block.materialize().values).mean(axis=(2, 3)).tolist() == [
         [0.0, 2.0], [1.0, 3.0], [4.0, 6.0], [5.0, 7.0],
     ]
     # Omitting every Pulse slot is still the same host-only scan, not a
@@ -1122,7 +1039,9 @@ def test_manual_axes_alone_repeat_a_fixed_pulse_at_each_confirmation() -> None:
         manual=(("power", (1.0, 2.0)),), values=None, shots=2, repeats=2,
         sequence=slotted,
     )
-    np.testing.assert_array_equal(fixed.block.values, value.block.values)
+    np.testing.assert_array_equal(
+        fixed.block.materialize().values, value.block.materialize().values
+    )
     assert fixed.block.schema.fingerprint == schema.fingerprint
     assert [r.payload["value"] for r in fixed_asked] == [1.0, 2.0, 1.0, 2.0]
     assert fixed_bench.scan_tables == [] and fixed_bench._loaded_program.slot_count == 0
@@ -1156,11 +1075,6 @@ def _device_run(
     from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
     from zlc_atom.devices.simulation.rf import virtual_rf_source
 
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
-    bench = None
-    host = None
     if tunables is None:
         source = virtual_rf_source(
             VaunixLmsConfig(
@@ -1175,35 +1089,24 @@ def _device_run(
         # the window, where the scan can put it back.
         source.tune("frequency", 600e6)
         tunables = {"rf": source}
-    try:
-        bench = ScriptedScanBench(
-            installation.device("sequencer"),
-            plane,
-            publications_per_fire=(1 if values is None else len(values)) * shots,
+    plan = ScanPlan(
+        (
+            ScanAxis(
+                DEVICE_PARAM_FAMILY + "rf:" + device_field, frequencies, unit
+            ),
         )
-        bench.publish(SCRIPTED_SEED_VALUE)
-        plan = ScanPlan(
-            (
-                ScanAxis(
-                    DEVICE_PARAM_FAMILY + "rf:" + device_field, frequencies, unit
-                ),
-            )
-            + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
-        )
-        node = descriptors["seamless_scan"].instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME,
-                pulse_sequence("mot_field_template.json") if values is None else _template_sequence()),
-            plan=plan.to_tree(),
-            tunable_devices=tunables,
-            device_labels=device_labels,
-            repeats=repeats,
-            shots_per_point=shots,
-        )
-        host = _scan_host(node, plane)
-        host.start()
+        + (() if values is None else (ScanAxis(BIAS_X_PORT, values),))
+    )
+    with _seamless_host(
+        plan,
+        pulse_sequence(TEMPLATE_NAME) if values is None else _template_sequence(),
+        publications_per_fire=(1 if values is None else len(values)) * shots,
+        tunable_devices=tunables,
+        device_labels=device_labels,
+        repeats=repeats,
+        shots_per_point=shots,
+    ) as run:
+        host = run.host
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline and not host.observation.terminal:
             host.poll()
@@ -1215,17 +1118,10 @@ def _device_run(
         assert observation.terminal, observation
         if observation.phase != "done":
             raise RuntimeError(str(observation.error))
-        value = plane.current_dataset(host.signal_key(SCAN_OUTPUT.name))
-        record = dict(node.last_run_record or {})
-        claims = node.resolved_device_claims()
-        return value, record, bench, tunables["rf"], claims
-    finally:
-        if host is not None:
-            host.shutdown()
-        if bench is not None:
-            bench.close()
-        plane.close()
-        installation.close()
+        value = run.plane.current_dataset(host.signal_key(SCAN_OUTPUT.name))
+        record = dict(run.declared[-1])
+        claims = run.node.resolved_device_claims()
+        return value, record, run.bench, tunables["rf"], claims
 
 
 def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
@@ -1458,28 +1354,14 @@ def test_an_api_parameter_axis_is_walked_by_the_host_one_load_per_point() -> Non
     codes = (-256.0, 0.0, 256.0)
     shots = 2
 
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
-    bench = None
-    host = None
-    try:
-        bench = ScriptedScanBench(
-            installation.device("sequencer"), plane, publications_per_fire=shots,
-        )
-        bench.publish(SCRIPTED_SEED_VALUE)
-        plan = ScanPlan((ScanAxis(API_PARAM_FAMILY + binding.field_id, codes),))
-        node = descriptors["seamless_scan"].instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, raw),
-            plan=plan.to_tree(),
-            repeats=1,
-            shots_per_point=shots,
-        )
-        host = _scan_host(node, plane)
-        host.start()
+    with _seamless_host(
+        ScanPlan((ScanAxis(API_PARAM_FAMILY + binding.field_id, codes),)),
+        raw,
+        publications_per_fire=shots,
+        repeats=1,
+        shots_per_point=shots,
+    ) as run:
+        host, node, bench = run.host, run.node, run.bench
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline and not host.observation.terminal:
             host.poll()
@@ -1487,15 +1369,8 @@ def test_an_api_parameter_axis_is_walked_by_the_host_one_load_per_point() -> Non
             time.sleep(0.002)
         observation = host.poll()
         assert observation.terminal and observation.phase == "done", observation
-        value = plane.current_dataset(host.signal_key(SCAN_OUTPUT.name))
-        record = dict(node.last_run_record or {})
-    finally:
-        if host is not None:
-            host.shutdown()
-        if bench is not None:
-            bench.close()
-        plane.close()
-        installation.close()
+        value = run.plane.current_dataset(host.signal_key(SCAN_OUTPUT.name))
+        record = dict(run.declared[-1])
 
     assert bench.fired_repeats == [(shots, 1)] * len(codes), "one fire per point"
     assert bench.loads == len(codes) and bench.scan_tables == [], "one load per point, no table"

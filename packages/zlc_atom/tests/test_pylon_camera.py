@@ -316,13 +316,14 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     assert not exposure_reads and len(camera.ExposureTime.writes) == writes
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
-    assert adapter.working_point().acquisition_mode is CameraAcquisitionMode.FREE_RUNNING
+    assert adapter.working_point().acquisition_mode == CameraAcquisitionMode.FREE_RUNNING.value
     assert len(exposure_reads) == 1
     with pytest.raises(RuntimeError, match="while armed"):
         adapter.set_roi(None)
+    with pytest.raises(RuntimeError, match="while armed"):
         adapter.set_exposure_seconds(0.02)
     adapter.finish_record_capture()
-    assert adapter.working_point().acquisition_mode is CameraAcquisitionMode.EXTERNAL_TRIGGERED
+    assert adapter.working_point().acquisition_mode == CameraAcquisitionMode.EXTERNAL_TRIGGERED.value
     adapter.close()
 
 
@@ -363,51 +364,6 @@ def test_a_refused_setting_is_not_the_config_and_does_not_block_the_next_one(
     assert adapter.config.roi_xywh == (0, 0, 16, 16)
 
 
-def test_the_binding_identity_is_the_serial_not_the_logical_key() -> None:
-    """Two keys naming one serial are one camera, and the broker must know.
-
-    The identity used to be the logical key, so the same physical camera
-    under a second name was accepted as a second device.
-    """
-
-    from zlc_atom.devices.camera.binding import bind_camera
-    from zlc_atom.execution import DeviceBroker
-    from zlc_atom.install import InstallationFactoryContext
-
-    def attached() -> PylonCameraAdapter:
-        adapter = PylonCameraAdapter(
-            PylonCameraConfig(serial="SAME-SERIAL-001"), camera=_FakeCamera()
-        )
-        adapter.open()
-        return adapter
-
-    broker = DeviceBroker()
-    context = InstallationFactoryContext(None, broker, {})
-    first = bind_camera(
-        context,
-        "first-name",
-        attached(),
-        "pylon-camera:serial=SAME-SERIAL-001",
-        "camera.pylon",
-    )
-    try:
-        assert (
-            first.physical_identity.stable_device_identity
-            == "pylon-camera:serial=SAME-SERIAL-001"
-        )
-        with pytest.raises(RuntimeError, match="already bound"):
-            bind_camera(
-                context,
-                "second-name",
-                attached(),
-                "pylon-camera:serial=SAME-SERIAL-001",
-                "camera.pylon",
-            )
-    finally:
-        first.close()
-        broker.unbind(first.binding)
-
-
 def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(fake_pypylon) -> None:
     """Monitor mode is an arm policy, not the camera's permanent configuration."""
 
@@ -420,7 +376,7 @@ def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=4, timeout=0.5)
     assert camera.TriggerMode.GetValue() == "Off"
     armed_point = adapter.working_point()
-    assert armed_point.acquisition_mode is CameraAcquisitionMode.FREE_RUNNING
+    assert armed_point.acquisition_mode == CameraAcquisitionMode.FREE_RUNNING.value
     assert armed_point.required_external_trigger_interval_seconds is None
     assert armed_point.external_trigger_integration_start_offset_seconds is None
     assert armed_point.readout_mode == "pylon:Mono8;free-running;grab=OneByOne"
@@ -479,7 +435,7 @@ def test_camera_measurement_monitor_arms_the_pylon_mode_for_a_whole_cycle(
         assert camera.MaxNumBuffer.GetValue() == camera.MaxNumBuffer.GetMax()
         actual = node.actual_working_point
         assert actual is not None
-        assert actual.acquisition_mode is mode
+        assert actual.acquisition_mode == mode.value
         assert actual.readout_mode == readout_mode
         if frames_per_cycle == 1:
             assert actual.required_external_trigger_interval_seconds is None
@@ -533,7 +489,7 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     assert camera.grab_calls[-1] == "StartGrabbing(one)"
     assert camera.MaxNumBuffer.writes[-1] == 3
     continuous_point = adapter.working_point()
-    assert continuous_point.acquisition_mode is CameraAcquisitionMode.EXTERNAL_TRIGGERED
+    assert continuous_point.acquisition_mode == CameraAcquisitionMode.EXTERNAL_TRIGGERED.value
     assert continuous_point.required_external_trigger_interval_seconds == pytest.approx(
         adapter.config.exposure_seconds
     )

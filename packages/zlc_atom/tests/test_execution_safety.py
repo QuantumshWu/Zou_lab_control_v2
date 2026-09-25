@@ -7,7 +7,6 @@ import pytest
 
 from zlc_atom.execution import (
     DeviceBroker,
-    DeviceIdentityEvidenceKind,
     PhysicalDeviceIdentity,
     ResourceKey,
     bind_verified_device,
@@ -18,12 +17,9 @@ from zlc_atom.execution.ports import IdentityProof
 def test_identity_proof_is_opaque_and_single_use() -> None:
     broker = DeviceBroker()
     with pytest.raises(TypeError):
-        IdentityProof(PhysicalDeviceIdentity("forged", DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT), "nonce")  # type: ignore[call-arg]
+        IdentityProof(PhysicalDeviceIdentity("forged"), "nonce")  # type: ignore[call-arg]
     proof = broker.verify_identity(
-        lambda: PhysicalDeviceIdentity(
-            "once",
-            DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-        )
+        lambda: PhysicalDeviceIdentity("once")
     )
     binding = broker.bind(
         key=ResourceKey.parse("device/once"),
@@ -41,18 +37,17 @@ def test_identity_proof_is_opaque_and_single_use() -> None:
 
 def test_unbind_releases_only_the_exact_broker_minted_physical_binding() -> None:
     broker = DeviceBroker()
-    identity = PhysicalDeviceIdentity(
-        "camera:serial-1",
-        DeviceIdentityEvidenceKind.HARDWARE_IDENTITY_READBACK,
-    )
+    identity = PhysicalDeviceIdentity("camera:serial-1")
 
     def bind(key: str):
-        return bind_verified_device(
+        binding = bind_verified_device(
             broker,
             key=ResourceKey.parse(f"device/{key}"),
             identity_probe=lambda: identity,
             capability_probe=dict,
         )[0]
+        broker.claim(binding)
+        return binding
 
     first = bind("camera")
     assert first.physical_identity is identity
@@ -82,10 +77,7 @@ def test_a_refused_capability_leaves_no_physical_binding_behind() -> None:
     """
 
     broker = DeviceBroker()
-    identity = PhysicalDeviceIdentity(
-        "device:serial1",
-        DeviceIdentityEvidenceKind.HARDWARE_IDENTITY_READBACK,
-    )
+    identity = PhysicalDeviceIdentity("device:serial1")
     with pytest.raises(TypeError, match="camera.adapter"):
         bind_verified_device(
             broker,
@@ -108,10 +100,7 @@ def test_unbound_binding_tombstone_is_collected_without_retaining_broker() -> No
     binding = bind_verified_device(
         broker,
         key=ResourceKey.parse("device/transient"),
-        identity_probe=lambda: PhysicalDeviceIdentity(
-            "transient",
-            DeviceIdentityEvidenceKind.INSTALLATION_ASSERTED_ENDPOINT,
-        ),
+        identity_probe=lambda: PhysicalDeviceIdentity("transient"),
         capability_probe=dict,
     )[0]
     token = binding._broker_token

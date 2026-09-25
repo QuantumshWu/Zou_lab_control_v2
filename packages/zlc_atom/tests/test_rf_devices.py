@@ -834,7 +834,8 @@ def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> No
 
     instrument.query = no_identity
     manager = SimpleNamespace(
-        open_resource=lambda resource: opened.append(resource) or instrument
+        open_resource=lambda resource: opened.append(resource) or instrument,
+        resource_info=lambda resource: SimpleNamespace(resource_name=resource),
     )
     monkeypatch.setattr(module, "visa_resources", lambda: manager)
     with pytest.raises(TimeoutError, match="no answer"):
@@ -875,9 +876,9 @@ def test_what_a_constructor_acquired_the_constructor_releases(monkeypatch) -> No
 def test_a_brick_the_sdk_refuses_to_close_stays_owned() -> None:
     """SDK error-bit replies retain ownership; nonzero success releases it."""
 
-    from zlc_atom.devices.rf.binding import bind_rf_source
     from zlc_atom.execution import DeviceBroker
     from zlc_atom.install import Installation, InstallationFactoryContext
+    from zlc_atom.install.descriptors import bind_leaf
 
     physical = {"open": False, "close_attempts": 0}
 
@@ -914,12 +915,13 @@ def test_a_brick_the_sdk_refuses_to_close_stays_owned() -> None:
     assert physical == {"open": True, "close_attempts": 1}
 
     broker = DeviceBroker()
-    leaf = bind_rf_source(
-        InstallationFactoryContext(None, broker, {}),
+    leaf = bind_leaf(
+        InstallationFactoryContext(None, broker),
         "rf",
+        "rf.vaunix_lms",
         source,
         "vaunix-lms:77",
-        "rf.vaunix_lms",
+        "rf.source",
     )
     installation = Installation({"rf": leaf}, world=None, broker=broker)
     with pytest.raises(BaseExceptionGroup, match="installation close failed"):
@@ -950,7 +952,10 @@ def test_a_brick_the_sdk_refuses_to_close_stays_owned() -> None:
 
 
 def test_the_lab_brick_speaks_its_own_units_and_refuses_off_grid() -> None:
+    # The virtual brick is the production driver with only its USB library
+    # answering from memory.
     source = virtual_rf_source(VaunixLmsConfig(serial=1001))
+    assert type(source) is VaunixLmsRfSource
     # 10 Hz frequency grid, quarter-dB power grid: representable values pass
     # exactly, everything else is refused BEFORE the write, naming the grid.
     assert source.tune(FREQUENCY_FIELD, 1_000_000_010.0) == 1_000_000_010.0
@@ -960,15 +965,15 @@ def test_the_lab_brick_speaks_its_own_units_and_refuses_off_grid() -> None:
     with pytest.raises(ValueError, match="0.25.*dBm grid"):
         source.tune(POWER_FIELD, -3.1)
     assert source.tune(OUTPUT_FIELD, True) is True
-
-
-def test_the_virtual_brick_is_the_real_driver_over_a_memory_library() -> None:
-    library = InMemoryLmsLibrary((7,))
-    source = VaunixLmsRfSource(VaunixLmsConfig(serial=7), library=library)
-    assert type(source) is VaunixLmsRfSource
-    source.tune(FREQUENCY_FIELD, 2.5e9)
-    assert library.get_frequency(7) == 250_000_000  # the DLL's 10 Hz units
     source.close()
+
+    # What reaches the library is the DLL's own 10 Hz unit, and close
+    # releases the brick.
+    library = InMemoryLmsLibrary((7,))
+    brick = VaunixLmsRfSource(VaunixLmsConfig(serial=7), library=library)
+    brick.tune(FREQUENCY_FIELD, 2.5e9)
+    assert library.get_frequency(7) == 250_000_000
+    brick.close()
     with pytest.raises(RuntimeError, match="not open"):
         library.get_frequency(7)
 
@@ -1148,12 +1153,18 @@ def test_a_scpi_instrument_is_found_by_asking_what_it_is() -> None:
     So the probe opens each candidate, asks the one universal question, and
     keeps the ones this driver can actually drive.  A scope on the same bus
     answers and is passed over -- it is not a refusal, it is the answer.
+
+    A serial port is never a candidate: ASRL is where the board's own UART
+    lives, and opening it to ask *IDN? takes it from whoever has it -- on
+    this bench, the pulse server that owns the streamer -- and gets nothing
+    back.
     """
 
     from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
 
     bus = _VisaBus(
         {
+            "ASRL3::INSTR": AssertionError("the probe opened a serial port"),
             "USB0::0x1AB1::0x0641::DG4E0000000001::INSTR":
                 "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12",
             "TCPIP0::198.51.100.7::INSTR":
@@ -1174,33 +1185,10 @@ def test_a_scpi_instrument_is_found_by_asking_what_it_is() -> None:
         "DG4E0000000002",
     ]
     assert [sighting.model for sighting in found] == ["DG4162", "DG4102"]
+    assert "ASRL3::INSTR" not in bus.opened
     # Every session opened is a session closed, including the scope's: a scan
     # must not leave an instrument held.
     assert sorted(bus.closed) == sorted(bus.opened)
-
-
-def test_the_probe_never_opens_a_serial_port() -> None:
-    """ASRL is where the board's own UART lives, and it is not a question.
-
-    Opening a serial port to ask *IDN? takes it from whoever has it -- on
-    this bench, the pulse server that owns the streamer -- and gets nothing
-    back.  A signal-generator scan must not be able to do that.
-    """
-
-    from zlc_atom.devices.rf.rigol_dg4000 import discover_dg4000
-
-    bus = _VisaBus(
-        {
-            "ASRL3::INSTR": AssertionError("the probe opened a serial port"),
-            "USB0::0x1AB1::0x0641::DG4E0000000001::INSTR":
-                "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12",
-        }
-    )
-
-    found = discover_dg4000(bus)
-
-    assert bus.opened == ["USB0::0x1AB1::0x0641::DG4E0000000001::INSTR"]
-    assert len(found) == 1
 
 
 def test_an_instrument_that_will_not_answer_is_passed_over(caplog) -> None:

@@ -1,8 +1,7 @@
 """The installed knobs a scan moves, and the two promises every move keeps.
 
-Both engines advance a ``device:`` axis the same way -- a ``tune`` call on
-the installed device between fires -- and both owe the bench the same two
-things for it.
+A ``device:`` axis advances by a ``tune`` call on the installed device
+between fires, and the scan owes the bench two things for it.
 
 THE SETPOINT AND READBACK ARE DIFFERENT FACTS. The scan coordinate is the
 nominal setpoint; ``tune`` returns the instrument's actual numeric readback
@@ -16,9 +15,6 @@ same ``tune`` path. A device refusal is reported, not inferred from numeric
 equality. A synthesizer left standing at the last scan
 point was what the operator found after every scan, and nothing on the
 bench said so.
-
-One owner for both, so neither engine can drift from the other about what
-a device axis means.
 """
 
 from __future__ import annotations
@@ -28,19 +24,7 @@ from collections.abc import Mapping
 
 from zlc_atom.authoring import read_tunable_in_unit, refresh_tunable_fields, tune_in_unit
 
-from .plan import DEVICE_PARAM_FAMILY
-
-
-def device_port_parts(port: str) -> tuple[str, str]:
-    """``device:<key>:<field>`` as its installed-device key and field name."""
-
-    text = str(port)
-    if not text.startswith(DEVICE_PARAM_FAMILY):
-        raise ValueError(f"{port!r} is not a device port")
-    key, separator, field = text[len(DEVICE_PARAM_FAMILY):].partition(":")
-    if not separator or not key or not field:
-        raise ValueError(f"{port!r} names no device field")
-    return key, field
+from .plan import device_port_parts
 
 
 def tune_value(device: object, field: str, value: float, unit: str = "") -> float:
@@ -148,40 +132,7 @@ class ScanDeviceKnobs:
             )
 
 
-def release_after_scan(
-    steps: tuple[tuple[str, object], ...], error: BaseException | None
-) -> None:
-    """Run every named cleanup step, and tell about all of them.
-
-    On the way out of a failed scan the original error stays the error:
-    what cleanup could not do is attached to it as notes.  On the way out
-    of a successful one, a cleanup failure is the run's failure, raised
-    after every step was still attempted.
-    """
-
-    failures: list[tuple[str, BaseException]] = []
-    for name, step in steps:
-        try:
-            step()
-        except BaseException as failure:
-            failures.append((name, failure))
-    if error is not None:
-        for name, failure in failures:
-            error.add_note(
-                f"{name} also reported: {type(failure).__name__}: {failure}"
-            )
-        return
-    if len(failures) == 1:
-        raise failures[0][1]
-    if failures:
-        raise BaseExceptionGroup(
-            "ending the scan failed", [failure for _name, failure in failures]
-        )
-
-
 __all__ = [
     "ScanDeviceKnobs",
-    "device_port_parts",
-    "release_after_scan",
     "tune_value",
 ]

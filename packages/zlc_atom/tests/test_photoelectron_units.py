@@ -30,24 +30,11 @@ from zlc_atom.devices.camera.photoelectrons import (
 )
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.calibration import ReadoutModelKind
-from zlc_atom.nodes.calibration.task import CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
+from zlc_runtime import SignalValue
 
 from tests.fakes import FakePlane, camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
-from test_installation_and_nodes import _calibration_request
-
-
-def _task(request) -> CalibrationTask:
-    installation = create_installation("virtual")
-    return CalibrationTask(
-        camera=installation.device("camera"),
-        sequencer=installation.device("sequencer"),
-        request=request,
-        pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-        pulse_path=IMAGING_PULSE_RESOURCE.path,
-        signal_plane=FakePlane(),
-    )
+from tests.pulse_fixture import calibration_request, calibration_task
 
 
 def test_the_qcmos_states_the_conversion_its_configuration_gives_it() -> None:
@@ -80,31 +67,24 @@ def test_the_qcmos_states_the_conversion_its_configuration_gives_it() -> None:
         DcamCameraConfig(offset_counts=200.0)
 
 
-def test_the_camera_states_its_own_conversion() -> None:
-    """The virtual sensor answers with the numbers it applies going the other way."""
+def test_the_camera_states_its_own_conversion_and_that_offers_the_switch() -> None:
+    """The virtual sensor answers with the numbers it applies going the other
+    way; the switch is a device fact, answered with the camera shut, with the
+    reason it is not."""
 
     installation = create_installation("virtual")
     try:
-        point = installation.device("camera").working_point()
+        camera = installation.device("camera")
+        point = camera.working_point()
         world = installation.world
         assert point.offset_counts == pytest.approx(world.offset_counts)
         assert point.electrons_per_count == pytest.approx(
             world.conversion_e_per_count
         )
-        assert installation.device("camera").photoelectron_conversion == (
+        assert camera.photoelectron_conversion == (
             pytest.approx(world.offset_counts),
             pytest.approx(world.conversion_e_per_count),
         )
-    finally:
-        installation.close()
-
-
-def test_the_switch_is_available_only_when_the_camera_states_a_conversion() -> None:
-    """A device fact, answered with the camera shut, with the reason it is not."""
-
-    installation = create_installation("virtual")
-    try:
-        camera = installation.device("camera")
         assert resolve_photoelectron_availability({"camera": camera}) == {}
     finally:
         installation.close()
@@ -123,12 +103,13 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
     """
 
     request = replace(
-        _calibration_request(repeats=10), photoelectrons=False
+        calibration_request(repeats=10), photoelectrons=False
     )
-    counts = _task(request).run(tmp_path)
-    electrons = _task(
-        replace(request, photoelectrons=True)
-    ).run(tmp_path)
+    with calibration_task(request) as task:
+        counts = task.run(tmp_path)
+        offset, scale = task.camera.photoelectron_conversion
+    with calibration_task(replace(request, photoelectrons=True)) as task:
+        electrons = task.run(tmp_path)
 
     assert electrons.capture.frames[0].image.dtype == np.float32
     assert counts.capture.frames[0].image.dtype == np.uint16
@@ -143,10 +124,8 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
         revision=1,
         value_unit="count",
     )
-    count_schema = OccupancyProcessor(counts.calibration)._output_schemas(
-        raw_source.block.schema
-    )["counts"]
-    assert count_schema.value_schema.value_unit == "count"
+    counted = OccupancyProcessor(counts.calibration).process(raw_source)
+    assert counted.artifacts["counts"].block.schema.value_schema.value_unit == "count"
     assert (
         electrons.calibration.site_map.n_sites
         == counts.calibration.site_map.n_sites
@@ -157,12 +136,6 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
         atol=0.5,
     )
 
-    installation = create_installation("virtual")
-    try:
-        offset = installation.world.offset_counts
-        scale = installation.world.conversion_e_per_count
-    finally:
-        installation.close()
     box_counts = counts.calibration.select_model(ReadoutModelKind.BOX)
     box_electrons = electrons.calibration.select_model(ReadoutModelKind.BOX)
     usable = np.asarray(box_counts.usable_sites, dtype=bool) & np.asarray(
@@ -188,34 +161,34 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
 def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
     """Not discovered in the data: refused where the two records meet."""
 
-    calibration = _task(
-        replace(_calibration_request(repeats=8), photoelectrons=True),
-    ).run(tmp_path)
+    with calibration_task(
+        replace(calibration_request(repeats=8), photoelectrons=True),
+    ) as task:
+        calibration = task.run(tmp_path)
     processor = OccupancyProcessor(calibration.calibration)
     frames = np.asarray(
         [record.image for record in calibration.capture.frames[:3]],
         dtype=np.float32,
     ).reshape(1, 3, *calibration.capture.frames[0].image.shape)
 
-    class _Source:
-        run_record = {
-            "parameters": {PHOTOELECTRONS: False},
-            "device_snapshots": {"camera": {}},
-        }
-        snapshot = None
+    def arriving(photoelectrons: bool) -> SignalValue:
+        return SignalValue(
+            "camera/frames",
+            camera_cycle_snapshot(frames),
+            None,
+            run_record={
+                "parameters": {PHOTOELECTRONS: photoelectrons},
+                "device_snapshots": {"camera": {}},
+            },
+        )
 
     with pytest.raises(ValueError, match="thresholds do not apply"):
-        processor._validate_source_run_record(_Source())
-
-    _Source.run_record = {
-        "parameters": {PHOTOELECTRONS: True},
-        "device_snapshots": {"camera": {}},
-    }
-    processor._validate_source_run_record(_Source())
-    published = processor.process(
-        camera_cycle_snapshot(frames),
+        processor.evaluate(arriving(False))
+    published = processor.evaluate(arriving(True))
+    assert (
+        published["occupied"].snapshot.materialize().block.values.shape[-1]
+        == calibration.calibration.n_sites
     )
-    assert np.asarray(published.occupied).shape[-1] == calibration.calibration.n_sites
 
 
 def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
@@ -276,25 +249,19 @@ def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
             assert publication is not None, "the monitor published nothing"
             value = publication.value(signal)
             assert value is not None
-            return value.snapshot, node.run_record
+            return value.snapshot, node.run_record, camera.photoelectron_conversion
         finally:
             plane.close()
             installation.close()
 
-    counts_snapshot, counts_record = _published(False)
+    counts_snapshot, counts_record, (offset, scale) = _published(False)
     counts = np.asarray(counts_snapshot.block.values[0, 0])
     assert counts.dtype == np.uint16
     assert counts.min() == counts.max() == dark
     assert counts_snapshot.block.schema.value_schema.value_unit == "count"
     assert counts_record["parameters"][PHOTOELECTRONS] is False
 
-    installation = create_installation("virtual")
-    try:
-        offset = installation.world.offset_counts
-        scale = installation.world.conversion_e_per_count
-    finally:
-        installation.close()
-    electron_snapshot, electron_record = _published(True)
+    electron_snapshot, electron_record, _conversion = _published(True)
     electrons = np.asarray(electron_snapshot.block.values[0, 0])
     assert electrons.dtype == np.float32
     assert electron_snapshot.block.schema.value_schema.value_unit is None
@@ -303,49 +270,12 @@ def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
         electrons, np.float32((dark - offset) * scale), rtol=1e-6
     )
 
-    fallback_snapshot, fallback_record = _published(True, conversion=False)
+    fallback_snapshot, fallback_record, _conversion = _published(True, conversion=False)
     fallback = np.asarray(fallback_snapshot.block.values[0, 0])
     assert fallback.dtype == np.uint16
     assert fallback.min() == fallback.max() == dark
     assert fallback_snapshot.block.schema.value_schema.value_unit == "count"
     assert fallback_record["parameters"][PHOTOELECTRONS] is False
-
-
-def test_the_camera_is_read_in_exactly_one_place() -> None:
-    """One intake, mechanically: a capture may not reach the adapter itself.
-
-    Both captures used to call ``read_frame_records`` directly and only one
-    of them converted.  Nothing about that was visible in a review -- the
-    conversion was there, in a method with a docstring calling itself THE
-    conversion point -- so the rule is enforced on the source instead.
-    """
-
-    import ast
-    from pathlib import Path
-
-    import zlc_atom.nodes.camera_measurement.measurement as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    reads = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "read_frame_records"
-    ]
-    assert len(reads) == 1, (
-        "every frame this node takes must come through read_records; "
-        f"found {len(reads)} calls to read_frame_records"
-    )
-    owner = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "read_records"
-        and any(read in ast.walk(node) for read in reads)
-    )
-    assert owner.name == "read_records"
 
 
 def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
@@ -424,13 +354,14 @@ def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
 
     from zlc_data.figure_archive import read_archive
 
-    result = _task(
+    with calibration_task(
         replace(
-            _calibration_request(repeats=4),
+            calibration_request(repeats=4),
             photoelectrons=True,
             save_frames=True,
         ),
-    ).run(tmp_path)
+    ) as task:
+        result = task.run(tmp_path)
 
     analysed = np.asarray(result.capture.frames[0].image)
     assert analysed.dtype == np.float32

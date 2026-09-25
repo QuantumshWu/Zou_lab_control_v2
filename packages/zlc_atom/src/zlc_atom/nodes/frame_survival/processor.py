@@ -330,7 +330,6 @@ class FrameSurvivalProcessor:
         source = next(iter(inputs.values()))
         frame_axis, _site = self._source_axes(source.schema)
         return {
-            "node": self.instance_id,
             "parameters": {
                 "occupancy_signal": self.source_signal or source.name,
                 "frames": frame_axis.size,

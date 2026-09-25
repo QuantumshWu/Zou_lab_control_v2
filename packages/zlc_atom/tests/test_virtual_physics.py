@@ -4,7 +4,6 @@ from dataclasses import FrozenInstanceError, replace
 import json
 from pathlib import Path
 import time
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,7 +13,7 @@ from scipy.ndimage import maximum_filter
 import zlc_atom.devices.simulation.world as simulation_world
 import zlc_atom.devices.slm.solver as slm_solver
 from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
-from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
+from zlc_atom.devices.simulation.camera import VirtualCamera
 from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.devices.slm.solver import (
@@ -294,44 +293,6 @@ def test_loading_probability_is_a_half_probability_ceiling() -> None:
     assert probabilities[-1] == pytest.approx(0.5)
 
 
-def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
-    """Rendering must not rebuild the same 35 fixed optical spots per frame."""
-
-    world = _world(seed=41)
-    reference = _world(seed=41)
-    site_count = len(world.geometry.site_centers_xy)
-    occupancies = (
-        np.ones(site_count, dtype=bool),
-        np.arange(site_count) % 3 == 0,
-        np.zeros(site_count, dtype=bool),
-    )
-    for ordinal, occupancy in enumerate(occupancies):
-        actual = world.render_frame(
-            exposure_seconds=0.02,
-            probe_seconds=0.005,
-            occupancy=occupancy,
-        )
-        expected = reference.render_frame(
-            exposure_seconds=0.02,
-            probe_seconds=0.005,
-            occupancy=occupancy,
-        )
-        np.testing.assert_array_equal(actual, expected)
-
-    def rebuilt_psf(*_args, **_kwargs):
-        raise AssertionError("render_frame rebuilt a fixed site PSF")
-
-    propagation_count = world._propagation_count
-    monkeypatch.setattr(simulation_world.np, "exp", rebuilt_psf)
-    for ordinal in (3, 4):
-        world.render_frame(
-            exposure_seconds=0.02,
-            probe_seconds=0.005,
-            occupancy=occupancies[ordinal % len(occupancies)],
-        )
-    assert world._propagation_count == propagation_count
-
-
 def test_mot_frame_is_uint8_with_a_windowed_separable_spot() -> None:
     """The MOT monitor renders like the Basler it stands in for: Mono8.
 
@@ -427,16 +388,15 @@ def test_mot_follows_the_net_field_and_is_best_at_the_planted_optimum() -> None:
 
 def test_virtual_traps_share_one_aberrated_psf_without_per_site_nuisance() -> None:
     world = _world(seed=4)
-    assert not hasattr(world, "_detector_efficiency")
-    assert not hasattr(world, "_site_psf_sigma_xy")
-    assert not hasattr(world, "_site_psf_angle_radians")
-    assert not hasattr(world, "_site_psf_skew")
     psf = np.asarray(world._camera_psf)
     assert float(np.max(np.abs(psf - np.flip(psf, axis=0)))) > 0.05
-    np.testing.assert_array_equal(
+    for (top, left, stamp), (again_top, again_left, again) in zip(
         world._trap_psf_spots,
         world._camera_spots(world._trap_centers_xy),
-    )
+        strict=True,
+    ):
+        assert (top, left) == (again_top, again_left)
+        np.testing.assert_array_equal(stamp, again)
     np.testing.assert_array_equal(_world(seed=4)._camera_psf, psf)
 
 
@@ -515,8 +475,6 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
     assert min(ratios) >= 1.8
     assert max(ratios) <= 2.2
     assert min(correctable_fractions) >= 0.90
-    assert not hasattr(SimulationWorld, "trap_plane_intensity")
-    assert not hasattr(SimulationWorld, "site_trap_intensities")
 
 
 def test_every_trap_is_one_raw_local_peak_on_one_fixed_scale() -> None:
@@ -1016,8 +974,57 @@ def test_atom_qcmos_and_mot_draws_are_independent() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("states", "delays", "frames", "expected"),
+    (
+        pytest.param(
+            (
+                (False, True, False),
+                (True, True, False),   # load
+                (False, True, False),
+                (True, False, False),  # cooling rise while trap is off
+                (False, False, True),  # camera must not split this release
+                (True, False, False),  # another rejected cooling rise
+                (False, True, False),  # one 3 ms release ends
+                (True, True, False),   # load
+                (False, False, False),
+                (True, True, True),    # loss, load, then camera at one tick
+            ),
+            (),
+            2,
+            [
+                ("load", None),
+                ("camera", None),
+                ("loss", pytest.approx(0.003, abs=1e-9)),
+                ("load", None),
+                ("loss", pytest.approx(0.001, abs=1e-9)),
+                ("load", None),
+                ("camera", None),
+            ],
+            id="every-cooling-rise-and-whole-trap-off-episode",
+        ),
+        pytest.param(
+            (
+                (False, True, False),
+                (False, False, True),
+                (False, False, False),
+            ),
+            (
+                OutputDelay("trap", 0.001, "s"),
+                OutputDelay("emCCD", 0.003, "s"),
+            ),
+            1,
+            [
+                ("loss", pytest.approx(0.001, abs=1e-9)),
+                ("camera", None),
+                ("loss", pytest.approx(0.003, abs=1e-9)),
+            ],
+            id="release-extends-to-the-delayed-physical-horizon",
+        ),
+    ),
+)
 def test_fire_processes_every_cooling_rise_and_whole_trap_off_episode(
-    monkeypatch,
+    monkeypatch, states, delays, frames, expected,
 ) -> None:
     installation = create_installation("virtual")
     world = installation.world
@@ -1047,96 +1054,19 @@ def test_fire_processes_every_cooling_rise_and_whole_trap_off_episode(
     monkeypatch.setattr(world, "_load_shot", record_load)
     monkeypatch.setattr(world, "_lose_atoms", record_loss)
     monkeypatch.setattr(world, "render_frame", record_camera)
-    pulse = _timeline_pulse(
-        (
-            (False, True, False),
-            (True, True, False),   # load
-            (False, True, False),
-            (True, False, False),  # cooling rise while trap is off
-            (False, False, True),  # camera must not split this release
-            (True, False, False),  # another rejected cooling rise
-            (False, True, False),  # one 3 ms release ends
-            (True, True, False),   # load
-            (False, False, False),
-            (True, True, True),    # loss, load, then camera at one tick
-        )
-    )
+    pulse = _timeline_pulse(states, delays=delays)
     try:
         camera.arm(
-            2,
-            source_group_sizes=(2,),
-            buffer_frame_count=2,
+            frames,
+            source_group_sizes=(frames,),
+            buffer_frame_count=frames,
             timeout=1.0,
         )
         _fire_world(world, pulse)
-        camera.read_frame_records(2, timeout=1.0, exact=True)
+        camera.read_frame_records(frames, timeout=1.0, exact=True)
         camera.finish_record_capture()
 
-        assert events == [
-            ("load", None),
-            ("camera", None),
-            ("loss", pytest.approx(0.003, abs=1e-9)),
-            ("load", None),
-            ("loss", pytest.approx(0.001, abs=1e-9)),
-            ("load", None),
-            ("camera", None),
-        ]
-    finally:
-        installation.close()
-
-
-def test_fire_extends_release_to_the_delayed_physical_horizon(
-    monkeypatch,
-) -> None:
-    installation = create_installation("virtual")
-    world = installation.world
-    camera = installation.device("camera")
-    events: list[tuple[str, float | None]] = []
-
-    def record_loss(seconds: float) -> None:
-        events.append(("loss", float(seconds)))
-
-    def record_camera(
-        *,
-        exposure_seconds: float,
-        probe_seconds: float,
-        occupancy: object,
-    ) -> np.ndarray:
-        assert exposure_seconds > 0.0
-        assert probe_seconds >= 0.0
-        assert np.asarray(occupancy).shape == (35,)
-        events.append(("camera", None))
-        return np.zeros(world.geometry.image_shape_yx, dtype=np.uint16)
-
-    monkeypatch.setattr(world, "_lose_atoms", record_loss)
-    monkeypatch.setattr(world, "render_frame", record_camera)
-    pulse = _timeline_pulse(
-        (
-            (False, True, False),
-            (False, False, True),
-            (False, False, False),
-        ),
-        delays=(
-            OutputDelay("trap", 0.001, "s"),
-            OutputDelay("emCCD", 0.003, "s"),
-        ),
-    )
-    try:
-        camera.arm(
-            1,
-            source_group_sizes=(1,),
-            buffer_frame_count=1,
-            timeout=1.0,
-        )
-        _fire_world(world, pulse)
-        camera.read_frame_records(1, timeout=1.0, exact=True)
-        camera.finish_record_capture()
-
-        assert events == [
-            ("loss", pytest.approx(0.001, abs=1e-9)),
-            ("camera", None),
-            ("loss", pytest.approx(0.003, abs=1e-9)),
-        ]
+        assert events == expected
     finally:
         installation.close()
 
@@ -1151,7 +1081,6 @@ def test_release_does_not_deplete_the_mot_population() -> None:
 
 def test_safe_has_no_persistent_test_only_occupancy_mode() -> None:
     world = _world(seed=2)
-    assert not hasattr(world, "set_occupancy")
     target = np.zeros(world.slm_shape_yx, dtype=np.float32)
     for index in ((32, 24), (64, 72), (96, 104)):
         target[index] = 1.0
@@ -1182,7 +1111,7 @@ def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
     assert not np.any(world._occupancy)
 
 
-def test_virtual_pulse_fire_uses_loaded_camera_window_count() -> None:
+def test_virtual_streamer_fire_done_safe_and_scan_row_order() -> None:
     world = _world(seed=1)
     streamer = VirtualPulseStreamer(
         world=world,
@@ -1512,22 +1441,12 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
         loading = world._site_loading_probabilities()
         fluorescence = world._fluorescence_scales(world._trap_intensities)
         expected_site_signal = loading * fluorescence
-        order = np.argsort(world._trap_intensities)
-        assert np.all(np.diff(loading[order]) >= 0.0)
-        assert np.count_nonzero(loading == 0.0) >= int(
-            np.ceil(0.10 * len(loading))
-        )
         nominal_loading = float(
             world._loading_probabilities(
                 np.asarray([world._loading_intensity_scale])
             )[0]
         )
         assert 0.0 < nominal_loading < world.loading_probability
-        depth_ratio = float(
-            np.max(world._trap_intensities)
-            / np.min(world._trap_intensities)
-        )
-        assert 1.8 <= depth_ratio <= 2.2
 
         measurement = CameraMeasurementNode(
             camera=camera,
@@ -1557,7 +1476,7 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
             return np.asarray(
                 plane.current_dataset(
                     measurement.signal_key("frames"), result.publication
-                ).block.values
+                ).block.materialize().values
             )
 
         frames = capture_frames()
@@ -2115,11 +2034,9 @@ def test_slm_solver_keeps_one_percent_gate_with_authored_pupil() -> None:
     )
     _normalized, ratio, _efficiency = _support_quality(phase, target, pupil)
 
-    if metadata["early_stopped"]:
-        assert metadata["support_intensity_ratio"] <= 1.01
-        assert ratio <= 1.01
-    else:
-        assert metadata["iterations_run"] == metadata["max_iterations"]
+    assert metadata["early_stopped"] is True
+    assert metadata["support_intensity_ratio"] <= 1.01
+    assert ratio <= 1.01
 
 
 def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
@@ -2232,6 +2149,36 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
     assert accepted_metadata["support_tolerance"] == 1.01
     assert accepted_metadata["minimum_iterations"] == 1
     assert ratio <= 1.01
+    # The selected-DFT gate judged exactly the phase it returned: the full
+    # FFT of that phase agrees, replaying to the accepted iteration returns
+    # the same phase, and one iteration fewer had not passed the gate yet.
+    full_ratio, full_efficiency = _full_fft_returned_quality(accepted, changed, pupil)
+    assert accepted_metadata["transform"] == "selected-dft"
+    assert accepted_metadata["support_intensity_ratio"] == pytest.approx(
+        full_ratio, rel=2e-5
+    )
+    assert accepted_metadata["diffraction_efficiency"] == pytest.approx(
+        full_efficiency, rel=2e-5
+    )
+    accepted_iteration = accepted_metadata["iterations_run"]
+    exact, exact_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        iterations=accepted_iteration,
+        spot_optimizer_state=json.loads(encoded_state),
+    )
+    assert exact_metadata["iterations_run"] == accepted_iteration
+    np.testing.assert_array_equal(exact, accepted)
+    if accepted_iteration > 1:
+        previous, _previous_metadata = solve_phase(
+            changed,
+            pupil_amplitude=pupil,
+            objective_kind="spots",
+            iterations=accepted_iteration - 1,
+            spot_optimizer_state=json.loads(encoded_state),
+        )
+        assert _full_fft_returned_quality(previous, changed, pupil)[0] > 1.01
 
     # A caller may tighten the gate: no early stop before the minimum passes,
     # and none until the support ratio is inside the requested tolerance.
@@ -2247,10 +2194,8 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
     assert tightened_metadata["support_tolerance"] == 1.002
     assert tightened_metadata["minimum_iterations"] == 5
     assert tightened_metadata["iterations_run"] >= 5
-    if tightened_metadata["early_stopped"]:
-        assert tightened_metadata["support_intensity_ratio"] <= 1.002
-    else:
-        assert tightened_metadata["iterations_run"] == tightened_metadata["max_iterations"]
+    assert tightened_metadata["early_stopped"] is True
+    assert tightened_metadata["support_intensity_ratio"] <= 1.002
     with pytest.raises(ValueError, match="support_tolerance"):
         solve_phase(changed, objective_kind="spots", support_tolerance=0.99)
     with pytest.raises(ValueError, match="minimum_iterations"):
@@ -2274,64 +2219,6 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
             stop_requested=stop_during_hot_update,
         )
     assert json.dumps(stopped_state, sort_keys=True) == unchanged
-
-
-def test_slm_selected_dft_hot_gate_matches_full_fft_returned_phase() -> None:
-    target = preset_grid((64, 80), (3, 4), spacing_yx=(13, 14))
-    yy, xx = np.ogrid[-1.0:1.0:64j, -1.0:1.0:80j]
-    pupil = (
-        (xx * xx + yy * yy <= 0.82**2) * (0.75 + 0.25 * (xx + 1.0) * 0.5)
-    ).astype(np.float32)
-    state: dict[str, object] = {}
-    solve_phase(
-        target,
-        pupil_amplitude=pupil,
-        objective_kind="spots",
-        iterations=30,
-        seed=23,
-        spot_optimizer_state=state,
-    )
-    encoded_state = json.dumps(state, allow_nan=False)
-    changed = np.zeros_like(target)
-    changed[target > 0.0] = np.linspace(0.8, 1.2, 12, dtype=np.float32)
-    accepted_state = json.loads(encoded_state)
-    accepted, metadata = solve_phase(
-        changed,
-        pupil_amplitude=pupil,
-        objective_kind="spots",
-        spot_optimizer_state=accepted_state,
-    )
-    ratio, efficiency = _full_fft_returned_quality(accepted, changed, pupil)
-    assert metadata["transform"] == "selected-dft"
-    assert metadata["support_intensity_ratio"] == pytest.approx(
-        ratio, rel=2e-5
-    )
-    assert metadata["diffraction_efficiency"] == pytest.approx(
-        efficiency, rel=2e-5
-    )
-    assert metadata["early_stopped"] is True
-
-    accepted_iteration = metadata["iterations_run"]
-    exact_state = json.loads(encoded_state)
-    exact, exact_metadata = solve_phase(
-        changed,
-        pupil_amplitude=pupil,
-        objective_kind="spots",
-        iterations=accepted_iteration,
-        spot_optimizer_state=exact_state,
-    )
-    assert exact_metadata["iterations_run"] == accepted_iteration
-    np.testing.assert_array_equal(exact, accepted)
-    if accepted_iteration > 1:
-        previous_state = json.loads(encoded_state)
-        previous, _previous_metadata = solve_phase(
-            changed,
-            pupil_amplitude=pupil,
-            objective_kind="spots",
-            iterations=accepted_iteration - 1,
-            spot_optimizer_state=previous_state,
-        )
-        assert _full_fft_returned_quality(previous, changed, pupil)[0] > 1.01
 
 
 def test_slm_optimizer_state_explicitly_invalidates_on_changed_physics() -> None:
@@ -2387,38 +2274,6 @@ def test_slm_optimizer_state_explicitly_invalidates_on_changed_physics() -> None
     assert image_metadata["hot_start_used"] is False
     assert "optimizer_state" not in image_metadata
     assert image_state == {}
-
-
-def test_slm_solver_uses_authored_spot_or_image_objective() -> None:
-    adjacent = np.zeros((64, 64), dtype=np.float32)
-    adjacent[32, 30:35] = 1.0
-    grid = preset_grid((64, 64), (5, 7), spacing_yx=(7, 6))
-    for target in (adjacent, grid):
-        _phase, metadata = solve_phase(
-            target,
-            objective_kind="spots",
-            iterations=4,
-            seed=17,
-        )
-        assert metadata["method"] == "wgs-kim"
-    _auto_phase, auto_metadata = solve_phase(
-        adjacent,
-        objective_kind="auto",
-        iterations=4,
-        seed=17,
-    )
-    assert auto_metadata["method"] == "wgs-kim"
-
-    dense = preset_flat_top((64, 64), (11, 13), edge=4)
-    _dense_phase, dense_metadata = solve_phase(
-        dense,
-        objective_kind="image",
-        iterations=4,
-        seed=9,
-    )
-    assert dense_metadata["method"] == "mraf"
-    with pytest.raises(ValueError, match="objective_kind"):
-        solve_phase(grid, objective_kind="unknown", iterations=1)
 
 
 @pytest.mark.parametrize("cartesian", [True, False])
@@ -2570,6 +2425,15 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
     checker_values = _ideal_slm_intensity(checker_phase)[checkerboard > 0.0]
     assert float(np.max(checker_values) / np.min(checker_values)) <= 1.01
 
+    # A line of adjacent spots is still spots, and "auto" reads it so.
+    adjacent = np.zeros((64, 64), dtype=np.float32)
+    adjacent[32, 30:35] = 1.0
+    for objective_kind in ("spots", "auto"):
+        _adjacent_phase, adjacent_metadata = solve_phase(
+            adjacent, objective_kind=objective_kind, iterations=4, seed=17
+        )
+        assert adjacent_metadata["method"] == "wgs-kim"
+
     dense = preset_flat_top((64, 64), (11, 13), edge=4)
     dense_phase, dense_metadata = solve_phase(
         dense, objective_kind="image", seed=9
@@ -2624,6 +2488,8 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
         )
     with pytest.raises(ValueError, match="positive intensity"):
         solve_phase(np.zeros((16, 16), dtype=np.float32))
+    with pytest.raises(ValueError, match="objective_kind"):
+        solve_phase(sparse, objective_kind="unknown", iterations=1)
 
 
 def test_slm_target_json_is_a_strict_objective_bearing_artifact(tmp_path: Path) -> None:

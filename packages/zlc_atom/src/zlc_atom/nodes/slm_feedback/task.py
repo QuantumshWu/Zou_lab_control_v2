@@ -3,6 +3,7 @@ bright-minus-dark contrast, or the loading rate."""
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -63,12 +64,12 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.calibration.calibration import box_fits
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement.measurement import (
-    CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
-    _finite_cycle_output,
+    frames_snapshot,
+    photoelectron_frame,
 )
-from zlc_atom.nodes.scan.source import wait_for_report
+from zlc_atom.nodes.scan.source import check_cancelled, wait_for_report
 
 
 SLM_PHASE_ARTIFACT_CONTRACT = SCIENCE_CONTEXT_ARTIFACT_CONTRACT
@@ -174,11 +175,6 @@ _CONVERGENCE_CANDIDATES = 3
 #: three times the loop's own step (see ``solve_phase``).
 _FEEDBACK_SOLVE_SUPPORT_TOLERANCE = 1.002
 _FEEDBACK_SOLVE_MINIMUM_ITERATIONS = 5
-
-
-def _check_cancelled(context: object) -> None:
-    if context.cancel_requested():
-        raise RuntimeError("SLM feedback was cancelled")
 
 
 def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
@@ -1633,7 +1629,6 @@ def _updated_target(
     rows: np.ndarray,
     columns: np.ndarray,
     *,
-    reference_valid: np.ndarray,
     feedback_gain: float,
     plant_slope: float | None,
     plant_sign: float,
@@ -1706,7 +1701,6 @@ def _updated_target(
     values = np.asarray(observed, dtype=float)
     errors = np.asarray(standard_error, dtype=float)
     control_valid = np.asarray(valid, dtype=bool)
-    references = np.asarray(reference_valid, dtype=bool)
     gain = float(feedback_gain)
     sign = float(plant_sign)
     if sign not in (-1.0, 1.0):
@@ -1743,13 +1737,11 @@ def _updated_target(
         values.shape != site_shape
         or errors.shape != site_shape
         or control_valid.shape != site_shape
-        or references.shape != site_shape
         or direction.shape != site_shape
         or boundary.shape != site_shape
         or boundary_direction.shape != site_shape
         or edge.shape != site_shape
         or np.any(edge & ~control_valid)
-        or np.any(references & ~control_valid)
         or np.any(~np.isfinite(direction))
         or not np.isfinite(gain)
         or gain < 0.0
@@ -1761,10 +1753,11 @@ def _updated_target(
         ~np.isfinite(values[control_valid]) | (values[control_valid] <= 0.0)
     ):
         raise ValueError("valid feedback observables must be finite and positive")
-    if not np.any(references):
+    # The reference is the geometric mean over the sites the loop steps.
+    if not np.any(control_valid):
         reference = float("nan")
     else:
-        reference = float(np.exp(np.mean(np.log(values[references]))))
+        reference = float(np.exp(np.mean(np.log(values[control_valid]))))
     raw_weights = np.asarray(target[rows, columns], dtype=float)
     log_correction = np.zeros(site_shape, dtype=float)
     decision = np.full(site_shape, "hold_invalid", dtype="<U32")
@@ -1953,10 +1946,15 @@ class SlmFeedbackTask:
             science_context.get("pattern_metadata", {})
         )
         self._prior_pattern_metadata = incoming_pattern_metadata
+        # What a run writes about itself into a candidate or final Context:
+        # it describes THAT run, so a Context loaded as the next run's start
+        # carries none of it forward -- a checkpoint's relative path most of
+        # all, which names a different file under the new run's root.
         runtime_metadata = {
             "candidate",
             "status",
             "measurement",
+            "measurement_checkpoint",
             "updates",
             "solver",
             "outcome",
@@ -1991,35 +1989,20 @@ class SlmFeedbackTask:
         #: identity under which a prior run's response state is this
         #: plant's (see ``execute``).
         self._program_digest: str | None = None
+        #: The Config the run's first fire played.  Every fire reads the
+        #: saved Config file again, and a Save mid-run would change the plant
+        #: under the controller's state and the recorded digest.
+        self._fired_config: Mapping[str, object] | None = None
         self._last_measured_phase: np.ndarray | None = None
         self._actual_device_snapshots: dict[str, Mapping[str, object]] = {}
+        # The authored form's minimums and validator already bound these.
         factors = tuple(float(value) for value in probe_factors)
-        if (
-            not factors
-            or any(
-                not np.isfinite(value) or value <= 0.0 or value == 1.0
-                for value in factors
-            )
-            or len(set(factors)) != len(factors)
-        ):
-            raise ValueError(
-                "probe_factors must be unique positive numbers excluding 1"
-            )
         self.probe_factors = factors
         self._candidate_capacity = (
             1
             + self.max_updates
             + self.max_updates * len(factors)
         )
-        if (
-            self.shots < 10
-            or self.max_updates < 1
-            or not np.isfinite(self.feedback_gain)
-            or self.feedback_gain < 0.0
-            or not np.isfinite(self.maximum_weight_change)
-            or self.maximum_weight_change < 0.0
-        ):
-            raise ValueError("feedback needs at least 10 shots and one update")
         contract = calibration.frame_contract
         height, width = contract.image_shape
         site_mask = np.zeros((height, width), dtype=bool)
@@ -2045,7 +2028,6 @@ class SlmFeedbackTask:
 
     def _run_record(self) -> dict[str, object]:
         return {
-            "node": self.instance_id,
             "calibration_path": str(self.calibration_path),
             "science_context_path": str(self.science_context_path),
             "pulse_path": str(self.pulse_path),
@@ -2345,20 +2327,20 @@ class SlmFeedbackTask:
     def _incoming_candidate(
         self,
         *,
-        observed: Mapping[str, object] | None,
         phase: np.ndarray,
         pattern: np.ndarray,
     ) -> dict[str, object]:
-        candidate = 1 if observed is None else int(observed["candidate"])
+        """The run's starting phase as a candidate no batch measured."""
+
         return {
-            "candidate": candidate,
+            "candidate": 1,
             "phase": np.array(phase, copy=True),
             "pattern_phase": np.array(pattern, copy=True),
             "target": np.array(self.target, copy=True),
             "solver": None,
-            "history": None if observed is None else observed["history"],
-            "samples": None if observed is None else observed.get("samples"),
-            "mean_frame": None if observed is None else observed.get("mean_frame"),
+            "history": None,
+            "samples": None,
+            "mean_frame": None,
         }
 
     def _apply_exact(self, phase: object) -> np.ndarray:
@@ -2422,8 +2404,6 @@ class SlmFeedbackTask:
         """Measure one authored shot batch; a failed batch is never repeated."""
 
         requested = self.shots
-        if requested < 4:
-            raise ValueError("qCMOS site statistics require at least four shots")
         commanded = self.slm.last_commanded_phase
         if commanded is None:
             raise RuntimeError("SLM has no confirmed phase for feedback measurement")
@@ -2521,23 +2501,29 @@ class SlmFeedbackTask:
             if not isinstance(actual.count_unit, str) or not actual.count_unit:
                 raise ValueError("Feedback camera count_unit is invalid")
             raw_maximum = np.iinfo(raw_dtype).max
-            if node.reads_photoelectrons:
-                current_offset = actual.offset_counts
-                current_scale = actual.electrons_per_count
-                if current_offset is None or current_scale is None:
-                    raise RuntimeError("camera lost its effective photoelectron conversion")
-                saturation_value = (
-                    np.float32(raw_maximum) - np.float32(current_offset)
-                ) * np.float32(current_scale)
-            else:
-                saturation_value = raw_maximum
-            _check_cancelled(context)
+            # The saturated count as the frames will carry it: in
+            # photoelectrons, through the camera measurement's own
+            # conversion, so the exact comparison below cannot drift from it.
+            saturation_value = (
+                photoelectron_frame(np.asarray(raw_maximum, dtype=raw_dtype), actual)
+                if node.reads_photoelectrons
+                else raw_maximum
+            )
+            check_cancelled(context)
             context.report_progress(
                 f"Reading mean qCMOS brightness for candidate {iteration + 1}",
                 current=0,
                 total=requested,
             )
             execution = self.sequencer.fire(run_repeats=requested, scan_repeats=1)
+            played = self.sequencer.config_values()
+            if self._fired_config is None:
+                self._fired_config = played
+            elif played != self._fired_config:
+                raise RuntimeError(
+                    "the Config file changed during the feedback run; later "
+                    "candidates would play values its record does not name"
+                )
             if self._program_digest is None:
                 self._program_digest = str(execution.program.digest)
             self._actual_device_snapshots["sequencer"] = (
@@ -2545,12 +2531,19 @@ class SlmFeedbackTask:
             )
 
             def commit_camera_cycle(cycle: object, index: int) -> None:
-                output = _finite_cycle_output(node, cycle, index)
                 if index == 0:
-                    record = dict(node.run_record)
-                    record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = (
+                    # The site overlay rides in the run record the camera
+                    # measurement declares with its first cycle.
+                    node.run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = (
                         image_point_overlay_geometry(
-                            output.snapshot,
+                            frames_snapshot(
+                                (cycle,),
+                                producer=node.instance_id,
+                                generation=node.generation,
+                                revision=1,
+                                working_point=node.actual_working_point,
+                                value_unit=node.frame_value_unit,
+                            ),
                             self._registered_site_map.centers_xy,
                             self._registered_site_map.site_ids,
                             status_axis=self._registered_site_map.site_axis,
@@ -2561,8 +2554,7 @@ class SlmFeedbackTask:
                             coordinates_are_indices=True,
                         )
                     )
-                    node._run_record = self.signal_plane.set_run_record(node, record)
-                node._commit_direct_outputs({CAMERA_FRAMES_OUTPUT.name: output})
+                node._commit_direct_cycle(cycle, index)
                 # Every frame IS one repeat played: the bar moves with the
                 # batch instead of standing at 0 for the ninety seconds it
                 # takes and jumping to the end.
@@ -2585,7 +2577,7 @@ class SlmFeedbackTask:
                     raise
                 raise RuntimeError(f"the pulse failed: {report.fault}")
             else:
-                _check_cancelled(context)
+                check_cancelled(context)
                 report = wait_for_report(self.sequencer, context)
                 if report.fault:
                     raise RuntimeError(f"the pulse failed: {report.fault}")
@@ -2600,7 +2592,16 @@ class SlmFeedbackTask:
                     self.sequencer.safe()
             finally:
                 if capture is not None and not capture.closed:
-                    capture.close()
+                    # Collect never ran -- a cancel, a refused camera, a
+                    # changed Config -- and collect is what seals or retires
+                    # the camera generation the prepare began.  Nothing was
+                    # read, so a frame the fire already triggered is a stop's
+                    # surplus, not a count to fail on over the real reason.
+                    capture.stopped = True
+                    try:
+                        capture.close()
+                    finally:
+                        self.signal_plane.retire(node)
         return result, saturation_value
 
     def _prepare_artifacts(self, context: object) -> dict[str, Path]:
@@ -2727,9 +2728,8 @@ class SlmFeedbackTask:
         )
         return context_path
 
-    def _save_figure(
+    def _submit_figure(
         self,
-        context: object,
         paths: Mapping[str, Path],
         name: str,
         *,
@@ -2737,36 +2737,57 @@ class SlmFeedbackTask:
         spec: object,
         parameters: Mapping[str, object] | None = None,
         size: str = "4x4",
-        artifact_name: str | None = None,
-        image_role: str = "preview",
         classifier_thresholds: object = (),
         device_event_record: Mapping[str, object],
-    ) -> tuple[Path, Path]:
+    ) -> object:
+        """Hand one Figure to the writer: the written (image, archive) pair,
+        or its future when the writer renders in its own process."""
+
         if not isinstance(device_event_record, Mapping):
             raise TypeError("Figure device_event_record must be a mapping")
+        writer = self._save_figure_artifact
+        if writer is None:
+            from zlc_plot import save_figure_artifact as writer
+        return writer(
+            paths["figures"] / f"{name}.png",
+            plot_input=snapshot,
+            spec=spec,
+            parameters={} if parameters is None else parameters,
+            size=size,
+            classifier_thresholds=classifier_thresholds,
+            source={
+                "task": self.instance_id,
+                "report": name,
+                "calibration_path": str(self.calibration_path),
+                "science_context_path": str(self.science_context_path),
+                "run_record": {
+                    **self._run_record(),
+                    **dict(device_event_record),
+                },
+            },
+        )
+
+    def _save_figure(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        name: str,
+        *,
+        artifact_name: str | None = None,
+        image_role: str = "preview",
+        submitted: object = None,
+        **figure: object,
+    ) -> tuple[Path, Path]:
+        """Write one Figure -- or collect one already ``submitted`` -- and
+        register it."""
+
         registered_name = str(name if artifact_name is None else artifact_name)
         base = paths["figures"] / f"{name}.png"
         try:
-            writer = self._save_figure_artifact
-            if writer is None:
-                from zlc_plot import save_figure_artifact as writer
-            written = writer(
-                base,
-                plot_input=snapshot,
-                spec=spec,
-                parameters={} if parameters is None else parameters,
-                size=size,
-                classifier_thresholds=classifier_thresholds,
-                source={
-                    "task": self.instance_id,
-                    "report": name,
-                    "calibration_path": str(self.calibration_path),
-                    "science_context_path": str(self.science_context_path),
-                    "run_record": {
-                        **self._run_record(),
-                        **dict(device_event_record),
-                    },
-                },
+            written = (
+                self._submit_figure(paths, name, **figure)
+                if submitted is None
+                else submitted
             )
             if hasattr(written, "result"):
                 written = written.result()
@@ -2860,26 +2881,31 @@ class SlmFeedbackTask:
             })
         return tuple(targets)
 
-    def _save_candidate_fit_figures(
+    def _submit_candidate_fit_figure(
         self,
         context: object,
         paths: Mapping[str, Path],
-        reports: list[tuple[Mapping[str, object], np.ndarray]],
-        *,
-        generation: str,
-    ) -> None:
-        for measurement, samples in reports:
-            candidate = int(measurement["iteration"])
+        measurement: Mapping[str, object],
+        samples: np.ndarray,
+    ) -> object:
+        """Start one candidate's fit Figure as soon as it is measured.
+
+        A process writer then renders it while the next batch is shot,
+        instead of every candidate's Figure one after another once the run
+        is sealed.  A Figure that could not even start fails where the
+        others are collected, beside them, not in the middle of the loop.
+        """
+
+        candidate = int(measurement["iteration"])
+        try:
             snapshot, spec = self._candidate_fit_figure(
                 measurement,
                 samples,
-                generation=generation,
+                generation=str(getattr(context.generation, "value", context.generation)),
             )
-            self._save_figure(
-                context,
+            return self._submit_figure(
                 paths,
                 f"candidate_site_fits/candidate-{candidate:04d}",
-                artifact_name=f"candidate_{candidate:04d}_site_fits",
                 snapshot=snapshot,
                 spec=spec,
                 parameters={
@@ -2887,10 +2913,45 @@ class SlmFeedbackTask:
                     "threshold_classifier": True,
                 },
                 size="8x8",
-                image_role="figure",
                 classifier_thresholds=self._candidate_fit_targets(measurement),
                 device_event_record=measurement["device_event_record"],
             )
+        except Exception as error:
+            failed: Future = Future()
+            failed.set_exception(error)
+            return failed
+
+    def _save_candidate_fit_figures(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        reports: list[tuple[Mapping[str, object], object]],
+    ) -> None:
+        """Collect and register every candidate's fit Figure.
+
+        Each was started as its candidate was measured, so each is collected
+        even after one fails -- one left uncollected renders on after the
+        seal into a file nobody registered -- and the first failure is
+        raised once all of them are in.
+        """
+
+        failure: Exception | None = None
+        for measurement, submitted in reports:
+            candidate = int(measurement["iteration"])
+            try:
+                self._save_figure(
+                    context,
+                    paths,
+                    f"candidate_site_fits/candidate-{candidate:04d}",
+                    artifact_name=f"candidate_{candidate:04d}_site_fits",
+                    image_role="figure",
+                    submitted=submitted,
+                )
+            except Exception as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
 
     def _save_figures(
         self,
@@ -2901,18 +2962,11 @@ class SlmFeedbackTask:
         selected: Mapping[str, object],
         initial_phase: np.ndarray,
         initial_mean_frame: np.ndarray,
-        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
     ) -> None:
         count = len(history)
         if count < 1:
             return
         generation = str(getattr(context.generation, "value", context.generation))
-        self._save_candidate_fit_figures(
-            context,
-            paths,
-            candidate_reports,
-            generation=generation,
-        )
         selected_history = selected.get("history")
         selected_device_record = (
             selected_history.get("device_event_record")
@@ -3448,7 +3502,7 @@ class SlmFeedbackTask:
         paths: Mapping[str, Path],
         initial_phase: np.ndarray,
         initial_mean_frame: np.ndarray | None,
-        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
+        candidate_reports: list[tuple[Mapping[str, object], object]],
         status: str,
         republish: bool,
         error: BaseException | None = None,
@@ -3545,14 +3599,18 @@ class SlmFeedbackTask:
             contract_id=SLM_PHASE_ARTIFACT_CONTRACT,
         )
         figures_error: BaseException | None = None
-        if (
-            history
-            and isinstance(retained_history, Mapping)
-            and candidate.get("samples") is not None
-            and candidate.get("mean_frame") is not None
-            and initial_mean_frame is not None
-        ):
-            try:
+        try:
+            # Every measured candidate's fit Figure was started as it was
+            # measured, so every one is collected, whether or not the kept
+            # candidate carries what the rest of the report is drawn from.
+            self._save_candidate_fit_figures(context, paths, candidate_reports)
+            if (
+                history
+                and isinstance(retained_history, Mapping)
+                and candidate.get("samples") is not None
+                and candidate.get("mean_frame") is not None
+                and initial_mean_frame is not None
+            ):
                 self._save_figures(
                     context,
                     paths,
@@ -3560,19 +3618,18 @@ class SlmFeedbackTask:
                     selected=candidate,
                     initial_phase=initial_phase,
                     initial_mean_frame=initial_mean_frame,
-                    candidate_reports=candidate_reports,
                 )
-            except Exception as figure_error:
-                figures_error = figure_error
-                context.report_progress(
+        except Exception as figure_error:
+            figures_error = figure_error
+            context.report_progress(
+                "Feedback figures were not written: "
+                f"{type(figure_error).__name__}: {figure_error}"
+            )
+            if error is not None:
+                error.add_note(
                     "Feedback figures were not written: "
                     f"{type(figure_error).__name__}: {figure_error}"
                 )
-                if error is not None:
-                    error.add_note(
-                        "Feedback figures were not written: "
-                        f"{type(figure_error).__name__}: {figure_error}"
-                    )
         self._write_summary(
             context,
             paths,
@@ -3627,18 +3684,22 @@ class SlmFeedbackTask:
         }
 
     def execute(self, context: object) -> dict[str, object]:
+        # The host's Logic row names this run's outputs and Figures, not the
+        # node type: a second Feedback row is a different Logic.
+        self.instance_id = context.instance_id
         self._actual_device_snapshots = {}
         self._actual_exposure_seconds = None
         self._effective_photoelectrons = None
         self._effective_count_unit = None
         self._program_digest = None
+        self._fired_config = None
         incoming = self._incoming_phase
         incoming_pattern = self._pattern_phase
         paths = self._prepare_artifacts(context)
         history: list[dict[str, object]] = []
-        candidate_reports: list[
-            tuple[Mapping[str, object], np.ndarray]
-        ] = []
+        #: Each measured candidate and its fit Figure, submitted when it was
+        #: measured and collected when the run is sealed.
+        candidate_reports: list[tuple[Mapping[str, object], object]] = []
         retained_valid: dict[str, object] | None = None
         most_visible_observed: dict[str, object] | None = None
         last_completed_candidate: dict[str, object] | None = None
@@ -3646,7 +3707,7 @@ class SlmFeedbackTask:
         stalled = False
         termination_reason = "all authored feedback updates completed"
         try:
-            _check_cancelled(context)
+            check_cancelled(context)
             self.sequencer.safe()
             # Science Context is the requested starting CONTENT, not proof of
             # what a previous process happens to have commanded. This Task owns
@@ -3661,7 +3722,7 @@ class SlmFeedbackTask:
                 api_values={},
             )
             arm_sequencer(self.sequencer, pulse)
-            _check_cancelled(context)
+            check_cancelled(context)
             current_target = self.target
             # The Target on the SLM is the control Target with this
             # candidate's identification excitation on its sites (see
@@ -3699,9 +3760,6 @@ class SlmFeedbackTask:
                 self._site_count, np.nan, dtype=float
             )
             probe_baseline_valid = np.zeros(self._site_count, dtype=bool)
-            probe_baseline_reference_valid = np.zeros(
-                self._site_count, dtype=bool
-            )
             probe_baseline_dark = np.zeros(self._site_count, dtype=bool)
             probe_baseline_edge = np.zeros(self._site_count, dtype=bool)
             pending_probes: list[
@@ -3738,7 +3796,7 @@ class SlmFeedbackTask:
                 return target, requested, effective, site_factors
 
             while candidate_number < self._candidate_capacity:
-                _check_cancelled(context)
+                check_cancelled(context)
                 applied = (
                     current_phase
                     if candidate_number == 0
@@ -4041,7 +4099,6 @@ class SlmFeedbackTask:
                     probe_baseline_observed[:] = observed
                     probe_baseline_error[:] = error
                     probe_baseline_valid[:] = observable_valid
-                    probe_baseline_reference_valid[:] = fit_valid
                     probe_baseline_dark[:] = unobservable_single
                     probe_baseline_edge[:] = loading_edge
                     for requested_factor in self.probe_factors:
@@ -4107,7 +4164,6 @@ class SlmFeedbackTask:
                             feedback_valid,
                             self._rows,
                             self._columns,
-                            reference_valid=fit_valid,
                             feedback_gain=self.feedback_gain,
                             plant_slope=plant_slope_magnitude,
                             plant_sign=self.observable.plant_sign,
@@ -4297,7 +4353,12 @@ class SlmFeedbackTask:
                     "samples": np.array(samples, copy=True),
                     "mean_frame": np.array(mean_frame, copy=True),
                 }
-                candidate_reports.append((history[-1], np.asarray(samples)))
+                candidate_reports.append((
+                    history[-1],
+                    self._submit_candidate_fit_figure(
+                        context, paths, history[-1], np.asarray(samples)
+                    ),
+                ))
                 last_completed_candidate = completed
                 completed["visibility_rank"] = (
                     visibility,
@@ -4438,7 +4499,6 @@ class SlmFeedbackTask:
                             probe_baseline_valid,
                             self._rows,
                             self._columns,
-                            reference_valid=probe_baseline_reference_valid,
                             feedback_gain=self.feedback_gain,
                             plant_slope=plant_slope_magnitude,
                             plant_sign=self.observable.plant_sign,
@@ -4643,7 +4703,6 @@ class SlmFeedbackTask:
                     retained = retained_valid or most_visible_observed
                     if retained is None:
                         retained = self._incoming_candidate(
-                            observed=most_visible_observed,
                             phase=incoming,
                             pattern=incoming_pattern,
                         )

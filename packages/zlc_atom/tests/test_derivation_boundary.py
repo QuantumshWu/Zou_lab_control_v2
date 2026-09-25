@@ -15,7 +15,6 @@ exist and this file states which is which so nobody "fixes" the boundary away.
 from __future__ import annotations
 
 from dataclasses import replace
-import sys
 import time
 from pathlib import Path
 from threading import Event
@@ -23,10 +22,6 @@ import warnings
 
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration import (
@@ -53,11 +48,8 @@ from zlc_plot import (
     image_point_overlay_from_signal,
 )
 from zlc_data import (
-    AxisId,
-    AxisSpec,
     DatasetSchema,
     DomainSpec,
-    SITE,
     owned_snapshot_from_arrays,
 )
 from zlc_runtime import DatasetCoverage, LiveDatasetOutput, MonitorCoverage
@@ -123,7 +115,7 @@ def _single_site_calibration(node, source) -> TrapCalibration:
     )
 
 
-def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning(monkeypatch) -> None:
+def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
     point = CameraWorkingPoint(
         "EXTERNAL_TRIGGERED",
         (4, 3),
@@ -139,14 +131,6 @@ def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning(monkeypatc
         1.0,
         "default",
     )
-    stack = np.stack
-    stacks = []
-
-    def stack_frames(values, *args, **kwargs):
-        stacks.append(len(values))
-        return stack(values, *args, **kwargs)
-
-    monkeypatch.setattr(np, "stack", stack_frames)
     frame = frames_snapshot(
         ((CameraFrameRecord(np.zeros((4, 3), dtype="<u2"), 0),),),
         producer="roi-camera",
@@ -155,7 +139,6 @@ def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning(monkeypatc
         working_point=point,
         value_unit=point.count_unit,
     )
-    assert stacks == [1], "camera publication assembles one final array, not two stacked copies"
     site_map = SiteMap(
         ("site-1",),
         np.asarray(((1.5, 2.0),)),
@@ -269,7 +252,9 @@ def test_occupancy_preserves_scan_axes_for_live_events_and_the_complete_run() ->
             assert outputs["occupied"].canonical_schema.point_domain == event.canonical_schema.point_domain
             assert outputs["occupied"].cell_origin == (repeat, 0)
         plane.seal_committed(scan)
-        snapshot = plane.current_dataset(scan.signal_key(SCAN_OUTPUT.name))
+        # The complete run is held as the shots it was written in; the
+        # processor reads it dense, and so does this check.
+        snapshot = plane.current_dataset(scan.signal_key(SCAN_OUTPUT.name)).materialize()
         assert snapshot.block.values.shape == (50, 3, 72, 92)
         assert tuple(a.size for a in snapshot.block.schema.point_domain.axes) == (3, 1)
         full = processor.evaluate(SignalValue(scan.signal_key(SCAN_OUTPUT.name), snapshot, None))
@@ -297,7 +282,6 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     processor = OccupancyProcessor(
         calibration,
         source_signal="event-camera/frames",
-        producer="event-occupancy",
     )
     assert processor.dataset_output_declarations is OCCUPANCY_OUTPUTS
     assert OCCUPANCY_LOGIC_NODE.outputs is OCCUPANCY_OUTPUTS
@@ -415,7 +399,7 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
             processor,
             event_plane,
             wake.set,
-            instance_id=processor.instance_id,
+            instance_id="event-occupancy",
             kind="processor",
             dataset_output_declarations=OCCUPANCY_OUTPUTS,
             input_signal="event-camera/frames",
@@ -433,6 +417,7 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
                 wake.wait(0.01)
                 wake.clear()
         assert current is not None
+        current = current.materialize()
         assert current.block.values.shape == (3, windows, 1)
         current_validity = current.expanded_validity()
         assert np.all(current_validity[0])
@@ -593,7 +578,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         processor,
         plane,
         wake.set,
-        instance_id=processor.instance_id,
+        instance_id="occupancy",
         kind="processor",
         dataset_output_declarations=OCCUPANCY_OUTPUTS,
         input_signal=source_name,
