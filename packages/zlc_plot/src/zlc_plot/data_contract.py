@@ -27,7 +27,6 @@ from zlc_data import (
     DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
-    expand_snapshot_validity,
 )
 from zlc_data.axis import SCALAR
 
@@ -41,34 +40,6 @@ def snapshot_schema(snapshot: OwnedSnapshot) -> DatasetSchema:
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
     return snapshot.block.schema
-
-
-def snapshot_values(snapshot: OwnedSnapshot) -> NDArray[Any]:
-    if not isinstance(snapshot, OwnedSnapshot):
-        raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
-    return snapshot.block.materialize().values
-
-
-def snapshot_sigma(snapshot: OwnedSnapshot) -> NDArray[np.float64] | None:
-    """The uncertainty of the samples themselves, or None if none is stated.
-
-    Not the uncertainty of a reduction over them: that one is derived where
-    the reduction happens, from the samples and their validity, and is
-    never transported.  This is the other kind -- a property of one sample,
-    which a fitted parameter has and a camera pixel does not -- and it
-    cannot be recovered downstream, so the producer sends it along.
-    """
-
-    if not isinstance(snapshot, OwnedSnapshot):
-        raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
-    sigma = snapshot.block.materialize().sigma
-    return None if sigma is None else np.asarray(sigma, dtype=np.float64)
-
-
-def snapshot_validity(snapshot: OwnedSnapshot) -> NDArray[np.bool_]:
-    if not isinstance(snapshot, OwnedSnapshot):
-        raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
-    return np.asarray(expand_snapshot_validity(snapshot), dtype=np.bool_)
 
 
 def snapshot_revision(snapshot: OwnedSnapshot) -> int:
@@ -383,6 +354,4 @@ __all__ = [
     "snapshot_generation",
     "snapshot_revision",
     "snapshot_schema",
-    "snapshot_validity",
-    "snapshot_values",
 ]

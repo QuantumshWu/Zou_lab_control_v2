@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
-from dataclasses import dataclass, field, replace
+from contextlib import nullcontext
+from dataclasses import replace
 import math
 from threading import Event
 from types import MappingProxyType
@@ -60,22 +61,6 @@ FitCallback = Callable[[FitEvent | None], object]
 _CLASSIFIER_REQUEST_GENERATION = -1
 
 _UNRESOLVED_WARM_START: Any = object()
-
-
-class _LiveSelectionCell:
-    """Mutable slot carrying a worker-built live selection to acceptance."""
-
-    __slots__ = ("selection",)
-
-    def __init__(self) -> None:
-        self.selection: FitSelection | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _DeferredStartedFitRequest(_StartedFitRequest):
-    """A live restart whose selection freeze runs inside the solver task."""
-
-    selection_cell: _LiveSelectionCell = field(default_factory=_LiveSelectionCell)
 
 
 class FitSessionMixin:
@@ -430,19 +415,12 @@ class FitSessionMixin:
                     f"{model_spec.model_id} fits one population; it has no "
                     "min_bic_gain"
                 )
-            options = {
-                **(
-                    dict(options)
-                    if isinstance(options, Mapping)
-                    else {} if options is None else {
-                        "loss": options.loss,
-                        "max_nfev": options.max_nfev,
-                        "deadline_seconds": options.deadline_seconds,
-                        "max_exact_points": options.max_exact_points,
-                    }
-                ),
-                "min_bic_gain": None if min_bic_gain is None else float(min_bic_gain),
-            }
+            gain = None if min_bic_gain is None else float(min_bic_gain)
+            options = (
+                {**dict(options), "min_bic_gain": gain}
+                if isinstance(options, Mapping)
+                else replace(options or FitOptions(), min_bic_gain=gain)
+            )
         if selector_kind is not None and not isinstance(
             selector_kind, SelectorKind
         ):
@@ -560,7 +538,9 @@ class FitSessionMixin:
             if distribution_indices is None else frozenset(distribution_indices)
         )
         # Warm starts are resolved on the calling thread so cell workers never
-        # touch session locks (the classifier solves under the session lock).
+        # touch session locks: a classifier refresh with no prepared batch to
+        # stand in (a commit, a parameter or spec change) still solves under
+        # the session lock.
         warm_starts = tuple(
             self._fit_warm_start(
                 model,
@@ -774,6 +754,19 @@ class FitSessionMixin:
         with self._render_lock:
             with self._lock:
                 self._assert_open()
+                projection = self._projected
+                batch_fit = request.all_facets or projection._has_grouped_histogram()
+                if not batch_fit:
+                    try:
+                        selection = projection.fit_selection(
+                            request.model,
+                            selector_kind=request.selector_kind,
+                        )
+                    except (TypeError, ValueError):
+                        if logical_completion is None or not live:
+                            raise
+                # The cell value follows the model only once the request
+                # stands: a refused selection leaves the display untouched.
                 if FACET_FIT_PARAMETER in self._parameter_schema:
                     selected_parameter = self.display_state[
                         FACET_FIT_PARAMETER
@@ -796,17 +789,8 @@ class FitSessionMixin:
                             previous_display,
                             candidate_display,
                         )
-                projection = self._projected
-                batch_fit = request.all_facets or projection._has_grouped_histogram()
-                if not batch_fit:
-                    try:
-                        selection = projection.fit_selection(
-                            request.model,
-                            selector_kind=request.selector_kind,
-                        )
-                    except (TypeError, ValueError):
-                        if logical_completion is None or not live:
-                            raise
+                        # The request presents under the display it reset.
+                        projection = self._projected
                 previous_fit_cancel = self._fit_cancel
                 previous_live_fit_cancel = self._live_fit_cancel
                 self._fit_context_generation += 1
@@ -848,7 +832,7 @@ class FitSessionMixin:
     def _pair_started(
         self,
         projection: FitProjection,
-    ) -> _DeferredStartedFitRequest | None:
+    ) -> _StartedFitRequest | None:
         """Freeze the armed live request against one prepared data frame.
 
         The selection freeze runs inside the solver task (from the captured
@@ -862,7 +846,7 @@ class FitSessionMixin:
         with self._lock:
             if self._closed or self._live_fit_request is None:
                 return None
-            return _DeferredStartedFitRequest(
+            return _StartedFitRequest(
                 request=self._live_fit_request,
                 selection=None,
                 projection=projection,
@@ -873,7 +857,7 @@ class FitSessionMixin:
 
     def _solve_live_pair(
         self,
-        started: _DeferredStartedFitRequest,
+        started: _StartedFitRequest,
         cancelled: Callable[[], bool] | None = None,
     ) -> _SolvedLiveFit:
         """Solve one exact pair or fail it without advancing visible data."""
@@ -1051,7 +1035,12 @@ class FitSessionMixin:
         FitResult | FacetFitBatchResult,
         tuple[FitSelection | None, ...],
     ]:
-        """Solve once and retain the exact Facet selections for live accept."""
+        """Solve once and retain the exact selections for live accept.
+
+        A single fit answers its one selection too: a live pair freezes it
+        here, inside the solver task, and acceptance reads it from the
+        answer rather than from the request.
+        """
 
         def should_cancel() -> bool:
             return started.cancellation.is_set() or (
@@ -1084,8 +1073,6 @@ class FitSessionMixin:
                 raise FitCancelled(
                     "live fit selection is unavailable for this revision"
                 ) from error
-            if isinstance(started, _DeferredStartedFitRequest):
-                started.selection_cell.selection = selection
         result = self._solve_fit_selection(
             started.projection,
             started.request.model,
@@ -1096,7 +1083,7 @@ class FitSessionMixin:
             cancelled=should_cancel,
             request_generation=started.request_generation,
         )
-        return result, ()
+        return result, (selection,)
 
     def _submit_started_fit(
         self,
@@ -1265,8 +1252,59 @@ class FitSessionMixin:
             self._projected._fit_parameter_units(model)
         )
 
-    def _refresh_threshold_classifier(self, *, indices: set[int] | None = None) -> None:
-        """Present caller-owned models; solve only distributions that need one."""
+    def _classifier_automatic_batch(
+        self,
+        projection: FitProjection,
+        cancelled: Callable[[], bool],
+    ) -> tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None:
+        """Solve a prepared frame's automatic classifier distributions.
+
+        Runs where the frame is prepared, on the analysis executor against
+        its frozen projection.  Solved inside the commit instead, a forty-two
+        site grid spent 46 ms a shot on the render worker under both session
+        locks, and every pointer event queued behind it.  The commit installs
+        this answer while the authored components it assumed still stand.
+        """
+
+        if not accepts_classifier_thresholds(
+            projection.spec, projection.display_state.values
+        ):
+            return None
+        components = self._classifier_gaussian_components
+        count = len(projection._fit_targets())
+        if len(components) != count:
+            components = (None,) * count
+        automatic = tuple(
+            index for index, component in enumerate(components) if component is None
+        )
+        if not automatic:
+            return None
+        batch, _selections = self._fit_batch(
+            projection,
+            self._resolve_fit_model("bimodal_gaussian"),
+            initial=None,
+            bounds=None,
+            options=None,
+            cancelled=cancelled,
+            request_generation=_CLASSIFIER_REQUEST_GENERATION,
+            distribution_indices=automatic,
+        )
+        return components, batch
+
+    def _refresh_threshold_classifier(
+        self,
+        *,
+        indices: set[int] | None = None,
+        prepared: (
+            tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None
+        ) = None,
+    ) -> None:
+        """Present caller-owned models; solve only distributions that need one.
+
+        ``prepared`` is the automatic batch a live frame solved before its
+        commit (``_classifier_automatic_batch``); it stands in for the solve
+        when it assumed the components that still stand.
+        """
 
         if not self._threshold_classifier_enabled():
             self._classifier_results = ()
@@ -1300,16 +1338,19 @@ class FitSessionMixin:
         requested = set(range(count)) if indices is None else indices
         automatic = tuple(index for index in requested if components[index] is None)
         if automatic:
-            batch, _selections = self._fit_batch(
-                projection,
-                model,
-                initial=None,
-                bounds=None,
-                options=None,
-                cancelled=None,
-                request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                distribution_indices=automatic,
-            )
+            if prepared is not None and indices is None and prepared[0] == components:
+                batch = prepared[1]
+            else:
+                batch, _selections = self._fit_batch(
+                    projection,
+                    model,
+                    initial=None,
+                    bounds=None,
+                    options=None,
+                    cancelled=None,
+                    request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                    distribution_indices=automatic,
+                )
             for index in automatic:
                 results[index] = batch.results[index]
                 overlays[index] = batch.overlays[index]
@@ -1597,23 +1638,32 @@ class FitSessionMixin:
             for presentation in reversed(presentations):
                 self._abort_fit_presentation(presentation)
 
+        with self._lock:
+            headless = self._presentation_dispatch is None and self._dispatch is None
         try:
-            with self._ownership_gate:
-                with self._lock:
-                    presentation_dispatch = self._presentation_dispatch
-                if presentation_dispatch is None:
-                    presented = self.owner_dispatch(accept_and_paint)
-                else:
-                    presented = presentation_dispatch(
-                        accept_and_paint,
-                        finalize_presentation,
-                        abort_presentation,
-                    )
-                if not isinstance(presented, Future):
-                    raise TypeError(
-                        "host presentation dispatch must return "
-                        "concurrent.futures.Future"
-                    )
+            # A headless owner accepts and paints right here, under the
+            # render lock; every render path that notifies (update_data,
+            # configure) holds the render lock before the ownership gate.
+            # Taken the other way round, a fit finishing during either
+            # deadlocked against it.  A host paints on its own thread, so
+            # this analysis thread never waits on a render for it.
+            with self._render_lock if headless else nullcontext():
+                with self._ownership_gate:
+                    with self._lock:
+                        presentation_dispatch = self._presentation_dispatch
+                    if presentation_dispatch is None:
+                        presented = self.owner_dispatch(accept_and_paint)
+                    else:
+                        presented = presentation_dispatch(
+                            accept_and_paint,
+                            finalize_presentation,
+                            abort_presentation,
+                        )
+                    if not isinstance(presented, Future):
+                        raise TypeError(
+                            "host presentation dispatch must return "
+                            "concurrent.futures.Future"
+                        )
         except Exception as error:
             targets = tuple(resolutions) or (
                 ()
@@ -1774,7 +1824,11 @@ class FitSessionMixin:
 
         result = self._stamp_fit_batch_revision(result)
         batch = result if isinstance(result, FacetFitBatchResult) else None
-        selection = None if batch is not None else self._started_selection(started)
+        selection = (
+            None
+            if batch is not None
+            else facet_selections[0] if facet_selections else started.selection
+        )
         if result.source_revision != projection.data_revision:
             raise RuntimeError("fit result does not match its data projection")
         if selection is not None and selection.data_revision != projection.data_revision:
@@ -1878,16 +1932,6 @@ class FitSessionMixin:
             accepted,
             previous,
         )
-
-    @staticmethod
-    def _started_selection(started: _StartedFitRequest) -> FitSelection | None:
-        """Return the frozen selection, whether eager or worker-built."""
-
-        if started.selection is not None:
-            return started.selection
-        if isinstance(started, _DeferredStartedFitRequest):
-            return started.selection_cell.selection
-        return None
 
     def _batch_fit_selections(
         self,

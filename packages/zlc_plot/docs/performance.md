@@ -106,6 +106,12 @@ Curve准备/范围计算、有效SEM像素混合、Facet Histogram compose、Fit
   healed without an error. Supporting eight 10 Hz Matplotlib surfaces would
   require a materially different renderer/process architecture and is not a
   hidden same-shot scheduling defect.
+
+  > Superseded (2026-09-25): that architecture exists. Every live Monitor
+  > panel now renders in a render child of its own (`RenderProcessPool`, one
+  > panel per child, never shared); these eight hosts shared one interpreter.
+  > See "Process-isolated Monitor, Edit and Figure export".
+
 - Isolated renderer P50 A/B in milliseconds was: Image+fit 34.37 -> 32.49,
   Curve 2.74 -> 2.40, Histogram 3.18 -> 2.82, Rolling 16.55 -> 15.18 and a
   four-cell FacetGrid 11.84 -> 9.59. DPR1/2 parity across Image, Curve,
@@ -265,6 +271,11 @@ seeds now compete against the cold moment search instead of short-circuiting
 it), made the rolling window a pure display selector over retained history,
 routed the live-fit budget through the controller's actual cadence, and
 stopped reporting superseded render futures as panel errors.
+
+> Superseded (2026-09-25): the per-revision mip pyramid is gone. The compiled
+> block sum reduces straight from the source in 0.7-2 ms, less than building
+> one level, so `ImageFrontStore` is only the prepared-front LRU (its
+> docstring keeps the measurement).
 
 A later pass fixed the color-limit drag: the preview no longer rewrites the
 colorbar's endpoint labels (chrome whose edit forced a full background
@@ -467,6 +478,10 @@ Before display-sized raster preparation, the same 2048² path spent about
 206 ms per preview and about 269 ms per live commit because Matplotlib
 normalized, color-mapped and resampled the entire source image on each blit.
 
+> Superseded: the 100 ms remap lane was removed; the recolor rides the 30 ms
+> pointer cadence (`pointer_update_interval_ms`), as the overhaul section
+> above records.
+
 DPR changes the preparation budget rather than stretching a low-resolution
 front.  For the same `2x2` source, DPR 1.0, 1.5 and 2.0 produced 480x357,
 720x536 and 960x714 fronts; the corresponding image axes were approximately
@@ -481,6 +496,10 @@ numeric labels and z-order for Matplotlib and the Qt candidate painter. A scene
 build measured about 5.08 µs; painting a candidate into an off-screen Qt image
 measured about 120 µs. The expensive part of a color-limit gesture is therefore
 the image presentation above, not selector geometry or text generation.
+
+> Superseded (2026-09-25): there is no Qt candidate painter. Matplotlib
+> artists are the only consumer of `SelectorScene`; committed and candidate
+> selectors are both baked into the raster front (see `architecture.md`).
 
 Every plot kind with a numerical fit meaning shares one request and
 presentation lifecycle: `FitSelection -> _solve_fit_selection -> FitEngine ->
@@ -501,6 +520,11 @@ overlay presentation, measured 7.65, 6.39 and 9.11 ms respectively. Built-in
 SciPy solver modules are loaded with the package rather than on the first fit
 gesture, so the first click does not pay a several-hundred-millisecond lazy
 import inside the fit transaction.
+
+> Superseded (2026-09-25): built-in models solve on the compiled engine and a
+> render child never imports SciPy. `least_squares` remains only for a custom
+> model without a compiled descriptor and is imported where it is called; the
+> child pays its first-fit cost in its level-2 warm (`warm_fit`) instead.
 
 A separate 20,000-point complete-session run measured a 72.0 ms cold and
 19.4 ms warm Curve Gaussian transaction, including the accepted overlay draw.
@@ -654,6 +678,10 @@ The residual console/isolated render ratio (camera-grid ~2x) is
 scheduler-level sharing among four worker threads, their kernel teams
 and the GUI thread; it shrinks only by making composes cheaper.
 
+> Superseded (2026-09-25): these four workers shared one render process.
+> Each panel now renders in its own child with its own interpreter; every
+> worker still masks its native team to `ZLC_NUMBA_WORKER_THREADS` (4).
+
 ## Compose and stroke round (September 2026, second pass)
 
 The question was what the four-panel chain still paid per panel after the
@@ -724,6 +752,14 @@ per frame (a presentation fact -- caps at every point -- not a kernel
 fact), and forty mathtext annotations parsed per frame under the GIL
 (5-10 ms).  The other three panels now finish well inside it.
 
+> Superseded (2026-09-25): every error-bar painter -- the native
+> prepared-series path, the kernel plan over the bar artists, and the
+> Agg/export path -- omits the caps of a group whose mean pixel pitch, on
+> the canvas it paints, is below one device pixel (the stems stay), by one
+> rule (`_effective_cap_width`), so the 0.3 px case above paints stems
+> alone and screen and export agree. The forty mathtext annotations became
+> a cached symbol plus a plain value (third pass below). Not re-measured.
+
 Band count is a shared-pool decision, measured: the default worker mask
 is the whole pool (16 threads here), and cutting a lone lane into sixteen
 bands from four workers at once moved the critical path from 83 to
@@ -733,6 +769,13 @@ and still took the curve panel's compose from 15.1 to 11.9 ms.  The cap
 is four.  The previous round's mask sweep (2/4/8 -> 90/84.5/79.2 ms)
 suggests a smaller default worker mask would help the chain; that is a
 product decision and was not taken here.
+
+> Superseded: the default worker team has been four since 2026-08-31
+> (`ZLC_NUMBA_WORKER_THREADS`, set by the bootstrap), not the whole pool, and
+> since 2026-09-25 the renderer no longer widens it to eight for large facet
+> grids. `_STROKE_BAND_LIMIT` stays four. Every panel now renders in its own
+> child, so the one-pool contention measured here no longer exists as such;
+> the chain has not been re-measured under the pool.
 
 Two measurement lessons worth keeping: kernel inputs captured by
 reference belong to a later frame (the renderer reuses its geometry
@@ -802,11 +845,20 @@ The next floor would be a native raster for histogram bars and their
 fit curves, as the curve cells already have, which is a larger project
 and was not taken here.
 
+> Superseded: histogram bars now rasterise natively
+> (`_raster_kernels.raster_histogram_bars`).
+
 Two observations, not changes: a bimodal fit over cells holding one or
 a few samples (window 1) spends 75-90 ms a shot converging to nothing,
 ten times its cost on a real histogram -- a fit that lacks the samples
 for its parameters would be cheaper refused than solved; and at window 1
 the p90 of any kind is dominated by the plane's ramp, not the plot.
+
+> Superseded (2026-09-25): a counted (histogram) fit now counts its
+> observations as the smaller of its bins and its samples (the sum of the
+> counts), so a window-1 cell with too few samples for its free parameters is
+> refused with the usual "needs more points" message instead of solved to
+> its budget.
 
 ## Poisson-Gaussian histogram models (2026-09-02)
 
@@ -925,7 +977,15 @@ DataView projection, display fit, render and compose.  C owns Panel Edit,
 point review and every Workbench or domain-Task Figure render/export.  A and C
 run the unchanged `RasterPlotHost`/`PlotSession` truth; B has no local plotting
 fallback.  A FigureViewer opened by TaskConsole retains the same A/C pair, and
-the last of the two windows to close owns shutdown.
+the device editors opened beside it retain its C (the Pulse Editor preview and
+the SLM Editor's three plots are C hosts); the last owner to close owns
+shutdown.
+
+> Superseded (2026-09-25): A is no longer one process. `RenderProcessPool`
+> gives every live Monitor panel a child of its own (one panel per child,
+> never shared), keeps four untouched children warm (two once more than two
+> are drawing) and retires a child when its panel closes; C is still one
+> process. The measurements in this section are of the single-A topology.
 
 Dataset revisions cross once per service through protocol-5 out-of-band
 shared transport and are reference-counted across all hosts.  Front RGBA lives
@@ -1002,6 +1062,11 @@ rise because A now runs concurrently with B and sustains a higher source rate.
 Cold first use also remains visible: one ordered cold/hot sample was about
 1.99 s for A and 0.53 s for C; it is not reported as a steady median.
 
+> Superseded (2026-09-25): with one child per panel the Monitor hosts are
+> process-parallel with one another; the four-panel chain has not been
+> re-measured under the pool, and the memory price is now one child (about
+> 200 MB) per live panel plus the warm spares.
+
 ## Edit surface actions at depth (September 2026, fourth pass)
 
 The scenario: the four-panel board an operator actually runs -- a qCMOS
@@ -1039,6 +1104,11 @@ What changed:
   the owner that settles it.
 * Save Fig renders the preview through the settled editor host, which
   already shows exactly that freeze, instead of building a third host.
+  > Superseded (2026-09-25): Save still runs on the settled editor host's
+  > worker and checks its recipe and data there, then builds one fresh export
+  > session from that recipe for both the archive and the image, so the PNG is
+  > what reopening the archive draws (the panel's own session keeps
+  > Normal-mode limits the reopened archive does not have).
   The archive deflates at level 1: on a 17 MB camera-history member
   zlib's default level took 1.9-2.7 s for 7.3 MB where level 1 takes
   0.2 s for 7.9 MB.
@@ -1086,6 +1156,9 @@ design:
   refused by design: the default facet is the live history, 1000 cells
   exceeds `facet_max_cells`, and the revert inherits the same default.
   The bench records it as a finding; the auto-fate table decides it.
+  > Superseded: the default table no longer facets a history window longer
+  > than `facet_max_cells` (`_facetable_history`); the grid pools the window
+  > into one cell instead, so the change is accepted.
 
 ## Window histogram from a carried frequency table (September 2026, fifth pass)
 
@@ -1198,6 +1271,10 @@ Curve-fit critical P50/P90 `89.85/93.83→84.69/86.92 ms`；Image-fit
 RegularImage single/Bn统一proxy→full TRF，规则轴不展开，既有context贯通objective，复用中心化统计量、
 省去未启用的权重图/重复valid扫描，最终直接核RSS；信息矩阵/协方差共享数值owner。
 最终同源AB：B40 `27.52→24.70 ms`；1200×1920 single `19.32→26.70 ms`，后者增加7.38ms，不能算作单图加速。
+
+> 已被取代（2026-09-25）：单cell组改用`reshape(1, -1)`借帧而不再`np.stack`，中心化context也不再分配物理
+> float64平面，这7.38 ms的两处来源已删除；尚未复测。
+
 旧single Newton/L-BFGS及其无人消费的辅助代码已删除。原始u8/u16保留，浮点至多f64。
 
 前景由原Agg/FT/MathText提供coverage，现有compose按原顺序批量重放；Single/Facet/Focus共用。

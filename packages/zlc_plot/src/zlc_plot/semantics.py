@@ -26,7 +26,6 @@ from zlc_data.axis import SCALAR, PRIMARY_INDEX, AxisId
 from zlc_data.snapshot_projection import indexed_history_layout
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
-from .session_policy import merge_labels
 from .specs import (
     FacetGridPlot,
     PlotLabels,
@@ -109,14 +108,22 @@ class SemanticCycleChoices(Sequence[SemanticChoice]):
             label = f"{label} {self.unit}"
         return scope_fate(coordinate), label
 
+    def position_of(self, value: object) -> int | None:
+        """Where one tagged scope value sits, through the axis's own locator.
+
+        The form layer asks this instead of walking every coordinate: a
+        Setting spec is rebuilt per shot while an axis fills, and each walk
+        built a fate and a label for every position up to the pinned one.
+        """
+
+        if not is_scope_fate(value):
+            return None
+        return self.locate(scope_coordinate_from_fate(value))
+
     def contains_value(self, value: object) -> bool:
         """Whether one already-tagged scope value belongs to this domain."""
 
-        if not is_scope_fate(value):
-            return False
-        coordinate = scope_coordinate_from_fate(value)
-        assert self.locate is not None
-        return self.locate(coordinate) is not None
+        return self.position_of(value) is not None
 
 
 def _unique_values(values: Iterable[object]) -> tuple[object, ...]:
@@ -134,9 +141,9 @@ def _unique_values(values: Iterable[object]) -> tuple[object, ...]:
 class SemanticField:
     """One semantic editor entry.
 
-    Semantic edits always rebuild the immutable projection.  The flag is
-    carried in the shared descriptor so a frontend cannot accidentally route
-    a semantic value through the cheap display-parameter channel.
+    Semantic edits always rebuild the immutable projection: a frontend
+    submits them through ``configure(semantic=...)``, never through the
+    display-parameter channel.
     """
 
     name: str
@@ -144,7 +151,6 @@ class SemanticField:
     value: object
     choices: tuple[SemanticChoice, ...]
     required: bool
-    rebuild: bool = True
     cycle_choices: SemanticCycleChoices | None = None
 
     def __post_init__(self) -> None:
@@ -152,8 +158,8 @@ class SemanticField:
             raise ValueError("semantic field name must be non-empty text")
         if not isinstance(self.label, str) or not self.label.strip():
             raise ValueError("semantic field label must be non-empty text")
-        if not isinstance(self.required, bool) or not isinstance(self.rebuild, bool):
-            raise TypeError("semantic field flags must be bool")
+        if not isinstance(self.required, bool):
+            raise TypeError("semantic field required flag must be bool")
         choices: list[SemanticChoice] = []
         for choice in self.choices:
             if (
@@ -347,28 +353,6 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
         schema.point_domain.axes,
         schema.cell_domain.axes,
     )
-
-
-def schema_summary(schema: DatasetSchema) -> str:
-    """One-line human description of a dataset's structure.
-
-    This is the single structure-description authority: frontends show it
-    verbatim (the embed window's data source line, notebook prints) instead
-    of each inventing its own shape text.
-    """
-
-    groups = schema_structure(schema)
-    parts = []
-    for group in groups:
-        text = " × ".join(f"{name} {size}" for name, size in group)
-        # A group of several axes is bracketed, so the reader can still see
-        # that the two data axes are one picture and the scan's two
-        # dimensions are one sweep.
-        parts.append(text if len(group) == 1 else f"({text})")
-    value = "value"
-    if schema.value_schema.value_unit not in {None, "", "1", "arb"}:
-        value = f"{value} ({schema.value_schema.value_unit})"
-    return " × ".join(parts) + f" → {value}"
 
 
 def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
@@ -733,11 +717,11 @@ def typed_choice(name: str, value: object) -> object:
     (``Reduction.SUM``, ``PlotKind.CURVE``), and as the plain value a RECORD
     holds -- a panel state, a saved layout, the editor row a frontend hands
     back.  Both name the same choice, so composition reads both instead of
-    making every caller remember which side of that line it stands on.  The
-    Figure Viewer stands on the other side: it routes an editor row straight
-    to ``apply_semantic``, so a plain ``"sum"`` reached ``CurvePlot.reduction``
-    and the dataclass refused it -- "reduction must be Reduction" -- for an
-    edit the operator made from the list this same module offered.
+    making every caller remember which side of that line it stands on.  An
+    editor row stands on the other side: handed back as it was offered, a
+    plain ``"sum"`` reached ``CurvePlot.reduction`` and the dataclass refused
+    it -- "reduction must be Reduction" -- for an edit the operator made
+    from the list this same module offered.
     """
 
     if name == "kind":
@@ -786,6 +770,32 @@ def _coordinate_spec(schema: DatasetSchema, spec: PlotSpec, primary: AxisRef, se
         return replace(spec, cell=replace(semantic, **changes), facet=remap(spec.facet),
                        scope=tuple(scope), coordinates=choices)
     return replace(spec, **changes, scope=tuple(scope), coordinates=choices)
+
+
+def merge_labels(old_spec: PlotSpec, new_spec: PlotSpec) -> PlotLabels:
+    """Carry authored labels across a semantic edit by role, never by slot.
+
+    Each kind declares which semantic role every label slot describes
+    (registry ``label_roles``).  A label survives only when the new spec has
+    a slot with the identical role, and it moves to that slot: a curve's
+    y-axis value label becomes a histogram's x label, while the curve's
+    x-axis label is dropped because no histogram slot describes that axis.
+    Verbatim slot copying is exactly the audit bug this replaces — it left
+    a histogram x axis reading "Time (mV)".
+    """
+
+    old_labels = semantic_spec(old_spec).labels
+    carriers = {}
+    for slot, role in handler_for(old_spec).label_roles(old_spec):
+        label = old_spec.labels.title if slot == "title" else getattr(old_labels, slot)
+        if label:
+            carriers[role] = label
+    slots = {
+        slot: carriers[role]
+        for slot, role in handler_for(new_spec).label_roles(new_spec)
+        if role in carriers
+    }
+    return PlotLabels(**slots)
 
 
 def composed_spec(
@@ -1092,32 +1102,6 @@ def composed_spec(
     return _settled(candidate)
 
 
-def _description_fate(self: "SemanticDescription", axis: AxisRef) -> object:
-    """What this configuration made of one axis."""
-
-    name = dict(self.fate_rows).get(axis)
-    if name is None:
-        raise KeyError(axis)
-    return self.field(name).value
-
-
-def _description_axes_offering(
-    self: "SemanticDescription",
-    fate: object,
-) -> tuple[AxisRef, ...]:
-    """Every axis whose row offers this fate -- the table read by column."""
-
-    return tuple(
-        axis
-        for axis, name in self.fate_rows
-        if any(value == fate for value in self.field(name).choice_values)
-    )
-
-
-SemanticDescription.fate = _description_fate  # type: ignore[attr-defined]
-SemanticDescription.axes_offering = _description_axes_offering  # type: ignore[attr-defined]
-
-
 def describe_semantics(
     schema: DatasetSchema | None,
     spec: PlotSpec,
@@ -1330,7 +1314,6 @@ __all__ = [
     "COORDINATE_PREFIX",
     "is_scope_fate",
     "schema_structure",
-    "schema_summary",
     "scope_coordinate_from_fate",
     "scope_fate",
     "updated_spec",

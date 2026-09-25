@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from enum import Enum
 from .parameters import ParameterSchema, RenderEffect
 from .specs import limit_pair_for
-from .semantics import SemanticDescription
 
 
 class ControlKind(str, Enum):
@@ -37,8 +36,6 @@ class ParameterControl:
     maximum: float | None
     step: float | None
     effects: RenderEffect
-    rebuild: bool = False
-    semantic: bool = False
     automatic: bool = False
     #: What Auto resolves to right now, for an automatic parameter the
     #: session can answer for: the unit an axis is read in unless one is
@@ -155,43 +152,6 @@ def parameter_controls_for_kind(
     return parameter_controls(schema, state)
 
 
-def semantic_controls(
-    description: SemanticDescription,
-) -> tuple[ParameterControl, ...]:
-    """Project registry-derived semantic fields into the same UI contract.
-
-    Semantic controls deliberately carry ``rebuild=True`` and a layout effect;
-    a frontend can therefore route them to ``replace_spec`` without guessing
-    whether a cheap display-parameter update is safe.
-    """
-
-    if not isinstance(description, SemanticDescription):
-        raise TypeError("description must be SemanticDescription")
-    result = []
-    for field in description.fields:
-        choices = tuple(field.choices)
-        allow_none = not field.required or any(
-            choice[0] is None for choice in choices
-        )
-        result.append(
-            ParameterControl(
-                name=field.name,
-                label=field.label,
-                kind=ControlKind.CHOICE,
-                value=field.value,
-                allow_none=allow_none,
-                choices=choices,
-                minimum=None,
-                maximum=None,
-                step=None,
-                effects=RenderEffect.LAYOUT,
-                rebuild=field.rebuild,
-                semantic=True,
-            )
-        )
-    return tuple(result)
-
-
 def _control_kind(value_type: object, choices: tuple[object, ...]) -> ControlKind:
     if choices:
         return ControlKind.CHOICE
@@ -212,5 +172,4 @@ __all__ = [
     "ParameterControl",
     "parameter_controls",
     "parameter_controls_for_kind",
-    "semantic_controls",
 ]

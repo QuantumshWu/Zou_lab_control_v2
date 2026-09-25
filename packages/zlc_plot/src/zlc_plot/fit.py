@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
-from functools import lru_cache
+from functools import lru_cache, partial
 from enum import Enum
 import hashlib
 import math
@@ -54,6 +54,8 @@ FIT_TARGET_FIELDS = frozenset({
 })
 
 # Models whose x origin is the start of the window they are fitted over.
+# Derived from the compiled descriptor's ``coordinate_origin`` (see
+# ``FitModelSpec``), never declared beside it.
 _DOMAIN_ANCHORED = "domain_anchored"
 Evaluator = Callable[..., np.ndarray]
 Initializer = Callable[[ArrayTuple, np.ndarray], Sequence[float]]
@@ -492,6 +494,14 @@ class FitModelSpec:
             raise TypeError(
                 "compiled_descriptor must be CompiledFitDescriptor or None"
             )
+        if self.compiled_descriptor is not None:
+            # The compiled path anchors by the descriptor's origin and the
+            # scalar path by this capability; one declaration, the
+            # descriptor's, decides both.  The capability then survives a
+            # caller replacing the descriptor away.
+            capabilities = capabilities - {_DOMAIN_ANCHORED}
+            if self.compiled_descriptor.coordinate_origin is not None:
+                capabilities = capabilities | {_DOMAIN_ANCHORED}
         if not isinstance(self.presentation, FitPresentationSpec):
             raise TypeError("presentation must be FitPresentationSpec")
         coordinate_relations = self.coordinate_relations
@@ -596,48 +606,38 @@ class FitModelSpec:
         if origin == 0.0:
             return self
 
-        def relative(coordinates: ArrayTuple) -> ArrayTuple:
-            first, *rest = coordinates
-            return (np.asarray(first, dtype=np.float64) - origin, *rest)
-
-        def anchor(evaluate: Evaluator) -> Evaluator:
-            def anchored(x, *values):
-                return evaluate(np.asarray(x, dtype=np.float64) - origin, *values)
-
-            return anchored
-
+        # Partials of module-level parts, so an anchored result still
+        # pickles across the render-process pipe.
         presentation = self.presentation
         if presentation.components:
             presentation = replace(
                 presentation,
                 components=tuple(
-                    replace(component, evaluator=anchor(component.evaluator))
+                    replace(
+                        component,
+                        evaluator=partial(_anchored_evaluator, component.evaluator, origin),
+                    )
                     for component in presentation.components
                 ),
             )
-        initializer = self.initializer
-        candidate = self.candidate_initializer
-        limits = self.bounds_initializer
         return replace(
             self,
-            evaluator=anchor(self.evaluator),
-            jacobian=None if self.jacobian is None else anchor(self.jacobian),
-            initializer=lambda coordinates, observed: initializer(
-                relative(coordinates), observed
+            evaluator=partial(_anchored_evaluator, self.evaluator, origin),
+            jacobian=(
+                None
+                if self.jacobian is None
+                else partial(_anchored_evaluator, self.jacobian, origin)
             ),
+            initializer=partial(_anchored_initializer, self.initializer, origin),
             candidate_initializer=(
                 None
-                if candidate is None
-                else lambda coordinates, observed: candidate(
-                    relative(coordinates), observed
-                )
+                if self.candidate_initializer is None
+                else partial(_anchored_initializer, self.candidate_initializer, origin)
             ),
             bounds_initializer=(
                 None
-                if limits is None
-                else lambda coordinates, observed: limits(
-                    relative(coordinates), observed
-                )
+                if self.bounds_initializer is None
+                else partial(_anchored_initializer, self.bounds_initializer, origin)
             ),
             presentation=presentation,
         )
@@ -696,6 +696,26 @@ class FitModelSpec:
                 f"fit model jacobian must have shape {expected}, got {jacobian.shape}"
             )
         return jacobian
+
+
+def _anchored_evaluator(
+    evaluate: Evaluator, origin: float, x: Any, *values: float
+) -> np.ndarray:
+    """``evaluate`` read from ``origin``: :meth:`FitModelSpec.anchored_at`."""
+
+    return evaluate(np.asarray(x, dtype=np.float64) - origin, *values)
+
+
+def _anchored_initializer(
+    initializer: Callable[[ArrayTuple, np.ndarray], Any],
+    origin: float,
+    coordinates: ArrayTuple,
+    observed: np.ndarray,
+) -> Any:
+    """``initializer`` asked about coordinates read from ``origin``."""
+
+    first, *rest = coordinates
+    return initializer((np.asarray(first, dtype=np.float64) - origin, *rest), observed)
 
 
 class FitModelRegistry:
@@ -1718,10 +1738,21 @@ class FitEngine:
         that could not hold the display rate.  The nested model has a
         compiled descriptor of its own and no reduction, so this is the
         same batch call with no recursion.
+
+        Nothing is solved where nobody asks the question: no threshold, or
+        an operator who fixed a parameter the reduction pins -- ``delta=5``
+        already asserts two populations, and the one-population answer
+        would overwrite that exact constraint with the pin.
         """
 
         reduction = spec.reduction
-        if reduction is None:
+        if (
+            reduction is None
+            or (options or FitOptions()).min_bic_gain is None
+            or not set(reduction.pinned).isdisjoint(
+                _fixed_parameter_partition(spec, bounds)[0]
+            )
+        ):
             return (None,) * len(observations)
         nested_spec = self.registry.get(reduction.nested_model_id)
         narrow_for = dict(reduction.shared)
@@ -1991,7 +2022,6 @@ class FitEngine:
                         spec,
                         result,
                         nested_by_local.get(local),
-                        data_revision=compiled_revisions[local],
                         options=options or FitOptions(),
                     )
                 except FitCancelled:
@@ -2063,6 +2093,7 @@ class FitEngine:
         #: cell histogram frame: 4.9 ms of the 21 ms both batches spent.
         histogram_bounds: dict[bytes, Any] = {}
         confining = _confines_to_histogram(model)
+        authored_seed = None if initial is None else _authored_seed(model, initial)
         for cell, coordinate_item in enumerate(coordinates):
             check()
             try:
@@ -2138,10 +2169,9 @@ class FitEngine:
                     model, cell_bounds
                 )
                 free_index = np.asarray(free_indices, dtype=np.int64)
-                if values.size <= len(free_indices):
-                    raise _too_few_points(
-                        model, len(free_indices), int(values.size)
-                    )
+                points = _observation_count(values, counted)
+                if points <= len(free_indices):
+                    raise _too_few_points(model, len(free_indices), points)
                 revision = integer(data_revisions[cell], "data_revision")
                 if revision < 0:
                     raise ValueError("data_revision must be non-negative")
@@ -2166,17 +2196,7 @@ class FitEngine:
                 weights: np.ndarray | None = None
                 binned = False
                 if sigma_array is not None:
-                    usable = sigma_array[
-                        np.isfinite(sigma_array) & (sigma_array > 0.0)
-                    ]
-                    if usable.size:
-                        floor = float(np.min(usable))
-                        bounded = np.where(
-                            np.isfinite(sigma_array) & (sigma_array > 0.0),
-                            sigma_array,
-                            floor,
-                        )
-                        weights = 1.0 / bounded
+                    weights = _sigma_weights(sigma_array)
                 elif (
                     not counted
                     and bool(free_indices)
@@ -2212,16 +2232,7 @@ class FitEngine:
 
             # Authored and warm values are explicit public inputs.  Invalid
             # values are a caller error, not a reason to silently run cold.
-            authored = (
-                None
-                if initial is None or not free_indices
-                else _initial_values(
-                    effective_model,
-                    solver_coords,
-                    solver_values,
-                    initial,
-                )
-            )
+            authored = None if not free_indices else authored_seed
             warm_item = warm_starts[cell]
             warm = (
                 None
@@ -2278,22 +2289,7 @@ class FitEngine:
                     raise RuntimeError("fixed fit evaluation is non-finite")
                 residuals = item["values"] - fitted
                 if counted:
-                    expected = np.maximum(fitted, _COUNT_FLOOR)
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        logarithm = np.where(
-                            item["values"] > 0.0,
-                            item["values"]
-                            * np.log(item["values"] / expected),
-                            0.0,
-                        )
-                    deviance = 2.0 * np.maximum(
-                        expected - item["values"] + logarithm,
-                        0.0,
-                    )
-                    quality = np.copysign(
-                        np.sqrt(deviance),
-                        expected - item["values"],
-                    )
+                    quality = _poisson_deviance_residual(fitted, item["values"])
                 elif item["weights"] is None:
                     quality = residuals
                 else:
@@ -2757,7 +2753,6 @@ class FitEngine:
                     options=opts,
                     cancelled=cancelled,
                 )[0],
-                data_revision=data_revision,
                 options=opts,
             )
 
@@ -2815,20 +2810,7 @@ class FitEngine:
         weight_roots: np.ndarray | None = None
         binned_statistics = False
         if sigma is not None:
-            # Known per-point uncertainty weights the residuals by 1/sigma.
-            # A non-positive or non-finite sigma cannot weight anything, and
-            # the boolean-rate endpoints (p in {0,1}) legitimately report a
-            # zero sample spread: those points take the strongest honest
-            # weight -- the smallest positive sigma present.  With no
-            # positive sigma at all the data is spreadless and the fit is
-            # the ordinary unweighted one.
-            usable_sigma = sigma[np.isfinite(sigma) & (sigma > 0.0)]
-            if usable_sigma.size:
-                floor = float(np.min(usable_sigma))
-                bounded = np.where(
-                    np.isfinite(sigma) & (sigma > 0.0), sigma, floor
-                )
-                weight_roots = 1.0 / bounded
+            weight_roots = _sigma_weights(sigma)
         elif (
             # The compression decides where the solver ITERATES; with every
             # parameter fixed nothing iterates and the full data is
@@ -2846,31 +2828,15 @@ class FitEngine:
                 solver_coords, solver_values, weight_roots = compressed
                 binned_statistics = True
 
-        def poisson_deviance(
-            predicted: np.ndarray,
-            observed: np.ndarray,
-        ) -> np.ndarray:
-            expected = np.maximum(predicted, _COUNT_FLOOR)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                logarithm = np.where(
-                    observed > 0.0,
-                    observed * np.log(observed / expected),
-                    0.0,
-                )
-            deviance = 2.0 * np.maximum(
-                expected - observed + logarithm,
-                0.0,
-            )
-            return np.copysign(np.sqrt(deviance), expected - observed)
-
         default_bounds = (
             spec.bounds_initializer(solver_coords, solver_values)
             if spec.bounds_initializer is not None
             else None
         )
         lower, upper = _solver_bounds(spec, default_bounds, bounds)
-        if values.size <= len(free_indices):
-            raise _too_few_points(spec, len(free_indices), int(values.size))
+        points = _observation_count(values, counted_observations)
+        if points <= len(free_indices):
+            raise _too_few_points(spec, len(free_indices), points)
         if not free_indices:
             check()
             fitted = spec.evaluate(coords, lower).reshape(-1)
@@ -2878,7 +2844,7 @@ class FitEngine:
                 raise RuntimeError("fixed fit evaluation is non-finite")
             residuals = values - fitted
             quality = (
-                poisson_deviance(fitted, values)
+                _poisson_deviance_residual(fitted, values)
                 if counted_observations
                 else residuals if weight_roots is None else residuals * weight_roots
             )
@@ -2939,7 +2905,7 @@ class FitEngine:
         def deviance_residual(predicted: np.ndarray) -> np.ndarray:
             """The Poisson deviance of each bin, signed, as a residual."""
 
-            return poisson_deviance(predicted, solver_values)
+            return _poisson_deviance_residual(predicted, solver_values)
 
         def residual(parameters: np.ndarray) -> np.ndarray:
             check()
@@ -3108,7 +3074,6 @@ class FitEngine:
                 options=opts,
                 cancelled=cancelled,
             )[0],
-            data_revision=data_revision,
             options=opts,
         )
 
@@ -3118,7 +3083,6 @@ class FitEngine:
         result: FitResult,
         nested: FitResult | None,
         *,
-        data_revision: int,
         options: FitOptions,
     ) -> FitResult:
         """Weigh a two-population answer against its nested one-population
@@ -3149,8 +3113,10 @@ class FitEngine:
         narrow_for = dict(reduction.shared)
         wide_observed = np.asarray(result.fitted_values) + np.asarray(result.residuals)
         narrow_observed = np.asarray(nested.fitted_values) + np.asarray(nested.residuals)
-        deviance_wide = _poisson_deviance_total(result.fitted_values, wide_observed)
-        deviance_narrow = _poisson_deviance_total(nested.fitted_values, narrow_observed)
+        wide_root = _poisson_deviance_residual(result.fitted_values, wide_observed)
+        narrow_root = _poisson_deviance_residual(nested.fitted_values, narrow_observed)
+        deviance_wide = float(np.dot(wide_root, wide_root))
+        deviance_narrow = float(np.dot(narrow_root, narrow_root))
         shots = float(np.sum(np.clip(wide_observed, 0.0, None)))
         extra = (
             len(spec.parameters) - len(result.fixed_parameter_names)
@@ -3171,6 +3137,12 @@ class FitEngine:
                 values[index] = (
                     nested_values[narrow_for[pin]] if isinstance(pin, str) else float(pin)
                 )
+        pinned = frozenset(reduction.pinned)
+        fixed_names = tuple(
+            name
+            for name in spec.parameter_names
+            if name in result.fixed_parameter_names or name in pinned
+        )
         covariance = np.zeros((count, count), dtype=np.float64)
         errors = np.zeros(count, dtype=np.float64)
         if nested.covariance_valid:
@@ -3184,26 +3156,35 @@ class FitEngine:
                 np.ix_(narrow, narrow)
             ]
             errors = np.sqrt(np.maximum(np.diag(covariance), 0.0))
-        pinned = frozenset(reduction.pinned)
-        return FitResult(
-            spec,
-            values,
-            errors,
-            covariance,
-            np.asarray(nested.fitted_values),
-            np.asarray(nested.residuals),
-            np.asarray(nested.selected_indices),
-            data_revision,
-            True,
-            f"one population: BIC gain {evidence:.1f} is below {threshold:g}",
-            nested.reduced_chi_square,
+        else:
+            # What the public constructor would write for an invalid
+            # covariance: unknown for the fitted, zero for the fixed.
+            covariance.fill(np.nan)
+            errors.fill(np.nan)
+            fixed = [spec.parameter_index(name) for name in fixed_names]
+            covariance[fixed, :] = 0.0
+            covariance[:, fixed] = 0.0
+            errors[fixed] = 0.0
+        for array in (values, errors, covariance):
+            array.setflags(write=False)
+        # Every input is already a validated read-only result array or was
+        # built just above; re-validating through the public constructor
+        # cost each one-population cell of a grid frame its copies again.
+        return _fit_result_from_validated_batch_row(
+            model=spec,
+            parameter_values=values,
+            standard_errors=errors,
+            covariance=covariance,
+            fitted_values=nested.fitted_values,
+            residuals=nested.residuals,
+            selected_indices=nested.selected_indices,
+            source_revision=result.source_revision,
+            success=True,
+            message=f"one population: BIC gain {evidence:.1f} is below {threshold:g}",
+            reduced_chi_square=nested.reduced_chi_square,
             covariance_valid=nested.covariance_valid,
             parameter_units=result.parameter_units,
-            fixed_parameter_names=tuple(
-                name
-                for name in spec.parameter_names
-                if name in result.fixed_parameter_names or name in pinned
-            ),
+            fixed_parameter_names=fixed_names,
             reduced=True,
             evidence=evidence,
         )
@@ -3383,15 +3364,42 @@ def _histogram_bounds(
     return confined
 
 
-def _poisson_deviance_total(fitted: np.ndarray, observed: np.ndarray) -> float:
-    """Twice the Poisson log-likelihood ratio of ``observed`` counts against
-    the ``fitted`` expectations, summed over the bins."""
+def _poisson_deviance_residual(fitted: np.ndarray, observed: np.ndarray) -> np.ndarray:
+    """Each bin's Poisson deviance 2*(mu - n + n*ln(n/mu)) as a signed root.
+
+    Its sum of squares is twice the log-likelihood ratio of ``observed``
+    counts against the ``fitted`` expectations, so an ordinary least-squares
+    solver minimises the Poisson likelihood unchanged, and the evidence of
+    two populations over one is the difference of two such sums.
+    """
 
     expected = np.maximum(np.asarray(fitted, dtype=np.float64), _COUNT_FLOOR)
     counts = np.asarray(observed, dtype=np.float64)
     with np.errstate(divide="ignore", invalid="ignore"):
         logarithm = np.where(counts > 0.0, counts * np.log(counts / expected), 0.0)
-    return float(np.sum(2.0 * np.maximum(expected - counts + logarithm, 0.0)))
+    deviance = 2.0 * np.maximum(expected - counts + logarithm, 0.0)
+    return np.copysign(np.sqrt(deviance), expected - counts)
+
+
+def _sigma_weights(sigma: np.ndarray) -> np.ndarray | None:
+    """Per-point weights 1/sigma for a fit that knows its uncertainties.
+
+    A zero sigma is a MEASURED zero spread -- a boolean rate at p in {0,1}
+    -- and takes the strongest honest weight, the smallest positive sigma
+    present.  A non-finite sigma is a spread nobody measured: a one-sample
+    bucket reports NaN, never zero, because zero would claim certainty, so
+    it claims no more than the least certain point present, the largest
+    usable sigma.  With no positive finite sigma at all the data is
+    spreadless and the fit is the ordinary unweighted one.
+    """
+
+    measured = np.isfinite(sigma)
+    usable = sigma[measured & (sigma > 0.0)]
+    if not usable.size:
+        return None
+    return 1.0 / np.where(
+        measured, np.maximum(sigma, np.min(usable)), np.max(usable)
+    )
 
 
 def _fixed_parameter_partition(
@@ -3411,6 +3419,17 @@ def _fixed_parameter_partition(
             if name not in fixed_names
         ),
     )
+
+
+def _observation_count(values: np.ndarray, counted: bool) -> int:
+    """How many observations a fit has to set its free parameters by.
+
+    A histogram's observations are its SHOTS as well as its bins: sixty
+    bins holding one shot pin down nothing, and bimodal fits over such
+    cells spent 75-90 ms a frame across a facet converging to nothing.
+    """
+
+    return min(values.size, int(np.sum(values))) if counted else values.size
 
 
 def _too_few_points(model: FitModelSpec, free_count: int, points: int) -> ValueError:
@@ -3471,6 +3490,36 @@ def _initial_values(
     return seed
 
 
+def _authored_seed(
+    model: FitModelSpec,
+    initial: Mapping[str, float] | Sequence[float],
+) -> np.ndarray:
+    """An operator's guess as the compiled solver takes it: NaN where the
+    guess names nothing.
+
+    The compiled preparation meets a partial row with every cold seed of
+    the cell, so ``x_0=guess(..)`` keeps the model's sign, phase and dip
+    lanes; filling the rest from the Python initializer solved one lane
+    only, and ran that second seeder per cell per frame.
+    """
+
+    if isinstance(initial, Mapping):
+        unknown = set(initial) - set(model.parameter_names)
+        if unknown:
+            raise ValueError(f"initial values name unknown parameters: {sorted(unknown)}")
+        named = tuple(float(value) for value in initial.values())
+        seed = np.asarray(
+            [float(initial.get(name, np.nan)) for name in model.parameter_names],
+            dtype=np.float64,
+        )
+    else:
+        seed = np.asarray(initial, dtype=np.float64).reshape(-1)
+        named = tuple(seed)
+    if seed.shape != (len(model.parameters),) or not all(map(math.isfinite, named)):
+        raise ValueError("fit initializer returned invalid parameter values")
+    return seed
+
+
 def _initial_candidates(
     model: FitModelSpec,
     coordinates: ArrayTuple,
@@ -3489,7 +3538,14 @@ def _initial_candidates(
                 seen.add(key)
                 unique.append(seed)
         return tuple(unique)
-    if initial is not None or model.candidate_initializer is None:
+    # A partial guess meets every candidate, as the compiled lanes merge it
+    # into every cold seed (``_authored_seed``); only a full guess is one seed.
+    guess = (
+        initial
+        if isinstance(initial, Mapping) and len(initial) != len(model.parameters)
+        else None
+    )
+    if model.candidate_initializer is None or (initial is not None and guess is None):
         return (_initial_values(model, coordinates, values, initial),)
     candidates = tuple(model.candidate_initializer(coordinates, values))
     if not candidates:
@@ -3498,6 +3554,13 @@ def _initial_candidates(
     seen: set[bytes] = set()
     for candidate in candidates:
         seed = _initial_values(model, coordinates, values, candidate)
+        if guess is not None:
+            seed = _initial_values(
+                model,
+                coordinates,
+                values,
+                {**dict(zip(model.parameter_names, seed)), **guess},
+            )
         key = seed.tobytes()
         if key not in seen:
             seen.add(key)
@@ -3774,7 +3837,7 @@ def _saturation_jacobian(x, asymptote, numerator, shift):
     return _compiled_fit._value_jacobian_saturation(coordinates, values, True)[1]
 
 
-def _saturation_preparation(coordinates, observations):
+def _saturation_candidates(coordinates, observations):
     coords = np.array(coordinates, dtype=np.float64, order="C")
     coords.setflags(write=False)
     values = np.array(observations, dtype=np.float64, order="C")
@@ -3788,15 +3851,7 @@ def _saturation_preparation(coordinates, observations):
     )
     if count == 0:
         raise ValueError("saturation fit requires distinct finite coordinates")
-    return tuple(seeds[:count]), lower
-
-
-def _saturation_candidates(coordinates, observations):
-    return _saturation_preparation(coordinates, observations)[0]
-
-
-def _saturation_bounds(coordinates, observations):
-    return {"shift": (float(_saturation_preparation(coordinates, observations)[1][2]), None)}
+    return tuple(seeds[:count])
 
 
 def _init_saturation(coordinates, observations):
@@ -3932,23 +3987,6 @@ def _lorentzian_candidates(
         (float(x[np.argmax(y)]), width, y_range, low_y),
         (float(x[np.argmin(y)]), width, -y_range, high_y),
     )
-
-
-def _lorentzian_bounds(
-    coords: ArrayTuple,
-    y: np.ndarray,
-) -> Mapping[str, tuple[float | None, float | None]]:
-    x_low, x_high = _data_interval(coords[0])
-    y_low, y_high = _data_interval(y)
-    x_span = _span(coords[0])
-    y_range = _value_range(y)
-    width = x_span / 4.0
-    return {
-        "center": (x_low, x_high),
-        "fwhm": (width / 10.0, width * 10.0),
-        "amplitude": (-10.0 * y_range, 10.0 * y_range),
-        "offset": (y_low - 10.0 * y_range, y_high + 10.0 * y_range),
-    }
 
 
 def _init_gaussian(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -4358,24 +4396,6 @@ def _doublet_candidates(
     )
 
 
-def _doublet_bounds(
-    coords: ArrayTuple,
-    y: np.ndarray,
-) -> Mapping[str, tuple[float | None, float | None]]:
-    x_low, x_high = _data_interval(coords[0])
-    y_low, y_high = _data_interval(y)
-    x_span = _span(coords[0])
-    y_range = _value_range(y)
-    width = float(_doublet_candidates(coords, y)[0][1])
-    return {
-        "center": (x_low, x_high),
-        "common_fwhm": (width / 10.0, width * 10.0),
-        "component_amplitude": (-10.0 * y_range, 10.0 * y_range),
-        "offset": (y_low - 10.0 * y_range, y_high + 10.0 * y_range),
-        "center_splitting": (0.0, 2.0 * x_span),
-    }
-
-
 def _init_damped_sine(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     x = coords[0]
     order = np.argsort(x)
@@ -4408,20 +4428,6 @@ def _damped_sine_candidates(
         )
         for shift in (-np.pi / 2.0, 0.0, np.pi / 2.0)
     )
-
-
-def _damped_sine_bounds(
-    coords: ArrayTuple,
-    y: np.ndarray,
-) -> Mapping[str, tuple[float | None, float | None]]:
-    amplitude, _offset, frequency, decay_time, _phase = _init_damped_sine(coords, y)
-    y_low, y_high = _data_interval(y)
-    return {
-        "amplitude": (amplitude / 5.0, amplitude * 5.0),
-        "offset": (y_low, y_high),
-        "baseband_frequency": (frequency / 5.0, frequency * 5.0),
-        "decay_time": (decay_time / 5.0, decay_time * 5.0),
-    }
 
 
 def _init_exponential(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -4540,26 +4546,6 @@ def _radial_candidates(
     )
 
 
-def _radial_bounds(
-    coords: ArrayTuple,
-    values: np.ndarray,
-) -> Mapping[str, tuple[float | None, float | None]]:
-    x_low, x_high = _data_interval(coords[0])
-    y_low, y_high = _data_interval(coords[1])
-    value_low, value_high = _data_interval(values)
-    value_range = _value_range(values)
-    radii = [float(seed[2]) for seed in _radial_candidates(coords, values)]
-    radius_low = max(min(radii) / 10.0, np.finfo(np.float64).eps)
-    radius_high = max(radii) * 10.0
-    return {
-        "amplitude": (-4.0 * value_range, 4.0 * value_range),
-        "offset": (value_low - value_range, value_high + value_range),
-        "one_over_e_radius": (radius_low, radius_high),
-        "center_x": (x_low, x_high),
-        "center_y": (y_low, y_high),
-    }
-
-
 def _anisotropic_seed(
     coords: ArrayTuple,
     values: np.ndarray,
@@ -4607,30 +4593,6 @@ def _init_anisotropic(coords: ArrayTuple, values: np.ndarray) -> Sequence[float]
     return _anisotropic_seed(coords, values, 1.0)
 
 
-def _anisotropic_bounds(
-    coords: ArrayTuple,
-    values: np.ndarray,
-) -> Mapping[str, tuple[float | None, float | None]]:
-    x_low, x_high = _data_interval(coords[0])
-    y_low, y_high = _data_interval(coords[1])
-    value_low, value_high = _data_interval(values)
-    value_range = _value_range(values)
-    seeds = _anisotropic_candidates(coords, values)
-    # The box has to hold every candidate offered beside it, so the floor
-    # comes from the narrowest and the ceiling from the widest.
-    radii_x = [float(seed[2]) for seed in seeds]
-    radii_y = [float(seed[3]) for seed in seeds]
-    epsilon = np.finfo(np.float64).eps
-    return {
-        "amplitude": (-4.0 * value_range, 4.0 * value_range),
-        "offset": (value_low - value_range, value_high + value_range),
-        "radius_x": (max(min(radii_x) / 10.0, epsilon), max(radii_x) * 10.0),
-        "radius_y": (max(min(radii_y) / 10.0, epsilon), max(radii_y) * 10.0),
-        "center_x": (x_low, x_high),
-        "center_y": (y_low, y_high),
-    }
-
-
 @lru_cache(maxsize=1)
 def builtin_fit_models() -> tuple[FitModelSpec, ...]:
     """The catalogue, built once.
@@ -4641,7 +4603,59 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
     asks about a fit model asks for it.
     """
 
-    return _builtin_fit_models()
+    # The SciPy lane -- a caller-replaced built-in, and the oracle the
+    # compiled batch is held to -- reads its data-derived box from
+    # ``bounds_initializer``; every built-in answers it from its compiled
+    # preparation, the one owner of that box.  A histogram's box is its
+    # histogram (``_histogram_bounds``).
+    return tuple(
+        model
+        if _confines_to_histogram(model)
+        else replace(
+            model,
+            # A partial of module-level parts, so a spec still pickles
+            # across the render-process pipe.
+            bounds_initializer=partial(
+                _compiled_bounds, model.compiled_descriptor, model.parameter_names
+            ),
+        )
+        for model in _builtin_fit_models()
+    )
+
+
+def _compiled_bounds(
+    descriptor: _compiled_fit.CompiledFitDescriptor,
+    names: tuple[str, ...],
+    coordinates: ArrayTuple,
+    observations: np.ndarray,
+) -> Mapping[str, tuple[float | None, float | None]]:
+    """A built-in's data-derived bounds, as its compiled preparation sets them."""
+
+    # The arrays take the callback's one ABI, the types the compiled batch
+    # hands it, so this call never compiles a second layout.
+    coords = np.array(
+        [np.asarray(axis, dtype=np.float64).reshape(-1) for axis in coordinates],
+        dtype=np.float64,
+        order="C",
+    )
+    coords.setflags(write=False)
+    values = np.array(observations, dtype=np.float64, order="C").reshape(-1)
+    lower = np.full(len(names), -np.inf)
+    upper = np.full(len(names), np.inf)
+    # Zero seed rows: the bounds only, never discarded cold seeds.
+    descriptor.prepare(
+        coords, values, np.broadcast_to(np.asarray(True), values.shape),
+        np.empty((0, len(names)), dtype=np.float64), lower, upper,
+        np.array(descriptor.context_builder(tuple(coords)), copy=True),
+    )
+    return {
+        name: (
+            None if math.isinf(low) else float(low),
+            None if math.isinf(high) else float(high),
+        )
+        for name, low, high in zip(names, lower, upper, strict=True)
+        if math.isfinite(low) or math.isfinite(high)
+    }
 
 
 def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
@@ -4672,7 +4686,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_lorentzian_jacobian,
             candidate_initializer=_lorentzian_candidates,
-            bounds_initializer=_lorentzian_bounds,
             default_for=(FitTarget.SERIES,),
             compiled_descriptor=_compiled_fit.lorentzian_descriptor(),
         ),
@@ -4929,7 +4942,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_symmetric_lorentzian_doublet_jacobian,
             candidate_initializer=_doublet_candidates,
-            bounds_initializer=_doublet_bounds,
             compiled_descriptor=(
                 _compiled_fit.symmetric_lorentzian_doublet_descriptor()
             ),
@@ -4965,8 +4977,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_damped_sine_jacobian,
             candidate_initializer=_damped_sine_candidates,
-            bounds_initializer=_damped_sine_bounds,
-            capabilities=frozenset({_DOMAIN_ANCHORED}),
             compiled_descriptor=_compiled_fit.damped_sine_descriptor(),
         ),
         FitModelSpec(
@@ -4989,7 +4999,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             formula=r"$f(t)=A e^{-(t-t_0)/\tau}+B$",
             jacobian=_exponential_decay_jacobian,
             candidate_initializer=_exponential_candidates,
-            capabilities=frozenset({_DOMAIN_ANCHORED}),
             compiled_descriptor=_compiled_fit.exponential_decay_descriptor(),
         ),
         FitModelSpec(
@@ -5008,7 +5017,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             formula=r"$f(x)=(A x+B)/(x+C)$",
             jacobian=_saturation_jacobian,
             candidate_initializer=_saturation_candidates,
-            bounds_initializer=_saturation_bounds,
             compiled_descriptor=_compiled_fit.saturation_descriptor(),
         ),
         FitModelSpec(
@@ -5074,7 +5082,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_anisotropic_gaussian_center_jacobian,
             candidate_initializer=_anisotropic_candidates,
-            bounds_initializer=_anisotropic_bounds,
             presentation=FitPresentationSpec(
                 ellipse_glyph=FitEllipseGlyphSpec(
                     ("center_x", "center_y"),
@@ -5117,7 +5124,6 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             formula=r"$f(x,y)=A e^{-((x-x_0)^2+(y-y_0)^2)/R^2}+B$",
             jacobian=_radial_gaussian_center_jacobian,
             candidate_initializer=_radial_candidates,
-            bounds_initializer=_radial_bounds,
             presentation=FitPresentationSpec(
                 ellipse_glyph=FitEllipseGlyphSpec(
                     ("center_x", "center_y"),

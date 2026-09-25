@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from dataclasses import replace
 from numbers import Integral
 from threading import Event
 from typing import TYPE_CHECKING, Callable
@@ -20,7 +21,6 @@ from .data_contract import (
 from ._fit_projection import FitProjection
 from ._session_state import (
     _LiveFrameFinalization,
-    _LiveFrameSnapshot,
     _PreparedLiveFrame,
     _SolvedLiveFit,
 )
@@ -126,20 +126,21 @@ class LiveSessionMixin:
                     )
                 cancellation = Event()
                 self._live_prepare_cancel = cancellation
-                snapshot = _LiveFrameSnapshot(
+                prepared = _PreparedLiveFrame(
+                    session_identity=self._session_identity,
+                    base_data_generation=self.data_generation,
+                    base_data_revision=self.data_revision,
+                    image_overlay=image_overlay,
+                    image_overlay_authority=self._image_overlay,
                     projection=self._projection._fork_frozen(
                         data=data,
                         revision=selected_revision,
                         context=self._projection_context(),
                     ),
-                    base_data_generation=self.data_generation,
-                    base_data_revision=self.data_revision,
-                    image_overlay=image_overlay,
-                    image_overlay_authority=self._image_overlay,
                 )
             future = self._analysis_executor.submit(
                 self._prepare_live_frame_worker,
-                snapshot,
+                prepared,
                 cancellation,
                 cancelled,
             )
@@ -156,7 +157,7 @@ class LiveSessionMixin:
 
     def _prepare_live_frame_worker(
         self,
-        snapshot: _LiveFrameSnapshot,
+        prepared: _PreparedLiveFrame,
         cancellation: Event,
         external_cancelled: Callable[[], bool] | None,
     ) -> _PreparedLiveFrame:
@@ -167,17 +168,12 @@ class LiveSessionMixin:
 
         if should_cancel():
             raise FitCancelled("live frame preparation was cancelled")
-        projection = snapshot.projection
-        projection._build_view_and_payload()
+        prepared.projection._build_view_and_payload()
         if should_cancel():
             raise FitCancelled("live frame preparation was cancelled")
-        return _PreparedLiveFrame(
-            session_identity=self._session_identity,
-            base_data_generation=snapshot.base_data_generation,
-            base_data_revision=snapshot.base_data_revision,
-            image_overlay=snapshot.image_overlay,
-            image_overlay_authority=snapshot.image_overlay_authority,
-            projection=projection,
+        return replace(
+            prepared,
+            classifier=self._classifier_automatic_batch(prepared.projection, should_cancel),
         )
 
     def commit_live_frame(
@@ -263,6 +259,7 @@ class LiveSessionMixin:
                 prepared.projection,
                 image_overlay=prepared.image_overlay,
                 solved=solved,
+                classifier=prepared.classifier,
             )
         return _LiveFrameFinalization(
             self._session_identity,

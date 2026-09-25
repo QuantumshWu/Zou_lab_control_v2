@@ -13,7 +13,7 @@ from zlc_data import (
     snapshot_from_manifest,
     snapshot_manifest,
 )
-from zlc_data.figure_archive import write_figure_archive
+from zlc_data.figure_archive import _snapshot_members, write_figure_archive
 from zlc_durable import atomic_write_file, durable_makedirs
 
 from .config import DEFAULTS
@@ -298,14 +298,12 @@ def _overlay_payload(plot_input: object, prefix: str) -> tuple[dict[str, np.ndar
         document["static_statuses"] = key
     if overlay.status is not None:
         stored: dict[str, np.ndarray] = {}
-        manifest = snapshot_manifest(
-            overlay.status, stored, values_key=f"{prefix}.status",
-            validity_key=f"{prefix}.status.validity",
+        # Named by the archive's one member-naming owner, so every plane the
+        # status carries -- a sigma included -- stays inside its namespace.
+        document["status"] = snapshot_manifest(
+            overlay.status, stored,
+            **_snapshot_members(f"{prefix}.status", overlay.status),
         )
-        ref = dict(manifest["ref"])
-        ref.pop("schema_fingerprint", None)
-        manifest["ref"] = ref
-        document["status"] = manifest
         arrays.update(stored)
     return arrays, document
 
@@ -323,7 +321,7 @@ def _restore_overlay(snapshot: OwnedSnapshot, arrays: Mapping[str, np.ndarray], 
         int(value["revision"]), np.asarray(arrays[str(value["coordinates"])], dtype="<f8"),
         strings("point_ids"), None if labels is None else tuple(None if item == "" else item for item in labels),
         None if "static_statuses" not in value else tuple(PointStatus(item) for item in strings("static_statuses")),
-        None if "status" not in value else snapshot_from_manifest(value["status"], arrays, embedded=True),
+        None if "status" not in value else snapshot_from_manifest(value["status"], arrays),
     ))
 
 
@@ -528,6 +526,60 @@ def _prepare_figure_artifact(
     return snapshot, image_path, write
 
 
+def _export(
+    write: Callable[[Mapping[str, object], object], tuple[Path, Path]],
+    image_path: Path,
+    *,
+    plot_input: object,
+    spec: object,
+    parameters: Mapping[str, object],
+    size: str,
+    viewport: Viewport | None,
+    classifier_thresholds: object,
+    facet_focus: int | None,
+    fit: Mapping[str, object] | None,
+    selectors: object,
+    interaction: Mapping[str, object] | None,
+    presentation: Mapping[str, object] | None,
+) -> tuple[Path, Path]:
+    """Archive and image from ONE fresh export session built from the recipe.
+
+    Both files come from the same session, so the image is what reopening
+    the archive draws.  A panel's own session is the wrong painter: it keeps
+    Normal-mode limits and a histogram's domain from its history, which a
+    session reopened from the archive does not have, and its picture could
+    differ from the archive's by the whole Normal deadband.
+    """
+
+    from .session import PlotSession
+
+    session = PlotSession(
+        plot_input,
+        spec,
+        parameters=parameters,
+        size=size,
+        device_pixel_ratio=DEFAULTS.layout.export_scale,
+        _for_export=True,
+        initial_configuration={
+            "viewport": viewport,
+            "classifier_thresholds": classifier_thresholds,
+            "facet_focus": facet_focus,
+            "selectors": selectors,
+            "fit": {} if fit is None else fit,
+            "fit_live": False,
+            "interaction": {} if interaction is None else interaction,
+            "presentation": {} if presentation is None else presentation,
+        },
+    )
+    try:
+        return write(
+            session._figure_recipe(),
+            lambda: session.save(image_path, restore_display=False),
+        )
+    finally:
+        session.close()
+
+
 def _submit_figure_artifact(
     host: object,
     base_path: str | Path,
@@ -599,20 +651,20 @@ def _submit_figure_artifact(
             or session.image_overlay_revision != expected_overlay_revision
         ):
             raise RuntimeError("settled save host differs from the frozen data")
-        return write(
-            encode_plot_recipe(
-                description.spec,
-                parameters=description.display_state.values,
-                size=description.size,
-                viewport=description.viewport,
-                classifier_thresholds=description.classifier_thresholds,
-                facet_focus=description.facet_focus,
-                fit=description.fit,
-                selectors=description.selectors,
-                interaction=description.display_state.interaction,
-                presentation=description.presentation,
-            ),
-            lambda: session.save(_image_path),
+        return _export(
+            write,
+            _image_path,
+            plot_input=plot_input,
+            spec=description.spec,
+            parameters=description.display_state.values,
+            size=description.size,
+            viewport=description.viewport,
+            classifier_thresholds=description.classifier_thresholds,
+            facet_focus=description.facet_focus,
+            fit=dict(description.fit),
+            selectors=description.selectors,
+            interaction=description.display_state.interaction,
+            presentation=description.presentation,
         )
 
     return dispatch(save_settled)
@@ -658,37 +710,24 @@ def save_figure_artifact(
         operation = pending.result() if hasattr(pending, "result") else pending
         return operation.value
 
-    snapshot, image_path, write = _prepare_figure_artifact(
+    _snapshot, image_path, write = _prepare_figure_artifact(
         base_path, plot_input=plot_input, lineage=lineage, source=source
     )
-
-    from .session import PlotSession
-
-    session = PlotSession(
-        plot_input,
-        spec,
+    return _export(
+        write,
+        image_path,
+        plot_input=plot_input,
+        spec=spec,
         parameters=parameters,
         size=size,
-        device_pixel_ratio=DEFAULTS.layout.export_scale,
-        _for_export=True,
-        initial_configuration={
-            "viewport": viewport,
-            "classifier_thresholds": classifier_thresholds,
-            "facet_focus": facet_focus,
-            "selectors": selectors,
-            "fit": {} if fit is None else fit,
-            "fit_live": False,
-            "interaction": {} if interaction is None else interaction,
-            "presentation": {} if presentation is None else presentation,
-        },
+        viewport=viewport,
+        classifier_thresholds=classifier_thresholds,
+        facet_focus=facet_focus,
+        fit=fit,
+        selectors=selectors,
+        interaction=interaction,
+        presentation=presentation,
     )
-    try:
-        return write(
-            session._figure_recipe(),
-            lambda: session.save(image_path, restore_display=False),
-        )
-    finally:
-        session.close()
 
 
 __all__ = [

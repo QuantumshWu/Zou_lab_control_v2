@@ -17,7 +17,9 @@ The callback ABI is deliberately small and write-oriented:
     The common preparation
     owner subsequently applies explicit requested bounds/fixed parameters,
     inserts a warm seed first, chooses authored seeds instead of cold seeds when
-    requested, clips, and exactly de-duplicates candidates.
+    requested, clips, and exactly de-duplicates candidates.  An authored row
+    with NaN entries is a partial guess: it names only its finite parameters,
+    and every cold seed carries those values instead of being replaced.
 
 ``objective(coords, observations, valid, full_parameters, free_indices,
 weights, use_weights, poisson, loss_code, gradient, information, jacobian_row,
@@ -1021,8 +1023,13 @@ def _prepare_one(
     for index in range(parameter_count):
         output_lower[index] = base_lower[index]
         output_upper[index] = base_upper[index]
+    needs_cold = not use_authored
+    if use_authored:
+        for seed_index in range(authored_seeds.shape[0]):
+            if not _seed_finite(authored_seeds[seed_index]):
+                needs_cold = True
     cold = np.full(
-        (0 if use_authored else max_cold_candidates, parameter_count),
+        (max_cold_candidates if needs_cold else 0, parameter_count),
         np.nan,
         dtype=np.float64,
     )
@@ -1076,14 +1083,33 @@ def _prepare_one(
 
     if use_authored:
         for seed_index in range(authored_seeds.shape[0]):
-            output_count = _append_seed(
-                authored_seeds[seed_index],
-                output_seeds,
-                output_count,
-                output_lower,
-                output_upper,
-                free_mask,
-            )
+            authored = authored_seeds[seed_index]
+            if _seed_finite(authored):
+                output_count = _append_seed(
+                    authored,
+                    output_seeds,
+                    output_count,
+                    output_lower,
+                    output_upper,
+                    free_mask,
+                )
+                continue
+            # A partial guess meets every cold lane -- the sign, phase and
+            # dip candidates a model offers for robustness -- rather than
+            # replacing that competition with one seed.
+            for cold_index in range(cold_count):
+                merged = cold[cold_index].copy()
+                for parameter in range(parameter_count):
+                    if math.isfinite(authored[parameter]):
+                        merged[parameter] = authored[parameter]
+                output_count = _append_seed(
+                    merged,
+                    output_seeds,
+                    output_count,
+                    output_lower,
+                    output_upper,
+                    free_mask,
+                )
     else:
         for seed_index in range(cold_count):
             output_count = _append_seed(
@@ -2455,7 +2481,9 @@ def _solve_compiled(
     if np.any(authored_flags) and authored_seeds is None:
         raise ValueError("use_authored requires authored_seeds")
     for cell in np.flatnonzero(authored_flags):
-        if not np.all(np.isfinite(authored[cell])):
+        # NaN leaves a parameter to the cold seeds (a partial guess); an
+        # infinite value is no guess at all.
+        if np.any(np.isinf(authored[cell])):
             raise ValueError("authored fit initializer returned invalid parameter values")
 
     warm_cube = _seed_cube(

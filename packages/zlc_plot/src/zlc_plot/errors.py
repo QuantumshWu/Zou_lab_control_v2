@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 
-class ZLCPlotError(Exception):
-    """Base class for presentation-layer errors."""
-
-
-class RevisionError(ZLCPlotError, ValueError):
+class RevisionError(ValueError):
     """A live update violates the monotonic revision contract."""
 
 
-__all__ = ["RevisionError", "ZLCPlotError"]
+__all__ = ["RevisionError"]

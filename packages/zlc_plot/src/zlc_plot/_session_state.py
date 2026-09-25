@@ -72,8 +72,10 @@ class _StartedFitRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class _LiveFrameSnapshot:
-    projection: FitProjection
+class _PreparedLiveFrame:
+    """One incoming frame; the analysis worker builds its projection in place."""
+
+    session_identity: object
     #: The data this frame was prepared ON TOP OF: its generation and its
     #: revision, because a new run restarts revisions at the same numbers.
     #: Carrying the revision alone let a frame prepared over run A@0 commit
@@ -82,16 +84,13 @@ class _LiveFrameSnapshot:
     base_data_revision: int
     image_overlay: ImagePointOverlay | None
     image_overlay_authority: ImagePointOverlay | None
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedLiveFrame:
-    session_identity: object
-    base_data_generation: str | None
-    base_data_revision: int
-    image_overlay: ImagePointOverlay | None
-    image_overlay_authority: ImagePointOverlay | None
     projection: FitProjection
+    #: The threshold classifier's automatic batch solved against this
+    #: frame, with the authored components it assumed; None when the
+    #: classifier is off or every distribution is authored.
+    classifier: (
+        "tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None"
+    ) = None
 
 @dataclass(frozen=True, slots=True)
 class _SolvedLiveFit:
@@ -184,7 +183,7 @@ class _FitPresentation:
 
 __all__ = [
     "_AcceptedFit", "_FitPresentation", "_FitResolution", "_LiveFitRequest",
-    "_LiveFrameFinalization", "_LiveFrameSnapshot", "_PointerUpdate",
+    "_LiveFrameFinalization", "_PointerUpdate",
     "_PreparedLiveFrame", "_ProjectionPresentation",
     "_SolvedLiveFit", "_StartedFitRequest", "FitEvent", "SelectionChange",
 ]

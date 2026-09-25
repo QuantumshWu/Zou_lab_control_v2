@@ -37,6 +37,7 @@ from .data_view import (
     ImageData,
     QuantityArray,
     RollingHistory,
+    _stride_zero_all_true,
     histogram_edges,
 )
 from .fit import (
@@ -292,16 +293,6 @@ def _trailing_trace(
     valid = (running_n > 0) & np.isfinite(mean)
     mean = np.where(valid, mean, np.nan)
     return mean, sem, valid
-
-
-def _broadcast_all_true(mask: np.ndarray) -> bool:
-    """True for a stride-0 broadcast plane that is constant True."""
-
-    if mask.size == 0:
-        return False
-    if any(stride != 0 for stride in mask.strides):
-        return False
-    return bool(mask.flat[0])
 
 
 _FIT_SELECTOR_KINDS = frozenset((
@@ -924,7 +915,7 @@ class FitProjection:
         if self._view is None:
             raise RuntimeError("dataset payload projection requires a DataView")
         if not isinstance(self._spec, HistogramPlot):
-            self._view._frequency_carry = None
+            self._view.release_window_frequency()
         handler_for(self._spec).build_payload(self, self._view, self.display_state)
 
     def _rolling_payload(
@@ -1056,7 +1047,7 @@ class FitProjection:
         binned_valid: np.ndarray | None = None,
         frequency: tuple[int, np.ndarray] | None = None,
     ) -> np.ndarray:
-        """Return stable display-unit edges for one histogram projection.
+        """Return stable canonical-unit edges for one histogram projection.
 
         THE DOMAIN COVERS WHAT IS BINNED, so the caller says what that is.
         It is not always this revision's samples: a window is the last N
@@ -1240,13 +1231,10 @@ class FitProjection:
             previous = selected
             self._histogram_projection = previous
         assert previous is not None
-        return np.asarray(
-            canonical_unit.convert_value_to(
-                previous.edges,
-                display_unit,
-            ),
-            dtype=float,
-        )
+        # Canonical, as the view counts: a round trip through a prefixed
+        # display unit moved integer-aligned edges off their half-integers
+        # and turned the integer frequency table away every frame.
+        return np.asarray(previous.edges, dtype=float)
 
     def _focused_payload(self, facet_index: int | None = None) -> Any:
         if not isinstance(self._spec, FacetGridPlot):
@@ -1971,7 +1959,7 @@ class FitProjection:
         observations = np.asarray(payload.z.canonical)
         valid: np.ndarray | None = None
         source = np.asarray(payload.valid, dtype=bool)
-        if not _broadcast_all_true(source):
+        if not _stride_zero_all_true(source):
             valid = source
         if observations.dtype.kind in "fc":
             finite = np.isfinite(observations)
@@ -2069,65 +2057,6 @@ class FitProjection:
             dtype=float,
         )
 
-    def _fit_overlay_curve_domain(
-        self,
-        result: FitResult,
-        selection: FitSelection,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return the painted one-dimensional domain in solver/display units.
-
-        The curve is drawn where it was solved.  Outside that window it is not
-        a claim about anything, and for a decay -- whose origin is the window
-        start -- the extrapolation runs away from the data within a few
-        samples.
-        """
-
-        payload = self._focused_payload(selection.facet_index)
-        if self._is_histogram_plot() and hasattr(payload, "centers"):
-            centers = payload.centers
-            canonical = self._fit_coordinate_values_to_solver(
-                np.asarray(centers.canonical, dtype=float).reshape(-1),
-                centers,
-                self._fit_relation_quantity(result.model.coordinate_relations[0]).canonical_unit,
-            )
-            return self._clip_to_fitted_domain(
-                canonical,
-                np.asarray(centers.display, dtype=float).reshape(-1),
-                selection,
-            )
-
-        series = tuple(getattr(payload, "series", ()))
-        if not series:
-            raise RuntimeError("one-dimensional fit overlay requires a painted series")
-        x = series[0].x
-        canonical = self._fit_coordinate_values_to_solver(
-            np.asarray(x.canonical, dtype=float).reshape(-1),
-            x,
-            self._fit_relation_quantity(result.model.coordinate_relations[0]).canonical_unit,
-        )
-        return self._clip_to_fitted_domain(
-            canonical,
-            np.asarray(x.display, dtype=float).reshape(-1),
-            selection,
-        )
-
-    @staticmethod
-    def _clip_to_fitted_domain(
-        canonical: np.ndarray,
-        display: np.ndarray,
-        selection: FitSelection,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        fitted = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
-        fitted = fitted[np.isfinite(fitted)]
-        if fitted.size == 0:
-            return canonical, display
-        inside = (canonical >= float(np.min(fitted))) & (
-            canonical <= float(np.max(fitted))
-        )
-        if not bool(np.any(inside)):
-            return canonical, display
-        return canonical[inside], display[inside]
-
     def _fit_solver_coordinate_to_display(
         self,
         values: np.ndarray,
@@ -2155,10 +2084,26 @@ class FitProjection:
         if not result.success or result.model.independent_arity != 1:
             return ()
         presentation = result.model.presentation
-        canonical, display_x = self._fit_overlay_curve_domain(result, selection)
+        # The curve is drawn where it was solved, and drawn as the function
+        # it is: sampled densely across the fitted window, never only at the
+        # scan points or bin centres, where a narrow peak between samples
+        # was cut off and a fast oscillation aliased.  Outside the window it
+        # claims nothing, and a decay anchored at the window start runs away
+        # from the data within a few samples.
+        source = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
+        finite = source[np.isfinite(source)]
+        if finite.size < 2:
+            return ()
+        sample_count = self._defaults.style.artists.fit_component_sample_count
+        dense = np.linspace(float(np.min(finite)), float(np.max(finite)), sample_count)
+        display_x = self._fit_solver_coordinate_to_display(
+            dense,
+            result.model.coordinate_relations[0],
+            UnitRelation.AXIS_0,
+        )
         if not presentation.components:
             fitted = result.model.evaluate(
-                (canonical,),
+                (dense,),
                 result.parameter_values,
             ).reshape(-1)
             fitted_display = (
@@ -2172,17 +2117,6 @@ class FitProjection:
             role = "total" if self._is_histogram_plot() else "primary"
             return (FitPolyline(display_x, fitted_display, role=role),)
 
-        source = np.asarray(canonical, dtype=float).reshape(-1)
-        finite = source[np.isfinite(source)]
-        if finite.size < 2:
-            return ()
-        sample_count = self._defaults.style.artists.fit_component_sample_count
-        dense = np.linspace(float(np.min(finite)), float(np.max(finite)), sample_count)
-        display_x = self._fit_solver_coordinate_to_display(
-            dense,
-            result.model.coordinate_relations[0],
-            UnitRelation.AXIS_0,
-        )
         component_values: dict[str, np.ndarray] = {}
         for component in presentation.components:
             component_values[component.component_id] = (

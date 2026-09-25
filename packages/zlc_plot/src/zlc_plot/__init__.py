@@ -92,7 +92,6 @@ _EXPORTS = {
     "SelectionSubject": ("zlc_plot.data_view", "SelectionSubject"),
     "SelectorData": ("zlc_plot.session", "SelectorData"),
     "describe_semantics": ("zlc_plot.semantics", "describe_semantics"),
-    "schema_summary": ("zlc_plot.semantics", "schema_summary"),
     "updated_spec": ("zlc_plot.semantics", "updated_spec"),
     "CurvePlot": ("zlc_plot.specs", "CurvePlot"),
     "accepts_classifier_thresholds": (
@@ -130,12 +129,6 @@ def __getattr__(name: str) -> object:
         from .backends import _qt5_plot_widget_class
 
         value = _qt5_plot_widget_class()
-    elif name == "Qt5ParameterPanel":
-        from .qt_controls import _qt5_parameter_panel_class
-
-        value = _qt5_parameter_panel_class()
-    elif name == "edit_plot_display":
-        from .qt_controls import edit_plot_display as value
     else:
         where = _EXPORTS.get(name)
         if where is None:
@@ -196,8 +189,6 @@ __all__ = [
     "PulseTimelineData",
     "PulseTimelinePlot",
     "PulseTimelineSelectionData",
-    "Qt5ParameterPanel",
-    "edit_plot_display",
     "Qt5PlotWidget",
     "RasterPlotHost",
     "RenderProcess",
@@ -222,7 +213,6 @@ __all__ = [
     "pulse_timeline",
     "read_figure_plot",
     "rolling",
-    "schema_summary",
     "save_figure_artifact",
     "show",
     "updated_spec",

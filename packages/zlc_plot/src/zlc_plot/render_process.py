@@ -2,9 +2,10 @@
 
 The main process owns Qt, Runtime and the immutable panel record.  This module
 keeps the plotting host's public asynchronous surface in that process while
-running its unchanged PlotSession, fit and renderer in one dedicated child.
-Two instances are used by the application: one for live Monitor surfaces and
-one for Edit/export work.
+running its unchanged PlotSession, fit and renderer in a child process.  Every
+live Monitor panel gets a child of its own from :class:`RenderProcessPool`,
+never shared with another panel; Edit and export work runs on one
+:class:`RenderProcess`.
 """
 
 from __future__ import annotations
@@ -261,8 +262,62 @@ def _wire_complete_fit_result(result: object) -> dict[str, object]:
     }
 
 
-def _wire_value(value: object) -> object:
-    """Encode only values whose immutable implementation is not pickleable."""
+#: The parts of a description that change only with the panel's spec, data
+#: generation or fit catalogue -- its vocabulary -- in the order both ends
+#: keep them.  Every accepted shot answers with a description, and this is
+#: its whole static weight: the parameter schema, the semantic table with
+#: its per-axis coordinates, the fit catalogue.
+_DESCRIPTION_VOCABULARY = (
+    "spec",
+    "size_choices",
+    "parameter_schema",
+    "semantics",
+    "selection_subject",
+    "fit_models",
+)
+
+
+def _description_vocabulary(value: object) -> tuple[object, ...] | None:
+    """A DisplayDescription's vocabulary, or None for any other value."""
+
+    from .session import DisplayDescription
+
+    if not isinstance(value, DisplayDescription):
+        return None
+    return tuple(getattr(value, name) for name in _DESCRIPTION_VOCABULARY)
+
+
+def _same_vocabulary(
+    held: tuple[object, ...] | None, vocabulary: tuple[object, ...]
+) -> bool:
+    """Whether a description's vocabulary is the one last sent for its host.
+
+    By identity for what the session keeps as one object until it changes --
+    the spec, the parameter schema, the memoised semantic description and
+    each registered fit model -- and by value for the two it rebuilds on
+    every call.  A miss only resends.
+    """
+
+    if held is None:
+        return False
+    spec, sizes, schema, semantics, subject, models = vocabulary
+    return bool(
+        held[0] is spec
+        and held[2] is schema
+        and held[3] is semantics
+        and held[1] == sizes
+        and held[4] == subject
+        and len(held[5]) == len(models)
+        and all(old is new for old, new in zip(held[5], models))
+    )
+
+
+def _wire_value(value: object, *, omit_vocabulary: bool = False) -> object:
+    """Encode only values whose immutable implementation is not pickleable.
+
+    ``omit_vocabulary`` sends a description's vocabulary as None: the child
+    passes it when the parent already holds that vocabulary for the host.
+    """
 
     from .fit import FacetFitBatchResult, FitResult
     from .session import DisplayDescription, SelectionData
@@ -275,47 +330,49 @@ def _wire_value(value: object) -> object:
             "display-description",
             {
                 "kind": value.kind,
-                "spec": value.spec,
                 "size": value.size,
-                "size_choices": tuple(value.size_choices),
-                "parameter_schema": tuple(
-                    {
-                        "name": parameter.name,
-                        "value_type": parameter.value_type,
-                        "effects": int(parameter.effects),
-                        "default": parameter.default,
-                        "allow_none": parameter.allow_none,
-                        "label": parameter.label,
-                        "choices": tuple(parameter.choices),
-                        "minimum": parameter.minimum,
-                        "maximum": parameter.maximum,
-                        "step": parameter.step,
-                        "portable": parameter.portable,
-                    }
-                    for parameter in value.parameter_schema.values()
-                ),
+                "vocabulary": None if omit_vocabulary else {
+                    "spec": value.spec,
+                    "size_choices": tuple(value.size_choices),
+                    "parameter_schema": tuple(
+                        {
+                            "name": parameter.name,
+                            "value_type": parameter.value_type,
+                            "effects": int(parameter.effects),
+                            "default": parameter.default,
+                            "allow_none": parameter.allow_none,
+                            "label": parameter.label,
+                            "choices": tuple(parameter.choices),
+                            "minimum": parameter.minimum,
+                            "maximum": parameter.maximum,
+                            "step": parameter.step,
+                            "portable": parameter.portable,
+                        }
+                        for parameter in value.parameter_schema.values()
+                    ),
+                    "semantics": value.semantics,
+                    "selection_subject": value.selection_subject,
+                    "fit_models": tuple(
+                        {
+                            "model_id": str(model.model_id),
+                            "display_name": str(model.display_name),
+                            "parameters": tuple(
+                                (str(parameter.name), str(parameter.symbol or parameter.name))
+                                for parameter in model.parameters
+                            ),
+                        }
+                        for model in value.fit_models
+                    ),
+                },
                 "display_state": _wire_display_state(value.display_state),
                 "parameter_choices": _plain(value.parameter_choices),
                 "automatic_values": _plain(value.automatic_values),
                 "limits": value.limits,
                 "viewport": value.viewport,
-                "semantics": value.semantics,
-                "selection_subject": value.selection_subject,
                 "selectors": tuple(value.selectors),
                 "classifier_thresholds": _plain(value.classifier_thresholds),
                 "facet_focus": value.facet_focus,
                 "fit": _plain(value.fit),
-                "fit_models": tuple(
-                    {
-                        "model_id": str(model.model_id),
-                        "display_name": str(model.display_name),
-                        "parameters": tuple(
-                            (str(parameter.name), str(parameter.symbol or parameter.name))
-                            for parameter in model.parameters
-                        ),
-                    }
-                    for model in value.fit_models
-                ),
                 "fit_expression": value.fit_expression,
                 "fit_expression_error": value.fit_expression_error,
                 "presentation": _plain(value.presentation),
@@ -442,7 +499,60 @@ def _restore_complete_fit_result(document: Mapping[str, object]) -> object:
     )
 
 
-def _unwire_value(value: object) -> object:
+def _unwire_vocabulary(document: Mapping[str, object]) -> tuple[object, ...]:
+    """Rebuild a description's vocabulary, in ``_DESCRIPTION_VOCABULARY`` order."""
+
+    from .parameters import ParameterSchema, ParameterSpec, RenderEffect
+
+    return (
+        document["spec"],
+        tuple(document["size_choices"]),
+        ParameterSchema(
+            ParameterSpec(
+                name=parameter["name"],
+                value_type=parameter["value_type"],
+                effects=RenderEffect(parameter["effects"]),
+                default=parameter["default"],
+                allow_none=parameter["allow_none"],
+                label=parameter["label"],
+                choices=tuple(parameter["choices"]),
+                minimum=parameter["minimum"],
+                maximum=parameter["maximum"],
+                step=parameter["step"],
+                portable=parameter["portable"],
+            )
+            for parameter in document["parameter_schema"]
+        ),
+        document["semantics"],
+        document["selection_subject"],
+        tuple(
+            SimpleNamespace(
+                model_id=model["model_id"],
+                display_name=model["display_name"],
+                parameters=tuple(
+                    SimpleNamespace(name=name, symbol=symbol)
+                    for name, symbol in model["parameters"]
+                ),
+                parameter_names=tuple(
+                    name for name, _symbol in model["parameters"]
+                ),
+                symbols=tuple(
+                    symbol for _name, symbol in model["parameters"]
+                ),
+            )
+            for model in document["fit_models"]
+        ),
+    )
+
+
+def _unwire_value(value: object, vocabulary: tuple[object, ...] | None = None) -> object:
+    """Decode one wired value.
+
+    A description sent without its vocabulary takes ``vocabulary`` -- the
+    one its host was last sent -- so every unchanged part is the very object
+    the previous description carried.
+    """
+
     if not (
         isinstance(value, tuple)
         and len(value) >= 2
@@ -463,59 +573,27 @@ def _unwire_value(value: object) -> object:
         )
     document = value[2]
     if kind == "display-description":
-        from .parameters import ParameterSchema, ParameterSpec, RenderEffect
-
-        state = _unwire_value(document["display_state"])
-        spec = document["spec"]
+        if vocabulary is None:
+            vocabulary = _unwire_vocabulary(document["vocabulary"])
+        spec, size_choices, parameter_schema, semantics, subject, fit_models = vocabulary
         return SimpleNamespace(
             kind=document["kind"],
             spec=spec,
             size=document["size"],
-            size_choices=tuple(document["size_choices"]),
-            parameter_schema=ParameterSchema(
-                ParameterSpec(
-                    name=parameter["name"],
-                    value_type=parameter["value_type"],
-                    effects=RenderEffect(parameter["effects"]),
-                    default=parameter["default"],
-                    allow_none=parameter["allow_none"],
-                    label=parameter["label"],
-                    choices=tuple(parameter["choices"]),
-                    minimum=parameter["minimum"],
-                    maximum=parameter["maximum"],
-                    step=parameter["step"],
-                    portable=parameter["portable"],
-                )
-                for parameter in document["parameter_schema"]
-            ),
-            display_state=state,
+            size_choices=size_choices,
+            parameter_schema=parameter_schema,
+            display_state=_unwire_value(document["display_state"]),
             parameter_choices=dict(document["parameter_choices"]),
             automatic_values=dict(document["automatic_values"]),
             limits=document["limits"],
             viewport=document["viewport"],
-            semantics=document["semantics"],
-            selection_subject=document["selection_subject"],
+            semantics=semantics,
+            selection_subject=subject,
             selectors=tuple(document["selectors"]),
             classifier_thresholds=tuple(document["classifier_thresholds"]),
             facet_focus=document["facet_focus"],
             fit=dict(document["fit"]),
-            fit_models=tuple(
-                SimpleNamespace(
-                    model_id=model["model_id"],
-                    display_name=model["display_name"],
-                    parameters=tuple(
-                        SimpleNamespace(name=name, symbol=symbol)
-                        for name, symbol in model["parameters"]
-                    ),
-                    parameter_names=tuple(
-                        name for name, _symbol in model["parameters"]
-                    ),
-                    symbols=tuple(
-                        symbol for _name, symbol in model["parameters"]
-                    ),
-                )
-                for model in document["fit_models"]
-            ),
+            fit_models=fit_models,
             fit_expression=str(document["fit_expression"]),
             fit_expression_error=str(document["fit_expression_error"]),
             presentation=dict(document["presentation"]),
@@ -618,6 +696,20 @@ class _SharedMappingCache:
                 return
             del self._entries[name]
         self._retirements.put((_MAPPING_RELEASED, entry[0]))
+
+    def retire_generation(self) -> None:
+        """The child that named every cached segment is gone.
+
+        Only an orderly child exit retires its segments one message at a
+        time; a crash or a silence-termination sends nothing, and each
+        restart names fresh segments -- so without this every crash left one
+        panel's fronts mapped, and committed, for the rest of the session.
+        """
+
+        with self._lock:
+            names = tuple(self._entries)
+        for name in names:
+            self.retire(name)
 
     def retire_all(self) -> None:
         """Told to go: release what nothing is reading, and mark the rest."""
@@ -729,7 +821,7 @@ _REMOTE_METHODS = frozenset(
     {
         "update_data", "update_image_overlay", "update_image_frame",
         "set_parameter", "set_parameters", "configure", "describe_display",
-        "describe_semantics", "replace_spec", "apply_semantic",
+        "describe_semantics", "replace_spec",
         "resolved_color_limits", "set_labels", "set_relim_mode",
         "set_y_limits", "reset_y_limits", "set_color_limits",
         "reset_color_limits", "set_x_limits", "set_view_limits", "set_size",
@@ -772,8 +864,6 @@ class _RemoteRasterPlotHost:
         self._close_requested = False
         self._startup_error: Exception | None = None
         self._service_failure = False
-        self._initial_metadata: tuple[object, object] | None = None
-        self._initial_error: BaseException | None = None
         self._interaction_enabled = True
         self._qt_widget = None
 
@@ -816,11 +906,6 @@ class _RemoteRasterPlotHost:
             return self._service_failure
 
     @property
-    def initial_state(self) -> tuple[tuple[object, object] | None, BaseException | None]:
-        with self._lock:
-            return self._initial_metadata, self._initial_error
-
-    @property
     def closing(self) -> bool:
         with self._lock:
             return self._closing or self._closed or not self._process.alive
@@ -836,19 +921,9 @@ class _RemoteRasterPlotHost:
             widget.set_interaction_enabled(bool(enabled))
 
     def qt_widget(self, *, auto_present: bool | None = None):
-        widget = self._qt_widget
-        if auto_present is not None and not isinstance(auto_present, bool):
-            raise TypeError("auto_present must be boolean or None")
-        if widget is not None and auto_present is not None and widget._auto_present != auto_present:
-            raise ValueError("the host's Qt presentation policy is already fixed")
-        if widget is None:
-            from .backends import Qt5PlotWidget
+        from .backends import host_qt_widget
 
-            widget = Qt5PlotWidget(self, auto_present=True if auto_present is None else auto_present)
-            self._qt_widget = widget
-            if not self._interaction_enabled:
-                widget.set_interaction_enabled(False)
-        return widget
+        return host_qt_widget(self, auto_present)
 
     def wait_for_front(self, timeout: float | None = None) -> RasterFront:
         front = self.front
@@ -930,13 +1005,6 @@ class _RemoteRasterPlotHost:
             except Exception:
                 continue
 
-    def _created(self, description: object) -> None:
-        with self._lock:
-            self._initial_metadata = (
-                description,
-                tuple(getattr(description, "fit_models", ())),
-            )
-
     def _failed(
         self,
         error: BaseException,
@@ -947,7 +1015,6 @@ class _RemoteRasterPlotHost:
             if isinstance(error, Exception):
                 self._startup_error = error
             self._service_failure = bool(service_failure)
-            self._initial_error = error
             self._closing = True
             self._front_ready.set()
 
@@ -1133,9 +1200,9 @@ class RenderProcessPool:
 
     # ------------------------------------------------------------- shaping
     def _idle(self, members: Sequence["RenderProcess"]) -> list["RenderProcess"]:
-        """Children no Host is drawing on.  Asked OUTSIDE this pool's lock."""
+        """Warm children fit to take a panel.  Asked OUTSIDE this pool's lock."""
 
-        return [member for member in members if member.host_count == 0]
+        return [member for member in members if member.fresh]
 
     def _warm_count(self, drawing: int) -> int:
         """How many stand warm while ``drawing`` children have a panel on them.
@@ -1149,10 +1216,17 @@ class RenderProcessPool:
         return self._spares if drawing <= self._settled_spares else self._settled_spares
 
     def _keep_warm(self) -> None:
-        """Start whatever is missing, retire whatever is spare.
+        """Start whatever is missing, retire whatever is spare or spent.
 
         Called after every change of shape -- a Host built, a Host retired,
         a child started.  It decides under the lock and acts outside it.
+
+        SPENT is a child that is neither fresh nor drawing: its panel closed,
+        or the child died.  A child builds ONE panel -- the grid cell reserve
+        and the level-2 fit warm are that panel's -- so a spent child is let
+        go, never kept as a spare; kept, it was the one handed out next while
+        a clean spare was retired, and a dead one was claimed before any
+        live one.
         """
 
         while True:
@@ -1164,12 +1238,20 @@ class RenderProcessPool:
                     if member not in self._retiring
                 ]
             unused = self._idle(members)
+            used = [
+                member for member in members
+                if member not in unused and member.host_count == 0
+            ]
             with self._lock:
                 if self._closing:
                     return
                 idle = [member for member in unused if member not in self._claimed]
+                spent = [
+                    member for member in used
+                    if member in self._members and member not in self._claimed
+                ]
                 pending = len(self._starting)
-                warm = self._warm_count(len(members) - len(idle))
+                warm = self._warm_count(len(members) - len(idle) - len(spent))
                 # Every waiting panel holds one of the starts in flight; the
                 # rest are the warm count's.
                 reserved = min(pending, self._waiting)
@@ -1189,16 +1271,18 @@ class RenderProcessPool:
                 # this pool still holds may be let go.
                 surplus = spare if spare in self._members else None
                 threads = self._launch(begin)
-                if surplus is not None:
-                    self._retiring.add(surplus)
-                    self._members.remove(surplus)
+                gone = spent if surplus is None else [*spent, surplus]
+                for member in gone:
+                    self._retiring.add(member)
+                    self._members.remove(member)
             for thread in threads:
                 thread.start()
+            for member in gone:
+                _retire_member(member)
+            with self._lock:
+                self._retiring.difference_update(gone)
             if surplus is None:
                 return
-            _retire_member(surplus)
-            with self._lock:
-                self._retiring.discard(surplus)
 
     def _launch(self, count: int) -> list[Thread]:
         """Threads that each start one child: made under the lock, started outside it."""
@@ -1406,7 +1490,12 @@ class RenderProcessPool:
 
 
 class RenderProcess:
-    """One long-lived process containing any number of RasterPlotHosts."""
+    """One render child and the pipe to it, restarted when it dies.
+
+    A monitor panel gets a child of its own from :class:`RenderProcessPool`
+    and never shares it; Edit and Save work runs its hosts on one instance of
+    this class directly.
+    """
 
     #: How long a child may give no sign of life, with requests outstanding,
     #: before it has stopped.  "The service is up" used to have two proxies
@@ -1441,7 +1530,7 @@ class RenderProcess:
         self.name = selected
         self._silence_deadline = deadline
         #: Told when this child finishes with a Host, so an owner that keeps
-        #: several children warm learns that one of them is free again.
+        #: several children warm learns that one of them is spent.
         #: Called on the reader thread and OUTSIDE this child's lock -- the
         #: listener is a pool, and a pool asks a child things under its own
         #: lock, so calling it under this one would close that cycle.
@@ -1488,6 +1577,12 @@ class RenderProcess:
         #: repeats one crosses the pipe as None.  Cleared with the child
         #: that filled it: a restart begins the agreement again.
         self._front_interaction: dict[str, RasterInteractionMap] = {}
+        #: The last description each Host answered with, and the wired
+        #: document it came from.  Its vocabulary crosses as None while it
+        #: repeats, and a description equal to the last one in every other
+        #: field too IS the last one: the same object reaches the console.
+        #: Kept and cleared exactly as the interaction maps are.
+        self._host_descriptions: dict[str, tuple[Mapping[str, object], object]] = {}
         self._mapping_retirements: Queue = Queue()
         self._mappings = _SharedMappingCache(self._mapping_retirements)
         self._mapping_retirement_thread = Thread(
@@ -1509,6 +1604,8 @@ class RenderProcess:
         """Start one fresh child after the previous reader fully retired."""
 
         self._front_interaction.clear()
+        self._host_descriptions.clear()
+        self._hosted = False
         context = multiprocessing.get_context("spawn")
         parent, child = context.Pipe(duplex=True)
         stopped = Event()
@@ -1582,6 +1679,15 @@ class RenderProcess:
         with self._lock:
             return len(self._hosts)
 
+    @property
+    def fresh(self) -> bool:
+        """Alive, and no Host was ever built on this child: fit to be a spare."""
+
+        with self._lock:
+            return bool(
+                not self._hosted and not self._closed and self._process.is_alive()
+            )
+
     def retain(self) -> None:
         """Add one application-window owner without creating another process."""
 
@@ -1644,6 +1750,7 @@ class RenderProcess:
             host = _RemoteRasterPlotHost(self, host_id, DEFAULTS)
             self._hosts[host_id] = host
             self._host_closed[host_id] = Event()
+            self._hosted = True
         input_tokens: set[int] = set()
         try:
             input_ref = self._replace_inputs(plot_input, input_tokens)
@@ -1674,8 +1781,7 @@ class RenderProcess:
 
         def created(done: Future) -> None:
             try:
-                operation = done.result()
-                host._created(operation.value)
+                done.result()
             except BaseException as error:
                 host._failed(error)
 
@@ -1799,7 +1905,7 @@ class RenderProcess:
                 "replace" if "data" in kwargs else "overlay"
                 if "image_overlay" in kwargs else ""
             )
-        pending = self._request(
+        return self._request(
             "call",
             host.host_id,
             str(method),
@@ -1809,15 +1915,6 @@ class RenderProcess:
             input_tokens=tuple(input_tokens),
             input_transition=transition,
         )
-        if method == "configure":
-            def remember_configuration(done: Future) -> None:
-                try:
-                    host._created(done.result().value)
-                except BaseException:
-                    return
-
-            pending.add_done_callback(remember_configuration)
-        return pending
 
     def _subscribe(
         self,
@@ -1935,11 +2032,13 @@ class RenderProcess:
         try:
             self._send(("request", request_id, action, *payload))
         except BaseException as error:
+            # Whoever takes the pending record settles it: a reader that
+            # swept it first has already failed this completion.
             with self._lock:
                 failed = self._pending.pop(request_id, None)
             if failed is not None:
                 self._settle_pending_inputs(failed, success=False)
-            completion.set_exception(error)
+                completion.set_exception(error)
         return completion
 
     def _send(self, message: object) -> None:
@@ -2494,10 +2593,18 @@ class RenderProcess:
         if pending is None:
             return
         self._settle_pending_inputs(pending, success=True)
+        try:
+            description = self._result_description(pending.host_id, wire_value)
+        except BaseException as error:
+            # This answer is already off the pending table, so the reader's
+            # own sweep would never settle it.
+            if not pending.future.done():
+                pending.future.set_exception(error)
+            raise
         if pending.future.cancelled():
             return
         try:
-            value = _unwire_value(wire_value)
+            value = _unwire_value(wire_value) if description is None else description
             if pending.raw_result:
                 if (
                     isinstance(value, tuple)
@@ -2529,6 +2636,44 @@ class RenderProcess:
             pending.future.set_result(RasterOperation(value, front))
         except BaseException as error:
             pending.future.set_exception(error)
+
+    def _result_description(self, host_id: str | None, wire_value: object) -> object:
+        """A result's description, decoded against the last one of its Host.
+
+        None for a result that is not a description.  The child sends a
+        Host's vocabulary only when it changed, so the copy kept here must
+        follow every one it sent -- answers nobody waits for any more
+        included, which is why this runs before the cancelled check.  An
+        unchanged vocabulary is the previous description's own objects, and
+        a document equal to the previous one returns the previous description
+        itself.  A description omitting a vocabulary this side never received
+        is a protocol violation and ends the reader, as a repeated interaction
+        map does: quietly, every later description of that panel would fail.
+        """
+
+        if not (
+            isinstance(wire_value, tuple)
+            and wire_value[:2] == (_VALUE_TAG, "display-description")
+        ):
+            return None
+        document = wire_value[2]
+        key = str(host_id)
+        held = self._host_descriptions.get(key)
+        if document["vocabulary"] is None:
+            if held is None:
+                raise RuntimeError(
+                    "a description omitted a vocabulary its host was never sent"
+                )
+            if document == held[0]:
+                return held[1]
+            vocabulary = tuple(
+                getattr(held[1], name) for name in _DESCRIPTION_VOCABULARY
+            )
+        else:
+            vocabulary = _unwire_vocabulary(document["vocabulary"])
+        description = _unwire_value(wire_value, vocabulary)
+        self._host_descriptions[key] = ({**document, "vocabulary": None}, description)
+        return description
 
     def _receive_cancelled(self, request_id: int) -> None:
         with self._lock:
@@ -2595,8 +2740,9 @@ class RenderProcess:
     def _finish_input_upload(self, token: int) -> None:
         """The child is done with this input; keep its segments to fill again.
 
-        Only reached once the child has acknowledged the drop, so nothing is
-        still reading what goes back on the free list.
+        The child acknowledges an input once it has copied every plane out of
+        the segments, so nothing is still reading what goes back on the free
+        list.
         """
 
         with self._lock:
@@ -2622,6 +2768,7 @@ class RenderProcess:
         with self._lock:
             host = self._hosts.pop(host_id, None)
             self._front_interaction.pop(str(host_id), None)
+            self._host_descriptions.pop(str(host_id), None)
             event = self._host_closed.pop(host_id, None)
             tokens = tuple(self._host_inputs.pop(host_id, ()))
             subscription_ids = tuple(
@@ -2657,6 +2804,11 @@ class RenderProcess:
             + ("" if failure is None else f": {failure}")
         )
         with self._lock:
+            # Closed in the same breath as the sweep: a request registered
+            # after it would otherwise be enqueued for a pipe nobody reads and
+            # never settle -- a remounted panel that never paints and never
+            # fails.  The restart decision below still asks the process.
+            self._closed = True
             pending = tuple(self._pending.values())
             self._pending.clear()
             hosts = tuple(self._hosts.values())
@@ -2713,6 +2865,7 @@ class RenderProcess:
         # first (above) is what stops anything enqueueing behind the STOP.
         self._outbox.put(_STOP_WRITER)
         self._writer.join(timeout=5.0)
+        self._mappings.retire_generation()
         self._reader_stopped.set()
 
     def close(self, timeout: float = 0.0) -> bool:
@@ -3147,11 +3300,23 @@ def _resolve_inputs(value: object, inputs: Mapping[int, object]) -> object:
 
 
 def _send_error(send: Callable[[object], None], request_id: int, error: BaseException) -> None:
+    """Send a failure the parent can always read, with the child's traceback.
+
+    The parent loads it on its reader thread, outside any one request, so an
+    exception that pickles but will not unpickle -- one whose ``__init__``
+    takes other arguments than it hands to ``Exception`` -- ended the reader
+    and failed every panel on this child.  Proven by a round trip here, where
+    only this request pays for it.  The traceback does not survive pickling;
+    a note does, so the frame the child failed in reaches the card and log.
+    """
+
+    detail = "render child traceback:\n" + "".join(traceback.format_exception(error))
     try:
-        pickle.dumps(error, protocol=5)
+        sent = pickle.loads(pickle.dumps(error, protocol=5))
     except Exception:
-        error = RuntimeError(f"{type(error).__name__}: {error}")
-    send(("error", int(request_id), error))
+        sent = RuntimeError(f"{type(error).__name__}: {error}")
+    sent.add_note(detail)
+    send(("error", int(request_id), sent))
 
 
 def _render_process_main(connection: Connection, name: str) -> None:
@@ -3313,6 +3478,9 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: crosses as ``None``.  Cleared with the Host, because the frontend's
     #: cache is cleared with it too.
     last_interaction: dict[str, object] = {}
+    #: The same agreement for each Host's description vocabulary.
+    described: dict[str, tuple[object, ...]] = {}
+    described_lock = Lock()
 
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
@@ -3327,11 +3495,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
         # whose limits are not moving, and it is the whole non-pixel weight of
         # this message: a 64-cell grid carries 128 transforms through pickle
         # on every frame to say nothing changed.  Send it once and name it.
+        # Remembered only once it is on its way: remembered first, a send that
+        # failed would have the next front name a map the parent never got.
         interaction = front.interaction
-        if interaction == last_interaction.get(host_id):
-            interaction = None
-        else:
-            last_interaction[host_id] = interaction
+        repeated = interaction == last_interaction.get(host_id)
         send(
             (
                 "front",
@@ -3340,7 +3507,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 tuple(front.logical_size),
                 float(front.logical_dpi),
                 float(front.device_pixel_ratio),
-                interaction,
+                None if repeated else interaction,
                 lease_id,
                 shared_name,
                 nbytes,
@@ -3348,26 +3515,44 @@ def _render_process_main(connection: Connection, name: str) -> None:
                 int(front.buffer.height),
             )
         )
+        if not repeated:
+            last_interaction[host_id] = interaction
         shown.set()
 
-    def complete(request_id: int, completed: Future) -> None:
+    def complete(request_id: int, completed: Future, host_id: str | None) -> None:
         pending.pop(request_id, None)
         if completed.cancelled():
             send(("cancelled", request_id))
             return
         try:
             operation = completed.result()
-            wire = _wire_value(operation.value)
             sequence = int(operation.front.identity.sequence)
+            vocabulary = _description_vocabulary(operation.value)
+            if vocabulary is None or host_id is None:
+                wire = _wire_value(operation.value)
+            else:
+                # Decided, sent and remembered as one step, so two answers of
+                # one Host finishing on different threads cannot reach the
+                # parent in the other order from the one they were decided in.
+                with described_lock:
+                    wire = _wire_value(
+                        operation.value,
+                        omit_vocabulary=_same_vocabulary(
+                            described.get(host_id), vocabulary
+                        ),
+                    )
+                    send(("result", request_id, wire, sequence))
+                    described[host_id] = vocabulary
+                return
         except BaseException as error:
             _send_error(send, request_id, error)
             return
         reply(request_id, ("result", request_id, wire, sequence))
 
-    def begin(request_id: int, future: Future) -> None:
+    def begin(request_id: int, future: Future, host_id: str | None = None) -> None:
         pending[request_id] = future
         future.add_done_callback(
-            lambda done, request_id=request_id: complete(request_id, done)
+            lambda done, request_id=request_id: complete(request_id, done, host_id)
         )
 
     def event(subscription_id: int, *payload: object) -> None:
@@ -3522,7 +3707,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         current = host.front
         if current is not None:
             publish_front(host_id, current)
-        begin(request_id, host.describe_display())
+        begin(request_id, host.describe_display(), host_id)
 
     def close_host(host_id: str) -> None:
         with state_lock:
@@ -3569,6 +3754,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
                         # disagreeing about what has been sent is exactly the
                         # protocol violation the frontend refuses loudly.
                         last_interaction.pop(host_id, None)
+                        with described_lock:
+                            described.pop(host_id, None)
                         if stopped:
                             hosts.pop(host_id, None)
                             last_front_sequence.pop(host_id, None)
@@ -3607,7 +3794,7 @@ def _render_process_main(connection: Connection, name: str) -> None:
         answer = getattr(host, method)(*selected_args, **selected_kwargs)
         if not isinstance(answer, Future):
             raise TypeError(f"remote host method {method!r} returned no Future")
-        begin(request_id, answer)
+        begin(request_id, answer, host_id)
 
     def save_artifact(request_id: int, payload: tuple[object, ...]) -> None:
         (

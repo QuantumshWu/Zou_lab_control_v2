@@ -581,13 +581,25 @@ class _SelectorController:
         return previous, state
 
     def remove(self, kind: SelectorKind) -> SelectorState:
+        """Take the committed geometry of ``kind`` away.
+
+        A pointer gesture on that kind goes on from its own copy.  The
+        threshold classifier repaints its line by removing the committed
+        one on every frame, and a second drag begun before the next shot
+        lost the pointer to it.  Withdrawing a selector the operator is
+        holding cancels the gesture first (``PlotSession.remove_selector``).
+        """
+
         if not isinstance(kind, SelectorKind):
             raise TypeError("kind must be SelectorKind")
         with self._lock:
             removed = self._states.pop(kind)
-            if self._gesture is not None and self._gesture.kind is kind:
-                self._gesture = None
-                self._draft = None
+            if (
+                self._gesture is not None
+                and self._gesture.kind is kind
+                and self._draft is None
+            ):
+                self._draft = removed
             return removed
 
     def _restore_removed(self, state: SelectorState) -> None:

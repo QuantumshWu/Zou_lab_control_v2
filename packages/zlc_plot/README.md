@@ -114,11 +114,11 @@ session.set_value_unit("V")
 session.set_size("2x4")
 ```
 
-每种 selector 最多存在一个；再次设置同一种 kind 会原子更新它。Fit 的唯一默认范围优先级是 `AREA > X_RANGE > viewport > all`；`selector_kind=` 也可显式绑定 Area 或 X-range。Distribution 的 `threshold_classifier` 是独立的显示/分类功能：启用后自行求出初始最优 threshold，绘制左右 Gaussian、总和、可拖动 threshold 线以及当前 L/R population 和 fidelity。普通 `bimodal_gaussian` fit 不会创建、移动或清除 classifier，classifier 也不写普通 fit 状态。所有具有数值 fit 语义的 plot kind 共用一条 `FitSelection -> FitEngine -> overlay/presentation` 生命周期：Curve/Rolling 使用当前 DataView 的第一条 painted series，Histogram 使用当前 painted bin centers/counts，Image 使用当前 painted scalar field，FacetGrid 只把输入投影委托给当前 focused cell 的 Curve/Histogram/Image 语义。group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 随后筛选实际显示的 projection；Fit 不会另建 raw tensor mask/reduction 路径。Rolling 还会限制在当前可见 window。selector/viewport 只决定参数估计使用的样本，成功的拟合曲线仍覆盖当前完整显示域，并以当前显示单位写出公式、参数值和 `±` 不确定度。`FitResult` 保存 canonical 参数、covariance 和 data revision；live data的`FitEvent`在exact solve接受后即可发布给Rolling等数据消费者，不等待较慢的owner raster，但主Panel仍只把`data@N + fit@N`画进同一个atomic front；显式manual `fit()`仍在accepted overlay transaction后通知。Area/X 拖动中的 draft 默认每 30 ms 只更新视觉场景；selector、viewport、unit 和 resize 不会启动拟合，旧 overlay 保持稳定并在上下文变化时标为 lagging。只有显式调用 `fit()`，或 live fit 已 armed 且出现新的 data revision，才会求解并原子替换完整结果。Image 的 color-limit handles 属于显示色阶控制，不是 data selector；拖动时 handles、色阶与 raster preview 跟随指针节拍实时更新（只重着色图像像素，不触碰 chrome），释放时提交精确终值。删除由 `selector_kind=` 显式绑定的 selector 会取消并关闭该 live fit；自动选择的 live fit 则按相同优先级继续。Histogram 只对 count projection 执行 fit；启用 `density` 或 `cumulative` 时必须先切回 count。普通数据的 Selector API 提供 canonical/display range；只有显式调用 `selector_data()` 时才从调用当时的最新 snapshot 计算 mask、indices、坐标、数据值和 revision；crosshair 只返回显示坐标中距离光标最近的一个有效样本。PulseTimeline 返回 `PulseTimelineSelectionData`（与所选时间范围相交的 blocks、analog traces、scan regions、DAC segments 与 loop markers）。selection event 本身不切片或缓存数据。
+每种 selector 最多存在一个；再次设置同一种 kind 会原子更新它。Fit 的唯一默认范围优先级是 `AREA > X_RANGE > viewport > all`；`selector_kind=` 也可显式绑定 Area 或 X-range。Distribution 的 `threshold_classifier` 是独立的显示/分类功能：启用后自行求出初始最优 threshold，绘制左右 Gaussian、总和、可拖动 threshold 线以及当前 L/R population 和 fidelity。普通 `bimodal_gaussian` fit 不会创建、移动或清除 classifier，classifier 也不写普通 fit 状态。所有具有数值 fit 语义的 plot kind 共用一条 `FitSelection -> FitEngine -> overlay/presentation` 生命周期：Curve/Rolling 使用当前 DataView 的第一条 painted series，Histogram 使用当前 painted bin centers/counts，Image 使用当前 painted scalar field，FacetGrid 只把输入投影委托给当前 focused cell 的 Curve/Histogram/Image 语义。group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 随后筛选实际显示的 projection；Fit 不会另建 raw tensor mask/reduction 路径。Rolling 还会限制在当前可见 window。selector/viewport 只决定参数估计使用的样本；成功的一维拟合曲线画在拟合窗口上（所选样本坐标的最小到最大值之间稠密求值，窗口外不画），并以当前显示单位写出公式、参数值和 `±` 不确定度。`FitResult` 保存 canonical 参数、covariance 和 data revision；live data的`FitEvent`在exact solve接受后即可发布给Rolling等数据消费者，不等待较慢的owner raster，但主Panel仍只把`data@N + fit@N`画进同一个atomic front；显式manual `fit()`仍在accepted overlay transaction后通知。Area/X 拖动中的 draft 默认每 30 ms 只更新视觉场景；selector、viewport、unit 和 resize 不会启动拟合，旧 overlay 保持稳定并在上下文变化时标为 lagging。只有显式调用 `fit()`，或 live fit 已 armed 且出现新的 data revision，才会求解并原子替换完整结果。Image 的 color-limit handles 属于显示色阶控制，不是 data selector；拖动时 handles、色阶与 raster preview 跟随指针节拍实时更新（只重着色图像像素，不触碰 chrome），释放时提交精确终值。删除由 `selector_kind=` 显式绑定的 selector 会取消并关闭该 live fit；自动选择的 live fit 则按相同优先级继续。Histogram 只对 count projection 执行 fit；启用 `density` 或 `cumulative` 时必须先切回 count。直方图的观测数取 bin 数与样本数（各 bin 计数之和）中较小者，不多于自由参数时按「needs more points」拒绝，不把样本太少的 cell 解到预算用完。普通数据的 Selector API 提供 canonical/display range；只有显式调用 `selector_data()` 时才从调用当时的最新 snapshot 计算 mask、indices、坐标、数据值和 revision；crosshair 只返回显示坐标中距离光标最近的一个有效样本。PulseTimeline 返回 `PulseTimelineSelectionData`（与所选时间范围相交的 blocks、analog traces、scan regions、DAC segments 与 loop markers）。selection event 本身不切片或缓存数据。
 
 Panel的单行Fit表达式使用当前显示单位，参数名就是公式里印出来的符号（`FitModelSpec.symbols`）：exponential decay 画的是 $f(x)=A e^{-x/\tau}+B$，所以写 `A=2` 把参数精确固定并从优化自由度移除，`tau=guess(5)` 只替换初始猜测；省略参数即保持Auto。PanelState与Figure只保存canonical `fixed`/`initial` mappings。表达式无效时忽略这份optional override、继续同model自动fit并显示warning；fixed参数显示为`(fixed)`且没有估计误差。
 
-`session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian，以及 single/bimodal Poisson-Gaussian（`histogram_poisson_gaussian`、`bimodal_poisson_gaussian`：泊松律经 Γ 函数延拓到实数光子数 $p(u)=\lambda^u e^{-\lambda}/\Gamma(u+1)$、归一化后与高斯读出噪声卷积，$f(x)=\frac{A}{\sigma\sqrt{2\pi}\,\int p}\int_0^\infty p(u)\,e^{-\frac{1}{2}((x-u)/\sigma)^2}du$，是 x 的光滑函数，和其他模型一样直接在 bin 中心与计数上拟合，不问数据来源；负值是读出噪声的正常结果而不是非法输入；直方图分布模型只包含命名的概率分量：single 为幅度 Nw（shot 数×bin 宽）、中心 x₀（Poisson 为 λ）和 σ；bimodal 再加 δ≥0、σ_B 和 r（上方群的比例），分量仅 A/B，不默认增加均匀污染背景 β。读出偏置属于横轴分布的位置，Poisson deviance 的数值 COUNT_FLOOR 不是拟合参数。classifier threshold/理论 fidelity 使用这两个分量的完整归一化权重；普通 Curve Gaussian 的 offset B 不受影响；直方图分辨得了的范围就是它的 bound：中心不出首末 bin 边缘、宽度在半个 bin 与整体跨度之间、间距不超跨度，调用方 bound 与之取交集、无交集则拒绝；bimodal 模型总能找到两个群，所以每次同时拟合嵌套的 single 模型并计算 ΔBIC=(D_single−D_bimodal)−Δk·ln N，只有 ΔBIC≥`FitOptions.min_bic_gain`（默认 `DECISIVE_BIC_GAIN`=10，Kass–Raftery 的 very strong）才报告两个群；否则结果以 bimodal 的参数名写出 single 的答案（δ=0、σ_B=σ、r=0.5，`FitResult.reduced=True`），`FitResult.evidence` 与 overlay 参数下方的一行都写明 ΔBIC 与判定；λ 低于约 3 光子时延拓律的均值高于 λ、拟合值偏低，低于 1 光子它已不是光子计数律）；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
+`session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine、exponential decay、saturation 与 release–recapture；Histogram 提供 bimodal 与 single Gaussian，以及 single/bimodal Poisson-Gaussian（`histogram_poisson_gaussian`、`bimodal_poisson_gaussian`：泊松律经 Γ 函数延拓到实数光子数 $p(u)=\lambda^u e^{-\lambda}/\Gamma(u+1)$、归一化后与高斯读出噪声卷积，$f(x)=\frac{A}{\sigma\sqrt{2\pi}\,\int p}\int_0^\infty p(u)\,e^{-\frac{1}{2}((x-u)/\sigma)^2}du$，是 x 的光滑函数，和其他模型一样直接在 bin 中心与计数上拟合，不问数据来源；负值是读出噪声的正常结果而不是非法输入；直方图分布模型只包含命名的概率分量：single 为幅度 Nw（shot 数×bin 宽）、中心 x₀（Poisson 为 λ）和 σ；bimodal 再加 δ≥0、σ_B 和 r（上方群的比例），分量仅 A/B，不默认增加均匀污染背景 β。读出偏置属于横轴分布的位置，Poisson deviance 的数值 COUNT_FLOOR 不是拟合参数。classifier threshold/理论 fidelity 使用这两个分量的完整归一化权重；普通 Curve Gaussian 的 offset B 不受影响；直方图分辨得了的范围就是它的 bound：中心不出首末 bin 边缘、宽度在半个 bin 与整体跨度之间、间距不超跨度，调用方 bound 与之取交集、无交集则拒绝；bimodal 模型总能找到两个群，所以每次同时拟合嵌套的 single 模型并计算 ΔBIC=(D_single−D_bimodal)−Δk·ln N，只有 ΔBIC≥`FitOptions.min_bic_gain`（默认 `DECISIVE_BIC_GAIN`=10，Kass–Raftery 的 very strong）才报告两个群（`min_bic_gain=None`，或操作者固定了这一比较要钉住的参数——例如 `delta=5` 本身就断言了两个群——时不解嵌套模型，照报 bimodal 结果）；否则结果以 bimodal 的参数名写出 single 的答案（δ=0、σ_B=σ、r=0.5，`FitResult.reduced=True`），`FitResult.evidence` 与 overlay 参数下方的一行都写明 ΔBIC 与判定；λ 低于约 3 光子时延拓律的均值高于 λ、拟合值偏低，低于 1 光子它已不是光子计数律）；Image 提供 anisotropic Gaussian center，x/y 坐标量纲兼容时另有（默认的）radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
 Live fit 的唯一自动触发源是宿主的通用 indexed-derived signal。只有真实Rolling/Histogram等history consumer取得window lease后，Runtime才从当时的current event开始记录；lease区间内每个Measurement primary index都在同一个普通Dataset中有value或invalid cell，之前的shot不回填。`display_interval`只控制Surface deadline。Host只保留一个active pair和一个latest完整输入，中间输入不排FIFO；现有Raster worker的active deadline超过1秒会loud发布invalid、取消该solve并继续latest。任何window/history按lease内source index连续，cadence skip与solver failure都显示为invalid/NaN，但只有后者是错误。主Panel的commit仍把`data@N + fit@N`原子画进同一front。
 
@@ -162,11 +162,10 @@ controls = parameter_controls(
 ```
 
 核心 schema 持有名称、类型、默认值、范围、合法选项和 render impact；
-`zlc_plot.ui` 只把它投影成 toolkit-neutral control description，PyQt5 子模块再映射成
+`zlc_plot.ui` 只把它投影成 toolkit-neutral control description，由应用映射成
 实际 widgets。具体应用只负责页面布局和业务流程。`describe_semantics(schema, spec)`
 及 `session.describe_semantics()` 从 kind registry 机械生成 kind、每个 Dataset 轴的 fate
-（x/y/group/facet/pool/reduce 或 tagged Scope 坐标）与 reduction 的编辑域；`zlc_plot.ui.semantic_controls()` 复用同一
-control 管线。拥有完整表单状态的宿主一次调用
+（x/y/group/facet/pool/reduce 或 tagged Scope 坐标）与 reduction 的编辑域。拥有完整表单状态的宿主一次调用
 `session.configure(...)` / `RasterPlotHost.configure(...)`，同时提交 semantic mapping、
 display mapping、size、Image overlay 和 fit choice；宿主不判断原位更新还是重排。
 `zlc_plot` 比较当前状态、合并 `RenderEffect`，并保留同一个 Figure。
@@ -202,13 +201,12 @@ Pulse timeline直接以不可变`PulseTimelineData`更新同一个session。每�
 
 ## PyQt5 嵌入
 
-`Qt5PlotWidget` 是只显示 immutable QImage front 的 raster adapter。外部应用拥有按钮、参数控件和状态显示，并将信号连接到异步 `RasterPlotHost` API；Matplotlib session 在专用 worker 创建。`Qt5ParameterPanel` 可直接消费 `describe_display()`，不要求应用重复维护参数名、类型或选项：
+`Qt5PlotWidget` 是只显示 immutable QImage front 的 raster adapter。外部应用拥有按钮、参数控件和状态显示，并将信号连接到异步 `RasterPlotHost` API；Matplotlib session 在专用 worker 创建。参数控件由应用把 `zlc_plot.ui.parameter_controls()` 给出的中立记录映射到自己的 widget，不要求应用重复维护参数名、类型或选项：
 
 ```python
 from zlc_plot import (
     AxisRef,
     CurvePlot,
-    Qt5ParameterPanel,
     Qt5PlotWidget,
     RasterPlotHost,
     ensure_qt5_application,
@@ -221,14 +219,7 @@ plot_host = RasterPlotHost.from_plot(
     size="2x2",
 )
 widget = Qt5PlotWidget(plot_host)
-description = plot_host.describe_display().result().value
-parameters = Qt5ParameterPanel(description)
-parameters.parameterEdited.connect(
-    lambda name, value: plot_host.set_parameter(name, value)
-)
-parameters.semanticEdited.connect(
-    lambda name, value: plot_host.replace_spec(next_spec(name, value))
-)
+plot_host.set_parameter("title", "Scan")
 widget.show()
 try:
     app.exec_()
@@ -237,8 +228,10 @@ finally:
     plot_host.close()
 ```
 
-只有确实需要自定义 `PlotSession` 子类时才使用 `RasterPlotHost(factory)`；普通 GUI
-集成统一走 `from_plot()`，不在应用里重复 session factory 样板。
+只有确实需要自定义 `PlotSession` 子类时才使用 `RasterPlotHost(factory)`；进程内的
+GUI 集成（脚本、测试、notebook 旁的小窗口）统一走 `from_plot()`，不在应用里重复
+session factory 样板。产品窗口不在主进程里画图，而是从渲染子进程的 `build_host()`
+取得同一接口的远端 host（见「渲染进程」）。
 
 GUI 可从 `plot_host.fit_models()` 读取 session 的公开 fit catalogue，把
 `FitModelSpec.display_name/model_id` 填入下拉框，再将选中的 model id 传给
@@ -336,12 +329,16 @@ Notebook 和 Qt 都消费同一个 `SurfacePlan`。宿主窗口或浏览器区�
 
 ## 渲染进程
 
-`RenderProcess` 是一个装着任意多个 `RasterPlotHost` 的子进程；`RenderProcessPool`
-是若干个这样的子进程，`build_host` 先铺开再共用——成员没满先起新的，满了才挑活
-host 最少的那个。同时在画的面板因此各占一个解释器：编译核 `nogil` 本来就能逃出
-GIL，artist 更新、chrome 绘制和每帧 front 的 pickle 逃不掉。成员按需起，只开一块
-面板的窗口仍然只有一个子进程；上限 `default_render_process_count()` 是逻辑核的四
-分之一、封顶 4，因为一个子进程在画任何东西之前就是两百多兆。
+`RenderProcess` 是一个渲染子进程：子进程里跑原样的 `RasterPlotHost -> PlotSession
+-> renderer`，主进程只持同一异步接口的代理 host，由 `build_host(plot_input, spec, ...)`
+建出；`retain`/`release` 让几个窗口共用它，最后一个 owner 才关闭。Edit、point review
+与 Figure export 用一个这样的子进程。`RenderProcessPool` 给每块 live Monitor 面板一个
+自己的子进程，一面板一子进程、绝不合租：编译核 `nogil` 本来就能逃出 GIL，artist
+更新、chrome 绘制和每帧 front 的 pickle 逃不掉，同一解释器里的几块面板一次只跑一块。
+池提前备着 `DEFAULT_RENDER_SPARES`（4）个没被任何面板碰过的子进程，一个被取走就补
+一个，超过 `DEFAULT_RENDER_SETTLED_SPARES`（2）个在画之后降到 2；找不到备用的面板为自己
+新起一个并等它启动，不去挤一个正在画的。面板关闭即退休它的子进程。代价只是内存，
+每个子进程约两百兆。
 
 子进程发布 front 时不再拷贝像素：`rendering.install_publish_pool` 让该进程的
 renderer 直接写进 frontend 要映射的共享段，`publish_front` 只交接租约。块的归还是

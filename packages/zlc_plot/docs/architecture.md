@@ -19,11 +19,12 @@
 | Plot kind, axes roles, reduction, facet choice | `zlc_plot` specifications |
 | Runtime viewport, display parameters, selectors, fixed size | `PlotSession` |
 | Parameter names/types/defaults/ranges/choices/render impact | core `ParameterSchema` + `RenderEffect` |
-| Schema-to-control projection and PyQt5 widgets | `zlc_plot.ui` / `zlc_plot.qt_controls` |
+| Schema-to-control projection | `zlc_plot.ui` |
 | Concrete control layout and application workflow | application UI |
 | Run history, cadence and revision publication | embedding Runtime/application |
 | Fit models and immutable fit results | `zlc_plot.fit` |
 | Immutable rendered front and exact physical-pixel export | `RasterFront` / `RasterBuffer` |
+| Render child processes, the main-process host proxy and shared-memory fronts | `RenderProcess` / `RenderProcessPool` |
 | Same-shot causal join, panel document and PulseDocument projection | application layer |
 | Device/Logic routes and acquisition orchestration | application layer |
 
@@ -39,8 +40,13 @@ application / acquisition
         │                                    ├── headless Agg/export
         │                                    ├── NotebookView (RasterFront + anywidget)
         │                                    └── RasterPlotHost worker
-        │                                           │
-        │                                           └── Qt5PlotWidget (QImage)
+        │                                           │  in-process (from_plot), or inside a
+        │                                           │  render child (RenderProcess / RenderProcessPool)
+        │                                           │        │ shared-memory front, pipe commands
+        │                                           │        ▼
+        │                                           │  _RemoteRasterPlotHost (main process)
+        │                                           │        │
+        │                                           └────────┴──► Qt5PlotWidget (QImage)
         │
         └── NPZ I/O (zlc_data only)
 ```
@@ -134,8 +140,8 @@ fixed size choices, current axes limits, explicit viewport and dynamic
 parameter choices such as compatible units or the closed package colormap set.
 
 `zlc_plot.ui.parameter_controls()` converts the description into ordered,
-toolkit-neutral editor records. The optional `qt_controls` module performs the
-PyQt5 widget mapping and nothing in the core imports Qt. A concrete GUI decides
+toolkit-neutral editor records. The application maps them to its own widgets
+and nothing in the core imports Qt. A concrete GUI decides
 where controls appear and which plot-kind factory to select; it does not repeat
 validation or renderer policy. Changing plot kind or any semantic role uses
 the session's atomic `replace_spec` rebuild policy on the existing Figure and
@@ -222,7 +228,7 @@ line/marker/text primitives、实时数值和 z-order，唯一的消费者是 ma
 存在第二套绘制器，Notebook 与 GUI 天然共享同一套 Area/X/Cross/threshold/color-limit
 几何与文字样式。
 
-Qt 只支持 PyQt5。`ensure_qt5_application()` 必须在首个 `QApplication` 创建前设置 High-DPI 属性并注册 Helvetica Light；named preset 保持相同逻辑尺寸，DPR 越高，backing store 使用的物理像素越多。普通应用通过 `RasterPlotHost.from_plot()` 把 immutable data/spec 交给 worker；只有自定义 `PlotSession` 子类使用 raw factory constructor。host 不公开 session，所有 Matplotlib mutation、draw 与 RGBA capture 都留在 serial worker。worker-originated immutable front 通过 queued Qt signal 进入 owner thread，首帧、live revision、fit overlay、preset 切换与 Notebook 共用 session redraw path。
+Qt 只支持 PyQt5。`ensure_qt5_application()` 必须在首个 `QApplication` 创建前设置 High-DPI 属性并注册 Helvetica Light；named preset 保持相同逻辑尺寸，DPR 越高，backing store 使用的物理像素越多。进程内用法（notebook、测试、脚本）通过 `RasterPlotHost.from_plot()` 把 immutable data/spec 交给 worker；产品窗口通过渲染子进程的 `build_host()` 得到同一接口的远端 host（见 Render processes 一节）；只有自定义 `PlotSession` 子类使用 raw factory constructor。host 不公开 session，所有 Matplotlib mutation、draw 与 RGBA capture 都留在 serial worker。worker-originated immutable front 通过 queued Qt signal 进入 owner thread，首帧、live revision、fit overlay、preset 切换与 Notebook 共用 session redraw path。
 
 `Qt5PlotWidget.set_interaction_enabled(False)` 只关闭输入 transport，使 Pulse
 Preview 或 Edit surface 可以把 wheel 留给外层 scroll area，而不停止 live、DPR
@@ -264,7 +270,7 @@ clipped artist factories. Pan/zoom/reset therefore cannot leave scan badges,
 DAC segments or loop markers in the figure margin; axis-transform effects
 always use the current limits and one complete redraw.
 
-Fit 在 canonical data 上计算并保存 immutable result；显示层把 fitted coordinates、参数和 uncertainty 一起转换到当前 display units，在图内绘制 fit curve、公式与 `±` 不确定度。annotation 使用固定 axes-fraction anchor、独立 3.25 pt font tier 和高于 data/fit curve 的 z-order；selector 或 viewport 改变不再触发障碍物搜索，所以 drag 与 live 更新不会让文字位置抖动。同一可见axes有非空可见Fit文字时，公共renderer隐藏Area/X-range的坐标文本，保留框、handles与全部交互；Fit文字撤回时恢复，live/preview/focus/export均用这份visibility。每种 selector 最多存在一个，默认 fit authority 严格按 `AREA > X_RANGE > viewport > all` 解析；`selector_kind` 可显式绑定 area、x-range 或 threshold。Histogram threshold classifier 独立拥有自己的 bimodal classification result、threshold、严格合计 100% 的 fitted-population L/R 百分比和 Fidelity projection；普通 fit 不创建或修改 classifier，classifier 也不进入普通 fit 状态。只有显式以 threshold 为 selector 的普通 fit 才读取当前 threshold scope。authority 保存 canonical geometry，单纯切换显示单位不会把同一批样本误判为过期。Curve/Rolling/1D Facet 直接消费 DataView 的第一条 immutable projected series；group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 再筛选这条实际显示的 series，Fit 不维护第二条 raw mask/reduction 真相源；Rolling 还限制到当前可见 window。selector/viewport 只限定参数估计样本，accepted 参数生成的 overlay 覆盖完整显示域。每个 accepted result 同时保存 data revision 和 fit-context generation；只有两者都匹配才是 current。
+Fit 在 canonical data 上计算并保存 immutable result；显示层把 fitted coordinates、参数和 uncertainty 一起转换到当前 display units，在图内绘制 fit curve、公式与 `±` 不确定度。annotation 使用固定 axes-fraction anchor、独立 3.25 pt font tier 和高于 data/fit curve 的 z-order；selector 或 viewport 改变不再触发障碍物搜索，所以 drag 与 live 更新不会让文字位置抖动。同一可见axes有非空可见Fit文字时，公共renderer隐藏Area/X-range的坐标文本，保留框、handles与全部交互；Fit文字撤回时恢复，live/preview/focus/export均用这份visibility。每种 selector 最多存在一个，默认 fit authority 严格按 `AREA > X_RANGE > viewport > all` 解析；`selector_kind` 可显式绑定 area、x-range 或 threshold。Histogram threshold classifier 独立拥有自己的 bimodal classification result、threshold、严格合计 100% 的 fitted-population L/R 百分比和 Fidelity projection；普通 fit 不创建或修改 classifier，classifier 也不进入普通 fit 状态。只有显式以 threshold 为 selector 的普通 fit 才读取当前 threshold scope。authority 保存 canonical geometry，单纯切换显示单位不会把同一批样本误判为过期。Curve/Rolling/1D Facet 直接消费 DataView 的第一条 immutable projected series；group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 再筛选这条实际显示的 series，Fit 不维护第二条 raw mask/reduction 真相源；Rolling 还限制到当前可见 window。selector/viewport 只限定参数估计样本；一维 overlay 画在拟合窗口上：从所选样本坐标的最小值到最大值按固定采样数稠密求值（不只在扫描点或 bin 中心取值，窄峰与快振荡因此不被截或混叠），窗口之外不画。每个 accepted result 同时保存 data revision 和 fit-context generation；只有两者都匹配才是 current。
 
 Fit models use a semantic `FitTarget` catalogue rather than frontend arity guesses.
 The registry permits at most one default per Series/Histogram/Image target; the
@@ -289,6 +295,20 @@ after the accepted overlay transaction. The logical live-fit Future resolves
 after the paired front is promoted, and selector motion has no fit-completion
 lane of its own.
 
+## Render processes
+
+产品窗口（TaskConsole、FigureViewer、Pulse Editor、SLM Editor）不在主进程里画图。`RenderProcess`
+是一个渲染子进程：子进程里跑原样的 `RasterPlotHost -> PlotSession -> renderer`，主进程只持
+`_RemoteRasterPlotHost` 代理，它保留同一套异步 host 接口（`configure`、pointer、front 回调、
+`qt_widget`、close）。命令与回复走管道，每个方向各一条写线程；front 的 RGBA 在子进程里直接写进
+共享内存段、只写一次，主进程按租约读，QImage 不复制像素；静态 Dataset 结构沿 input token 在每个
+子进程里只传一次。`RenderProcessPool` 给每块 live Monitor 面板一个自己的子进程，一面板一子进程、
+绝不合租：同一解释器里的几块面板的 Python（artist 更新、chrome、front 的 pickle）一次只能跑一块。
+池提前备着 `DEFAULT_RENDER_SPARES`（4）个没被任何面板碰过的子进程，超过 `DEFAULT_RENDER_SETTLED_SPARES`
+（2）个子进程在画之后降到 2；面板关闭即退休它的子进程，不回收成备用。Edit、point review 与
+Figure export 走一个 `RenderProcess`。两者都以 `build_host(plot_input, spec, ...)` 建 host，
+`retain`/`release` 让几个窗口共享同一服务，最后一个 owner 才关闭它。
+
 ## Style and runtime configuration
 
-`PlotLibraryDefaults` combines immutable `PlotStyleConfig`, `PlotLayoutConfig`, `LiveDefaults` and `InteractionDefaults`. rcParams, palette, artist tokens, font tiers, split ratios, preset geometry, refresh choices, pointer cadence, selector hit radius and wheel zoom factor each have one typed owner. Each PlotSession owns exactly one serial analysis executor; its concurrency is an invariant, not a configurable second policy.
+`PlotLibraryDefaults` combines immutable `PlotStyleConfig`, `PlotLayoutConfig`, `LiveDefaults`, `InteractionDefaults` and `ProjectionDefaults`. rcParams, palette, artist tokens, font tiers, split ratios, preset geometry, refresh choices, pointer cadence, selector hit radius, wheel zoom factor and histogram domain padding each have one typed owner. Each PlotSession owns exactly one serial analysis executor; its concurrency is an invariant, not a configurable second policy.

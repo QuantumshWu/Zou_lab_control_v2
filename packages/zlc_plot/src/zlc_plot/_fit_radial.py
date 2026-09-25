@@ -32,6 +32,7 @@ from .fit import (
     FitOptions,
     FitResult,
     RegularImageFitInput,
+    _authored_seed,
     _covariance_from_information,
     _DeferredFitData,
     _fixed_parameter_partition,
@@ -241,11 +242,19 @@ def _compiled_axis_terms(
 
 @njit(cache=True, nogil=True, parallel=True)
 def _compiled_regular_centered_context(source, mask, width):
-    """Pack physical values and centered moments in one shared stripe pass."""
+    """Centre each cell on its first valid value and pack its moments.
+
+    The centred plane is the one float64 copy of a frame the refinement
+    makes: every objective reads it with the offset shifted by the same
+    reference, which leaves each residual unchanged and keeps the moment
+    sums from cancelling.  A physical copy beside it was a second
+    frame-sized plane per fit that nothing needed.  Each context row holds
+    the reference, then the centred sum, sum of squares and valid count.
+    """
 
     cells, points = source.shape
-    values = np.empty((cells, points), dtype=np.float64)
-    contexts = np.empty((cells, 1, points + 4), dtype=np.float64)
+    centered = np.empty((cells, points), dtype=np.float64)
+    contexts = np.empty((cells, 1, 4), dtype=np.float64)
     stripe_size = _REGULAR_IMAGE_STRIPE_ROWS * width
     stripes = (points + stripe_size - 1) // stripe_size
     moments = np.empty((cells, stripes, 3), dtype=np.float64)
@@ -263,12 +272,11 @@ def _compiled_regular_centered_context(source, mask, width):
         total, squares, count = 0.0, 0.0, 0
         for point in range(stripe * stripe_size, min((stripe + 1) * stripe_size, points)):
             value = float(source[cell, point])
-            values[cell, point] = value
-            centered = value - reference
-            contexts[cell, 0, point + 4] = centered
+            shifted = value - reference
+            centered[cell, point] = shifted
             if (mask.size == 0 or mask[cell, point]) and math.isfinite(value):
-                total += centered
-                squares += centered * centered
+                total += shifted
+                squares += shifted * shifted
                 count += 1
         moments[cell, stripe, 0] = total
         moments[cell, stripe, 1] = squares
@@ -279,7 +287,7 @@ def _compiled_regular_centered_context(source, mask, width):
             for stripe in range(stripes):
                 total += moments[cell, stripe, moment]
             contexts[cell, 0, moment + 1] = total
-    return values, contexts
+    return centered, contexts
 
 
 @njit(cache=True)
@@ -319,8 +327,9 @@ def _compiled_regular_linear_objective(
     height = y_vectors.shape[1]
     width = x_vectors.shape[1]
     amplitude = parameters[0]
-    physical_offset = parameters[1]
-    offset = physical_offset - (context[0, 0] if context.size else 0.0)
+    # With a context the observations are centred on context[0, 0], and the
+    # offset moves by the same reference: the residuals are unchanged.
+    offset = parameters[1] - (context[0, 0] if context.size else 0.0)
     x_full = np.ones((4, width), dtype=np.float64)
     y_full = np.ones((4, height), dtype=np.float64)
     for vector in range(3):
@@ -329,7 +338,6 @@ def _compiled_regular_linear_objective(
     projected = np.zeros((3, height), dtype=np.float64)
     raw_rss = 0.0
     if not information_only:
-        source = context[0, 4:] if context.size else observations
         if derivatives or context.size:
             # One row of the image projected onto each x basis vector, as
             # three matrix-vector products whose results are the rows of
@@ -339,7 +347,7 @@ def _compiled_regular_linear_objective(
             # the same numbers as strided views, and np.dot on a strided
             # operand falls off BLAS.  The constant-offset sum already has a
             # scalar owner.
-            image = source.reshape(height, width)
+            image = observations.reshape(height, width)
             for vector in range(3):
                 projected[vector] = image @ x_vectors[vector]
         if context.size:
@@ -368,11 +376,11 @@ def _compiled_regular_linear_objective(
             roundoff /= 1.0 - roundoff
             if raw_rss <= roundoff * magnitude:
                 raw_rss = _compiled_regular_residual_rss(
-                    observations, amplitude, physical_offset, x_vectors[0], y_vectors[0]
+                    observations, amplitude, offset, x_vectors[0], y_vectors[0]
                 )
         else:
             raw_rss = _compiled_regular_residual_rss(
-                observations, amplitude, physical_offset, x_vectors[0], y_vectors[0]
+                observations, amplitude, offset, x_vectors[0], y_vectors[0]
             )
     if not derivatives:
         return 0.5 * raw_rss, raw_rss, math.isfinite(raw_rss)
@@ -488,7 +496,12 @@ def _compiled_regular_linear_objective(
 
 @njit(cache=True, nogil=True, parallel=True)
 def _compiled_regular_information_batch(x_coordinates, y_coordinates, parameters, radial, observations, complete):
-    """Shared axis-Gram information and one final direct physical RSS pass."""
+    """Shared axis-Gram information and one final direct RSS pass.
+
+    ``observations`` and the offset in ``parameters`` may both be centred on
+    one reference; the RSS does not move, and the information never reads
+    either.
+    """
 
     cells, count = parameters.shape
     matrices = np.full((cells, count, count), np.nan, dtype=np.float64)
@@ -635,7 +648,6 @@ def _compiled_regular_image_objective(
     full_row = np.empty(parameters.size, dtype=np.float64)
     amplitude = parameters[0]
     offset = parameters[1] - (context[0, 0] if context.size else 0.0)
-    source = context[0, 4:] if context.size else observations
     for row_index in range(height):
         y_basis = y_vectors[0, row_index]
         y_radius = y_vectors[1, row_index]
@@ -656,7 +668,7 @@ def _compiled_regular_image_objective(
                 finite,
             ) = _compiled_fit.compiled_point_terms(
                 predicted,
-                source[point],
+                observations[point],
                 poisson,
                 weights[point] if use_weights else 1.0,
                 use_weights,
@@ -1036,7 +1048,7 @@ def _median_3x3_nearest(values: np.ndarray) -> np.ndarray:
     row and column: what ``scipy.ndimage.median_filter(size=3,
     mode="nearest")`` returns, without scipy -- 318 ms and 17 MB of
     imports every render child paid warm for nine numbers sorted, on a
-    path only a partly authored seed reaches.  A median is a selection,
+    path only a partial warm start reaches.  A median is a selection,
     so the two agree to the bit.
     """
 
@@ -1096,19 +1108,19 @@ def _regular_image_striped_objective(
     loss: str,
     collect_information: bool,
 ) -> tuple[float, np.ndarray, float, np.ndarray, int]:
-    """Masked/robust objective over row stripes, fanned across a small pool.
+    """Masked/robust objective over row stripes, one after another.
 
-    Partial results are combined in stripe order after joining, so the
-    accumulation order (and therefore the value) is deterministic regardless
-    of worker scheduling.  The offset column is analytic (its derivative
-    plane is constant one), so no ones-plane is materialized.
+    Partial results are combined in stripe order, so the accumulation order
+    (and therefore the value) is deterministic.  The offset column is
+    analytic (its derivative plane is constant one), so no ones-plane is
+    materialized.
     """
 
     amplitude, offset = float(parameters[0]), float(parameters[1])
     data = context.data
     parameter_count = kernel.parameter_count
     x_vectors = kernel.x_vectors(parameters, data.x_coordinates)
-    context.float_observations()  # materialize once before fan-out
+    context.float_observations()  # materialize once for every stripe
 
     def stripe_task(
         bounds: tuple[int, int],
@@ -1402,8 +1414,13 @@ def fit_regular_separable_images(
             check()
             first = stage_items[cells[0]]
             height, width = first.observations.shape
-            source = np.stack(
-                [stage_items[cell].observations.reshape(-1) for cell in cells],
+            # One cell -- every public single fit -- borrows its frame.
+            source = (
+                first.observations.reshape(1, -1)
+                if len(cells) == 1
+                else np.stack(
+                    [stage_items[cell].observations.reshape(-1) for cell in cells],
+                )
             )
             # The compiled boundary combines these explicit masks with value
             # and coordinate finiteness; do not build that full mask twice.
@@ -1420,6 +1437,10 @@ def fit_regular_separable_images(
                 # real floating storage retains the existing f64 conversion.
                 if source.dtype.kind == "f" and source.dtype.itemsize not in (4, 8):
                     source = np.asarray(source, dtype=np.float64)
+                # A borrowed frame is read-only and a stacked one is not:
+                # hand the kernel one kind, so it has one specialization
+                # per storage to load.
+                source.setflags(write=False)
                 values, native_context = _compiled_regular_centered_context(
                     source, np.empty((0, 0), dtype=np.bool_) if valid is None else valid,
                     width,
@@ -1442,9 +1463,9 @@ def fit_regular_separable_images(
                 authored = np.stack([seeds[cell] for cell in cells])[:, None, :]
                 authored_flags = True
             elif initial is not None:
-                authored = np.stack(
-                    [direct_seed(initial, stage_items[cell]) for cell in cells]
-                )[:, None, :]
+                # One row for every cell: a partial guess leaves its
+                # unnamed parameters to each cell's own compiled cold seeds.
+                authored = _authored_seed(model, initial)
                 authored_flags = True
             warm = np.zeros((len(cells), len(model.parameters)), dtype=np.float64)
             warm_flags = np.zeros(len(cells), dtype=np.bool_)
@@ -1482,23 +1503,22 @@ def fit_regular_separable_images(
                 xtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_FTOL,
                 gtol=_REGULAR_IMAGE_PROXY_TOL if coarse_proxy else _REGULAR_IMAGE_GTOL,
                 finalize=False,
-                # Regular images retain their original masked/NaN samples;
-                # unlike compact point fits, they still need this boundary's
-                # finite-input selection.
-                all_finite=False,
+                # Regular images retain their original masked/NaN samples,
+                # so they need this boundary's finite-input selection --
+                # except an unmasked integer frame, which has none to select.
+                all_finite=valid is None and source.dtype.kind in "biu",
             )
             direct_rss = None
             if refinement and options.loss == "linear":
-                complete = np.asarray([
-                    stage_items[cell].valid_mask is None for cell in cells
-                ])
-                if any(stage_items[cell].observations.dtype.kind == "f" for cell in cells):
-                    complete &= np.all(np.isfinite(values), axis=1)
+                # The context counted each cell's finite, unmasked values.
+                complete = native_context[:, 0, 3] == values.shape[1]
                 selected = np.flatnonzero(complete)
                 if selected.size:
+                    centred_parameters = np.array(output.parameters, dtype=np.float64)
+                    centred_parameters[:, 1] -= native_context[:, 0, 0]
                     matrices, direct_rss = _compiled_regular_information_batch(
                         first.x_coordinates, first.y_coordinates,
-                        output.parameters, kernel is _RADIAL_KERNEL, values, complete,
+                        centred_parameters, kernel is _RADIAL_KERNEL, values, complete,
                     )
                     finite = np.all(np.isfinite(matrices), axis=(1, 2))
                     for local in selected:

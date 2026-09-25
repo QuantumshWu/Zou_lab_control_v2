@@ -1173,9 +1173,6 @@ def _qt5_plot_widget_class() -> type[Any]:
                 key=key,
                 identity=(None if source_front is None else source_front.identity),
                 axes=source_axes,
-                interaction=(
-                    None if source_front is None else source_front.interaction
-                ),
                 held=held,
             )
 
@@ -1474,6 +1471,34 @@ def _qt5_plot_widget_class() -> type[Any]:
     _Qt5PlotWidget.__module__ = __name__
     _QT_WIDGET_CLASS = _Qt5PlotWidget
     return _QT_WIDGET_CLASS
+
+
+def host_qt_widget(host: Any, auto_present: bool | None) -> Any:
+    """The Qt widget that shows ``host``, made once and kept on it.
+
+    The widget is built HERE because it is this package's widget: a host
+    handed across a boundary should not oblige the receiver to know which
+    class draws it, and a composition root that constructs Qt widgets is a
+    composition root assembling a UI.  Made lazily, so a host used
+    headlessly never touches Qt at all.  An explicit presentation policy
+    belongs to the first mount; later getters reuse that same adapter.  The
+    in-process host and the render child's facade both answer through here.
+    """
+
+    widget = host._qt_widget
+    if auto_present is not None and not isinstance(auto_present, bool):
+        raise TypeError("auto_present must be boolean or None")
+    if widget is not None and auto_present is not None and widget._auto_present != auto_present:
+        raise ValueError("the host's Qt presentation policy is already fixed")
+    if widget is None:
+        widget = _qt5_plot_widget_class()(
+            host, auto_present=True if auto_present is None else auto_present
+        )
+        host._qt_widget = widget
+        # Whatever was decided before there was a widget to decide it for.
+        if not host._interaction_enabled:
+            widget.set_interaction_enabled(False)
+    return widget
 
 
 def __getattr__(name: str) -> object:

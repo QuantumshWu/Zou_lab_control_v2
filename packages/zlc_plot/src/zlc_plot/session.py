@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from numbers import Integral, Real
 from pathlib import Path
 from threading import Event, RLock, current_thread
@@ -124,6 +124,7 @@ from .specs import (
     PulseTimelinePlot,
     RelimMode,
     RollingPlot,
+    limit_pair_for,
     limit_pairs,
     parameter_schema_for,
     semantic_spec,
@@ -133,9 +134,7 @@ from .semantics import (
     SemanticDescription,
     composed_spec,
     describe_semantics,
-    updated_spec,
 )
-from .session_policy import replace_spec_initial_state
 
 
 _ProjectionInput = OwnedSnapshot | PulseTimelineData
@@ -170,6 +169,65 @@ _CONFIGURATION_STATE_NAMES = (
     "_live_fit_cancel", "_live_fit_request", "_live_fit_future",
     "_live_fit_completion", "_presentation_epoch",
 )
+
+
+def _retained_parameters(
+    old_parameters: Mapping[str, object],
+    schema: ParameterSchema,
+) -> dict[str, object]:
+    """What of the old display values the new schema can still take.
+
+    Most values stand alone and are tried alone.  A limit pair does not: its
+    mode is only valid WITH both bounds, and either bound without the mode
+    is inert.  Tried one field at a time, ``fixed`` was refused for lacking
+    the bounds that were about to follow it, the bounds were then kept on
+    their own, and a reduction change silently turned an operator's fixed
+    range back into automatic limits -- with their numbers still in the bag.
+    Each pair the new schema declares is therefore tried as the group it
+    is, and only a group the new schema cannot take falls back to its
+    members.
+    """
+
+    current = schema.initial_values()
+    retained: dict[str, object] = {}
+    names = tuple(schema.names)
+    for group in limit_pairs():
+        if any(name not in names or name not in old_parameters for name in group):
+            continue
+        try:
+            candidate = schema.prepare_transition(
+                current, {name: old_parameters[name] for name in group}
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+        current = candidate
+        for name in group:
+            retained[name] = candidate[name]
+    for name in names:
+        if name not in old_parameters or name in retained:
+            continue
+        try:
+            candidate = schema.prepare_transition(current, {name: old_parameters[name]})
+        except (TypeError, ValueError, KeyError):
+            continue
+        current = candidate
+        retained[name] = candidate[name]
+    return retained
+
+
+def _viewport_roles(spec: PlotSpec) -> tuple[object, ...]:
+    """The coordinate roles that give a viewport its units and geometry.
+
+    A viewport is display-space state, so it survives a semantic replacement
+    only while these stay the same: grouping and reduction leave them alone,
+    a changed facet source does not.
+    """
+
+    semantic = semantic_spec(spec)
+    roles = [spec.kind, getattr(semantic, "x", None), getattr(semantic, "y", None)]
+    if isinstance(spec, FacetGridPlot) and spec.facet is not None:
+        roles.append(spec.facet)
+    return tuple(roles)
 
 
 def _validated_device_pixel_ratio(value: float) -> float:
@@ -729,8 +787,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             with self._lock:
                 self._assert_open()
             assert self._renderer is not None
+            # ONE projection wrapper for the whole snapshot: every
+            # ``_projected`` builds a fresh context, selector snapshot and
+            # projection copy, and each visible axis asked for about
+            # fourteen -- six hundred per front on a 42-cell grid.
+            projected = self._projected
             return tuple(
-                self._axis_transform_for_axis(axis)
+                self._axis_transform_for_axis(axis, projected)
                 for axis in self._renderer.figure.axes
                 if bool(axis.get_visible())
             )
@@ -740,12 +803,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         role: str,
         x_limits: tuple[float, float],
         y_limits: tuple[float, float],
+        projected: FitProjection,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
         if role == "distribution":
             values = tuple(
-                self._projected._display_scalar_to_canonical(
+                projected._display_scalar_to_canonical(
                     value,
-                    self._projected._value_quantity(),
+                    projected._value_quantity(),
                 )
                 if self._view is not None
                 else float(value)
@@ -755,22 +819,22 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if self._view is None:
             return tuple(map(float, x_limits)), tuple(map(float, y_limits))
         x_values = tuple(
-            self._display_x_scalar_to_canonical(value) for value in x_limits
+            self._display_x_scalar_to_canonical(value, projected) for value in x_limits
         )
         y_values = (
             tuple(map(float, y_limits))
-            if self._projected._is_histogram_plot()
+            if projected._is_histogram_plot()
             else tuple(
-                self._projected._display_scalar_to_canonical(
+                projected._display_scalar_to_canonical(
                     value,
-                    self._projected._y_ref_or_value(),
+                    projected._y_ref_or_value(),
                 )
                 for value in y_limits
             )
         )
         return x_values, y_values
 
-    def _axis_transform_for_axis(self, axis: Any) -> AxisTransform:
+    def _axis_transform_for_axis(self, axis: Any, projected: FitProjection) -> AxisTransform:
         assert self._renderer is not None
         width, height = canvas_physical_size(self._renderer.figure.canvas)
         bbox = axis.get_window_extent()
@@ -782,14 +846,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             role or "main",
             display_x,
             display_y,
+            projected,
         )
         x_scale = self._renderer.axis_scale(axis, "x")
         y_scale = self._renderer.axis_scale(axis, "y")
         canonical_scales = [None, None]
-        semantic = self._projected._semantic_spec()
+        semantic = projected._semantic_spec()
         if isinstance(semantic, ImagePlot) and role in {"image", "facet_cell"}:
             for index, (ref, scale) in enumerate(((semantic.x, x_scale), (semantic.y, y_scale))):
-                quantity = self._projected._coordinate(ref)
+                quantity = projected._coordinate(ref)
                 canonical, display = quantity.canonical_unit, quantity.display_unit
                 if canonical != display and (
                     isinstance(scale, tuple) or not (canonical.is_linear and display.is_linear)
@@ -924,18 +989,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _unit_parameter_sources(self) -> Mapping[str, Any]:
         if self._view is None:
             return MappingProxyType({})
-        semantic = self._projected._semantic_spec()
+        # One projection wrapper per call: each ``_projected`` builds a fresh
+        # context, selector snapshot and projection copy.
+        projected = self._projected
+        semantic = projected._semantic_spec()
         sources: dict[str, Any] = {
-            "value_display_unit": self._projected._value_quantity(),
+            "value_display_unit": projected._value_quantity(),
         }
         x_ref = getattr(semantic, "x", None)
         y_ref = getattr(semantic, "y", None)
         if isinstance(x_ref, AxisRef):
-            sources["x_display_unit"] = self._projected._coordinate(x_ref)
+            sources["x_display_unit"] = projected._coordinate(x_ref)
         if isinstance(y_ref, AxisRef):
-            sources["y_display_unit"] = self._projected._coordinate(y_ref)
+            sources["y_display_unit"] = projected._coordinate(y_ref)
         if isinstance(self._spec, FacetGridPlot) and self._spec.facet is not None:
-            sources["facet_display_unit"] = self._projected._coordinate(
+            sources["facet_display_unit"] = projected._coordinate(
                 self._spec.facet
             )
         return MappingProxyType(sources)
@@ -1027,14 +1095,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # default written out is a setting nobody chose.
             defaults = FitOptions()
             options = {
-                name: getattr(request.options, name)
-                for name in (
-                    "loss",
-                    "max_nfev",
-                    "deadline_seconds",
-                    "max_exact_points",
-                )
-                if getattr(request.options, name) != getattr(defaults, name)
+                option.name: getattr(request.options, option.name)
+                for option in fields(FitOptions)
+                if option.name != "min_bic_gain"
+                and getattr(request.options, option.name)
+                != getattr(defaults, option.name)
             }
             if options:
                 fit["options"] = options
@@ -1203,13 +1268,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         """Semantically and dimensionally valid models for the painted plot."""
 
         with self._render_lock:
-            target = self._projected._fit_target()
+            projected = self._projected
+            target = projected._fit_target()
             if target is None:
                 return ()
             return tuple(
                 model
                 for model in self._fit_engine.registry.models_for(target)
-                if self._projected._fit_model_units_compatible(model)
+                if projected._fit_model_units_compatible(model)
             )
 
     def _resolve_fit_model(self, model: str | FitModelSpec) -> FitModelSpec:
@@ -1394,6 +1460,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         image_overlay: ImagePointOverlay | None,
         solved: _SolvedLiveFit | None,
+        classifier: (
+            tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None
+        ) = None,
     ) -> tuple[_ProjectionPresentation, _FitResolution | None]:
         """Accept one data/overlay/fit answer for every data entry point."""
 
@@ -1405,6 +1474,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         try:
             presentation = self._present_projection_transaction(
                 projection, image_overlay=image_overlay, accepted_fit=accepted_fit,
+                classifier=classifier,
             )
         except Exception:
             self._restore_live_fit_completion(resolution)
@@ -1422,6 +1492,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         image_overlay: ImagePointOverlay | None,
         accepted_fit: _AcceptedFit | None,
+        classifier: (
+            tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None
+        ) = None,
     ) -> _ProjectionPresentation:
         """Swap one complete projected frame, restoring the old frame on failure."""
 
@@ -1506,7 +1579,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._fit_warm_starts = replacement_fit_warm_starts
                 self._image_overlay = image_overlay
                 self._accepted_fit = accepted_fit
-                self._refresh_threshold_classifier()
+                self._refresh_threshold_classifier(prepared=classifier)
                 if isinstance(self._spec, FacetGridPlot):
                     assert new_count is not None
                     self._clamp_facet_state(new_count)
@@ -2071,17 +2144,26 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             or prepared["value_display_unit"] == previous.values.get("value_display_unit")
         ):
             return
-        if (
-            prepared.get("relim_mode") != "fixed"
-            and "relim_mode" in prepared
-        ):
-            return
         semantic = self._projected._semantic_spec()
+        # Which limit pair is the value axis is the kind's to say: a
+        # histogram's value axis is its x axis.
         if isinstance(semantic, (CurvePlot, RollingPlot)):
-            range_names = ("y_min", "y_max")
+            value_low = "y_min"
         elif isinstance(semantic, ImagePlot):
-            range_names = ("color_min", "color_max")
+            value_low = "color_min"
+        elif isinstance(semantic, HistogramPlot):
+            value_low = "x_min"
         else:
+            return
+        # And that pair answers to its OWN mode, which the pair table owns:
+        # a histogram's ``relim_mode`` belongs to the count axis.
+        pair = limit_pair_for(value_low)
+        assert pair is not None
+        mode_name, *range_names = pair
+        if (
+            prepared.get(mode_name) != "fixed"
+            and mode_name in prepared
+        ):
             return
         selected_unit = prepared["value_display_unit"]
         target_unit = (
@@ -2656,26 +2738,30 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self,
         spec: PlotSpec,
         parameters: Mapping[str, object] | None,
-        size: str,
-    ) -> tuple[Any, Any, DisplayStateStore, int | None, FitProjection]:
-        """Build and validate everything a spec replacement would commit."""
+    ) -> tuple[Any, Viewport | None, DisplayStateStore, int | None, FitProjection]:
+        """Build and validate everything a spec replacement would commit.
+
+        Display values are revalidated against the new schema, so units and
+        the other shared fields survive whenever the new kind has them; the
+        viewport survives only unchanged coordinate roles.  Selector and fit
+        state never cross: the caller starts them empty.
+        """
 
         data = self._projection.data
         FitProjection._validate_input(data, spec)
         old_state = self.display_state
         schema = parameter_schema_for(spec, style=self._defaults.style)
-        initial_state = replace_spec_initial_state(
-            self._spec,
-            spec,
-            old_state.values,
-            schema,
-            size=size,
-            viewport=self._viewport,
-            parameters=parameters,
+        retained = _retained_parameters(old_state.values, schema)
+        if parameters:
+            retained.update(parameters)
+        viewport = (
+            self._viewport
+            if _viewport_roles(self._spec) == _viewport_roles(spec)
+            else None
         )
         display_store = DisplayStateStore(
             schema,
-            self._filled_store_values(schema, initial_state.parameters),
+            self._filled_store_values(schema, retained),
             initial_revision=old_state.revision + 1,
             initial_interaction=old_state.interaction,
         )
@@ -2687,7 +2773,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             context=ProjectionContext(
                 display_store.state,
                 SelectorSnapshot(()),
-                viewport=initial_state.viewport,
+                viewport=viewport,
                 focused_facet_index=focused,
             ),
             unit_registry=self._unit_registry,
@@ -2695,31 +2781,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             histogram_projection=None,
         )
         projection._build_view_and_payload()
-        return schema, initial_state, display_store, focused, projection
-
-    def apply_semantic(self, name: str, value: object) -> DisplayDescription:
-        """Apply one semantic edit -- a kind, an axis role, a reduction.
-
-        The composition lives here because both of its inputs already do: the
-        current spec and the schema of the data being drawn.  Every embedder
-        used to do this itself, which meant every embedder kept its own shadow
-        copy of the spec, dug the schema out of the frame it happened to have
-        started from, and reimplemented the same two lines -- three copies of
-        one rule, each able to drift from the session that actually renders.
-
-        ``updated_spec`` stays the single composition authority; this only
-        gives it the two things it needs and submits what it returns.
-        """
-
-        with self._lock:
-            self._assert_open()
-            data = self._projection.data
-            schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
-            candidate = updated_spec(schema, self._spec, str(name), value)
-            unchanged = candidate is self._spec or candidate == self._spec
-        if unchanged:
-            return self.describe_display()
-        return self.replace_spec(candidate)
+        return schema, viewport, display_store, focused, projection
 
     def replace_spec(
         self,
@@ -2791,11 +2853,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         )
                 (
                     schema,
-                    initial_state,
+                    viewport,
                     display_store,
                     focused,
                     projection,
-                ) = self._prepare_replacement(spec, parameters, selected_size)
+                ) = self._prepare_replacement(spec, parameters)
                 assert self._renderer is not None
                 renderer = self._renderer
                 old_plan = renderer.plan
@@ -2833,7 +2895,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     else None
                 )
                 self._size = selected_size
-                self._viewport = initial_state.viewport
+                self._viewport = viewport
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
                 self._accepted_fit = None
@@ -3080,11 +3142,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 with self._lock:
                     self._device_pixel_ratio = previous_ratio
                     self._layout_revision = previous_revision
-                    assert self._renderer is not None
-                    self._renderer.plan = previous_plan
-                    figure = self._renderer.figure
-                    figure._original_dpi = previous_plan.logical_dpi
-                    figure._set_dpi(previous_plan.dpi, forward=False)
                 try:
                     self._apply_layout_plan(previous_plan)
                 except Exception:
@@ -3262,17 +3319,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if image_frame is not None and revision is not None:
             raise ValueError("ImageFrame revision is owned by its snapshot")
 
-        removed_selection_events: tuple[SelectionEvent, ...] = ()
-        withdrawn_fit = False
-        generation_retirement: tuple[Event, Event, Event, Future | None] | None = None
         with self._render_lock:
             with self._lock:
                 self._assert_open()
-                generation_changed = False
                 if isinstance(data, OwnedSnapshot):
                     assert isinstance(self._projection.data, OwnedSnapshot)
-                    data_revision = snapshot_revision(data)
-                    if revision is not None and revision != data_revision:
+                    selected_revision = snapshot_revision(data)
+                    if revision is not None and revision != selected_revision:
                         raise ValueError(
                             "OwnedSnapshot revision must equal the supplied revision"
                         )
@@ -3283,147 +3336,47 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         or indexed_schemas_compatible(previous_schema, next_schema)
                     ):
                         raise ValueError("data schema must remain exactly constant")
-                    generation_changed = self._data_generation_changed(
-                        self._projection.data,
-                        data,
-                    )
-                    # A new run over the SAME geometry keeps the operator's
-                    # selectors: the axes still name the same world, and
-                    # wiping the table per shot erased the very markers the
-                    # panel record had just mirrored.  ONE place decides
-                    # whether the world moved -- the projection transaction,
-                    # which retires the selector table when it does.  Asked
-                    # a second time here, off the FULL schema name, a
-                    # rolling panel sliding its shot window announced every
-                    # marker removed while that transaction kept every one
-                    # of them.  These are the events for a table it MAY
-                    # retire, built here while the old projection can still
-                    # display them and dropped below if it kept the table.
-                    if generation_changed:
-                        removed_selection_events = tuple(
-                            SelectionEvent(
-                                SelectionChange.REMOVED,
-                                state,
-                                (
-                                    self._special_display_selector_state(state)
-                                    if self._view is None
-                                    else self._projected._display_selector_state(state)
-                                ),
-                                self.data_revision,
-                                self.data_generation,
-                                self._selection_subject(),
-                                (
-                                    self._classifier_threshold_targets_state()
-                                    if state.kind is SelectorKind.THRESHOLD
-                                    else ()
-                                ),
-                            )
-                            for state in self._selector_controller.states()
-                        )
-                    previous_revision = snapshot_revision(self._projection.data)
-                    if not generation_changed and data_revision <= previous_revision:
+                    if self.holds_live_revision(data, selected_revision):
                         raise ValueError(
                             "data revision must increase: "
-                            f"{data_revision} <= {previous_revision}"
+                            f"{selected_revision} <= {self.data_revision}"
                         )
-                    if image_frame is not None and not generation_changed:
+                    if image_frame is not None and not self._data_generation_changed(
+                        self._projection.data, data
+                    ):
                         self._validate_image_frame_overlay(
                             self._image_overlay,
                             image_frame.overlay,
                         )
                 else:
-                    next_revision = (
+                    selected_revision = (
                         self.data_revision + 1
                         if revision is None
                         else revision
                     )
-                    if next_revision <= self.data_revision:
+                    if selected_revision <= self.data_revision:
                         raise ValueError(
                             "data revision must increase: "
-                            f"{next_revision} <= {self.data_revision}"
+                            f"{selected_revision} <= {self.data_revision}"
                         )
-                selected_revision = (
-                    snapshot_revision(data)
-                    if isinstance(data, OwnedSnapshot)
-                    else next_revision
-                )
-                if generation_changed:
-                    projection_context = ProjectionContext(
-                        display_state=self.display_state,
-                        selector_snapshot=self._selector_controller.snapshot(),
-                        viewport=self._viewport,
-                        focused_facet_index=self._focused_facet_index,
-                    )
-                else:
-                    projection_context = self._projection_context()
                 projection = self._projection._fork_frozen(
                     data=data,
                     revision=selected_revision,
-                    context=projection_context,
+                    context=self._projection_context(),
                 )
                 projection._build_view_and_payload()
-            started = None if generation_changed else self._pair_started(projection)
+            # A new run is decided where the hosted pipeline decides it: the
+            # projection transaction keeps the operator's selectors over the
+            # same geometry and retires them over another, and an armed fit
+            # pairs with the new run's frame as it does with any other.
+            started = self._pair_started(projection)
             solved = None if started is None else self._solve_live_pair(started)
             presentation, resolution = self._present_solved_projection(
                 projection, image_overlay=image_overlay, solved=solved,
             )
-            if generation_changed:
-                withdrawn_fit = presentation.previous_accepted_fit is not None
-                if (
-                    presentation.previous_selector_controller
-                    is self._selector_controller
-                ):
-                    # The transaction kept the operator's table: the world
-                    # these markers name still stands, so none of them was
-                    # removed and none is announced.
-                    removed_selection_events = ()
-                with self._lock:
-                    fit_cancel = self._fit_cancel
-                    live_fit_cancel = self._live_fit_cancel
-                    live_prepare_cancel = self._live_prepare_cancel
-                    completion = self._live_fit_completion
-                    self._fit_cancel = Event()
-                    self._live_fit_cancel = Event()
-                    self._live_prepare_cancel = Event()
-                    self._live_prepare_future = None
-                    self._live_fit_completion = None
-                    self._live_fit_request = None
-                    self._live_fit_future = None
-                    self._fit_context_generation += 1
-                    self._fit_request_generation += 1
-                generation_retirement = (
-                    fit_cancel,
-                    live_fit_cancel,
-                    live_prepare_cancel,
-                    completion,
-                )
             self._emit_projection_focus_change(presentation)
         if resolution is not None:
             self._resolve_fit_completion(resolution)
-        if generation_retirement is not None:
-            fit_cancel, live_fit_cancel, live_prepare_cancel, completion = (
-                generation_retirement
-            )
-            fit_cancel.set()
-            live_fit_cancel.set()
-            live_prepare_cancel.set()
-            if completion is not None and not completion.done():
-                completion.set_exception(
-                    FitCancelled("data generation replaced")
-                )
-            for event in removed_selection_events:
-                with self._lock:
-                    subscriptions = tuple(
-                        item
-                        for item in self._selection_subscriptions
-                        if item.selector_kind in (None, event.selector.kind)
-                    )
-                self._notify_callbacks(
-                    tuple(item.callback for item in subscriptions),
-                    event,
-                )
-            if withdrawn_fit:
-                self._notify_fit(None)
 
     def update_image_frame(self, frame: ImageFrame) -> ImageFrame:
         """Present image data and its point layer in one render transaction."""
@@ -3870,7 +3823,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if display:
                 if self._view is not None:
                     point = CrosshairPoint(
-                        self._display_x_scalar_to_canonical(x),
+                        self._display_x_scalar_to_canonical(x, self._projected),
                         y
                         if self._projected._is_histogram_plot()
                         else self._projected._display_scalar_to_canonical(
@@ -3951,7 +3904,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if not isinstance(value, CrosshairPoint):
                     raise TypeError("crosshair selector requires CrosshairPoint")
                 canonical = CrosshairPoint(
-                    self._display_x_scalar_to_canonical(value.x),
+                    self._display_x_scalar_to_canonical(value.x, self._projected),
                     value.y
                     if self._projected._is_histogram_plot()
                     else self._projected._display_scalar_to_canonical(
@@ -4025,7 +3978,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 # not withdrawing it.
                 chosen_previous = self._classifier_thresholds
                 if kind is SelectorKind.THRESHOLD and self._classifier_thresholds:
-                    index = 0 if state.facet_index is None else state.facet_index
+                    # The distribution the line was drawn on, found the way
+                    # the install found it: a group splits a facet into
+                    # several distributions, so a facet number is not one.
+                    index = self._classifier_distribution_index(state.facet_index)
                     cleared = dict(self._classifier_thresholds)
                     cleared.pop(index, None)
                     self._classifier_thresholds = cleared
@@ -4448,7 +4404,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             counts.append(last - first)
             scales.append(scale)
 
-        aspect = _image_cell_aspect(*axes_values)
+        aspect = _image_cell_aspect(*axes_values, tuple(scales))
         if aspect is None or not math.isclose(
             pitches[0], pitches[1] * aspect, rel_tol=1e-9, abs_tol=0.0
         ):
@@ -4564,10 +4520,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             else value
         )
 
-    def _display_x_scalar_to_canonical(self, value: float) -> float:
-        source = self._projected._x_selector_source()
-        quantity = self._projected._coordinate(source) if isinstance(source, AxisRef) else source
-        return self._projected._display_scalar_to_canonical(value, quantity)
+    def _display_x_scalar_to_canonical(
+        self, value: float, projected: FitProjection
+    ) -> float:
+        source = projected._x_selector_source()
+        quantity = projected._coordinate(source) if isinstance(source, AxisRef) else source
+        return projected._display_scalar_to_canonical(value, quantity)
 
 
     def _area_display_to_canonical(

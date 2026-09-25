@@ -13,7 +13,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import partial
+from functools import cache, partial
 from typing import ClassVar, get_args, TypeAlias
 
 from zlc_data.units import DEFAULT_UNITS, UnitError, resolve_unit
@@ -1238,12 +1238,14 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
     )
 
 
+@cache
 def non_portable_display_names() -> frozenset[str]:
     """The display names whose value must not follow a panel across kinds.
 
     THE answer, derived from every kind's own declarations rather than
     kept as a list beside them: a spec says whether it is portable, and
-    this reads the specs.
+    this reads the specs.  Declarations are constants, so it is read once:
+    a caller asks it for every display key of a panel.
     """
 
     from .config import DEFAULTS  # noqa: PLC0415

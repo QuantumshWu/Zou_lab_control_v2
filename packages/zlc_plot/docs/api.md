@@ -91,8 +91,8 @@ Rolling 的 `trailing=N` 决定每个画出的点平均多少枪：`1`（默认�
 自己，`N` 是最近 N 枪的均值，band 也随之变成这 N 枪的标准误。它读的是保留
 下来的矩，因此一枪 pool 的样本越多权重越大——这是均值的算术，所以在非 MEAN
 reduction 上它不起作用。窗口未填满时它就是「至今为止的均值」，不会有跳变。
-`window=` 仍然只决定看得见多少枪、永不改变数字；当 `trailing` 比 `window`
-更靠后时，runtime 的历史保留量按 `trailing` 计。
+`window=` 决定保留并看得见多少枪；`trailing` 不改变 runtime 的历史保留量，
+窗口左端不足 `trailing` 枪时，那一点就是窗内已有那几枪的均值。
 
 `curve(...)`、`image(...)` 与 `rolling(...)` 都通过 `reduction=` 暴露与各自
 typed specification 相同的 reduction 选择；字符串简写只表示具名Point axis，
@@ -322,7 +322,6 @@ print(description.limits, description.viewport)
 colormap catalogue (`inferno`, `viridis`, `magma`, `plasma`, `gray`) when those
 parameters apply. A frontend maps the returned
 toolkit-neutral controls to widgets; it does not duplicate validation rules.
-`zlc_plot.qt_controls.Qt5ParameterPanel` provides the PyQt5 mapping.
 
 ### Semantic edit description
 
@@ -344,15 +343,12 @@ handler admits the schema; `axis_choices` is the stable ordered set of
 `AxisRef` values declared by that schema; and `fields` contains the current
 `kind`, one `fate:<domain>:<axis id>` field per dataset axis -- along it as
 x, split by it as group, laid out by it as facet, pooled, reduced, or pinned
-to one tagged Scope coordinate, as the kind admits -- and `reduction`. Every `zlc_plot.semantics.SemanticField` is
-marked `rebuild=True`. A frontend that owns a complete form submits its whole
+to one tagged Scope coordinate, as the kind admits -- and `reduction`. A
+frontend that owns a complete form submits its whole
 semantic/display/size/overlay/fit target once through `configure()`; `zlc_plot`
 composes the typed spec and chooses the minimum render path. Code that already
 owns a complete typed spec may call `replace_spec()` directly. `facet_max_cells`
-is the layout-declared capacity for a grid. `zlc_plot.ui.semantic_controls()`
-projects this exact description into the same toolkit-neutral
-`zlc_plot.ui.ParameterControl` pipeline used by display controls; semantic controls carry
-`semantic=True` and `rebuild=True`.
+is the layout-declared capacity for a grid.
 
 Frequently changed presentation state is edited in place:
 
@@ -467,7 +463,9 @@ adds a suffix to an axis or colorbar label. Passing `None` restores the
 data-declared display unit.
 
 Curve, Rolling and Histogram y limits use the current display-value/count unit.
-Image color limits use the current displayed value unit. Normal mode keeps a
+A Histogram's x axis is the value itself, so its written x limits are in the
+value display unit and a value-unit change converts them (ms -> s keeps the
+same physical range). Image color limits use the current displayed value unit. Normal mode keeps a
 zero baseline for non-negative data; tight mode follows both bounds; fixed mode
 is controlled through the public helpers:
 
@@ -537,8 +535,10 @@ available asynchronously through `plot_host.fit_models()`; Notebook and GUI
 must consume it instead of inferring compatibility from independent arity.
 
 The built-in catalogue is Series: Lorentzian (default), Gaussian with offset,
-symmetric Lorentzian doublet, damped sine, exponential decay and release–recapture; Histogram:
-Bimodal Gaussian (default) and Single Gaussian; Image: Radial Gaussian center
+symmetric Lorentzian doublet, damped sine, exponential decay, saturation
+(`saturation`) and release–recapture; Histogram: Bimodal Gaussian (default),
+Single Gaussian, Poisson–Gaussian (`histogram_poisson_gaussian`) and Bimodal
+Poisson–Gaussian (`bimodal_poisson_gaussian`); Image: Radial Gaussian center
 (default, only for compatible x/y coordinate dimensions) plus Anisotropic
 Gaussian center for independent x/y dimensions. PulseTimeline has no numeric
 fit target.
@@ -594,7 +594,7 @@ Histogram 的 `threshold_classifier` 独立拥有 bimodal classification fit、�
 selector/viewport 改变后旧结果只标为 `"lagging"`，不会在 pointer motion 中启动新的 solver。
 图内保留上一份稳定 overlay；下一条 data revision 才一次性替换 curve 与参数文字。
 
-`zlc_plot.fit.FitResult` 包含 success/message、model id、参数值、covariance/error、selected indices 和 `source_revision`；facet batch 使用同名的 `source_revision`，而 `batch_revision` 只表示发布顺序。只有 source revision 仍然有效的结果才会显示到当前图。Curve、Rolling、Histogram、Image 与 FacetGrid 的三种 cell 语义共用同一 `zlc_plot._fit_projection.FitSelection`、solver、结果接受和 overlay presentation 生命周期；差异只在于从当前 painted payload 生成 series、bin counts 或 scalar-field solver input。FacetGrid 的 `fit(..., live=True)` 每个 data revision 对所有 cell 生成一个 `zlc_plot.fit.FacetFitBatchResult`，其 `overlays` 与 `results` 按 cell 同序；overview 画全部 cell 的 fit 曲线和每 cell 一个 headline 参数注释，focus 后显示所选 cell 的完整参数框。group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 随后筛选实际显示的 projection；fit 不会另建 raw tensor mask/reduction 路径。Rolling 还会把候选数据限制在当前可见 window。selector/viewport 决定参数估计样本，`zlc_plot.fit.FitResult.fitted` 与 residuals 也对应这些样本；图内 overlay 则用已接受参数覆盖当前完整显示域。`FitResult.selected_indices` 索引当前 fit projection（series、histogram bins 或扁平 image projection），不是原始 snapshot 的 flat indices；原始数据索引只由显式 `selector_data(kind)` 返回。成功结果同时显示使用当前显示单位的公式、参数值和 `±` 不确定度。
+`zlc_plot.fit.FitResult` 包含 success/message、model id、参数值、covariance/error、selected indices 和 `source_revision`；facet batch 使用同名的 `source_revision`，而 `batch_revision` 只表示发布顺序。只有 source revision 仍然有效的结果才会显示到当前图。Curve、Rolling、Histogram、Image 与 FacetGrid 的三种 cell 语义共用同一 `zlc_plot._fit_projection.FitSelection`、solver、结果接受和 overlay presentation 生命周期；差异只在于从当前 painted payload 生成 series、bin counts 或 scalar-field solver input。FacetGrid 的 `fit(..., live=True)` 每个 data revision 对所有 cell 生成一个 `zlc_plot.fit.FacetFitBatchResult`，其 `overlays` 与 `results` 按 cell 同序；overview 画全部 cell 的 fit 曲线和每 cell 一个 headline 参数注释，focus 后显示所选 cell 的完整参数框。group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 随后筛选实际显示的 projection；fit 不会另建 raw tensor mask/reduction 路径。Rolling 还会把候选数据限制在当前可见 window。selector/viewport 决定参数估计样本，`zlc_plot.fit.FitResult.fitted_values` 与 residuals 也对应这些样本；一维图内 overlay 用已接受参数画在拟合窗口上（所选样本坐标的最小到最大值之间稠密求值），窗口之外不画。`FitResult.selected_indices` 索引当前 fit projection（series、histogram bins 或扁平 image projection），不是原始 snapshot 的 flat indices；原始数据索引只由显式 `selector_data(kind)` 返回。成功结果同时显示使用当前显示单位的公式、参数值和 `±` 不确定度。
 
 Facet批量结果直接公开与cell同序的数值列：
 
@@ -605,14 +605,14 @@ batch.parameter_values
 batch.parameter_errors
 batch.parameter_error_validity
 batch.success
-batch.sample_coordinates
-batch.sample_labels
+batch.sample_axes
 batch.source_revision
 batch.batch_revision
 ```
 
-Scalar`FitResult`公开自己的参数向量、standard errors和source/batch revision；
-不再构造一份重复table。Facet failure messages由`batch.failure_messages`提供。
+`batch.sample_axes`是有序的`(name, AxisSpec)`对，Facet×Group的每一行都由它定位；
+单个fit是同一张表的无轴一项。Scalar`FitResult`公开自己的参数向量、standard errors
+（`parameter_errors`）和source/batch revision；不再构造一份重复table。Facet failure messages由`batch.failure_messages`提供。
 
 `fit()` / `fit_async()`默认启用live fit。Runtime提交的每个data revision通过同一
 prepare/solve/commit入口与匹配的fit原子呈现。selector、viewport、unit和resize
@@ -638,7 +638,7 @@ renderer again. The default remains future events only.
 
 Live data pair的event在solve结果通过request/projection identity检查后发布，因此Rolling可以与main raster并行准备；此时主图仍保持旧front，直到owner把`data@N + fit@N`一起commit/present。显式manual `fit()`则仍在accepted overlay transaction之后通知。两种路径都只发布一次同一source revision；event callback不得被当成“像素已呈现”的信号。
 
-Histogram fit 使用 count projection；`density=True` 或 `cumulative=True` 时会明确拒绝 fit，切回两者均为 `False` 后再调用。Threshold classifier 同样要求 `cumulative=False`，但不依赖普通 fit 的启停或 model choice。
+Histogram fit 使用 count projection；`density=True` 或 `cumulative=True` 时会明确拒绝 fit，切回两者均为 `False` 后再调用。它的观测数取 bin 数与样本数（各 bin 计数之和）中较小者；不多于自由参数时与其它 fit 一样以 "needs more points" 拒绝。Threshold classifier 同样要求 `cumulative=False`，但不依赖普通 fit 的启停或 model choice。
 
 Fit annotation 使用固定 axes-fraction anchor，单图/focus 的 full annotation 为
 3.25 pt，FacetGrid overview 的单行 headline annotation 为固定 3.5 pt；两者
@@ -646,11 +646,15 @@ Fit annotation 使用固定 axes-fraction anchor，单图/focus 的 full annotat
 内容或 fit result，不重新寻找 annotation anchor，因此框选、pan 或 live revision
 不会让参数文字跳位。
 
-Built-in models provide analytic residual Jacobians to SciPy's common
-`least_squares` path; custom models may omit the declaration and retain
-two-point numerical differentiation. A live fit request uses the last accepted
-parameters for each cell as the next revision's initial seed, falling back to
-the model initializer on the first frame or after a failed warm solve.
+Built-in models solve on the compiled engine (`zlc_plot._fit_compiled`): one
+trust-region solver with each model's analytic Jacobian and compiled automatic
+seeds, single and batch sharing the same math. A complete `initial` replaces
+the automatic seeds; a partial one fills just the named parameters of every
+compiled cold seed. A live fit request adds the last accepted parameters of each cell as a
+warm candidate that competes with the fresh cold seeds and is cleared by a
+failed solve; it never replaces them. A custom model without a compiled
+descriptor takes SciPy's `least_squares`, with its declared analytic Jacobian
+or two-point numerical differentiation; SciPy is imported only on that path.
 
 自定义模型可作为 `FitModelSpec` 直接传给 `fit()`，或在
 `zlc_plot.fit.FitModelRegistry` 中注册后由 `zlc_plot.fit.FitEngine` 注入 session。参数的 canonical/display
@@ -748,7 +752,6 @@ PyQt5是根产品的固定runtime依赖，不存在单独的Plot Qt extra。
 from zlc_plot import (
     AxisRef,
     CurvePlot,
-    Qt5ParameterPanel,
     Qt5PlotWidget,
     RasterPlotHost,
     ensure_qt5_application,
@@ -761,9 +764,7 @@ plot_host = RasterPlotHost.from_plot(
     size="2x2",
 )
 widget = Qt5PlotWidget(plot_host)
-description = plot_host.describe_display().result().value
-parameters = Qt5ParameterPanel(description)
-parameters.parameterEdited.connect(plot_host.set_parameter)
+plot_host.set_parameter("title", "Scan")
 widget.show()
 try:
     app.exec_()
@@ -771,6 +772,11 @@ finally:
     widget.close_adapter()
     plot_host.close()
 ```
+
+`from_plot()` 是进程内的 host，供脚本、notebook 与测试使用。产品窗口不在自己的进程里画图：
+它们从渲染子进程的 `build_host(plot_input, spec, ...)` 取得同一接口的远端 host
+（`RenderProcess`；live Monitor 面板用 `RenderProcessPool`，一面板一子进程），`Qt5PlotWidget`
+的用法不变。
 
 Adapter 只支持 PyQt5 并惰性导入。必须由 `ensure_qt5_application()` 创建或取得首个
 `QApplication`，以便在创建 application 前统一设置 High-DPI 属性。`Qt5PlotWidget`

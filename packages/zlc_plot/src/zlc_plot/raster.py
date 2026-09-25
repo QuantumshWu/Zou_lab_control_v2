@@ -329,11 +329,10 @@ class RasterPlotHost:
         self._host_id = uuid4().hex if host_id is None else text(host_id, "host_id")
         self._sequence = 0
         self._front: RasterFront | None = None
-        self._initial_metadata: tuple[object, object] | None = None
-        #: The configure target still queued, so a call that coalesces on
-        #: top of it carries its fields forward.  See ``configure``.
-        self._queued_configuration: dict[str, object] | None = None
-        self._initial_error: BaseException | None = None
+        #: Every configure target not yet applied, in arrival order.  The
+        #: one coalesced task that runs drains and merges them all.  See
+        #: ``configure``.
+        self._queued_configurations: list[dict[str, object]] = []
         #: Built on demand by :meth:`qt_widget`; a headless host never has one.
         self._qt_widget = None
         #: Whether dragging on this plot is allowed.  Held here rather than
@@ -341,7 +340,6 @@ class RasterPlotHost:
         #: widget exists and must survive until it does.
         self._interaction_enabled = True
         self._front_callbacks: list[Callable[[RasterFront], None]] = []
-        self._last_front_callback_error: Exception | None = None
         self._thread = Thread(
             target=self._run,
             name="zlc-raster-plot",
@@ -353,15 +351,6 @@ class RasterPlotHost:
             mode=_DispatchMode.PUBLISH,
             coalesce_key="initial-front",
         )
-        initial_metadata = self._submit(
-            lambda: (
-                self._require_session().describe_display(),
-                self._require_session().fit_models,
-            ),
-            mode=_DispatchMode.CONTROL,
-            coalesce_key="initial-metadata",
-        )
-        initial_metadata.add_done_callback(self._capture_initial_operation)
 
     @classmethod
     def from_plot(
@@ -487,33 +476,6 @@ class RasterPlotHost:
         with self._condition:
             return self._front
 
-    def _capture_initial_operation(
-        self,
-        completed: Future[RasterOperation[object]],
-    ) -> None:
-        """Cache the initial worker result so the GUI owner never resolves it."""
-
-        try:
-            operation = completed.result()
-            metadata = operation.value
-            if not isinstance(metadata, tuple) or len(metadata) != 2:
-                raise TypeError("initial raster metadata must be a pair")
-        except BaseException as error:
-            with self._condition:
-                self._initial_error = error
-        else:
-            with self._condition:
-                self._initial_metadata = metadata
-
-    @property
-    def initial_state(
-        self,
-    ) -> tuple[tuple[object, object] | None, BaseException | None]:
-        """Already-completed metadata/error for non-blocking owner projection."""
-
-        with self._condition:
-            return self._initial_metadata, self._initial_error
-
     @property
     def host_id(self) -> str:
         """Stable opaque identity stamped into every front from this host."""
@@ -555,30 +517,11 @@ class RasterPlotHost:
         return None if front is None else tuple(front.logical_size)
 
     def qt_widget(self, *, auto_present: bool | None = None):
-        """The Qt widget that shows this host, made once and kept.
+        """The Qt widget that shows this host, made once and kept."""
 
-        The widget is built HERE because it is this package's widget: a host
-        handed across a boundary should not oblige the receiver to know which
-        class draws it, and a composition root that constructs Qt widgets is a
-        composition root assembling a UI.  Made lazily, so a host used
-        headlessly never touches Qt at all. An explicit presentation policy
-        belongs to the first mount; later getters reuse that same adapter.
-        """
+        from .backends import host_qt_widget
 
-        widget = self._qt_widget
-        if auto_present is not None and not isinstance(auto_present, bool):
-            raise TypeError("auto_present must be boolean or None")
-        if widget is not None and auto_present is not None and widget._auto_present != auto_present:
-            raise ValueError("the host's Qt presentation policy is already fixed")
-        if widget is None:
-            from .backends import Qt5PlotWidget
-
-            widget = Qt5PlotWidget(self, auto_present=True if auto_present is None else auto_present)
-            self._qt_widget = widget
-            # Whatever was decided before there was a widget to decide it for.
-            if not self._interaction_enabled:
-                widget.set_interaction_enabled(False)
-        return widget
+        return host_qt_widget(self, auto_present)
 
     def set_interaction_enabled(self, enabled: bool) -> None:
         """Allow or suspend dragging on this plot -- selectors, zoom, pan.
@@ -792,9 +735,9 @@ class RasterPlotHost:
             front = self._capture_front() if publishes else self.front
             if front is None:
                 front = self._capture_front()
+            delivery_failure = None
             if publishes:
-                if not self._promote(front):
-                    raise RuntimeError("raster host closed before front promotion")
+                delivery_failure = self._promote(front)
                 promoted = True
                 # The surface callback is intentionally lossless while a
                 # CONTROL task is running.  If this task itself captured the
@@ -805,6 +748,8 @@ class RasterPlotHost:
             if mode is _DispatchMode.PRESENTATION:
                 assert after_publish is not None
                 after_publish()
+            if delivery_failure is not None:
+                raise delivery_failure
             return RasterOperation(value, front)
         except Exception:
             if mode is _DispatchMode.PRESENTATION and not promoted:
@@ -1398,47 +1343,34 @@ class RasterPlotHost:
             configuration["fit_live"] = fit_live
 
         with self._condition:
-            queued = self._queued_configuration
-            if queued is not None:
-                merged = dict(queued)
-                for name in ("interaction", "presentation"):
-                    if name in configuration:
-                        configuration[name] = {**merged.get(name, {}), **configuration[name]}
-                if "selectors" in configuration:
-                    merged.pop("selector_updates", None)
-                elif "selector_updates" in configuration:
-                    configuration["selector_updates"] = {
-                        **merged.get("selector_updates", {}),
-                        **configuration["selector_updates"],
-                    }
-                merged.update(configuration)
-                configuration = merged
-            self._queued_configuration = configuration
+            self._queued_configurations.append(configuration)
 
-        def forget() -> None:
+        def apply() -> "DisplayDescription":
+            # Drained when the task RUNS, not when it was queued: a call that
+            # arrives after this point starts a task of its own, so nothing
+            # already applied is merged into it and applied twice.
             with self._condition:
-                if self._queued_configuration is configuration:
-                    self._queued_configuration = None
+                queued, self._queued_configurations = self._queued_configurations, []
+            merged: dict[str, object] = {}
+            for target in queued:
+                target = dict(target)
+                if "selectors" in target:
+                    merged.pop("selector_updates", None)
+                # Deltas merge; every other field is a target the later call
+                # replaces.  ``parameter_updates`` is the transaction's
+                # authored delta, so an earlier edit's names must survive a
+                # later edit of a different field.
+                for name in ("interaction", "presentation", "parameter_updates", "selector_updates"):
+                    if name in target:
+                        target[name] = {**merged.get(name, {}), **target[name]}
+                merged.update(target)
+            return self._require_session().configure(**merged)
 
-        pending = self._dispatch_session(
-            lambda: (forget(), self._require_session().configure(**configuration))[1],
+        return self._dispatch_session(
+            apply,
             _mode=_DispatchMode.ADAPTIVE,
             coalesce_key="configuration",
         )
-
-        def remember(completed: Future[RasterOperation[object]]) -> None:
-            if completed.cancelled():
-                return
-            try:
-                description = completed.result().value
-                models = tuple(description.fit_models)
-            except BaseException:
-                return
-            with self._condition:
-                self._initial_metadata = (description, models)
-
-        pending.add_done_callback(remember)
-        return pending
 
     def describe_display(self) -> Future[RasterOperation["DisplayDescription"]]:
         """Return the worker session's immutable control-plane description."""
@@ -1469,25 +1401,6 @@ class RasterPlotHost:
                 spec,
                 parameters=parameters,
             ),
-            _mode=_DispatchMode.PUBLISH,
-            coalesce_key="spec",
-        )
-
-    def apply_semantic(
-        self,
-        name: str,
-        value: object,
-    ) -> Future[RasterOperation["DisplayDescription"]]:
-        """Apply one semantic edit, composed against what is currently drawn.
-
-        The caller supplies only what the operator changed.  Composing the
-        candidate needs the current spec and the data schema, both of which the
-        session holds -- so asking a caller for them is asking it to keep a copy
-        of state it does not own.
-        """
-
-        return self._dispatch_session(
-            lambda: self._require_session().apply_semantic(str(name), value),
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="spec",
         )
@@ -1927,7 +1840,6 @@ class RasterPlotHost:
         key: str | None = None,
         identity: RasterIdentity | None = None,
         axes: AxisTransform | None = None,
-        interaction: RasterInteractionMap | None = None,
         held: bool = False,
     ) -> Future[RasterOperation[object]]:
         """Route Qt raster input through PlotSession's interaction engine.
@@ -1955,12 +1867,6 @@ class RasterPlotHost:
             raise TypeError("pointer axes must be AxisTransform or None")
         if axes is not None and identity is None:
             raise ValueError("pointer axes require their painted front identity")
-        if interaction is not None and not isinstance(
-            interaction, RasterInteractionMap
-        ):
-            raise TypeError("pointer interaction must be RasterInteractionMap or None")
-        if interaction is not None and identity is None:
-            raise ValueError("pointer interaction requires its painted front identity")
 
         def apply() -> object:
             session = self._require_session()
@@ -2415,10 +2321,19 @@ class RasterPlotHost:
             ),
         )
 
-    def _promote(self, front: RasterFront) -> bool:
+    def _promote(self, front: RasterFront) -> Exception | None:
+        """Make ``front`` current and hand it to every subscriber.
+
+        Every subscriber is served even when one fails, and the first failure
+        is returned so the task that promoted the front fails with it.  In a
+        render child the one subscriber is the publish to the parent: a
+        publish that failed quietly left the panel frozen on its last picture
+        with nothing anywhere saying why.
+        """
+
         with self._condition:
             if self._closing:
-                return False
+                raise RuntimeError("raster host closed before front promotion")
             self._front = front
             # The first front's future served ``wait_for_front`` until there
             # was a front; kept past that, it pinned the first front's block
@@ -2426,14 +2341,14 @@ class RasterPlotHost:
             # segment per panel that never went back to the pool.
             self._initial_front = None
             callbacks = tuple(self._front_callbacks)
+        failure: Exception | None = None
         for callback in callbacks:
             try:
                 callback(front)
             except Exception as error:
-                with self._condition:
-                    self._last_front_callback_error = error
-                continue
-        return True
+                if failure is None:
+                    failure = error
+        return failure
 
     #: How long close waits for the worker by default.
     #:

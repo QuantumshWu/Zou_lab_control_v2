@@ -7,12 +7,13 @@ topology from values.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import product
 import math
 from operator import is_
 from numbers import Integral
+import threading
 from typing import Any, TypeAlias
 import warnings
 
@@ -21,9 +22,6 @@ from numpy.typing import ArrayLike, NDArray
 
 from zlc_data import (
     CoordinateScalar,
-    BlockId,
-    DatasetRevisionRef,
-    DatasetSchema,
     LATEST_COORDINATE,
     OwnedSnapshot,
     canonical_coordinate_scalar,
@@ -33,10 +31,6 @@ from zlc_data.snapshot_projection import (
     SHOT_TIME_AXIS_ID,
     IndexedHistoryLayout,
     indexed_history_layout,
-    restrict_snapshot,
-    restricted_values,
-    selection_indices,
-    value_selection,
 )
 
 from .data_contract import (
@@ -50,11 +44,8 @@ from .data_contract import (
     schema_shape,
     schema_value_unit,
     snapshot_generation,
-    snapshot_sigma,
     snapshot_revision,
     snapshot_schema,
-    snapshot_validity,
-    snapshot_values,
 )
 
 from .kinds import AxisRef, PlotKind
@@ -267,9 +258,7 @@ class RollingHistory:
     replaced was constructed five thousand times per drawn frame -- most
     of that re-proving, one shot at a time, exactly what the batch
     establishes here once -- and the payload's first act was to stack the
-    shots straight back into these planes.  Row access (``history[i]``)
-    hands out a lightweight :class:`RollingShot` view for the callers
-    that want one shot.
+    shots straight back into these planes.
     """
 
     revision: int
@@ -340,58 +329,6 @@ class RollingHistory:
 
     def __len__(self) -> int:
         return int(self.values.shape[0])
-
-    def __getitem__(self, index: int) -> RollingShot:
-        shots = len(self)
-        if not -shots <= index < shots:
-            raise IndexError(index)
-        return RollingShot(self, index % shots)
-
-    def __iter__(self) -> Iterator[RollingShot]:
-        for index in range(len(self)):
-            yield RollingShot(self, index)
-
-
-@dataclass(frozen=True, slots=True)
-class RollingShot:
-    """One shot of a :class:`RollingHistory`, as row views of its planes."""
-
-    history: RollingHistory
-    index: int
-
-    @property
-    def revision(self) -> int:
-        return self.history.revision
-
-    @property
-    def generation(self) -> str:
-        return self.history.generation
-
-    @property
-    def values(self) -> NDArray[Any]:
-        return self.history.values[self.index]
-
-    @property
-    def valid(self) -> NDArray[np.bool_]:
-        return self.history.valid[self.index]
-
-    @property
-    def counts(self) -> NDArray[np.int64]:
-        return self.history.counts[self.index]
-
-    @property
-    def group_keys(self) -> tuple[tuple[AxisValue, ...], ...]:
-        return self.history.group_keys
-
-    @property
-    def source_index(self) -> int | None:
-        indices = self.history.source_indices
-        return None if indices is None else int(indices[self.index])
-
-    @property
-    def sem(self) -> NDArray[np.float64] | None:
-        sem = self.history.sem
-        return None if sem is None else sem[self.index]
 
 
 @dataclass(frozen=True, slots=True)
@@ -709,7 +646,6 @@ class DataView:
         "_histogram_cache",
         "_unit_registry_revision",
         "_history_layout",
-        "_history_mask_cache",
         "_frequency_carry",
         "_rolling_carry",
         "_packed_segments",
@@ -760,6 +696,7 @@ class DataView:
         self._packed_carry = (
             (inherit_domains_from._snapshot, inherit_domains_from._packed_segments)
             if snapshot.block.values is None and inherit_domains_from is not None
+            and inherit_domains_from._snapshot.block.values is None
             and inherit_domains_from._packed_segments is not None
             else None
         )
@@ -769,12 +706,10 @@ class DataView:
         self._pooled_cache: NDArray[Any] | None = None
         self._histogram_cache: tuple[object, "_HistogramPlan"] | None = None
         #: The Runtime history's shot structure, read off the schema once
-        #: (it is cached there) and the per-window sample mask derived from
-        #: it, built once per view however many projections ask.
+        #: (it is cached there).
         self._history_layout: IndexedHistoryLayout | None = indexed_history_layout(
             schema
         )
-        self._history_mask_cache: dict[int, NDArray[np.bool_]] = {}
         #: The previous view's window frequency table, to be moved by the
         #: shots that entered and left rather than rebuilt: ``window_frequency``.
         self._frequency_carry: _WindowFrequency | None = None
@@ -784,28 +719,43 @@ class DataView:
                     and schema.value_schema.dtype.kind in "iu"
                     and snapshot.ref.stream_generation == inherit_domains_from._snapshot.ref.stream_generation):
                 self._frequency_carry = inherit_domains_from._frequency_carry
-            if (
-                self._history_layout is not None and snapshot.block.values is None
-                and inherit_domains_from._axis_display_units == overrides
+            same_units = (
+                inherit_domains_from._axis_display_units == overrides
                 and inherit_domains_from._unit_registry is registry
                 and inherit_domains_from._unit_registry_revision == registry.revision
+            )
+            if (
+                same_units and snapshot.block.values is None
+                and (self._history_layout is None) == (inherit_domains_from._history_layout is None)
             ):
                 self._rolling_carry = inherit_domains_from._rolling_carry
-        if (
-            inherit_domains_from is not None
-            and isinstance(inherit_domains_from, DataView)
-            and inherit_domains_from._schema.fingerprint == schema.fingerprint
-            and inherit_domains_from._axis_display_units == overrides
-            and inherit_domains_from._unit_registry is registry
-            and inherit_domains_from._unit_registry_revision
-            == self._unit_registry_revision
-        ):
-            # Resolved declared axes are immutable schema/unit facts, not
-            # revision data.
-            # Carry the small cache under the same exact context gate as the
-            # domains; copy the dict so either view may still resolve another
-            # axis without mutating its sibling.
-            self._axis_cache = dict(inherit_domains_from._axis_cache)
+            if same_units:
+                # Resolved declared axes are immutable schema/unit facts, not
+                # revision data.  A stamped window renames its shot times on
+                # every shot, so an axis is carried whenever ITS declaration,
+                # row mapping and tensor shape are unchanged, not only when
+                # the whole schema is.  The dict is copied so either view may
+                # still resolve another axis without mutating its sibling.
+                previous = inherit_domains_from._schema
+                if previous.fingerprint == schema.fingerprint:
+                    self._axis_cache = dict(inherit_domains_from._axis_cache)
+                elif previous.physical_shape == schema.physical_shape:
+                    for ref, entry in inherit_domains_from._axis_cache.items():
+                        try:
+                            contract = resolve_axis(schema, ref)
+                        except KeyError:
+                            continue
+                        old = entry.contract
+                        base, *repeats = contract.domain.code_mapping(contract.axis_id)
+                        old_base, *old_repeats = old.domain.code_mapping(old.axis_id)
+                        if (
+                            contract.dimension == old.dimension
+                            and repeats == old_repeats
+                            and contract.coordinates == old.coordinates
+                            and (base == old_base if isinstance(base, range) and isinstance(old_base, range)
+                                 else np.array_equal(base, old_base))
+                        ):
+                            self._axis_cache[ref] = replace(entry, contract=contract)
         # Fail early for misspelled or undeclared override keys.
         for ref in overrides:
             self._resolve(ref)
@@ -814,32 +764,23 @@ class DataView:
     def samples(self) -> SampleProjection:
         if self._samples is None:
             snapshot = self._snapshot
-            if snapshot.block.values is None:
-                values, valid, sigma, rows = self._segment_arrays(sigma=True)
-                if rows is not None:
-                    # The public samples API promises the full schema shape.
-                    # Scatter physical cells once, not one Python copy per block.
-                    shape = schema_shape(self._schema)
-                    whole_values = np.zeros(shape, dtype=values.dtype)
-                    whole_valid = np.zeros(shape, dtype=np.bool_)
-                    whole_values[rows], whole_valid[rows] = values, valid
-                    whole_sigma = None
-                    if sigma is not None:
-                        whole_sigma = np.full(shape, np.nan)
-                        whole_sigma[rows] = sigma
-                        whole_sigma.setflags(write=False)
-                    values, valid, sigma = whole_values, whole_valid, whole_sigma
-                    values.setflags(write=False)
-                    valid.setflags(write=False)
-            else:
-                values = snapshot_values(snapshot)
-                valid = snapshot_validity(snapshot)
-                sigma = snapshot_sigma(snapshot)
-                if values.dtype.kind not in "biu":
-                    finite = np.isfinite(values)
-                    if not bool(finite.all()):
-                        valid = finite if _stride_zero_all_true(valid) else valid & finite
-                        valid.setflags(write=False)
+            # The one finite-and-valid scratch every projection reads.
+            values, valid, sigma, rows = self._segment_arrays(sigma=True)
+            if rows is not None:
+                # The public samples API promises the full schema shape.
+                # Scatter physical cells once, not one Python copy per block.
+                shape = schema_shape(self._schema)
+                whole_values = np.zeros(shape, dtype=values.dtype)
+                whole_valid = np.zeros(shape, dtype=np.bool_)
+                whole_values[rows], whole_valid[rows] = values, valid
+                whole_sigma = None
+                if sigma is not None:
+                    whole_sigma = np.full(shape, np.nan)
+                    whole_sigma[rows] = sigma
+                    whole_sigma.setflags(write=False)
+                values, valid, sigma = whole_values, whole_valid, whole_sigma
+                values.setflags(write=False)
+                valid.setflags(write=False)
             self._samples = SampleProjection(
                 revision=snapshot_revision(snapshot),
                 generation=snapshot_generation(snapshot),
@@ -861,40 +802,6 @@ class DataView:
 
     def coordinate(self, ref: AxisRef) -> CoordinateArray:
         return self._resolve(ref).coordinate
-
-    def _last_view(
-        self, *, keep: Sequence[AxisRef] = (), reduced: Sequence[AxisRef] | None = None
-    ) -> "DataView":
-        """Reuse the Dataset Scope cutter, including sparse empty selections."""
-
-        from .semantics import axis_choices_for_schema
-
-        families = {
-            self._resolve(ref).contract.domain.coordinate_axis(self._resolve(ref).contract.axis_id).axis_id
-            for ref in keep
-        }
-        refs = tuple(reduced) if reduced is not None else tuple(
-            ref for ref in axis_choices_for_schema(self._schema)
-            if self._resolve(ref).contract.domain.axis(self._resolve(ref).contract.axis_id).coordinate_of is None
-            and self._resolve(ref).contract.axis_id not in families
-        )
-        if all(self._resolve(ref).contract.size == 1 for ref in refs):
-            return self
-        terms = {self._resolve(ref).contract.axis_id: LATEST_COORDINATE for ref in refs}
-        source = self._snapshot
-        identity = ",".join(sorted(str(axis) for axis in terms))
-        snapshot = restrict_snapshot(
-            source, value_selection(self._schema, terms),
-            reference_for=lambda schema: DatasetRevisionRef(
-                BlockId(f"{source.ref.block_id.value}|last:{identity}"),
-                source.ref.stream_generation, schema.fingerprint, source.ref.revision,
-            ),
-        )
-        return DataView(
-            snapshot, axis_display_units=self._axis_display_units,
-            value_display_unit=self._value_display_unit,
-            unit_registry=self._unit_registry,
-        )
 
     def selection_subject(
         self,
@@ -1025,13 +932,7 @@ class DataView:
         for the editor to give, not a construction-time refusal.
         """
 
-        self._validate_curve_shape(x, tuple(group_by))
-
-    def _validate_curve_shape(
-        self,
-        x: AxisRef,
-        groups: tuple[AxisRef, ...],
-    ) -> tuple[AxisRef, ...]:
+        groups = tuple(group_by)
         if not isinstance(x, AxisRef):
             raise TypeError("x must be AxisRef")
         _validate_refs(groups, "group_by")
@@ -1046,7 +947,6 @@ class DataView:
         _require_real_numeric(self._resolve(x).coordinate.canonical, x)
         for ref in groups:
             self._resolve(ref)
-        return groups
 
     def curve(
         self,
@@ -1063,17 +963,13 @@ class DataView:
             # The standard error IS the spread of the samples the MEAN pooled:
             # for any other reduction the quantity is undefined, and pretending
             # otherwise would attach a number with no meaning to the plot.
-            if aggregation.statistic is not Reduction.MEAN:
+            if aggregation is not Reduction.MEAN:
                 raise ValueError(
                     "uncertainty is defined for Reduction.MEAN only, "
                     f"not {aggregation.value!r}"
                 )
             if self._schema.value_schema.dtype.kind == "c":
                 raise ValueError("uncertainty is undefined for complex values")
-        if aggregation is Reduction.LAST:
-            return self._last_view(keep=(x, *groups)).curve(
-                x, group_by=groups, aggregation=Reduction.MEAN, uncertainty=uncertainty,
-            )
         dense = self._dense_data_curve(x, groups, aggregation, uncertainty)
         if dense is not None:
             return dense
@@ -1108,19 +1004,49 @@ class DataView:
 
         if not refs:
             return None
+        aggregation = _validate_aggregation(aggregation)
         try:
             domains, codes, dimensions = self._axis_projection(refs)
         except AxisResolutionError:
             return None
-        if self._snapshot.block.values is None:
-            source, source_usable, source_sigma, rows = self._segment_arrays(sigma=uncertainty)
-            if rows is not None:
-                return None
-        else:
-            source = self.samples.value.canonical
-            source_usable = self.samples.valid_mask
-            source_sigma = self.samples.sigma if uncertainty else None
+        source, source_usable, source_sigma, rows = self._segment_arrays(sigma=uncertainty)
+        if rows is not None:
+            return None
         shape = schema_shape(self._schema)
+        layout = self._history_layout
+        if layout is not None and layout.inner_count is not None and any(
+            dimension == 1 and int(domain.size) != int(shape[1])
+            for domain, dimension in zip(domains, dimensions)
+        ):
+            # A uniform indexed history is a (shots, rows per shot) lattice
+            # on its Point dimension.  Viewed that way, an event axis tiled
+            # once per shot (a camera frame) is a real tensor dimension and
+            # the history reduces in one pass instead of by sample codes.
+            shots, inner = layout.shot_count, layout.inner_count
+            split_codes, split_dimensions = [], []
+            for domain_codes, dimension, ref in zip(codes, dimensions, refs):
+                if dimension != 1:
+                    split_codes.append(domain_codes)
+                    split_dimensions.append(dimension + (dimension > 1))
+                    continue
+                contract = self._resolve(ref).contract
+                base, repeat, tile = contract.domain.code_mapping(contract.axis_id)
+                if len(base) * repeat == inner and tile == shots:
+                    split_codes.append(domain_codes[:inner])
+                    split_dimensions.append(2)
+                elif repeat == inner and len(base) * tile == shots:
+                    split_codes.append(domain_codes[::inner])
+                    split_dimensions.append(1)
+                else:
+                    return None
+            lattice = (shape[0], shots, inner, *shape[2:])
+            source = source.reshape(lattice)
+            source_usable = (
+                np.broadcast_to(np.asarray(True), lattice)
+                if _stride_zero_all_true(source_usable) else source_usable.reshape(lattice)
+            )
+            source_sigma = None if source_sigma is None else source_sigma.reshape(lattice)
+            codes, dimensions, shape = tuple(split_codes), tuple(split_dimensions), lattice
         if len(set(dimensions)) != len(dimensions):
             return None
         orders: list[NDArray[np.int64] | None] = []
@@ -1323,18 +1249,11 @@ class DataView:
     ) -> CurveData:
         """Exact full-Dataset Curve aggregation without position planes."""
 
-        projection = self._axis_projection((*groups, x))
-        domains, axis_codes, dimensions = projection
-        if self._snapshot.block.values is None:
-            values, counts, presence, sem = self._segmented_axes(
-                axis_codes, dimensions, tuple(domain.size for domain in domains),
-                aggregation, uncertainty=uncertainty,
-            )
-        else:
-            domains, values, counts, presence = self._aggregate_axes(
-                (*groups, x), aggregation, projection=projection,
-            )
-            sem = None
+        domains, axis_codes, dimensions = self._axis_projection((*groups, x))
+        values, counts, presence, sem = self._segmented_axes(
+            axis_codes, dimensions, tuple(domain.size for domain in domains),
+            aggregation, uncertainty=uncertainty,
+        )
         group_domains = domains[:-1]
         x_domain = domains[-1]
         nx = int(x_domain.size)
@@ -1351,34 +1270,6 @@ class DataView:
             resolved.coordinate.label,
         )
         group_sizes = tuple(int(domain.size) for domain in group_domains)
-        if uncertainty and self._snapshot.block.values is not None:
-            shape = (*group_sizes, nx)
-            means = np.asarray(values, dtype=np.float64).reshape(shape)
-            domain_sizes = tuple(int(domain.size) for domain in domains)
-
-            def centred_moments(
-                plane: Any, offsets: NDArray[np.float64]
-            ) -> tuple[Any, Any] | None:
-                reduced = _axis_aggregate(
-                    np.asarray(plane),
-                    self.samples.valid_mask,
-                    axis_codes,
-                    dimensions,
-                    domain_sizes,
-                    Reduction.SUM,
-                    offsets=np.asarray(offsets, dtype=np.float64).reshape(-1),
-                )
-                first, second, _moment_counts, _presence = reduced
-                return first.reshape(shape), second.reshape(shape)
-
-            sem = _sem_of_mean(
-                means,
-                counts,
-                self.samples.value.canonical,
-                self.samples.sigma,
-                centred_moments,
-            )
-            assert sem is not None
         return CurveData(
             revision=snapshot_revision(self._snapshot),
             generation=snapshot_generation(self._snapshot),
@@ -1942,6 +1833,7 @@ class DataView:
         rides this single kernel instead of growing its own.
         """
 
+        aggregation = _validate_aggregation(aggregation)
         if aggregation not in (
             Reduction.MEAN,
             Reduction.SUM,
@@ -1949,14 +1841,9 @@ class DataView:
             Reduction.MAX,
         ):
             return None
-        if self._snapshot.block.values is None:
-            values, usable, source_sigma, rows = self._segment_arrays(sigma=uncertainty)
-            if rows is not None:
-                return None
-        else:
-            values = self.samples.value.canonical
-            usable = self.samples.valid_mask
-            source_sigma = self.samples.sigma if uncertainty else None
+        values, usable, source_sigma, rows = self._segment_arrays(sigma=uncertainty)
+        if rows is not None:
+            return None
         if values.dtype.kind == "c":
             return None
         if not row_refs:
@@ -2033,12 +1920,12 @@ class DataView:
             if axis != row_dimension and axis not in kept_dims
         )
         # Sums accumulate in float64 exactly as the generic kernel's
-        # bincount does, so a uint8 camera frame cannot wrap either way.
+        # bincount does, so a uint8 camera frame cannot wrap either way --
+        # read in its own dtype, never copied whole to float64 first.
         # A hole-free mask (the common live case) takes the plain kernels:
         # masked reductions cost half again as much, and the masked
         # square-sum's 160 MB temporary costs 7x the einsum that replaces
         # it -- einsum reduces v*v in one fused pass with no temporary.
-        as_double = values.astype(np.float64, copy=False)
         all_valid = _stride_zero_all_true(usable) or bool(usable.all())
         if all_valid:
             reduced = 1
@@ -2055,32 +1942,36 @@ class DataView:
         if aggregation in (Reduction.MEAN, Reduction.SUM):
             if all_valid:
                 moments_pg = np.sum(
-                    as_double, axis=reduce_axes, dtype=np.float64
+                    values, axis=reduce_axes, dtype=np.float64
                 )
             else:
                 moments_pg = np.sum(
-                    as_double,
+                    values,
                     axis=reduce_axes,
                     where=usable,
                     dtype=np.float64,
                 )
         else:
-            ufunc = np.min if aggregation is Reduction.MIN else np.max
+            minimum = aggregation is Reduction.MIN
+            ufunc = np.min if minimum else np.max
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 if all_valid:
-                    moments_pg = ufunc(as_double, axis=reduce_axes)
+                    moments_pg = ufunc(values, axis=reduce_axes)
                 else:
+                    # An empty bucket keeps this bound; its zero count masks it.
+                    limits = (
+                        (np.inf, -np.inf) if values.dtype.kind == "f"
+                        else (True, False) if values.dtype.kind == "b"
+                        else (np.iinfo(values.dtype).max, np.iinfo(values.dtype).min)
+                    )
                     moments_pg = ufunc(
-                        as_double,
+                        values,
                         axis=reduce_axes,
                         where=usable,
-                        initial=(
-                            np.inf
-                            if aggregation is Reduction.MIN
-                            else -np.inf
-                        ),
+                        initial=limits[0] if minimum else limits[1],
                     )
+            moments_pg = np.asarray(moments_pg, dtype=np.float64)
         # The reductions keep the surviving dims in ORIGINAL tensor order
         # (the repeat dim precedes the rows dim when it is grouped); the
         # fold and the series walk both speak (rows, *groups-as-given).
@@ -2166,14 +2057,15 @@ class DataView:
         if uncertainty:
             # Per (row, group) first, then folded by the same combined row
             # key as the means.  The compiled pass reads every sample once
-            # and accumulates both centred moments about its FINAL bucket's
-            # own mean; the small residue is then folded as before.
+            # in its own dtype and accumulates both centred moments about
+            # its FINAL bucket's own mean; the small residue is then folded
+            # as before.  Only the NumPy fallback widens, one centred copy.
             safe_fold_codes = np.maximum(fold_codes, 0)
 
             def centred_moments(
                 plane: Any, offsets: NDArray[np.float64]
             ) -> tuple[Any, Any]:
-                plane = np.asarray(plane, dtype=np.float64)
+                plane = np.asarray(plane)
                 bucket_offsets = np.asarray(offsets, dtype=np.float64).reshape(-1)
                 per_group_offsets = from_code_order(
                     bucket_offsets[safe_fold_codes].reshape(rows, combos)
@@ -2234,7 +2126,7 @@ class DataView:
             sem_flat = _sem_of_mean(
                 np.asarray(y_flat, np.float64),
                 counts,
-                as_double,
+                values,
                 source_sigma,
                 centred_moments,
             )
@@ -2394,9 +2286,6 @@ class DataView:
         honours it -- admits and buildable are one decision, owned here.
         """
 
-        self._validate_image_shape(x, y)
-
-    def _validate_image_shape(self, x: AxisRef, y: AxisRef) -> None:
         if not isinstance(x, AxisRef) or not isinstance(y, AxisRef):
             raise TypeError("image x and y must be AxisRef objects")
         if x == y:
@@ -2415,8 +2304,6 @@ class DataView:
     ) -> ImageData:
         self.validate_image(x, y)
         aggregation = _validate_aggregation(aggregation)
-        if aggregation is Reduction.LAST:
-            return self._last_view(keep=(x, y)).image(x, y, aggregation=Reduction.MEAN)
         dense = self._dense_data_image(x, y, aggregation)
         if dense is not None:
             return dense
@@ -2602,8 +2489,8 @@ class DataView:
             starts = origins[:, 0] * shape[1] + origins[:, 1]
             ends = (origins[:, 0] + extents[:, 0] - 1) * shape[1] + origins[:, 1] + extents[:, 1]
             reusable = (
-                retained <= len(segments) and prepared[4] is None
-                and old_block.schema.physical_shape[1:] == shape[1:]
+                old_block.values is None and retained <= len(segments) and prepared[4] is None
+                and old_block.schema.physical_shape == shape
                 and old_block.schema.cell_domain == self._schema.cell_domain
                 and old_block.schema.value_schema == self._schema.value_schema
                 and all(map(is_, old_block.segments, segments))
@@ -2611,29 +2498,79 @@ class DataView:
                 and np.array_equal(old_block.segment_shapes, source_block.segment_shapes[:retained])
                 and (not starts.size or (starts[0] > last and bool(np.all(starts[1:] >= ends[:-1]))))
             )
-            if reusable:
+            if reusable and retained == len(segments):
+                # The same run, nothing arrived: the predecessor's scratch
+                # and its buffers are this view's too.
+                cached = prepared
+            elif reusable:
+                sigma_read = sigma and prepared[5]
                 tail_values, tail_valid, tail_sigma, tail_rows = self._segment_arrays(
-                    sigma=sigma and prepared[5], selection=np.arange(retained, len(segments)),
+                    sigma=sigma_read, selection=np.arange(retained, len(segments)),
                 )
-                old_values = prepared[0].reshape((-1, *cell_shape))
-                old_valid = prepared[1].reshape(old_values.shape)
                 tail_values = tail_values.reshape((-1, *cell_shape))
                 tail_valid = tail_valid.reshape(tail_values.shape)
-                values = (np.concatenate((old_values, tail_values), axis=0)
-                          if tail_values.shape[0] else old_values)
-                valid = (old_valid if not tail_values.shape[0] else
-                         np.broadcast_to(np.asarray(True), values.shape)
-                         if _stride_zero_all_true(old_valid) and _stride_zero_all_true(tail_valid) else
-                         np.concatenate((old_valid, tail_valid), axis=0))
-                errors = None
-                sigma_read = sigma and prepared[5]
-                if sigma_read and (prepared[2] is not None or tail_sigma is not None):
-                    previous_sigma = (np.broadcast_to(np.asarray(np.nan), old_values.shape)
-                                      if prepared[2] is None else prepared[2].reshape(old_values.shape))
-                    arriving_sigma = (np.broadcast_to(np.asarray(np.nan), tail_values.shape)
-                                      if tail_sigma is None else tail_sigma.reshape(tail_values.shape))
-                    errors = (np.concatenate((previous_sigma, arriving_sigma), axis=0)
-                              if tail_values.shape[0] else previous_sigma)
+                if tail_sigma is not None:
+                    tail_sigma = tail_sigma.reshape(tail_values.shape)
+                rows = old_rows + tail_values.shape[0]
+                # ONE SCRATCH PER RUN, shared by every view of it: planes, the
+                # segments whose rows they hold, that row count, a lock.  It
+                # grows with the rows acquired -- geometrically, to at most
+                # twice the rows in hand and never past the run the schema
+                # declares, so a run stopped early never paid for the rest.
+                # A row is written once, by the first view that holds it; a
+                # view whose segments continue the ones written writes only
+                # beyond them.  Every earlier view keeps a read-only prefix
+                # that is never written again, and a prepared frame that was
+                # discarded leaves rows the next frame takes over instead of
+                # sending it to copy the whole run into a second scratch.
+                scratch = prepared[6]
+                with scratch[5]:
+                    extends = (
+                        scratch[0] is not None and old_rows <= scratch[4] <= rows
+                        and all(map(is_, scratch[3], segments))
+                    )
+                    start = scratch[4] if extends else old_rows
+                    if not extends or rows > len(scratch[0]):
+                        capacity = min(shape[0] * shape[1], 2 * rows)
+                        grown = [np.empty((capacity, *cell_shape), dtype=tail_values.dtype), None, None]
+                        grown[0][:start] = (scratch[0][:start] if extends
+                                            else prepared[0].reshape((old_rows, *cell_shape)))
+                        for plane in (1, 2):
+                            if extends and scratch[plane] is not None:
+                                grown[plane] = np.empty(grown[0].shape, dtype=scratch[plane].dtype)
+                                grown[plane][:start] = scratch[plane][:start]
+                        scratch[:3] = grown
+                    scratch[0][start:rows] = tail_values[start - old_rows:]
+                    values = scratch[0][:rows]
+                    if (scratch[1] is None and (not old_rows or _stride_zero_all_true(prepared[1]))
+                            and _stride_zero_all_true(tail_valid)):
+                        valid = np.broadcast_to(np.asarray(True), values.shape)
+                    else:
+                        if scratch[1] is None:
+                            # Every row held so far was valid: a new plane
+                            # is written whole from this view's own planes.
+                            scratch[1] = np.empty(scratch[0].shape, dtype=np.bool_)
+                            scratch[1][:old_rows] = prepared[1].reshape((old_rows, *cell_shape))
+                            scratch[1][old_rows:rows] = tail_valid
+                        else:
+                            scratch[1][start:rows] = tail_valid[start - old_rows:]
+                        valid = scratch[1][:rows]
+                    errors = None
+                    if not sigma_read:
+                        # Rows this view does not read are not written, so a
+                        # later reader must not find the plane stale.
+                        scratch[2] = None
+                    elif prepared[2] is not None or tail_sigma is not None or scratch[2] is not None:
+                        if scratch[2] is None:
+                            scratch[2] = np.empty(scratch[0].shape)
+                            scratch[2][:old_rows] = (np.nan if prepared[2] is None else
+                                                     prepared[2].reshape((old_rows, *cell_shape)))
+                            scratch[2][old_rows:rows] = np.nan if tail_sigma is None else tail_sigma
+                        else:
+                            scratch[2][start:rows] = (np.nan if tail_sigma is None else
+                                                      tail_sigma[start - old_rows:])
+                        errors = scratch[2][:rows]
+                    scratch[3], scratch[4] = segments, rows
                 origins, extents = source_block.segment_origins, source_block.segment_shapes
                 counts = extents[:, 0] * extents[:, 1]
                 complete = (values.shape[0] == shape[0] * shape[1]
@@ -2655,7 +2592,7 @@ class DataView:
                 for array in (values, valid, errors):
                     if array is not None:
                         array.setflags(write=False)
-                cached = values, valid, errors, row_indices, None, sigma_read
+                cached = values, valid, errors, row_indices, None, sigma_read, scratch
         if cached is None:
             values, mask, errors, row_indices, order = source_block.packed_planes(
                 selection=selection, sigma=sigma,
@@ -2673,11 +2610,12 @@ class DataView:
                 if not bool(finite.all()):
                     valid = finite if _stride_zero_all_true(valid) else valid & finite
             valid.setflags(write=False)
-            cached = values, valid, errors, row_indices, order, sigma
-        values, valid, errors, row_indices, order, sigma_read = cached
+            cached = (values, valid, errors, row_indices, order, sigma,
+                      [None, None, None, (), 0, threading.Lock()])
+        values, valid, errors, row_indices, order, sigma_read, scratch = cached
         if sigma and not sigma_read:
             errors = source_block._pack_sigma(values.shape, selection=selection, order=order)
-            cached = values, valid, errors, row_indices, order, True
+            cached = values, valid, errors, row_indices, order, True, scratch
         if selection is None:
             self._packed_segments = cached
         return values, valid, errors, row_indices
@@ -2687,6 +2625,7 @@ class DataView:
         sizes: tuple[int, ...], aggregation: Reduction, *, uncertainty: bool,
     ) -> tuple:
         """Apply the ordinary axis reduction once to the calculation scratch."""
+        aggregation = _validate_aggregation(aggregation)
         source, valid, sigma, row_indices = self._segment_arrays(sigma=uncertainty)
         if row_indices is None:
             codes, kept = axis_codes, dimensions
@@ -2728,12 +2667,6 @@ class DataView:
         self,
         refs: tuple[AxisRef, ...],
         aggregation: Reduction,
-        *,
-        projection: tuple[
-            tuple[_Domain, ...],
-            tuple[NDArray[np.int64], ...],
-            tuple[int, ...],
-        ] | None = None,
     ) -> tuple[tuple[_Domain, ...], NDArray[Any], NDArray[np.int64], NDArray[np.bool_]]:
         """Aggregate the full Dataset once by small per-axis code vectors.
 
@@ -2744,23 +2677,12 @@ class DataView:
         validity and therefore describes geometry, not measurement success.
         """
 
-        projection = self._axis_projection(refs) if projection is None else projection
-        domains, axis_codes, dimensions = projection
-        if self._snapshot.block.values is None:
-            reduced, counts, present, _sem = self._segmented_axes(
-                axis_codes, dimensions, tuple(domain.size for domain in domains),
-                aggregation, uncertainty=False,
-            )
-            return domains, reduced, counts, present
-        domain_sizes = tuple(domain.size for domain in domains)
-        reduced, counts, present = _axis_aggregate(
-            self.samples.value.canonical, self.samples.valid_mask,
-            axis_codes, dimensions, domain_sizes, aggregation,
+        domains, axis_codes, dimensions = self._axis_projection(refs)
+        reduced, counts, present, _sem = self._segmented_axes(
+            axis_codes, dimensions, tuple(domain.size for domain in domains),
+            aggregation, uncertainty=False,
         )
-        return (
-            domains, reduced.reshape(domain_sizes), counts.reshape(domain_sizes),
-            present.reshape(domain_sizes),
-        )
+        return domains, reduced, counts, present
 
     def _image_from_axes(
         self,
@@ -2781,30 +2703,21 @@ class DataView:
         self,
         *,
         bins: int | Sequence[float],
-        values: NDArray[Any] | None = None,
-        valid: NDArray[np.bool_] | None = None,
         reduce_axes: Sequence[AxisRef] = (),
         aggregation: Reduction = Reduction.MEAN,
         group_by: tuple[AxisRef, ...] = (),
         window: int = 1,
     ) -> HistogramData:
-        """Distribution of the acquired values.
+        """Distribution of the acquired values over canonical ``bins``.
 
         Every axis pools into the one distribution unless it is named in
         ``reduce_axes``, which collapses it under ``aggregation`` first --
         the difference between the distribution of every shot and the
-        distribution of each site's mean over shots.
+        distribution of each site's mean over shots.  The histogram kind
+        runs the same two steps with its own edges in between.
         """
 
-        if values is None and valid is None:
-            plan = self._histogram_plan(tuple(group_by), tuple(reduce_axes), aggregation, window)
-        else:
-            if group_by:
-                raise ValueError("grouped histogram uses its coordinate-owned source values")
-            selected, usable = self.histogram_pool(
-                values=values, valid=valid, reduce_axes=reduce_axes, aggregation=aggregation,
-            )
-            plan = _HistogramPlan(selected, usable, np.zeros(1, dtype=np.int64), 0, ((),))
+        plan = self._histogram_plan(tuple(group_by), tuple(reduce_axes), aggregation, window)
         return self._histogram_from_plan(bins, plan)
 
     def _reduction_plan(
@@ -2935,181 +2848,15 @@ class DataView:
             ),
         )
 
-    def _collapse_axes(
-        self,
-        values: NDArray[Any],
-        valid: NDArray[np.bool_],
-        refs: Sequence[AxisRef],
-        aggregation: Reduction,
-    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-        """Collapse whole box axes, keeping validity honest.
+    def release_window_frequency(self) -> None:
+        """Drop the carried window table: this view's panel counts no window.
 
-        A collapsed cell is valid when it had anything to collapse; the
-        aggregation reads only the usable entries, so a partly invalid row
-        still reports the statistic of what was measured.
+        A view inherits the table so a histogram can move it by the shots
+        that entered and left; a panel projecting anything else would only
+        keep the last histogram revision alive through it.
         """
 
-        if not isinstance(aggregation, Reduction):
-            raise TypeError("aggregation must be Reduction")
-        if aggregation is Reduction.LAST:
-            terms = {self._resolve(ref).contract.axis_id: LATEST_COORDINATE for ref in refs}
-            indices = selection_indices(self._schema, value_selection(self._schema, terms))
-            scoped = self._last_view(reduced=refs)
-            return scoped._collapse_axes(
-                restricted_values(values, self._schema, *indices),
-                restricted_values(np.broadcast_to(valid, values.shape), self._schema, *indices),
-                refs, Reduction.MEAN,
-            )
-        dimensions, coordinates = self._reduction_plan(refs)
-        if not dimensions and not coordinates:
-            return values, valid
-
-        usable = np.asarray(np.broadcast_to(valid, values.shape), dtype=bool)
-        if coordinates:
-            return self._collapse_by_coordinates(
-                values, usable, dimensions, coordinates, aggregation
-            )
-
-        axes = dimensions
-        counts = np.count_nonzero(usable, axis=axes)
-        present = counts > 0
-        as_double = values.astype(np.float64, copy=False)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            if aggregation in (Reduction.MEAN, Reduction.SUM):
-                totals = np.sum(as_double, axis=axes, where=usable)
-                collapsed = (
-                    np.divide(
-                        totals,
-                        counts,
-                        out=np.zeros_like(totals),
-                        where=present,
-                    )
-                    if aggregation is Reduction.MEAN
-                    else totals
-                )
-            elif aggregation in (Reduction.MIN, Reduction.MAX):
-                ufunc = np.min if aggregation is Reduction.MIN else np.max
-                collapsed = ufunc(
-                    as_double,
-                    axis=axes,
-                    where=usable,
-                    initial=(
-                        np.inf if aggregation is Reduction.MIN else -np.inf
-                    ),
-                )
-            elif aggregation is Reduction.FIRST:
-                # FIRST used to fall into the else branch above and come
-                # back as MAX -- no error, no warning, just a different
-                # statistic drawn under the name the operator chose.  Every
-                # other reducer in this file dispatches it explicitly.
-                collapsed, present = _leading_along_axes(
-                    as_double, usable, axes
-                )
-            else:
-                raise AssertionError(f"unsupported reduction: {aggregation!r}")
-        return collapsed, present
-
-    def _collapse_by_coordinates(
-        self,
-        values: NDArray[Any],
-        usable: NDArray[np.bool_],
-        dimensions: Sequence[int],
-        coordinates: Sequence[AxisRef],
-        aggregation: Reduction,
-    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-        """Collapse named point coordinates, keeping the rest apart.
-
-        Reducing "detuning" over a detuning x power scan means one value
-        per power, not one value for the whole scan: the point rows are
-        grouped by the coordinates NOT named, and each group is reduced.
-        The whole tensor axes named alongside are reduced in the same pass,
-        so a joint reduction stays joint -- a mean over repeats and
-        detuning together is one mean, not a mean of means.
-        """
-
-        buckets = self._reduction_buckets(
-            dimensions, coordinates, shape=values.shape
-        )
-        out_shape = buckets.shape
-        collapsed, counts, _presence = _axis_aggregate(
-            values, usable, buckets.codes, buckets.axes, buckets.shape, aggregation,
-        )
-        present = (counts > 0).reshape(out_shape)
-        collapsed = np.where(present, collapsed.reshape(out_shape), 0.0)
-        return collapsed, present
-
-    def history_validity(self, window: int) -> NDArray[np.bool_]:
-        """Which samples the last ``window`` shots contribute, over the WHOLE shape.
-
-        The selection rule, said once and in the sample space every other
-        projection speaks.  ``history_values`` narrows this to the repeats
-        that can carry it, which is a saving and not a second rule; a facet
-        cannot take that narrowing -- its cells are indexed in the original
-        space -- so it takes this plane instead.
-        """
-
-        window = _history_window(window)
-        values = self.samples.value.canonical
-        validity = self.samples.valid_mask
-        if self.has_primary_index:
-            point_mask = self._history_point_mask(window)
-            return (
-                point_mask
-                if _stride_zero_all_true(validity)
-                else np.asarray(validity, dtype=np.bool_) & point_mask
-            )
-        count = min(window, max(1, schema_repeat_count(self._schema)))
-        keep = np.zeros(values.shape[0], dtype=np.bool_)
-        keep[values.shape[0] - count:] = True
-        repeat_mask = np.broadcast_to(
-            keep.reshape(-1, *([1] * (values.ndim - 1))), values.shape
-        )
-        return (
-            repeat_mask
-            if _stride_zero_all_true(validity)
-            else np.asarray(validity, dtype=np.bool_) & repeat_mask
-        )
-
-    def _history_point_mask(self, window: int) -> NDArray[np.bool_]:
-        """The indexed-history selection, as a plane over the sample shape."""
-
-        layout = self._history_layout
-        assert layout is not None
-        window = _history_window(window)
-        cached = self._history_mask_cache.get(window)
-        if cached is None:
-            cached = self._spread_rows(layout.row_mask(window))
-            self._history_mask_cache[window] = cached
-        return cached
-
-    def _spread_rows(self, plane: NDArray[Any]) -> NDArray[Any]:
-        """One value per point row, broadcast over the whole sample tensor."""
-
-        values = self.samples.value.canonical
-        return np.broadcast_to(
-            np.reshape(plane, (1, plane.size, *([1] * (values.ndim - 2)))),
-            values.shape,
-        )
-
-    def history_values(
-        self, window: int
-    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-        """Return the last accepted history cells without binning policy.
-
-        The same selection as ``history_validity``, narrowed where it can be:
-        an unindexed dataset carries its shots on the repeat axis, so the
-        repeats outside the window are dropped rather than masked, and a
-        window of two over a thousand repeats reads two.
-        """
-
-        window = _history_window(window)
-        values = self.samples.value.canonical
-        validity = self.samples.valid_mask
-        if self.has_primary_index:
-            return values, self.history_validity(window)
-        count = min(window, max(1, schema_repeat_count(self._schema)))
-        return values[-count:], validity[-count:]
+        self._frequency_carry = None
 
     def window_frequency(
         self, window: int
@@ -3354,13 +3101,9 @@ class DataView:
         if group is not None:
             if not isinstance(group, AxisRef):
                 raise TypeError("rolling group must be an AxisRef or None")
-            contract = resolve_axis(self._schema, group)
-            record_group = (
-                group.domain.value == "point"
-                and contract.domain.coordinate_axis(contract.axis_id).axis_id
-                == PRIMARY_INDEX_AXIS_ID
-            ) if self.has_primary_index else group.domain.value == "repeat"
-            if record_group:
+            from .semantics import _is_rolling_record_axis
+
+            if _is_rolling_record_axis(self._schema, group):
                 raise DataViewError("Rolling's fixed record axis cannot also be Group")
             self._resolve(group)
 
@@ -3456,18 +3199,7 @@ class DataView:
         """
 
         self.validate_rolling(group, x=x)
-        if aggregation is Reduction.LAST:
-            from .semantics import axis_choices_for_schema
-
-            retained = (
-                (AxisRef.point(PRIMARY_INDEX_AXIS_ID.value),)
-                if self.has_primary_index
-                else tuple(ref for ref in axis_choices_for_schema(self._schema)
-                           if ref.domain.value == "repeat")
-            )
-            return self._last_view(keep=retained + (() if group is None else (group,))).rolling_history(
-                x=x, group=group, aggregation=Reduction.MEAN, uncertainty=uncertainty,
-            )
+        aggregation = _validate_aggregation(aggregation)
         if self.has_primary_index:
             return self._history_by_primary_index(
                 group=group,
@@ -3479,15 +3211,10 @@ class DataView:
             return self._single_revision_history(
                 group=group, aggregation=aggregation, uncertainty=uncertainty
             )
-        aggregation = _validate_aggregation(aggregation)
-        tensor = self._repeat_history_tensor(
-            group=group,
-            aggregation=aggregation,
-            repeats=repeats,
-            uncertainty=uncertainty,
-        )
-        if tensor is not None:
-            return tensor
+        if self._snapshot.block.values is None:
+            segmented = self._segment_history(group, aggregation, uncertainty)
+            if segmented is not None:
+                return segmented
         axis_codes = (np.arange(repeats, dtype=np.int64),)
         dimensions, sizes = (0,), (repeats,)
         keys = ((),)
@@ -3502,136 +3229,6 @@ class DataView:
             aggregation=aggregation, uncertainty=uncertainty,
         )
 
-    def _repeat_history_tensor(
-        self,
-        *,
-        group: AxisRef | None,
-        aggregation: Reduction,
-        repeats: int,
-        uncertainty: bool = True,
-    ) -> RollingHistory | None:
-        """Reduce a regular repeat history once, not once per repeat.
-
-        Runtime remains the only history owner; this is only a projection of
-        its immutable Dataset.  A one-to-one group is one retained tensor axis.
-        Anything whose group/domain cannot be proven one-to-one returns None
-        and keeps the generic position path above.
-        """
-
-        if self._snapshot.block.values is None:
-            return None
-        values = self.samples.value.canonical
-        usable = self.samples.valid_mask
-        if values.shape[0] != repeats:
-            return None
-        if group is None:
-            group_count = 1
-            keys: tuple[tuple[AxisValue, ...], ...] = ((),)
-
-            def cube(plane: Any) -> NDArray[Any]:
-                return np.asarray(plane).reshape(repeats, 1, -1)
-
-        else:
-            resolved = self._resolve(group)
-            dimension = int(resolved.dimension)
-            if dimension <= 0 or dimension >= values.ndim:
-                return None
-            group_count = int(values.shape[dimension])
-            domain = self._domain(group)
-            if domain.size != group_count or not np.array_equal(
-                domain.codes,
-                np.arange(group_count, dtype=np.int64),
-            ):
-                return None
-            keys = tuple((value,) for value in domain.values)
-
-            def cube(plane: Any) -> NDArray[Any]:
-                return np.moveaxis(np.asarray(plane), dimension, 1).reshape(
-                    repeats, group_count, -1
-                )
-
-        # One layout, applied to every plane: values, validity and the
-        # samples' own sigma cannot end up shaped differently.
-        value_cube = cube(values)
-        usable_cube = cube(usable)
-
-        # The generic bucket reducer always accumulates numerics in float64;
-        # matching that here also prevents integer SUM/square overflow.
-        working = value_cube.astype(np.float64, copy=False)
-        reduced, counts = _masked_leading_reduce(
-            np.moveaxis(working, -1, 0),
-            np.moveaxis(usable_cube, -1, 0),
-            aggregation,
-        )
-        reduced = np.asarray(reduced, dtype=np.float64)
-        counts = np.asarray(counts, dtype=np.int64)
-        reduced = np.where(counts > 0, reduced, np.nan)
-        sem = None
-        if uncertainty and aggregation is Reduction.MEAN:
-            pool = int(value_cube.shape[-1])
-            marks = (
-                None
-                if _stride_zero_all_true(usable_cube)
-                else usable_cube.reshape(1, repeats * group_count, pool)
-            )
-
-            def centred_moments(
-                plane: Any, offsets: NDArray[np.float64]
-            ) -> tuple[Any, Any]:
-                from . import _raster_kernels as kernels
-
-                shaped = cube(np.asarray(plane, dtype=np.float64)).reshape(
-                    1, repeats * group_count, pool
-                )
-                sums = kernels.masked_centred_moment_sums(
-                    shaped,
-                    np.asarray(offsets, dtype=np.float64).reshape(-1),
-                    marks,
-                )
-                if sums is None:
-                    leading = np.moveaxis(
-                        cube(np.asarray(plane, dtype=np.float64)), -1, 0
-                    )
-                    leading_usable = np.moveaxis(usable_cube, -1, 0)
-                    delta = np.where(
-                        leading_usable,
-                        leading,
-                        np.asarray(offsets, dtype=np.float64),
-                    )
-                    delta -= np.asarray(offsets, dtype=np.float64)
-                    first_sum = np.sum(delta, axis=0, dtype=np.float64)
-                    np.square(delta, out=delta)
-                    second_sum = np.sum(delta, axis=0, dtype=np.float64)
-                    sums = first_sum, second_sum
-                return tuple(
-                    np.divide(
-                        moment.reshape(counts.shape),
-                        counts,
-                        out=np.full(counts.shape, np.nan, dtype=np.float64),
-                        where=counts > 0,
-                    )
-                    for moment in sums
-                )
-
-            sem = _sem_of_mean(
-                reduced,
-                counts,
-                values,
-                self.samples.sigma,
-                centred_moments,
-            )
-            assert sem is not None
-        valid = (counts > 0) & np.isfinite(reduced)
-        return RollingHistory(
-            revision=snapshot_revision(self._snapshot),
-            generation=snapshot_generation(self._snapshot),
-            values=reduced,
-            valid=valid,
-            counts=counts,
-            group_keys=keys,
-            sem=sem,
-        )
-
     def _history_by_primary_index(
         self,
         *,
@@ -3643,9 +3240,8 @@ class DataView:
 
         layout = self._history_layout
         assert layout is not None
-        aggregation = _validate_aggregation(aggregation)
         if self._snapshot.block.values is None:
-            segmented = self._indexed_segment_history(group, aggregation, uncertainty)
+            segmented = self._segment_history(group, aggregation, uncertainty)
             if segmented is not None:
                 return segmented
         axis_codes = (layout.codes(),)
@@ -3667,23 +3263,37 @@ class DataView:
             source_indices=layout.cells, source_times=layout.times,
         )
 
-    def _indexed_segment_history(
+    def _segment_history(
         self, group: AxisRef | None, aggregation: Reduction, uncertainty: bool,
     ) -> RollingHistory | None:
-        """Carry rows by immutable plane identity; compute changes as one batch."""
+        """Carry history rows by immutable segment identity; reduce the rest once.
+
+        A row is a shot of an indexed window or a repeat of a finite run.
+        Runtime extends both by appending segments -- a window also drops
+        its oldest -- so the previous revision's segments reappear as one
+        contiguous run at the start of this one's, and only the rows the
+        others touch are reduced again: a commit costs what it brought, not
+        what the run already holds.
+        """
         layout = self._history_layout
-        assert layout is not None
         block = self._snapshot.block
         origins, extents, segments = block.segment_origins, block.segment_shapes, block.segments
-        if (bool(np.any(origins[:, 0] != 0)) or bool(np.any(extents[:, 0] != 1))
-                or bool(np.any(extents[:, 1] < 1))):
+        if not segments or bool(np.any(extents[:, 0] != 1)):
             self._rolling_carry = None
             return None
-        shots = layout.codes(origins[:, 1])
-        if (not np.array_equal(shots, layout.codes(origins[:, 1] + extents[:, 1] - 1))
-                or np.unique(shots).size != len(segments)):
-            self._rolling_carry = None
-            return None
+        if layout is None:
+            # A finite run's row is its repeat; one repeat may arrive in
+            # several segments, one per scan point.
+            row_count = int(self._schema.repeat_domain.size)
+            rows = origins[:, 0]
+        else:
+            rows = layout.codes(origins[:, 1])
+            if (bool(np.any(origins[:, 0] != 0))
+                    or not np.array_equal(rows, layout.codes(origins[:, 1] + extents[:, 1] - 1))
+                    or np.unique(rows).size != len(segments)):
+                self._rolling_carry = None
+                return None
+            row_count = layout.shot_count
         group_codes, group_dimension = None, None
         if group is None:
             keys = ((),)
@@ -3692,80 +3302,86 @@ class DataView:
             keys = tuple((value,) for value in domains[0].values)
             group_codes, group_dimension = codes[0], dimensions[0]
         query = (group, aggregation, uncertainty)
+        identities = np.fromiter(map(id, segments), dtype=np.intp, count=len(segments))
         carried = self._rolling_carry
-        reusable = (carried is not None and carried[0] == query
-                    and carried[2].group_keys == keys and carried[3] == group_dimension)
-        if reusable and group_dimension != 1:
-            reusable = np.array_equal(carried[4], group_codes)
-        previous = carried[1] if reusable else {}
-        old_history = carried[2] if reusable else None
-        old_rows, old_points, matched, pending = [], [], [], []
-        retained = {}
-        for index, segment in enumerate(segments):
-            # The carried snapshot holds these tuples alive until matching is
-            # complete. IDs cannot be recycled; there is no child ref/schema.
-            identity = id(segment)
-            retained[identity] = (int(shots[index]), int(origins[index, 1]))
-            old = previous.get(identity)
-            if old is None:
-                pending.append(index)
-            else:
-                old_rows.append(old[0])
-                old_points.append(old[1])
-                matched.append(index)
-        matched = np.asarray(matched, dtype=np.intp)
-        old_rows = np.asarray(old_rows, dtype=np.intp)
-        if matched.size and group_dimension == 1:
-            # A Point group also depends on its placement in the parent. Check
-            # the actual selected row codes in one batch, not just group labels.
-            lengths = extents[matched, 1]
-            starts = np.cumsum(lengths) - lengths
-            owners = np.repeat(np.arange(matched.size), lengths)
-            local = np.arange(int(lengths.sum())) - starts[owners]
-            current_points = origins[matched, 1][owners] + local
-            previous_points = np.asarray(old_points)[owners] + local
-            same = group_codes[current_points] == carried[4][previous_points]
-            unchanged = np.logical_and.reduceat(same, starts)
-            pending.extend(matched[~unchanged].tolist())
-            matched, old_rows = matched[unchanged], old_rows[unchanged]
-        values = np.full((layout.shot_count, len(keys)), np.nan)
+        start = matched = 0
+        if (carried is not None and carried[0] == query and carried[2].group_keys == keys
+                and carried[3] == group_dimension
+                and (group_dimension == 1 and layout is not None
+                     or np.array_equal(carried[4], group_codes))):
+            # The carried snapshot holds its segments alive, so an equal id
+            # names the very same immutable planes.
+            old_identities, old_segments = carried[1], carried[-1].block.segments
+            found = np.flatnonzero(old_identities == identities[0])
+            if found.size:
+                start = int(found[0])
+                matched = len(old_identities) - start
+                if (matched > len(segments)
+                        or not all(map(is_, old_segments[start:], segments[:matched]))
+                        or layout is None and (start or len(carried[2]) != row_count
+                                               or not np.array_equal(carried[6], origins[:matched]))):
+                    matched = 0
+        if matched and layout is None:
+            # Repeats that receive a new segment are reduced again whole.
+            pending_rows = np.unique(rows[matched:])
+            carried_rows = np.ones(row_count, dtype=np.bool_)
+            carried_rows[pending_rows] = False
+            destination = previous = carried_rows
+        elif matched:
+            kept = np.arange(matched)
+            if group_dimension == 1:
+                # A Point group also depends on its placement in the parent.
+                # Check the actual selected row codes in one batch, not just
+                # group labels.
+                lengths = extents[:matched, 1]
+                starts = np.cumsum(lengths) - lengths
+                owners = np.repeat(kept, lengths)
+                local = np.arange(int(lengths.sum())) - starts[owners]
+                current_points = origins[:matched, 1][owners] + local
+                previous_points = carried[6][start:, 1][owners] + local
+                same = group_codes[current_points] == carried[4][previous_points]
+                kept = kept[np.logical_and.reduceat(same, starts)]
+            destination, previous = rows[kept], carried[5][start + kept]
+            pending_rows = np.setdiff1d(rows, destination)
+        else:
+            pending_rows = np.unique(rows)
+            destination = previous = None
+        values = np.full((row_count, len(keys)), np.nan)
         counts = np.zeros(values.shape, dtype=np.int64)
         valid = np.zeros(values.shape, dtype=np.bool_)
         want_sem = uncertainty and aggregation is Reduction.MEAN
         sem = np.full(values.shape, np.nan) if want_sem else None
-        if matched.size:
-            destination = shots[matched]
-            source = old_rows
-            if bool(np.all(np.diff(source) == 1)):
-                source = slice(int(source[0]), int(source[-1]) + 1)
-            if bool(np.all(np.diff(destination) == 1)):
-                destination = slice(int(destination[0]), int(destination[-1]) + 1)
-            values[destination] = old_history.values[source]
-            counts[destination] = old_history.counts[source]
-            valid[destination] = old_history.valid[source]
+        if destination is not None:
+            old_history = carried[2]
+            values[destination] = old_history.values[previous]
+            counts[destination] = old_history.counts[previous]
+            valid[destination] = old_history.valid[previous]
             if sem is not None:
-                sem[destination] = old_history.sem[source]
-        if pending:
-            pending = np.asarray(pending, dtype=np.intp)
-            new_shots = np.sort(shots[pending])
-            source, marks, sigma, rows = self._segment_arrays(sigma=want_sem, selection=pending)
-            selected_codes = layout.codes(None if rows is None else rows[1])
-            codes = (np.searchsorted(new_shots, selected_codes),)
-            dimensions = (1,) if rows is None else (0,)
-            sizes = (len(new_shots),)
+                sem[destination] = old_history.sem[previous]
+        if pending_rows.size:
+            pending = np.flatnonzero(np.isin(rows, pending_rows))
+            source, marks, sigma, packed_rows = self._segment_arrays(sigma=want_sem, selection=pending)
+            if layout is None:
+                selected = np.arange(row_count) if packed_rows is None else packed_rows[0]
+                dimensions = (0,)
+            else:
+                selected = layout.codes(None if packed_rows is None else packed_rows[1])
+                dimensions = (1,) if packed_rows is None else (0,)
+            codes = (np.searchsorted(pending_rows, selected),)
+            sizes = (len(pending_rows),)
             if group is not None:
-                codes += (group_codes if rows is None or group_dimension > 1 else
-                          group_codes[rows[group_dimension]],)
-                dimensions += (group_dimension if rows is None else
+                codes += (group_codes if packed_rows is None or group_dimension > 1 else
+                          group_codes[packed_rows[group_dimension]],)
+                dimensions += (group_dimension if packed_rows is None else
                                0 if group_dimension < 2 else group_dimension - 1,)
                 sizes += (len(keys),)
             reduced, counted, _presence = _axis_aggregate(
                 source, marks, codes, dimensions, sizes, aggregation,
             )
-            new_shape = (len(new_shots), len(keys))
-            values[new_shots] = reduced.reshape(new_shape)
-            counts[new_shots] = counted.reshape(new_shape)
-            valid[new_shots] = ((counted > 0) & np.isfinite(reduced)).reshape(new_shape)
+            new_shape = (len(pending_rows), len(keys))
+            values[pending_rows] = reduced.reshape(new_shape)
+            counts[pending_rows] = counted.reshape(new_shape)
+            valid[pending_rows] = ((counted > 0) & np.isfinite(reduced)).reshape(new_shape)
             if sem is not None:
                 def centred_moments(plane: Any, offsets: NDArray[np.float64]) -> tuple[Any, Any]:
                     first, second, _counts, _presence = _axis_aggregate(
@@ -3776,18 +3392,20 @@ class DataView:
 
                 errors = _sem_of_mean(reduced, counted, source, sigma, centred_moments)
                 assert errors is not None
-                sem[new_shots] = errors.reshape(new_shape)
+                sem[pending_rows] = errors.reshape(new_shape)
         for plane in (values, counts, valid, sem):
             if plane is not None:
                 plane.setflags(write=False)
         result = RollingHistory(
             snapshot_revision(self._snapshot), snapshot_generation(self._snapshot),
-            values, valid, counts, keys, layout.cells, layout.times, sem,
+            values, valid, counts, keys,
+            None if layout is None else layout.cells, None if layout is None else layout.times, sem,
         )
         # Reused statistics may need no raw packing at all. Do not leave an
         # unconsumed previous raw window pinned after accepting this result.
         self._packed_carry = None
-        self._rolling_carry = query, retained, result, group_dimension, group_codes, self._snapshot
+        self._rolling_carry = (query, identities, result, group_dimension, group_codes,
+                               rows, origins, self._snapshot)
         return result
 
     def _history_from_axes(
@@ -3798,32 +3416,13 @@ class DataView:
         source_times: NDArray[np.float64] | None = None,
     ) -> RollingHistory:
         shape = (domain_sizes[0], math.prod(domain_sizes[1:]))
-        if self._snapshot.block.values is None:
-            values, counts, _presence, sem = self._segmented_axes(
-                axis_codes, dimensions, domain_sizes, aggregation,
-                uncertainty=uncertainty and aggregation is Reduction.MEAN,
-            )
-            values, counts = values.reshape(shape), counts.reshape(shape)
-            if sem is not None:
-                sem = sem.reshape(shape)
-        else:
-            source = self.samples.value.canonical
-            valid_source = self.samples.valid_mask
-            values, counts, _presence = _axis_aggregate(
-                source, valid_source, axis_codes, dimensions, domain_sizes, aggregation,
-            )
-            values, counts = values.reshape(shape), counts.reshape(shape)
-            sem = None
-            if uncertainty and aggregation is Reduction.MEAN:
-                def centred_moments(plane: Any, offsets: NDArray[np.float64]) -> tuple[Any, Any]:
-                    first, second, _counts, _presence = _axis_aggregate(
-                        np.asarray(plane), valid_source, axis_codes, dimensions, domain_sizes,
-                        Reduction.SUM, offsets=np.asarray(offsets, dtype=np.float64).reshape(-1),
-                    )
-                    return first.reshape(shape), second.reshape(shape)
-
-                sem = _sem_of_mean(values, counts, source, self.samples.sigma, centred_moments)
-                assert sem is not None
+        values, counts, _presence, sem = self._segmented_axes(
+            axis_codes, dimensions, domain_sizes, aggregation,
+            uncertainty=uncertainty and aggregation is Reduction.MEAN,
+        )
+        values, counts = values.reshape(shape), counts.reshape(shape)
+        if sem is not None:
+            sem = sem.reshape(shape)
         valid = (counts > 0) & np.isfinite(values)
         for plane in (values, counts, valid, sem):
             if plane is not None:
@@ -3840,38 +3439,6 @@ class DataView:
             sem=sem,
         )
 
-    def histogram_pool(
-        self,
-        *,
-        values: NDArray[Any] | None = None,
-        valid: NDArray[np.bool_] | None = None,
-        reduce_axes: Sequence[AxisRef] = (),
-        aggregation: Reduction = Reduction.MEAN,
-    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-        """The values a histogram will ACTUALLY bin, and their validity.
-
-        Raw samples, or the history window, or the per-group statistic when
-        axes are reduced -- whichever this spec means.  It is a separate
-        question from binning them because the bin domain has to cover what
-        is binned: taken from the raw pool instead, a reduced histogram --
-        whose values are means, and therefore narrower by construction --
-        landed in two bins out of twelve.
-        """
-
-        if (values is None) != (valid is None):
-            raise ValueError("histogram pool values and validity must appear together")
-        if values is None:
-            window = (self._history_layout.shot_count if self._history_layout is not None
-                      else schema_repeat_count(self._schema))
-            plan = self._histogram_plan((), tuple(reduce_axes), aggregation, window)
-            return plan.values, plan.valid
-        selected, usable = values, valid
-        if reduce_axes:
-            selected, usable = self._collapse_axes(
-                selected, usable, reduce_axes, aggregation
-            )
-        return selected, usable
-
     def facet_histogram_pool(
         self, spec: FacetGridPlot, *, window: int = 1,
     ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
@@ -3887,10 +3454,9 @@ class DataView:
     ) -> "_HistogramPlan":
         """Keep grouping identities through the same named-axis reduction."""
         window = _history_window(window)
-        if aggregation is Reduction.LAST:
-            return self._last_view(keep=groups, reduced=reduced)._histogram_plan(
-                groups, (), Reduction.MEAN, window,
-            )
+        aggregation = _validate_aggregation(aggregation)
+        # A planned histogram is not binned from the window frequency table.
+        self._frequency_carry = None
         key = (groups, reduced, aggregation, window)
         remembered = self._histogram_cache
         if remembered is not None and remembered[0] == key:
@@ -4018,7 +3584,7 @@ class DataView:
     def _canonical_histogram_bins(
         self, bins: int | Sequence[float]
     ) -> int | NDArray[Any]:
-        """Validate bins once and express explicit edges canonically."""
+        """Validate bins once; explicit edges are canonical, as counted."""
 
         if isinstance(bins, bool):
             raise TypeError("histogram bin count must be an integer")
@@ -4032,9 +3598,6 @@ class DataView:
             raise ValueError(
                 "histogram edges must be a finite one-dimensional sequence"
             )
-        edges = self._value_display_unit.convert_value_to(
-            edges, schema_value_unit(self._schema, self._unit_registry)
-        )
         if np.any(np.diff(edges) <= 0):
             raise ValueError("histogram edges must be strictly increasing")
         return edges
@@ -4093,11 +3656,11 @@ class DataView:
             self._resolve(spec.facet)
         cell = spec.cell
         if isinstance(cell, CurvePlot):
-            self._validate_curve_shape(
-                cell.x, () if cell.group is None else (cell.group,)
+            self.validate_curve(
+                cell.x, group_by=() if cell.group is None else (cell.group,)
             )
         elif isinstance(cell, ImagePlot):
-            self._validate_image_shape(cell.x, cell.y)
+            self.validate_image(cell.x, cell.y)
         elif isinstance(cell, HistogramPlot):
             if cell.group is not None:
                 self._resolve(cell.group)
@@ -4117,18 +3680,6 @@ class DataView:
                 "facet cell must be CurvePlot, ImagePlot, or HistogramPlot"
             )
 
-    def facet_cell_count(self, spec: FacetGridPlot) -> int:
-        """Return the facet domain size without building any cell.
-
-        The used set comes from one code per physical carrier row, never one
-        coordinate per dataset element.  This remains O(R), O(P), or O(Di)
-        regardless of the cell payload size.
-        """
-
-        if spec.facet is None:
-            return 1
-        return self._domain(spec.facet).size
-
     def facet(
         self, spec: FacetGridPlot, *, bins: int | Sequence[float] | None = None,
         uncertainty: bool = False, window: int = 1,
@@ -4141,16 +3692,6 @@ class DataView:
             if bins is None:
                 raise DataViewError("histogram facet cells require explicit bins")
             return self._histogram_facet(spec, bins, window)
-        if cell.reduction is Reduction.LAST:
-            kept = tuple(ref for ref in (
-                spec.facet, getattr(cell, "x", None), getattr(cell, "y", None),
-                getattr(cell, "group", None), *(ref for ref, _value in spec.scope),
-            ) if ref is not None)
-            payload = self._last_view(keep=kept).facet(
-                replace(spec, cell=replace(cell, reduction=Reduction.MEAN)),
-                bins=bins, uncertainty=uncertainty, window=window,
-            )
-            return replace(payload, spec=spec)
         if bins is not None:
             raise ValueError("bins are accepted only for Histogram facet cells")
         if uncertainty and not isinstance(cell, CurvePlot):
@@ -4455,17 +3996,15 @@ def _counts_from_frequency(
     if aligned is None:
         return None
     first, width = aligned
-    counts = np.zeros(edges.size - 1, dtype=np.int64)
-    if not frequency.size:
-        return counts
-    low = int(offset)
-    high = low + int(frequency.size) - 1
-    for index in range(counts.size):
-        start = max(first + index * width, low) - low
-        stop = min(first + (index + 1) * width, high + 1) - low
-        if stop > start:
-            counts[index] = np.sum(frequency[start:stop], dtype=np.int64)
-    return counts
+    size = int(frequency.size)
+    # Each edge as a table position, clipped to the table, in exact Python
+    # integers; a bin is then one difference of the running total.
+    positions = np.asarray(
+        [min(max(first + width * index - int(offset), 0), size) for index in range(edges.size)],
+        dtype=np.intp,
+    )
+    running = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(frequency, dtype=np.int64)))
+    return running[positions[1:]] - running[positions[:-1]]
 
 
 def _frequency_span(
@@ -4797,9 +4336,16 @@ def _validate_refs(refs: tuple[AxisRef, ...], what: str) -> None:
 
 
 def _validate_aggregation(value: Reduction) -> Reduction:
+    """The statistic a projection computes for an authored reduction.
+
+    Last is a Scope: the common projection restriction (``projection_scope``)
+    has already pinned every reduced axis to its last coordinate before any
+    DataView exists, so what is left of it here is the ordinary mean.
+    """
+
     if not isinstance(value, Reduction):
         raise TypeError("aggregation must be Reduction")
-    return value
+    return value.statistic
 
 
 def _inverse_code_order(codes: NDArray[np.int64]) -> NDArray[np.int64] | None:
@@ -4886,9 +4432,9 @@ def _masked_leading_reduce(
         elif aggregation is Reduction.SUM:
             result = np.sum(values, axis=0, dtype=wide)
         elif aggregation is Reduction.MIN:
-            result = np.min(np.asarray(values, dtype=np.float64), axis=0)
+            result = np.min(values, axis=0).astype(np.float64)
         elif aggregation is Reduction.MAX:
-            result = np.max(np.asarray(values, dtype=np.float64), axis=0)
+            result = np.max(values, axis=0).astype(np.float64)
         elif aggregation is Reduction.FIRST:
             result = np.asarray(values[0])
         else:
@@ -5276,24 +4822,6 @@ def _bucket_sums(
     )
 
 
-def _leading_along_axes(
-    values: NDArray[Any],
-    usable: NDArray[np.bool_],
-    axes: tuple[int, ...],
-) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-    """The first usable entry along ``axes``, in the array's own order."""
-
-    moved_values = np.moveaxis(values, axes, range(-len(axes), 0))
-    moved_usable = np.moveaxis(usable, axes, range(-len(axes), 0))
-    head = moved_values.shape[: moved_values.ndim - len(axes)]
-    flat_values = moved_values.reshape(head + (-1,))
-    flat_usable = moved_usable.reshape(head + (-1,))
-    present = flat_usable.any(axis=-1)
-    first = np.argmax(flat_usable, axis=-1)
-    taken = np.take_along_axis(flat_values, first[..., None], axis=-1)[..., 0]
-    return np.where(present, taken, 0.0), present
-
-
 def _history_window(window: object) -> int:
     if isinstance(window, bool) or not isinstance(window, Integral):
         raise TypeError("history window must be an integer")
@@ -5443,7 +4971,6 @@ __all__ = [
     "HistogramData",
     "ImageData",
     "RollingHistory",
-    "RollingShot",
     "SelectionSubject",
     "QuantityArray",
     "SampleProjection",
