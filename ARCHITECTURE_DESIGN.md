@@ -332,7 +332,8 @@ Node new chunk
   状态机，也有自己的一把Python GIL：Panel间的Python绘制真正进程并行，UI/Runtime与Save/Edit同样隔离。
   每个子进程的Numba/OpenMP pool保留本机logical-CPU容量（OpenBLAS在子进程里为1线程），但每个
   Raster/analysis worker只启用`ZLC_NUMBA_WORKER_THREADS`（默认4）的team并在空闲时sleep，kernel内
-  不临时扩team。没有跨进程的native线程总预算：N块同时在画的面板最多请求N×2个team，多于本机
+  不临时扩team。OpenMP只按team建线程，pool容量只是上限，不多占线程或内存（2026-09-25实测pool 16/8/4
+  相同）。没有跨进程的native线程总预算：N块同时在画的面板最多请求N×2个team，多于本机
   逻辑核时由OS调度分摊；要收紧就调小`ZLC_NUMBA_WORKER_THREADS`，operator显式环境设置始终优先。
   B不初始化Plot kernel pool；不得用跨host render/fit锁重新串行化A。
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。

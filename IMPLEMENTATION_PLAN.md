@@ -621,14 +621,11 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
   history 的行，所以 `selection_output_catalog` 对 rolling 返回空。要切到那些 shot，需要 rolling
   适配层在范围里写明坐标轴（primary-index 或 shot time），再按普通 point 轴切——那是能力，不是修补。
 - **`_reduce_blocks` 4.2 ms 出现在半数 image 帧上**（08-27 的数，未复测；裁决见上，记录在此备查）。
-- **render 子进程的 numba pool 仍按逻辑核数建**（2026-09-25 审查 E2-5 的子进程一半）：子进程继承 bootstrap 设的 `NUMBA_NUM_THREADS`（逻辑核数），各 worker 再按 `ZLC_NUMBA_WORKER_THREADS`（默认 4）mask；把子进程的 pool 也设成 team 会改内核并行度，须先跑 bench 实测，本轮未改。
-- **既有红测试不再以「master 同红」带过**：d00ce8c9 全量为 plot 9、runtime 25、pulse 3、ui 4、
-  atom 20、workbench 32 + 2 errors（data、durable 为 0）。2026-09-25 的测试审查逐条归了类：多数是
-  segmented DataBlock 之后测试仍直读 `.block.values`（`np.asarray(None)` 还让其中几条断言永远不会失败）、
-  测试替身缺新字段、断言已删的私有 API 或旧 grammar；`test_guard_c_save_semantics` 红在
-  `refresh_panel_snapshot` 返回 False（layout load 按设计退休被替换的 Logic host），不是 mathtext。产品侧
-  两处（gallery 示例的信号签名、`FluentLineEdit` 把未改动的 `100.0` 改写成 `100`）已修。测试修订之后的
-  计数以下一次全量运行为准。
+- **全量测试只剩一条红**（2026-09-25 修订后逐包各跑一次）：data 188、durable 28、runtime 176、
+  pulse 157（5 skip）、ui 161、plot 1183、atom 497、workbench 531 通过；唯一的红是下一条的
+  `test_environment`。d00ce8c9 时的 plot 9、runtime 25、pulse 3、ui 4、atom 20、workbench 32 + 2 errors
+  多数是 segmented DataBlock 之后测试仍直读 `.block.values`、测试替身缺新字段、断言已删的 API，已随测试
+  审查逐条修掉或删去。
 - **`Github\zlc_*` 是拆包残留的旧副本**（`zlc_runtime/selection_bridge.py` 56KB vs 树内 96KB，
   8 月 3 日），pip editable 全部指向它们。走 `zou_lab_control` bootstrap 时不受影响
   （它把 checkout 置顶），但**裸 `import zlc_runtime` 会拿到旧副本**。`zlc-check-environment` 在
@@ -637,6 +634,11 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
   会红到这 8 个旧 editable 安装被卸载为止——那是检查在起作用。删不删是用户的事。
 
 ### 已经查清、不是缺陷的
+
+- **render 子进程的 numba pool 按逻辑核数建不是浪费**（2026-09-25 实测）：numba 在这里用 OpenMP
+  线程层，只按 worker 的 mask（`ZLC_NUMBA_WORKER_THREADS`，默认 4）建线程，pool 大小只是上限。子进程里
+  pool 为 16、8、4 时，跑过并行内核后同为 18 个线程、提交 310 MB，内核耗时 0.34–0.37 ms；四面板
+  console 各子进程线程数（21–24）、提交（约 355 MB）与帧率都不随 pool 变。所以子进程不另设 pool。
 
 - **facet grid 先前那个 78 ms 是探针假象**：facet 的 overview 是"选择器"，
   按设计只认左双击进入单元格，别的手势一律忽略——探针在它上面拖，量到的是下一帧 live 到达。
