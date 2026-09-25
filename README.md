@@ -67,16 +67,22 @@ Manager and Init starts the server in-process; once published with Remote,
 the device card's Log button tails that device's own narration. The headless `pulse_server` / `slm_server` commands remain
 for a machine without a bench window.
 
-Run experiment windows from the folder owning `pulses\`, `data\`,
-`config_values\`, and `apparatus.json`, or pass `--workspace`. Set
+An experiment window uses the experiment folder it is started in (the nearest
+folder at or above the working directory holding `pulses\` or
+`apparatus.json`); failing that `ZLC_WORKSPACE`, and failing that the
+checkout's own untracked `workspace\`. An installed product has no checkout
+folder and refuses to guess: pass `--workspace` or set `ZLC_WORKSPACE`. Set
 `ZLC_PY_CMD` only when the intended Python is outside normal discovery.
 
-`config_values\current.json` is how the BOARD is calibrated today: channel
-delays and DAC biases, by name. It is loaded onto the sequencer, not into a
-pulse, so every pulse on the bench plays through the same set -- a session
-picks it up when it opens a board, and the Pulse Editor's **Load config** /
-**Save config** buttons read and write it. A pulse that declares a config
-parameter no set names is refused, loudly, rather than played with a guess.
+A Config file under `config_values\` is how the BOARD is calibrated: named
+values such as channel delays and DAC biases. It is loaded onto the sequencer,
+not into a pulse, so every pulse on the bench plays through the same set. The
+sequencer's Init names the file (left empty, none is loaded; no
+`current.json` is read implicitly), and the Pulse Editor's Config tab loads,
+edits and saves it; only a saved file ever reaches a Fire. A field bound to a
+name the loaded file does not provide plays its authored default and shows as
+not overridden; a value that is used but malformed or in the wrong unit is
+reported, not guessed.
 
 A pulse's own API parameters are a different thing: they belong to the pulse
 file, and a node that loads a pulse offers a per-run table for them, so one
@@ -118,8 +124,7 @@ replaced: `start.json` at Start (identity, normalized inputs, `started_at`) and
 registered artifacts, failure). Nothing is written in between, so a folder
 holding `start.json` and no `run.json` is a run that did not finish. Tasks save
 only curated domain outputs; Runtime does not dump all live data or
-intermediate shots. Calibration, Temperature and SLM Feedback use this same
-lifecycle.
+intermediate shots. Calibration and SLM Feedback use this same lifecycle.
 
 Calibration's threshold method is the operator's choice and defaults to
 `gaussian`: every site fits an unlabelled two-component Gaussian mixture to all
@@ -185,8 +190,9 @@ is numerically valid, meets the component and separation conditions and wins by
 full-data ΔBIC > 10; an ordinary fit that does not is a single (not loaded), and
 a numeric or acquisition failure is invalid and holds its share. A dark site
 moves toward the loading edge by bracketed bisection, or one resolution step
-along its probed direction, funded by the loaded sites through one common
-factor at no more than one resolution step per site per candidate; a loaded site
+along its probed direction, funded in share space by the loaded sites whose own
+loop step does not point the other way, each giving at most one resolution step
+per candidate with total power conserved; a loaded site
 on the loading ramp (bright fraction below half the array median) holds; only
 formal double updates use `feedback_gain`. Every next acquisition requires a
 confirmed different phase. The task stops when three consecutive formal
@@ -212,8 +218,8 @@ depth deliberately places ordinary optical nonuniformity near that edge.
 ### Pulse and FPGA
 
 Pulse execution has three explicit hardware layers: Scan repeats walk the
-complete table, Run repeats play the complete Pulse at one row, and the single
-draggable PulseBracket loops only its authored timeline subset. Camera
+complete table, Run repeats play the complete Pulse at one row, and named,
+nestable PulseBrackets loop only their authored timeline subsets. Camera
 frames-per-cycle and Dataset repeat remain independent acquisition facts.
 The Pulse server alone owns UART/JTAG hardware; normal disconnect drives SAFE,
 UART auto-selection requires the word-63 fingerprint, and explicit UART failure

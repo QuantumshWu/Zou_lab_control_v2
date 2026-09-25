@@ -31,7 +31,7 @@
 | Layer | 唯一职责 | 禁止 |
 |---|---|---|
 | `zlc_data` | Immutable scientific schema、values、validity、selection projection和codec grammar | Runtime、Qt、device、workspace路径 |
-| `zlc_durable` | Atomic write、并发安全命名、workspace path | Science schema与figure语义 |
+| `zlc_durable` | Atomic write、并发安全命名、workspace path、readable JSON写出与唯一strict JSON读入（拒绝重复key与non-finite） | Science schema与figure语义 |
 | `zlc_runtime` | Node lifecycle、canonical run accumulation、live/partial/final publication、causal identity、front scheduling | Plugin physics、plot rendering、Qt |
 | `zlc_plot` | Snapshot projection、exact fit、overlay、selector、raster front | Signal registry、Task lifecycle、plugin science |
 | `zlc_ui` | Qt views和plain view models | Plot/Runtime/device/domain ownership与blocking work |
@@ -75,7 +75,7 @@
 
 - 一个writer、一个reader、一个format owner。
 - RenderFrame的公共present准备完整data、边框、刻度、标题及overlay后才选择输出；compose=False只省去屏幕像素合成，不能省去场景组成。Facet边框/刻度/标题在最终axes几何确定后统一准备，屏幕compose与文件save消费同一份；Save不得依赖此前显示过一帧、另建Calibration修补路径或补一次无用屏幕draw。
-- Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit。纯文件导出由已有save worker直接使用同一PlotSession/MatplotlibRenderer，按最终导出DPI准备数据和artist，不创建无人观看的RasterPlotHost、屏幕front或返回假的accepted description；规范化配置仍由同一Session与Figure codec保存。先写NPZ，再绘制真实文件，不恢复不存在的屏幕。已有交互Host保存仍恢复原屏幕。
+- Figure reader直接返回metadata、NPZ成员和已经完整验证的typed datasets；typed成员与Dataset共享同一不可变buffer，消费者不再次decode或copy。初始Host配置使用同一configure事务，在第一张front之前应用viewport/selectors/focus/classifier/fit。纯文件导出由已有save worker直接使用同一PlotSession/MatplotlibRenderer，按最终导出DPI准备数据和artist，不创建无人观看的RasterPlotHost、屏幕front或返回假的accepted description；规范化配置仍由同一Session与Figure codec保存。先写NPZ，再绘制真实文件，不恢复不存在的屏幕。已有交互Host保存先在该Host worker上核对settled recipe与数据，再同样由recipe新建一个导出session写archive与图：面板自己的session带着Normal模式的历史limits与histogram域，与从archive重开的画面可能差一个deadband，所以不借用它，面板屏幕也因此不受Save影响。
 - FigureViewer开图只创建真正的Monitor A Host，不在C先画一遍来取配置；首个真实accept才从其SelectionSubject恢复交互并同步Port/PanelState的规范化target。新图成功前保留旧板，失败或Close清理候选；A沿普通live fit契约首帧求解并继续处理新数据，C的静态保存策略不复制到A。
 - 编辑任意archive Dataset的数据只需要typed数据和已有recipe，不能先创建隐藏Host求fit/description；包括非默认Dataset。修改后的实际Preview才进入同一个A接受流程，纯数据草稿不保存第二份display description。
 - Writer写入前规划全部member namespace并拒绝碰撞。
@@ -126,7 +126,7 @@ Node new chunk
 - `Operand`只是完整`DatasetSchema + values + validity`的薄数值包装，始终保留Repeat × Point × Cell-data三domain，不按数组shape猜轴、不自动squeeze。`isel`按索引、`sel`按精确typed coordinate选择任意具名axis；标量选择移除该具名axis但保留所属domain，长度1列表保留该axis，无具名axis的domain仍有大小1。`mean/sum/count/any/all/min/max/std`可沿一个或多个任意domain中的具名axis归约，歧义用完整AxisId消除，轴名与ID区分大小写、示例须按实际输入轴名替换；`where`只限制validity，空组invalid，`std`为总体标准差（ddof=0），并为每个输出bucket选取该bucket自己的真实样本作锚点，再以两遍局部残差形成均值与平方和；不得用跨bucket全局中心或`E[x²]-E[x]²`，常量必须严格为零而大基线上的可分辨小spread必须保留。bool归约使用`count/any/all`，其`count`数有效True、numeric的`count`数有效样本。算术/比较/布尔运算要求相同几何并沿公共单位规则，不静默对齐或做笛卡尔积；原始NumPy可通过`.values/.valid/.masked`使用，同shape替换走`.with_values(...)`，高级变形必须显式构造带完整schema的`Operand`，不能直接发布一个猜不出domain的ndarray。
 - Processor的Input range由Node的`dataset_input_view/dataset_input_window`声明，独立于exact/latest交付策略：`event`为当前publication的原始event；`run`为该publication对应的本次运行canonical Dataset，finite源包含尚未采集的invalid位置，且不受其它Panel的history lease影响；普通Monitor没有finite累计范围时，`run`就是它当前完整结果，不凭此无限积累。`window`为Runtime原有`index_by_source`能力下最近N个publication位置的bounded Dataset，沿原source ordinal保留gap/invalid与相对`primary-index`，不按Repeat长度猜事件数或只数成功样本；不支持history的源（包括无此能力的finite源）明确拒绝并提示使用`run`。Derive默认`event`、window默认50；显式范围在live与terminal求值一致，未声明该属性的既有Processor仍保持live-event/terminal-canonical规则。
 - Input window的lease只在NodeHost运行期间对同一bundle所需成员一起取得，按同一exact publication与共同可保留窗口物化，不能拼出不同起点的siblings；开始前不可恢复的旧event不回填，结束、Stop、失败或关闭释放自身lease，不影响其它consumer的lease。Runtime继续独占history、event record与causal publication；Derive不存输入历史、不建第二份placement表。每次Derive求值的所有输出都是完整当前结果，以`MonitorCoverage`替换上次估计，不把任意归约结果按输入finite位置append，也不继承未归约输入的50-repeat geometry。输出保留本次实际parent与source primary index，声明`index_by_source`仅供真实下游按需取得history；终态保留完整结果并seal。
-- History唯一保留上限是所有active有限正整数lease的最大window，不另以隐藏字节预算或固定shot数缩短用户请求。gap仍占其实际index位置并为invalid，最后lease释放立即归零；内存随真实requested window和retained buffers增长，不承诺任意大window均能装入物理内存。
+- History唯一保留上限是所有active有限正整数lease的最大window，不另以隐藏字节预算或固定shot数缩短用户请求。gap仍占其实际index位置并为invalid，最后lease释放立即归零；内存随真实requested window和retained buffers增长，不承诺任意大window均能装入物理内存；lease取得或放大时，按最新event估算的待保留字节若超过当前可用物理内存，则明确拒绝该lease；lease先于本次generation取得（恢复的Panel、Stop后再Start）时，同一检查在该generation第一个event提交时进行并拒绝该提交，此时扣除被丢弃的上一generation为该signal保留、其Panel在新publication替换前仍在显示的window字节，只按新window超出部分计价（record变大时按增长量拒绝）；均不静默缩短。
 - `scope/reduction/fate`只决定怎样投影Panel已经取得的canonical view，绝不替代Processor的Input range或决定读取event；同一publication不能因Panel semantic不同代表两份不同数据truth。
 - Incremental placement沿Repeat/Point两个`DomainSpec`的物理rows；多维scan由Point domain内多个
   logical axes及其唯一`axis_codes`表达，不另存平行row/topology结构。一个cell payload
@@ -139,12 +139,12 @@ Node new chunk
 - Bounded indexed history已经淘汰的旧publication属于正常presentation过期，不是signal/Panel故障：`SignalDataPlane.retains(signal, publication)`必须把primary index早于history first index回答为False，materialization以明确的expired/cancel结果拒绝；Surface丢弃这次排队更新并保留上一完整front、host和control vocabulary。Frozen Edit仍以自身accepted snapshot完成selector/fit/producer映射，但不得把已淘汰parent交给Runtime SelectionBridge；它同时撤下该bridge之前的derived output，绝不能拿latest冒充旧publication或留下旧ROI信号，也不能让普通`ValueError`关闭host或清空Fit/Setting UI。
 - Panel Edit的冻结数据是否落后于Live与冻结配置是否仍兼容是两个状态：同run内accepted surface所示Dataset revision推进（scan逐点增长或Monitor发布新值，比较的是exact revision ref而不是publication上不存在的coverage）只标记`data advanced`，不得阻止对exact frozen snapshot做Fit、Refresh或Save；只有signal/spec/axis vocabulary真正不兼容才阻止保存。Refresh只是请求：新的冻结候选留在editor entry里随Edit host一起交付，公开frozen record、`data advanced`与Save读取的都是Editor最后接受的完整画面，Editor接受新front时二者才一起推进；没有Edit surface时才直接冻结accepted Live。接受Display/Fit/Focus等配置时，PanelState、frozen target和两surface配置必须原子推进，不能先把自己标stale再由stale阻断同步。
 - Panel的title shape与Setting semantic都只能读取同一publication的canonical current Dataset，不得读取最后event chunk冒充完整signal。title结构固定为`(repeat axes) × (point axes) × (cell-data axes)`三组；例如Survival field scan显示`(20) × (3×10×10×10) × (35)`：survival的pair是Point domain内的READOUT_EVENT axis，scan axes在同一Point domain按声明顺序追加，site留在Cell-data。PanelCard以独立的accepted-data projection持有title structure/scope，不从Setting parameter surface读取；每次surface accept都直接更新该projection，即使不改变任何PanelState/control vocabulary。存在具名Point axes时不得再发明flattened `point` ordinal；多维FacetGrid默认facet最外层真实scan axis，其余轴保持可编辑的Reduced。即使当前projection因FacetGrid 64-cell上限等原因拒绝，错误只标记不可用的presentation/fit，完整canonical scan-axis fate仍必须留在Setting中供operator修复。live publication未改变PanelState或authoring字段域时不得reconcile Setting form；Plot kind是Add Panel时确定的panel identity，不进入Setting通用表单，FacetGrid仅暴露可变的Cell kind。
-- 未经authoring的默认投影只由`zlc_plot._kinds.defaults`一张表决定：每种plot kind的`default_spec`、FacetGrid的cell kind选择和「从当前plot要一个grid」都是对同一张表的读取，不得各自维护第二套推断。表按`classify_axes`得到的axis family分组，永不按axis name特判：R（Repeat domain axes）是统计量，只被reduce或被Histogram pool，只要还有别的轴有结构就不成为layout轴；H（Runtime的`primary-index`）同样是统计量，除Rolling自己走它之外只在其它轴都没有结构时作curve最后的x；S（Point domain中的scan axis，slowest first）是位置——最内层是一次sweep走的x，两层是heatmap，最外层是grid的facet，无人认领的scan轴保持可编辑的Reduced；E（Point domain中的`READOUT_EVENT`，如camera frame、survival pair）是子测量的选择——grid给每个event一个cell，无scan的curve沿它走，其它情况在构造默认spec时选择末项真实坐标的Scope，不得对不同frame取平均；D（Cell-data axes）是内容——声明的picture或两条content轴成image，剩下的一条content在palette能分辨时成group，否则reduce。size为1的degenerate轴是provenance不是结构：curve默认的x若只剩degenerate轴可选，则改走声明顺序里下一条有变化的轴（此时只可能是Repeat轴——别的family有变化的轴表已先选走），全都无变化才把首条degenerate轴画成一个点，一条轴都没有则该kind无默认（返回None，入口按「无法绘制」拒绝而不是抛异常）。这条规则只在这张表里，Workbench的`fitting_panel_spec`只定kind/cell kind，不得再改选任何轴。`packages/zlc_plot/tests/test_default_roles.py`枚举全表。Limit类display字段（relim与x/y/color范围）声明为non-portable：panel identity改变时它们随semantic/fit一起从新vocabulary重新开始，只有外观字段跨kind携带。
+- 未经authoring的默认投影只由`zlc_plot._kinds.defaults`一张表决定：每种plot kind的`default_spec`、FacetGrid的cell kind选择和「从当前plot要一个grid」都是对同一张表的读取，不得各自维护第二套推断。表按`classify_axes`得到的axis family分组，永不按axis name特判：R（Repeat domain axes）是统计量，只被reduce或被Histogram pool，只要还有别的轴有结构就不成为layout轴；H（Runtime的`primary-index`）同样是统计量，除Rolling自己走它之外只在其它轴都没有结构时作curve最后的x；S（Point domain中的scan axis，slowest first）是位置——最内层是一次sweep走的x，两层是heatmap，最外层是grid的facet，无人认领的scan轴保持可编辑的Reduced；E（Point domain中的`READOUT_EVENT`，如camera frame、survival pair）是子测量的选择——grid给每个event一个cell，无scan的curve沿它走，其它情况在构造默认spec时选择末项真实坐标的Scope，不得对不同frame取平均；D（Cell-data axes）是内容——声明的picture或两条content轴成image，剩下的一条content在palette能分辨时成group，否则reduce。size为1的degenerate轴是provenance不是结构：curve默认的x若只剩degenerate轴可选，则改走声明顺序里下一条有变化的轴（此时只可能是Repeat轴——别的family有变化的轴表已先选走），全都无变化才把首条degenerate轴画成一个点，一条轴都没有则该kind无默认（返回None，入口按「无法绘制」拒绝而不是抛异常）。这条规则只在这张表里，Workbench的`task_console_fitting_spec`只定kind/cell kind，不得再改选任何轴。`packages/zlc_plot/tests/test_default_roles.py`枚举全表。Limit类display字段（relim与x/y/color范围）声明为non-portable：panel identity改变时它们随semantic/fit一起从新vocabulary重新开始，只有外观字段跨kind携带。
 - Panel host accept后的Setting/PanelState metadata必须读取该次accepted surface的完整Dataset描述（含已物化窗口轴），不得再用原始event/canonical信号目录字段覆盖。首次挂载与普通更新共用端口呈现通知并接纳归一化target，不得只更新Console一侧而留下旧port target。一个表单提交的全部fate rows是一次原子axis-role assignment：先确定全部x/y/group/facet目标，再处理Reduced/Pooled/scope及真正空缺的required role；结果不得依赖row迭代顺序或中间冲突。
 - Fate vocabulary只由schema与plot kind声明：每个axis无条件列出该kind拥有的全部roles，UI不得运行candidate projection、cell-count、surface size、DPR或layout feasibility来删除选项。实际组合是否合法、Facet是否超过容量只由提交后的Plot/layout transaction判断并loud拒绝；拒绝不得改写或缩减Setting vocabulary。这条法则覆盖表单全部section：**Setting表单的字段集合只由panel身份（signal/kind/cell kind解出的schema与描述）决定，数据与生命周期状态只能改字段的值、可用性与注记，永不能增删字段**——「标记不可用」不等于「移除字段」；host描述过的panel在任何degrade/报错路径都必须从其accepted描述重投完整字段集（含Fit），schema投影只服务从未描述过的panel。停止的run不是例外：sealed monitor publication由plane无条件保留（终态保留策略唯一属plane，节点不再逐个声明），其上的ROI/fit派生走terminal路径照常工作，「run no longer held」只在硬retire后出现且属于自清除的condition通道而非error。
 - Panel surface在`board.commit`中首次accepted后，Derivation Bridge必须在同一个owner turn完成level reconcile，之后才能把交互权交回Qt；不得出现像素已可点但首个selector尚无Bridge而永久丢失的display-cadence窗口。
-- Layout（`zlc.console-board`）恢复参数按当前声明取交集：存在的字段填保存值，缺失用当前默认，已不存在的字段忽略；Logic读取当前AuthoringSchema，Panel读取当前PanelState/Plot词汇，不为某两个废弃参数加兼容分支或版本表。字段本身的类型/数值校验仍保留；未完成的业务草稿可载入，完整性由原Start入口判断。动态semantic在真实schema可用时通过同一PanelState投影筛除不存在的键，不猜旧轴名称或翻译旧角色；底层Plot参数API和数据文件校验不放宽。结构身份仍明确：每个panel必须保存唯一非空`panel_id`与可识别kind，Logic必须可定位当前插件，不能按行号猜身份。Load先为本次加载铸造新panel id，再统一重映射`@logic/<保存的id>/...`；无法解析的连接置空并在status说明。Load/Clear仍是整板替换的同一commit，有运行节点时先确认、停止并等terminal，不从UI强关host。程序化`apply_layout`未授权`stop_running`仍拒绝覆盖运行节点；读取不自动改写原文件，保存仅写当前有效参数。
-- Plot live revision identity始终读取底层Dataset snapshot的`stream_generation + revision`；`ImageFrame`只是overlay wrapper，不能隐藏新generation并把重置后的相同revision误判成stale。same-geometry新run复用host及交互订阅，geometry变化才replacement。
+- Layout（`zlc.console-board`）恢复参数按当前声明取交集：存在的字段填保存值，缺失用当前默认，已不存在的字段忽略；Logic读取当前AuthoringSchema，Panel读取当前PanelState/Plot词汇，不为某两个废弃参数加兼容分支或版本表。字段本身的类型/数值校验仍保留；未完成的业务草稿可载入，完整性由原Start入口判断。动态semantic在真实schema可用时通过同一PanelState投影筛除不存在的键，不猜旧轴名称或翻译旧角色；底层Plot参数API和数据文件校验不放宽。结构身份仍明确：每个panel必须保存唯一非空`panel_id`与可识别kind，Logic必须可定位当前插件，不能按行号猜身份。Load先为本次加载铸造新panel id，再统一重映射`@logic/<保存的id>/...`；无法解析的连接置空并在status说明。一块panel的port准备不了（例如其semantic表被拒）时，它以schema投影的修复表单无port留在板上并记一条load说明，其余panel照常载入；被拒的表是该panel的状态，发布、Task接管等路径把它当作不可绘制而不抛出。这次load即算该信号本run的挂载尝试：无port留下的panel（表被拒或kind不兼容）到源的下一个run才自动重挂，不在下一拍重复同一拒绝盖掉load摘要。Load/Clear仍是整板替换的同一commit，有运行节点时先确认、停止并等terminal，不从UI强关host。程序化`apply_layout`未授权`stop_running`仍拒绝覆盖运行节点；读取不自动改写原文件，保存仅写当前有效参数。
+- Plot live revision identity始终读取底层Dataset snapshot的`stream_generation + revision`；`ImageFrame`只是overlay wrapper，不能隐藏新generation并把重置后的相同revision误判成stale。same-geometry新run复用host、交互订阅与已armed的fit，geometry变化才replacement；是否same geometry由host自己的规则判定（两个snapshot schema相等，或indexed_schemas_compatible），不比较完整fingerprint。
 - Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。动态status与图像都取其exact publication的canonical prefix，再按公共Scope/Last与facet定位一个Repeat/Point cell；site向量不能被图像pixel fate裁掉。多个cells的Mean或pool没有独立Boolean判决，不私造共识状态，无法唯一选定时显示UNKNOWN/隐藏。
 - Processor可声明消费订阅锚点同一原子publication内的具名siblings；它们不形成独立source或异步join，exact replay与causal lineage由该publication提供。Derive用直接`a.<name>`引用规划所需siblings（加上订阅锚点）；动态使用`a`时保留该producer的全部成员，AST这里只规划依赖、不限制Python语法。所有成员统一使用同一个Input range，不能为其中一项读latest或另一份窗口；不支持跨独立producer的隐式join。原`occupancy_agreement`已退役，一致性掩码只是普通Python，例如`agree = a.occupied.isel(frame=0) == a.occupied.isel(frame=2)`，再以`.where(agree)`限制选定frame的counts；也可继续归约Repeat或其它命名轴，不限定为site-only操作，不重读camera/calibration或重新分类。
 - Dataset输入可声明`select_bundle`：其界面按同一atomic producer的输出集合提供一项普通Fluent choice，显示producer和成员名，不让操作者在bundle内部选某个叶子。Runtime仍用一个成员signal作为既有订阅锚点，按上述依赖规则消费同publication的siblings，不引入bundle数据或另一份registry；不同atomic owner即使共用Panel标题也不得混成一个bundle。Derive使用这个入口，普通单signal输入继续使用现有树形选择器。
@@ -161,24 +161,24 @@ Node new chunk
 - Signal目录只随其结构、生命周期与parent generation事实改变；值revision不属于菜单事实。Plane保留唯一不可变目录，Console从这一份目录产生并复用rows与overlay候选；无变更的idle/new-value拍不重建菜单。菜单家族匹配不是same-shot许可，实际呈现仍核exact publication。
 
 - Scan数据的两条Repeat轴name与任务UI对齐为`repeat`、`shots per point`，不以Pulse硬件的Scan/Run repeats命名。轴顺序、坐标与稳定AxisId不随manual/device/pulse执行方式改变；Pulse本身的参数和执行字段保持原意。
-- Generation标识一次run/restart；generation内schema和stream generation固定。
+- Generation标识一次run/restart；generation内schema和stream generation固定。唯一不算schema变化的是从Runtime history window切出的Monitor结果：它带着窗口自己的坐标（stamped history的shot time、每条记录的sample-time origin），这些逐shot移动而physical shape、axes、roles与units不变，所以形状与structure fingerprint相同时仍留在原generation；窗口变长仍改变形状，也就开始新generation。
 - Restart只等两件事：旧run真正停下（device lease随worker终态释放），以及仍要从Plane读旧generation的面板投影（含正在retarget的候选port）跑完。投影读完后surface拿着自己的副本走，渲染子进程里的绘制、cohort的成组、屏幕翻转都不参与等待；卡片说明在等哪一件。终态过渡无条件：worker完成一旦被取走，即使退休Plane generation失败，run也以failed结束并说明原因；display步骤失败不跳过节点轮询。
 - Panel标题仅Repeat域显示条件写入数量，Point/Cell-data仍显示完整维度。对每个Repeat轴只放开自身，其余Repeat/Point轴固定于同一publication最后写入位置的canonical axis_codes；只数该切面已写入的不同Repeat坐标。Cell-data整块发布，site/pixel没有用于标题的当前坐标，科学validity（例如Survival分母资格）不能充当写入覆盖。Runtime复用唯一occupied_cells覆盖记录，在commit时把包括本次block的计数作为SignalValue.repeat_counts固定下来；Monitor的完整事件按实际Repeat carrier计数。旧publication、Stop后的数据与Frozen继续持有自己的整数，不读独立latest，不扫描像素或累计第二份进度。Panel只投影exact accepted publication的计数，不受Scope/Focus/Facet/Reduction影响，不产生min–max区间；计数之积不表示全Dataset样本总数。
 - Producer与latest/frozen/follow Processor的Start共用同一终态世代交接：旧结果在结束/Shutdown后仍保留，直到下一次Start才退休旧owner及派生closure。cleanup在Plane锁外，最终source exact校验与新state安装在同一锁内，`_starting`由同一入口释放；仍active的owner不得被覆盖。不得用关闭时清数据或为Derive另建重启路径绕过。
 - Revision严格递增，不接受重复、倒退或同ref不同内容。
 - Selection revision属于用户的数值范围选择，不属于source generation。相同revision、相同数值几何和同source generation是幂等提交；旧revision或同revision改真实范围仍拒绝。兼容选区遇到新的accepted source generation时在原Bridge重新激活派生，不伪造一次用户编辑。仅视觉用的drawn不触发数值重算，Panel文档不另存revision，交回Bridge始终用原binding.selection_revision。
 - 一次commit的siblings共享revision、run record和causal parent。
-- 成功Dataset commit的通知只由Plane的publication订阅发出，worker与processor遵守同一入口；NodeHost不再为同一commit额外唤醒。进度、完成、交互及渲染完成仍沿各自原通知，不能为省唤醒把已到deadline的新数据强制推迟到下一display beat。Indexed history在原子commit预检一次，更新保留窗口不重复执行相同预检；lease变化仍在更新前校验。
+- 成功Dataset commit的通知只由Plane的publication订阅发出，worker与processor遵守同一入口；NodeHost不再为同一commit额外唤醒。进度、完成、交互及渲染完成仍沿各自原通知，不能为省唤醒把已到deadline的新数据强制推迟到下一display beat。publication回调带本次commit的signal名：LiveBoard只在其中有当前面板的front signal时唤醒owner，扫描源只在自己的signal发布时尝试绑定；无人显示的signal不唤起owner turn（processor完成仍走自己的唤醒）。Indexed history在原子commit预检一次，更新保留窗口不重复执行相同预检；lease变化仍在更新前校验。
 - Run record属于generation声明，不属于每event数据：实际准备完成后只注册/冻结一次，后续commit引用Runtime拥有的不可变记录，不携整张计划反复比较。event record才携本事件变化的时间/设备事实，每次atomic commit只冻结一次；内部siblings/publication复用同一记录。finite物化共享已冻结条目，按需生成精确prefix记录，indexed只保留窗口范围。仅更换DataBlock身份不重扫未改变的数值内容。
 - Finite保留在原generation owner内直接持有已验证的数值bytes与紧凑逐event事实，不逐shot常驻SignalValue/Snapshot/DataBlock及祖先Publication对象树。Boolean数值与mask无损按位保存、公开读取时仍恢复不可变数组；其它完整连续数值plane复用原不可变byte owner，不额外复制相机图像或sigma。祖先run声明共享，事件只记录其序号、parent关系和实际event record；相同非空record按内容共享，空record不建独立对象。普通数组物化不解码祖先；Exact replay按需重建公共对象，仍保留全部identity、validity、sigma、placement与来源事实。待消费replay只持所选signal的数据，不钉住退休node、其它siblings或整份materialized Dataset；已持有的真实parent payload仍沿原弱引用owner解析。内部紧凑编码不是新增磁盘格式。
 - Boolean bytes直接存入同一append-only事件buffer，不逐plane留独立bytes头；materialization只在锁内截取已提交前缀的引用和范围，逐event拷贝/解码在锁外，不能因大pixel mask扩大公共锁内复制。来自本generation已有commit的parent复用其sequence/offset，不把过去整条祖先链在每个新event重复展开；读取用显式栈，不新增递归深度限制或永久EventRef索引。
 - 数组读取与来源记录读取按真实需求分开、共用同一materialization owner：current_dataset只准备snapshot，不构造随即丢弃的记录；current_dataset_view才准备完整exact记录，并复用同一atomic bundle、同revision/范围的结果。公共锁只截取不可变输入及接纳结果，不合并时间索引或计算时间坐标；需要完整新平坦记录时的线性输出成本放在锁外，不能把“只增量放置数组”误称为所有metadata工作都O(增量)。
 - 接收队列、未消费exact事件、用户科学history、Frozen快照和溯源元数据各有明确寿命；溯源的event identity/run record/parent关系不授予无限保留祖先像素的权力。当前科学求值、same-shot front和Frozen仍持所需真实payload；有限结果只永久保留自身数据及祖先元数据，回放按原chunks顺序按需读取，不在公共锁内构造全历史临时队列。普通Monitor不构造无消费者的finite replay副本。
-- Exact订阅的live待处理队列同时按事件数与payload字节明确限额，默认1024事件、128MiB，可在订阅时显式调整；这是未消费缓冲而非history上限。满额或单事件超额只使该订阅明确失败，不丢旧/取latest、不阻塞其它消费者。原生不可暂停数据源不能承诺无限积压仍无损；有界故障必须携容量和积压信息。
+- Exact订阅的live待处理队列同时按事件数与payload字节明确限额，默认1024事件、字节取128MiB与首个事件32倍中的较大者（每事件连同其钉住的祖先payload计），可在订阅时显式调整；这是未消费缓冲而非history上限。满额或单事件超额只使该订阅明确失败，不丢旧/取latest、不阻塞其它消费者。原生不可暂停数据源不能承诺无限积压仍无损；有界故障必须携容量和积压信息。
 - 运行后续失败与此前已commit数据有效性分开：保留已验证的partial prefix，同时向订阅者传播失败终态，不伪装完整或正常EOS。Stop继续保留数据；显式Remove/Clear释放被移除owner的Runtime保留，仍由实际Frozen/Save持有的不可变值不受影响。
 - Exact scientific Processor逐publication有序处理；pure display derivation可latest。交付策略由input contract声明，不从coverage猜；同一交付publication的event/run/window输入范围是另一项显式选择，exact并不强制只读event chunk。
 - 不同Processor可并发，同一Processor保持有序。
-- Processor的Start是持续跟随意图，只有操作者Stop才取消；源暂时不满足计算条件（如Frame Survival少于两帧）保留原因并等待，不伪造结果。失败的同一源generation不反复执行；新generation有publication后复用原Start重新接入，包含已经sealed的新数据。实际尝试的输入publication由NodeHost唯一持有，Workbench不另存重试世代或判断插件帧数。
+- Processor的Start是持续跟随意图，只有操作者Stop才取消；源暂时不满足计算条件（如Frame Survival少于两帧）保留原因并等待，不伪造结果。失败的同一源generation不反复执行；新generation有publication后复用原Start重新接入，包含已经sealed的新数据。旧generation被退休对它的订阅者是流的结束（`StreamEndedEarly`），不是source failure：跟随它的host以cancelled收尾，不报错误。实际尝试的输入publication由NodeHost唯一持有，Workbench不另存重试世代或判断插件帧数。
 
 ### 4.3 Logic Node contract
 
@@ -199,7 +199,7 @@ Node new chunk
 - Descriptor outputs、runtime declarations和preview references只有一份typed vocabulary。
 - Concrete Logic Node不得要求Workbench识别其模块、output spelling或domain helper；通用显示/overlay/selection能力由中立层contract表达，Workbench只路由contract。
 - 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
-- Hosted Task需要人工决定时，只能通过NodeHost同时公开一个带唯一request identity的operator-input request并在worker内等待；Workbench按request kind提供交互，response必须精确匹配当前request。Stop唤醒并取消等待，不使用轮询、第二条Task lifecycle或plugin-specific Workbench状态。未来人工Scan axis复用这个lifecycle，但其业务与UI不属于Calibration实现。
+- Hosted Task需要人工决定时，只能通过NodeHost同时公开一个带唯一request identity的operator-input request并在worker内等待；Workbench按request kind提供交互，response必须精确匹配当前request。Stop唤醒并取消等待，不使用轮询、第二条Task lifecycle或plugin-specific Workbench状态。Calibration的site review与Seamless的manual轴（`manual-axis` request：run停在该点，请operator把knob移到给定值后Continue，Stop即结束）都复用这个lifecycle；各自的业务与UI留在各自的owner。
 
 ### 4.4 TaskRun与durable artifacts
 
@@ -225,20 +225,20 @@ Node new chunk
 - Facet的layout只拥有title，轴/值的显式标签由现有cell.labels唯一保存。构造时将外层显式x/y/value优先规范到cell后清外层对应项；renderer、Focus、label carry均读同一semantic cell，不在每次渲染时重建spec。换轴删除失去角色的旧标签，不能被旧cell fallback重新带回。
 - Pulse字段显示由field_label统一读取`period.name or period_id`：duration为`MOT.duration`，DAC为`MOT.<port label>`，delay为`<port label>.delay`。同一Pulse的有效Period显示名必须唯一，空Name允许使用唯一ID；错误输入只提示并恢复已有字段显示，不改执行程序。ScanColumn/ScanPort的name/port保留变量ID，label用于界面；扫描Dataset的AxisId继续由原port identity产生，Axis.name单独承接显示label，Period改名不得破坏Plan/selector接线或改写值/单位。
 - Exponential的短区间数据只能提供初值，不能据其x/y跨度限制A/B或寿命tau；只保留tau>0的数学域及用户显式约束。固定B后可需要远大于观测窗口的tau，不能用自动上限排除合法更低损失解。fixed/free映射及通用solver停止容差不因此另建分支。
-- Histogram的single/bimodal Gaussian及Poisson-Gaussian只包含其命名的概率分量，不默认添加每bin平底beta；已删除其参数、背景组件、gap-floor种子及从population/fidelity扣除K*beta的旁路。数值COUNT_FLOOR仍只为Poisson deviance计算服务，普通Series Gaussian的背景B保留。
+- Histogram的single/bimodal Gaussian及Poisson-Gaussian只包含其命名的概率分量，不默认添加每bin平底beta；已删除其参数、背景组件、gap-floor种子及从population/fidelity扣除K*beta的旁路。数值COUNT_FLOOR仍只为Poisson deviance计算服务，普通Series Gaussian的背景B保留。直方图fit的观测数取bin数与样本数（各bin计数之和）中较小者，不多于自由参数时与其它fit同一句「needs more points」拒绝，不把样本太少的cell解到预算用完。
 - `release_recapture`是普通Series模型：`q=exp(-W0((2π f t)^2))`、`P=A[1-exp(-eta*q)]/[1-exp(-eta)]+B`，参数为amplitude/offset/eta/frequency，显示符号A/B/eta/f；eta无量纲、f为普通频率并复用sine的inverse-axis单位，时间原点固定为物理t=0而非选区起点。A/B可经现有表达式固定。模型/Jacobian/自动初值只有同一套Numba实现，single/batch复用通用TRF与现有协方差；继续使用Series数值/SEM拟合契约，不隐式构造binomial trial counts或另建温度Task。
 - `display_interval`只控制Surface刷新deadline，不决定active history lease内的Measurement primary index是否存在。Runtime只在lease起点之后为indexed-derived Dataset写value或invalid；昂贵Surface计算同一same-shot group只允许一个active，并在忙时只保留Plane latest完整输入，中间indices仍以invalid存在而不排完整frame。
 - Panel只原子呈现`data@N + fit@N`。
 - Fit selection唯一优先级是committed Area ROI（或显式X-range）→viewport→full range。FacetGrid Focus只定位交互坐标变换与绘制cell，不为数值选区增加隐式facet Scope；同一canonical范围作用于全部facet，用户显式Scope/Last/window仍有效。切换Focus只迁移选区的绘制位置，不改选区范围或revision，任何PanelState重放不得把ROI降级成viewport/full；独立按cell配置的classifier阈值仍由其原owner管理。
 - Fit参数编辑只有一个紧凑表达式：`name=value`表示该参数精确固定、从优化自由度中移除；`name=guess(value)`只替换初始猜测。表达式使用当前painted单位，按参数语义换算成canonical：位置类参数（中心、offset）走单位注册表的精确换算，dBm这类对数单位按其命名的功率跨越；宽度、幅度与标准误只有线性比例，同单位原样通过、跨对数单位没有值并loud拒绝，绝不用两点估一个倍率。PanelState、accepted description和Figure只保存canonical `fixed`/`initial` mappings，不保存第二份原始文本。语法/参数/domain错误只忽略该optional override并继续同model全自动fit，同时保留可修的临时draft和loud warning；不得用窄bounds伪装fixed。model切换清除旧model的fixed/initial。Curve、Rolling、Histogram、Image与Facet cells共用这一contract；fixed参数不报告估计误差，DOF/covariance只按free参数计算。
-- MEAN uncertainty的唯一owner先取得每个输出bucket自己的mean，再以一次second pass同时累积`E[d]`与`E[d²]`（`d=x-mean_bucket`），由`E[d²]-E[d]²`恢复样本方差；不得以一条series的公共reference代替bucket中心。局部矩差若不大于本次浮点归约与相减的前向误差界，必须归零而不得冒充极小SEM；这个边界只消除无法与零区分的roundoff，不是数据阈值，因此`0±1e-3`与`1e6±1e-3`等bucket必须保留各自真实spread。Dense、axis、factored、generic、Facet及regular/irregular/indexed Rolling均调用同一contract。Rolling trailing不从远端whole-history prefix相减`N/S/Q`，而以逐shot `(n, mean, M2)`和span-block Chan/Welford前后缀形成窗口；总样本数为1时保留该sample声明的sigma。随后Fit对零/NaN SEM沿用统一的最小真实正SEM规则，不允许某个plot kind或模型另行修权重。
+- MEAN uncertainty的唯一owner先取得每个输出bucket自己的mean，再以一次second pass同时累积`E[d]`与`E[d²]`（`d=x-mean_bucket`），由`E[d²]-E[d]²`恢复样本方差；不得以一条series的公共reference代替bucket中心。局部矩差若不大于本次浮点归约与相减的前向误差界，必须归零而不得冒充极小SEM；这个边界只消除无法与零区分的roundoff，不是数据阈值，因此`0±1e-3`与`1e6±1e-3`等bucket必须保留各自真实spread。Dense、axis、factored、generic、Facet及regular/irregular/indexed Rolling均调用同一contract。Rolling trailing不从远端whole-history prefix相减`N/S/Q`，而以逐shot `(n, mean, M2)`和span-block Chan/Welford前后缀形成窗口；总样本数为1时保留该sample声明的sigma。随后Fit的权重只有一条规则（single与batch同用）：零SEM是测得的零散布，取本次最小真实正SEM（最强的诚实权重）；非有限SEM（单样本bucket的NaN）是没人测过的散布，取最大可用SEM（最弱权重）；一个正的有限SEM都没有时按无权重拟合。不允许某个plot kind或模型另行修权重。
 - Histogram除single/bimodal Gaussian外提供single/bimodal Poisson-Gaussian（`histogram_poisson_gaussian`、`bimodal_poisson_gaussian`）：泊松律经Γ函数延拓到实数光子数`p(u)=λ^u e^{-λ}/Γ(u+1)`（u≥0），按自身质量归一化后与高斯读出噪声卷积，`f(x)=A/(σ√2π·∫p)·∫p(u)exp(-(x-u)²/2σ²)du`——x的光滑函数，和其他模型走同一条evaluator/jacobian/initializer/bounds路子，直接在plot kind算好的bin中心与计数上拟合，不看数据来源与单位；负值是读出噪声的正常结果。每类参数A（面积=计数×bin宽，任何λ下都成立）、λ、σ；bimodal以λ_L与δ=λ_R−λ_L参数化，headline为δ（bright−dark contrast）。λ为NONNEGATIVE（零光子时密度就是读噪高斯本身），σ与Gaussian模型同为POSITIVE，沿用直方图对宽度的通用半bin下限，没有本模型专属的下限、capability或单位门。种子取直方图四分位间的质量加权均值与四分位距（不是矩，热像素尖峰会把矩种子推进平谷），σ种子为四分位宽度对λ的超出量且不低于一个bin。卷积无闭式，编译核用梯形积分：每光子n个节点，n=每σ与每个p尺度（λ≥1时√λ，否则1/(1+|ln λ|)）各十二个——节点数随参数变化处模型会跳一个积分误差、数值差分会把它除以步长，十二个而非六个把这一跳压到1e-9以下；u=0端点用Euler–Maclaurin修正到O(h⁶)；λ低于1e-150时延拓律比最细网格还窄，密度就取零光子高斯；p表从众数处n个直接值按`p(u+1)=p(u)λ/(u+1)`递推填满支撑区，高斯因子沿网格两乘递推，每bin每节点几次乘法、无超越函数；归一化质量与其λ导数用同一梯形规则。SciPy路径的evaluator与overlay调用同一编译核，冻结anchors用mpmath独立求积钉住它（相对1e-6）。延拓律不是格点律：λ低于约3光子时其均值高于λ、拟合值偏低约5%，低于1光子不再是光子计数律；σ只在低光子数区可辨识（方差=λ+σ²），高计数下误差棒如实变大；bin比读噪宽时σ停在半bin下限，要测读噪须用不宽于σ的bin。
 - Pulse字段的默认值只属于原字段；唯一`PulseBinding`按稳定`PulseFieldRef`记录独立Scan能力与Default/API/Config三选一的基础来源，API和Config互斥，Scan可与任一来源共存。Scan/API不保存用户编号或自定义别名，用户按公共`field_label`选择物理字段，内部按稳定field identity寻址。执行值优先级为本次显式Scan值 > 本次API或已保存Config值 > 原字段默认值；未扫描的能力标记只在执行副本取消，不丢弃基础来源。解析/单位换算/编译由Pulse公共层统一完成，Editor和所有测量节点不得各自维护覆盖算法。
 - 每个读取文件内容的表单字段（`resource`与`ArtifactInputSpec`）在Browse旁提供Refresh：decode结果按finalization key缓存而该key不含文件系统项，此前只能靠关闭重开Edit、按Start或改动别的字段才能重读。Refresh执行的就是打开Edit时那一套（force finalize + 重投影 + 刷新行），不另立第二条重读路径；`folder`字段只指地方不读内容，不提供。
 - Calibration的Reference before、Readout、Reference after明确选择API时间字段，保存稳定字段身份，展示实际字段名；不得用列表第N项、显示编号或猜字段名定位。原有long/short/long帧角色及seconds到字段单位换算保持不变；Scan能力标记不妨碍非扫描测量消费其API默认值或覆盖值。
 - 渲染进程边界的两个方向各只有一条写线程，由队列喂。`Connection.send_bytes` 会阻塞到对端读走且 Windows 上无超时，管道缓冲 8192 字节，而 front 消息随 cell 数增长（layout 允许的 64 cell 实测 9762 字节），所以「写要等」是常态不是异常。**任何需要读管道的线程都不得亲自执行写**：子进程 service loop 要发 input-ack 与拒绝，父进程读线程结算结果时要发 drop-input，两侧原先各有一把跨阻塞写持有的发送锁，于是 owner 一写、读线程停排空、对端写不完、对端停读，Qt 事件循环再不返回。一个方向一条写线程即按构造消除该环，顺序由队列保证（input 仍先于引用其 token 的 request 到达）；写线程退出前必须先关闭发送门，进入无人排空队列的消息等于永不失败也永不完成的请求。
 - **published front 只写一次，写在会被读到的地方**：渲染子进程原先把一帧写进私有 publish block，再把整块拷进 frontend 映射的共享段——操作者密度下（1470×1071 DPR 3）6.3 MB 写两遍，每帧每面板。publish pool 现在是可安装的（`rendering.install_publish_pool`），子进程装的那个 pool 直接发共享段，`publish_front` 只交接租约，一次拷贝不再发生（实测 raster worker 自时间里 `publish` 12.5→0 ms/s，worker 自时间合计 108→85 ms/s）。**块的归还是显式的两手契约**，因为持有它的是两个进程而只有一个有解释器能说话：子进程侧沿用既有 weakref（渲染器自己那份只读视图消失时），frontend 侧是它释放租约，后到的那一手才把块放回自由表，谁都不许被当成最后一手。没人归还的块就是池再也见不到的块，下一次 `take` 另分配——每一种错法的代价都是多一个段，不是别人的像素。**两个池合并也要合并深度**：`FRONT_DEPTH=3`（一块在写、一块在屏上、一块在途中）乘以 live host 数才是自由表预算，只按 host 数留一块会让单面板窗口每帧新分配一个段，正是 pooling 本来要避免的那 6 ms 缺页。interaction map 与上一帧相同时以 `None` 过管道、父进程用缓存的那份（64 cell 一帧要 pickle 128 个 transform 才能说出「没变」），父子两侧的缓存都随 host 关闭和子进程重启清空。
-- **同时画的面板要在不同进程里画**：live 面板的 renderer 原先全在一个渲染子进程里，编译核 `nogil` 能逃出 GIL，artist 更新、chrome 绘制和每帧 front 的 pickle 逃不掉，于是四块面板的 Python 一次只跑一块。`RenderProcessPool` 按面板分片，策略只有两条：**先铺开再共用**（成员未满先起新的，满了才挑 host 最少的那个——一上来就「挑最少」会把四块面板全塞进第一个，因为只有它存在时它就是最少的），以及**按需起**（只开一块面板的 console 仍然只有一个子进程，一个子进程在画任何东西之前就是两百多兆）。**数量是工作点的决定，不是默认值的**，两边都实测过：满速下四个子进程画出一个的 2.3–3.0 倍（4 面板 1470×1071 DPR 3：camera 4M 54.5→156.6 fps、facet64 image 35.1→104.6、heatmap 44.3→102.1、curve 65.8→108.2）；而 10 Hz 的 display beat 下没有人在满速——四面板只用三分之一个核、从没有人在等，于是多出来的子进程一帧都不多画，却让每次开 console 多等 **6.9 秒**（首块面板出图 12.5→19.4 s，全部是这些子进程自己 import matplotlib 和预热内核；实测池 size=1 是 12.46 s，与单进程的 12.50 s 无差别，所以这 7 秒是**数量**，不是起进程的方式，提前并发起也省不掉）、每个再占约 200 MB。所以默认 `size=1`（即今天的行为、今天的启动、今天的内存），beat 提上去、上 2048² 相机、或者手势要跟上整块板子时，由调用方把这个数字调大。上限之下仍是懒起：要了 4 只开一块面板，仍然只有一个子进程。
+- **同时画的面板要在不同进程里画，一面板一子进程、绝不合租**：编译核 `nogil` 能逃出 GIL，artist 更新、chrome 绘制和每帧 front 的 pickle 逃不掉，同一解释器里的几块面板的 Python 一次只跑一块，其中一块的 fit 还会抢走另一块的帧。所以 `RenderProcessPool`（A）给每块 live Monitor 面板一个自己的子进程：找不到 warm 子进程的面板不去挤一个正在画的，而是为它新起一个并等它启动（子进程一 import 完就回答 create，不等自己的预热跑完）。满速下四个子进程画出一个的 2.3–3.0 倍（4 面板 1470×1071 DPR 3：camera 4M 54.5→156.6 fps、facet64 image 35.1→104.6、heatmap 44.3→102.1、curve 65.8→108.2）。**子进程提前备好**：一个子进程从 spawn 到首帧约 2.3 s，等面板要时才起，四块面板就按 2.3 s 一级的台阶出图（2.4/4.7/7.0/7.1 s）；提前备好时同样四块 0.35 s 出图。池一开就备 `DEFAULT_RENDER_SPARES=4` 个没被任何面板碰过的子进程（一块板就是四张卡），被取走一个立刻补一个；有超过 `DEFAULT_RENDER_SETTLED_SPARES=2` 个子进程在画之后，板子已经到齐、此后一次只加一块面板，备用数降到 2；在画的回到 2 个及以下（含面板全关）时又备回 4 个。代价只是内存：每个子进程约 200 MB，不论有没有面板落上去。面板关闭后它的子进程是 spent（grid 的 cell 储备与二级 fit 预热都是那块面板的），直接退休、不回收成备用；死掉的子进程同样不会被领用或算作 warm。Panel Edit、point review 与 export 走同一 application 的一个 `RenderProcess`（C），不入池。
 - **渲染子进程必须是 daemon**：`multiprocessing` 的退出钩子会 join 非 daemon 子进程，所以任何跳过 `close()` 的退出路径（脚本里逃出来的异常、崩溃）都会在 atexit 里永久挂住，而此时像素早已没人要。daemon 让同一个钩子改为 terminate；有序 close 仍会等 save worker 收尾。子进程收尾时告别消息（`stopped`）必须排在写线程哨兵**之前**，否则它进入无人排空的队列，父侧读线程只能等到 EOF 并把「按要求停下」记成失败。
 - **渲染子进程一启动就把进程级的首次开销付掉，分两级**：磁盘 kernel cache 省的是编译，省不掉一个新进程第一次画图要付的那些——matplotlib 的 figure/axes/text 模块首次 import、第一次量文字要装字体、numba 刷新 typing context 并从磁盘读入每个 kernel 的机器码。这些与那块面板画什么无关，却全落在操作者的第一块面板上（DPR 3、4x4、3 格 image grid 实测：进程内冷 0.85 s / 热 0.22 s；console 第一块面板 0.9–2 s，之后 0.25 s）。所以 `_render_process_main` 一起来就在自己的线程上跑**一级** `_kernel_warm.warm_process()`——`representative_work` 的一小段、按 console 的尺寸画：相机帧的 grid（unsigned 与 float）、直方图 grid、数据轴曲线 grid，紧接着 64 个空 cell 的储备（`CELL_RESERVE`，任何 grid 都会取走它，所以必须排在这里画的最后一个 grid 之后），再单帧（三种 dtype）、由形状选出的签名、3D 场景——每画一张前先问 `proceed()`，第一个 create 请求一到就答否、预热停在下一张之前（请求与预热共享同一个解释器，预热多画一张就是面板多等一张；没预热到的由第一块需要它的面板照旧自己付）。**fit 不在一级里**：Windows spawn 没有 COW，子进程装进来的机器码全是私有内存，一级就把三族 fit 内核都装上的备用子进程为一块还没见到的面板多持约 70 MB，而它最终拿到的面板只用一族。所以**二级** `warm_fit(spec, storage=)` 只在这块面板**首帧发出之后、父进程请求出现第一个 ≥100 ms 空档时**（最迟首帧后 1 s 兜底）在 warm 线程上跑（不排到面板 worker：二级的 170–200 ms 几乎全是 numba 从磁盘缓存装内核，内核是进程级的，排在 worker 上落在其中的一帧要整整等 200–250 ms；在 warm 线程上只是 GIL 争用、重叠的那一帧多 5–45 ms，而等到空档就没有重叠——shot 间隔 ≥0.5 s，首帧后的空档装得下整个二级）、只按它自己的 kind、形状与存储 dtype（单图走串行求解器，grid 的 live fit 走 prange 批量，相机图走按 dtype 编译的条纹求解器）通过 `configure(fit=)` 画一张带 fit 的图——那正是面板自己会走的调用，直接调引擎会把 session 的请求机器留冷；备用子进程永远到不了二级。放在首帧之后而不是旁边，是因为装内核持有 numba 编译锁、并行入口首次分发会吃满机器。warm 线程与所有 ZLC worker 一样掩到 4 线程的工作组。实测（真实子进程池、DPR 3、5 种面板）：空闲备用子进程 commit 283→200 MB、独占 204→162；首帧/稳定帧/首 fit/稳定 fit 持平。预热失败写子进程 stderr，不结束子进程。守卫：`test_kernel_warm` 在新解释器里 `warm_process()` 之后读每个 dispatcher 自己装了的 overloads（不是 `cold_kernels`——那个连磁盘缓存一起数，缓存满时不预热也答空），断言求解器一个没装；再对每种面板（含各自的 grid）`warm_fit` 后按 console 的尺寸与 DPR 画并配置 fit，断言它们不再装任何 kernel；`test_raster_host` 在真实子进程里量首帧之后的第一次 fit。
 - **只有 window 可以躲开 facet 容量上限**：shot 历史每个保留 shot 一个坐标，长度等于面板 window，是操作者旋钮而不是数据的尺寸，所以它超过 `facet_max_cells` 时默认 facet 不选它（grid 把整窗池成一格）。否则 window=1000 的 grid 默认就要 1000 个 cell，surface 拒绝面板唯一持有的 spec，host 根本起不来，操作者还没做任何选择就只剩一条报错和空面板。**结构轴（扫描轴、事件轴）反过来必须照旧被提供并被响亮拒绝**：65 点的扫描画成 64 个 cell 是另一张图，拒绝信息本身就写着两条出路（pin 一个轴或改一个 fate）。「这个 window 能不能当 facet」只有一个所有者 `_facetable_history()`。
@@ -255,7 +255,7 @@ Node new chunk
 
 ### 5.2 Performance与state
 
-- 数值显示单位仅在真实消费者需要的表示上转换；归约后绘图不得预先转换全量raw values，raw selector确实读取display时才按需取得。完整用户初值直接进入solver，不计算马上覆盖的自动初值；partial初值仍补自动值。compiled prepare的零行seed输出表示仅请求必要的自动bounds，模型内部只计算这些bounds真实依赖的统计，不产生弃置seed；普通cold/warm竞争不变。预热停止在构造下一个样例前生效，size/parameters按最终初态进入共享Host。
+- 数值显示单位仅在真实消费者需要的表示上转换；归约后绘图不得预先转换全量raw values，raw selector确实读取display时才按需取得。完整用户初值直接进入solver，不计算马上覆盖的自动初值；partial初值按名覆盖每条自动冷启动seed（compiled与SciPy lane同一规则），其余参数取各条seed自己的值。compiled prepare的零行seed输出表示仅请求必要的自动bounds，模型内部只计算这些bounds真实依赖的统计，不产生弃置seed；普通cold/warm竞争不变。预热停止在构造下一个样例前生效，size/parameters按最终初态进入共享Host。
 - 内置模型的值、Jacobian与single/batch求解共用同一逐点数学primitive；只有需要导数的求解/协方差消费者才请求Jacobian。只画曲线不生成N×P导数矩阵，也不为可写ABI复制一维坐标。已筛finite的数据在同一私有数值入口复用该事实，新的坐标变换/分箱、RegularImage原始masked输入仍检查实际有效性；不移除cold/warm不同初值竞争或custom fallback。
 - 数值core只读取validity，其ABI接受readonly strided mask；已知全有效输入用一字节True广播，不分配B×N的全True矩阵。外部/RegularImage真实mask仍按其实际布局与有效性处理。configure中的spec替换仅修改状态，最外层统一生成一次最终description；public replace_spec仍返回完整真实描述。
 - 显示用图像块平均统一float64累加、除完整有效样本数后才转换到输出dtype；NumPy参考与compiled采用同一数学，不为保留整数图像旧的float32中间舍入另建sum kernel或2^24分流。Histogram单组与Facet使用同一分箱kernel及真实边界修正规则，普通分布只是一组内部输出，不向Dataset伪造axis。入口统一的性能代价单独量化，不能当作提速。
@@ -265,7 +265,7 @@ Node new chunk
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
 - 长期绘图服务不能用全局gc.freeze或提高回收阈值来永久保留正在使用的Figure。随viewport/time变化的共享刻度placement缓存有明确工作集上限；Host关闭释放其输入与结构依赖，已退休的共享像素segment在最后读者释放后解除映射，不积累空闲旧名字。进程可复用编译代码与有界缓存，但科学窗口固定时资源保留不得随运行时长无界增长。
-- IPC静态Dataset结构沿现有input token及引用生命周期只传一次，后续revision只传结构引用和变化的数值/validity；进程重建重新安装，不传Python私有memo。Scope的坐标定位只持该AxisSpec，不通过绑定方法带入整张Domain坐标表；单次Freeze/Save共享同run的plain记录转换，磁盘JSON仍按当前公开grammar编码。
+- IPC静态Dataset结构沿现有input token及引用生命周期只传一次，后续revision只传结构引用和变化的数值/validity；进程重建重新安装，不传Python私有memo。description的vocabulary（spec、size choices、parameter schema、semantics、selection subject、fit models）同样只在变化时过管道，父进程读线程换回自己已持有的对象，所以没变的description交到console就是同一个对象，console据此跳过Setting表单的重投影。Scope的坐标定位只持该AxisSpec，不通过绑定方法带入整张Domain坐标表；单次Freeze/Save共享同run的plain记录转换，磁盘JSON仍按当前公开grammar编码。
 - Configure在最终绘制前被拒绝时只恢复旧字段及renderer准备态，保留原已接受front，不重新compose/发布；最终绘制已开始后失败则必须完整恢复像素，后续主动redraw同样只能呈现旧状态。
 - `PanelState`是可编辑、可在拒绝后继续修复的authored target；只有Plot成功接受后返回的
   完整`DisplayDescription`才是当前Live/Frozen/Viewer pixels的accepted truth，其`spec`也是
@@ -279,21 +279,25 @@ Node new chunk
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
 - Navigation viewport按X/Y分别记录可选范围；未操作的轴为None，继续由已有自动/Fixed参数决定。只缩放或平移X不得捕获当时Y。显式轴limits/mode编辑在同一Plot配置事务中撤回该轴旧navigation覆盖，保留另一轴；重放完整相同target不算重新编辑。普通Image的square/pixel-grid约束仍由原几何owner统一解析。Renderer、Fit、Live/Edit镜像及Figure读同一逐轴状态，不以完整矩形的旧Y覆盖新设置；真实Area selector仍必须是完整数据坐标矩形。
-- TaskConsole与FigureViewer的显示执行固定为三个进程、一个Plot真相源：B是Qt主进程并继续拥有
-  Runtime、Logic、device client、PanelState、SelectionBridge、LiveBoard与same-shot accept；A只承载
-  全部Monitor card的`RasterPlotHost -> PlotSession -> DataView/Fit/Render/Compose`；C承载Panel Edit、
-  point review与Figure archive/export。A和C运行同一个render-service实现，交互surface使用同一个
+- TaskConsole与FigureViewer的显示执行固定为B/A/C三种进程、一个Plot真相源：B是Qt主进程并继续拥有
+  Runtime、Logic、device client、PanelState、SelectionBridge、LiveBoard与same-shot accept；A是Monitor
+  render pool，每块Monitor card在自己的子进程里承载`RasterPlotHost -> PlotSession -> DataView/Fit/Render/Compose`
+  （一面板一子进程，见5.1）；C是一个子进程，承载Panel Edit、point review与Figure archive/export。A的每个子进程
+  与C运行同一个render-service实现，交互surface使用同一个
   `RasterPlotHost`；C纯文件save worker直接使用同一`PlotSession/MatplotlibRenderer`，无需屏幕Host。
   不得复制live/editor/export renderer，也不得在A/C失败时退回B进程内渲染。
   Edit的Qt表单和A/C输出的QImage-only frontend始终留在B；B只提交异步命令、接收完整Front和
-  observation，任何Qt slot都不得同步等待IPC。同一application只创建一对A/C；TaskConsole与其
-  打开的FigureViewer各持一个显式owner lease，任一窗口先关闭都不得终止另一窗口仍在使用的服务，
-  最后一个owner才关闭进程。独立FigureViewer则拥有自己的一对A/C。
+  observation，任何Qt slot都不得同步等待IPC。同一application只创建一个A池与一个C；TaskConsole与其
+  打开的FigureViewer、以及同一experiment flow里由设备卡打开的device editor（Pulse Editor预览、
+  SLM Editor的三张图画在C）各持一个显式owner lease，任一窗口先关闭都不得终止另一窗口仍在使用的服务，
+  最后一个owner才关闭进程。独立FigureViewer则拥有自己的A池与C；没有application的独立Pulse
+  Editor/SLM Editor各自起一个私有render子进程，同样不在B内画图。
 - Domain Task仍在B决定并写非Figure科学NPZ/JSON、选择artifact路径并向TaskRun登记完成文件；
   TaskArtifactContext不拥有Plot。Calibration与SLM Feedback的Figure archive/render/export
   由composition显式注入同一个C服务执行，Task worker只等待该Future，不得在B隐式构造本地Plot host。
-- B向一个render service提交同一`DatasetRevisionRef`只建立一份transport value，由该service内
-  全部Panel共享；不得按Panel重复发送或让Runtime感知Plot transport。A/C向B发布的RGBA使用
+- B向一个render子进程提交同一`DatasetRevisionRef`只建立一份transport value，由该子进程内的
+  全部host共享（A的子进程各只有一块面板，C里的Edit/Save/point review共享）；同一子进程内不得按host
+  重复发送，也不得让Runtime感知Plot transport。A/C向B发布的RGBA使用
   有生命周期的共享buffer lease，只有B中最后一个Front/QImage/ndarray引用释放后才可复用。
   operation completion只引用同一host已经发布的front sequence，不得再次复制像素；进程断开时
   所有pending Future明确失败，B保留最后一张完整Front，并由现有Panel lifecycle从accepted
@@ -310,9 +314,9 @@ Node new chunk
 - 整数频数窗口以持有中的不可变plane身份、局部Point范围和出现次数匹配贡献，窗口名字不作为跨revision复用许可；只打包并统计进出/变化范围，不物化前后整窗或读取无用sigma。源世代与Cell/value契约变化不复用；不消费该统计的Group/Reduced/其它kind与退场表示清理旧carry，不能长期持有旧大窗口。
 - 同一次Plot输入的新增依赖沿现有input-token图按依赖顺序批量序列化，共用一次消息和传输allocation；不能每个存储块一条消息/一个共享内存映射。接收后每个数值plane仍独立拥有不可变bytes，单个小块不能钉住整批传输内存；引用释放同样批量发送，不新增第二份history或transport数据owner。
 - 原始数值打包只由DataBlock.packed_planes处理布局、compact mask及按需sigma，不做finite过滤或统计；Plot复用该方法后再计算，完整物化仅在有空位时一次scatter到canonical范围。不得再为保存、Processor整数组读取或Plot各留一套逐块拼装。无归约的dense单块借同一数组；未请求sigma不能因共用入口而被计算。
-- Indexed Rolling的既有归约结果只按持有中的不可变plane身份、真实布局及计算配置复用；旧结果整批搬运，新/改变的输入整批计算。缓存只在当前表示能消费时继承，完成复用后丢弃未消费的旧packed carry；缩小/关闭history不得因全部统计命中而钉住旧窗口。当前DataView只持当前source或本次复用所需的前一source，不链接全部revision。中心化SEM保持原统计定义，不改grouped/ungrouped trailing权重。
+- Indexed Rolling（以及finite run上的Rolling，按repeat）的既有归约结果只按持有中的不可变plane身份、真实布局及计算配置复用，只重算新段落到的history行；旧结果整批搬运，新/改变的输入整批计算。缓存只在当前表示能消费时继承，完成复用后丢弃未消费的旧packed carry；缩小/关闭history不得因全部统计命中而钉住旧窗口。当前DataView只持当前source或本次复用所需的前一source，不链接全部revision。中心化SEM保持原统计定义，不改grouped/ungrouped trailing权重。
 - FacetGrid的facet role可为空；为空不是semantic vacancy，也不允许UI或renderer伪造Dataset轴，而是唯一一个完整cell，标题为`Facet 1`。同一cell kind的projection、fit、selector、Focus和Figure grammar仍走普通Facet路径；给真实轴Facet fate后才扩为多cell。
-- Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。每根SEM误差棒以stem与两cap的几何并集为一个工字形，subpixel coverage之后只应用一次alpha；不同误差棒仍独立混色，不能按整数display column合并为min/max envelope。Native、Agg与导出读取同一端点与屏幕尺度style。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
+- Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。每根SEM误差棒以stem与两cap的几何并集为一个工字形，subpixel coverage之后只应用一次alpha；不同误差棒仍独立混色，不能按整数display column合并为min/max envelope。Native、Agg与导出读取同一端点与屏幕尺度style，也共用同一条cap规则（`_effective_cap_width`）：一组点的平均像素间距小于1个设备像素时该组只画stem、省略cap（stem已连成实带，cap只加厚带的边缘，逐个混色看不出区别），更疏时每个cap都画。间距按正在画的那张画布的设备像素量：同一画面里prepared series的native快路、artist上的native plan与Agg全画三条路径同判，所以hover/聚焦materialize后的帧与屏幕帧一致；导出在自己的dpi（默认`export_dpi`）下重判，屏幕上省略cap的一组可能在导出里间距够宽而画cap，高DPR屏幕上画cap的一组也可能在导出里省略。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。
 - Tick label字号只有normal `6.5 pt`与compact `3.25 pt`，删除逐级×0.8和剩余空间比例缩字。保持对应tick的锚点/alignment；公共locator先在原字号选择可行数字刻度，最终真实text/data-frame/标题碰撞时先尝试更稀的合法lattice与formatter，再在确实无解时切compact；同轴至少两个数值刻度，不单独隐藏Text制造marks/导出分歧。可选计数侧栏zero优先由同一locator省略，色条两端和显式coordinate names不裁。Facet等价axes共同采用最终lattice，改变刻度时同步其native marks；布局变宽后可恢复刻度/字号，稳定布局不重复规划。3.25 pt仍拥挤时接受重叠，不移动锚点、不引入其它字号。
 - Facet overview在最终实际cell几何上共同安排标题header和刻度gutter，同方向刻度与cell标题分别使用统一字号；像素取整不得让相同cell跨不同字号档，标题不得借用刻度空间。只在已有chrome布局签名变化时重新定价，复用同一文字度量/placement缓存，稳态数据更新不跑额外碰撞扫描；Focus仍用单图预算，屏幕与导出消费同一chrome。
@@ -322,13 +326,15 @@ Node new chunk
 - History表示切换若删除退场轴的fate，后续configure与port必须继续使用同一归一化后的PanelState，不得回写调用前的旧candidate。已同identity描述的Panel在新surface接受前保留完整controls；schema-only fallback只用于尚无对应accepted description的面板，不能用空Fit词汇替换已显示词汇。
 - Configure接纳与数据呈现共用已有presentation epoch：旧表示上完成的配置回复不得恢复退场轴或覆盖新target；沿现有presentation debt等待完整新surface，不按history轴名过滤回复。
 - Pause时Edit/Refresh仍可采用已显示的完整快照，但不得隐式stage新的Live数据；尚欠的新数据刷新由Resume后的正常admission兑现。同数据上的clim、selector和viewport交互继续正常工作。
+- 没人看的画面不画：窗口最小化，或当前页既非Monitor板也非任何面板Edit（Edit的Refresh与「数据已前进」读live卡片）时，Board不stage新画面，beat的其余部分（Plane pump、派生、节点轮询）照常。带region或fit的面板例外：它也是producer——host只对交给它的帧求fit，region在每个run的首次呈现时重新挂上——读其输出的节点不能因没人看而停下。回到可见时全部面板立即欠一次呈现，不等各自deadline；从未显示的窗口（无头组合）视为可见。
 - 同一shot的Surface仍原子accept；staging只把active-fit surface排在display-only sibling之前，使更深依赖链先启动，不改变panel cadence、cohort membership或accept顺序。
-- A内的Panel仍各自保留现有Raster/analysis worker、latest-only admission与串行Host状态机；它们
-  共享A的一把Python GIL，所以该拓扑保证UI/Runtime与Save/Edit隔离，而不冒充Panel间Python
-  绘制已经进程并行。A/C各自的Numba/OpenMP pool保留本机logical-CPU容量，但每个Raster/
-  analysis worker默认只启用4-thread team并在空闲时sleep；大量互不重叠的Facet raster lanes
-  可在本次kernel内临时扩到8并立即恢复。A与C的并发native team总预算不得超过本机容量，B不再
-  初始化Plot kernel pool。operator显式环境设置仍优先；不得用跨host render/fit锁重新串行化A。
+- A的每个子进程只有一块Panel，保留它自己的Raster/analysis worker、latest-only admission与串行Host
+  状态机，也有自己的一把Python GIL：Panel间的Python绘制真正进程并行，UI/Runtime与Save/Edit同样隔离。
+  每个子进程的Numba/OpenMP pool保留本机logical-CPU容量（OpenBLAS在子进程里为1线程），但每个
+  Raster/analysis worker只启用`ZLC_NUMBA_WORKER_THREADS`（默认4）的team并在空闲时sleep，kernel内
+  不临时扩team。没有跨进程的native线程总预算：N块同时在画的面板最多请求N×2个team，多于本机
+  逻辑核时由OS调度分摊；要收紧就调小`ZLC_NUMBA_WORKER_THREADS`，operator显式环境设置始终优先。
+  B不初始化Plot kernel pool；不得用跨host render/fit锁重新串行化A。
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
 - RegularImage的single是同一批量数值流程的一条lane；不得按cell数量维护不同full-refinement算法。规则网格以明确的内部shape/axis包交给同一TRF，不展开重复的逐像素坐标，也不改变Dataset或Plot轴语义。现有数值context同时供prepare与objective使用，可保留每cell一次计算的中心化统计量；原始物理参数、bounds和损失/收敛含义保持不变。最终质量仍由真实数据的直接残差核对，不能用不稳定的大数相减或放松精度换取提速。
 - 编译Fit中未启用权重时，由既有use_weights表示并传递空权重行，所有objective/finalizer只在启用时读取权重数据；不得为默认权重1建立完整B×N数组。前景仍由Agg/FreeType/MathText产生字形/覆盖率，现有compose按原顺序批量重放；未纳入批量覆盖的artist在原顺序位置保留既有draw，不另建科学数据路线。Image的备用像素在fallback/export消费时才由公共owner物化，普通native帧不重复生成一份未绘制RGBA。
@@ -359,7 +365,7 @@ Node new chunk
 - ROI/binning坐标只由一个transform owner处理。
 - 分组颜色直接按源坐标序号读取公共line cycle，不跳过首槽：group[0]与未分组曲线均为原灰色#808080，其余依次使用共享色表。Curve/Rolling/Histogram、Facet overview/focus及meter共用同一映射；颜色不随当前可见子集重新编号。
 - Producer联动只修改下一次运行的唯一Logic草稿，不改正在执行的运行。删除ROI时恢复联动前对应字段的草稿值，不从设备readback或Panel显示范围猜初值；必要的撤销记录留在现有authoring owner，不成为另一份可编辑草稿。每个字段只由最近写入它的Panel持有撤销权，多Panel不堆叠旧patch；用户之后手动改写的字段不被ROI撤销覆盖。运行一旦开始，它启动时用的值就是producer自己的值：撤销记录清空，之后删除ROI保留的是最近一次运行使用的值，不回到运行之前的草稿。数值控件的被动规范化沿同一draft patch标明normalized，更新唯一草稿但不取消撤销权，普通Form与Scan贡献编辑器相同；不能靠浮点容差或JSON文本顺序猜测用户意图。镜像删除使用公共panel_plot_selectors给出的绘制种类，不把Curve Area的x_range数值语义当成实际图形类型。没有producer参数语义的Histogram选区只限制数据，不联动producer。
-- ROI统计按已启用输出准备计算：仅Mean/Sum不构造整数直方图，均值与总和共享一次累加；确实请求尾部统计时才用原计数路径，并保持全部结果一致。已知全有效的stacked结果不先分配随后丢弃的零矩阵。此规则不改变默认发布开关或推断订阅需求。
+- 区域派生经`zlc_data.restrict_snapshot`这一个切割入口逐段切出区域大小的结果，facet条件由`zlc_data.value_selection`翻译；SelectionBridge不先物化整份final run，也不另存一套坐标翻译。ROI统计按已启用输出准备计算：仅Mean/Sum不构造整数直方图，均值与总和共享一次累加；确实请求尾部统计时才用原计数路径，并保持全部结果一致。已知全有效的stacked结果不先分配随后丢弃的零矩阵。此规则不改变默认发布开关或推断订阅需求。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
 - Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。
 - Area selector及已有Area handle/body的左键press只做命中并arm手势；它不得建立candidate、发布selection或渲染overlay。只有按键仍held且pointer坐标相对press确实变化的首个move才开始gesture并首次preview；原地release不得产生零面积Area。Qt/Notebook的double-click都走这一共享状态机，双击的首个普通press/release因此不能闪现或提交Area；空白单击清除既有Area仍是独立click语义，不得靠创建degenerate candidate实现。
@@ -371,7 +377,7 @@ Node new chunk
 - 旧Pulse/Config只通过操作者显式运行的离线迁移工具转换：先验证完整候选、备份原始字节，再原子替换；旧数字Config N在文件与Pulse引用中共同变为config_N。正式reader不兼容旧grammar，工具不改Figure或自动应用配置。
 
 - Remote编码/解码按immutable dataclass类型复用字段metadata，JSON grammar与对象验证不变。Load可明确复用同连接已接受AppliedState中的未变authored_source，不反复传输/解码原稿；新实际source/program照常验证。原稿变化就完整传入，服务器无旧记录时拒绝复用，绝不把filled source当原稿。客户端在发送前清原有应用缓存，失败不缓存假成功；重连继续按原有applied查询恢复事实，不增加源缓存或后台同步。
-- Config tab用独立草稿编辑命名值表并显示dirty，只有显式Save/Save as写入文件后才参与下一次Fire；不自动保存，不把未保存值送设备。Load绑定已保存文件，Refresh重读编辑文件（已经Unload的文件不被Refresh偷偷重新激活），Save使用草稿而不是Pulse默认值；Pulse Save只保存Pulse内容与引用。File读写沿唯一codec及原durable API，既有device load/fire在开始新执行前重读已绑定文件；运行中的Pulse不因编辑草稿或保存而改变。Config文件与Pulse引用的dirty互不混用；外部刷新不能静默覆盖未保存草稿。
+- Config tab用独立草稿编辑命名值表并显示dirty，只有显式Save/Save as写入文件后才参与下一次Fire；不自动保存，不把未保存值送设备。Load绑定已保存文件，Refresh重读编辑文件（已经Unload的文件不被Refresh偷偷重新激活），Save使用草稿而不是Pulse默认值；Pulse Save只保存Pulse内容与引用。File读写沿唯一codec及原durable API，既有device load/fire在开始新执行前重读已绑定文件；运行中的Pulse不因编辑草稿或保存而改变。多次Fire的run（Seamless的host点、SLM Feedback的candidate）在每次Fire后比对`config_values()`与本run首次Fire：运行中已保存的Config一变就拒绝继续，不让后续点在只记首次值的run record下播放另一套值。Config文件与Pulse引用的dirty互不混用；外部刷新不能静默覆盖未保存草稿。
 - Config tab的Pulse bindings采用与Target一致的对齐Fluent行布局；Config name始终是可编辑文本，空白表示未指定，下拉只建议当前已加载Config文件中的名称，不加入Default、当前自定义名或历史名称。换文件和Unload只改变候选与覆盖状态，不删除已指定文本；未保存的Config草稿不冒充已加载文件的候选。真正使用Config覆盖的可编辑字段采用用户选择的C色（#D1E8E1）与深色文字，未覆盖的Config字段保留白底绿框；禁用字段沿普通Fluent灰显，不改变尺寸或字体区分状态。Calibration两个曝光字段后紧接三个API选择框，共用同一参数表单列宽及草稿通道，资源选择/Refresh沿原入口。
 
 ## 6. UI与Lifecycle
@@ -389,14 +395,15 @@ Node new chunk
 - Derive的输入/输出信息以完整三domain逻辑结构为主，颜色复用Panel标题的`AXIS_GROUP_COLORS`；NumPy物理shape明确标为Storage辅助信息。多个逻辑Repeat/Point轴共享一个物理carrier是既有Dataset模型，不把逻辑轴丢弃或错误解释成同一轴。Signal列表仍只显示数字维度，不随此信息面板增加轴名。
 - Derive的具体Logic Editor只组合普通Fluent控件：Input range与window数量、逐输出Name/多行Code、Add/Remove、只读输入/输出三domain结构与代码帮助。结构摘要读取Runtime已发布的schema/snapshot，未运行的代码不预猜输出；普通Python/NumPy、`isel/sel/where`、命名轴归约、有效性、显式schema及range边界都在同一帮助文本中说明。Qt只编辑草稿/投影metadata，不执行表达式或物化run/history；数值业务仍在Derive自己的owner。
 - Qt slot不得执行blocking I/O、device tune或`Future.result()`。
-- Window只有在owned command、worker、executor和claim安全退出后才能消失。
+- Window只有在owned command、device claim以及仍在设备调用里的worker安全退出后才能消失，仍在设备调用里的行继续挡关闭并如实报告。不驱动设备的Logic行（lease没有claim，例如卡在循环里的Derive表达式）在close等待报告之后放掉它纯簿记的lease、不再挡关闭；Logic的owner mailbox每个操作一条daemon线程，不会留住进程。
 - 正式Board通过host的`qt_widget(auto_present=False)`挂载唯一缓存的Qt adapter，不另建未纳入host关闭流程的surface；普通Edit/standalone保持自动呈现。Card退场先以现有`set_surface(None)`解除Qt父子关系，host完成异步关闭后才结束adapter，不能由Card的deferred delete提前销毁仍接收结果的QObject。
 - Device Manager的`instance_id`是稳定device identity，operator-facing role只是metadata；改role不得把同一硬件变成remove/add。所有设备UI的名称与choice label使用Role，choice value、保存引用与device ownership仍用稳定ID；Loaded/Control使用accepted apparatus的Role，未Init草稿显示自己的Role。Role在同一apparatus内不得重名；无效草稿在Init/Save前拒绝，不回退成旧名字后继续Init。Loaded card的Control与Close都只提交intent，不能由View直接关device。
-- Active apparatus变更走同一个`ExperimentSession`内的差量reconcile：相同key/type/canonical parameters的leaf、SignalPlane、TaskConsole与Panel继续复用；新增只build新增leaf，remove/change/Close只处理受影响leaf、world-bound closure及factory dependants。只有完全相同的draft/live集合才把主按钮解释为Shutdown。
-- Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
+- Active apparatus变更走同一个`ExperimentSession`内的差量reconcile：相同key/type/canonical parameters的leaf、SignalPlane、TaskConsole与Panel继续复用；新增只build新增leaf，remove/change/Close只处理受影响leaf：设备互不组合，一个leaf只因自己的编辑重建；simulation world编辑只重建world-bound leaf，独立物理leaf保留原对象。只有完全相同的draft/live集合才把主按钮解释为Shutdown。
+- Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。close逐leaf进行，每个leaf都得到自己的close；partial close/factory cleanup失败后，只有拒绝关闭、因而仍open的leaf继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
 - Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
+- 设备发现按family在daemon线程上跑：卡住的厂商调用不挡Device Manager关闭，也不留住进程，但关闭要停下已载入设备时在状态栏与日志里点名仍在应答的family，使此后的崩溃可归因；仍在扫描的family让Init/Apply/Scan明确拒绝并点名。扫描结果按原因合并：同一原因的多个family只报一行并逐个点名。VISA总线上各family的探测轮流进行（一把模块锁，设备自己的VISA session也在这把锁下打开），不同时问同一台仪器；本进程作为设备打开着的仪器（按VISA规范名比较）不被探测；VISA什么都列不出时由这一处说明要装什么。
 - Device Manager关闭失败必须展开ExceptionGroup里的实际原因并保留完整日志，不能只显示sub-exception数量。Vaunix LMS命令返回按厂商LVSTATUS最高位判错，不能把任意非零成功值当失败；Init/Close/frequency/power/RF开关共用同一校验。真实SDK错误仍保留installation的失败持有与显式重试语义，不自动重发或假称已关闭。
-- Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败不能覆盖原始hardware/science failure：failure时附注在原始错误上（进入记录的traceback），Stop时成为observation的error与stopped记录的error而状态仍是stopped/cancelled——Stop不因保存失败变成failure，保存失败也不得被当作从未发生。Calibration与SLM Feedback都必须使用该边界保存各自可证明的partial报告。
+- Hosted Task可登记且只能登记一个domain-owned partial-exit writer；Runtime在worker线程、撤回Dataset及把TaskRun标为stopped/failed之前恰好调用一次。Writer只能从已经完成的数据原子写并登记checkpoint/process/Figure/preview/summary，不得制造required final；writer失败不能覆盖原始hardware/science failure：failure时附注在原始错误上（进入记录的traceback），Stop时成为observation的error与stopped记录的error而状态仍是stopped/cancelled——Stop不因保存失败变成failure，保存失败也不得被当作从未发生。Calibration必须使用该边界保存可证明的partial报告。SLM Feedback不登记writer：它的Stop与failure要把最佳已测candidate封存到SLM与`final/`（见SLM Feedback节），这正是writer不得做的事，所以它在execute内以`seal_terminal(accept_stop=True)`自行封存。
 - Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。Generic Control的X在既有close guard放行后只隐藏，同一device session复用窗口与Desired/单位；隐藏时停止Live debounce、撤销尚未执行的字段写入并跳过周期UI投影，重开按保留单位读取current；device unload/rebuild或session shutdown才真正关闭并释放窗口与Qt连接。
 - Device Control的表头与全部Fluent form rows共用一份列宽预算：只有Desired列伸缩，其余列按全表内容对齐；Desired内的单位选择器同宽，输入框右边缘一致。布尔开关保留自己的绘制/命中宽度，无Live能力的行保留空列。不得让各行按不同的两个stretch列独立分配宽度，也不单独给RF手写另一套表单。
 - Scan Plan在原轴行owner内共享全表列宽：手动轴的提示与名字属于同一identity单元，普通/手动轴均保留单位位置；起终点等宽，单位选择器、点数、状态与删除列对齐，只有identity随窗口伸缩。单位控件只在自己的单元内替换，长状态使用现有ElidedLabel，不推动其它列；不得通过重建行或改写ScanPlan实现排版。
@@ -406,7 +413,7 @@ Node new chunk
 - 风险接受只绑定当前`device_session_id + device-specific owner revision`。owner或session变化立即失效；字段命令在DeviceUse同一原子锁内再次核revision/claim，active field command阻止新Logic Start。in-flight live edits只保留每字段最新值，owner变化后尚未执行的write取消。
 - Control空闲beat只比较DeviceUse既有owner revision；没有变化不重新构建字段权限/依赖闭包或全表投影。本地编辑、风险确认和设备命令结果直接投影一次；该显示去重不参与实际command admission。
 - `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；Pylon无法证明live tune前后的buffer边界，因此本次arm内tune之后的每个readback都保守标为old/new mixed，只有重新arm才回到单一epoch——一次read碰巧取走部分旧队列不是其余帧已是新设置的证据。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
-- Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
+- Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。Stop在拿到命令锁之前是黏的：正在准备中的FIRE（读Config、编译、load）在发出前看到它就拒绝发出，不会在Stop之后再播一次；本地与remote client同一规则。
 - Pulse Editor每个channel保留同一组编辑/单位/全开/全关列；DAC不支持全开时保留按钮但disabled，不隐藏列。全关仍可用。
 - Pulse DAC模式Combo的宽度由公共FluentComboBox按实际字体、文字边距与箭头给出，不在Pulse复制估宽公式；模式与数值框之间保留行布局的显式逻辑像素间距，不能用过大的固定Combo宽度挤掉间距或数值输入空间。
 - Pulse Period字段的无变化判断只读取该卡片当前accepted PeriodVM（名字、duration/unit、DAC mode/value），不保存上次发送intent的数值。Load/Sync/Clear及拒绝后的回显共用原投影；未被owner接受的输入不能被视作已提交，控件复用不得吞掉再次输入。
@@ -439,7 +446,7 @@ Node new chunk
 - Occupancy的每一帧可以用自己的calibration：`ArtifactInputSpec(per_frame=True)`让一个artifact输入除了给每帧兜底的那份路径外，再按`"<name>[<frame>]"`（帧从1数，操作员看到的编号）给某几帧各自一份；表单里只有源的一个周期多于一帧时才出现「· frame k」行（帧数先问源的生产者草稿`frames_per_cycle`，没有草稿再问plane最新publication里readout-event角色的Point轴；生产者的草稿一变，console重投影每个读它信号的节点的编辑器，所以行数跟着相机的frames_per_cycle立即变），空行表示该帧读兜底那份；投影给表单的值恰好是表单的键（每行都有值，表单拒绝多一个少一个键）；行就是周期的帧：周期缩短，超出的帧连同它的路径一起从草稿里删掉（不藏着——藏着会让Start因一个看不见的行被拒），周期变长，新帧从空开始，单帧周期没有逐帧行也就没有逐帧路径；每次finalization都先做这一步，所以Start和编辑器看到同一份草稿；finalization把同一文件只解码一次，build拿到`calibration`加`calibration_by_frame`。读出提取对整叠帧一次gather（`extract_box_signals`/`extract_psf_signals`收`(F,H,W)`答`(F,N)`，`TrapCalibration.signals_of_frames`），每个窗口仍按自己的连续像素求和，所以整叠答案与逐帧逐字相同；occupancy每份calibration只读一次它负责的那些cell。processor的规矩：每帧读的是同一组site（site_ids必须一致，否则拒绝），各帧用自己的阈值与usable集判定，ROI重定位对每份calibration一起做，帧号超过周期帧数或源没有帧轴却给了逐帧calibration都拒绝；run record只在有某帧自己的calibration时才写`calibration_paths_by_frame`，没有的run记录得和以前一模一样。
 - 节点可以给操作员留空的字段自己定默认值：`LogicNodeDescriptor.resolve_defaults(values, resources)`在workspace资源解析之后、草稿投影之前被问，只填空字段，每次finalization重算，草稿本身不写入（默认跟着资源走）。Calibration用它把reference before/readout/reference after三个API字段默认成所选pulse按period顺序的前三个API参数（`zlc_pulse.api_bindings_in_period_order`：按period位置、同period先duration后DAC、delay最后），所以用为此写的模板时默认就是对的；操作员选过的字段不动。字段还可以声明为**派生**（`AuthoringField(derived=True)`）：不论草稿里有什么都取同一个钩子的值、表单只显示不可编辑（字段的description就是禁用原因）、草稿从不持有它。Calibration的「Camera exposure seconds」就是派生的：它开的camera measurement武装相机用的曝光=三个窗里最长的（reference，`camera_exposure_seconds`一处规则），请求校验它不短于reference窗，run record照记相机实际积分的值。
 
-- Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。
+- Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。readout按到达顺序归位，所以板子自己的DONE报告是「不会再有触发」的唯一证据：Seamless在源空闲时最多每0.5 s问一次板子报告，报告DONE后源若在5 s加3个shot周期内（从报告或源最近一次交付算起，仍在交付的慢管线不算停）仍交不齐，scan以「the board played N shots and the source delivered M」失败；board fault立即失败。
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
 - qCMOS区分last-successful requested设置与actual working point；量化后的actual不覆盖requested，重复同请求不因此重写。成功setter及arm后的readback形成一份actual，普通working_point读取复用；失败清除请求成功事实，后续setter真正重试。arm后保留真实工作点读回与改变拒绝；不得要求读回之后transfer count仍为零——相机可能已接收本代首帧。本代copied/last count从0开始，首次读取按真实count/newest取回早到帧，负数、倒退、不一致、有限上限及copy-overrun检查不删除。
@@ -447,6 +454,7 @@ Node new chunk
 - Camera/Waveform真实与Virtual adapter共用中立设备基础层的同一个RecordQueue（由原Waveform队列迁移，不保留两套实现）；容量、FIFO顺序、ordinal检查、失败优先与Stop后待消费尾部由它保证。插件仅产生已独占的原生record并执行自己的SDK start/read/stop；线程归属、触发方式及不可观测硬件gap不能由通用queue猜测，不把具体SDK依赖反向放入Runtime。
 - Stop保留已接收尾部与最终Close释放资源是不同边界：硬件/生产线程确已关闭后，共同queue释放未消费记录及失败引用；SDK拒绝Close时仍保留句柄和数据供重试。持续广播设备的本次capture完整性错误只结束该次采集，接收线程继续idle排流，普通Restart重置本次ordinal/clock；真实通信I/O故障仍结束接收并明确要求重开设备，不自动吞错或继续失败capture。
 - Pylon同样区分requested/actual；arm模式、restore及gain变化使工作点失效，不能复用旧mode/epoch。SDK frame在result仍有效时直接构造不可变CameraFrameRecord，再Release；不先复制一份随即丢弃的mutable整图。非连续输入直接打包C-order bytes，immutable ownership、frame ordinal及epoch事实不变。
+- CameraFrameRecord是每帧唯一一次整图拷贝（拷成bytes，下游zlc_data据此保留视图而不再复制）；已是连续小端、base链终于bytes的图像原样保留。从这里到Plane，counts帧不再有整图拷贝（多帧cycle组装时的一次join除外），光电子帧只多一次换算分配及其record拷贝（见第9节BOX/Camera条）。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
 - Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值；未显式选择Acquisition logic时不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。
 - Seamless Scan可显式选择一个`Acquisition logic`，只提供声明ready的Measurement，不硬编码Camera。每次Scan Start仅一次`Pulse SAFE → 原Logic Start/Restart → 本次host ready`，其后复用采集运行；manual Continue、device点和repeat均不重启。Seamless没有settle参数、UI、默认值或隐藏等待；设备写入后读取实际值，不比较与设定值相等，不把读回宣称为物理稳定。正常段尾以板端DONE为安全完成事实，不再追加SAFE；Stop/错误才发SAFE。程序只编译/完整load一次，后续Fire直接复用驻留程序，只重置计数、cursor及运行FIFO，不重抄DAC表、不清clock配置；唯一例外是`api:`轴：API参数是程序里的数，某个点改了它，就为该点重新编译并重新load，再fire。源tap/shot写入和进度仍走既有owner。
@@ -460,14 +468,14 @@ Node new chunk
 ### 7.3 Remote
 
 - 无密码、认证、TLS或权限UI。
-- Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。旧socket由server主动shutdown并close，不等待旧client再次发话；其退出不对新owner执行SAFE，日志明确标记已被替换的连接。
+- `open`携带client的`command_protocol`；与server不同的open在claim之前就被拒绝（错误回复，连接不claim，不接管也不SAFE），所以旧版本client不会把正在运行的owner踢掉。协议相同的second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。旧socket由server主动shutdown并close，不等待旧client再次发话；其退出不对新owner执行SAFE，日志明确标记已被替换的连接。
 - 同一client的Stop不排队：其command lane正在等LOAD/FIRE的回复时，client用`open`回复里的cancel token在另一条自己的连接上发一次`cancel`，server执行与takeover/disconnect相同的第一步——command lane旁的SAFE，其stop event打断pending transport——而owner、epoch与command lane都不变；最终SAFE readback仍来自command lane上串行的`safe`。cancel连接一问一答后关闭、从不claim；token不是当前owner的按名拒绝且不碰板子；任何socket始终只有一个线程读写，timeout不因此缩短。
 - 完成等待同样走不claim的旁路连接，以现有owner token和本次FIRE command_id绑定；server等待本run既有DONE Event，完成即回复，不占command lane或owner锁等待。有限timeout到期不消费结果；长等待以最长1秒的Event等待续接，不加客户端轮询sleep。Stop/Close唤醒旧Event，下一Fire更换Event；旧等待不能消费或覆盖下一run。两端握手确认completion_notifications，删除旧poll_interval参数。Pulse Editor复用独立后台worker在FIRE返回后立即发起等待，Qt仅通过完成投递更新；状态定时器不再取走有限run报告，Sync不取消本run等待，旧snapshot不得重新显示RUNNING。
 - 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。
 - UART auto枚举COM、优先USB VID/PID，并只在word-63 fingerprint匹配后选用；
   显式port把探测限制为该端口。auto探测失败才回退JTAG，显式UART失败则报错。
 - 只有server process持hardware transport；不保留假的进程内Interprocess lease。
-- Device Manager的Remote把本机一个loaded device公布到bench fabric（generic tunable plane；自带协议的device只公布其server地址）。公布即交出：它在Session的DeviceUse里取该device的command claim——任何本地Logic/command占用该device时按名拒绝且不公布；已公布期间所有本地Logic、command、字段写入与rebuild都按名拒绝，直到Remote撤回。撤回先撤公告再释放claim；unload与Shutdown先撤回全部公布。排他是整个device而不是字段，没有第二张owner表。公布的是loaded device所来自的accepted apparatus，不是表单上未Apply的draft；远端proxy不缓存字段，每次Refresh都经fields RPC取当前完整字段投影（metadata/current/live_write/group/device_limits）。
+- Device Manager的Remote把本机一个loaded device公布到bench fabric（generic tunable plane；自带协议的device只公布其server地址）。公布即交出：它在Session的DeviceUse里取该device的command claim——任何本地Logic/command占用该device时按名拒绝且不公布；已公布期间所有本地Logic、command、字段写入与rebuild都按名拒绝，直到Remote撤回。撤回先撤公告再释放claim；unload与Shutdown先撤回全部公布。自带协议的本地device（本地板、本地SLM）撤回时，server在同一把锁下停止接纳外机并断开已接入的peer，本地leaf再问一次自己的loopback client：若公布期间peer接管过板子，就重新接入，不必重新Init。排他是整个device而不是字段，没有第二张owner表。公布的是loaded device所来自的accepted apparatus，不是表单上未Apply的draft；远端proxy不缓存字段，每次Refresh都经fields RPC取当前完整字段投影（metadata/current/live_write/group/device_limits）。proxy的tune等回复120 s（一次合法的N100改速率就要十秒以上）；失败的请求从不重放，连接断了由下一次请求重新拨号，close之后才是终态。
 
 ### 7.4 Host/RTL/build invariants
 
@@ -481,7 +489,7 @@ Node new chunk
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。
 - Fire成功返回现有已确认AppliedState；调用方不为相同事实追加snapshot/applied查询。更新重复次数只校验计数并共享已验证program/rows，计数不变复用原对象。Remote以现有LOAD/FIRE确认及已接纳装载状态交付相同事实，只有真正变更才重新装载；同连接未变scan rows沿既有装载引用复用，不新增状态缓存。
 - Count必须是合法hardware range内整数，不clamp/wrap。
-- Hardware SAFE把TTL拉低、把DAC data置safe码，并让DAC latch strobe继续走足够长以把该safe码真正锁进外部转换器，之后才gate住strobe；只gate而不锁存等于把safe码摆上引脚却永远送不进DAC，模拟输出会保持run的最后一个edge/ramp值。LOAD/FIRE前pins保持safe。
+- Hardware SAFE把TTL拉低、把DAC data置safe码，并让DAC latch strobe继续走足够长以把该safe码真正锁进外部转换器，之后才gate住strobe；只gate而不锁存等于把safe码摆上引脚却永远送不进DAC，模拟输出会保持run的最后一个edge/ramp值。CTRL20在配置时即全部latch clock使能，所以配置后的park窗口就把safe码锁进转换器，不等第一次FIRE。DAC safe码固定为中码（`1 << (width-1)`，即RTL的`BUS_SAFE_VALUE`），`PulsePortSpec`不接受别的值，如同数字port固定为0，virtual与真板因此不会分叉。LOAD/FIRE前pins保持safe。
 - Public DONE等待delay FIFOs和final DAC latch完成并进入安全态。
 - Underflow与engine delay-FIFO overflow sticky且loud；scan point0必须resident。UART CRC/framing/address fault由framed reply与独立LINK_ERROR报告，不能污染engine ERROR。命令使用独立32-bit ID；板端仅保留最后一次命令结果，重试同ID不得重复Fire。SAFE完成安全gating、LOAD完成装载、FIRE被接受后才返回完成/接受ACK；SAFE可抢占mini-loader。普通寄存器写ACK不充当命令完成证明。观察一次连续CTRL读取中的status/cursor；DONE后cursor固定，结果不是逐word读取的“原子快照”。Observer失败保存真实exception和已取得的状态，不虚构双读或board ERROR。新command ABI与server能力在既有握手严格检查。
 - 50MHz engine有真实clock/STA constraints。
@@ -498,10 +506,10 @@ Node new chunk
 - SLM proxy无authentication/TLS，只能部署在trusted laboratory LAN，不得暴露到public Internet。
 - Initial command state是unknown，只有成功write/display/readback/settle后才known。
 - Side effect失败区分known-old、known-new和unknown outcome。
-- Correction mutation取得同一DeviceUse claim并冻结mapping revision。
+- Vendor correction是server的Init字段（`correction_path`），启动时按表单加载，进入command receipt；运行中没有correction mutation入口，remote协议只有describe与apply。
 - Profile记录model、serial、wavelength、phase curve来源和settle语义；不新增hash。
 - Editor明确区分authoring draft与device command；external Task后旧Send不得静默覆盖。
-- Editor的device状态问句（100 ms轮询与每次草稿变化）在Editor自己的串行command executor上问、在Qt线程上显示：一次只有一问在途，command进行中不问——command的交付本身带回它留下的device状态；Qt线程从不等在remote proxy的apply锁后面，远端慢apply只推迟状态行，不冻结event loop。
+- Editor的device状态问句（100 ms轮询与每次草稿变化）在Editor自己的串行command executor上问、在Qt线程上显示：一次只有一问在途，command进行中不问——command的交付本身带回它留下的device状态；Qt线程从不等在remote proxy的apply锁后面：proxy缓存的状态有自己的短锁，任何状态读（含Editor构造时的第一次）都不等apply的网络往返；远端慢apply只推迟状态行，不冻结event loop。
 
 ### 8.2 Context与artifacts
 
@@ -531,7 +539,7 @@ Node new chunk
 - Feedback自动preview固定为带编号site map的实时Camera Measurement mean reduction、observable uniformity、site signal evolution与Target share evolution；phase仍发布且保存最终Figure，但不自动占用Monitor panel。
 - Task preview只冻结运行中的signal/overlay/cell kind/semantic与publisher wiring；Selector、viewport、hover、line lock等Panel interaction始终由全局Selector toggle控制，Calibration、Feedback与普通Panel行为一致。Task锁只阻止selection反向改写正在运行的producer draft，不阻止本地交互状态。
 - Task到达completed/stopped/failed terminal时移除该run自动创建的preview panels；用户手工创建的Panels不受影响。Panel header使用紧凑Setting与紧邻的`×`；`×`单击进入红色确认态，系统double-click interval内第二击才删除，超时恢复中性灰。
-- Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
+- 求解按target形状选路：sparse spots（site阵列）走WGS-Kim；dense image target（Editor的Gaussian/Flat Top等预设或导入图像）走MRAF，从radial-transport/mapping seed起步，边长≥512且有≥64像素平坦内部的target先在四分之一分辨率收敛再抬升为seed（multigrid）。有平坦内部时以该内部95/5百分位强度比≤1%为停止判据，否则以merit停滞为判据，两者都要求相对rms≤0.5%；到不了就跑满有界迭代并如实报告。SLM Feedback只接受spots target。全部在CPU上算，不引GPU。
 
 ## 9. Calibration、Scan与Simulation
 
@@ -541,7 +549,7 @@ Node new chunk
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
 - Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换。
 - BOX model仍为Calibration/Occupancy持久化自己的readout事实；Feedback只取BOX geometry。未观测Target site由注册产生predicted BOX，并与实测site一起接受本次run的双高斯估计，不伪造Calibration dark/bright样本。
-- BOX仅在每个实际区域累加为float64，不先把整帧转为float64。Camera组装cycle/repeat时只stack一次；不可变snapshot仍独占输入。Derive的numeric count只归约validity，其他归约只分配实际需要的累加量，保留全domain/空组/单位语义。成功Gaussian threshold不计算弃置的Empirical答案；Empirical模式仍保留Gaussian拟合用于独立理论报告。
+- BOX仅在每个实际区域累加为float64，不先把整帧转为float64；窗内有任一非有限像素则该窗没有总和（NaN，与PSF读出同一规则），被遮的site读成「没有数」而不是一个暗的有效值。Camera组装cycle不stack：每条CameraFrameRecord已持连续不可变bytes，单帧cycle直接交出该view，多帧cycle一次`b"".join`成Dataset自有bytes；光电子换算一次分配（相减直接加宽到float32、再原地乘scale），再由record做它唯一一次bytes拷贝。不可变snapshot仍独占输入。Derive的numeric count只归约validity，其他归约只分配实际需要的累加量，保留全domain/空组/单位语义。成功Gaussian threshold不计算弃置的Empirical答案；Empirical模式仍保留Gaussian拟合用于独立理论报告。
 - Calibration threshold method保留operator选择并默认`gaussian`：每个site/readout model只用全部finite short-shot signal做无标签双Gaussian mixture fit，按均值识别低/高分量并保留fit得到的population weights；threshold是两条实际加权分量曲线`w_dark N_dark(t)=w_bright N_bright(t)`在两均值之间、令拟合population总误判最小的解析交点。reference真实标签不得进入Gaussian参数、权重或threshold；只允许用于Empirical threshold及最终actual fidelity。Gaussian参数、population或相关解析根无效时该site使用全部有效labelled samples上令实际总正确率最大的empirical threshold；operator显式选择`empirical`时所有site都走该路径。Histogram竖线始终是最终写入Calibration并由`detect()`使用的threshold；Gaussian曲线必须复用Calibration保存的同一组参数与权重，不得由Plot二次拟合，fallback site不得伪造理论曲线。报告分别保存最终threshold在全部有效真实数据上的overall actual fidelity（另存dark/bright conditional值），以及Gaussian threshold按其fit population weights积分得到的theoretical fidelity；fit失败site没有theoretical值。
 - Calibration只使用稳定`format="zlc.calibration.readout"`，无数字版本；reader只接受当前完整grammar，alternate root或缺失统计均loud拒绝。
 - Calibration run保存final JSON、summary JSON/text及精选报告图；每张报告图都有可由FigureViewer重开的typed Figure NPZ，PNG仅为preview。默认不保存全部raw frames；operator显式请求时才保存采样数据。
@@ -576,4 +584,4 @@ Node new chunk
 
 ## 11. 当前实现状态
 
-当前tree正在按上述不变量完成无版本strict persistence与统一TaskRun收口；当前验证状态见`IMPLEMENTATION_PLAN.md`。任何未执行的real-screen/hardware/optical步骤必须继续标为`UNEXECUTED`。
+当前tree已按上述不变量完成无版本strict persistence与统一TaskRun；实现状态与验证证据见`IMPLEMENTATION_PLAN.md`。任何未执行的real-screen/hardware/optical步骤必须继续标为`UNEXECUTED`。

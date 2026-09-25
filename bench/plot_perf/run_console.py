@@ -287,7 +287,7 @@ class ConsoleBench:
     ):
         from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
         from zlc_workbench.apps.task_console import build_console
-        from zlc_workbench.logic import stable_signal_key
+        from zlc_runtime import stable_signal_key
         from zlc_workbench.session import ExperimentSession
 
         self.session = ExperimentSession.open(self._tmp, template="virtual")

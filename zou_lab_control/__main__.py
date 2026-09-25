@@ -221,7 +221,6 @@ def evidence(argv: list[str] | None = None) -> int:
         groups = (
             (("zlc_ui",), (repo / "packages/zlc_ui/tests",)),
             (("zlc_plot",), (repo / "packages/zlc_plot/tests/test_qt_widget.py",)),
-            (("zlc_plot",), (repo / "packages/zlc_plot/tests/test_semantic_ui.py",)),
             (("zlc_atom",), (repo / "packages/zlc_atom/tests/test_slm_editor.py",)),
             (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_task_console_app.py",)),
             (("zlc_workbench",), (repo / "packages/zlc_workbench/tests/test_console_presenter.py",)),

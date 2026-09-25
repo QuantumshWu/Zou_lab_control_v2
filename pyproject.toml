@@ -7,7 +7,7 @@ name = "zou-lab-control"
 version = "2.0.0"
 description = "Neutral-atom experiment control: one distribution, eight layers"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "matplotlib==3.10.8",
     "numba==0.67.0",
