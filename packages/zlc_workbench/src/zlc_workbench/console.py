@@ -152,6 +152,39 @@ def _error_text(error: BaseException) -> str:
     return str(error) or type(error).__name__
 
 
+def _panel_caption(panel_id: str, title: str) -> str:
+    """What a card's strip calls its panel: which card, showing what.
+
+    DISPLAY ONLY.  The title is also the panel's editable name, and this
+    presenter decides whether the operator has renamed a panel by asking
+    whether its title still equals its signal -- so a decoration written
+    into the state would permanently answer "renamed" and freeze
+    auto-retitling when the signal changes.  The caption travels beside the
+    state in the projected surface, and the card only renders it; the
+    rename field and the Setting form's "Panel name" go on showing the name.
+
+    A signal-bound panel's title IS the signal's name, and every logic
+    signal's name carries the same prefix, which tells the reader nothing.
+    The name is read by ``split_signal_key``, the grammar's one reader, so
+    only its owner and output follow the card's own id -- "which of these
+    cards am I looking at" is the question the strip could not answer
+    before.
+
+    The id is minted from a running serial and is never persisted, so it
+    names a card within this board session, not across saves.
+    """
+
+    parts = split_signal_key(title)
+    if parts is not None:
+        owner, output = parts
+        return f"{panel_id}@{owner}/{output}"
+    if title.startswith("@"):
+        return f"{panel_id}{title}"
+    # A panel with no signal is named for its kind ("Image 2"), and an
+    # "@" in front of that would claim it is bound to something.
+    return f"{panel_id} {title}"
+
+
 def _same_panel_selection(left: object, right: object) -> bool:
     def signature(selection: object) -> tuple[object, ...]:
         return (
@@ -4835,6 +4868,7 @@ class ConsolePresenter:
         science_locked = self._task_science_locked(binding)
         surface["science_locked"] = science_locked
         surface["paints_images"] = self._paints_image_surfaces(binding)
+        surface["caption"] = _panel_caption(binding.panel_id, binding.state.title)
         for section in ("semantic", "display", "fit"):
             declared = tuple(surface.get(section, ()))
             legal: dict[str, object] = {}

@@ -595,36 +595,19 @@ class PanelCardView(FluentGroupBox):
         )
 
     def _caption(self) -> str:
-        """What the strip calls this panel: which card, showing what.
+        """What the strip calls this panel, as its presenter captioned it.
 
-        DISPLAY ONLY.  The title is also the panel's editable name, and the
-        console decides whether the operator has renamed a panel by asking
-        whether its title still equals its signal -- so a decoration written
-        into the state would permanently answer "renamed" and freeze
-        auto-retitling when the signal changes.  This composes the caption at
-        paint time and leaves ``_base_title`` alone; the rename field and the
-        Setting form's "Panel name" go on showing the name itself.
-
-        A signal-bound panel's title IS the signal's name, and every logic
-        signal's name begins "@logic/" -- a segment that is the same on every
-        panel and so tells the reader nothing.  It collapses to the "@" it
-        already carries, and the card's own id goes in front, because "which
-        of these cards am I looking at" is the question the strip could not
-        answer before.
-
-        The id is minted from a running serial and is never persisted, so it
-        names a card within this board session, not across saves.
+        DISPLAY ONLY, and not this card's to compose: a signal-bound panel is
+        captioned from its signal's name, and that name's grammar belongs to
+        the runtime, which this package does not import.  The presenter reads
+        it there and projects the caption beside the data shape, so the
+        strip renders exactly what it was given.  The title is untouched --
+        it is the panel's editable name, which the rename field and the
+        Setting form's "Panel name" go on showing -- and a card nothing has
+        captioned yet is called by that name.
         """
 
-        title = str(self._base_title)
-        signal_prefix = "@logic/"
-        if title.startswith(signal_prefix):
-            return f"{self.panel_id}@{title[len(signal_prefix):]}"
-        if title.startswith("@"):
-            return f"{self.panel_id}{title}"
-        # A panel with no signal is named for its kind ("Image 2"), and an
-        # "@" in front of that would claim it is bound to something.
-        return f"{self.panel_id} {title}"
+        return str(self._parameter_surface.get("caption") or self._base_title)
 
     def _band_fragments(self) -> tuple[tuple, tuple]:
         """The strip's two lines as coloured fragments: sizes, then names.

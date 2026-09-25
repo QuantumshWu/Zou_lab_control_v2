@@ -131,6 +131,12 @@ Title, signal, size and update interval are edited in the card's Setting
 form only, and every edit there leaves as one `state_changed` patch; the
 card keeps no other control for them.
 
+The title strip names the panel by the surface's `caption`, exactly as the
+presenter composed it: a signal's name is read by the runtime that owns its
+grammar, never by the card.  The caption is display only -- the state's
+`title` stays the panel's editable name -- and a card no presenter has
+captioned is called by that name.
+
 `set_selectors_enabled(False)` suspends the mounted plot's whole pointer
 transport -- area, zoom, pan, hover and double-click focus -- and the
 ordinary wheel stays with the surrounding page; On restores all of it.

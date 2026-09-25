@@ -55,7 +55,8 @@ def populate(viewer) -> None:
             "size": "2x2", "interval_ms": 400, "title": "camera · frame",
             "semantic": {}, "display": {}, "fit": {}, "overlay_signal": "",
         },
-        {"semantic": (), "display": (), "fit": (), "data_structure": (), "data_scope": ()},
+        {"semantic": (), "display": (), "fit": (), "data_structure": (), "data_scope": (),
+         "caption": "panel-1 camera · frame"},
     )
     viewer.set_archive_info(
         (

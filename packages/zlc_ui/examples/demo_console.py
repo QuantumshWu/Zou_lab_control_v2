@@ -96,6 +96,9 @@ def populate(console, *, wire_intents: bool = True) -> None:
                 "semantic": (),
                 "display": (),
                 "fit": (),
+                # What a presenter would caption it: this toolkit composes
+                # no caption of its own.
+                "caption": f"{panel_id} Fake card {index}",
             },
         )
         console.set_panel_signal_choices(

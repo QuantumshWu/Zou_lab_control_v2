@@ -1041,6 +1041,46 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     assert binding.state is original_state
 
 
+def test_a_card_is_captioned_through_the_signal_key_grammar(presenter) -> None:
+    """The presenter captions a card; the card renders what it is handed.
+
+    A signal's name is read by the runtime's one reader of its grammar, and
+    the caption travels in the projected surface, never in the state: the
+    title stays the panel's editable name, which is what says whether the
+    operator has renamed the panel.
+    """
+
+    from zlc_runtime import stable_signal_key
+
+    binding = presenter.add_selected_panel("image")
+    assert binding is not None
+    panel_id = binding.panel_id
+
+    def caption() -> str:
+        return presenter.view.panel_parameter_surfaces[panel_id]["caption"]
+
+    # Named for its kind: an "@" in front would claim a binding.
+    assert caption() == f"{panel_id} {binding.state.title}"
+
+    # Bound to a logic signal, the title IS the signal's name; the caption
+    # says its owner and output after the card's id.  An owner may itself
+    # contain a slash: the grammar reads it up to the LAST one.
+    signal = stable_signal_key("camera/left", "frames")
+    assert presenter.update_panel_state(panel_id, {"signal": signal}) is True
+    assert binding.state.title == signal
+    assert caption() == f"{panel_id}@camera/left/frames"
+    assert "caption" not in binding.state.document()
+
+    # Any other name that starts with "@" keeps its own prefix.
+    assert presenter.update_panel_state(panel_id, {"title": "@figure/1/data"})
+    assert caption() == f"{panel_id}@figure/1/data"
+
+    # Renamed -- the title no longer its signal -- it shows its name.
+    assert presenter.update_panel_state(panel_id, {"title": "MOT shot"})
+    assert binding.state.signal == signal
+    assert caption() == f"{panel_id} MOT shot"
+
+
 def test_facet_grid_cell_kind_is_a_panel_parameter(presenter) -> None:
     """The cell kind is chosen in panel settings; empty means the data decides."""
 

@@ -2273,17 +2273,15 @@ assert not switch.isVisible(), 'no switch where the node opens nothing'
     )
 
 
-def test_the_card_caption_names_the_card_and_drops_the_logic_segment(run_qt) -> None:
-    """The strip says WHICH card, and stops repeating what never varies.
+def test_the_card_strip_renders_the_caption_its_presenter_projected(run_qt) -> None:
+    """The strip says what the presenter captioned the panel, and only that.
 
-    Every logic signal's name begins "@logic/", so that segment is identical
-    on every panel and tells the reader nothing; the card's own id is what
-    the strip could not say before.
-
-    Display only.  The title is also the panel's editable name, and the
-    console decides whether the operator has renamed a panel by asking
-    whether the title still equals the signal -- so the decoration must
-    never reach the state, the rename field, or the Setting form.
+    A signal-bound panel is captioned from its signal's name, whose grammar
+    the runtime owns; the presenter reads it there, so the card composes
+    nothing.  Display only: the title is also the panel's editable name, and
+    the caption must never reach the state, the rename field, or the Setting
+    form.  (The caption itself is pinned through the presenter's projection
+    in test_console_presenter.)
     """
 
     run_qt(
@@ -2294,14 +2292,17 @@ PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
 
 
-def project(card, title, signal):
+def project(card, title, signal, caption):
+    surface = {'semantic': (), 'display': (), 'fit': ()}
+    if caption is not None:
+        surface['caption'] = caption
     card.set_panel_projection(
         {
             'signal': signal, 'kind': 'image', 'size': '2x2',
             'interval_ms': 100, 'title': title, 'semantic': {},
             'display': {}, 'fit': {}, 'overlay_signal': '',
         },
-        {'semantic': (), 'display': (), 'fit': ()},
+        surface,
     )
 
 
@@ -2309,29 +2310,25 @@ card = PanelCardView('panel-2', 'Card')
 card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
 card.set_signal_choices((('source', (('Frames', '@logic/camera_measurement/frames'),)),))
 
-# A signal-bound panel: the title IS the signal's name.
-project(card, '@logic/camera_measurement/frames', '@logic/camera_measurement/frames')
+signal = '@logic/camera_measurement/frames'
+project(card, signal, signal, 'panel-2@camera_measurement/frames')
 assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
 line = card._band_fragments()[0][0][0]
 assert line == 'panel-2@camera_measurement/frames', line
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.
-assert card._base_title == '@logic/camera_measurement/frames'
-assert card._form_values()['title'] == '@logic/camera_measurement/frames'
+assert card._base_title == signal
+assert card._state_projection['title'] == signal
+assert card._form_values()['title'] == signal
 
-# A signal from somewhere other than logic keeps its own prefix.
-project(card, '@device/mot_camera/frames', '@device/mot_camera/frames')
-assert card._caption() == 'panel-2@device/mot_camera/frames', card._caption()
-
-# A panel with no signal is named for its kind; an "@" would claim a
-# binding it does not have.
-project(card, 'Image 2', '')
-assert card._caption() == 'panel-2 Image 2', card._caption()
-
-# And an operator's own name still shows, with the card it belongs to.
-project(card, 'MOT shot', '@logic/camera_measurement/frames')
+# A renamed panel is re-captioned by the same projection that renames it.
+project(card, 'MOT shot', signal, 'panel-2 MOT shot')
 assert card._caption() == 'panel-2 MOT shot', card._caption()
 assert card._form_values()['title'] == 'MOT shot'
+
+# A card nothing has captioned is called by its name.
+project(card, 'Image 2', '', None)
+assert card._caption() == 'Image 2', card._caption()
 card.deleteLater()
 print('ok')
 """
