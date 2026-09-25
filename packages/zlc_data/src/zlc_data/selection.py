@@ -9,7 +9,6 @@ from numbers import Real
 
 import numpy as np
 
-from ._diagnostic import exact_integer_text
 from .validation import (
     integer,
     nonnegative_integer,
@@ -144,10 +143,6 @@ class Selection:
         object.__setattr__(self, "terms", tuple(sorted(terms, key=lambda term: term.axis_id.value)))
 
     @classmethod
-    def index(cls, axis_id: AxisId, index: int) -> "Selection":
-        return cls((IndexSelection(axis_id, index),))
-
-    @classmethod
     def index_range(
         cls,
         axis_id: AxisId,
@@ -167,29 +162,6 @@ class Selection:
     ) -> "Selection":
         return cls(
             (CoordinateRangeSelection(axis_id, lower, upper, coordinate_frame),),
-        )
-
-    @classmethod
-    def rectangle(
-        cls,
-        x_axis_id: AxisId,
-        y_axis_id: AxisId,
-        x_lower: CoordinateScalar,
-        x_upper: CoordinateScalar,
-        y_lower: CoordinateScalar,
-        y_upper: CoordinateScalar,
-        *,
-        coordinate_frame: CoordinateFrameId | None,
-    ) -> "Selection":
-        return cls(
-            (
-                CoordinateRangeSelection(
-                    x_axis_id, x_lower, x_upper, coordinate_frame
-                ),
-                CoordinateRangeSelection(
-                    y_axis_id, y_lower, y_upper, coordinate_frame
-                ),
-            ),
         )
 
 
@@ -239,17 +211,13 @@ def resolve_selection_indices(
     if isinstance(term, IndexSelection):
         if term.index >= axis.size:
             raise IndexError(
-                "selection index "
-                f"{exact_integer_text(term.index)} is outside axis "
-                f"{axis.axis_id}"
+                f"selection index {term.index} is outside axis {axis.axis_id}"
             )
         return range(term.index, term.index + 1), True
     if isinstance(term, IndexRangeSelection):
         if term.stop > axis.size:
             raise IndexError(
-                "selection range stop "
-                f"{exact_integer_text(term.stop)} is outside axis "
-                f"{axis.axis_id}"
+                f"selection range stop {term.stop} is outside axis {axis.axis_id}"
             )
         return range(term.start, term.stop), False
     if axis.coordinate_frame != term.coordinate_frame:

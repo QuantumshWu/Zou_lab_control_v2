@@ -21,7 +21,6 @@ import re
 from typing import Callable, Iterator
 
 from .durability import _atomic_write_unique_path, _flush_published, durable_makedirs
-from .paths import resolve_under
 
 
 __all__ = [
@@ -111,10 +110,13 @@ def unique_path(
         safe = f"_{safe}"
 
     def candidates() -> Iterator[Path]:
+        # One sanitized name component under the resolved folder: nothing
+        # to confine, and an occupied name -- a symlink included -- simply
+        # advances the ordinal.
         ordinal = 1
         while True:
             numbered = safe if ordinal == 1 else f"{safe}-{ordinal}"
-            yield resolve_under(directory, f"{numbered}{suffix}")
+            yield directory / f"{numbered}{suffix}"
             ordinal += 1
 
     if not suffix:

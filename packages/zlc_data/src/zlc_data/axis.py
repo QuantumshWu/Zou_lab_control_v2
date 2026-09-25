@@ -15,7 +15,6 @@ from .validation import (
     positive_integer,
 )
 
-from ._diagnostic import exact_integer_text
 from ._arrays import immutable_array
 
 
@@ -198,6 +197,12 @@ class AxisSpec:
         compare=False,
         default=None,
     )
+    _hash: int | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.axis_id, AxisId):
@@ -273,6 +278,7 @@ class AxisSpec:
                 )
             object.__setattr__(self, "coordinate_labels", labels)
         object.__setattr__(self, "_coordinate_positions", None)
+        object.__setattr__(self, "_hash", None)
 
     def __eq__(self, other: object) -> bool:
         if self is other:
@@ -289,11 +295,17 @@ class AxisSpec:
         )
 
     def __hash__(self) -> int:
-        return hash((self.axis_id, self.name, self.role, self.size, self.unit,
-                     self.coordinate_frame, self.index_origin, self.coordinate_labels,
-                     self.coordinate_of,
-                     None if self.coordinates is None else tuple(self.coordinates),
-                     None if self.coordinate_origins is None else tuple(self.coordinate_origins)))
+        # Hashed once: the axis is immutable, and a schema-cache lookup per
+        # publication would otherwise walk every coordinate of a long trace.
+        cached = self._hash
+        if cached is None:
+            cached = hash((self.axis_id, self.name, self.role, self.size, self.unit,
+                           self.coordinate_frame, self.index_origin, self.coordinate_labels,
+                           self.coordinate_of,
+                           None if self.coordinates is None else tuple(self.coordinates),
+                           None if self.coordinate_origins is None else tuple(self.coordinate_origins)))
+            object.__setattr__(self, "_hash", cached)
+        return cached
 
     def __len__(self) -> int:
         return self.size
@@ -350,8 +362,7 @@ class AxisSpec:
         index = normalized
         if not 0 <= index < self.size:
             raise IndexError(
-                f"axis index {exact_integer_text(index)} is outside "
-                f"[0, {exact_integer_text(self.size)})"
+                f"axis index {index} is outside [0, {self.size})"
             )
         if self.coordinates is None:
             return self.index_origin + index

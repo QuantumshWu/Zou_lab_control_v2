@@ -226,13 +226,9 @@ def write_figure_archive(
     datasets: dict[str, Any] = {}
     for key, value in arrays.items():
         if isinstance(value, OwnedSnapshot):
-            manifest = snapshot_manifest(
+            datasets[key] = snapshot_manifest(
                 value, stored, **_snapshot_members(key, value)
             )
-            ref = dict(manifest["ref"])
-            ref.pop("schema_fingerprint", None)
-            manifest["ref"] = ref
-            datasets[key] = manifest
         else:
             stored[key] = np.asarray(value)
 
@@ -387,7 +383,7 @@ def _read_datasets(
             arrays[member] = np.frombuffer(
                 array.tobytes(order="C"), dtype=array.dtype
             ).reshape(array.shape)
-        datasets[name] = snapshot_from_manifest(manifest, arrays, embedded=True)
+        datasets[name] = snapshot_from_manifest(manifest, arrays)
     return datasets
 
 

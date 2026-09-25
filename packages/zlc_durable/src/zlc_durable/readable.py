@@ -15,6 +15,10 @@ Not for anything hashed or sent.  A digest wants the compact, sorted,
 separator-pinned form and must not move when this changes its mind about where
 to wrap -- those callers stay on ``json.dumps`` with their own separators, and
 should.
+
+Reading is the other half of the same rule, and it does not depend on layout:
+:func:`strict_json_loads` is the one strict reader for every JSON a package
+above this one reads back -- a document, a profile, a frame off a socket.
 """
 
 from __future__ import annotations
@@ -27,7 +31,12 @@ from typing import Any
 from .durability import atomic_write_bytes
 
 
-__all__ = ["readable_json", "readable_json_bytes", "write_readable_json"]
+__all__ = [
+    "readable_json",
+    "readable_json_bytes",
+    "strict_json_loads",
+    "write_readable_json",
+]
 
 #: Where an inline list is wrapped.  Wide enough that a row of numbers or a
 #: handful of names is one line, narrow enough to read without scrolling
@@ -59,6 +68,38 @@ def write_readable_json(path: str | Path, tree: Any, *, indent: int = 2) -> Path
     """
 
     return atomic_write_bytes(path, readable_json_bytes(tree, indent=indent))
+
+
+def strict_json_loads(text: str, what: str) -> Any:
+    """Parse JSON that must mean exactly what it says.
+
+    Python's parser keeps the last of two equal keys, accepts NaN and
+    Infinity, and reads an overflowing number such as ``1e999`` as infinity;
+    each would let a document or a request silently lose or change a fact
+    that no writer here can put back, so each is refused, naming ``what``
+    was being read.
+    """
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"duplicate key {key!r} in {what}")
+            result[key] = value
+        return result
+
+    def constant(name: str) -> None:
+        raise ValueError(f"non-finite JSON constant {name} in {what}")
+
+    def number(literal: str) -> float:
+        value = float(literal)
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite JSON number {literal} in {what}")
+        return value
+
+    return json.loads(
+        text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number
+    )
 
 
 def _scalar(value: Any) -> bool:

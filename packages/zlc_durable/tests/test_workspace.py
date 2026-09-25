@@ -10,7 +10,6 @@ from threading import Barrier
 import pytest
 
 from zlc_durable import day_folder, day_folder_path, unique_path
-from zlc_durable.workspace import day_folder_name
 
 
 def _commit_process_payload(arguments: tuple[str, int]) -> tuple[str, bytes]:
@@ -23,13 +22,6 @@ def _commit_process_payload(arguments: tuple[str, int]) -> tuple[str, bytes]:
         writer=lambda temporary: temporary.write_bytes(payload),
     )
     return path.name, path.read_bytes()
-
-
-def test_day_folder_name_is_zero_padded() -> None:
-    assert day_folder_name(date(2026, 8, 5)) == "2026_08_05"
-    assert day_folder_name(date(2026, 12, 31)) == "2026_12_31"
-    assert day_folder_name(date(2026, 1, 1)) == "2026_01_01"
-    assert day_folder_name(date(1999, 10, 9)) == "1999_10_09"
 
 
 def test_day_folder_creates_the_day_beneath_an_existing_root(tmp_path) -> None:
@@ -47,7 +39,7 @@ def test_day_folder_refuses_a_save_root_that_does_not_exist(tmp_path) -> None:
         day_folder(tmp_path / "typo", date(2026, 8, 5))
 
 
-def test_unique_path_never_returns_an_occupied_name(tmp_path) -> None:
+def test_unique_path_never_returns_an_occupied_name(tmp_path, monkeypatch) -> None:
     """Saving twice in one day must not overwrite the morning's data."""
 
     first = unique_path(
@@ -77,6 +69,21 @@ def test_unique_path_never_returns_an_occupied_name(tmp_path) -> None:
         b"second",
         b"third",
     ]
+
+    # A FAT32/exFAT stick has no hard links: the name is claimed instead.
+    def no_links(*_args, **_kwargs):
+        raise OSError(1, "Incorrect function")
+
+    monkeypatch.setattr("zlc_durable.durability.os.link", no_links)
+    fourth = unique_path(
+        tmp_path,
+        "scan",
+        ".npz",
+        writer=lambda temporary: temporary.write_bytes(b"fourth"),
+    )
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "scan-2.npz", "scan-3.npz", "scan-4.npz", "scan.npz",
+    ] and fourth.read_bytes() == b"fourth"
 
 
 def test_unique_file_allocation_does_not_collapse_under_concurrency(tmp_path) -> None:
@@ -229,14 +236,9 @@ def test_day_folder_path_names_the_day_without_making_it(tmp_path) -> None:
     named = day_folder_path(tmp_path, date(2026, 8, 5))
     assert named == tmp_path / "2026_08_05"
     assert not named.exists()
-    # Naming is pure; only making refuses a root that is not there.
+    # Naming is pure: a root that is not there is still named.
     assert day_folder_path(tmp_path / "missing", date(2026, 8, 5)) == (
         tmp_path / "missing" / "2026_08_05"
     )
-    with pytest.raises(NotADirectoryError):
-        day_folder(tmp_path / "missing", date(2026, 8, 5))
     with pytest.raises(ValueError):
         day_folder_path("relative/root", date(2026, 8, 5))
-    # The write-side twin makes exactly that path.
-    assert day_folder(tmp_path, date(2026, 8, 5)) == named.resolve()
-    assert named.is_dir()

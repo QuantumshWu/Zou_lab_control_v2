@@ -1,14 +1,9 @@
-
-
-
 def test_a_schema_catalogues_its_axes_once() -> None:
     """The catalog is a fact about the schema; it is built once.
 
     Repeat and Point axes are already canonical and the catalog is cached;
     a 200x200 scan must not rebuild per-row coordinates on every selection.
     """
-
-    import time
 
     import numpy as np
 
@@ -43,11 +38,4 @@ def test_a_schema_catalogues_its_axes_once() -> None:
     )
 
     first = axis_catalog(schema)
-    started = time.perf_counter()
-    again = axis_catalog(schema)
-    elapsed = time.perf_counter() - started
-
-    assert again is first
-    # The rebuild it replaces is tens of milliseconds; anything in this
-    # range is a lookup rather than a second walk over 40 000 rows.
-    assert elapsed < 1e-3, elapsed
+    assert axis_catalog(schema) is first

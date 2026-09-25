@@ -27,6 +27,7 @@ The top-level facade contains only these names:
 |---|---|
 | `atomic_write_file`, `atomic_write_bytes`, `atomic_write_text` | publish complete content by same-directory temporary, fsync, replace, and directory flush |
 | `readable_json_bytes`, `write_readable_json` | validate a plain JSON tree and encode or durably write its readable UTF-8 representation |
+| `strict_json_loads` | the one strict JSON reader of the product: refuses a duplicate key, `NaN`/`Infinity` and an overflowing literal such as `1e999`, naming what was being read |
 | `durable_makedirs` | durably create every missing level of a directory tree |
 | `day_folder` | create or open one calendar-day folder beneath an existing save root |
 | `day_folder_path` | name that calendar-day folder without creating, stat'ing or resolving anything -- the pure question a form, a title or a dialog asks |
@@ -52,8 +53,10 @@ does not exist so a typo cannot scatter data into a new tree.
 For a file, `unique_path` requires a `writer`. The writer receives a hidden
 same-directory temporary path with the requested suffix, so path-based encoders
 can use it directly. The complete flushed file is then published without
-replacement. Concurrent processes therefore cannot select the same final name,
-and a failed writer publishes no partial artifact. An empty suffix instead
+replacement -- by a hard link, or, on a volume without hard links (FAT32, exFAT,
+some shares), by claiming the name exclusively and moving the file onto it.
+Concurrent processes therefore cannot select the same final name, and a failed
+writer publishes no partial artifact. An empty suffix instead
 performs an exclusive `mkdir`; it takes no writer.
 
 ## What is deliberately not here

@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import numpy as np
 
 from ._tree import digest as _tree_digest
-from .validation import canonical_text as _text, exact_mapping as _exact_map, integer as _integer
+from .validation import (
+    DIGEST_BITS,
+    canonical_text as _text,
+    exact_mapping as _exact_map,
+    integer as _integer,
+)
 
 from .axis import PRIMARY_INDEX, AxisId, AxisRoleId, AxisSpec, CoordinateFrameId, canonical_coordinate_scalar
 from .schema import (
@@ -66,10 +72,30 @@ def dataset_revision_ref_from_tree(tree: Any) -> DatasetRevisionRef:
     return value
 
 
-def _coordinate_tree(values: Any) -> list[Any]:
+def _vector_digest(values: np.ndarray) -> dict[str, str]:
+    """A numeric vector's content name, for a fingerprint only.
+
+    AxisSpec and DomainSpec keep every numeric vector in the one canonical
+    dtype its values call for, so equal vectors have equal bytes once a
+    negative zero is folded into the zero it equals.  Spelling each number
+    out in JSON costs milliseconds per shot on a stamped history window,
+    whose coordinates -- and so schema and fingerprint -- are new each shot.
+    """
+
+    if values.dtype.kind == "f":
+        values = values + 0.0
+    return {
+        "dtype": values.dtype.str,
+        "blake2b": hashlib.blake2b(values.tobytes(), digest_size=DIGEST_BITS // 8).hexdigest(),
+    }
+
+
+def _coordinate_tree(values: Any, *, digest: bool = False) -> list[Any] | dict[str, str]:
     # AxisSpec already validated this immutable vector. JSON's canonical
     # numeric spelling only needs integral floats changed to Python ints.
     if isinstance(values, np.ndarray):
+        if digest:
+            return _vector_digest(values)
         source = values.tolist()
         return [int(value) if value.is_integer() else value for value in source] if values.dtype.kind == "f" else source
     return list(values)
@@ -88,14 +114,14 @@ def _read_coordinates(values: Any, field: str) -> list[Any] | None:
     return values
 
 
-def axis_to_tree(axis: AxisSpec, *, structure: bool = False) -> dict[str, Any]:
+def axis_to_tree(axis: AxisSpec, *, structure: bool = False, digest: bool = False) -> dict[str, Any]:
     return {
         "schema": AXIS_SCHEMA,
         "axis_id": axis.axis_id.value,
         "name": axis.name,
         "role": axis.role.value,
         "size": axis.size,
-        "coordinates": None if axis.coordinates is None else len(axis.coordinates) if structure else _coordinate_tree(axis.coordinates),
+        "coordinates": None if axis.coordinates is None else len(axis.coordinates) if structure else _coordinate_tree(axis.coordinates, digest=digest),
         "unit": axis.unit,
         "coordinate_frame": None
         if axis.coordinate_frame is None
@@ -105,7 +131,7 @@ def axis_to_tree(axis: AxisSpec, *, structure: bool = False) -> dict[str, Any]:
         if axis.coordinate_labels is None
         else len(axis.coordinate_labels) if structure else list(axis.coordinate_labels),
         **({"coordinate_of": axis.coordinate_of.value} if axis.coordinate_of is not None else {}),
-        **({"coordinate_origins": len(axis.coordinate_origins) if structure else _coordinate_tree(axis.coordinate_origins)}
+        **({"coordinate_origins": len(axis.coordinate_origins) if structure else _coordinate_tree(axis.coordinate_origins, digest=digest)}
            if axis.coordinate_origins is not None else {}),
     }
 
@@ -154,13 +180,13 @@ def axis_from_tree(tree: Any) -> AxisSpec:
     return axis
 
 
-def domain_to_tree(domain: DomainSpec, *, structure: bool = False) -> dict[str, Any]:
+def domain_to_tree(domain: DomainSpec, *, structure: bool = False, digest: bool = False) -> dict[str, Any]:
     if not isinstance(domain, DomainSpec):
         raise TypeError("domain must be DomainSpec")
     sliding = {axis.axis_id for axis in domain.axes if axis.role == PRIMARY_INDEX} if structure else set()
     axes = []
     for axis in domain.axes:
-        tree = axis_to_tree(axis, structure=structure)
+        tree = axis_to_tree(axis, structure=structure, digest=digest)
         if sliding and (axis.axis_id in sliding or axis.coordinate_of in sliding or axis.coordinate_origins is not None):
             tree["size"] = tree["index_origin"] = "sliding"
             if axis.coordinate_origins is None and tree["coordinates"] is not None:
@@ -178,7 +204,8 @@ def domain_to_tree(domain: DomainSpec, *, structure: bool = False) -> dict[str, 
         "axis_codes": None
         if domain.axis_codes is None
         else "sliding" if sliding else [
-            {"range": [codes.start, codes.stop, codes.step]} if isinstance(codes, range) else codes.tolist()
+            {"range": [codes.start, codes.stop, codes.step]} if isinstance(codes, range)
+            else _vector_digest(codes) if digest else codes.tolist()
             for codes in domain.axis_codes
         ],
         **({"axis_code_repeats": [list(pair) for pair in domain.axis_code_repeats]}
@@ -285,12 +312,17 @@ def value_schema_from_tree(tree: Any) -> ValueSchema:
     return schema
 
 
-def dataset_schema_to_tree(schema: DatasetSchema, *, structure: bool = False) -> dict[str, Any]:
+def dataset_schema_to_tree(
+    schema: DatasetSchema, *, structure: bool = False, digest: bool = False,
+) -> dict[str, Any]:
+    """The schema as a primitive tree; ``digest`` names each numeric vector by
+    its bytes instead of spelling it out -- for a fingerprint, never a file."""
+
     return {
         "schema": DATASET_SCHEMA,
-        "repeat_domain": domain_to_tree(schema.repeat_domain, structure=structure),
-        "point_domain": domain_to_tree(schema.point_domain, structure=structure),
-        "cell_domain": domain_to_tree(schema.cell_domain, structure=structure),
+        "repeat_domain": domain_to_tree(schema.repeat_domain, structure=structure, digest=digest),
+        "point_domain": domain_to_tree(schema.point_domain, structure=structure, digest=digest),
+        "cell_domain": domain_to_tree(schema.cell_domain, structure=structure, digest=digest),
         "value_schema": value_schema_to_tree(schema.value_schema),
     }
 
@@ -310,12 +342,8 @@ def dataset_schema_from_tree(tree: Any) -> DatasetSchema:
     return schema
 
 
-def value_schema_fingerprint(schema: ValueSchema) -> str:
-    return _tree_digest(value_schema_to_tree(schema))
-
-
 def dataset_schema_fingerprint(schema: DatasetSchema) -> str:
-    return _tree_digest(dataset_schema_to_tree(schema))
+    return _tree_digest(dataset_schema_to_tree(schema, digest=True))
 
 
 def dataset_schema_structure_fingerprint(schema: DatasetSchema) -> str:

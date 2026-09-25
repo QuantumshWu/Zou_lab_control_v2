@@ -25,13 +25,11 @@ from zlc_data.codec import dataset_schema_from_tree, dataset_schema_to_tree
 from zlc_data.schema import (
     DatasetSchema,
     DomainSpec,
-    SCALAR_DOMAIN,
     ValueSchema,
 )
 from zlc_data.validity import (
     VALID,
     CellValidity,
-    DatasetComponentValidity,
     ValidityContract,
 )
 from zlc_data.value import (
@@ -73,12 +71,6 @@ def dataset_schema(*, explicit: bool = False, component_validity: bool = False) 
         DomainSpec((len(point_values),), (detuning,), (point_values,)),
         *image_schema(component_validity=component_validity),
     )
-
-
-def test_scalar_has_the_canonical_length_one_carrier_axis():
-    scalar_schema = ValueSchema.scalar(np.dtype(np.float64), "count")
-    assert scalar_schema.validity_contract == ValidityContract.value()
-    assert SCALAR_DOMAIN.shape == (1,)
 
 
 def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_copy():
@@ -139,7 +131,7 @@ def test_intrinsically_immutable_strided_views_cross_value_and_dataset_without_c
     assert tree["value_schema"]["name"] == "survival"
     assert dataset_schema_from_tree(tree) == named_schema
     assert named_schema.fingerprint != schema.fingerprint
-    assert named_value.fingerprint != value_schema.fingerprint
+    assert named_value != value_schema
     assert replace(named_value, dtype=np.dtype("<f8"), value_unit="V").name == "survival"
     assert dataset_schema_from_tree(dataset_schema_to_tree(schema)).value_schema.name is None
     with pytest.raises(ValueError, match="non-canonical"):
@@ -160,23 +152,6 @@ def test_dataset_rejects_duplicate_axis_identity_across_axis_families():
             DomainSpec((1,), (point,), ((0,),)),
             *image_schema(),
         )
-
-
-def test_dataset_component_validity_includes_repeat_and_physical_point_rows():
-    schema = dataset_schema(component_validity=True)
-    site_like_x = schema.cell_domain.axes[1]
-    validity = DatasetComponentValidity(
-        (site_like_x.axis_id,),
-        np.ones((2, 3, 4), dtype=bool),
-    )
-    block = DataBlock(
-        BlockId("capture-1"),
-        DatasetRevision(0),
-        np.zeros(schema.physical_shape, dtype=np.uint16),
-        validity,
-        schema,
-    )
-    assert block.validity.mask.shape == (2, 3, 4)
 
 
 def test_datablock_owns_intrinsically_immutable_bytes():
@@ -393,24 +368,10 @@ def test_schema_fingerprint_covers_index_codes_and_component_validity():
 
 
 def test_schema_fingerprint_normalizes_dtype_endianness():
-    little = ValueSchema.scalar(np.dtype("<i2"))
-    big = ValueSchema.scalar(np.dtype(">i2"))
+    base = dataset_schema()
+    little = replace(base, value_schema=replace(base.value_schema, dtype=np.dtype("<i2")))
+    big = replace(base, value_schema=replace(base.value_schema, dtype=np.dtype(">i2")))
     assert little.fingerprint == big.fingerprint
-
-
-def test_immutable_schema_fingerprints_are_computed_once(monkeypatch):
-    schema = dataset_schema()
-    dataset_fingerprint = schema.fingerprint
-    value_fingerprint = schema.value_schema.fingerprint
-    import zlc_data.codec as codec
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("immutable schema fingerprint was recomputed")
-
-    monkeypatch.setattr(codec, "dataset_schema_fingerprint", forbidden)
-    monkeypatch.setattr(codec, "value_schema_fingerprint", forbidden)
-    assert schema.fingerprint == dataset_fingerprint
-    assert schema.value_schema.fingerprint == value_fingerprint
 
 
 def test_value_schema_rejects_non_numeric_payload_dtypes():
@@ -575,11 +536,12 @@ for forbidden in ('matplotlib', 'PyQt5'):
         )
 
 
-def test_a_schema_is_not_named_until_someone_asks() -> None:
+def test_a_schema_is_named_once_and_only_when_asked(monkeypatch) -> None:
     """A name costs 23 us and most schemas are never named.
 
     Derived operations build intermediate schemas, and most are compared as
-    objects without ever asking for a persisted fingerprint.
+    objects without ever asking for a persisted fingerprint.  An immutable
+    schema asked twice is named once.
     """
 
     import zlc_data.codec as codec
@@ -591,13 +553,10 @@ def test_a_schema_is_not_named_until_someone_asks() -> None:
         calls.append(schema)
         return real(schema)
 
-    codec.dataset_schema_fingerprint = counted
-    try:
-        schema = dataset_schema()
-        assert calls == [], "a schema was named before anyone asked"
-        first = schema.fingerprint
-        assert len(calls) == 1
-        assert schema.fingerprint == first
-        assert len(calls) == 1, "the name was computed twice"
-    finally:
-        codec.dataset_schema_fingerprint = real
+    monkeypatch.setattr(codec, "dataset_schema_fingerprint", counted)
+    schema = dataset_schema()
+    assert calls == [], "a schema was named before anyone asked"
+    first = schema.fingerprint
+    assert len(calls) == 1
+    assert schema.fingerprint == first
+    assert len(calls) == 1, "the name was computed twice"

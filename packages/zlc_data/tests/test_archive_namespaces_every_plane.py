@@ -78,7 +78,11 @@ def _round_trip(arrays):
 
 
 def test_a_saved_figure_opens_again_when_its_dataset_states_an_error() -> None:
-    """The writer produced files the reader refused; it no longer can."""
+    """The writer produced files the reader refused; it no longer can.
+
+    And what opens is the dataset that was saved, its error included: an
+    archived run that loses its uncertainty is an archived lie.
+    """
 
     source = _snapshot("data", 1.0)
     source = OwnedSnapshot(source.ref, source.block.replacing(
@@ -90,8 +94,8 @@ def test_a_saved_figure_opens_again_when_its_dataset_states_an_error() -> None:
     for snapshot in (source, OwnedSnapshot(source.ref, segmented)):
         _info, members, restored = _round_trip({"data": snapshot})
         assert "data.validity" in members and "data.sigma" in members
-        np.testing.assert_array_equal(restored["data"].block.values, source.block.values)
-        np.testing.assert_array_equal(restored["data"].expanded_validity(), source.expanded_validity())
+        assert restored["data"].block.sigma is not None
+        assert restored["data"].exactly_equals(source)
 
 
 def test_two_datasets_that_both_state_errors_keep_their_own() -> None:
@@ -100,6 +104,12 @@ def test_two_datasets_that_both_state_errors_keep_their_own() -> None:
     Written under one bare name, the second dataset's sigma silently
     replaced the first -- and the collision check, which exists for
     exactly this, never saw the name because nothing claimed it.
+
+    The rule the reader enforces is stated as the rule and not as a list:
+    a fixed pair of accepted names has to be edited for every plane a
+    block grows, and the edit that was missed is what produced files the
+    reader rejected.  Every member lives under its own dataset's name, for
+    the plane after next too, without anyone editing anything.
     """
 
     _info, members, _datasets = _round_trip(
@@ -107,24 +117,13 @@ def test_two_datasets_that_both_state_errors_keep_their_own() -> None:
     )
     assert "first.sigma" in members and "second.sigma" in members
     assert not np.array_equal(members["first.sigma"], members["second.sigma"])
+    for member in members:
+        assert member.split(".", 1)[0] in ("first", "second"), member
 
 
 def test_a_dataset_that_states_no_error_writes_no_member_for_one() -> None:
-    _info, members, _datasets = _round_trip({"data": _snapshot("data", 1.0, sigma=False)})
+    """Absent must not come back as zero, which would claim certainty."""
+
+    _info, members, datasets = _round_trip({"data": _snapshot("data", 1.0, sigma=False)})
     assert not [name for name in members if name.endswith(".sigma")]
-
-
-def test_every_member_a_dataset_writes_lives_under_its_own_name() -> None:
-    """The rule the reader enforces, stated as the rule and not as a list.
-
-    A fixed pair of accepted names has to be edited for every plane a
-    block grows, and the edit that was missed is what produced files the
-    reader rejected.  This is the property that must hold for the plane
-    after next, without anyone editing anything.
-    """
-
-    _info, members, _datasets = _round_trip(
-        {"alpha": _snapshot("alpha", 1.0), "beta": _snapshot("beta", 2.0)}
-    )
-    for member in members:
-        assert member.split(".", 1)[0] in ("alpha", "beta"), member
+    assert datasets["data"].block.sigma is None

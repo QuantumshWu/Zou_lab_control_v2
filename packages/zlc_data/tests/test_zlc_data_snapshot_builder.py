@@ -11,18 +11,23 @@ from zlc_data import (
     BlockId,
     DataBlock,
     DatasetRevision,
+    DatasetRevisionRef,
     DatasetSchema,
     DomainSpec,
+    IndexedWindow,
     OwnedSnapshot,
+    PRIMARY_INDEX,
     REPEAT,
+    SCALAR_DOMAIN,
     SPATIAL_X,
     StreamGenerationId,
     ValidityContract,
     ValueSchema,
     compact_dataset_validity,
-    expand_snapshot_validity,
     owned_snapshot_from_arrays,
 )
+from zlc_data.selection import IndexRangeSelection, Selection
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, restrict_snapshot
 
 
 def _schema(*, component_validity: bool) -> DatasetSchema:
@@ -94,8 +99,8 @@ def test_direct_constructor_matches_explicit_runtime_construction():
     assert not direct.exactly_equals(changed)
     assert not direct.exactly_equals(object())
     np.testing.assert_array_equal(
-        expand_snapshot_validity(direct),
-        expand_snapshot_validity(runtime),
+        direct.expanded_validity(),
+        runtime.expanded_validity(),
     )
     assert isinstance(direct.block.validity, type(runtime.block.validity))
 
@@ -194,11 +199,6 @@ def test_direct_constructor_rejects_numeric_truthiness_validity(validity):
         )
 
 
-def test_snapshot_validity_expander_rejects_other_objects():
-    with pytest.raises(TypeError, match="OwnedSnapshot"):
-        expand_snapshot_validity(object())  # type: ignore[arg-type]
-
-
 def test_the_builder_stamps_where_a_window_sits_and_a_restriction_keeps_it() -> None:
     """A block's window provenance travels with it, through a restriction too.
 
@@ -208,29 +208,6 @@ def test_the_builder_stamps_where_a_window_sits_and_a_restriction_keeps_it() -> 
     Restricting the block to some of its rows keeps the shots' numbers, so
     the derived block keeps the stamp.
     """
-
-    import numpy as np
-
-    from zlc_data import (
-        PRIMARY_INDEX,
-        REPEAT,
-        AxisId,
-        AxisSpec,
-        BlockId,
-        DataBlock,
-        DatasetRevisionRef,
-        DatasetSchema,
-        DomainSpec,
-        IndexedWindow,
-        SCALAR_DOMAIN,
-        ValueSchema,
-        owned_snapshot_from_arrays,
-    )
-    from zlc_data.selection import IndexRangeSelection, Selection
-    from zlc_data.snapshot_projection import (
-        PRIMARY_INDEX_AXIS_ID,
-        restrict_snapshot,
-    )
 
     repeat = AxisSpec(AxisId("cam.repeat"), "repeat", REPEAT, 1, (0,))
     source_index = AxisSpec(

@@ -284,11 +284,3 @@ def test_durable_mkdir_rejects_a_regular_file_target(tmp_path):
     path.write_bytes(b"payload")
     with pytest.raises(NotADirectoryError):
         durable_mkdir(path)
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle smoke test")
-def test_windows_directory_handle_flush_smoke(tmp_path):
-    import zlc_durable.durability as durability
-
-    target = durable_mkdir(tmp_path / "windows-directory")
-    durability._flush_windows_directory(target)

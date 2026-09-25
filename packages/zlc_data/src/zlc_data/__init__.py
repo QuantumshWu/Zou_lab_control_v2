@@ -1,5 +1,8 @@
 """Stable role-axis contracts for named multidimensional data."""
 
+# Whether an array already rests on immutable bytes: a producer that owns
+# its frame that way hands it on without a second copy.
+from ._arrays import is_intrinsically_immutable_array
 from .axis import (
     COMPONENT,
     PRIMARY_INDEX,
@@ -66,7 +69,6 @@ from .value import (
     StreamGenerationId,
     compact_dataset_validity,
     expand_dataset_validity,
-    expand_snapshot_validity,
     owned_snapshot_from_arrays,
     repeat_coordinate_counts,
 )
@@ -95,6 +97,7 @@ __all__ = [
     "exact_mapping",
     "finite_real",
     "integer",
+    "is_intrinsically_immutable_array",
     "nonnegative_integer",
     "positive_integer",
     "AxisId",
@@ -138,7 +141,6 @@ __all__ = [
     "NPZFormatError",
     "compact_dataset_validity",
     "expand_dataset_validity",
-    "expand_snapshot_validity",
     "materialize_derived_dataset",
     "owned_snapshot_from_arrays",
     "repeat_coordinate_counts",

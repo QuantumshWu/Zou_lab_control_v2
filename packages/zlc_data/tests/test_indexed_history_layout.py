@@ -134,7 +134,6 @@ def test_a_schema_without_a_shot_index_has_no_layout() -> None:
         VALUE,
     )
     assert indexed_history_layout(plain) is None
-    assert indexed_history_layout(plain) is None
 
 
 @pytest.mark.parametrize(

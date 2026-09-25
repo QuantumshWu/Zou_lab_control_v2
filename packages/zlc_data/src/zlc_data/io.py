@@ -120,10 +120,14 @@ def snapshot_manifest(
     if len({values_key, validity_key, sigma_key}) != 3:
         raise ValueError("values, validity and sigma need distinct array keys")
     arrays[values_key] = snapshot.block.values
+    # The schema travels whole beside the ref, so its digest is derived on
+    # reading rather than repeated here.
+    ref = dataset_revision_ref_to_tree(snapshot.ref)
+    del ref["schema_fingerprint"]
     manifest = {
         "format": _FORMAT,
         "schema": dataset_schema_to_tree(snapshot.block.schema),
-        "ref": dataset_revision_ref_to_tree(snapshot.ref),
+        "ref": ref,
         "values_key": values_key,
         "validity": _manifest_validity(
             snapshot.block.validity, arrays, validity_key
@@ -153,13 +157,9 @@ def manifest_array_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
 def snapshot_from_manifest(
     manifest: Mapping[str, Any],
     arrays: Mapping[str, Any],
-    *,
-    embedded: bool = False,
 ) -> OwnedSnapshot:
     """Rebuild one snapshot from its manifest and the arrays it names."""
 
-    if type(embedded) is not bool:
-        raise TypeError("embedded must be bool")
     if not isinstance(manifest, Mapping):
         raise NPZFormatError("manifest root must be an object")
     expected = {"format", "schema", "ref", "values_key", "validity"}
@@ -173,15 +173,9 @@ def snapshot_from_manifest(
     if not isinstance(manifest["ref"], Mapping):
         raise NPZFormatError("manifest.ref must be an object")
     ref_tree = dict(manifest["ref"])
-    has_fingerprint = "schema_fingerprint" in ref_tree
-    if embedded:
-        if has_fingerprint:
-            raise NPZFormatError(
-                "embedded manifest ref must not repeat schema_fingerprint"
-            )
-        ref_tree["schema_fingerprint"] = schema.fingerprint
-    elif not has_fingerprint:
-        raise NPZFormatError("manifest.ref is missing schema_fingerprint")
+    if "schema_fingerprint" in ref_tree:
+        raise NPZFormatError("manifest ref must not repeat schema_fingerprint")
+    ref_tree["schema_fingerprint"] = schema.fingerprint
     ref = dataset_revision_ref_from_tree(ref_tree)
     values = _array(arrays, manifest["values_key"], referenced, "manifest.values_key")
     validity = _validity_from_manifest(manifest["validity"], arrays, referenced)

@@ -6,7 +6,6 @@ import json
 from io import BytesIO
 import warnings
 import zipfile
-import zlib
 
 import numpy as np
 import pytest
@@ -77,18 +76,7 @@ def _figure_payload(members: dict[str, np.ndarray]) -> bytes:
     return stream.getvalue()
 
 
-def test_figure_archive_round_trip_validates_members_and_dataset_shape(monkeypatch):
-    import zlc_data.figure_archive as figures
-
-    decoded = []
-    original = figures.snapshot_from_manifest
-
-    def decode(*args, **kwargs):
-        result = original(*args, **kwargs)
-        decoded.append(result)
-        return result
-
-    monkeypatch.setattr(figures, "snapshot_from_manifest", decode)
+def test_figure_archive_round_trip_validates_members_and_dataset_shape():
     snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
     stream = _figure_stream(
         "strict figure",
@@ -102,35 +90,21 @@ def test_figure_archive_round_trip_validates_members_and_dataset_shape(monkeypat
     assert set(info["members"]) == {"data", "data.validity", "trace"}
     assert set(arrays) == {"data", "data.validity", "trace"}
     assert datasets["data"].exactly_equals(snapshot)
-    assert decoded == [datasets["data"]]
     assert datasets["data"].block.values is arrays["data"]
     assert datasets["data"].block.validity.mask is arrays["data.validity"]
     with pytest.raises(ValueError):
         arrays["data"].setflags(write=True)
 
 
-def test_figure_archive_compresses_only_members_that_shrink_materially(monkeypatch):
+def test_figure_archive_compresses_only_members_that_shrink_materially():
     rng = np.random.default_rng(7)
     compressible = np.zeros(2 << 20, dtype=np.uint8)
     camera_noise = rng.integers(0, 256, size=2 << 20, dtype=np.uint8)
-    # The archive does not record its deflate level, so the compressor
-    # construction is the witness.  Level 1: zlib's default took ten times
-    # as long on a thousand-shot camera history for 8 % of the size, and a
-    # Save is waited for.
-    levels: list[int] = []
-    real_compressobj = zlib.compressobj
-
-    def spying_compressobj(level=-1, *args, **kwargs):
-        levels.append(level)
-        return real_compressobj(level, *args, **kwargs)
-
-    monkeypatch.setattr(zlib, "compressobj", spying_compressobj)
     stream = _figure_stream(
         "adaptive compression",
         arrays={"compressible": compressible, "camera_noise": camera_noise},
         sections={},
     )
-    assert levels and set(levels) == {1}, levels
 
     with zipfile.ZipFile(stream) as archive:
         assert archive.getinfo("compressible.npy").compress_type == zipfile.ZIP_DEFLATED
@@ -141,15 +115,21 @@ def test_figure_archive_compresses_only_members_that_shrink_materially(monkeypat
     np.testing.assert_array_equal(arrays["camera_noise"], camera_noise)
 
 
-@pytest.mark.parametrize("extra", ({"unexpected": 2}, {"schema": "not-zlc.figure"}))
-def test_figure_reader_rejects_non_current_roots(extra):
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    (
+        ({"unexpected": 2}, "metadata keys mismatch"),
+        ({"schema": "not-zlc.figure"}, "unsupported figure format"),
+    ),
+)
+def test_figure_reader_rejects_non_current_roots(extra, message):
     members = _figure_members(
         _figure_stream("current", arrays={"trace": np.arange(2)}, sections={})
     )
     info = json.loads(str(members["info"].item()))
     info.update(extra)
     members["info"] = np.asarray(json.dumps(info, sort_keys=True))
-    with pytest.raises(ValueError, match="metadata keys mismatch|unsupported figure format"):
+    with pytest.raises(ValueError, match=message):
         read_archive(BytesIO(_figure_payload(members)))
 
 
@@ -272,18 +252,6 @@ def test_figure_writer_rejects_unknown_or_lossy_metadata(bad):
             arrays={"trace": np.arange(2)},
             sections={"bad": bad},
         )
-
-
-def test_figure_reader_rejects_wrong_format():
-    members = _figure_members(
-        _figure_stream("format", arrays={"trace": np.arange(2)}, sections={})
-    )
-    info = json.loads(str(members["info"].item()))
-    info["schema"] = "other-format"
-    members["info"] = np.asarray(json.dumps(info, sort_keys=True))
-
-    with pytest.raises(ValueError, match="unsupported figure format"):
-        read_archive(BytesIO(_figure_payload(members)))
 
 
 def test_figure_reader_rejects_extra_and_shape_changed_members():

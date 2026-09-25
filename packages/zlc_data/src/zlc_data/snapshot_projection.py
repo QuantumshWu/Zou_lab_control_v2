@@ -125,10 +125,6 @@ class IndexedHistoryLayout:
     def row_count(self) -> int:
         return self.point_domain.size
 
-    @property
-    def row_codes(self) -> np.ndarray:
-        return self.codes()
-
     def codes(self, rows: np.ndarray | None = None) -> np.ndarray:
         """Each requested point row's shot position, oldest shot first."""
 
@@ -526,11 +522,24 @@ def _subset_mapped_domain(
     if _keeps_everything(indices, domain.size):
         return domain
     axes: list[AxisSpec] = []
-    axis_codes: list[np.ndarray] = []
+    axis_codes: list[np.ndarray | range] = []
+    axis_repeats: list[tuple[int, int]] = []
+    contiguous = isinstance(indices, range) and indices.step == 1
     selected_rows = indices if isinstance(indices, range) else np.asarray(indices, dtype=np.int64)
     for axis in domain.axes:
-        selected = domain.codes(axis.axis_id, selected_rows)
-        used, inverse = np.unique(selected, return_inverse=True)
+        # A contiguous cut of a declared regular mapping stays regular: a run
+        # of whole base entries (a window of shots) or whole repetitions of a
+        # tiled base (the events of those shots).  Expanding it to one code
+        # per row made a history window cost a sort and a digest of every row.
+        base, inner, outer = domain.code_mapping(axis.axis_id)
+        period = len(base) * inner
+        if contiguous and outer == 1 and indices.start % inner == 0 and indices.stop % inner == 0:
+            kept, tile = base[indices.start // inner:indices.stop // inner], 1
+        elif contiguous and indices.start % period == 0 and indices.stop % period == 0:
+            kept, tile = base, len(indices) // period
+        else:
+            kept, inner, tile = domain.codes(axis.axis_id, selected_rows), 1, 1
+        used, inverse = np.unique(np.asarray(kept), return_inverse=True)
         if used.size == axis.size:
             axes.append(axis)
         else:
@@ -538,8 +547,10 @@ def _subset_mapped_domain(
                             if used.size and int(used[-1]) - int(used[0]) + 1 == used.size
                             else tuple(used.tolist()))
             axes.append(_subset_axis(axis, axis_indices))
-        axis_codes.append(inverse)
-    return DomainSpec((len(indices),), tuple(axes), tuple(axis_codes))
+        axis_codes.append(range(inverse.size) if np.array_equal(inverse, np.arange(inverse.size))
+                          else inverse)
+        axis_repeats.append((inner, tile))
+    return DomainSpec((len(indices),), tuple(axes), tuple(axis_codes), tuple(axis_repeats))
 
 
 def _keeps_everything(indices: range | tuple[int, ...], size: int) -> bool:

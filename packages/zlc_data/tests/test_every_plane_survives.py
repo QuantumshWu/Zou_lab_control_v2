@@ -8,13 +8,12 @@ before the sigma plane existed and each listed the fields it carried, so
 each dropped it silently the day it arrived.
 
 Listing fields is the defect these pin against.  ``replacing`` copies what
-it was not asked to change, the cutter cuts every plane by the same
-indices, and the format writes the key only when there is one to write.
+it was not asked to change and the cutter cuts every plane by the same
+indices; the file format's door is pinned beside the archive namespace
+(``test_archive_namespaces_every_plane``).
 """
 
 from __future__ import annotations
-
-import io
 
 import numpy as np
 import pytest
@@ -35,7 +34,6 @@ from zlc_data import (
     SCALAR_DOMAIN,
     ValueSchema,
 )
-from zlc_data.figure_archive import read_archive, write_figure_archive
 from zlc_data.selection import IndexRangeSelection, Selection
 from zlc_data.snapshot_projection import restrict_snapshot
 
@@ -129,30 +127,6 @@ def test_a_cut_of_something_that_states_nothing_states_nothing() -> None:
         reference_for=lambda schema: _derived_ref(schema),
     )
     assert cut.block.sigma is None
-
-
-def _round_trip(snapshot: OwnedSnapshot) -> OwnedSnapshot:
-    """Out through the writer the product saves with, and back in."""
-
-    stream = io.BytesIO()
-    write_figure_archive(stream, "planes.png", arrays={"data": snapshot}, sections={})
-    stream.seek(0)
-    return read_archive(stream)[2]["data"]
-
-
-def test_a_saved_dataset_comes_back_with_its_error() -> None:
-    """An archived run that loses its uncertainty is an archived lie."""
-
-    loaded = _round_trip(_snapshot())
-    assert loaded.block.sigma is not None
-    np.testing.assert_array_equal(loaded.block.sigma, SIGMA)
-    assert loaded.exactly_equals(_snapshot())
-
-
-def test_a_saved_dataset_that_stated_nothing_still_states_nothing() -> None:
-    """Absent must not come back as zero, which would claim certainty."""
-
-    assert _round_trip(_snapshot(with_sigma=False)).block.sigma is None
 
 
 def test_two_blocks_that_differ_only_in_their_error_are_different() -> None:

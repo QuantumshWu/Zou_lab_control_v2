@@ -585,14 +585,6 @@ def owned_snapshot_from_arrays(
     return OwnedSnapshot(block.ref(resolved_generation), block)
 
 
-def expand_snapshot_validity(snapshot: OwnedSnapshot) -> np.ndarray:
-    """Expand an :class:`OwnedSnapshot` validity to its physical shape."""
-
-    if not isinstance(snapshot, OwnedSnapshot):
-        raise TypeError("snapshot must be OwnedSnapshot")
-    return snapshot.expanded_validity()
-
-
 def expand_dataset_validity(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     schema: DatasetSchema,
@@ -771,6 +763,5 @@ __all__ = [
     "compact_dataset_validity",
     "dataset_validity_storage",
     "expand_dataset_validity",
-    "expand_snapshot_validity",
     "owned_snapshot_from_arrays",
 ]

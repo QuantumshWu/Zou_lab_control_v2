@@ -42,10 +42,6 @@ def test_a_coordinate_selection_resolves_on_an_implicit_axis(
     avoid -- 2048 validated elements per frame to say what "none" already says.
     """
 
-    from zlc_data.selection import CoordinateRangeSelection, resolve_selection_indices
-    from zlc_data.axis import AxisId, AxisSpec
-    from zlc_data import SPATIAL_X
-
     axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X,
                     8 if coordinates is None else len(coordinates), coordinates)
 
@@ -60,10 +56,6 @@ def test_a_coordinate_selection_resolves_on_an_implicit_axis(
 def test_an_implicit_axis_selection_respects_its_index_origin() -> None:
     """A cropped implicit axis records where it starts, and a box must land."""
 
-    from zlc_data.selection import CoordinateRangeSelection, resolve_selection_indices
-    from zlc_data.axis import AxisId, AxisSpec
-    from zlc_data import SPATIAL_X
-
     axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 4, index_origin=100)
 
     indices, _dropped = resolve_selection_indices(
@@ -74,10 +66,6 @@ def test_an_implicit_axis_selection_respects_its_index_origin() -> None:
 
 
 def test_a_coordinate_selection_off_an_implicit_axis_is_refused() -> None:
-    from zlc_data.selection import CoordinateRangeSelection, resolve_selection_indices
-    from zlc_data.axis import AxisId, AxisSpec
-    from zlc_data import SPATIAL_X
-
     axis = AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 4)
 
     with pytest.raises(ValueError, match="empty"):
@@ -180,15 +168,17 @@ def test_a_box_whose_coordinates_share_no_row_is_an_empty_selection() -> None:
         ValueSchema.scalar(np.dtype("<f8")),
     )
 
-    taken = Selection.rectangle(
-        x.axis_id, y.axis_id, -0.1, 0.1, -0.1, 0.1, coordinate_frame=None
-    )
+    taken = Selection((
+        CoordinateRangeSelection(x.axis_id, -0.1, 0.1, None),
+        CoordinateRangeSelection(y.axis_id, -0.1, 0.1, None),
+    ))
     _repeat, points, _data = selection_indices(schema, taken)
     assert points == range(0, 1)
 
-    untaken = Selection.rectangle(
-        x.axis_id, y.axis_id, -0.1, 0.1, 0.9, 1.1, coordinate_frame=None
-    )
+    untaken = Selection((
+        CoordinateRangeSelection(x.axis_id, -0.1, 0.1, None),
+        CoordinateRangeSelection(y.axis_id, 0.9, 1.1, None),
+    ))
     with pytest.raises(EmptySelection):
         selection_indices(schema, untaken)
 

@@ -197,7 +197,23 @@ def _atomic_write_unique_path(
             except FileExistsError:
                 destination = next(choices)
                 continue
-            temporary.unlink()
+            except OSError:
+                # FAT32, exFAT and some shares have no hard links: claim the
+                # name exclusively, then move the complete file onto it.
+                try:
+                    os.close(os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                except FileExistsError:
+                    destination = next(choices)
+                    continue
+                try:
+                    os.replace(temporary, destination)
+                except BaseException:
+                    # The claim is ours and empty: a failed move must not
+                    # leave it published under the final name.
+                    destination.unlink(missing_ok=True)
+                    raise
+            else:
+                temporary.unlink()
             _flush_published(parent, destination)
             return destination
     finally:

@@ -11,7 +11,6 @@ from zlc_data.axis import (
     AxisId,
     AxisSpec,
     CoordinateFrameId,
-    PRIMARY_INDEX,
     REPEAT,
     SITE,
     SPATIAL_X,
@@ -19,8 +18,6 @@ from zlc_data.axis import (
 from zlc_data.schema import DatasetSchema, DomainSpec, SCALAR_DOMAIN, ValueSchema
 from zlc_data.selection import IndexRangeSelection, Selection, take_indices
 from zlc_data.snapshot_projection import (
-    PRIMARY_INDEX_AXIS_ID,
-    indexed_schemas_compatible,
     materialize_derived_dataset,
     restrict_snapshot,
     restricted_schema,
@@ -255,47 +252,6 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
         selected_schema = restricted_schema(exact_schema, range(3), range(3), {x_id: indices})
         selected_axis = selected_schema.cell_domain.axis(x_id)
         assert tuple(selected_axis.coordinate_at(i) for i in range(len(indices))) == tuple(exact_values[i] for i in indices)
-
-
-def _indexed_schema(offsets: tuple[int, ...]) -> DatasetSchema:
-    repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,))
-    primary = AxisSpec(
-        PRIMARY_INDEX_AXIS_ID,
-        "source index",
-        PRIMARY_INDEX,
-        len(offsets),
-        offsets,
-    )
-    return DatasetSchema(
-        DomainSpec((1,), (repeat,), ((0,),)),
-        DomainSpec(
-            (len(offsets),),
-            (primary,),
-            (tuple(range(len(offsets))),),
-        ),
-        SCALAR_DOMAIN,
-        ValueSchema.scalar(np.dtype("<f4"), "count"),
-    )
-
-
-def test_relative_indexed_windows_share_one_event_layout() -> None:
-    assert indexed_schemas_compatible(
-        _indexed_schema((-1, 0)),
-        _indexed_schema((-2, -1, 0)),
-    )
-    # A history restricted to its past shots keeps their coordinates and is
-    # still the same history.
-    assert indexed_schemas_compatible(
-        _indexed_schema((-2, -1)),
-        _indexed_schema((-2, -1, 0)),
-    )
-    # Offsets above 0 are absolute ordinals that never became relative
-    # coordinates: no history at all, and the one layout reader says so.
-    with pytest.raises(ValueError, match="latest offset 0"):
-        indexed_schemas_compatible(
-            _indexed_schema((4, 5)),
-            _indexed_schema((5, 6)),
-        )
 
 
 def test_take_indices_rejects_stepped_range_instead_of_silently_ignoring_step():

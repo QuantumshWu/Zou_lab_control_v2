@@ -8,7 +8,7 @@ from math import prod
 from typing import Any
 
 import numpy as np
-from .validation import canonical_text, integer, positive_integer
+from .validation import canonical_text, positive_integer
 
 from ._arrays import canonical_dtype, immutable_array
 from .axis import (
@@ -239,15 +239,6 @@ class DomainSpec:
         self._codes[index] = cached
         return cached
 
-    def code_at(self, axis_id: AxisId, row: int) -> int:
-        """Read one physical row's code directly from its declared mapping."""
-
-        base, inner, outer = self.code_mapping(axis_id)
-        row = integer(row, "domain row", minimum=0)
-        if row >= len(base) * inner * outer:
-            raise IndexError("domain row is outside its physical dimension")
-        return int(base[(row // inner) % len(base)])
-
     def coordinate_axis(self, axis_id: AxisId) -> AxisSpec:
         """The physical axis whose positions this coordinate names."""
         axis = self.axis(axis_id)
@@ -348,9 +339,6 @@ class ValueSchema:
     dtype: np.dtype
     value_unit: str | None = None
     name: str | None = None
-    #: Cached on first request.  Computed eagerly it cost 23 us per schema,
-    #: paid by every intermediate schema construction that never names it.
-    _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         if not isinstance(self.validity_contract, ValidityContract):
@@ -360,7 +348,6 @@ class ValueSchema:
             canonical_text(self.value_unit, "value_unit")
         if self.name is not None:
             canonical_text(self.name, "value name")
-        object.__setattr__(self, "_fingerprint", None)
 
     @classmethod
     def scalar(
@@ -376,16 +363,6 @@ class ValueSchema:
             value_unit,
             name,
         )
-
-    @property
-    def fingerprint(self) -> str:
-        """This schema's canonical name, computed once, on request."""
-
-        if self._fingerprint is None:
-            from .codec import value_schema_fingerprint
-
-            object.__setattr__(self, "_fingerprint", value_schema_fingerprint(self))
-        return self._fingerprint
 
 
 @dataclass(frozen=True)
