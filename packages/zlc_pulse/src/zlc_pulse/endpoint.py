@@ -10,11 +10,18 @@ The server implementation is not the place to keep shared connection defaults:
 importing the package merely to read a port must not load the socket server.
 The product manifest imports that server only when ``zlc pulse_server`` is
 selected.
+
+The socket chores the pulse server and the SLM server share -- telling this
+machine's clients from a peer's, listing the addresses a peer can reach, and
+dropping a connection -- live here too, for the same reason: the SLM server
+needs them without loading the pulse server.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import ipaddress
+import socket
 
 
 __all__ = [
@@ -23,7 +30,10 @@ __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "DEFAULT_REQUEST_TIMEOUT",
+    "drop_connection",
+    "drop_peer_connections",
     "is_loopback_host",
+    "local_ipv4_addresses",
 ]
 
 #: The port a pulse server listens on and a client dials.
@@ -68,3 +78,76 @@ def is_loopback_host(host: str) -> bool:
         return False
     mapped = getattr(address, "ipv4_mapped", None)
     return bool((mapped or address).is_loopback)
+
+
+def local_ipv4_addresses() -> tuple[str, ...]:
+    """Discover non-loopback IPv4 addresses without requiring a network request."""
+
+    addresses: list[str] = []
+    packed_addresses: set[bytes] = set()
+
+    def add(value: object) -> None:
+        try:
+            address = str(value).strip()
+            packed = socket.inet_aton(address)
+        except (OSError, ValueError):
+            return
+        if address == "0.0.0.0" or address.startswith("127.") or packed in packed_addresses:
+            return
+        packed_addresses.add(packed)
+        addresses.append(address)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            add(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM):
+            add(info[4][0])
+    except OSError:
+        pass
+
+    try:
+        for address in socket.gethostbyname_ex(socket.gethostname())[2]:
+            add(address)
+    except OSError:
+        pass
+
+    return tuple(addresses)
+
+
+def drop_connection(connection: socket.socket) -> None:
+    """End a connection nobody wants any more, from this side.
+
+    Windows can leave a blocking recv waiting after shutdown alone. Close
+    the revoked socket here instead of waiting for its peer to speak again.
+    """
+
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    finally:
+        connection.close()
+
+
+def drop_peer_connections(connections: Iterable[socket.socket]) -> int:
+    """Drop every connection from another machine; return how many went.
+
+    What a server does when it stops being on offer: this machine's own
+    clients stay connected.
+    """
+
+    dropped = 0
+    for connection in connections:
+        try:
+            peer = connection.getpeername()[0]
+        except OSError:
+            continue
+        if not is_loopback_host(peer):
+            drop_connection(connection)
+            dropped += 1
+    return dropped

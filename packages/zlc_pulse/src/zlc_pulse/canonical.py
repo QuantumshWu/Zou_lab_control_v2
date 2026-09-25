@@ -10,6 +10,8 @@ import math
 from enum import Enum
 from typing import Any
 
+from zlc_data.validation import DIGEST_BITS
+
 try:
     import numpy as np
 except ImportError:  # pragma: no cover - numpy is a package dependency
@@ -69,13 +71,6 @@ def canonical_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-#: The same width zlc_data uses for a content name.  Stated again rather than
-#: imported: this package depends on numpy and pyserial and nothing else, so a
-#: board can be driven with no data layer present.  zlc_workbench, which sees
-#: both, checks that the two agree.
-DIGEST_BITS = 128
-
-
 def canonical_digest(value: Any) -> str:
     """One content name for a canonically encoded value.
 
@@ -89,4 +84,4 @@ def canonical_digest(value: Any) -> str:
     ).hexdigest()
 
 
-__all__ = ["DIGEST_BITS", "canonical_bytes", "canonical_digest"]
+__all__ = ["canonical_bytes", "canonical_digest"]

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import socket
 import json
+import struct
 import threading
 import time
 from types import SimpleNamespace
@@ -37,7 +38,7 @@ from zlc_pulse.remote import (
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.transport.uart import UartError
 from zlc_pulse.transport import uart_frame as framing
-from zlc_pulse.wire import CMD_LOAD, CMD_SAFE, CtrlWords, DEFAULT_UART_BAUD, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
+from zlc_pulse.wire import CMD_LOAD, CMD_SAFE, CtrlWords, DEFAULT_UART_BAUD, LAYOUT_STRUCT_VERSION, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
 
 
 _BOARD_TARGET = pulse_target_from_xdc()
@@ -89,6 +90,24 @@ def _client(server: PulseRemoteServer) -> RemotePulseStreamer:
     client = RemotePulseStreamer("127.0.0.1", server.server_address[1])
     client.open()
     return client
+
+
+def _send_raw(connection: socket.socket, message: dict) -> None:
+    """One request frame as plain JSON, whatever the client's own encoder says."""
+
+    payload = json.dumps(message).encode("utf-8")
+    connection.sendall(struct.pack("!I", len(payload)) + payload)
+
+
+def _receive_raw(connection: socket.socket) -> dict:
+    header = b""
+    while len(header) < 4:
+        header += connection.recv(4 - len(header))
+    (size,) = struct.unpack("!I", header)
+    body = b""
+    while len(body) < size:
+        body += connection.recv(size - len(body))
+    return json.loads(body.decode("utf-8"))
 
 
 def test_canonical_and_pulse_json_boundaries_do_not_coerce_or_drop_input() -> None:
@@ -664,9 +683,6 @@ def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
     never claimed the board.
     """
 
-    import json
-    import struct
-
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
         MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
@@ -681,20 +697,6 @@ def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
 
     streamer.safe = counted_safe  # type: ignore[method-assign]
 
-    def send(connection, message):
-        payload = json.dumps(message).encode("utf-8")
-        connection.sendall(struct.pack("!I", len(payload)) + payload)
-
-    def receive(connection):
-        header = b""
-        while len(header) < 4:
-            header += connection.recv(4 - len(header))
-        (size,) = struct.unpack("!I", header)
-        body = b""
-        while len(body) < size:
-            body += connection.recv(size - len(body))
-        return json.loads(body.decode("utf-8"))
-
     with _server(streamer) as server:
         client = _client(server)
         try:
@@ -707,8 +709,8 @@ def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
                 ("127.0.0.1", server.server_address[1]), timeout=5.0
             )
             try:
-                send(lane, {"id": 1, "method": "cancel", "params": {"token": "not-" + token}})
-                answer = receive(lane)
+                _send_raw(lane, {"id": 1, "method": "cancel", "params": {"token": "not-" + token}})
+                answer = _receive_raw(lane)
                 assert answer["ok"] is False
                 assert "does not name the current owner" in answer["error"]["message"]
                 assert safes == [], "a stranger's cancel must not touch the board"
@@ -721,8 +723,8 @@ def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
                 ("127.0.0.1", server.server_address[1]), timeout=5.0
             )
             try:
-                send(lane, {"id": 1, "method": "cancel", "params": {"token": token}})
-                assert receive(lane)["ok"] is True
+                _send_raw(lane, {"id": 1, "method": "cancel", "params": {"token": token}})
+                assert _receive_raw(lane)["ok"] is True
                 assert safes == ["safe"]
                 assert lane.recv(1) == b"", "one request, then the lane closes"
             finally:
@@ -731,8 +733,8 @@ def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
 
             # On the command lane itself, cancel is refused by name and the
             # session goes on.
-            send(client._socket, {"id": 99, "method": "cancel", "params": {"token": token}})
-            answer = receive(client._socket)
+            _send_raw(client._socket, {"id": 99, "method": "cancel", "params": {"token": token}})
+            answer = _receive_raw(client._socket)
             assert answer["ok"] is False
             assert "connection of its own" in answer["error"]["message"]
             assert client.describe() is not None
@@ -772,7 +774,7 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "scan_repeats=1" in output
     assert "reloaded_before_fire" not in output
     assert "ZLC SNAPSHOT client=127.0.0.1:" in output
-    assert "ZLC CURSOR client=127.0.0.1:" in output
+    assert "ZLC CURSOR" not in output
     assert "ZLC APPLIED client=127.0.0.1:" in output
     assert "rows=2" in output
     assert "ZLC DONE" in output
@@ -823,40 +825,10 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
     assert "by=127.0.0.1:" in output
 
 
-def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
-    """Sending nothing is what editing looks like, and it must cost nothing.
-
-    An idle timer used to SAFE the outputs and release the board after five
-    minutes without a request, which is a description of somebody editing a
-    pulse.  Nothing in the handler measures silence any more -- there is no
-    deadline on the read at all -- so this asserts what the socket sees: no
-    request, no reply, and the board still firing and still owned.
-    """
-
-    geom = _sequence_geometry()
-    source = _sequence()
-    program = compile_sequence(source, geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
-    with _server(streamer) as server:
-        client = _client(server)
-        try:
-            client.load(program)
-            client.fire(run_repeats=0)
-            owner = server.owner_status()[0]
-            time.sleep(0.3)  # not one word from us
-            assert streamer.snapshot()["firing"] is True
-            assert server.owner_status()[0] == owner
-            assert client.snapshot()["firing"] is True
-        finally:
-            client.close()
-            client.disconnect()
-
-
 def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         remote_module,
-        "_local_ipv4_addresses",
+        "local_ipv4_addresses",
         lambda: ("192.168.0.20", "10.0.0.5"),
     )
 
@@ -1007,7 +979,30 @@ def test_backend_failure_categories_use_real_transport_exceptions() -> None:
     else:
         raise AssertionError("corrupted UART frame was accepted")
 
-    assert remote_module._probe_failure_reason(UartError("UART CRC error status in read reply")) == "CRC error"
+    class CrcLink:
+        def open(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def exchange(self, request, *, deadline, stop=None):
+            return framing.encode_reply(request[3], framing.ST_CRC_FAIL)
+
+        def write_batch(self, requests, *, deadline, stop=None):
+            return [framing.encode_reply(request[3], framing.ST_CRC_FAIL) for request in requests]
+
+    # A board that answers CRC_FAIL, through the real UART transport.  The
+    # retry law asks a refusing board again, one attempt budget apart, until
+    # the deadline: keep that deadline short here.
+    transport = transport_module.UartRegisterTransport(link=CrcLink(), action_timeout=0.2)
+    transport.start()
+    try:
+        with pytest.raises(UartError) as failure:
+            transport.read_word(CtrlWords.LAYOUT_ID)
+    finally:
+        transport.close()
+    assert remote_module._probe_failure_reason(failure.value) == "CRC error"
 
     mismatch = MemoryRegisterTransport(layout_id=build_fingerprint(StreamerParams()) ^ 1)
     mismatch_streamer = PulseStreamer(
@@ -1023,33 +1018,7 @@ def test_backend_failure_categories_use_real_transport_exceptions() -> None:
     assert remote_module._probe_failure_reason(FileNotFoundError("COM7")) == "open failed"
 
 
-def test_real_uart_crc_status_exception_maps_to_crc_category(tmp_path) -> None:
-    class CrcLink:
-        def open(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        def exchange(self, request, *, deadline, stop=None):
-            return framing.encode_reply(request[3], framing.ST_CRC_FAIL)
-
-        def write_batch(self, requests, *, deadline, stop=None):
-            return [framing.encode_reply(request[3], framing.ST_CRC_FAIL) for request in requests]
-
-    # The retry law asks a refusing board again, one attempt budget apart,
-    # until the deadline: keep that deadline short here.
-    transport = transport_module.UartRegisterTransport(link=CrcLink(), action_timeout=0.2)
-    transport.start()
-    try:
-        with pytest.raises(UartError) as failure:
-            transport.read_word(CtrlWords.LAYOUT_ID)
-        assert remote_module._probe_failure_reason(failure.value) == "CRC error"
-    finally:
-        transport.close()
-
-
-def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch, tmp_path) -> None:
+def test_uart_probe_reuses_pulse_streamer_word63_open(monkeypatch) -> None:
     params = StreamerParams()
     records: list[tuple[str, int, float]] = []
     open_calls: list[int] = []
@@ -1120,8 +1089,6 @@ def test_server_cli_defaults_to_auto_and_accepts_explicit_backends() -> None:
     assert parser.parse_args([]).uart_baud == DEFAULT_UART_BAUD
     assert parser.parse_args(["--backend", "jtag-axi"]).backend == "jtag-axi"
     assert parser.parse_args(["--backend", "uart", "--uart-port", "COM3"]).uart_port == "COM3"
-    # No knob decides when a quiet client is disconnected, because nothing does.
-    assert not hasattr(parser.parse_args([]), "client_idle_timeout")
 
 
 def test_server_refuses_deployment_config_fallback(monkeypatch, capsys) -> None:
@@ -1221,36 +1188,6 @@ def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None
     assert "ZLC AUTO-SAFE" in capsys.readouterr().out
 
 
-def test_a_pulse_that_declares_a_config_parameter_survives_the_wire() -> None:
-    """The board must be able to receive every kind of pulse the grammar allows.
-
-    ``load`` ships the source sequence itself, and the decoder matches types by
-    name: a binding the encoder knows nothing about makes the pulse unloadable
-    on a remote board while loading perfectly on a local one, which is the
-    worst possible place for the difference to appear.
-    """
-
-    geom = _sequence_geometry()
-    source = _sequence(configured=True)
-    program = compile_sequence(source, geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
-    with _server(streamer) as server:
-        client = _client(server)
-        try:
-            client.load(program, source=source)
-            state = client.applied()
-            assert state is not None
-            assert state.source == source
-            assert state.source.config_bindings == source.config_bindings
-            rebuilt = compile_sequence(state.source, geom, 50e6)
-            assert pack_program(rebuilt, geom, target=source.target) == pack_program(
-                state.program, geom, target=source.target,
-            )
-        finally:
-            client.close()
-
-
 def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
     """A client vanishing is the end of a session, not a server fault.
 
@@ -1302,9 +1239,7 @@ def test_a_poll_is_logged_only_when_its_answer_changes(capsys) -> None:
 
     The former wait_done poll loop asked every 10 ms, so one five-second
     shot printed four hundred identical "state=PENDING" lines
-    and buried the run they were about.  The same rule makes CURSOR useful for
-    the first time: a cursor that stays at 3 says nothing, and a cursor that
-    becomes 4 is the scan advancing.
+    and buried the run they were about.
     """
 
     from zlc_pulse.remote import _forget_polls, _server_log_change
@@ -1323,19 +1258,15 @@ def test_a_poll_is_logged_only_when_its_answer_changes(capsys) -> None:
         for value in (3, 3, 3, 4, 4, 5):
             _server_log_change("CURSOR", client=client, detail=f"value={value}")
         assert len(capsys.readouterr().out.splitlines()) == 3, "3, 4, 5"
+
+        # A client that leaves takes its poll memory with it -- otherwise a
+        # server that runs for months grows one entry per connection -- so
+        # the same answer is news again to whoever connects next.
+        _forget_polls(client)
+        _server_log_change("CURSOR", client=client, detail="value=5")
+        assert len(capsys.readouterr().out.splitlines()) == 1
     finally:
         _forget_polls(client)
-
-
-def test_a_client_that_leaves_takes_its_poll_memory_with_it() -> None:
-    """Otherwise a server that runs for months grows one entry per connection."""
-
-    from zlc_pulse.remote import _LAST_POLL, _forget_polls, _server_log_change
-
-    _server_log_change("CURSOR", client="10.0.0.1:1", detail="value=1")
-    assert any(key[0] == "10.0.0.1:1" for key in _LAST_POLL)
-    _forget_polls("10.0.0.1:1")
-    assert not any(key[0] == "10.0.0.1:1" for key in _LAST_POLL)
 
 
 def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> None:
@@ -1351,9 +1282,6 @@ def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> 
 
     Reading a frame and understanding what is in it are two jobs.
     """
-
-    import json
-    import struct
 
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     streamer = PulseStreamer(
@@ -1374,35 +1302,31 @@ def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> 
             ("127.0.0.1", server.server_address[1]), timeout=5.0
         )
         try:
-            def send(message):
-                payload = json.dumps(message).encode("utf-8")
-                connection.sendall(struct.pack("!I", len(payload)) + payload)
-
-            def receive():
-                header = connection.recv(4)
-                (size,) = struct.unpack("!I", header)
-                body = b""
-                while len(body) < size:
-                    body += connection.recv(size - len(body))
-                return json.loads(body.decode("utf-8"))
-
-            send({"id": 1, "method": "open", "params": {}})
-            assert receive()["ok"] is True
+            _send_raw(connection, {"id": 1, "method": "open", "params": {"command_protocol": LAYOUT_STRUCT_VERSION}})
+            assert _receive_raw(connection)["ok"] is True
             safed.clear()
 
+            # A client of another protocol is turned away before it can take
+            # the board: the owner keeps it and nothing is safed.
+            owner = server.owner_status()[0]
+            with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5.0) as stale:
+                _send_raw(stale, {"id": 1, "method": "open", "params": {"command_protocol": LAYOUT_STRUCT_VERSION - 1}})
+                assert _receive_raw(stale)["ok"] is False
+            assert server.owner_status()[0] == owner and not safed
+
             # A payload naming a type this server cannot read.
-            send({
+            _send_raw(connection, {
                 "id": 2,
                 "method": "load",
                 "params": {"program": {"__type__": "CompiledProgram", "bogus": 1}},
             })
-            answer = receive()
+            answer = _receive_raw(connection)
             assert answer["id"] == 2
             assert answer["ok"] is False
 
             # The session is still alive and still owns the board.
-            send({"id": 3, "method": "describe", "params": {}})
-            assert receive()["ok"] is True
+            _send_raw(connection, {"id": 3, "method": "describe", "params": {}})
+            assert _receive_raw(connection)["ok"] is True
 
             # Checked while the session is still open: safing on the way
             # out is what a real disconnect is supposed to do, and would

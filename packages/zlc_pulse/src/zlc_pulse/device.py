@@ -13,7 +13,7 @@ import time
 
 from collections.abc import Mapping
 
-from .binding import apply_config_values, config_parameter_key
+from .binding import apply_config_values
 from .compile import CompiledProgram, compile_sequence
 from .model import FIELD_DURATION, MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
 from .schedule import bus_action_ticks, trigger_edge_ticks
@@ -91,8 +91,6 @@ class DoneReport:
         finished at all was indistinguishable from a clean one, and the data it
         did not take was published as though it had.
         """
-
-        from .wire import STATUS_ERROR, STATUS_UNDERFLOW
 
         reasons = []
         if self.observer_error:
@@ -248,26 +246,19 @@ class ConfigValueHolder:
         ``source`` is an informational label, never an implicit file binding.
         """
 
+        from .codec import _config_value_entry
+
         if not isinstance(entries, Mapping):
             raise TypeError("config values must be a mapping")
         held: dict[str, tuple[float, str]] = {}
         for name, entry in entries.items():
-            name = config_parameter_key(name)
-            if name in held:
-                raise ValueError(f"duplicate Config name {name!r}")
             try:
                 value, unit = entry
             except (TypeError, ValueError):
                 raise TypeError(
                     f"config value {name!r} must be (value, unit)"
                 ) from None
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"config value {name!r} must be numeric")
-            if not math.isfinite(float(value)):
-                raise ValueError(f"config value {name!r} must be finite")
-            if not isinstance(unit, str) or not unit.strip():
-                raise ValueError(f"config value {name!r} must name a unit")
-            held[name] = (float(value), unit)
+            held[name] = _config_value_entry(name, value, unit)
         with self._config_lock:
             self._config_values = held
             self._config_source = str(source or "")
@@ -405,7 +396,6 @@ class PulseStreamer(ConfigValueHolder):
         self._scan_repeats = 1
         self._scan_rows: tuple[tuple[int, ...], ...] = ()
         self._scan_next_chunk = 2
-        self._scan_ready = 0
         self._scan_armed = False
         self._scan_count = 0
         self._scan_last_cursor = 0
@@ -417,6 +407,13 @@ class PulseStreamer(ConfigValueHolder):
         self._resends_at_fire = 0
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
+        #: The threads whose Stop is waiting for the streamer: entered before
+        #: a Stop waits, left once its SAFE holds the lock.  A FIRE prepared
+        #: meanwhile under the lock (Config reread, recompile, reload) would
+        #: otherwise clear ``_stop`` and go out after the Stop that raced it.
+        #: Per thread, because a load's own SAFE runs under that lock too and
+        #: must not lower another thread's Stop.
+        self._stopping: set[int] = set()
         self._done = threading.Event()
         self._terminal_status = 0
         self._fire_started = 0.0
@@ -541,7 +538,6 @@ class PulseStreamer(ConfigValueHolder):
             self._program = prog
             self._loaded = True
             self._scan_next_chunk = 2
-            self._scan_ready = self._initial_ready(self._scan_count)
             self._scan_armed = False
             self._scan_last_cursor = 0
             self._scan_cursor_total = 0
@@ -582,6 +578,8 @@ class PulseStreamer(ConfigValueHolder):
             self._require_loaded()
             self._require_idle()
             self._stop.clear()
+            if self._stopping:
+                raise RuntimeError("a Stop arrived while this FIRE was being prepared; it was not sent")
             assert self._program is not None
             if not self._scan_rows and scan_repeats != 1:
                 raise ValueError("scan_repeats must be 1 when no scan table is loaded")
@@ -674,18 +672,24 @@ class PulseStreamer(ConfigValueHolder):
                 return self._cursor_value
         return self._read(CtrlWords.CURSOR) if self._opened else None
     def safe(self) -> SafeReadback:
-        self._stop_worker()
-        with self._lock:
-            self._require_open()
-            if self._safe_readback is None or not self._safe_readback.stable:
-                status, _cursor = self._command(CMD_SAFE)
-                readback = SafeReadback(status, self._command_id)
-                if status != 0:
-                    raise RuntimeError(f"SAFE did not complete (STATUS=0x{status:08X})")
-                self._safe_readback = readback
-            self._firing = False
-            self._terminal_status = self._safe_readback.status
-            return self._safe_readback
+        caller = threading.get_ident()
+        self._stopping.add(caller)
+        try:
+            self._stop_worker()
+            with self._lock:
+                self._stopping.discard(caller)
+                self._require_open()
+                if self._safe_readback is None or not self._safe_readback.stable:
+                    status, _cursor = self._command(CMD_SAFE)
+                    readback = SafeReadback(status, self._command_id)
+                    if status != 0:
+                        raise RuntimeError(f"SAFE did not complete (STATUS=0x{status:08X})")
+                    self._safe_readback = readback
+                self._firing = False
+                self._terminal_status = self._safe_readback.status
+                return self._safe_readback
+        finally:
+            self._stopping.discard(caller)
     def describe(self) -> BoardDescription:
         """The board this streamer drives, as its handshake proved it to be.
 
@@ -794,8 +798,18 @@ class PulseStreamer(ConfigValueHolder):
                     return
                 if self._scan_rows:
                     self._refill(cursor)
-                if self._stop.wait(self._observer_interval):
-                    return
+                # time.sleep, not Event.wait: on Windows a timed wait rounds
+                # up to the ~15 ms timer tick, so DONE was seen up to a tick
+                # late on every shot.  The transport's period (transport/
+                # base.py says why 5 ms) is slept in slices no longer than
+                # the default one, so a Stop joining this thread is not held
+                # behind JTAG's 50 ms either.
+                resume = time.monotonic() + self._observer_interval
+                while not self._stop.is_set():
+                    left = resume - time.monotonic()
+                    if left <= 0:
+                        break
+                    time.sleep(min(left, DEFAULT_OBSERVER_INTERVAL))
         except Exception as error:
             if not self._stop.is_set():
                 self._record_observer_failure(error)
@@ -978,7 +992,8 @@ class PulseStreamer(ConfigValueHolder):
                 scan_repeats=1,
                 bracket_bodies=kept_bodies,
             )
-            run_end = sum(program.frame_ticks(point) for point in execution_rows)
+            pulse_ticks = {point: program.frame_ticks(point) for point in set(execution_rows)}
+            run_end = sum(pulse_ticks[point] for point in execution_rows)
             for bus, delay in bus_delays.items():
                 events = list(actions[bus])
                 # Finite completion captures one final SAFE descriptor per bus.
@@ -1020,7 +1035,6 @@ class PulseStreamer(ConfigValueHolder):
 
         if self._scan_count == 0 or self._scan_armed:
             return ()
-        ready = self._initial_ready(self._scan_count)
         rows: list[tuple[int, int]] = []
         for chunk in (0, 1):
             if chunk * self.geom.bank_size < self._scan_count:
@@ -1030,9 +1044,8 @@ class PulseStreamer(ConfigValueHolder):
         rows.append((CtrlWords.BANK0_CHUNK, 0))
         if self.geom.bank_size < self._scan_count:
             rows.append((CtrlWords.BANK1_CHUNK, 1))
-        rows.append((CtrlWords.BANK_READY, ready))
+        rows.append((CtrlWords.BANK_READY, self._initial_ready(self._scan_count)))
         self._scan_next_chunk = 2
-        self._scan_ready = ready
         self._scan_last_cursor = 0
         self._scan_cursor_total = 0
         return tuple(rows)
@@ -1073,19 +1086,20 @@ class PulseStreamer(ConfigValueHolder):
             stream_chunk = self._scan_next_chunk
             table_chunk = stream_chunk % chunks_per_sweep
             bank = stream_chunk & 1
-            bit = 1 << bank
-            unarmed = self._scan_ready & ~bit
             words = pack_scan_rows(
                 self._scan_rows, self.geom, bank, table_chunk
             )
             chunk_reg = CtrlWords.BANK0_CHUNK if bank == 0 else CtrlWords.BANK1_CHUNK
             self._scan_armed = False
-            self._write((
-                (CtrlWords.BANK_READY, unarmed),
-                *tuple(sorted(words.items())),
-                (chunk_reg, table_chunk),
-                (CtrlWords.BANK_READY, self._scan_ready | bit),
-            ), stop=self._stop)
+            # The chunk register is what makes the bank resident: the engine
+            # reads a point only from a bank whose chunk register names that
+            # point's chunk, and the register still names the chunk two back
+            # while its words are overwritten.  So it is written on its own,
+            # only once every scan word has been acknowledged -- a line that
+            # resends only the frames it lost could otherwise land a lost
+            # word after the bank was declared resident.
+            self._write(tuple(sorted(words.items())), stop=self._stop)
+            self._write(((chunk_reg, table_chunk),), stop=self._stop)
             self._scan_next_chunk += 1
 
     def _stop_worker(self) -> None:

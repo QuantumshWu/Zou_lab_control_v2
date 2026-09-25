@@ -17,14 +17,7 @@ from fractions import Fraction
 import math
 
 from .canonical import canonical_digest
-from .loops import (
-    LoopNode,
-    bracket_iterations,
-    frame_ticks,
-    frame_visits,
-    loop_nesting_depth,
-    loop_tree,
-)
+from .loops import frame_ticks, frame_visits, loop_nesting_depth
 from .model import (
     FIELD_DAC,
     FIELD_DURATION,
@@ -39,7 +32,6 @@ from .model import (
 from .wire import StreamerParams, build_fingerprint
 
 
-COMPILER_ID = "zlc-pulse-native"
 BUS_MODES = frozenset(("edge", "ramp"))
 
 
@@ -472,7 +464,8 @@ def compile_sequence(
             f"sequence has {len(sequence.brackets)} brackets but the streamer geometry "
             f"holds {params.max_loops} loops"
         )
-    depth = max(sequence.bracket_depths, default=0)
+    loops = sequence.loops
+    depth = loop_nesting_depth(loops)
     if depth > params.loop_depth:
         raise ValueError(
             f"brackets nest {depth} deep but the streamer geometry holds "
@@ -516,7 +509,6 @@ def compile_sequence(
                 0 if selector is not None else step.value - port.signed_range[0],
                 0 if selector is None else selector + 1,
             ))
-    loops = sequence.loops
     channel_delays, bus_delays = _delay_values(sequence)
     logical = tuple(sorted(
         (port.key, port.lanes[0])
@@ -549,16 +541,9 @@ def compile_sequence(
 
 
 __all__ = [
-    "COMPILER_ID",
     "CompiledProgram",
-    "LoopNode",
     "TargetBusAction",
     "TargetBusDelay",
-    "bracket_iterations",
     "compile_sequence",
-    "frame_ticks",
-    "frame_visits",
-    "loop_nesting_depth",
-    "loop_tree",
     "nominal_slot_values",
 ]

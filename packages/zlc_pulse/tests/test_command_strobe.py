@@ -11,12 +11,11 @@ from pathlib import Path
 import pytest
 
 from zlc_pulse import compile_sequence, pulse_target_from_xdc
-from zlc_pulse import device
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.wire import CMD_FIRE, CMD_LOAD, CMD_SAFE, CtrlWords, STATUS_RUNNING, StreamerParams
 
-from test_wire_device import _sequence
+from test_wire_device import _open_streamer, _sequence
 
 
 RTL = Path(__file__).resolve().parents[1] / "fpga" / "pulse_streamer" / "zlc_pulse_streamer_top.v"
@@ -201,9 +200,7 @@ class _Recorder(MemoryRegisterTransport):
 
 def _streamer(*, auto_done: bool = True) -> tuple[PulseStreamer, _Recorder, object]:
     geom = StreamerParams()
-    transport = _Recorder(geom=geom, auto_done=auto_done)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom, _Recorder, auto_done=auto_done)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
     return streamer, transport, program
 
@@ -244,16 +241,10 @@ def test_load_reports_a_loader_that_never_acknowledges() -> None:
                 raise TimeoutError("LOAD completion was not acknowledged")
             return super().command(code, command_id, **kwargs)
 
-    transport = _NeverLoads(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geom, _NeverLoads)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    device.LOAD_TIMEOUT = 0.05
-    try:
-        with pytest.raises(TimeoutError, match="LOAD completion"):
-            streamer.load(program, rows=((1,),))
-    finally:
-        device.LOAD_TIMEOUT = 5.0
+    with pytest.raises(TimeoutError, match="LOAD completion"):
+        streamer.load(program, rows=((1,),))
 
 
 def test_replaying_a_scan_table_re_arms_the_banks_at_point_zero() -> None:
@@ -298,9 +289,7 @@ def test_safe_refuses_missing_or_error_completion_without_guessing(monkeypatch) 
                 raise TimeoutError("SAFE completion was not acknowledged")
             return super().command(code, command_id, **kwargs)
 
-    transport = _NeverSafe(geom=StreamerParams(), auto_done=True)
-    streamer = PulseStreamer(transport, StreamerParams(), 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(StreamerParams(), _NeverSafe)
     with pytest.raises(TimeoutError, match="SAFE completion"):
         streamer.safe()
 
@@ -311,12 +300,15 @@ def test_a_board_describes_itself_rather_than_letting_a_client_assume(monkeypatc
     So a client wanting ports, pins or a clock had to read its own XDC and
     config and hope they were the ones the board was built from -- the exact
     mistake the layout handshake exists to catch, made one layer up.
+    Ports, pins and the clock have to arrive intact over the wire too, or
+    the client still guesses.
     """
 
     from zlc_pulse import load_streamer_config
-    from zlc_pulse.device import BoardDescription, PulseStreamer
-    from zlc_pulse.transport import MemoryRegisterTransport
+    from zlc_pulse.device import BoardDescription
+    from zlc_pulse.remote import REMOTE_METHODS, decode_tree, encode_tree
 
+    assert "describe" in REMOTE_METHODS
     config = load_streamer_config()
     geometry = config["params"]
     streamer = PulseStreamer(
@@ -352,45 +344,15 @@ def test_a_board_describes_itself_rather_than_letting_a_client_assume(monkeypatc
         # twice, and the wire silently emptied the nested copy.
         assert set(described.target.package_pins) == set(described.target.raw_lanes)
         assert all(pin.strip() for pin in described.target.package_pins.values())
-    finally:
-        streamer.close()
 
-
-def test_the_description_survives_the_wire() -> None:
-    """Ports, pins and the clock have to arrive intact or the client still guesses."""
-
-    from zlc_pulse.remote import REMOTE_METHODS, decode_tree, encode_tree
-    from zlc_pulse import load_streamer_config
-    from zlc_pulse.device import PulseStreamer
-    from zlc_pulse.transport import MemoryRegisterTransport
-
-    assert "describe" in REMOTE_METHODS
-
-    config = load_streamer_config()
-    geometry = config["params"]
-    streamer = PulseStreamer(
-        MemoryRegisterTransport(geom=geometry, auto_done=True),
-        geometry,
-        config["clock_hz"],
-        target=_BOARD_TARGET,
-    )
-    streamer.open()
-    try:
-        original = streamer.describe()
-        restored = decode_tree(encode_tree(original))
-
-        assert restored.target == original.target
+        # Equality covers the ports with the labels an operator reads, the
+        # geometry its layout fingerprint is built from, and the clock; the
+        # pin map is carried beside the ports and is checked on its own.
+        restored = decode_tree(encode_tree(described))
+        assert restored == described
         assert dict(restored.target.package_pins) == dict(
-            original.target.package_pins
+            described.target.package_pins
         ), "the wire dropped the pin map"
-
-        assert restored.clock_hz == original.clock_hz
-        assert restored.geometry == original.geometry
-        assert restored.layout_fingerprint == original.layout_fingerprint
-        # The port labels are what an operator reads in an editor.
-        assert [port.label for port in restored.target.ports] == [
-            port.label for port in original.target.ports
-        ]
     finally:
         streamer.close()
 

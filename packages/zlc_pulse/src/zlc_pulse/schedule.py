@@ -12,7 +12,7 @@ from numbers import Integral
 
 import numpy as np
 
-from .compile import CompiledProgram, bracket_iterations
+from .compile import CompiledProgram
 from .model import MAXIMUM_REPEAT_COUNT
 
 
@@ -63,8 +63,8 @@ def trigger_edge_ticks(
 
     ``bracket_bodies`` walks only the first and last that many replays of
     every Bracket in every Pulse, at their true ticks -- see
-    :func:`bracket_iterations` -- which is what bounds a capacity check over
-    a loop that replays a body a billion times.
+    :func:`.loops.bracket_iterations` -- which is what bounds a capacity
+    check over a loop that replays a body a billion times.
     """
 
     names = tuple(channels)
@@ -104,12 +104,15 @@ def bus_action_ticks(
     for action in prog.bus_actions:
         by_row.setdefault(action.row, []).append(action.bus_index)
     ticks: dict[int, list[int]] = {index: [] for index in range(len(prog.bus_names))}
+    points = _scan_points(prog, table, run_repeats, scan_repeats)
+    shapes = _point_shapes(prog, points, bracket_bodies)
     run_offset = 0
-    for point in _scan_points(prog, table, run_repeats, scan_repeats):
-        for row, tick in prog.frame_visits(point, bracket_bodies=bracket_bodies):
+    for point in points:
+        visits, total = shapes[point]
+        for row, tick in visits:
             for bus in by_row.get(row, ()):
                 ticks[bus].append(run_offset + tick)
-        run_offset += prog.frame_ticks(point)
+        run_offset += total
     return {bus: tuple(values) for bus, values in ticks.items()}
 
 
@@ -181,13 +184,7 @@ def _channel_edges(
         bits.append(bit)
 
     points = _scan_points(prog, table, run_repeats, scan_repeats)
-    shapes: dict[tuple[int, ...], tuple[tuple[tuple[int, int], ...], int]] = {}
-    for point in points:
-        if point not in shapes:
-            shapes[point] = (
-                prog.frame_visits(point, bracket_bodies=bracket_bodies),
-                prog.frame_ticks(point),
-            )
+    shapes = _point_shapes(prog, points, bracket_bodies)
 
     streams: list[tuple[int, ...]] = []
     for bit in bits:
@@ -211,6 +208,28 @@ def _channel_edges(
         streams.append(tuple(ticks))
 
     return tuple(streams)
+
+
+def _point_shapes(
+    prog: CompiledProgram,
+    points: Sequence[tuple[int, ...]],
+    bracket_bodies: int | None,
+) -> dict[tuple[int, ...], tuple[tuple[tuple[int, int], ...], int]]:
+    """Each distinct point's row visits and Pulse length, derived once.
+
+    A run replays a handful of points thousands of times (every Run repeat,
+    every sweep, the capacity check's warm-up), and each derivation rebuilds
+    the loop tree and walks every Bracket.
+    """
+
+    shapes: dict[tuple[int, ...], tuple[tuple[tuple[int, int], ...], int]] = {}
+    for point in points:
+        if point not in shapes:
+            shapes[point] = (
+                prog.frame_visits(point, bracket_bodies=bracket_bodies),
+                prog.frame_ticks(point),
+            )
+    return shapes
 
 
 def _scan_points(
@@ -267,7 +286,6 @@ def _finite_repeat_count(value: int, field_name: str) -> int:
 
 
 __all__ = [
-    "bracket_iterations",
     "bus_action_ticks",
     "run_duration_seconds",
     "trigger_windows_by_channel",

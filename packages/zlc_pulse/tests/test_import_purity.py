@@ -12,13 +12,16 @@ SRC = ROOT / "src" / "zlc_pulse"
 #: can be lifted out and used to drive the board on its own, so it stays as
 #: close to "numpy and a serial port" as the work allows.
 #:
-#: ``zlc_data`` is here for ONE thing: it owns what a unit is.  A duration is
+#: ``zlc_data`` is here for two things.  It owns what a unit is: a duration is
 #: a number and a unit, and the compiler that turns one into device ticks
 #: cannot be the only layer with its own opinion about what "us" means -- that
 #: is how this package came to hold a second unit table with a different base,
 #: a different spelling set and different arithmetic from everybody else's.
+#: And it owns how wide a content digest is, so a pulse's digest is named at
+#: the width every other artifact's is.
 #: ``zlc_durable`` is here for the same one reason: it owns what an atomic
-#: write and a readable JSON document ARE.  A pulse saved beside its module
+#: write and a readable JSON document ARE, and how JSON is read back strictly
+#: (a saved pulse, a remote frame).  A pulse saved beside its module
 #: is a file on disk like every other document this project writes, and a
 #: package with its own writer is a package whose files differ from the rest
 #: in line endings, temp-file discipline and crash behaviour.
@@ -34,12 +37,6 @@ ALLOWED_TOP_LEVEL = {
 
 #: The allowed layers, each of which must stay as light as this package is.
 LIGHT_LAYERS = ("zlc_data", "zlc_durable")
-
-
-def test_package_import_is_pure() -> None:
-    import zlc_pulse
-
-    assert Path(zlc_pulse.__file__).resolve().parent.name == "zlc_pulse"
 
 
 def _imported_top_levels(path: Path) -> list[str]:

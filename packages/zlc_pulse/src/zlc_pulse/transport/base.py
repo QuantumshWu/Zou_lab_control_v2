@@ -7,8 +7,16 @@ from typing import Protocol
 import threading
 
 
-DEFAULT_OBSERVER_INTERVAL = 0.001
-UART_OBSERVER_INTERVAL = 0.001
+#: How long the pulse observer sleeps between two STATUS/CURSOR reads while
+#: a FIRE plays.  5 ms: DONE is seen at most 5 ms (plus one read) after the
+#: board reaches it, a third of the ~15 ms Windows timer tick a timed wait
+#: used to cost, and a shot is at most ~200 reads a second (fewer over a
+#: UART, whose read adds its round trip) instead of a back-to-back loop in
+#: the bench process for the whole of a forever pulse.  A streamed scan's
+#: bank refill rides the same read and is still three times sooner than
+#: when the tick paced it.
+DEFAULT_OBSERVER_INTERVAL = 0.005
+UART_OBSERVER_INTERVAL = DEFAULT_OBSERVER_INTERVAL
 JTAG_AXI_OBSERVER_INTERVAL = 0.05
 
 

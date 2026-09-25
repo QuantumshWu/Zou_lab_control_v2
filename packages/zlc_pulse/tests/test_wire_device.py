@@ -24,13 +24,11 @@ from zlc_pulse.device import DoneReport, PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.wire import (
     CMD_FIRE,
-    CMD_LOAD,
     CMD_SAFE,
     CtrlWords,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_LINK_ERROR,
-    STATUS_LOADED,
     STATUS_RUNNING,
     build_fingerprint,
     check_rtl_assumptions,
@@ -67,6 +65,22 @@ def _sequence(*, slotted: bool = False, period_ns: int = 40) -> PulseSequence:
         ),
         bindings=slots,
     )
+
+
+def _open_streamer(
+    geom: StreamerParams,
+    transport_cls: type[MemoryRegisterTransport] = MemoryRegisterTransport,
+    *,
+    target: PulseTarget = _BOARD_TARGET,
+    auto_done: bool = True,
+    **transport_options,
+) -> tuple[PulseStreamer, MemoryRegisterTransport]:
+    """An opened streamer over an in-memory board of ``geom``, and that board."""
+
+    transport = transport_cls(geom=geom, auto_done=auto_done, **transport_options)
+    streamer = PulseStreamer(transport, geom, 50e6, target=target)
+    streamer.open()
+    return streamer, transport
 
 
 def test_build_fingerprint_covers_each_geometry_field_except_host_cap() -> None:
@@ -181,9 +195,7 @@ def test_pack_loops_and_slot_rows_into_their_own_regions() -> None:
 def test_fire_applies_the_loaded_rows_without_rewriting_program_regions() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom)
     rows = ((1,), (2,), (1,))
     streamer.load(program, rows=rows)
     before = len(transport.write_batches)
@@ -204,9 +216,7 @@ def test_unslotted_program_uses_run_repeats_without_a_scan_cursor() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     assert program.slot_count == 0
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom)
     streamer.load(program)
 
     streamer.fire(run_repeats=5)
@@ -233,9 +243,7 @@ def test_one_tick_rows_and_brackets_need_no_seam_margin() -> None:
     program = compile_sequence(short, geom, 50e6)
     assert program.durations == (1, 1)
 
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geom)
     streamer.load(program)
     for run_repeats in (1, 2, 0):
         streamer.fire(run_repeats=run_repeats)
@@ -252,17 +260,13 @@ def test_one_tick_rows_and_brackets_need_no_seam_margin() -> None:
         50e6,
     )
     assert repeated.frame_ticks() == 2 * (1 + 3)
-    other_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    other = PulseStreamer(other_transport, geom, 50e6, target=_BOARD_TARGET)
-    other.open()
+    other, _ = _open_streamer(geom)
     other.load(repeated)
     other.fire(run_repeats=2)
     assert other.wait_done(1.0) is not None
 
     scanned = compile_sequence(_sequence(slotted=True, period_ns=20), geom, 50e6)
-    scan_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    scan = PulseStreamer(scan_transport, geom, 50e6, target=_BOARD_TARGET)
-    scan.open()
+    scan, _ = _open_streamer(geom)
     scan.load(scanned, rows=((1,), (2,)))
     scan.fire(run_repeats=1, scan_repeats=2)
     assert scan.wait_done(1.0) is not None
@@ -271,9 +275,7 @@ def test_one_tick_rows_and_brackets_need_no_seam_margin() -> None:
 def test_load_requires_one_complete_application_shape() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geom)
     with pytest.raises(ValueError, match="requires a non-empty value table"):
         streamer.load(program)
     with pytest.raises(TypeError, match="must be integers"):
@@ -293,9 +295,7 @@ def test_load_rejects_compiler_identity_before_touching_hardware() -> None:
             "geometry",
         ),
     ):
-        transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-        streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-        streamer.open()
+        streamer, transport = _open_streamer(geom)
         with pytest.raises(ValueError, match=message):
             streamer.load(mismatch)
         assert transport.write_batches == []
@@ -310,18 +310,14 @@ def test_load_rejects_compiler_identity_before_touching_hardware() -> None:
         package_pins=_BOARD_TARGET.package_pins,
     )
     assert relabelled.abi_fingerprint == _BOARD_TARGET.abi_fingerprint
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=relabelled)
-    streamer.open()
+    streamer, _ = _open_streamer(geom, target=relabelled)
     streamer.load(program)
 
 
 def test_repeat_counts_are_strict_and_zero_is_the_only_infinite_value() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom)
     streamer.load(program)
     before = list(transport.write_batches)
     for invalid in (True, 1.5, None, -1, 2**32):
@@ -340,9 +336,7 @@ def test_repeat_counts_are_strict_and_zero_is_the_only_infinite_value() -> None:
         replace(program, loops=((0, 1, 2**32),))
 
     scan_program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    scan_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    scan = PulseStreamer(scan_transport, geom, 50e6, target=_BOARD_TARGET)
-    scan.open()
+    scan, _ = _open_streamer(geom)
     scan.load(scan_program, rows=((1,), (2,)))
     with pytest.raises(ValueError, match="32-bit CURSOR"):
         scan.fire(run_repeats=1, scan_repeats=(1 << 31) + 1)
@@ -388,9 +382,7 @@ def test_delay_capacity_covers_execution_repeat_seams_and_terminal_safe() -> Non
     dac_program = compile_sequence(dac_sequence, geom, 50e6)
 
     for program, label in ((ttl_program, "channel"), (dac_program, "DAC bus")):
-        transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-        streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-        streamer.open()
+        streamer, transport = _open_streamer(geom)
         streamer.load(program)
         before = list(transport.write_batches)
         with pytest.raises(ValueError, match=label):
@@ -412,17 +404,7 @@ def test_delay_capacity_covers_execution_repeat_seams_and_terminal_safe() -> Non
         delays=(OutputDelay(_DAC_PORT.key, 160, "ns"),),
     )
     terminal_program = compile_sequence(terminal_source, terminal_geom, 50e6)
-    terminal_transport = MemoryRegisterTransport(
-        geom=terminal_geom,
-        auto_done=True,
-    )
-    terminal_streamer = PulseStreamer(
-        terminal_transport,
-        terminal_geom,
-        50e6,
-        target=_BOARD_TARGET,
-    )
-    terminal_streamer.open()
+    terminal_streamer, _ = _open_streamer(terminal_geom)
     terminal_streamer.load(terminal_program, rows=((2,),))
     with pytest.raises(ValueError, match="DAC bus.*needs 3 delayed events"):
         terminal_streamer.fire(run_repeats=1, scan_repeats=2)
@@ -465,9 +447,7 @@ def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
     for count in (4, 100_000):
         source = constant_body(count)
         program = compile_sequence(source, geometry, 50e6)
-        transport = MemoryRegisterTransport(geom=geometry, auto_done=True)
-        streamer = PulseStreamer(transport, geometry, 50e6, target=_BOARD_TARGET)
-        streamer.open()
+        streamer, _ = _open_streamer(geometry)
         try:
             streamer.load(program, source=source)
             streamer.fire(run_repeats=3)
@@ -490,9 +470,7 @@ def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
         delays=(OutputDelay(_DIGITAL_PORT.key, 400, "ns"),),
     )
     program = compile_sequence(crowded, geometry, 50e6)
-    transport = MemoryRegisterTransport(geom=geometry, auto_done=True)
-    streamer = PulseStreamer(transport, geometry, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geometry)
     try:
         # LOAD cannot answer this: the walk is over the run the board will
         # actually play, and how many times it plays is FIRE's argument.
@@ -507,9 +485,7 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     source = _sequence(slotted=True)
     program = compile_sequence(source, geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geom)
     rows = ((1,), (2,), (3,))
     streamer.load(program, source=source, rows=rows)
 
@@ -522,6 +498,18 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     assert loaded.scan_repeats == 1
     assert loaded.loaded_at > 0
 
+    # The applied state tracks the scan table through a finished run ...
+    streamer.fire(run_repeats=2, scan_repeats=3)
+    report = streamer.wait_done(1.0)
+    assert report is not None
+    assert report.cursor == len(rows) * 3 - 1
+    after_done = streamer.applied()
+    assert after_done is not None
+    assert after_done.rows == rows
+    assert after_done.run_repeats == 2
+    assert after_done.scan_repeats == 3
+
+    # ... and an endless one, and survives the SAFE that stops it.
     streamer.fire(run_repeats=0)
     state = streamer.applied()
     assert state is not None
@@ -530,6 +518,12 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     assert state.scan_repeats == 1
     with pytest.raises(FrozenInstanceError):
         state.run_repeats = 2
+    assert streamer.safe().stable
+    after_safe = streamer.applied()
+    assert after_safe is not None
+    assert after_safe.rows == rows
+    assert after_safe.run_repeats == 0
+    assert after_safe.scan_repeats == 1
 
     # A GUI can discard its local objects and rebuild the same static image from
     # the echoed source; the active row is a separate scan-bank write.
@@ -549,34 +543,6 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
         + [remainder[key] for key in sorted(remainder)][:: geom.num_slots]
     )
     assert slot_words == [1, 2, 3]
-
-
-def test_applied_state_tracks_scan_table_and_survives_done_and_safe() -> None:
-    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
-    source = _sequence(slotted=True)
-    program = compile_sequence(source, geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
-    rows = ((1,), (2,), (1,))
-    streamer.load(program, source=source, rows=rows)
-    streamer.fire(run_repeats=2, scan_repeats=3)
-    report = streamer.wait_done(1.0)
-    assert report is not None
-    assert report.cursor == len(rows) * 3 - 1
-    after_done = streamer.applied()
-    assert after_done is not None
-    assert after_done.rows == rows
-    assert after_done.run_repeats == 2
-    assert after_done.scan_repeats == 3
-    streamer.fire(run_repeats=0, scan_repeats=1)
-    safe = streamer.safe()
-    assert safe.stable
-    after_safe = streamer.applied()
-    assert after_safe is not None
-    assert after_safe.rows == rows
-    assert after_safe.run_repeats == 0
-    assert after_safe.scan_repeats == 1
     streamer.close()
     assert streamer.applied() is None
 
@@ -584,9 +550,7 @@ def test_applied_state_tracks_scan_table_and_survives_done_and_safe() -> None:
 def test_repeated_fire_reuses_resident_program_after_done_and_safe() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom)
     try:
         streamer.load(program, rows=((1,), (2,), (1,)))
         clocks = tuple(transport.read_word(CtrlWords.CLK_ENABLE + i)
@@ -621,9 +585,7 @@ def test_repeated_fire_reuses_resident_program_after_done_and_safe() -> None:
 def test_runtime_slot_rows_reject_a_duration_the_row_cannot_hold() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom)
     for invalid in (0, -2, 1 << 32):
         with pytest.raises(ValueError, match="tick range"):
             streamer.load(program, rows=((invalid,),))
@@ -642,9 +604,7 @@ def test_open_rejects_mismatched_word63() -> None:
 def test_wait_done_uses_one_observer_owned_status_cursor_block(monkeypatch) -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom)
     streamer.load(program)
     transport.read_log.clear()
     streamer.fire(run_repeats=1)
@@ -741,13 +701,9 @@ class _BlockingObserverTransport(MemoryRegisterTransport):
 def test_safe_cancels_blocked_observer_and_leaves_no_late_operation() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    transport = _BlockingObserverTransport(
-        honor_stop=True,
-        geom=geom,
-        auto_done=False,
+    streamer, transport = _open_streamer(
+        geom, _BlockingObserverTransport, auto_done=False, honor_stop=True,
     )
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
     streamer.load(program)
     transport.block_observer = True
     streamer.fire(run_repeats=0)
@@ -777,13 +733,9 @@ def test_safe_cancels_blocked_observer_and_leaves_no_late_operation() -> None:
 def test_safe_does_not_claim_observer_exit_when_transport_ignores_stop() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    transport = _BlockingObserverTransport(
-        honor_stop=False,
-        geom=geom,
-        auto_done=False,
+    streamer, transport = _open_streamer(
+        geom, _BlockingObserverTransport, auto_done=False, honor_stop=False,
     )
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
     streamer.load(program)
     transport.block_observer = True
     streamer.fire(run_repeats=0)
@@ -828,9 +780,7 @@ class _FailingRefillTransport(_AdvancingMemoryTransport):
 def test_observer_refills_a_freed_scan_bank() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = _AdvancingMemoryTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom, _AdvancingMemoryTransport, auto_done=False)
     rows = tuple((value,) for value in (1, 2, 1, 3, 1, 2))
     streamer.load(program, rows=rows)
     streamer.fire(run_repeats=1)
@@ -839,18 +789,16 @@ def test_observer_refills_a_freed_scan_bank() -> None:
     assert report.status == STATUS_DONE
     assert report.cursor == 5
     assert report.underflow is False
-    assert any(
-        (CtrlWords.BANK0_CHUNK, 2) in batch
-        for batch in transport.write_batches
-    )
+    # The chunk register makes the bank resident, so it travels alone and
+    # after the chunk's words: a resent word frame can never land after it.
+    committed = transport.write_batches.index(((CtrlWords.BANK0_CHUNK, 2),))
+    assert transport.write_batches[committed - 1] == tuple(sorted(pack_scan_rows(rows, geom, 0, 2).items()))
 
 
 def test_observer_refill_failure_becomes_terminal_error() -> None:
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(slotted=True), geom, 50e6)
-    transport = _FailingRefillTransport(geom=geom, auto_done=False)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, transport = _open_streamer(geom, _FailingRefillTransport, auto_done=False)
     rows = tuple((value,) for value in (1, 2, 1, 3, 1, 2))
     streamer.load(program, rows=rows)
     transport.fail_refill = True
@@ -900,9 +848,7 @@ def test_one_failed_poll_is_a_warning_and_the_shot_still_reports_done() -> None:
 
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    transport = _PollFailingTransport(failures=1, geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geom, _PollFailingTransport, failures=1)
     streamer.load(program)
     streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
@@ -920,9 +866,7 @@ def test_two_consecutive_failed_polls_end_the_observation_in_error() -> None:
 
     geom = replace(StreamerParams(), max_rows=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
-    transport = _PollFailingTransport(failures=2, geom=geom, auto_done=True)
-    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
-    streamer.open()
+    streamer, _ = _open_streamer(geom, _PollFailingTransport, failures=2)
     streamer.load(program)
     streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)

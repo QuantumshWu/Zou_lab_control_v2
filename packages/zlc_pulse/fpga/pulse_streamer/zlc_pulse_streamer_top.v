@@ -258,7 +258,14 @@ module zlc_pulse_streamer_top #(
     // --- CTRL regfile ---------------------------------------------------------
     reg [31:0] ctrl_reg [0:R_CTRL_WORDS-1];
     integer ci;
-    initial begin for (ci = 0; ci < R_CTRL_WORDS; ci = ci + 1) ctrl_reg[ci] = 32'b0; end
+    // Every DAC latch clock starts enabled (every program enables them all
+    // anyway): with CLK_ENABLE at 0 the park window below would strobe
+    // nothing after configuration, and the converters would keep their
+    // power-up code until the first FIRE.
+    initial begin
+        for (ci = 0; ci < R_CTRL_WORDS; ci = ci + 1) ctrl_reg[ci] = 32'b0;
+        ctrl_reg[C_CLK_ENABLE] = {{(32-BUS_COUNT){1'b0}}, {BUS_COUNT{1'b1}}};
+    end
 
     // assemble the DENSE delay-tick busses and the loop table from their registers
     genvar dw;

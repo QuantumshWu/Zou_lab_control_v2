@@ -65,9 +65,11 @@ authorization boundary.
 Scans use named slots: a scan point is one vector of `NUM_SLOTS` 32-bit
 values, and a row reads its duration (a tick count) or a DAC action reads its
 code from the slot its selector names.  The scan window is a 2-bank
-ping-pong.  Prepare uploads the first two chunks before FIRE; during the run
-the sole host observer uses `BANK_READY` and `BANK*_CHUNK` to refill each
-released bank.  The FPGA clocks scan points autonomously through its own
+ping-pong.  Prepare uploads the first two chunks and arms `BANK_READY` before
+FIRE; during the run the sole host observer refills each released bank with
+the chunk's words and then, in a write of its own once they are acknowledged,
+that bank's `BANK*_CHUNK` -- the register that makes the bank resident for the
+prefetcher.  The FPGA clocks scan points autonomously through its own
 scan-point prefetcher, while the host only transfers chunks.  A late or
 missing refill produces `UNDERFLOW`, and the run is rejected.  Analog buses
 need no separate table: every row carries one action per bus (hold, edge to
@@ -112,7 +114,9 @@ CURSOR      top -> host   cumulative row-visit ordinal; unchanged by Run repeats
                           current table row is CURSOR modulo SCAN_COUNT
 BANK_READY  host -> top   bit b = bank b is loaded and ready
 BANK0_CHUNK / BANK1_CHUNK host -> top   sweep-chunk index resident in each bank
-CLK_ENABLE  host -> top   per-channel mask: output the 50 MHz clock instead of data
+CLK_ENABLE  host -> top   per-bus DAC latch-clock enable (low BUS_COUNT bits of word 20);
+                          every bus starts enabled at configuration, so the park
+                          window after configuration latches the safe code
 LAYOUT_ID   top -> host   hardwired register-layout ID (word 63); the host refuses
                           to drive a bitstream whose layout differs from its own
 ```

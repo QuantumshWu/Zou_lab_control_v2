@@ -13,13 +13,17 @@ from dataclasses import dataclass, fields as _dataclass_fields, replace as _data
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from zlc_durable import strict_json_loads
+
+from .loops import loop_nesting_depth
+
 __all__ = [
     "StreamerParams", "CtrlWords",
     "pack_program", "region_bases",
     "check_rtl_assumptions",
     "CMD_LOAD", "CMD_FIRE", "CMD_RESET", "CMD_SAFE",
     "STATUS_LOADED", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR", "STATUS_UNDERFLOW", "STATUS_LINK_ERROR",
-    "REGISTER_LAYOUT_ID", "LAYOUT_STRUCT_VERSION", "build_fingerprint",
+    "LAYOUT_STRUCT_VERSION", "build_fingerprint",
     "DEFAULT_CONFIG_PATH", "load_streamer_config", "params_from_config", "default_params",
     "FROZEN_CLOCK_HZ",
     "DEFAULT_UART_BAUD", "default_uart_baud",
@@ -395,7 +399,6 @@ def pack_program(program, params: StreamerParams | None = None, *, target) -> di
     only by ``PulseStreamer.fire``.  COMMAND/STATUS/CURSOR/BANK_READY are
     runtime mailbox words.  The target owns the raw-pin to DAC-bus clock
     mapping; the compiled program keeps raw identity."""
-    from .compile import loop_nesting_depth
     from .model import PORT_DAC, PulseTarget
 
     p = params or StreamerParams()
@@ -909,21 +912,8 @@ def require_streamer_config(path: str | Path) -> dict:
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(f"streamer config is missing: {source}")
+    raw = strict_json_loads(source.read_text(encoding="utf-8"), "streamer_config.json")
 
-    def pairs(items: list[tuple[str, object]]) -> dict:
-        mapping = dict(items)
-        if len(mapping) != len(items):
-            raise ValueError("duplicate key in streamer_config.json")
-        return mapping
-
-    def constant(name: str) -> None:
-        raise ValueError(f"non-finite JSON constant {name} in streamer_config.json")
-
-    raw = json.loads(
-        source.read_text(encoding="utf-8"),
-        object_pairs_hook=pairs,
-        parse_constant=constant,
-    )
     if not isinstance(raw, dict) or set(raw) != CONFIG_TOP_LEVEL_FIELDS:
         raise ValueError("streamer_config.json fields are not exact")
     if not isinstance(raw["params"], dict) or set(raw["params"]) != set(_PARAM_FIELD_NAMES):
@@ -944,12 +934,6 @@ def default_params(path: str | Path | None = None) -> StreamerParams:
     """The configured runtime geometry (config-driven, defaults if the file is absent)."""
     return load_streamer_config(path)["params"]
 
-# The shipped-config fingerprint: the value a bitstream built from the current streamer_config.json
-# exposes on CTRL word 63, and the RTL's LAYOUT_FINGERPRINT generic default.  Callers wanting "the
-# id of the default build" (tests, the UART/AXI bridge models) use this constant; the per-session
-# connect-check uses build_fingerprint(session.params) so a custom-geometry session is verified
-# against ITS OWN geometry, not the default.
-REGISTER_LAYOUT_ID = build_fingerprint(StreamerParams())
 
 def default_uart_baud(path: str | Path | None = None) -> int:
     return load_streamer_config(path)["uart_baud"]
@@ -1166,26 +1150,26 @@ def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int) -> dict[in
         raise ValueError("scan bank must be 0 or 1")
     if isinstance(chunk, bool) or not isinstance(chunk, Integral) or chunk < 0:
         raise ValueError("scan chunk must be non-negative")
-    points = [list(row) for row in rows]
-    if not points:
+    total = len(rows)
+    if not total:
         raise ValueError("scan rows must be non-empty")
+    first = int(chunk) * geom.bank_size
+    if first >= total:
+        return {}
+    # Only this chunk is converted and checked: a streamed sweep packs every
+    # chunk from the observer thread, and the table was validated whole when
+    # it was loaded.
+    points = [list(row) for row in rows[first:first + geom.bank_size]]
     slot_count = len(points[0])
     if any(len(row) != slot_count for row in points):
         raise ValueError("scan rows must have equal widths")
     if slot_count > geom.num_slots:
         raise ValueError("scan row has more slots than the wire geometry")
 
-    first = int(chunk) * geom.bank_size
-    total = len(points)
-    if first >= total:
-        return {}
     base = region_bases(geom)["scan"] + int(bank) * geom.bank_size * geom.scan_words
     words: dict[int, int] = {}
-    for off in range(geom.bank_size):
+    for off, point in enumerate(points):
         idx = first + off
-        if idx >= total:
-            break
-        point = points[idx]
         row = base + off * geom.scan_words
         for j in range(geom.num_slots):
             val = point[j] if j < slot_count else 0

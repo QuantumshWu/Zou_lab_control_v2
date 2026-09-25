@@ -9,7 +9,6 @@ import math
 
 from .model import (
     BINDING_API,
-    BINDING_CONFIG,
     BINDING_DEFAULT,
     config_parameter_key,
     FIELD_DAC,

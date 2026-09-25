@@ -81,6 +81,9 @@ def test_default_board_manifest_generates_host_and_validates_both_projections() 
         "push_freq_switch": "K14", "pgc_1D_freq_switch": "J16",
     }.items():
         assert target.package_pins[target.by_key[name].lanes[0]] == pin
+    pgc = target.by_key["pgc_1D"]
+    assert pgc.kind == "digital" and pgc.lanes == ("ch18",)
+    assert target.package_pins[target.by_key["da_dipole"].lanes[0]] == "V9"
     assert "arb_wave" not in target.by_key
     buses = tuple(port for port in target.ports if port.kind == "dac")
     assert len(buses) == 4

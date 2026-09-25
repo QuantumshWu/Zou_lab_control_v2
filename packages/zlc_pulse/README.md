@@ -1,7 +1,7 @@
 # zlc-pulse
 
 `zlc-pulse` is the small host-side package for the pulse-streamer register
-image. It models a target and sequence, compiles one edge program, loads one
+image. It models a target and sequence, compiles one period-table program, loads one
 complete application, and executes the three explicit repeat layers:
 
 ```python
@@ -86,9 +86,14 @@ grammar, so unsupported workspace files are refused.
 For a separated FPGA machine, the bench serves the board in-process (the
 `sequencer.local` device type), or the headless `pulse_server` command
 starts the same thin length-prefixed-JSON facade. The server process is the only hardware-transport
-owner. The first valid control RPC claims the board; a newer valid client takes over
+owner. A client names its command protocol in `open`, and the server refuses an
+`open` of another protocol before claiming anything, so a stale client is turned
+away without evicting the owner or touching the board; update client and server
+together. The first valid control RPC claims the board; a newer valid client takes over
 only after the old physical state reaches verified SAFE. A real disconnect or
-server shutdown also drives SAFE. There is no normal-connection idle timeout,
+server shutdown also drives SAFE. A Stop is sticky until its SAFE holds the
+command lane: a FIRE still being prepared (Config reread, compile, load) sees it
+and refuses to send, locally and through the remote client alike. There is no normal-connection idle timeout,
 authentication, or TLS in this trusted-lab protocol.
 
 The launcher distinguishes the listen bind from client addresses. With the

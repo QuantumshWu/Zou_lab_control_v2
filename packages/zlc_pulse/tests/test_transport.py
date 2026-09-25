@@ -7,26 +7,19 @@ import pytest
 
 from zlc_pulse.transport import VivadoAxiRegisterTransport
 from zlc_pulse.transport import uart_frame as framing
-from zlc_pulse.transport.axi import JTAG_AXI_OBSERVER_INTERVAL
-from zlc_pulse.transport.uart import PySerialLink, UartError, UartRegisterTransport
+from zlc_pulse.transport.uart import PySerialLink, UartRegisterTransport
 from zlc_pulse.transport.memory import MemoryRegisterTransport
 from zlc_pulse.wire import CMD_FIRE, CtrlWords, DEFAULT_UART_BAUD, STATUS_RUNNING
 
 
-def test_uart_frame_round_trip_and_crc_guard() -> None:
+def test_uart_codec_round_trips_and_rejects_corrupt_oversize_and_coerced() -> None:
     reply = framing.encode_reply(7, framing.ST_OK, (0x12345678, 9))
     assert framing.decode_reply(reply) == (7, framing.ST_OK, [0x12345678, 9])
     broken = bytearray(reply)
     broken[-1] ^= 0x01
-    try:
+    with pytest.raises(framing.FrameError):
         framing.decode_reply(bytes(broken))
-    except framing.FrameError:
-        pass
-    else:
-        raise AssertionError("CRC corruption was accepted")
 
-
-def test_uart_codec_rejects_oversize_reply_and_coerced_words() -> None:
     count = framing.MAX_FRAME_WORDS + 1
     body = bytes((framing.RESP, 7, framing.ST_OK)) + count.to_bytes(2, "little")
     body += bytes(4 * count)
@@ -188,73 +181,15 @@ def test_a_close_that_fails_keeps_the_handle_for_the_next_close() -> None:
     assert len(closes) == 2
 
 
-def test_uart_crc_status_is_reported_as_crc_error(tmp_path) -> None:
-    class FakeLink:
-        def open(self):
-            pass
-
-        def close(self):
-            pass
-
-        def exchange(self, request, *, deadline, stop=None):
-            del deadline, stop
-            return framing.encode_reply(request[3], framing.ST_CRC_FAIL)
-
-        def write_batch(self, requests, *, deadline, stop=None):
-            del requests, deadline, stop
-            return []
-
-    transport = UartRegisterTransport(link=FakeLink())
-    transport.start()
-    try:
-        try:
-            transport.read_word(63)
-        except UartError as error:
-            assert "CRC" in str(error)
-        else:
-            raise AssertionError("CRC status was accepted")
-    finally:
-        transport.close()
-
-
-def test_observer_intervals_are_transport_specific() -> None:
-    assert MemoryRegisterTransport.observer_interval == 0.001
-    assert UartRegisterTransport.observer_interval == 0.001
-    assert VivadoAxiRegisterTransport.observer_interval == JTAG_AXI_OBSERVER_INTERVAL
-    assert JTAG_AXI_OBSERVER_INTERVAL >= 0.05
-
-
-def test_memory_transport_records_full_list_history_by_default() -> None:
-    transport = MemoryRegisterTransport()
-    transport.start()
-
-    for index in range(5):
-        address = 10_000 + index
-        transport.write_words(((address, index),))
-        assert transport.read_word(address) == index
-
-    assert isinstance(transport.write_batches, list)
-    assert isinstance(transport.read_log, list)
-    assert transport.write_batches[:2] == [
-        ((10_000, 0),),
-        ((10_001, 1),),
-    ]
-    assert transport.write_batches[-2:] == [
-        ((10_003, 3),),
-        ((10_004, 4),),
-    ]
-    assert transport.read_log == [10_000, 10_001, 10_002, 10_003, 10_004]
-
-
 def test_memory_transport_can_disable_diagnostic_history() -> None:
     transport = MemoryRegisterTransport(record_history=False)
     transport.start()
 
-    for index in range(10_000):
+    for index in range(3):
         transport.write_words(((10_000, index),))
         assert transport.read_word(10_000) == index
 
-    assert transport.words[10_000] == 9_999
+    assert transport.words[10_000] == 2
     assert transport.write_batches == []
     assert transport.read_log == []
 

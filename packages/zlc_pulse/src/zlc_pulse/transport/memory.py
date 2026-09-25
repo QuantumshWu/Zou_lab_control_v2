@@ -11,7 +11,6 @@ from ..wire import (
     CMD_RESET,
     CMD_SAFE,
     CtrlWords,
-    REGISTER_LAYOUT_ID,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_LOADED,

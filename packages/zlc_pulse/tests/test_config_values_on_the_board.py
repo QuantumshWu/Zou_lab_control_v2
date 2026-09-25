@@ -29,7 +29,7 @@ def _geometry() -> StreamerParams:
 
     return replace(
         StreamerParams(),
-        channel_count=3,
+        channel_count=4,
         bus_count=1,
         bus_width=2,
         max_rows=8,
@@ -39,10 +39,11 @@ def _geometry() -> StreamerParams:
 
 def _configured() -> PulseSequence:
     target = PulseTarget(
-        lanes=("d0", "a0", "a1"),
+        lanes=("d0", "a0", "a1", "clock"),
         ports=(
             PulsePortSpec("d0", "digital", ("d0",)),
-            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0),
+            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0, latch_clock="clock"),
+            PulsePortSpec("clock", "clock", ("clock",)),
         ),
     )
     return PulseSequence(
@@ -50,8 +51,8 @@ def _configured() -> PulseSequence:
         target=target,
         time_step_ns=20,
         periods=(
-            PulsePeriod("p0", 40, "ns", (1, 0, 0)),
-            PulsePeriod("p1", 40, "ns", (0, 0, 0)),
+            PulsePeriod("p0", 40, "ns", (1, 0, 0, 0)),
+            PulsePeriod("p1", 40, "ns", (0, 0, 0, 0)),
         ),
         bindings=(PulseBinding(PulseFieldRef('duration', 'p1'), 'ns', source='config', config_key='probe_time'),),
     )

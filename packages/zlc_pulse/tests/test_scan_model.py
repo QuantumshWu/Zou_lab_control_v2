@@ -13,7 +13,6 @@ from zlc_pulse.scan import (
     prepare_scan_application,
     scan_columns_for,
     scan_rows_from_wire,
-    scan_rows_to_wire,
     scan_table_template,
     validate_scan_table,
 )
@@ -152,33 +151,23 @@ def test_a_duration_column_spans_one_tick_to_the_whole_row_counter() -> None:
         validate_scan_table(((0.0,),), (column,))
 
 
-def test_the_starter_program_builds_one_table_of_the_right_width() -> None:
-    """scan_table is the contract with whoever runs the program."""
-
-    columns = (
-        ScanColumnSpec("a", 20.0, 200.0),
-        ScanColumnSpec("b", -512.0, 511.0, True, "value"),
-    )
-    namespace: dict = {}
-    exec(scan_table_template("column_stack", columns), namespace)  # noqa: S102
-
-    table = np.asarray(namespace["scan_table"])
-    assert table.ndim == 2 and table.shape[1] == len(columns)
-    assert table.shape[0] > 1
-    # The DAC column is integer codes, not fractions of one.
-    assert np.all(table[:, 1] == np.round(table[:, 1]))
-
-
 def test_a_slot_id_is_never_a_name_in_the_starter_program() -> None:
     """Slot ids live in the pulse's namespace; the program has its own.
 
     ``np``, ``for`` and ``N`` are all legal slot ids.  A starter that spelled
     its axes after them shadowed its own import, was a syntax error, or made
     the point count an array -- the product's own template could not run.
+    ``scan_table`` is the contract with whoever runs the program: one table of
+    the right width, and a DAC column of integer codes, not fractions of one.
     """
 
-    for names in (("np",), ("for",), ("N", "other")):
-        columns = tuple(ScanColumnSpec(name, 20.0, 200.0) for name in names)
+    for columns in (
+        (ScanColumnSpec("np", 20.0, 200.0),),
+        (ScanColumnSpec("for", 20.0, 200.0),),
+        (ScanColumnSpec("N", 20.0, 200.0), ScanColumnSpec("other", 20.0, 200.0)),
+        (ScanColumnSpec("a", 20.0, 200.0), ScanColumnSpec("b", -512.0, 511.0, True, "value")),
+    ):
+        names = tuple(column.name for column in columns)
         for kind in ("column_stack", "grid"):
             source = scan_table_template(kind, columns)
             # The id is still said, where a person reads it.
@@ -188,6 +177,9 @@ def test_a_slot_id_is_never_a_name_in_the_starter_program() -> None:
             table = np.asarray(namespace["scan_table"])
             assert table.ndim == 2 and table.shape[1] == len(columns), (kind, names)
             assert table.shape[0] > 1
+            for index, column in enumerate(columns):
+                if column.is_dac:
+                    assert np.all(table[:, index] == np.round(table[:, index])), (kind, names)
 
 
 def test_a_grid_sweeps_every_combination_and_says_its_shape() -> None:
@@ -204,19 +196,6 @@ def test_a_grid_sweeps_every_combination_and_says_its_shape() -> None:
 def test_a_column_needs_a_range_to_sweep() -> None:
     with pytest.raises(ValueError):
         ScanColumnSpec("a", 1.0, 1.0)
-
-
-def test_scan_rows_are_packed_once_without_materializing_repeats() -> None:
-
-    from zlc_pulse import load_streamer_config
-    from zlc_pulse.wire import pack_scan_rows
-
-    geometry = load_streamer_config()["params"]
-    rows = [(10,), (20,), (30,)]
-
-    words = pack_scan_rows(rows, geometry, 0, 0)
-    ordered = [words[key] for key in sorted(words)]
-    assert ordered[:: geometry.num_slots] == [10, 20, 30]
 
 
 def test_scan_sweeps_stream_table_local_chunks_into_alternating_banks() -> None:

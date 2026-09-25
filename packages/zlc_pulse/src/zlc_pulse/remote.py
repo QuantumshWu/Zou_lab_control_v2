@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 from .endpoint import (
-    is_loopback_host,
     DEFAULT_BIND_HOST,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_REQUEST_TIMEOUT,
+    drop_connection,
+    drop_peer_connections,
+    is_loopback_host,
+    local_ipv4_addresses,
 )
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
+from pathlib import Path
 import argparse
 import json
 import logging
@@ -26,6 +30,8 @@ import sys
 import threading
 import time
 from typing import Any, Callable
+
+from zlc_durable import strict_json_loads
 
 from .compile import CompiledProgram, TargetBusAction as _TargetBusAction, TargetBusDelay as _TargetBusDelay
 from .device import (
@@ -48,10 +54,21 @@ from .model import (
     PulseBinding,
     PulseTarget,
 )
-from .wire import DEFAULT_UART_BAUD, LAYOUT_STRUCT_VERSION, StreamerParams, load_streamer_config
+from .wire import (
+    DEFAULT_UART_BAUD,
+    LAYOUT_STRUCT_VERSION,
+    StreamerParams,
+    _fpga_asset_path,
+    load_streamer_config,
+    require_streamer_config,
+)
 
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+#: Vivado's working directory and its last reply per action, for the JTAG-AXI
+#: transport: beside the build it talks to, not wherever the bench happened to
+#: be launched from.
+AXI_STATE_DIR = _fpga_asset_path("build", "geom.tcl").parent / "state"
 _FRAME_HEADER = struct.Struct("!I")
 UART_PROBE_TIMEOUT = 0.5
 #: What a client is told when its connection ends under it.  The board goes
@@ -147,7 +164,7 @@ def _server_log(event: str, *, client: str | None = None, detail: str = "") -> N
     _LOG.info(line)
 
 
-#: Suppress unchanged status/cursor projections on the command connection.
+#: Suppress unchanged status projections on the command connection.
 _LAST_POLL: dict[tuple[str, str], str] = {}
 _POLL_LOCK = threading.Lock()
 
@@ -155,8 +172,8 @@ _POLL_LOCK = threading.Lock()
 def _server_log_change(event: str, *, client: str = "", detail: str = "") -> None:
     """Log a polled answer only when it differs from the last one.
 
-    Which is also what makes the interesting ones visible: a cursor that stays
-    at 3 says nothing, and a cursor that becomes 4 is the scan advancing.
+    A status poll answers the same thing many times; only a change (loaded,
+    firing, stopped) is an event worth a line.
     """
 
     key = (str(client), str(event))
@@ -173,21 +190,6 @@ def _forget_polls(client: str) -> None:
     with _POLL_LOCK:
         for key in [key for key in _LAST_POLL if key[0] == str(client)]:
             del _LAST_POLL[key]
-
-
-def _drop_connection(connection: socket.socket) -> None:
-    """End a connection nobody wants any more, from this side.
-
-    Windows can leave a blocking recv waiting after shutdown alone. Close
-    the revoked socket here instead of waiting for its peer to speak again.
-    """
-
-    try:
-        connection.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
-    finally:
-        connection.close()
 
 
 def _program_summary(program: object, *, source: object = None) -> str:
@@ -212,46 +214,7 @@ def _client_addresses(bind_host: str) -> tuple[str, ...]:
     host = str(bind_host).strip()
     if host and host not in {"0.0.0.0", "::"}:
         return ("127.0.0.1",) if host.lower() == "localhost" else (host,)
-    return _local_ipv4_addresses()
-
-
-def _local_ipv4_addresses() -> tuple[str, ...]:
-    """Discover non-loopback IPv4 addresses without requiring a network request."""
-
-    addresses: list[str] = []
-    packed_addresses: set[bytes] = set()
-
-    def add(value: object) -> None:
-        try:
-            address = str(value).strip()
-            packed = socket.inet_aton(address)
-        except (OSError, ValueError):
-            return
-        if address == "0.0.0.0" or address.startswith("127.") or packed in packed_addresses:
-            return
-        packed_addresses.add(packed)
-        addresses.append(address)
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            add(sock.getsockname()[0])
-    except OSError:
-        pass
-
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM):
-            add(info[4][0])
-    except OSError:
-        pass
-
-    try:
-        for address in socket.gethostbyname_ex(socket.gethostname())[2]:
-            add(address)
-    except OSError:
-        pass
-
-    return tuple(addresses)
+    return local_ipv4_addresses()
 
 
 def _print_client_endpoints(bind_host: str, port: int) -> None:
@@ -617,17 +580,6 @@ def _recv_frame(connection: socket.socket) -> Any | None:
     if payload is None:
         raise ConnectionError("remote connection closed before frame payload")
 
-    def object_from_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate key {key!r} in remote JSON")
-            result[key] = value
-        return result
-
-    def reject_constant(value):
-        raise ValueError(f"non-finite JSON constant {value!r} in remote JSON")
-
     # THE TREE, NOT THE OBJECTS IT DESCRIBES.  Decoding domain values
     # here made a payload the server could not interpret indistinguishable
     # from a broken socket: decode_tree raises ValueError, only OSError is
@@ -640,11 +592,7 @@ def _recv_frame(connection: socket.socket) -> Any | None:
     #
     # Reading a frame and understanding what is in it are two jobs.  This
     # one ends at the JSON.
-    return json.loads(
-        payload.decode("utf-8"),
-        object_pairs_hook=object_from_pairs,
-        parse_constant=reject_constant,
-    )
+    return strict_json_loads(payload.decode("utf-8"), "remote JSON")
 
 
 class _RemoteHandler(socketserver.BaseRequestHandler):
@@ -654,8 +602,21 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
         assert isinstance(server, PulseRemoteServer)
         self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Admission is asked again here, under the lock ``admit_peers``
+        # withdraws under: a peer accepted just before a withdrawal joins
+        # ``_connections`` after that withdrawal swept it, and would keep
+        # (and could take) a board no longer on offer.
         with server._client_lock:
-            server._connections.add(self.request)
+            admitted = server.peers or is_loopback_host(self.client_address[0])
+            if admitted:
+                server._connections.add(self.request)
+        if not admitted:
+            _server_log(
+                "PEER REFUSED",
+                client=f"{self.client_address[0]}:{self.client_address[1]}",
+                detail=_log_fields(reason="the device was withdrawn while this peer connected"),
+            )
+            drop_connection(self.request)
 
     def finish(self) -> None:
         server = self.server
@@ -727,6 +688,19 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                             else server.wait_owner_done(params)
                         )
                     else:
+                        if (
+                            method == "open"
+                            and params.get("command_protocol") != LAYOUT_STRUCT_VERSION
+                        ):
+                            # Refused before the claim: a client speaking
+                            # another protocol must not evict the owner and
+                            # SAFE its running board on the way to being
+                            # turned away.
+                            raise ValueError(
+                                f"client command protocol {params.get('command_protocol')!r} "
+                                f"differs from this server's {LAYOUT_STRUCT_VERSION}; update "
+                                "the older side and restart it"
+                            )
                         if not claimed:
                             server.claim_client(client, self.request)
                             claimed = True
@@ -797,6 +771,15 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
             # Closed, reset, or dropped by a newer client taking the board.
             # Each of those ends this session; none is a server defect.
             disconnect_reason = f"client connection dropped: {type(exc).__name__}"
+        except ValueError as exc:
+            # A frame that is not strict JSON (or claims more than the frame
+            # cap) leaves the stream at an unknown position, so the session
+            # ends -- said as what it is, not as the client going away.
+            disconnect_reason = (
+                f"unreadable request frame: {type(exc).__name__}: "
+                f"{str(exc).replace(chr(10), ' ')}"
+            )
+            _server_log("RPC ERROR", client=client, detail=_log_fields(error=disconnect_reason))
         finally:
             outputs_safe = (
                 server.client_disconnected(
@@ -870,7 +853,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         with self._client_lock:
             connections = tuple(self._connections)
         for connection in connections:
-            _drop_connection(connection)
+            drop_connection(connection)
         super().server_close()
 
     def handle_error(self, request, client_address) -> None:
@@ -911,24 +894,16 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         This machine's own clients are not touched.
         """
 
-        self._peers = bool(admitted)
+        with self._client_lock:
+            self._peers = bool(admitted)
+            connections = tuple(self._connections)
         if admitted:
             _server_log(
                 "PEERS ADMITTED",
                 detail=_log_fields(endpoint=f"{self.server_address[0]}:{self.server_address[1]}"),
             )
             return
-        with self._client_lock:
-            connections = tuple(self._connections)
-        dropped = 0
-        for connection in connections:
-            try:
-                peer = connection.getpeername()[0]
-            except OSError:
-                continue
-            if not is_loopback_host(peer):
-                _drop_connection(connection)
-                dropped += 1
+        dropped = drop_peer_connections(connections)
         _server_log("PEERS REFUSED", detail=_log_fields(dropped=dropped))
 
     def _safe_beside_the_lane(self) -> None:
@@ -996,7 +971,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 detail=_log_fields(by=client),
             )
         if connection_to_drop is not None:
-            _drop_connection(connection_to_drop)
+            drop_connection(connection_to_drop)
 
         self._safe_beside_the_lane()
 
@@ -1074,7 +1049,6 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     raise RuntimeError("this connection no longer owns the pulse server")
             try:
                 no_params = {
-                    "open",
                     "describe",
                     "close",
                     "cursor",
@@ -1087,6 +1061,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     if method == "load"
                     else {"run_repeats", "scan_repeats"}
                     if method == "fire"
+                    else {"command_protocol"}
+                    if method == "open"
                     else set()
                 )
                 if method not in REMOTE_METHODS:
@@ -1203,8 +1179,10 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     )
                     result = {"command_id": self.streamer._fire_command_id}
                 elif method == "cursor":
+                    # Not narrated: a scan moves it on every poll, and a
+                    # line per step pushes LOAD/FIRE/ERROR out of the bench
+                    # log.  DONE reports the final cursor.
                     result = self.streamer.cursor()
-                    _server_log_change("CURSOR", client=client, detail=_log_fields(value=result))
                 elif method == "safe":
                     result = self.streamer.safe()
                     _server_log(
@@ -1224,13 +1202,14 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         detail=_log_fields(
                             **{
                                 key: result.get(key)
+                                # State transitions only; the cursor is left
+                                # to DONE for the reason given at "cursor".
                                 for key in (
                                     "opened",
                                     "loaded",
                                     "firing",
                                     "run_repeats",
                                     "scan_repeats",
-                                    "cursor",
                                 )
                             }
                         ),
@@ -1379,7 +1358,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             transition_epoch = self._owner_epoch
             self._fault = "disconnect SAFE has not completed"
         if connection_to_drop is not None:
-            _drop_connection(connection_to_drop)
+            drop_connection(connection_to_drop)
         _server_log("AUTO-SAFE", client=client, detail=_log_fields(reason=reason))
 
         # Cancel first; the command lane remains owned by the old handler until
@@ -1452,6 +1431,13 @@ class RemotePulseStreamer(ConfigValueHolder):
         #: How this client names itself on the cancel lane, from the
         #: server's answer to ``open``; None while there is no connection.
         self._cancel_token: str | None = None
+        #: The threads whose Stop found the lane busy: entered before the
+        #: cancel notice, left once that Stop's serial SAFE holds the lane.
+        #: A FIRE still being prepared on the lane (Config reread, recompile,
+        #: reload) must not be sent while any is waiting.  Per thread, as the
+        #: device keeps it, so the first Stop to reach the lane cannot lower
+        #: a second one's.
+        self._stopping: set[int] = set()
         self._fire_command_id: int | None = None
         self._description: BoardDescription | None = None
         self._loaded_application: AppliedState | None = None
@@ -1461,7 +1447,7 @@ class RemotePulseStreamer(ConfigValueHolder):
         with self._io_lock:
             try:
                 self._connect_locked()
-                answer = self._call_locked("open", {})
+                answer = self._call_locked("open", {"command_protocol": LAYOUT_STRUCT_VERSION})
                 if (
                     not isinstance(answer, Mapping)
                     or set(answer) != {"cancel_token", "command_protocol", "completion_notifications"}
@@ -1566,6 +1552,8 @@ class RemotePulseStreamer(ConfigValueHolder):
                         rows=applied.rows,
                     )
             self._fire_command_id = None
+            if self._stopping:
+                raise RuntimeError("a Stop arrived while this FIRE was being prepared; it was not sent")
             receipt = self._call_locked(
                 "fire",
                 {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
@@ -1606,6 +1594,8 @@ class RemotePulseStreamer(ConfigValueHolder):
                     answer = _recv_frame(lane)
             except OSError as error:
                 raise ConnectionError(f"{_CONNECTION_ENDED} ({type(error).__name__})") from error
+            except ValueError as error:
+                raise ConnectionError(f"the pulse server's completion reply could not be read: {error}") from error
             if (not isinstance(answer, Mapping) or answer.get("id") != 1
                     or type(answer.get("ok")) is not bool
                     or set(answer) != ({"id", "ok", "result"} if answer["ok"] else {"id", "ok", "error"})):
@@ -1652,10 +1642,16 @@ class RemotePulseStreamer(ConfigValueHolder):
                 return self._call_locked("safe", {})
             finally:
                 self._io_lock.release()
-        self._cancel_pending_command()
-        with self._io_lock:
-            self._fire_command_id = None
-            return self._call_locked("safe", {})
+        caller = threading.get_ident()
+        self._stopping.add(caller)
+        try:
+            self._cancel_pending_command()
+            with self._io_lock:
+                self._stopping.discard(caller)
+                self._fire_command_id = None
+                return self._call_locked("safe", {})
+        finally:
+            self._stopping.discard(caller)
 
     def _cancel_pending_command(self) -> None:
         """Say "stop" beside the busy command lane, on a connection of its own.
@@ -1681,9 +1677,11 @@ class RemotePulseStreamer(ConfigValueHolder):
                     {"id": 1, "method": CANCEL_METHOD, "params": {"token": token}},
                 )
                 answer = _recv_frame(lane)
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            # ValueError: an answer that is not strict JSON is a refusal too,
+            # and must not cost the serial SAFE that follows.
             _LOG.info(
-                "CLIENT CANCEL LANE UNREACHABLE endpoint=%s:%d error=%s: %s",
+                "CLIENT CANCEL LANE FAILED endpoint=%s:%d error=%s: %s",
                 self.host,
                 self.port,
                 type(error).__name__,
@@ -1765,8 +1763,10 @@ class RemotePulseStreamer(ConfigValueHolder):
             "method": method,
             "params": dict(params),
         }
+        sent = False
         try:
             _send_frame(self._socket, request)
+            sent = True
             response = _recv_frame(self._socket)
         except TimeoutError as exc:
             self._disconnect_locked()
@@ -1776,6 +1776,15 @@ class RemotePulseStreamer(ConfigValueHolder):
         except OSError as exc:
             self._disconnect_locked()
             raise ConnectionError(f"{_CONNECTION_ENDED} ({type(exc).__name__})") from exc
+        except ValueError as exc:
+            if not sent:
+                # A request this side could not encode never left: the
+                # connection is untouched and the caller hears why.
+                raise
+            # A reply that cannot be read leaves the stream at an unknown
+            # position; nothing after it on this connection can be trusted.
+            self._disconnect_locked()
+            raise ConnectionError(f"the pulse server's reply could not be read: {exc}") from exc
         if response is None:
             # End of stream: the same thing, arriving as silence rather than as
             # an error.  It used to be reported as "the response is not an
@@ -1828,12 +1837,32 @@ class RemotePulseStreamer(ConfigValueHolder):
             pass
 
 
+def _deployment_config() -> dict:
+    """The deployed streamer_config.json, refused if anything was forgiven.
+
+    ``load_streamer_config`` searches where the file may live and falls back
+    to defaults so a window survives a missing or unreadable one; a server
+    driving hardware must not.  The file that search found is then read
+    through the config owner's strict door, so the server refuses exactly
+    what a build refuses (a duplicated key, a non-finite constant, a member
+    nobody knows) rather than a lenient subset of it.
+    """
+
+    found = load_streamer_config()
+    if found["source"] is None or found["warnings"]:
+        detail = "; ".join(found["warnings"]) or "canonical config source is missing"
+        raise RuntimeError(
+            f"deployment requires a valid streamer_config.json without fallback: {detail}"
+        )
+    return require_streamer_config(found["source"])
+
+
 def open_local_streamer(
     *,
     backend: str = "auto",
     uart_port: str | None = None,
     uart_baud: int = DEFAULT_UART_BAUD,
-    state_dir: str = "fpga/build/state",
+    state_dir: str | Path = AXI_STATE_DIR,
 ) -> PulseStreamer:
     """Build, open and SAFE-check the one local board this process owns.
 
@@ -1844,12 +1873,7 @@ def open_local_streamer(
     story reads the same from a console or from a bench window.
     """
 
-    config = load_streamer_config()
-    if config["source"] is None or config["warnings"]:
-        detail = "; ".join(config["warnings"]) or "canonical config source is missing"
-        raise RuntimeError(
-            f"deployment requires a valid streamer_config.json without fallback: {detail}"
-        )
+    config = _deployment_config()
     target = pulse_target_from_xdc(config_path=config["source"])
     resolution = resolve_backend(
         backend,
@@ -1959,7 +1983,7 @@ class LocalPulseService:
         backend: str = "auto",
         uart_port: str | None = None,
         uart_baud: int = DEFAULT_UART_BAUD,
-        state_dir: str = "fpga/build/state",
+        state_dir: str | Path = AXI_STATE_DIR,
         host: str = DEFAULT_BIND_HOST,
         port: int = DEFAULT_PORT,
         peers: bool = False,
@@ -2086,7 +2110,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="transport policy; auto probes UART word 63, then falls back to JTAG",
     )
-    parser.add_argument("--state-dir", default="fpga/build/state")
+    parser.add_argument("--state-dir", default=str(AXI_STATE_DIR))
     parser.add_argument("--uart-port", default=None, help="the one configured Pulse UART port")
     parser.add_argument(
         "--uart-baud", type=int, default=DEFAULT_UART_BAUD,
@@ -2099,17 +2123,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def _main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     try:
-        config = load_streamer_config()
+        config = _deployment_config()
     except Exception as exc:
         print(f"ERROR: invalid streamer_config.json: {exc}", file=sys.stderr, flush=True)
-        return 2
-    if config["source"] is None or config["warnings"]:
-        detail = "; ".join(config["warnings"]) or "canonical config source is missing"
-        print(
-            f"ERROR: deployment requires a valid streamer_config.json without fallback: {detail}",
-            file=sys.stderr,
-            flush=True,
-        )
         return 2
     target = pulse_target_from_xdc(config_path=config["source"])
     if args.check_config:

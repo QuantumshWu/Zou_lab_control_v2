@@ -2,12 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-_PACKAGE_DIR = Path(__file__).resolve().parent
-if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
-    raise ImportError(f"unexpected zlc_pulse installation path: {_PACKAGE_DIR}")
-
 from .codec import (
     CONFIG_VALUES_DIRECTORY,
     CURRENT_CONFIG_VALUES,
@@ -23,7 +17,7 @@ from .codec import (
 )
 from .model import (
     ANALOG_MODE_CHOICES,
-    MINIMUM_BRACKET_COUNT,  # noqa: E402
+    MINIMUM_BRACKET_COUNT,
     TIME_UNIT_CHOICES,
     canonical_time_unit,
     nanoseconds_per,
@@ -42,8 +36,8 @@ from .model import (
     PulseBinding,
     PulseTarget,
 )
-from .compile import analog_levels, compile_sequence  # noqa: E402
-from .binding import (  # noqa: E402
+from .compile import analog_levels, compile_sequence
+from .binding import (
     apply_api_values,
     apply_config_values,
     authored_api_entries,
@@ -57,16 +51,16 @@ from .binding import (  # noqa: E402
     pulse_field_value,
     resolve_api_parameters,
 )
-from .wire import load_streamer_config  # noqa: E402
-from .manifest import pulse_target_from_xdc  # noqa: E402
-from .device import PulseStreamer  # noqa: E402
-from .endpoint import (  # noqa: E402
+from .wire import load_streamer_config
+from .manifest import pulse_target_from_xdc
+from .device import PulseStreamer
+from .endpoint import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_REQUEST_TIMEOUT,
 )
-from .scan import (  # noqa: E402
+from .scan import (
     api_parameter_columns_for,
     prepare_scan_application,
     resolve_scan_point,
@@ -76,7 +70,7 @@ from .scan import (  # noqa: E402
     scan_table_template,
     validate_scan_table,
 )
-from .transport import (  # noqa: E402
+from .transport import (
     MemoryRegisterTransport,
 )
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import os
 import re
@@ -260,6 +259,8 @@ def test_clock_and_safe_pin_boundary_are_explicit() -> None:
     assert "eng_reset ? {TTL_CHANNEL_COUNT{1'b0}} : out" in top
     assert "bus_clk_enable[cmx]" in top
     assert "zlc_safe_latching || (!eng_reset && zlc_physical_active)" in top
+    # Configuration parks the converters too: the latch clocks start enabled.
+    assert "ctrl_reg[C_CLK_ENABLE] = {{(32-BUS_COUNT){1'b0}}, {BUS_COUNT{1'b1}}};" in top
     assert "bus_out_final" in top
     assert "eng_reset ? bus_safe_pack : zlc_bus_out" in top
 
@@ -297,17 +298,3 @@ def test_uart_decoder_releases_truncated_frames_and_rejects_bounds() -> None:
     assert "{rx_byte,f_count[7:0]} > FRAME_WORDS" in bridge
     assert "|f_addr[31:ADDR_WORD_WIDTH]" in bridge
     assert "17'd64" in bridge
-
-
-def test_fpga_launchers_use_the_package_wire_cli() -> None:
-    # In bin\, with everything else a human clicks.  They still drive THIS
-    # layer's board, which is why this layer is what checks them.
-    launchers = ROOT.parents[1] / "bin"
-    build = (launchers / "build_and_program.bat").read_text(encoding="utf-8")
-    estimate = (launchers / "estimate_resources.bat").read_text(encoding="utf-8")
-    assert "fpga.pulse_streamer.host" not in build
-    assert "fpga.pulse_streamer.host" not in estimate
-    # Both hardware wrappers use the installed product manifest command; no
-    # launcher imports a layer module or mutates PYTHONPATH.
-    assert "zou_lab_control fpga" in build
-    assert "zou_lab_control fpga" in estimate

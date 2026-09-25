@@ -14,14 +14,13 @@ devices and editors do not maintain alternative readers or writers.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import json
 import math
 import os
 from pathlib import Path
 from numbers import Real
 from typing import Any
 
-from zlc_durable import atomic_write_bytes, readable_json_bytes
+from zlc_durable import atomic_write_bytes, readable_json_bytes, strict_json_loads
 
 from .binding import config_parameter_key
 
@@ -62,23 +61,7 @@ def parse_pulse_tree_json(text: str | bytes) -> Mapping[str, Any]:
         text = text.decode("utf-8")
     if not isinstance(text, str):
         raise TypeError("pulse JSON must be text or UTF-8 bytes")
-
-    def object_from_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate key {key!r} in pulse JSON")
-            result[key] = value
-        return result
-
-    def reject_constant(value):
-        raise ValueError(f"non-finite JSON constant {value!r} in pulse JSON")
-
-    value = json.loads(
-        text,
-        object_pairs_hook=object_from_pairs,
-        parse_constant=reject_constant,
-    )
+    value = strict_json_loads(text, "pulse JSON")
     if not isinstance(value, Mapping):
         raise TypeError("pulse JSON must contain one object")
     return value

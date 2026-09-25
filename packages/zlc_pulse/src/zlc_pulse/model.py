@@ -215,9 +215,15 @@ class PulsePortSpec:
                 bus_index = 0
             bus_index = _nonnegative_int(bus_index, "DAC bus_index")
             encoding = self.encoding or DAC_OFFSET_BINARY
-            safe_value = (1 << (width - 1)) if self.safe_value is None else _nonnegative_int(self.safe_value, "DAC safe_value")
+            mid_scale = 1 << (width - 1)
+            safe_value = mid_scale if self.safe_value is None else _nonnegative_int(self.safe_value, "DAC safe_value")
             if encoding != DAC_OFFSET_BINARY:
                 raise ValueError("only offset-binary DAC encoding is supported")
+            # The board parks every bus at mid-scale (0 V) on SAFE whatever
+            # the target says, and the virtual world rests at this value: any
+            # other one would make the two disagree.
+            if safe_value != mid_scale:
+                raise ValueError(f"a DAC port rests at its mid-scale code {mid_scale} (0 V)")
         else:
             if width != 1:
                 raise ValueError("digital and clock ports require one lane")
@@ -735,22 +741,6 @@ class PulseSequence:
             if bracket.bracket_id == bracket_id:
                 return bracket
         raise ValueError(f"no bracket exists with id {bracket_id!r}")
-
-    @property
-    def bracket_depths(self) -> tuple[int, ...]:
-        """How many brackets each bracket lies inside, plus one; aligned with ``brackets``.
-
-        The deepest value is the loop nesting the board must hold at once.
-        """
-
-        return tuple(
-            1 + sum(
-                bracket_contains(outer, inner)
-                for other, outer in enumerate(self._bracket_bounds)
-                if other != index
-            )
-            for index, inner in enumerate(self._bracket_bounds)
-        )
 
     @property
     def loops(self) -> tuple[tuple[int, int, int], ...]:

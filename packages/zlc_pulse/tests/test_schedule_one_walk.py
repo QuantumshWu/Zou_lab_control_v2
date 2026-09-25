@@ -31,7 +31,7 @@ from zlc_pulse import (
 )
 from zlc_pulse.model import PulseFieldRef
 from zlc_pulse.wire import StreamerParams
-from zlc_pulse import schedule
+from zlc_pulse.loops import bracket_iterations
 from zlc_pulse.schedule import (
     run_duration_seconds,
     trigger_edge_ticks,
@@ -96,9 +96,22 @@ def test_a_point_is_shaped_once_however_many_lanes_ask_about_it(monkeypatch) -> 
 
 def test_asking_about_every_lane_at_once_answers_what_asking_one_by_one_does(
 ) -> None:
+    """One lane or all of them, the same edges -- and the edges state their levels.
+
+    Rise, fall, rise, fall: a window is a pair, not a search.  A delay FIFO
+    holds an entry per edge, rise and fall alike, and the capacity check used
+    to ask for exposure windows and then take them apart -- pairing every edge
+    with its neighbour, flattening the pairs, and sorting them back into the
+    order they were already in.  The edge stream is that stream, delivered in
+    that order, without the round trip.
+    """
+
     program = _program()
     table = _table(4)
     together = trigger_edge_ticks(
+        program, _LANES, table, run_repeats=3, scan_repeats=2
+    )
+    windows = trigger_windows_by_channel(
         program, _LANES, table, run_repeats=3, scan_repeats=2
     )
     for lane in _LANES:
@@ -106,51 +119,12 @@ def test_asking_about_every_lane_at_once_answers_what_asking_one_by_one_does(
             program, (lane,), table, run_repeats=3, scan_repeats=2
         )
         assert together[lane] == alone[lane], lane
-    windows = trigger_windows_by_channel(
-        program, _LANES, table, run_repeats=3, scan_repeats=2
-    )
-    for lane in _LANES:
         assert windows[lane] == trigger_windows_by_channel(
             program, (lane,), table, run_repeats=3, scan_repeats=2
         )[lane]
-
-
-def test_an_edge_stream_states_its_levels_by_position() -> None:
-    """Rise, fall, rise, fall -- so a window is a pair, not a search."""
-
-    program = _program()
-    table = _table(3)
-    for lane in _LANES:
-        edges = trigger_edge_ticks(
-            program, (lane,), table, run_repeats=2, scan_repeats=2
-        )[lane]
-        windows = trigger_windows_by_channel(
-            program, (lane,), table, run_repeats=2, scan_repeats=2
-        )[lane]
-        assert tuple(zip(edges[0::2], edges[1::2])) == windows
-        assert list(edges) == sorted(edges)
-
-
-def test_the_capacity_question_is_asked_of_edges_not_of_exposures() -> None:
-    """A delay FIFO holds an entry per edge, rise and fall alike.
-
-    The check used to ask for exposure windows and then take them apart --
-    pairing every edge with its neighbour, flattening the pairs, and
-    sorting them back into the order they were already in.  This is that
-    stream, delivered in that order, without the round trip.
-    """
-
-    program = _program()
-    table = _table(4)
-    windows = trigger_windows_by_channel(
-        program, _LANES, table, run_repeats=3, scan_repeats=2
-    )
-    edges = trigger_edge_ticks(
-        program, _LANES, table, run_repeats=3, scan_repeats=2
-    )
-    for lane in _LANES:
-        flattened = [tick for window in windows[lane] for tick in window]
-        assert list(edges[lane]) == flattened == sorted(flattened)
+        edges = together[lane]
+        assert tuple(zip(edges[0::2], edges[1::2])) == windows[lane], lane
+        assert list(edges) == sorted(edges), lane
 
 
 def test_a_bounded_bracket_walk_keeps_the_true_timeline() -> None:
@@ -181,9 +155,9 @@ def test_a_bounded_bracket_walk_keeps_the_true_timeline() -> None:
     assert trigger_edge_ticks(
         program, _LANES, table, run_repeats=2, bracket_bodies=2
     ) == full
-    assert list(schedule.bracket_iterations(10, 3)) == [0, 1, 2, 7, 8, 9]
-    assert list(schedule.bracket_iterations(6, 3)) == list(range(6))
-    assert list(schedule.bracket_iterations(6, None)) == list(range(6))
+    assert list(bracket_iterations(10, 3)) == [0, 1, 2, 7, 8, 9]
+    assert list(bracket_iterations(6, 3)) == list(range(6))
+    assert list(bracket_iterations(6, None)) == list(range(6))
 
 
 def test_run_repeats_hold_each_row_then_scan_repeats_replay_the_table() -> None:

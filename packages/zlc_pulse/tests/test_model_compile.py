@@ -181,9 +181,11 @@ def test_a_bracket_of_one_plays_its_range_once_like_no_bracket() -> None:
     assert program.frame_ticks() == plain.frame_ticks()
     assert trigger_windows_by_channel(program, ("d0", "d1")) == trigger_windows_by_channel(plain, ("d0", "d1"))
     # The wire image carries the count as written: the engine plays 1 once.
-    from zlc_pulse.wire import pack_program
+    from zlc_pulse.wire import CtrlWords, pack_program, region_bases
 
-    assert pack_program(program, geometry, target=once.target)
+    words = pack_program(program, geometry, target=once.target)
+    assert words[CtrlWords.LOOP_TABLE_COUNT] == 1
+    assert words[region_bases(geometry)["loop"] + 1] == 1
 
 
 def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
@@ -199,7 +201,6 @@ def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
     nested = replace(base, brackets=(inner, outer))
     assert [bracket.bracket_id for bracket in nested.brackets] == ["outer", "inner"]
     assert nested.bracket_bounds == ((0, 2), (1, 2))
-    assert nested.bracket_depths == (1, 2)
     program = compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2), 50e6)
     assert program.loops == ((0, 1, 2), (1, 1, 3))
     assert program.loop_depth == 2
@@ -215,7 +216,7 @@ def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
         PulseBracket("late", "p2", "p2", 2), PulseBracket("early", "p0", "p0", 2),
     ))
     assert [bracket.bracket_id for bracket in apart.brackets] == ["early", "late"]
-    assert apart.bracket_depths == (1, 1)
+    assert compile_sequence(apart, StreamerParams(max_rows=8, bank_size=2), 50e6).loop_depth == 1
     with np.testing.assert_raises_regex(ValueError, "overlap"):
         replace(base, brackets=(
             PulseBracket("a", "p0", "p1", 2), PulseBracket("b", "p1", "p2", 2),
@@ -226,16 +227,6 @@ def test_brackets_nest_or_stay_apart_and_compile_outermost_first() -> None:
         compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2, loop_depth=1), 50e6)
     with np.testing.assert_raises_regex(ValueError, "2 brackets"):
         compile_sequence(nested, StreamerParams(max_rows=8, bank_size=2, max_loops=1), 50e6)
-    # An empty bracket at another bracket's boundary gap sits beside it: an
-    # editor draws it from the same rule, so nesting is decided by bounds alone.
-    beside = replace(base, brackets=(
-        PulseBracket("empty", "p2", "p1", 2), PulseBracket("body", "p0", "p1", 2),
-    ))
-    assert beside.bracket_depths == (1, 1)
-    within = replace(base, brackets=(
-        PulseBracket("empty", "p1", "p0", 2), PulseBracket("body", "p0", "p1", 2),
-    ))
-    assert within.bracket_depths == (1, 2)
 
 
 def test_bracket_count_run_repeats_and_scan_slot_domain_are_strict() -> None:

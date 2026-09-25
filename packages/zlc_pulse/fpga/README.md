@@ -64,7 +64,10 @@ also prints a copyable `RemotePulseStreamer(...)` example after the hardware
 handshake. `0.0.0.0` means “listen on all interfaces” and must not be passed
 as the client host.
 
-There is no idle timeout for a healthy client. The first valid RPC owns the
+There is no idle timeout for a healthy client. A client names its command
+protocol in `open`; the server refuses an `open` of another protocol before
+claiming anything, so a stale client never evicts the owner or SAFEs its board
+(update client and server together). The first valid RPC owns the
 board; a newer valid client takes over only after verified physical SAFE. A
 real disconnect or server shutdown also drives SAFE.
 
@@ -84,10 +87,11 @@ action builds and programs; use explicit `--build-only` to generate reports and
 a bitstream without connecting to hardware. Flash remains a separate action.
 
 Default clock is 50 MHz (20 ns tick); the minimal pulse width and resolution are
-1 tick. The qualified deployment has 512 period rows, 8 nested loops and two
-2048-point scan banks, so 4096 bank-local scan slots are resident at one time. A run may contain
-more points: preparation preloads the first two chunks, then the sole host
-observer refills each released bank through `BANK_READY` / `BANK*_CHUNK`. The
+1 tick. The qualified deployment has 512 period rows, 8 loops nested up to 4 deep
+and two 2048-point scan banks, so 4096 scan points are resident at one time. A run may contain
+more points: preparation preloads the first two chunks and arms `BANK_READY`,
+then the sole host observer refills each released bank: its words first, then
+its `BANK*_CHUNK` register (which makes it resident) in a separate write. The
 FPGA still clocks every point autonomously; the host moves chunks, never drives
 individual point timing. Any observed `UNDERFLOW` invalidates the run. The
 deployed clock is fixed at 50 MHz. `ZLC_PS_XDC` selects the approved

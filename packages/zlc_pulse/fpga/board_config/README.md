@@ -19,7 +19,7 @@ This file describes the approved board and frozen deployment geometry:
 | `board.lanes` | indexed host/RTL/XDC lane and pin mapping |
 | `params.channel_count` | physical raw lanes, including TTL, DAC data and latch clocks |
 | `params.bus_count` / `bus_width` | DAC bus geometry |
-| remaining `params.*` fields | edge, scan, coefficient, delay, and FIFO limits |
+| remaining `params.*` fields | row, loop, scan-slot, delay and FIFO limits |
 
 `zlc_pulse.pulse_target_from_xdc()` generates the complete `PulseTarget` from
 the explicit manifest indices, then requires both checked-in projections to
@@ -32,11 +32,16 @@ the XDC fails immediately. A top-level RTL assignment to the wrong TTL
 `out_final[index]`, DAC bit or `bus_clk_final[bus]` also fails validation.
 
 The expansion has 69 physical lanes: 25 TTL, four 10-bit DAC buses and four
-latch clocks. Only the 25 leading TTL lanes occupy the edge mask (one 32-bit
-word). DAC data has its own segment engine; CTRL word 20 holds four bus-clock
-enable bits. Delay words contain the 25 TTL delays followed by four DAC delays.
-The TTL event FIFO is 32 deep; the DAC event FIFO remains 64 deep. This is ABI
-version 7 / fingerprint `0x5A94F3B6`, requiring a matching new bitstream.
+latch clocks. The board plays a period table: one row per period (up to
+`max_rows`), holding its tick count or the scan slot that supplies it, the 25
+TTL levels, and what each DAC bus does when the row is entered; Brackets are a
+separate loop table (`max_loops`, nested up to `loop_depth`). CTRL word 20
+holds four bus-clock enable bits. Delay words contain the 25 TTL delays
+followed by four DAC delays. The TTL event FIFO is 32 deep; the DAC event FIFO
+64 deep. The register ABI version is `zlc_pulse.wire.LAYOUT_STRUCT_VERSION`
+and the layout fingerprint a bitstream must report on word 63 is the
+`ZLC_LAYOUT_FINGERPRINT` in the generated `pulse_streamer/zlc_geometry.vh`;
+neither is restated here, so this page cannot fall behind a rebuild.
 
 ## Upgrading existing Pulse files
 

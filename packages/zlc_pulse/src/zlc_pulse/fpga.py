@@ -1,8 +1,8 @@
-"""FPGA build projections and capacity estimates.
+"""The build-time surface: the ``fpga`` command and the names a build imports.
 
-Runtime clients should import geometry, packing, and compatibility checks from
-the wire module. This module is the explicit home for build-time emitters and
-resource-budget tooling.
+The capacity estimator, the geometry emitters and the strict config door are
+defined in the wire module, beside the geometry they project; this module only
+names them for the launchers, the build scripts and ``zlc fpga``.
 """
 
 from __future__ import annotations

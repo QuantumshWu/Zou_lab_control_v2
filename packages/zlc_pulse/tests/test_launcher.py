@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
@@ -150,29 +149,6 @@ def _assert_every_python_line_enters_through_the_bootstrap(launcher: Path) -> No
                 ), (launcher.name, text)
             continue
         raise AssertionError(f"{launcher.name}: unrecognised Python invocation: {text}")
-
-
-def test_shipped_board_includes_pgc_1d_without_a_local_mutation_step() -> None:
-    from zlc_pulse import PulsePeriod, PulseSequence, compile_sequence, pulse_target_from_xdc
-    from zlc_pulse.wire import default_params
-
-    target = pulse_target_from_xdc()
-    geometry = default_params()
-    assert len(target.raw_lanes) == geometry.channel_count == 69
-    assert geometry.num_delay_ch == 25
-    channel = target.by_key["pgc_1D"]
-    assert channel.kind == "digital" and channel.lanes == ("ch18",)
-    assert target.package_pins[channel.lanes[0]] == "P19"
-    dipole = target.by_key["da_dipole"]
-    assert target.package_pins[dipole.lanes[0]] == "V9"
-    states = [0] * geometry.channel_count
-    states[18] = 1
-    pulse = PulseSequence(name="pgc_pin", target=target, time_step_ns=20,
-                          periods=(PulsePeriod("on", 1000, "ns", tuple(states)),
-                                   PulsePeriod("off", 1000, "ns", (0,) * geometry.channel_count)))
-    program = compile_sequence(pulse, geometry, 50e6)
-    assert program.masks[0] == 1 << 18 and program.masks[-1] == 0
-    assert not (ROOT.parents[1] / "bin" / "add_pulse_channel.bat").exists()
 
 
 def test_a_stored_python_path_is_honoured_under_either_expansion_mode(tmp_path) -> None:

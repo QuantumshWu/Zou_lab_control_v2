@@ -120,7 +120,6 @@ class VivadoAxiRegisterTransport:
         self._abandoned_marker: str | None = None
         self._counter = 0
         self._closed = True
-        self._log_path = self.state_dir / "vivado_axi_transport.log"
 
     def start(self) -> None:
         with self._io_lock:
@@ -606,11 +605,11 @@ class VivadoAxiRegisterTransport:
         if stdout is None:
             generation_queue.put(None)
             return
-        with self._log_path.open("a", encoding="utf-8", errors="replace") as log:
-            for line in stdout:
-                log.write(line)
-                log.flush()
-                generation_queue.put(line)
+        # Not teed to a file: every observer poll prints a few lines, so a
+        # running server grew that file without bound.  Each action's reply
+        # is kept by ``_record_diagnostic`` instead.
+        for line in stdout:
+            generation_queue.put(line)
         generation_queue.put(None)
 
 

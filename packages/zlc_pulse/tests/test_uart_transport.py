@@ -8,6 +8,18 @@ a sync pair.  That frame is never acknowledged.
 
 from __future__ import annotations
 
+import os
+import threading
+import time
+
+import pytest
+
+from zlc_pulse.transport import MemoryRegisterTransport
+from zlc_pulse.transport import uart_frame as framing
+from zlc_pulse.transport.base import TransportAborted
+from zlc_pulse.transport.uart import PySerialLink, UartRegisterTransport, _extract_reply
+from zlc_pulse.wire import CMD_FIRE, CMD_LOAD, STATUS_RUNNING
+
 
 def test_a_frame_the_board_never_answered_is_sent_again() -> None:
     """One mis-sampled stop bit and the bridge abandons that frame.
@@ -22,10 +34,6 @@ def test_a_frame_the_board_never_answered_is_sent_again() -> None:
     Every frame already carried a SEQ and every acknowledgement carried it
     back.  Using it is the difference between losing a frame and losing a load.
     """
-
-    from zlc_pulse.transport import uart as uart_module
-    from zlc_pulse.transport.uart import UartRegisterTransport
-    from zlc_pulse.transport import uart_frame as framing
 
     class _LossyLink:
         """Answers every frame but the first of each four."""
@@ -71,10 +79,6 @@ def test_a_frame_the_board_never_answered_is_sent_again() -> None:
 
 
 def test_command_lost_ack_retries_the_same_id_without_firing_twice() -> None:
-    from zlc_pulse.transport import MemoryRegisterTransport, uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
-    from zlc_pulse.wire import CMD_FIRE, CMD_LOAD, STATUS_RUNNING
-
     engine = MemoryRegisterTransport(auto_done=False)
     engine.start()
     engine.command(CMD_LOAD, 1)
@@ -125,11 +129,6 @@ def test_resending_happens_while_there_is_still_time_to_resend() -> None:
     missed it because its fake returned instantly, spending no clock.
     """
 
-    import time
-
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
-
     class _RealisticallyLossyLink:
         port = "COM-TEST"
         baud = 3_000_000
@@ -178,9 +177,6 @@ def test_a_damaged_acknowledgement_means_send_that_frame_again() -> None:
     frame whose write is idempotent and whose retry is free.
     """
 
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
-
     class _CorruptingLink:
         port = "COM-TEST"
         baud = 3_000_000
@@ -221,9 +217,6 @@ def test_extraction_walks_past_a_damaged_frame_to_the_good_one_behind_it() -> No
     performs in the other direction.
     """
 
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import _extract_reply
-
     good = framing.encode_reply(7, framing.ST_OK, ())
     damaged = bytearray(framing.encode_reply(6, framing.ST_OK, ()))
     damaged[4] ^= 0x01  # status byte flipped after the CRC was computed
@@ -233,7 +226,7 @@ def test_extraction_walks_past_a_damaged_frame_to_the_good_one_behind_it() -> No
     assert _extract_reply(buffer) is None
 
 
-def test_a_retry_costs_milliseconds_not_seconds() -> None:
+def test_the_attempt_budget_is_milliseconds_and_scales_with_the_transfer() -> None:
     """The stall the operator feels IS the attempt budget.
 
     Every lost frame charges one budget before its resend, so an On Pulse over
@@ -242,10 +235,15 @@ def test_a_retry_costs_milliseconds_not_seconds() -> None:
     -- wire time plus a ~16 ms USB latency timer -- needs tens of
     milliseconds.  Waiting too little is benign (writes are idempotent and a
     late duplicate is dropped by SEQ), so this pins the ceiling.
-    """
 
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
+    And a scan start is sixty-four full frames, not a strobe.  The budget and
+    the deadline are the same physical claim about the same bytes, and the
+    budget was written flat: 80 ms of host slack over 223 ms of wire left the
+    first two attempts an 8 per cent margin, so the same bench saw one-frame
+    strobes that never failed and scan starts that timed out at random -- the
+    operator's exact report.  The budget must exceed the wire time by a real
+    host factor, not a constant.
+    """
 
     class _Idle:
         port = "COM-TEST"
@@ -259,30 +257,6 @@ def test_a_retry_costs_milliseconds_not_seconds() -> None:
     ten_frames = [framing.encode_write(index * 4, (0,), seq=index) for index in range(10)]
     assert transport._attempt_budget(ten_frames) < 0.2
 
-
-def test_the_attempt_budget_scales_with_the_transfer() -> None:
-    """A scan start is sixty-four full frames, not a strobe.
-
-    The budget and the deadline are the same physical claim about the same
-    bytes, and the budget was written flat: 80 ms of host slack over 223 ms
-    of wire left the first two attempts an 8 per cent margin, so the same
-    bench saw one-frame strobes that never failed and scan starts that
-    timed out at random -- the operator's exact report.  The budget must
-    exceed the wire time by a real host factor, not a constant.
-    """
-
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
-
-    class _Idle:
-        port = "COM-TEST"
-        baud = 3_000_000
-
-        def open(self) -> None: ...
-
-        def close(self) -> None: ...
-
-    transport = UartRegisterTransport(link=_Idle())
     table = [
         framing.encode_write(index * 4, tuple(range(256)), seq=index)
         for index in range(64)
@@ -324,10 +298,6 @@ class _TailDroppingPort:
         self._pending = b""
 
     def write(self, payload: bytes) -> int:
-        import time
-
-        from zlc_pulse.transport import uart_frame as framing
-
         self.exchanges += 1
         self.sent_at.append(time.monotonic())
         reply = framing.encode_reply(payload[3], framing.ST_OK, (85,))
@@ -358,11 +328,6 @@ def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
     between requests on the wire: each one budget, none the deadline.
     """
 
-    import time
-
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import PySerialLink, UartRegisterTransport
-
     link = PySerialLink("COM-TEST")
     link._serial = _TailDroppingPort(drops=3)
     transport = UartRegisterTransport(link=link)
@@ -387,8 +352,6 @@ def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
 
     # Complete current replies are already in the same USB read as stale,
     # duplicate and CRC-damaged frames. None requires a retransmission.
-    from zlc_pulse.wire import CMD_FIRE, STATUS_RUNNING
-
     port = _TailDroppingPort(drops=0)
     def complete_write(payload):
         requests = payload.split(b"\xff" * 8)
@@ -460,10 +423,6 @@ def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
         assert split.timeout_updates == [0.01]
         assert split.exchanges == 1 and transport.resends == 0
 
-    import threading
-    import pytest
-    from zlc_pulse.transport.base import TransportAborted
-
     empty = _SplitPort(False)
     empty.write = lambda payload: len(payload)
     def blocking_empty_read(size):
@@ -499,10 +458,6 @@ def test_a_read_that_never_completes_reports_every_attempt_by_shape() -> None:
     line that died -- and the archived failure kept only the final attempt.
     """
 
-    import pytest
-
-    from zlc_pulse.transport.uart import PySerialLink, UartRegisterTransport
-
     link = PySerialLink("COM-TEST")
     link._serial = _TailDroppingPort(drops=10_000)
     transport = UartRegisterTransport(link=link, action_timeout=0.3)
@@ -530,13 +485,7 @@ def test_a_slow_write_is_a_timeout_this_layer_can_retry(monkeypatch) -> None:
     on a line whose retry machinery exists for exactly that moment.
     """
 
-    import time
-    import os
-
-    import pytest
     import serial
-
-    from zlc_pulse.transport.uart import PySerialLink
 
     class _StalledPort:
         write_timeout = None
@@ -602,9 +551,6 @@ def test_a_slow_write_is_a_timeout_this_layer_can_retry(monkeypatch) -> None:
 
 def test_a_write_timeout_on_an_early_attempt_is_retried() -> None:
     """The first attempt stalling in the WRITE path must not end the call."""
-
-    from zlc_pulse.transport import uart_frame as framing
-    from zlc_pulse.transport.uart import UartRegisterTransport
 
     class _FirstWriteStalls:
         port = "COM-TEST"

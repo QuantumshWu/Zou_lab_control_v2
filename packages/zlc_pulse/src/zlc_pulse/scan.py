@@ -104,12 +104,7 @@ def _column_for_field(
         # DAC's box three tabs away.  The wire holds offset-binary -- the
         # compiler writes `value - signed_range[0]` -- and that offset is
         # recorded here rather than demanded of the author.
-        port = sequence.target.by_key.get(reference.port)
-        low, high = (
-            port.signed_range
-            if port is not None and port.signed_range
-            else (-512, 511)
-        )
+        low, high = sequence.target.by_key[reference.port].signed_range
         return ScanColumnSpec(
             name,
             float(low),

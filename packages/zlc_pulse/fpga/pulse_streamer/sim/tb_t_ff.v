@@ -207,7 +207,8 @@ module tb_safe_gate;
   end endtask
 
   initial begin
-    force dut.bus_clk_enable = 4'b1111;
+    // The first check is configuration as built: CLK_ENABLE is whatever the
+    // top's initial value makes it, so the park window must latch with it.
     ttl_pattern = 25'b0;
     force dut.out = ttl_pattern;
     force dut.zlc_bus_out = {4{10'd37}};
