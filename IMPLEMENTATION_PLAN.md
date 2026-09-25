@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- 查过不做（2026-09-24，用户拍板）：finite run 读者的 O(run) 拷贝——plane 侧已增量（`_materialize_dataset` 带 basis），剩 `data_view` 的 `_packed_carry` 命中时仍 `np.concatenate((old, tail))` 拷整个 run（230 MB run 75 ms/发、ROI 1000 发 13 ms/发）；根修是 carry 改带备用容量的缓冲区就地追加（约 60–100 行），但缓冲区最多比 run 大 50%，用户以内存为由不做。
 - 读出提取整叠向量化（2026-09-24，用户点名）：`extract_box_signals`从逐站点Python循环改为一次rint定位+一次fancy-index gather+按窗口连续像素求和（int精确、float排除非有限像素、全非有限为NaN；越界仍以同一句拒绝），并接受`(F,H,W)`整叠；`extract_psf_signals`的完整窗快路径同样接受整叠（窗与环一次gather，每窗的匹配滤波仍是该窗连续乘积的求和，逐帧逐字相同），不完整窗退回逐帧逐站点；`TrapCalibration.signals_of_frames`；occupancy每份calibration只读一次它负责的cell。测试`test_readout_stack_extraction`：整叠==逐帧==老的逐站点参照（含NaN/inf/贴边/半整数中心）、PSF两种背景、calibration整叠==逐帧、occupancy逐帧计数==对应calibration的`signals`。
 - 同源复查第二轮（2026-09-24）：「节点/设备说的事被整份草稿是否投影成功挡住」这一类还有一处：`finalize_logic_draft`只在草稿投影成功时才问设备的字段可用性（`resolve_field_availability`），于是刚加的、有一个字段不对的节点上，相机做不到的Photoelectrons开关照样可点、显示为开。改为只要设备绑定齐就问，不可用布尔的有效值False照写；测试补「草稿投影失败时开关仍不可用、显示False」。查过没有别的：`defaulted`在投影前算，帧数与输出都读原始草稿。
 - 同源复查（2026-09-24）：①刷新链还有一处同类缺口——生产者草稿改动若改变了它发布的输出（derive 的 rows），其他编辑器的源列表没人重投影；`update_logic_draft`现在比较改动前后的输出名，变了就重投影所有其他编辑器（与增删节点同一规则），没变只重投影消费者；测试`test_a_producers_new_output_reaches_every_open_editors_sources`。②`_reconcile_frame_artifacts`每拍每节点都跑到`_frames_per_cycle_for`，改为只对声明了逐帧artifact的节点做。③查过不改：`prepared[...]`式索引全仓仅那一处；Σperiod式时长仅编辑器两处已改，时间轴一遍是设计；Bracket=1在schedule/device/RTL各层无≥2假设；派生字段在`instantiate`绕过表单的路径由`_build`按规则算；`test_the_form_and_the_request_agree…`的红来自6aa4d311（09-17）把API字段设成必填，不是这几轮的。
