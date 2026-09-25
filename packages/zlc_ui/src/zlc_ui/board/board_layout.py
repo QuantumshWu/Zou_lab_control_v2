@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-__all__ = ["BoardMetrics", "GeomProxy", "board_width", "nearest_anchor",
-           "first_free_slot", "gravity_slot", "min_board_width", "pack"]
+__all__ = ["BoardMetrics", "GeomProxy", "nearest_anchor", "first_free_slot",
+           "min_board_width", "pack"]
 
 
 @dataclass(frozen=True)
@@ -48,9 +48,8 @@ class GeomProxy:
         self.row = row
 
 
-def _aabb(cfg, metrics: BoardMetrics) -> tuple[int, int, int, int]:
+def _aabb(cfg) -> tuple[int, int, int, int]:
     """The card's pixel AABB ``(x0, y0, x1, y1)`` -- top-left ``(col, row)`` plus its size."""
-    del metrics
     return (cfg.col, cfg.row, cfg.col + cfg.width, cfg.row + cfg.height)
 
 
@@ -62,7 +61,7 @@ def _overlaps_with_gap(box: tuple[int, int, int, int], placed, metrics: BoardMet
     gap = metrics.gap
     x0, y0, x1, y1 = box
     for p in placed:
-        px0, py0, px1, py1 = _aabb(p, metrics)
+        px0, py0, px1, py1 = _aabb(p)
         if x0 < px1 + gap and px0 < x1 + gap and y0 < py1 + gap and py0 < y1 + gap:
             return True
     return False
@@ -88,7 +87,7 @@ def first_free_slot(
     xs = {gap}
     ys = {lowest}
     for p in placed:
-        px0, py0, px1, py1 = _aabb(p, metrics)
+        px0, py0, px1, py1 = _aabb(p)
         xs.add(px1 + gap)
         ys.add(py1 + gap)
         xs.add(px0)            # also align left edges, so a card can tuck under a wider one
@@ -100,7 +99,7 @@ def first_free_slot(
             if not _overlaps_with_gap((x, y, x + w, y + _h), placed, metrics):
                 return (x, y)
     # No candidate fit (should not happen -- placing past the lowest card always clears).
-    bottom = max((py1 for *_rest, py1 in (_aabb(p, metrics) for p in placed)), default=0)
+    bottom = max((py1 for *_rest, py1 in (_aabb(p) for p in placed)), default=0)
     return (gap, max(lowest, bottom + gap) if placed else lowest)
 
 
@@ -121,7 +120,7 @@ def gravity_slot(cfg, placed, board_w: int, metrics: BoardMetrics) -> tuple[int,
     width, height = cfg.width, cfg.height
     x = min(max(int(cfg.col), gap), max(gap, board_w - gap - width))
     y = max(int(cfg.row), gap)
-    boxes = [_aabb(p, metrics) for p in placed]
+    boxes = [_aabb(p) for p in placed]
     # Each pass strictly lowers x or y, and both take values from a finite set
     # (the margin, and each placed card's right or bottom edge), so this ends.
     for _pass in range(2 * len(boxes) + 2):
@@ -155,18 +154,10 @@ def min_board_width(configs: Sequence, metrics: BoardMetrics) -> int:
     return widest + 2 * metrics.gap
 
 
-def board_width(configs: Sequence, metrics: BoardMetrics) -> int:
-    """A fallback packing width for callers without a live viewport (the pure-function tests): two
-    of the WIDEST card side by side plus the gap margins, so cards CAN pack side by side.  The real
-    GUI passes the scroll viewport width to :func:`pack` instead, so the board wraps at the edge."""
-    widest = max((c.width for c in configs), default=0)
-    return max(2 * widest + 3 * metrics.gap, min_board_width(configs, metrics))
-
-
 def pack(
     order: Sequence,
     metrics: BoardMetrics,
-    board_w: int | None = None,
+    board_w: int,
     *,
     dropped=None,
 ) -> bool:
@@ -182,8 +173,8 @@ def pack(
     in that order, and nothing else: its intent decides who yields when two
     cards want the same place, and gravity then treats it like any other.
 
-    ``board_w`` defaults to a two-wide headless width and is always clamped to
-    fit one card.  A narrow board clamps positions but the caller keeps the
+    ``board_w`` is the live viewport width, always clamped to fit one card.
+    A narrow board clamps positions but the caller keeps the
     authored ones, so widening restores the arrangement rather than leaving
     the operator with the single column the narrow board packed.  Returns
     whether any proxy moved.
@@ -191,8 +182,7 @@ def pack(
     order = list(order)
     if dropped is not None and not any(cfg is dropped for cfg in order):
         raise ValueError("the dropped card must belong to the packed board")
-    board_w = (board_width(order, metrics) if board_w is None
-               else max(board_w, min_board_width(order, metrics)))
+    board_w = max(board_w, min_board_width(order, metrics))
     settling = sorted(
         order,
         key=lambda cfg: (int(cfg.row), int(cfg.col), 0 if cfg is dropped else 1),
@@ -212,7 +202,7 @@ def nearest_anchor(
     cfg,
     others: Sequence,
     metrics: BoardMetrics,
-    board_w: int | None = None,
+    board_w: int,
 ) -> tuple[int, int]:
     """Nearest two-dimensional gravity anchor to a dropped card's top-left.
 
@@ -224,15 +214,13 @@ def nearest_anchor(
     then western anchor.
     """
 
-    configs = list(others) + [cfg]
-    board_w = board_width(configs, metrics) if board_w is None else board_w
-    board_w = max(board_w, min_board_width(configs, metrics))
+    board_w = max(board_w, min_board_width(list(others) + [cfg], metrics))
     drop_x, drop_y = int(round(cfg.col)), int(round(cfg.row))
     width = cfg.width
     xs = {metrics.gap}
     ys = {metrics.gap}
     for other in others:
-        left, top, right, bottom = _aabb(other, metrics)
+        left, top, right, bottom = _aabb(other)
         xs.update((left, right + metrics.gap))
         ys.update((top, bottom + metrics.gap))
     max_x = max(metrics.gap, board_w - metrics.gap - width)

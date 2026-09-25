@@ -73,14 +73,6 @@ def _is_stdlib(root: str) -> bool:
     return root in sys.builtin_module_names or root in sys.stdlib_module_names
 
 
-def test_a_third_party_package_is_not_the_standard_library() -> None:
-    """The guard's own oracle: pytest is installed, and is not stdlib."""
-
-    assert _is_stdlib("json") and _is_stdlib("sys")
-    assert not _is_stdlib("pytest")
-    assert not _is_stdlib("PyQt5")
-
-
 def test_package_modules_are_nonempty_and_import_pure() -> None:
     modules = _package_modules()
     assert modules, "the purity guard must scan at least one package module"

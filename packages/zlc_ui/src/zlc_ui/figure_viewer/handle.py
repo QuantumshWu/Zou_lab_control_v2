@@ -94,7 +94,7 @@ class FigureViewerHandle(QtCore.QObject):
         view.pulse_size_committed.connect(self.pulse_size_committed)
         view.pulse_save_requested.connect(self.pulse_save_requested)
         view.close_requested.connect(self.close_requested)
-        if window is not None and hasattr(window, "closed"):
+        if window is not None:
             window.closed.connect(self.closed)
 
     # ------------------------------------------------------------ the window
@@ -111,7 +111,7 @@ class FigureViewerHandle(QtCore.QObject):
         QtCore.QTimer.singleShot(0, self.close)
 
     def set_close_guard(self, guard) -> None:
-        if self._window is None or not hasattr(self._window, "set_close_guard"):
+        if self._window is None:
             raise RuntimeError("figure viewer has no top-level close guard")
         self._window.set_close_guard(guard)
 
@@ -254,9 +254,6 @@ class FigureViewerHandle(QtCore.QObject):
 
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         self._view.set_panel_selectors_enabled(panel_id, enabled)
-
-    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
-        self._view.set_panel_mutation_enabled(panel_id, enabled)
 
     def present_panel_front(self, panel_id: str, front: object) -> bool:
         return self._view.present_panel_front(panel_id, front)

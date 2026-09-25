@@ -76,11 +76,6 @@ def spacer_control_width(card_width: int) -> int:
     return card_width - 2 * px(7) - px(4)
 
 
-def set_fixed_height(widget: QtWidgets.QWidget, height: int | None = None) -> QtWidgets.QWidget:
-    widget.setFixedHeight(row_height() if height is None else height)
-    return widget
-
-
 def set_form_label_geometry(label: FluentLabel) -> FluentLabel:
     label.setAlignment(QtCore.Qt.AlignCenter)
     label.setFixedSize(channel_label_width(), row_height())
@@ -115,16 +110,12 @@ def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> Fl
     return label
 
 
-def channel_row_height() -> int:
-    return px(ROW_HEIGHT, minimum=22)
-
-
 __all__ = [
     "add_labeled_widget", "card_gutter",
-    "channel_label_width", "channel_name_edit_width", "channel_row_height",
+    "channel_label_width", "channel_name_edit_width",
     "form_control_cell", "hide_button_width", "panel_top_height",
     "period_card_width", "period_control_width", "px", "row_height",
-    "row_region_vmetrics", "row_spacing", "set_fixed_height", "spacer_card_width",
+    "row_region_vmetrics", "row_spacing", "spacer_card_width",
     "spacer_control_width",
     "set_form_label_geometry", "time_unit_width",
 ]

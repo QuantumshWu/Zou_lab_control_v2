@@ -44,6 +44,7 @@ from ..fluent import (
     fluent_integer_box,
     fluent_unit_picker,
     fluent_switch_width,
+    retire_widget,
     scaled_px,
     setting_label_width,
     signals_blocked,
@@ -211,8 +212,10 @@ def _install_validator(field: FormFieldProps, widget: FluentLineEdit) -> None:
             field.unit, bottom=field.minimum, top=field.maximum
         )
     else:
+        # "float" or "number": an int|float field tells the box, whose
+        # width rewrites would otherwise turn 1e16 into the int 10**16.
         widget.set_numeric_validator(
-            "float", bottom=field.minimum, top=field.maximum
+            field.kind, bottom=field.minimum, top=field.maximum
         )
 
 
@@ -342,8 +345,7 @@ class _RowsEditor(QtWidgets.QWidget):
 
     def _retire(self, row: QtWidgets.QWidget) -> None:
         self._rows_layout.removeWidget(row)
-        row.hide()
-        row.deleteLater()
+        retire_widget(row)
 
     def _append(
         self, values: Mapping[str, object]
@@ -1421,11 +1423,9 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         row = self._rows.pop(key)
         self._layout.removeWidget(row)
-        # Reconcile may run while an Edit page is visible.  An unparented
-        # QWidget becomes a transient native window; hide the retired row
-        # and retain this form as QObject owner until DeferredDelete.
-        row.hide()
-        row.deleteLater()
+        # Reconcile may run while an Edit page is visible: the row keeps
+        # this form as its owner until its deferred delete.
+        retire_widget(row)
         self._widgets.pop(key, None)
         self._handlers.pop(key, None)
         self._auto_switches.pop(key, None)
@@ -1748,6 +1748,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         old_label_width = self._label_width or _form_label_width(
             self._spec.fields
         )
+        deferred = None
         for field in spec.fields:
             old_field = old_fields.get(field.key)
             if (
@@ -1759,6 +1760,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 # Its family changed while they are typing in it.  The
                 # new widget lands the moment they leave; a projection
                 # is never worth the words they are still writing.
+                deferred = field.key
                 continue
             handler = new_handlers[field.key]
             widget = handler.build(
@@ -1777,6 +1779,20 @@ class FluentParameterForm(QtWidgets.QWidget):
                     automatic_checked=prepared[field.key] is None,
                 ),
             )
+        if deferred is not None:
+            # Until they leave it, the row keeps the field and handler its
+            # widget was built for.  Recorded as the new field, the next
+            # reconcile would compare the new family with itself and the
+            # promised replacement would never land -- leaving a spin box
+            # under a handler that expects a line edit.
+            spec = FormSpec(
+                tuple(
+                    old_fields[deferred] if field.key == deferred else field
+                    for field in spec.fields
+                )
+            )
+            new_handlers[deferred] = FORM_WIDGET_HANDLERS[old_fields[deferred].kind]
+            new_dependents = self._dependency_map(spec)
 
         retained_widgets = tuple(
             self._widgets[field.key]
@@ -1803,7 +1819,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         try:
             with signals_blocked(*retained_widgets, *retained_switches):
                 for field in spec.fields:
-                    if field.key in replacements:
+                    if field.key in replacements or field.key == deferred:
                         continue
                     old_field = old_fields[field.key]
                     widget = self._widgets[field.key]

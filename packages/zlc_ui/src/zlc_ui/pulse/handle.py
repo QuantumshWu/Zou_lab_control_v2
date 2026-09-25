@@ -102,7 +102,6 @@ class PulseEditorHandle(QtCore.QObject):
 
     # -- the target ------------------------------------------------------
     target_apply_requested = QtCore.pyqtSignal(tuple)
-    target_feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, window: Any, view: PulseEditorView) -> None:
         super().__init__()
@@ -149,8 +148,7 @@ class PulseEditorHandle(QtCore.QObject):
         preview.selectors_toggled.connect(self.preview_selectors_toggled)
         preview.save_requested.connect(self.preview_save_requested)
         target.apply_requested.connect(self.target_apply_requested)
-        target.feedback_requested.connect(self.target_feedback_requested)
-        if window is not None and hasattr(window, "closed"):
+        if window is not None:
             window.closed.connect(self.closed)
 
     # ------------------------------------------------------------ the window
@@ -180,14 +178,9 @@ class PulseEditorHandle(QtCore.QObject):
         """Raise this existing editor; never construct a second window."""
 
         target = self._window if self._window is not None else self._view
-        if hasattr(target, "showNormal"):
-            target.showNormal()
-        else:
-            target.show()
-        if hasattr(target, "raise_"):
-            target.raise_()
-        if hasattr(target, "activateWindow"):
-            target.activateWindow()
+        target.showNormal()
+        target.raise_()
+        target.activateWindow()
 
     def window_size(self) -> tuple[int, int]:
         """Width and height of the window, for acceptance to check the rule."""
@@ -292,9 +285,6 @@ class PulseEditorHandle(QtCore.QObject):
     def set_connection(self, connection: ConnectionVM) -> None:
         self._view.schedule_view.set_connection(connection)
 
-    def set_scan_busy(self, busy: bool) -> None:
-        self._view.scan_view.set_workspace_busy(busy)
-
     # -------------------------------------------------------------- the scan
 
     def set_scan_page(self, record: Any) -> None:
@@ -302,9 +292,6 @@ class PulseEditorHandle(QtCore.QObject):
 
     def set_scan_progress_text(self, text: str) -> None:
         self._view.scan_view.set_progress_text(text)
-
-    def set_scan_repeats_range(self, low: int, high: int) -> None:
-        self._view.scan_view.set_repeats_range(low, high)
 
     # ----------------------------------------------------------- the preview
 

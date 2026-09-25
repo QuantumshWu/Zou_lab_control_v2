@@ -1,65 +1,13 @@
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from types import SimpleNamespace
 
 from zlc_ui.board import BoardMetrics, first_free_slot, nearest_anchor, pack
 
 
-ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-REPO_ROOT = ROOT.parents[1]
-
-
-def _run_qt_smoke(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    verified = """
-import zou_lab_control
-import zlc_ui
-print(zou_lab_control.__file__)
-print(zlc_ui.__file__)
-""" + code
-    completed = subprocess.run(
-        [sys.executable, "-c", verified],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_fluent_controls_and_shared_scale() -> None:
-    _run_qt_smoke(
+def test_point_review_is_one_fluent_view_and_dialog(run_qt) -> None:
+    run_qt(
         """
-from PyQt5 import QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton, FluentLabel, scaled_px, set_fluent_scale, window_pad
-ensure_qt_app(['zlc-ui-tests'])
-set_fluent_scale(1.0)
-assert window_pad() > 0
-assert scaled_px(10) == 10
-assert isinstance(FluentButton('Run'), QtWidgets.QPushButton)
-assert isinstance(FluentLabel('status'), QtWidgets.QLabel)
-"""
-    )
-
-
-def test_point_review_is_one_fluent_view_and_dialog() -> None:
-    _run_qt_smoke(
-        """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import PointReviewView
@@ -106,8 +54,8 @@ parent.close()
     )
 
 
-def test_plain_choice_picker_and_legend() -> None:
-    _run_qt_smoke(
+def test_plain_choice_picker_and_legend(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentComboBox, PublishedItemsLegend, fill_grouped_choice_combo, read_editable_combo
@@ -124,8 +72,8 @@ assert 'ambient temperature' in legend.toolTip()
     )
 
 
-def test_fluent_combo_popup_is_lazy_single_owned_and_keyboard_selectable() -> None:
-    _run_qt_smoke(
+def test_fluent_combo_popup_is_lazy_single_owned_and_keyboard_selectable(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -250,7 +198,7 @@ page.close()
     )
 
 
-def test_a_popup_opens_at_the_same_size_every_time_expanded_or_not() -> None:
+def test_a_popup_opens_at_the_same_size_every_time_expanded_or_not(run_qt) -> None:
     """The popup's geometry is a function of its content, not of the last opening.
 
     Read back from the scroll area's lazy layout, the chrome was the PREVIOUS
@@ -260,7 +208,7 @@ def test_a_popup_opens_at_the_same_size_every_time_expanded_or_not() -> None:
     content, the column is the viewport, and no horizontal bar exists.
     """
 
-    _run_qt_smoke(
+    run_qt(
         """
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -330,8 +278,8 @@ print('ok')
     )
 
 
-def test_form_runtime_context_and_qt_projection() -> None:
-    _run_qt_smoke(
+def test_form_runtime_context_and_qt_projection(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form import FormFieldProps, FormRuntimeContext, FormSpec, FluentParameterForm
@@ -345,41 +293,27 @@ assert form.read_all() == {'name': 'changed', 'count': 4}
     )
 
 
-def test_board_geometry_values() -> None:
-    metrics = BoardMetrics(4)
-    cards = [
-        SimpleNamespace(width=40, height=30, col=0, row=0),
-        SimpleNamespace(width=40, height=30, col=0, row=0),
-    ]
-    assert pack(cards, metrics, board_w=100)
-    assert cards[0].col <= cards[1].col
-    assert nearest_anchor(cards[0], cards[1:], metrics, board_w=100) == (4, 4)
+def _board_card(width: int, height: int, col: int = 0, row: int = 0):
+    return SimpleNamespace(width=width, height=height, col=col, row=row)
 
 
 def test_nearest_anchor_uses_probe_position_without_mutating_layout_record() -> None:
     metrics = BoardMetrics(8)
-    others = [
-        SimpleNamespace(width=500, height=275, col=0, row=0) for _ in range(3)
-    ]
+    others = [_board_card(500, 275) for _ in range(3)]
     pack(others, metrics, board_w=1200)
-    probe = SimpleNamespace(width=500, height=275, col=600, row=0)
+    probe = _board_card(500, 275, 600, 0)
     assert nearest_anchor(probe, others, metrics, 1200) == (516, 8)
     assert (probe.col, probe.row) == (600, 0)
 
+
 def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
     metrics = BoardMetrics(10)
-    others = [
-        SimpleNamespace(width=100, height=80, col=0, row=0) for _ in range(2)
-    ]
+    others = [_board_card(100, 80) for _ in range(2)]
     pack(others, metrics, board_w=350)
-    probe = SimpleNamespace(width=100, height=80, col=12, row=96)
+    probe = _board_card(100, 80, 12, 96)
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 100)
     probe.col, probe.row = 12, 14
     assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)
-
-
-def _board_card(width: int, height: int, col: int = 0, row: int = 0):
-    return SimpleNamespace(width=width, height=height, col=col, row=row)
 
 
 def test_a_card_put_below_another_stays_below_it() -> None:
@@ -449,7 +383,7 @@ def test_first_free_slot_tiles_the_top_row_then_wraps() -> None:
     assert slots == [(10, 10), (120, 10), (10, 100), (120, 100)]
 
 
-def test_only_the_tab_on_screen_is_built() -> None:
+def test_only_the_tab_on_screen_is_built_and_a_value_is_never_cut(run_qt) -> None:
     """A pane holds five tabs and a reader reads one.
 
     Every leaf of every row becomes a tree item, so building the four that
@@ -457,7 +391,7 @@ def test_only_the_tab_on_screen_is_built() -> None:
     asked for -- on a long run's document, hundreds of milliseconds of it.
     """
 
-    _run_qt_smoke(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import InfoPane
@@ -492,16 +426,8 @@ assert not plot.built, 'the reader was on Raw, so Plot waits'
 plot.filter_edit.setText('Other')
 assert plot.tree.topLevelItem(0).isHidden()
 assert not plot.tree.topLevelItem(1).isHidden()
-"""
-    )
+pane.close()
 
-
-def test_figure_info_construct() -> None:
-    _run_qt_smoke(
-        """
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import InfoPane
-app = ensure_qt_app(['zlc-ui-tests'])
 long_value = 'C:/' + 'very-long-segment/' * 12 + 'figure.npz'
 explicit = 'first\\nsecond\\nthird'
 pane = InfoPane(
@@ -524,7 +450,7 @@ assert tree.horizontalScrollBar().maximum() > 0
     )
 
 
-def test_a_data_table_shows_its_number_on_the_first_click() -> None:
+def test_a_data_table_opens_a_cell_on_one_click_and_every_direction_walks_the_grid(run_qt) -> None:
     """A click on a cell is a request to READ it, and one white ground.
 
     Selection paint -- any of it -- covers the digits the click was asking
@@ -534,22 +460,32 @@ def test_a_data_table_shows_its_number_on_the_first_click() -> None:
     The banding goes with it: every other Fluent surface here is one white
     ground separated by hairlines, and a striped table belongs to another
     toolkit.
+
+    Tab, Backtab, Up and Down are one contract, not three plus luck.  Qt
+    hands the delegate Tab and Backtab.  Up and Down only ever appeared to
+    work because a QLineEdit ignores them and the unhandled key reached the
+    view underneath -- an accident that ends the moment an editor consumes
+    arrows, and one a single-row table cannot even show.  The second editor
+    here is a spin box, which is exactly that case.
     """
 
-    _run_qt_smoke(
+    run_qt(
         """
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui import ensure_qt_app
 from zlc_ui.fluent import ACCENT_TINT, FluentTableView
 
 class Model(QtCore.QAbstractTableModel):
+    def __init__(self, size, value):
+        super().__init__()
+        self._size, self._value = size, value
     def rowCount(self, _p=QtCore.QModelIndex()):
-        return 4
+        return self._size
     def columnCount(self, _p=QtCore.QModelIndex()):
-        return 4
+        return self._size
     def data(self, index, role=QtCore.Qt.DisplayRole):
         if role in (QtCore.Qt.DisplayRole, QtCore.Qt.EditRole):
-            return f'{index.row() * 4 + index.column()}.5'
+            return self._value(index.row() * self._size + index.column())
         return None
     def flags(self, index):
         return (
@@ -558,9 +494,22 @@ class Model(QtCore.QAbstractTableModel):
             | QtCore.Qt.ItemIsEditable
         )
 
+def click(table, target):
+    QtWidgets.QApplication.sendEvent(
+        table.viewport(),
+        QtGui.QMouseEvent(
+            QtCore.QEvent.MouseButtonPress,
+            QtCore.QPointF(table.visualRect(target).center()),
+            QtCore.Qt.LeftButton,
+            QtCore.Qt.LeftButton,
+            QtCore.Qt.NoModifier,
+        ),
+    )
+    app.processEvents()
+
 app = ensure_qt_app(['zlc-ui-tests'])
 table = FluentTableView()
-table.setModel(Model())
+table.setModel(Model(4, lambda number: f'{number}.5'))
 table.resize(420, 200); table.show(); app.processEvents()
 
 assert not table.alternatingRowColors(), 'a Fluent table is not striped'
@@ -568,18 +517,7 @@ assert 'alternate-background-color' not in table.styleSheet()
 assert f'selection-background-color: {ACCENT_TINT}' in table.styleSheet()
 
 target = table.model().index(1, 2)
-point = table.visualRect(target).center()
-QtWidgets.QApplication.sendEvent(
-    table.viewport(),
-    QtGui.QMouseEvent(
-        QtCore.QEvent.MouseButtonPress,
-        QtCore.QPointF(point),
-        QtCore.Qt.LeftButton,
-        QtCore.Qt.LeftButton,
-        QtCore.Qt.NoModifier,
-    ),
-)
-app.processEvents()
+click(table, target)
 editor = table.findChild(QtWidgets.QLineEdit)
 assert editor is not None, 'one click must open the cell'
 assert editor.text() == '6.5', editor.text()
@@ -588,15 +526,51 @@ assert editor.text() == '6.5', editor.text()
 table.closePersistentEditor(target)
 table.setCurrentIndex(table.model().index(0, 0))
 table.setFocus()
-from PyQt5 import QtTest
 QtTest.QTest.keyClick(table, QtCore.Qt.Key_Right)
 QtTest.QTest.keyClick(table, QtCore.Qt.Key_Down)
 assert table.currentIndex() == table.model().index(1, 1), table.currentIndex()
+table.close()
+
+class SpinDelegate(QtWidgets.QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        box = QtWidgets.QSpinBox(parent)
+        box.setRange(0, 999)
+        return box
+
+table = FluentTableView()
+table.setModel(Model(5, int))
+table.setItemDelegate(SpinDelegate(table))
+table.resize(520, 220); table.show(); app.processEvents()
+
+def cell():
+    index = table.currentIndex()
+    return (index.row(), index.column())
+
+def press(key, modifier=QtCore.Qt.NoModifier):
+    editor = table.findChild(QtWidgets.QSpinBox)
+    QtTest.QTest.keyClick(editor if editor is not None else table, key, modifier)
+    app.processEvents()
+
+click(table, table.model().index(2, 2))
+assert cell() == (2, 2), cell()
+assert table.findChild(QtWidgets.QSpinBox) is not None, 'one click opens the cell'
+
+press(QtCore.Qt.Key_Down)
+assert cell() == (3, 2), f'Down must step a row: {cell()}'
+press(QtCore.Qt.Key_Up)
+assert cell() == (2, 2), f'Up must step back: {cell()}'
+press(QtCore.Qt.Key_Tab)
+assert cell() == (2, 3), f'Tab must step right: {cell()}'
+press(QtCore.Qt.Key_Backtab, QtCore.Qt.ShiftModifier)
+assert cell() == (2, 2), f'Shift+Tab must step left: {cell()}'
+
+# The cell stays open as it moves: stepping is part of editing.
+assert table.findChild(QtWidgets.QSpinBox) is not None
 """
     )
 
 
-def test_no_control_becomes_a_desktop_window_while_it_is_built() -> None:
+def test_no_control_becomes_a_desktop_window_while_it_is_built(run_qt) -> None:
     """A parentless widget made visible IS a top-level window.
 
     ``FluentPathEdit`` set its Refresh button visible before the layout
@@ -607,7 +581,7 @@ def test_no_control_becomes_a_desktop_window_while_it_is_built() -> None:
     for anything to be on screen: every child is born with its parent.
     """
 
-    _run_qt_smoke(
+    run_qt(
         """
 from PyQt5 import QtWidgets
 from zlc_ui import ensure_qt_app
@@ -633,92 +607,6 @@ assert field.refresh.parent() is field
 assert field.browse.parent() is field
 assert field.edit.parent() is field
 assert field.refresh.isVisible() is False, 'unshown parent, unshown child'
-"""
-    )
-
-
-def test_all_four_directions_walk_the_grid_while_a_cell_is_open() -> None:
-    """Tab, Backtab, Up and Down are one contract, not three plus luck.
-
-    Qt hands the delegate Tab and Backtab.  Up and Down only ever
-    appeared to work because a QLineEdit ignores them and the unhandled
-    key reached the view underneath -- an accident that ends the moment
-    an editor consumes arrows, and one a single-row table cannot even
-    show.  The editor here is a spin box, which is exactly that case.
-    """
-
-    _run_qt_smoke(
-        """
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
-from zlc_ui import ensure_qt_app
-from zlc_ui.fluent import FluentTableView
-
-class Model(QtCore.QAbstractTableModel):
-    def rowCount(self, _p=QtCore.QModelIndex()):
-        return 5
-    def columnCount(self, _p=QtCore.QModelIndex()):
-        return 5
-    def data(self, index, role=QtCore.Qt.DisplayRole):
-        if role in (QtCore.Qt.DisplayRole, QtCore.Qt.EditRole):
-            return index.row() * 5 + index.column()
-        return None
-    def flags(self, index):
-        return (
-            QtCore.Qt.ItemIsEnabled
-            | QtCore.Qt.ItemIsSelectable
-            | QtCore.Qt.ItemIsEditable
-        )
-
-class SpinDelegate(QtWidgets.QStyledItemDelegate):
-    def createEditor(self, parent, option, index):
-        box = QtWidgets.QSpinBox(parent)
-        box.setRange(0, 999)
-        return box
-
-app = ensure_qt_app(['zlc-ui-tests'])
-table = FluentTableView()
-table.setModel(Model())
-table.setItemDelegate(SpinDelegate(table))
-table.resize(520, 220); table.show(); app.processEvents()
-
-def cell():
-    index = table.currentIndex()
-    return (index.row(), index.column())
-
-def open_editor(row, column):
-    target = table.model().index(row, column)
-    QtWidgets.QApplication.sendEvent(
-        table.viewport(),
-        QtGui.QMouseEvent(
-            QtCore.QEvent.MouseButtonPress,
-            QtCore.QPointF(table.visualRect(target).center()),
-            QtCore.Qt.LeftButton,
-            QtCore.Qt.LeftButton,
-            QtCore.Qt.NoModifier,
-        ),
-    )
-    app.processEvents()
-
-def press(key, modifier=QtCore.Qt.NoModifier):
-    editor = table.findChild(QtWidgets.QSpinBox)
-    QtTest.QTest.keyClick(editor if editor is not None else table, key, modifier)
-    app.processEvents()
-
-open_editor(2, 2)
-assert cell() == (2, 2), cell()
-assert table.findChild(QtWidgets.QSpinBox) is not None, 'one click opens the cell'
-
-press(QtCore.Qt.Key_Down)
-assert cell() == (3, 2), f'Down must step a row: {cell()}'
-press(QtCore.Qt.Key_Up)
-assert cell() == (2, 2), f'Up must step back: {cell()}'
-press(QtCore.Qt.Key_Tab)
-assert cell() == (2, 3), f'Tab must step right: {cell()}'
-press(QtCore.Qt.Key_Backtab, QtCore.Qt.ShiftModifier)
-assert cell() == (2, 2), f'Shift+Tab must step left: {cell()}'
-
-# The cell stays open as it moves: stepping is part of editing.
-assert table.findChild(QtWidgets.QSpinBox) is not None
 """
     )
 

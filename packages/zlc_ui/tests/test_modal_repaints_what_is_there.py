@@ -13,11 +13,8 @@ Measured on a pulse reopen before the fix: 6 old period cards alive beside the
 
 from __future__ import annotations
 
-import pytest
-
 
 def test_a_dialog_opens_only_after_retired_widgets_are_gone() -> None:
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtWidgets
 
     from zlc_ui.fluent import retire_pending_widgets
@@ -84,7 +81,6 @@ def test_a_modal_always_opens_where_its_buttons_can_be_clicked() -> None:
     pulse with the window near an edge was an unrecoverable freeze.
     """
 
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtCore, QtWidgets
 
     from zlc_ui.qt import ensure_qt_app
@@ -140,7 +136,6 @@ def test_a_frameless_card_can_be_moved_because_it_is_its_own_title_bar() -> None
     buttons still click and the message body still selects.
     """
 
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtCore, QtGui, QtWidgets
 
     from zlc_ui.qt import ensure_qt_app
@@ -197,7 +192,6 @@ def test_the_full_dialog_window_opens_on_a_screen_too() -> None:
     have moved it back.
     """
 
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtWidgets
 
     from zlc_ui.fluent import FluentDialogWindow, screen_fit_window_size

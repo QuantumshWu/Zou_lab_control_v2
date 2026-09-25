@@ -30,8 +30,12 @@ from zlc_ui.fluent import (
 
 from .logic_row_view import LogicRowView
 from .logic_editor_view import LogicEditorView
-from .panel_card_view import PanelCardView
-from .panel_editor_view import PanelEditorView
+from .panel_card_view import PanelCardView, new_panel_card
+from .panel_editor_view import (
+    PanelEditorView,
+    new_panel_editor,
+    panel_editor_projection,
+)
 from .point_review_view import PointReviewView
 from .signal_chooser import choose_signal
 from .task_console_view import TaskConsoleView
@@ -59,7 +63,6 @@ class TaskConsoleHandle(QtCore.QObject):
     """One task console, as the outside sees it."""
 
     # -- the window ------------------------------------------------------
-    close_requested = QtCore.pyqtSignal()
     closed = QtCore.pyqtSignal()
 
     # -- the board -------------------------------------------------------
@@ -140,9 +143,7 @@ class TaskConsoleHandle(QtCore.QObject):
             "stop_task_requested", "panel_order_committed",
         ):
             getattr(view, name).connect(getattr(self, name))
-        if hasattr(view, "close_requested"):
-            view.close_requested.connect(self.close_requested)
-        if window is not None and hasattr(window, "closed"):
+        if window is not None:
             window.closed.connect(self.closed)
         view.editor_close_requested.connect(self._editor_close_requested)
 
@@ -151,8 +152,6 @@ class TaskConsoleHandle(QtCore.QObject):
     def close(self) -> None:
         if self._window is not None:
             self._window.close()
-        elif hasattr(self._view, "finish_close"):
-            self._view.finish_close()
 
     def close_later(self) -> None:
         """Retry the top-level close after the current owner turn finishes."""
@@ -175,6 +174,23 @@ class TaskConsoleHandle(QtCore.QObject):
     def is_visible(self) -> bool:
         target = self._window if self._window is not None else self._view
         return bool(target.isVisible())
+
+    def plots_visible(self) -> bool:
+        """Whether a live plot is on screen: the Monitor board or a panel's Edit.
+
+        A panel's Edit counts because its Refresh and its "live data advanced"
+        mark read the card's accepted picture.  A window that was never shown
+        (a headless composition) is hidden by nobody and counts as showing.
+        """
+
+        target = self._window if self._window is not None else self._view
+        if not target.isVisible():
+            return True
+        if target.isMinimized():
+            return False
+        return bool(self._view.board.isVisible()) or any(
+            editor.isVisible() for editor in self._panel_editors.values()
+        )
 
     def window_size(self) -> tuple[int, int]:
         target = self._window if self._window is not None else self._view
@@ -201,42 +217,33 @@ class TaskConsoleHandle(QtCore.QObject):
         self._view.set_panel_kinds(kinds, current)
 
     def set_panel_intervals(self, intervals: object, default_interval: int) -> None:
-        """Project the scheduler's finite refresh policy to every panel view."""
+        """Project the scheduler's finite refresh policy to every panel view.
 
-        values = tuple(int(value) for value in tuple(intervals or ()))
-        if not values:
-            raise ValueError("panel interval choices must not be empty")
-        default = int(default_interval)
-        if default not in values:
-            raise ValueError("default panel interval must be one of the choices")
-        self._panel_intervals = values
-        self._panel_default_interval = default
+        Each card validates the policy it is given; this only keeps it for
+        the cards still to come.
+        """
+
+        self._panel_intervals = tuple(int(value) for value in tuple(intervals))
+        self._panel_default_interval = int(default_interval)
         for card in self._cards.values():
-            card.set_interval_choices(values, default)
+            card.set_interval_choices(
+                self._panel_intervals, self._panel_default_interval
+            )
 
     def set_panel_sizes(self, sizes: object, default_size: str) -> None:
         """Project the plotting owner's finite size policy to every panel view."""
 
-        values = tuple(str(value) for value in tuple(sizes or ()))
-        if not values or len(set(values)) != len(values):
-            raise ValueError("panel size choices must be unique and non-empty")
-        default = str(default_size)
-        if default not in values:
-            raise ValueError("default panel size must be one of the choices")
-        self._panel_sizes = values
-        self._panel_default_size = default
+        self._panel_sizes = tuple(str(value) for value in tuple(sizes))
+        self._panel_default_size = str(default_size)
         for card in self._cards.values():
-            card.set_size_choices(values, default)
+            card.set_size_choices(self._panel_sizes, self._panel_default_size)
 
     def set_grid_cell_kinds(self, kinds: object) -> None:
         """Project the grid cell vocabulary to every panel's settings control."""
 
-        values = tuple(str(value) for value in tuple(kinds or ()))
-        if not values or len(set(values)) != len(values):
-            raise ValueError("grid cell kinds must be unique and non-empty")
-        self._grid_cell_kinds = values
+        self._grid_cell_kinds = tuple(str(value) for value in tuple(kinds))
         for card in self._cards.values():
-            card.set_cell_kind_choices(values)
+            card.set_cell_kind_choices(self._grid_cell_kinds)
 
     def set_logic_kinds(
         self, kinds: tuple[tuple[str, str, str], ...]
@@ -381,35 +388,8 @@ class TaskConsoleHandle(QtCore.QObject):
         """
 
         key = str(panel_id)
-        card = self._cards.get(key)
-        if card is None:
-            card = PanelCardView(key, str(title))
-            if not self._panel_sizes:
-                raise RuntimeError("panel size choices were not projected")
-            card.set_size_choices(self._panel_sizes, self._panel_default_size)
-            card.remove_requested.connect(
-                lambda _=None, pid=key: self.panel_remove_requested.emit(pid)
-            )
-            card.edit_requested.connect(
-                lambda _=None, pid=key: self.panel_edit_requested.emit(pid)
-            )
-            card.state_changed.connect(
-                lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
-            )
-            card.plot_error.connect(
-                lambda message, pid=key: self.panel_plot_error.emit(
-                    pid, str(message)
-                )
-            )
-            self._cards[key] = card
-            if self._panel_intervals:
-                card.set_interval_choices(
-                    self._panel_intervals,
-                    self._panel_default_interval,
-                )
-            if self._grid_cell_kinds:
-                card.set_cell_kind_choices(self._grid_cell_kinds)
-            card.set_editing_enabled(True)
+        if key not in self._cards:
+            self._cards[key] = new_panel_card(self, key, title)
         self._view.set_cards(tuple(self._cards.values()))
 
     def remove_panel(self, panel_id: str) -> None:
@@ -478,18 +458,6 @@ class TaskConsoleHandle(QtCore.QObject):
     def set_panel_status(self, panel_id: str, text: str, *, error: bool) -> None:
         self._cards[str(panel_id)].set_status(text, error=error)
 
-    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
-        """Combine one panel's owner gate with the application Task gate."""
-
-        key = str(panel_id)
-        effective = bool(enabled)
-        card = self._cards.get(key)
-        if card is not None:
-            card.set_editing_enabled(effective)
-        editor = self._panel_editors.get(key)
-        if editor is not None:
-            editor.set_mutation_enabled(effective)
-
     def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
         key = str(panel_id)
         self._cards[key].set_selectors_enabled(enabled)
@@ -501,34 +469,14 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def open_panel_editor(self, panel_id: str, projection: Any) -> None:
         key = str(panel_id)
-        incoming = dict(projection)
-        incoming["interval_choices"] = self._panel_intervals
-        incoming["size_choices"] = self._panel_sizes
         editor = self._panel_editors.get(key)
         if editor is None:
-            editor = PanelEditorView(key, incoming)
-            editor.set_mutation_enabled(True)
-            editor.state_changed.connect(
-                lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
-            )
-            editor.snapshot_refresh_requested.connect(
-                lambda _=None, pid=key: self.panel_snapshot_refresh_requested.emit(pid)
-            )
+            editor = new_panel_editor(self, key, projection)
             editor.producer_edit_requested.connect(
                 lambda node_id: self.logic_edit_requested.emit(str(node_id))
             )
-            editor.save_figure_requested.connect(
-                lambda path, pid=key: self.panel_save_figure_requested.emit(pid, str(path))
-            )
-            # The Edit surface's failures travel the same channel as the
-            # card's: one relay rule, one place the console reports a plot.
-            editor.plot_error.connect(
-                lambda message, pid=key: self.panel_plot_error.emit(
-                    pid, str(message)
-                )
-            )
             self._panel_editors[key] = editor
-            state = incoming.get("state") or {}
+            state = dict(projection).get("state") or {}
             title = (
                 str(dict(state).get("title") or key)
                 if isinstance(state, Mapping)
@@ -536,7 +484,7 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             self._view.add_editor_tab(editor, f"Edit Panel · {title}")
         else:
-            editor.update_projection(incoming)
+            editor.update_projection(panel_editor_projection(self, projection))
             self._view.focus_editor_tab(editor)
         editor.set_selectors_enabled(self._cards[key].selectors_enabled)
 
@@ -544,10 +492,7 @@ class TaskConsoleHandle(QtCore.QObject):
         editor = self._panel_editors.get(str(panel_id))
         if editor is None:
             return False
-        incoming = dict(projection)
-        incoming["interval_choices"] = self._panel_intervals
-        incoming["size_choices"] = self._panel_sizes
-        editor.update_projection(incoming)
+        editor.update_projection(panel_editor_projection(self, projection))
         return True
 
     def set_panel_snapshot_status(self, panel_id: str, status: Mapping[str, object]) -> None:

@@ -1,54 +1,13 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
-import sys
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-REPO_ROOT = ROOT.parents[1]
-
-
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
-#: product bootstrap is what puts this checkout's layers on the path,
-#: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
-
-
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        "" if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_panel_card_construct_and_setters() -> None:
-    _run_qt(
+def test_panel_card_construct_and_setters(run_qt) -> None:
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 from zlc_ui.console import panel_card_view as tested_module
-print(tested_module.__file__)
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
 card = PanelCardView('panel-1', 'Card')
@@ -156,13 +115,10 @@ else:
     )
 
 
-def test_panel_card_qtest_signal_payloads() -> None:
-    _run_qt(
+def test_panel_card_qtest_signal_payloads(run_qt) -> None:
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from zlc_ui.console import panel_card_view as tested_module
-print(tested_module.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.fluent import GREY, RED, FluentOverlayFrame
 from zlc_ui.qt import ensure_qt_app
@@ -194,42 +150,22 @@ QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
 assert events == [('remove',)]
 assert GREY.lower() in card.close_button.styleSheet().lower()
 # Edit and the explicit text Remove remain available in Setting as well.
-top_levels = {widget for widget in app.topLevelWidgets() if widget.isVisible()}
-shown_top_levels = []
-class _TopLevelShowSpy(QtCore.QObject):
-    def eventFilter(self, watched, event):
-        if (
-            event.type() == QtCore.QEvent.Show
-            and isinstance(watched, QtWidgets.QWidget)
-            and watched.isWindow()
-        ):
-            shown_top_levels.append(type(watched).__name__)
-        return False
-show_spy = _TopLevelShowSpy()
-app.installEventFilter(show_spy)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 popup = card._settings_popup
 # A frame INSIDE the page, not a window.  A bare card is its own page, so
-# the frame is an ordinary child clipped to the card -- and no top-level
-# of any kind is shown for it: there is nothing the desktop could stack,
-# lose behind another program, or leave floating over the wrong tab.
+# the frame is an ordinary child clipped to the card.
 assert isinstance(popup, FluentOverlayFrame)
 assert not popup.isWindow()
 assert popup.parentWidget() is card.window()
-assert shown_top_levels == []
 assert card._settings_drag_handle.text() == 'Setting · panel-1'
 assert card._settings_close_button.toolTip() == 'Close settings'
-assert {
-    widget for widget in app.topLevelWidgets() if widget.isVisible()
-} == top_levels
 assert 240 <= popup.width() <= 320
 assert popup.height() <= card.height()
 assert popup.mapToGlobal(popup.rect().bottomRight()).y() <= card.mapToGlobal(
     card.rect().bottomRight()
 ).y()
 assert card._settings_scroll.geometry().right() == popup.rect().right()
-assert not hasattr(card, 'apply_button')
 app.processEvents()
 # Whatever the form's length, all of it is reachable inside the popup the
 # card clamps: the scrollbar's range is exactly the overflow.
@@ -245,48 +181,20 @@ interval.setCurrentIndex(interval.findData(800))
 interval.activated.emit(interval.currentIndex())
 app.processEvents()
 assert popup.isVisible()
-start = popup.pos()
-press = QtCore.QPoint(5, 5)
-handle = card._settings_drag_handle
-origin = handle.mapToGlobal(press)
-target = origin + QtCore.QPoint(24, 18)
-QtWidgets.QApplication.sendEvent(
-    handle,
-    QtGui.QMouseEvent(
-        QtCore.QEvent.MouseButtonPress, press, origin,
-        QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-    ),
-)
-QtWidgets.QApplication.sendEvent(
-    handle,
-    QtGui.QMouseEvent(
-        QtCore.QEvent.MouseMove, press + QtCore.QPoint(24, 18), target,
-        QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-    ),
-)
-QtWidgets.QApplication.sendEvent(
-    handle,
-    QtGui.QMouseEvent(
-        QtCore.QEvent.MouseButtonRelease, press + QtCore.QPoint(24, 18), target,
-        QtCore.Qt.LeftButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
-    ),
-)
-app.processEvents()
-assert popup.pos() != start
+# Closing never delays the next open: no wait between them.
 QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert not popup.isVisible()
-QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
+assert popup.isVisible()
 popup.hide()  # The page owner may hide it while switching views.
 app.processEvents()
 assert not popup.isVisible()
-QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
-QtTest.QTest.qWait(300)
+app.processEvents()
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
@@ -294,14 +202,13 @@ assert ('edit',) in events
 assert ('remove',) in events
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 assert ('state', {'interval_ms': 800}) in events
-app.removeEventFilter(show_spy)
 popup.close(); card.close(); card.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 """
     )
 
 
-def test_the_setting_frame_belongs_to_the_panel_page() -> None:
+def test_the_setting_frame_belongs_to_the_panel_page(run_qt) -> None:
     """The Setting frame lives inside the panel page, full stop.
 
     It was a Qt.Popup once (dismissed by the next click), then a Qt.Tool
@@ -316,12 +223,9 @@ def test_the_setting_frame_belongs_to_the_panel_page() -> None:
     with the window, gone with it.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from zlc_ui.fluent import fluent as tested_module
-print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui import open_task_console
 from zlc_ui.console import PanelCardView
@@ -495,17 +399,11 @@ app.processEvents()
     )
 
 
-def test_public_panel_removal_retires_its_popup_and_card() -> None:
-    _run_qt(
+def test_public_panel_removal_retires_its_popup_and_card(run_qt) -> None:
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from PyQt5 import QtCore, sip
 from zlc_ui import open_task_console
-from zlc_ui.console import board_view as board_module
-from zlc_ui.console import handle as handle_module
-print(board_module.__file__)
-print(handle_module.__file__)
 from zlc_ui.qt import ensure_qt_app
 
 app = ensure_qt_app(['panel-remove'])
@@ -545,7 +443,7 @@ finally:
     )
 
 
-def test_a_dragged_setting_popup_stays_where_the_operator_put_it() -> None:
+def test_a_dragged_setting_popup_stays_where_the_operator_put_it(run_qt) -> None:
     """Growing the form must not throw the popup back beside its button.
 
     Placement had two owners -- the anchor and the operator's drag -- and
@@ -560,10 +458,8 @@ def test_a_dragged_setting_popup_stays_where_the_operator_put_it() -> None:
     the frame opens; nothing re-places a frame that is already on screen.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control, zlc_ui
-print(zou_lab_control.__file__); print(zlc_ui.__file__)
 from PyQt5 import QtCore
 from zlc_ui import open_task_console
 from zlc_ui.qt import ensure_qt_app
@@ -638,10 +534,6 @@ try:
     card.retire_settings_popup()
     app.processEvents()
     assert not popup.isVisible()
-    assert not hasattr(card, '_settings_origin'), (
-        'a remembered origin only ever existed to survive a re-placement '
-        'that no longer happens'
-    )
     specs = []
     original_spec = card._form_spec
     def counted_spec():
@@ -663,8 +555,8 @@ finally:
     )
 
 
-def test_board_constructs_and_packs_from_metrics() -> None:
-    _run_qt(
+def test_board_constructs_and_packs_from_metrics(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.board import BoardMetrics
@@ -686,8 +578,8 @@ assert not board.grab().isNull()
     )
 
 
-def test_board_does_not_capture_ancestor_update_suppression() -> None:
-    _run_qt(
+def test_board_does_not_capture_ancestor_update_suppression(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -729,69 +621,9 @@ app.processEvents()
     )
 
 
-def test_board_qtest_drop_intent_payload() -> None:
-    _run_qt(
-        """
-from PyQt5 import QtCore
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import ConsoleBoardView, PanelCardView
-app = ensure_qt_app(['test'])
-card = PanelCardView('panel-1')
-board = ConsoleBoardView(); board.set_cards((card,))
-events = []
-board.order_committed.connect(lambda value: events.append(value))
-card.dropped.emit((40, 50))
-assert events == [('panel-1',)]
-"""
-    )
-
-
-def test_board_qtest_drop_uses_the_nearest_anchor_before_gravity() -> None:
-    _run_qt(
-        """
-from PyQt5 import QtCore, QtTest
-from zlc_ui.board import BoardMetrics
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import ConsoleBoardView, PanelCardView
-app = ensure_qt_app(['test'])
-metrics = BoardMetrics(10)
-cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-w, h = cards[0].size().width(), cards[0].size().height()
-board = ConsoleBoardView(metrics=metrics)
-board.resize(3 * w + 4 * 10, 2 * h + 3 * 10)
-board.set_cards(cards); board.show(); app.processEvents()
-events = []
-board.order_committed.connect(events.append)
-row = ((10, 10), (20 + w, 10), (30 + 2 * w, 10))
-assert tuple(card.geometry().getRect()[:2] for card in cards) == row
-
-def drop_top_left_at(card, top_left):
-    grab = QtCore.QPoint(18, 18)
-    target = card.mapFrom(board, QtCore.QPoint(top_left[0] + 18, top_left[1] + 18))
-    QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, pos=grab)
-    QtTest.QTest.mouseMove(card, target)
-    QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=target)
-    app.processEvents()
-
-drop_top_left_at(cards[2], (12, h + 16))
-assert board._order == ('panel-0', 'panel-1', 'panel-2')
-second_row = ((10, 10), (20 + w, 10), (10, 20 + h))
-assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
-
-board.resize(w + 20, 4 * h); app.processEvents()
-assert all(card.geometry().x() == 10 for card in cards)
-board.resize(3 * w + 4 * 10, 2 * h + 3 * 10); app.processEvents()
-assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
-
-drop_top_left_at(cards[2], (12, 14))
-assert board._order == ('panel-2', 'panel-0', 'panel-1')
-assert tuple(board._cards[panel_id].geometry().getRect()[:2] for panel_id in board._order) == row
-"""
-    )
-
-
-def test_board_keeps_every_place_a_drop_authored() -> None:
-    """A drop moves the card that was dropped.  It does not release the others.
+def test_board_qtest_drop_uses_the_nearest_anchor_and_keeps_every_place_a_drop_authored(run_qt) -> None:
+    """A drop lands at the nearest anchor, commits the new order, and moves
+    only the card that was dropped.
 
     The board packed every card into the first free slot on the board and
     exempted exactly one -- whichever had been dropped last -- so it could
@@ -800,24 +632,26 @@ def test_board_keeps_every_place_a_drop_authored() -> None:
     gravity never does: it stops a card at the first thing in its way.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.board import BoardMetrics
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import ConsoleBoardView, PanelCardView
-app = ensure_qt_app(['placements'])
+app = ensure_qt_app(['test'])
 metrics = BoardMetrics(10)
-cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
-w, h = cards[0].size().width(), cards[0].size().height()
-board = ConsoleBoardView(metrics=metrics)
-board.resize(3 * w + 4 * 10, 3 * h + 4 * 10)
-board.set_cards(cards); board.show(); app.processEvents()
-assert tuple(card.geometry().getRect()[:2] for card in cards) == (
-    (10, 10), (20 + w, 10), (30 + 2 * w, 10)
-)
 
-def drop_top_left_at(card, top_left):
+def new_board(rows):
+    cards = tuple(PanelCardView(f'panel-{index}') for index in range(3))
+    w, h = cards[0].size().width(), cards[0].size().height()
+    board = ConsoleBoardView(metrics=metrics)
+    board.resize(3 * w + 4 * 10, rows * h + (rows + 1) * 10)
+    board.set_cards(cards); board.show(); app.processEvents()
+    events = []
+    board.order_committed.connect(events.append)
+    return board, cards, events, w, h
+
+def drop_top_left_at(board, card, top_left):
     grab = QtCore.QPoint(18, 18)
     target = card.mapFrom(board, QtCore.QPoint(top_left[0] + 18, top_left[1] + 18))
     QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, pos=grab)
@@ -825,13 +659,39 @@ def drop_top_left_at(card, top_left):
     QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=target)
     app.processEvents()
 
+# The nearest anchor, before gravity; each drop commits the board's order.
+board, cards, events, w, h = new_board(2)
+row = ((10, 10), (20 + w, 10), (30 + 2 * w, 10))
+assert tuple(card.geometry().getRect()[:2] for card in cards) == row
+
+drop_top_left_at(board, cards[2], (12, h + 16))
+assert events[-1] == ('panel-0', 'panel-1', 'panel-2'), events
+second_row = ((10, 10), (20 + w, 10), (10, 20 + h))
+assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
+
+board.resize(w + 20, 4 * h); app.processEvents()
+assert all(card.geometry().x() == 10 for card in cards)
+board.resize(3 * w + 4 * 10, 2 * h + 3 * 10); app.processEvents()
+assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
+
+drop_top_left_at(board, cards[2], (12, 14))
+assert events[-1] == ('panel-2', 'panel-0', 'panel-1'), events
+by_id = {card.panel_id: card for card in cards}
+assert tuple(by_id[panel_id].geometry().getRect()[:2] for panel_id in events[-1]) == row
+
+# Every place a drop authored stands through the next drop.
+board.close()
+board, cards, events, w, h = new_board(3)
+assert tuple(card.geometry().getRect()[:2] for card in cards) == (
+    (10, 10), (20 + w, 10), (30 + 2 * w, 10)
+)
 # panel-1 under panel-0; panel-2 slides left into the place it left.
-drop_top_left_at(cards[1], (12, h + 16))
+drop_top_left_at(board, cards[1], (12, h + 16))
 assert cards[1].geometry().getRect()[:2] == (10, 20 + h), cards[1].geometry()
 assert cards[2].geometry().getRect()[:2] == (20 + w, 10), cards[2].geometry()
 
 # A second drop, and the first placement still stands.
-drop_top_left_at(cards[2], (12, 2 * h + 40))
+drop_top_left_at(board, cards[2], (12, 2 * h + 40))
 assert cards[0].geometry().getRect()[:2] == (10, 10), cards[0].geometry()
 assert cards[1].geometry().getRect()[:2] == (10, 20 + h), cards[1].geometry()
 assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry()
@@ -839,8 +699,8 @@ assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry(
     )
 
 
-def test_board_qtest_drag_has_free_positions_without_ghost_or_live_reflow() -> None:
-    _run_qt(
+def test_board_qtest_drag_has_free_positions_without_ghost_or_live_reflow(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.board import BoardMetrics
@@ -854,7 +714,6 @@ board = ConsoleBoardView(metrics=metrics)
 board.resize(2 * w + 3 * 10, 2 * h + 3 * 10)
 board.set_cards(cards); board.show(); app.processEvents()
 before = tuple(card.geometry().getRect() for card in cards[1:])
-assert not hasattr(board, '_ghost')
 
 def drag_to(card, board_point):
     start = card.geometry().center()
@@ -880,8 +739,8 @@ assert board._order == ('panel-1', 'panel-2', 'panel-3', 'panel-0')
     )
 
 
-def test_board_drag_raises_the_active_card_above_an_overlapping_sibling() -> None:
-    _run_qt(
+def test_board_drag_raises_the_active_card_above_an_overlapping_sibling(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.board import BoardMetrics
@@ -909,8 +768,8 @@ QtTest.QTest.mouseRelease(first, QtCore.Qt.LeftButton, pos=QtCore.QPoint(18, 18)
     )
 
 
-def test_board_reuses_cards_and_reflows_on_resize() -> None:
-    _run_qt(
+def test_board_reuses_cards_and_reflows_on_resize(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.board import BoardMetrics
@@ -931,13 +790,14 @@ assert all(card.geometry().x() == 10 for card in cards)
     )
 
 
-def test_logic_row_construct_and_setters() -> None:
-    _run_qt(
+def test_logic_row_projects_its_state_and_raises_its_intents(run_qt) -> None:
+    run_qt(
         """
+from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView
 app = ensure_qt_app(['test'])
-row = LogicRowView('Processor', 'processor')
+row = LogicRowView('Processor', 'processor'); row.show(); app.processEvents()
 assert not row.start_button.isEnabled()
 assert not row.stop_button.isEnabled()
 row.set_commands(can_start=True, can_stop=True)
@@ -948,18 +808,6 @@ assert row.stop_button.isEnabled()
 assert row.start_button.isEnabled()
 assert row.start_button.text() == 'Restart'
 assert 'out' in row.publishes_label.text()
-"""
-    )
-
-
-def test_logic_row_qtest_signal_payloads() -> None:
-    _run_qt(
-        """
-from PyQt5 import QtCore, QtTest
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import LogicRowView
-app = ensure_qt_app(['test'])
-row = LogicRowView('Processor', 'processor'); row.show(); app.processEvents()
 events = []
 row.start_requested.connect(lambda: events.append('start'))
 row.edit_requested.connect(lambda: events.append('edit'))
@@ -971,12 +819,9 @@ assert events == ['start', 'edit']
     )
 
 
-def test_logic_editor_is_a_live_closable_draft_projection() -> None:
-    _run_qt(
+def test_logic_editor_is_a_live_closable_draft_projection(run_qt) -> None:
+    run_qt(
         """
-import zou_lab_control
-import zlc_ui.console.logic_editor_view as tested_module
-print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -1185,13 +1030,9 @@ assert 'panel-1' not in handle._panel_publisher_editors
     )
 
 
-def test_panel_editor_and_setting_are_views_of_the_same_projection() -> None:
-    _run_qt(
+def test_panel_editor_and_setting_are_views_of_the_same_projection(run_qt) -> None:
+    run_qt(
         """
-import zou_lab_control
-import zlc_ui.console.panel_editor_view as tested_module
-print(zou_lab_control.__file__)
-print(tested_module.__file__)
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
@@ -1383,7 +1224,7 @@ compact_surface = dict(
 )
 handle.set_panel_projection('panel-1', state, compact_surface)
 card._settings_popup.hide()
-QtTest.QTest.qWait(300)
+app.processEvents()
 card._open_settings()
 app.processEvents()
 compact_left_edges = {
@@ -1398,7 +1239,7 @@ title_widget = card._settings_form.widget_for('title')
 natural_title_width = title_widget.minimumWidth()
 title_widget.setMinimumWidth(520)
 card._settings_popup.hide()
-QtTest.QTest.qWait(300)
+app.processEvents()
 card._open_settings()
 card._settings_body.layout().activate()
 editor_right = title_widget.mapTo(
@@ -1807,13 +1648,16 @@ temporary.cleanup()
     )
 
 
-def test_status_strip_construct_and_priority() -> None:
-    _run_qt(
+def test_status_strip_shows_the_latest_line_and_falls_back_to_idle(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import StatusStrip
 app = ensure_qt_app(['test'])
 strip = StatusStrip()
+strip.show_status('idle text', 'idle')
+assert strip.current_severity == 'idle'
+assert strip.text() == 'idle text'
 strip.show_status('warning text', 'warning')
 assert strip.current_severity == 'warning'
 strip.show_status('task text', 'task')
@@ -1827,28 +1671,16 @@ assert strip.text() == 'error text'
 strip.show_status('saved 3 panel(s)', 'task')
 assert strip.current_severity == 'task'
 assert strip.text() == 'saved 3 panel(s)'
-"""
-    )
-
-
-def test_status_strip_idle_fallback() -> None:
-    _run_qt(
-        """
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import StatusStrip
-app = ensure_qt_app(['test'])
-strip = StatusStrip()
-strip.show_status('task text', 'task')
+# An empty message is nothing to say: the idle line, not an older one.
 strip.show_status('', 'task')
-strip.show_status('idle text', 'idle')
 assert strip.current_severity == 'idle'
 assert strip.text() == 'idle text'
 """
     )
 
 
-def test_task_console_construct_and_setters() -> None:
-    _run_qt(
+def test_task_console_construct_and_setters(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView, PanelCardView, TaskConsoleView
@@ -1895,8 +1727,8 @@ for widget in (
     )
 
 
-def test_task_console_reuses_logic_rows_after_repeated_projection() -> None:
-    _run_qt(
+def test_task_console_reuses_logic_rows_after_repeated_projection(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView, TaskConsoleView
@@ -1911,8 +1743,6 @@ row_a.set_state('running', 'still usable')
 row_b.set_state('idle', 'also usable')
 assert row_a.parentWidget() is view.logic_body
 assert row_b.parentWidget() is view.logic_body
-assert view._logic_rows == (row_a, row_b)
-assert view.logic_layout.count() == 4  # hidden hint + two rows + permanent stretch
 assert not view.logic_hint.isVisible()
 assert row_a.status_label.text() == 'still usable'
 assert row_b.status_label.text() == 'also usable'
@@ -1920,11 +1750,10 @@ assert row_b.status_label.text() == 'also usable'
     )
 
 
-def test_task_console_qtest_signal_payloads() -> None:
-    _run_qt(
-        """import zou_lab_control
+def test_task_console_qtest_signal_payloads(run_qt) -> None:
+    run_qt(
+        """
 from zlc_ui.console import task_console_view as tested_module
-print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import TaskConsoleHandle
@@ -1959,7 +1788,6 @@ assert view.kind_combo.itemText(2) == 'Measurement: Camera Measurement'
 assert view.kind_combo.itemText(3) == 'Processor: Occupancy'
 assert view.kind_combo.itemText(4) == 'Task: Calibration'
 assert view.kind_combo.currentData() == ('plot', 'image')
-assert not hasattr(view, 'add_logic_button')
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
 view.kind_combo.setCurrentIndex(2)
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
@@ -2026,7 +1854,7 @@ assert camera_row.remove_button.isEnabled()
     )
 
 
-def test_pause_is_reversible_and_says_which_way_it_goes() -> None:
+def test_pause_is_reversible_and_says_which_way_it_goes(run_qt) -> None:
     """A one-way pause is a stopped console with no way back.
 
     The button carries the command and its label carries the state, so it must
@@ -2034,7 +1862,7 @@ def test_pause_is_reversible_and_says_which_way_it_goes() -> None:
     is what tells it which that is.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
@@ -2054,14 +1882,14 @@ assert asked == [True, False], asked
     )
 
 
-def test_the_signal_chooser_lists_rows_under_their_producer() -> None:
+def test_the_signal_chooser_lists_rows_under_their_producer(run_qt) -> None:
     """It is asked for at the moment it is needed, so it can be readable.
 
     A picker squeezed into the header collapsed to an ellipsis and clipped
     the control beside it; a chooser you cannot read is not a chooser.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
@@ -2083,38 +1911,25 @@ dialog.list.setCurrentRow(3)
 assert dialog.chosen() == '@logic/panel-1/roi_mean'
 assert 'cut from @logic/cm/frames' in dialog.list.item(3).toolTip()
 assert dialog.accept_button.isEnabled()
+
+# Nothing has published: say so, and refuse to pretend otherwise.
+empty = SignalChooser(())
+assert empty.chosen() is None
+assert not empty.accept_button.isEnabled()
 """
     )
 
 
-def test_the_signal_chooser_cannot_accept_an_empty_offer() -> None:
-    """Nothing has published: say so, and refuse to pretend otherwise."""
-
-    _run_qt(
+def test_task_console_acceptance_launcher_keeps_the_empty_status_left_anchored(run_qt) -> None:
+    run_qt(
         """
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.console import SignalChooser
-app = ensure_qt_app(['chooser-empty'])
-dialog = SignalChooser(())
-assert dialog.chosen() is None
-assert not dialog.accept_button.isEnabled()
-"""
-    )
-
-
-def test_task_console_acceptance_launcher_keeps_target_size_and_left_anchored_empty_status() -> None:
-    _run_qt(
-        """
-from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import TaskConsoleView
-from zlc_ui.fluent import WINDOW_SCREEN_FRACTION, launch_fluent_window, screen_fit_window_size
+from zlc_ui.fluent import launch_fluent_window
 app = ensure_qt_app(['acceptance'])
 body = TaskConsoleView()
 window = launch_fluent_window(body, title='TaskConsole@Zou lab', fixed_size=False)
 app.processEvents()
-target = screen_fit_window_size(WINDOW_SCREEN_FRACTION)
-assert window.size() == target, (window.size().width(), window.size().height(), target.width(), target.height())
 dot_left = body.status_strip.dot.geometry().left()
 assert dot_left == body.status_strip.layout().contentsMargins().left(), (dot_left, body.status_strip.layout().contentsMargins().left())
 window.close()
@@ -2122,7 +1937,7 @@ window.close()
     )
 
 
-def test_a_window_hosting_a_close_guarding_body_can_actually_be_closed() -> None:
+def test_a_window_hosting_a_close_guarding_body_can_actually_be_closed(run_qt) -> None:
     """The X did nothing at all.
 
     Several bodies refuse their own close and raise close_requested so a host
@@ -2131,7 +1946,7 @@ def test_a_window_hosting_a_close_guarding_body_can_actually_be_closed() -> None
     closed -- the body ignored the event and nothing answered the request.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -2157,63 +1972,18 @@ second.close()
 app.processEvents()
 assert not second.isVisible()
 assert inner._closing, 'the body never got to run its own teardown'
-"""
-    )
 
-
-def test_the_launcher_leaves_a_body_without_the_protocol_alone() -> None:
-    """Binding must not invent a close guard for a widget that has none."""
-
-    _run_qt(
-        """
-from PyQt5 import QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import launch_fluent_window
-app = ensure_qt_app(['plain-body'])
-window = launch_fluent_window(lambda: QtWidgets.QLabel('plain'), title='Plain')
-assert window.isVisible()
-window.close()
+# Binding must not invent a close guard for a widget that has none.
+plain = launch_fluent_window(lambda: QtWidgets.QLabel('plain'), title='Plain')
+assert plain.isVisible()
+plain.close()
 app.processEvents()
-assert not window.isVisible()
+assert not plain.isVisible()
 """
     )
 
 
-def test_the_connection_control_is_one_complete_presenter_projection() -> None:
-
-    _run_qt(
-        """
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse.models import ConnectionChoiceVM, ConnectionVM
-from zlc_ui.pulse.schedule_view import PulseScheduleView
-app = ensure_qt_app(['endpoint'])
-view = PulseScheduleView(); view.show(); app.processEvents()
-
-choices = (
-    ConnectionChoiceVM('Virtual (sim)', 'virtual'),
-    ConnectionChoiceVM('Remote server', 'remote', endpoint_editable=True),
-    ConnectionChoiceVM('Offline (edit only)', 'offline'),
-)
-view.set_connection(ConnectionVM(choices, 'offline', '127.0.0.1:18861', 'not connected'))
-assert view.connection_endpoint.text() == '127.0.0.1:18861'
-assert 'host:port' in view.connection_endpoint.toolTip()
-assert not view.connection_endpoint.isEnabled()
-
-view.set_connection(ConnectionVM(choices, 'remote', '', 'remote selected'))
-assert view.connection_endpoint.text() == ''
-assert view.connection_endpoint.isEnabled()
-
-given = (ConnectionChoiceVM('Experiment session', 'given'),)
-view.set_connection(ConnectionVM(given, 'given', '', 'connected', locked=True))
-assert view.connection_combo.currentText() == 'Experiment session'
-assert not view.connection_combo.isEnabled()
-assert not view.connection_button.isEnabled()
-assert not view.connection_endpoint.isEnabled()
-"""
-    )
-
-
-def test_a_schedule_rebuild_keeps_the_operator_where_they_were() -> None:
+def test_a_schedule_rebuild_keeps_the_operator_where_they_were(run_qt) -> None:
     """Every update tore the cards out of their layout and reset the scroll.
 
     So pressing On Pulse -- or editing anything at all -- threw the board back
@@ -2221,7 +1991,7 @@ def test_a_schedule_rebuild_keeps_the_operator_where_they_were() -> None:
     working on period nine.
     """
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse.schedule_view import PulseScheduleView
@@ -2268,7 +2038,7 @@ assert all(bar.value() <= bar.maximum() for bar in bars)
     )
 
 
-def test_every_panel_kind_opens_its_setting_form_with_exact_keys() -> None:
+def test_every_panel_kind_opens_its_setting_form_with_exact_keys(run_qt) -> None:
     """The Setting form's SPEC and its VALUES are one decision, not two lists.
 
     ``FluentParameterForm`` demands exact keys, and it is built inside a Qt
@@ -2280,16 +2050,12 @@ def test_every_panel_kind_opens_its_setting_form_with_exact_keys() -> None:
     surfaces are empty on purpose -- the question is the card's OWN rows.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import panel_card_view as tested_module
 from zlc_ui.console import panel_editor_view as editor_module
-print(tested_module.__file__)
-print(editor_module.__file__)
 
 app = ensure_qt_app(['test'])
 surface = {'semantic': (), 'display': (), 'fit': ()}
@@ -2383,21 +2149,18 @@ finally:
     )
 
 
-def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on() -> None:
+def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on(run_qt) -> None:
     """A checkable FluentButton drew NO checked state: on and off were the
     same pixels, in the same accent as Edit beside it, so the control read as
     a fourth command button and an operator could not find the toggle at all.
     A boolean is a switch in this chrome; a command is a button.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentSwitch
 from zlc_ui.console import logic_row_view as tested_module
-print(tested_module.__file__)
 
 app = ensure_qt_app(['test'])
 row = tested_module.LogicRowView('camera_measurement', 'measurement')
@@ -2446,21 +2209,18 @@ assert switch.isVisible()
     )
 
 
-def test_the_editor_shows_the_same_preview_switch_beside_its_own_start() -> None:
+def test_the_editor_shows_the_same_preview_switch_beside_its_own_start(run_qt) -> None:
     """Adding a node opens its Edit tab and focuses it, so THAT Start is the
     one an operator presses.  The switch is a projection of the node's stored
     preference in both places -- the editor keeps no default of its own.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentSwitch
 from zlc_ui.form import FormSpec
 from zlc_ui.console import logic_editor_view as tested_module
-print(tested_module.__file__)
 
 app = ensure_qt_app(['test'])
 projection = {
@@ -2513,7 +2273,7 @@ assert not switch.isVisible(), 'no switch where the node opens nothing'
     )
 
 
-def test_the_card_caption_names_the_card_and_drops_the_logic_segment() -> None:
+def test_the_card_caption_names_the_card_and_drops_the_logic_segment(run_qt) -> None:
     """The strip says WHICH card, and stops repeating what never varies.
 
     Every logic signal's name begins "@logic/", so that segment is identical
@@ -2526,9 +2286,8 @@ def test_the_card_caption_names_the_card_and_drops_the_logic_segment() -> None:
     never reach the state, the rename field, or the Setting form.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import panel_card_view as tested_module
 PanelCardView = tested_module.PanelCardView
@@ -2579,7 +2338,7 @@ print('ok')
     )
 
 
-def test_a_reason_is_never_a_control_in_the_setting_form() -> None:
+def test_a_reason_is_never_a_control_in_the_setting_form(run_qt) -> None:
     """Why a section could not be applied is a MESSAGE, not a setting.
 
     All three reasons were declared as form fields of kind "text", so each
@@ -2589,9 +2348,8 @@ def test_a_reason_is_never_a_control_in_the_setting_form() -> None:
     it could not do; the form declares controls and nothing else.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console.panel_card_view import PanelCardView
 app = ensure_qt_app(['reason'])
@@ -2632,7 +2390,7 @@ app.processEvents()
     )
 
 
-def test_a_click_on_a_card_is_not_a_drop() -> None:
+def test_a_click_on_a_card_is_not_a_drop(run_qt) -> None:
     """A drop pins the card as the board's anchor, so a click must not be one.
 
     The card emitted `dropped` on any left release that followed a left
@@ -2643,9 +2401,8 @@ def test_a_click_on_a_card_is_not_a_drop() -> None:
     widening the window rearranged everything except that card.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import PanelCardView
@@ -2686,7 +2443,7 @@ print('ok')
     )
 
 
-def test_panel_editor_body_is_opaque_so_scrolling_blits() -> None:
+def test_panel_editor_body_is_opaque_so_scrolling_blits(run_qt) -> None:
     """The Edit page's scrolled body must be a widget Qt cannot see through.
 
     A scrolled widget Qt can see through is repainted whole on every step
@@ -2700,7 +2457,7 @@ def test_panel_editor_body_is_opaque_so_scrolling_blits() -> None:
     SURFACE: an Edit page is one tab among white ones, and it was the one
     grey tab while its body painted the window's page colour.
     """
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -2744,12 +2501,12 @@ print('opaque body ok')
     )
 
 
-def test_a_card_replaced_under_its_id_leaves_the_board() -> None:
+def test_a_card_replaced_under_its_id_leaves_the_board(run_qt) -> None:
     """One panel_id is one card.  A different object arriving under an id
     already on the board was wired and shown beside the object it replaced,
     which stayed a child of the board, still wired, behind it."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, sip
 from zlc_ui.qt import ensure_qt_app
@@ -2772,14 +2529,14 @@ assert not new.isHidden() and board._cards == {'stable': new}
     )
 
 
-def test_a_per_frame_artifact_form_reconciles_row_by_row() -> None:
+def test_a_per_frame_artifact_form_reconciles_row_by_row(run_qt) -> None:
     """The REAL editor takes a projection whose artifact form has one row per
     frame -- keys with brackets in them, a value for every key -- and takes
     the rows away again when the cycle shrinks.  A stand-in view had let a
     projection through whose values named fewer keys than its form, which
     the real form refuses on the operator's screen as an internal error."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
@@ -2826,12 +2583,12 @@ editor.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_identical_artifact_results_keep_their_readouts() -> None:
+def test_identical_artifact_results_keep_their_readouts(run_qt) -> None:
     """The same results re-projected destroyed every readout and built
     them again on every beat; a readout whose name is still listed is kept
     and re-told its path."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app

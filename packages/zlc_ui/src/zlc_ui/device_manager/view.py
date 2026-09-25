@@ -32,7 +32,7 @@ from zlc_ui.fluent import (
 from zlc_data.units import DEFAULT_UNITS, NO_PREFIX, UnitError, format_quantity
 
 from zlc_ui.form.form import FormSpec
-from zlc_ui.form.qt_form import FluentParameterForm
+from zlc_ui.form.qt_form import FluentParameterForm, being_edited
 from zlc_ui.console.status_strip import StatusStrip
 
 
@@ -82,7 +82,10 @@ class _DeviceCard(FluentFrame):
         the type the host itself had sent.
         """
 
-        self.role_edit.setText(str(role))
+        # A scan, Init or Apply landing re-projects every card; the name
+        # the operator is still typing is theirs until they leave the box.
+        if not being_edited(self.role_edit):
+            self.role_edit.setText(str(role))
         index = self.type_combo.findData(str(type_key))
         if index >= 0:
             with signals_blocked(self.type_combo):
@@ -90,6 +93,13 @@ class _DeviceCard(FluentFrame):
         self.name_label.setToolTip(f"Internal ID: {self.instance_id}")
 
     def set_choices(self, choices: tuple[tuple[str, str], ...]) -> None:
+        # Every keystroke in a parameter box re-projects every card; a
+        # vocabulary that did not change is not cleared and refilled.
+        if tuple(
+            (self.type_combo.itemText(index), self.type_combo.itemData(index))
+            for index in range(self.type_combo.count())
+        ) == tuple((str(label), str(key)) for label, key in choices):
+            return
         current = self.type_combo.currentData()
         self.type_combo.blockSignals(True)
         try:
@@ -521,10 +531,7 @@ class DeviceControlView(QtWidgets.QWidget):
         with signals_blocked(self.risk_switch):
             self.risk_switch.setChecked(bool(projection.get("risk_accepted", False)))
         self.risk_switch.setEnabled(bool(projection.get("risk_enabled", False)))
-        colours = {
-            "info": GREY, "idle": GREY, "ready": GREEN,
-            "task": ORANGE, "warning": ORANGE, "error": RED,
-        }
+        colours = {"ready": GREEN, "task": ORANGE, "warning": ORANGE, "error": RED}
         units = {declared.key: declared.unit for declared in spec.fields}
         self._units = units
         for key in spec.keys:
@@ -558,7 +565,7 @@ class DeviceControlView(QtWidgets.QWidget):
             if not bool(field.get("editable", False)) or not live.isChecked():
                 self._live_timers[key].stop()
             status.setText(str(field.get("status", "")))
-            dot.set_color(colours.get(str(field.get("severity", "info")), GREY))
+            dot.set_color(colours[str(field.get("severity", "ready"))])
             reason = str(field.get("reason", ""))
             for widget in (editor, live, apply, status):
                 widget.setToolTip(reason)
@@ -580,8 +587,11 @@ class DeviceControlView(QtWidgets.QWidget):
         self.field_unit_requested.emit(str(key), symbol)
 
     def _desired_changed(self, key: str, *, live: bool = True) -> None:
-        if not live:
-            self._live_timers[str(key)].stop()
+        # A normalization (live=False) reports the box's own rewrite and never
+        # starts a write -- nor cancels one: it is delivered a turn later, so
+        # stopping the timer here dropped the operator's pending live write
+        # whenever a projection's rounding landed just after their edit.  The
+        # timer reads the box when it fires, i.e. the normalized value.
         try:
             value = self.form.read_value(key)
         except (TypeError, ValueError):
@@ -633,6 +643,7 @@ class _ServerLogView(QtWidgets.QPlainTextEdit):
         super().__init__(parent)
         self._snapshot = snapshot
         self._seen = -1
+        self._shown: tuple[str, ...] | None = None
         self.setReadOnly(True)
         self.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
         self.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
@@ -656,13 +667,20 @@ class _ServerLogView(QtWidgets.QPlainTextEdit):
         if total == self._seen:
             return
         self._seen = total
+        # The count is every server's; only this device's lines change the
+        # page.  Another device's line must not repaint it under a reader.
+        if lines == self._shown:
+            return
+        self._shown = lines
         bar = self.verticalScrollBar()
-        follow = bar.value() >= bar.maximum() - 4
+        position = bar.value()
+        follow = position >= bar.maximum() - 4
         self.setPlainText(
             "\n".join(lines) if lines else "No interactions recorded yet."
         )
-        if follow:
-            bar.setValue(bar.maximum())
+        # setPlainText scrolls to the top; a reader scrolled back into the
+        # history stays where they were.
+        bar.setValue(bar.maximum() if follow else position)
 
 
 class DeviceManagerView(QtWidgets.QWidget):
@@ -888,8 +906,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 card = self._cards.pop(instance_id)
                 domain = self._card_domains.pop(instance_id)
                 self.domain_card_layouts[domain].removeWidget(card)
-                card.hide()
-                card.deleteLater()
+                retire_widget(card)
         for instance_id, role, type_key, domain in wanted:
             self._ensure_domain(domain)
             card = self._cards.get(instance_id)
@@ -936,8 +953,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 continue
             card = self._loaded_cards.pop(instance_id)
             self.loaded_layout.removeWidget(card)
-            card.hide()
-            card.deleteLater()
+            retire_widget(card)
         for index, (instance_id, role, type_id) in enumerate(devices):
             instance_id = str(instance_id)
             card = self._loaded_cards.get(instance_id)
@@ -1018,8 +1034,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             if instance_id not in wanted:
                 frame, _title, _detail, _button = self._discovered_widgets.pop(instance_id)
                 self.discovered_cards_layout.removeWidget(frame)
-                frame.hide()
-                frame.deleteLater()
+                retire_widget(frame)
         self._configured_discoveries = {
             str(instance_id)
             for instance_id, _role, _type_id, added in devices

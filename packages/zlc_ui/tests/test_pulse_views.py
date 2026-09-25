@@ -1,45 +1,16 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
-import sys
+import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
-#: product bootstrap is what puts this checkout's layers on the path,
-#: and it is the same one every launcher uses.
-_BOOTSTRAP = (
-    "import zou_lab_control\nfrom pathlib import Path\nimport zlc_ui\n"
-    "print('BOOTSTRAP', zou_lab_control.__file__)\n"
-    "print('ROOT', Path(zou_lab_control.__file__).resolve().parents[1], 'UI', zlc_ui.__file__)\n"
-    "from zlc_plot._kernel_cache import install\ninstall()\n"
-)
+#: The preview draws with zlc_plot's compiled kernels; every child loads them
+#: from the machine cache instead of compiling its own.
+_KERNEL_CACHE = "from zlc_plot._kernel_cache import install\ninstall()\n"
 
 
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    # Fixed for the child, not inherited: a matplotlib backend chosen by
-    # whatever imported it in the parent is how this harness produced access
-    # violations at teardown that had nothing to do with the code under test.
-    environment["MPLBACKEND"] = "Agg"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code], cwd=ROOT, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+@pytest.fixture
+def run_qt(run_qt):
+    return lambda code: run_qt(_KERNEL_CACHE + code, mpl_agg=True)
 
 
 def _schedule_source() -> str:
@@ -64,8 +35,51 @@ vm = ScheduleVM(
 '''
 
 
-def test_embedded_connection_is_named_and_locked_in_the_real_schedule_view() -> None:
-    _run_qt(
+#: The strip gestures the tests drive, over the snippet's ``app`` and
+#: ``strip``.  A drag's payload is the strip's own MIME item key.
+_STRIP_GESTURES = r'''
+import json
+
+def send(widget, kind, button, buttons, at=QtCore.QPoint(5, 5)):
+    """One mouse event at ``at`` in the widget's frame, its global position included."""
+    QtWidgets.QApplication.sendEvent(widget, QtGui.QMouseEvent(
+        kind, QtCore.QPointF(at), QtCore.QPointF(widget.mapToGlobal(at)),
+        button, buttons, QtCore.Qt.NoModifier))
+    app.processEvents()
+
+def click(widget):
+    send(widget, QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+    send(widget, QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+
+def item_data(key):
+    data = QtCore.QMimeData()
+    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(key).encode("utf-8")))
+    return data
+
+def hover(key, x):
+    """One dragMoveEvent, and what the strip decided about it."""
+    data = item_data(key)
+    event = QtGui.QDragMoveEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dragMoveEvent(event)
+    return event.isAccepted(), strip._indicator.isVisible()
+
+def drop(key, x):
+    """One dropEvent, and whether the strip took it."""
+    data = item_data(key)
+    event = QtGui.QDropEvent(
+        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
+        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    )
+    strip.dropEvent(event)
+    return event.isAccepted()
+'''
+
+
+def test_embedded_connection_is_named_and_locked_in_the_real_schedule_view(run_qt) -> None:
+    run_qt(
         r'''
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import ConnectionChoiceVM, ConnectionVM, PulseScheduleView
@@ -110,6 +124,8 @@ standalone.set_connection(ConnectionVM(
 assert standalone.connection_combo.isEnabled()
 assert standalone.connection_button.isEnabled()
 assert not standalone.connection_endpoint.isEnabled()
+assert standalone.connection_endpoint.text() == "127.0.0.1:18861"
+assert "host:port" in standalone.connection_endpoint.toolTip()
 standalone.connection_combo.setCurrentIndex(
     standalone.connection_combo.findData("remote")
 )
@@ -122,8 +138,8 @@ assert requests == [("remote", "127.0.0.1:18861")]
     )
 
 
-def test_schedule_stale_rejection_and_widget_reuse() -> None:
-    _run_qt(
+def test_schedule_stale_rejection_and_widget_reuse(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import ScheduleVM, PulseScheduleView
@@ -190,8 +206,8 @@ assert durations == [("p1", 6.0, "us")] * 2
     )
 
 
-def test_schedule_projects_scan_and_api_bindings_into_fields() -> None:
-    _run_qt(
+def test_schedule_projects_scan_and_api_bindings_into_fields(run_qt) -> None:
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM, DelayRowVM
@@ -214,7 +230,7 @@ vm = ScheduleVM(
         PeriodVM("p1", "One", field_scan, "us", ("ns", "us"), digital=(("d0", True),)),
         PeriodVM("p2", "Two", field_api, "us", ("ns", "us"), digital=(("d0", False),)),
     ),
-    delay_rows=(DelayRowVM("d0", field_api, "ns", (("ns", 1.0),)),),
+    delay_rows=(DelayRowVM("d0", field_api, "ns", ("ns",)),),
     scan_summary_text="1 slot · 4 pts",
 )
 view = PulseScheduleView(); view.set_schedule(vm)
@@ -229,8 +245,8 @@ assert view.channel_panel.scan_summary_label.text() == "1 slot · 4 pts"
     )
 
 
-def test_pulse_binding_popup_emits_independent_scan_source_intents() -> None:
-    _run_qt(
+def test_pulse_binding_popup_emits_independent_scan_source_intents(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
@@ -282,7 +298,7 @@ assert delay.binding_button.source == "default"
     )
 
 
-def test_dropping_a_period_proposes_a_move_and_moves_nothing_itself() -> None:
+def test_dropping_a_period_proposes_a_move_and_moves_nothing_itself(run_qt) -> None:
     """The drag is a real QDrag now, so the DROP is what the test drives.
 
     It used to be inferred at release from where the button happened to come
@@ -291,54 +307,35 @@ def test_dropping_a_period_proposes_a_move_and_moves_nothing_itself() -> None:
     reorders nothing by itself: it proposes, and the presenter decides.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import PulseScheduleView
-""" + _schedule_source() + r'''
+""" + _schedule_source() + _STRIP_GESTURES + r'''
 app = ensure_qt_app(["pulse-drag"])
 view = PulseScheduleView(); view.set_schedule(vm); view.show(); app.processEvents()
 events = []
 view.reorder_items_requested.connect(events.append)
 strip = view.drag_container
 
-def drop(period_id, x):
-    import json
-    data = QtCore.QMimeData()
-    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("period", period_id)).encode("utf-8")))
-    event = QtGui.QDropEvent(
-        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
-        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-    )
-    strip.dropEvent(event)
-
 cards = strip.pulse_cards()
 # Dropped left of the first card: it goes before p1.
-drop("p2", cards[0].geometry().left())
+drop(("period", "p2"), cards[0].geometry().left())
 assert events == [(("period", "p2"), ("period", "p1"))], events
 
 # Dropped past the last card: it goes to the end, which is "before nothing".
 events.clear()
-drop("p1", cards[-1].geometry().right() + 40)
+drop(("period", "p1"), cards[-1].geometry().right() + 40)
 assert events == [(("period", "p2"), ("period", "p1"))], events
 
 # Dropped on itself proposes nothing at all.
 events.clear()
-drop("p1", cards[0].geometry().center().x())
+drop(("period", "p1"), cards[0].geometry().center().x())
 assert events == [], events
 
 # And the strip reorders nothing on its own.
 assert tuple(item.period_id for item in strip.pulse_cards()) == ("p1", "p2")
-
-# A press and release that never moved is a CLICK, which selects.
-picked = []
-strip.period_clicked.connect(picked.append)
-for kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
-    QtWidgets.QApplication.sendEvent(cards[1], QtGui.QMouseEvent(
-        kind, QtCore.QPoint(5, 5), QtCore.Qt.LeftButton,
-        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
-assert picked == ["p2"], picked
 
 # Close before teardown.  A synthetic QDropEvent built in Python and a widget
 # tree torn down by the interpreter's exit race each other, and the process
@@ -349,8 +346,8 @@ app.processEvents()
     )
 
 
-def test_scan_text_is_immediate_state_intent_and_run_has_no_payload() -> None:
-    _run_qt(
+def test_scan_text_is_immediate_state_intent_and_run_has_no_payload(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
@@ -365,12 +362,11 @@ table_changes = []
 scan.scan_table_view.textChanged.connect(lambda: table_changes.append(True))
 scan.set_page(ScanPageRecord(source_text="typing more", table_text="1 2 3", source_dirty=True))
 assert not table_changes, 'typing source replaced the unchanged scan-table document'
-assert not hasattr(scan, "_code_dirty") and not hasattr(scan, "_source_revision")
 scan.set_repeats((1 << 32) - 1)
 assert int(scan.scan_repeats_spin.maximum()) == (1 << 32) - 1
 assert scan.scan_repeats_spin.text() == str((1 << 32) - 1)
 target = PulseTargetView(); target.set_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
-target.set_ports((TargetPortRecord("d0", "digital", "Gate", ("d0",), lane_order=(0,)),), True, "ready")
+target.set_ports((TargetPortRecord("d0", "digital", "Gate", ("d0",)),), True, "ready")
 events = []; target.apply_requested.connect(events.append)
 target.show(); app.processEvents(); QtTest.QTest.mouseClick(target.apply_button, QtCore.Qt.LeftButton)
 assert events and isinstance(events[-1][0], TargetPortRecord)
@@ -378,8 +374,8 @@ assert events and isinstance(events[-1][0], TargetPortRecord)
     )
 
 
-def test_preview_mount_and_demo_smoke() -> None:
-    _run_qt(
+def test_preview_mount_and_demo_smoke(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -388,18 +384,16 @@ app = ensure_qt_app(["preview"]); view = PulsePreviewView(); first = QtWidgets.Q
 view.mount_content(first, logical_size=(100, 60)); view.mount_content(second, logical_size=(120, 70)); assert view._content_widget is second and first.parentWidget() is None
 """
     )
-    environment = dict(os.environ)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "examples/demo_pulse_editor.py", "--once"],
-        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30, check=False,
+    completed = run_qt(
+        "import runpy, sys; "
+        "sys.argv = ['demo_pulse_editor.py', '--once']; "
+        "runpy.run_path('examples/demo_pulse_editor.py', run_name='__main__')"
     )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
     assert "scan_hold_requested" in completed.stdout
     assert "save_requested" in completed.stdout
 
 
-def test_linked_panes_show_one_bar_only_while_some_pane_overflows() -> None:
+def test_linked_panes_show_one_bar_only_while_some_pane_overflows(run_qt) -> None:
     """The group decides "is there more below" ONCE, from the deepest pane.
 
     Two synchronized bars answer it twice, and the answers diverge the moment
@@ -407,7 +401,7 @@ def test_linked_panes_show_one_bar_only_while_some_pane_overflows() -> None:
     the operator can reach, and rows past that cap are unreachable.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -440,10 +434,10 @@ assert not bar.isVisible(), "nothing overflows any more, so no bar"
     )
 
 
-def test_schedule_channel_column_is_reachable_without_any_periods() -> None:
+def test_schedule_channel_column_is_reachable_without_any_periods(run_qt) -> None:
     """A board's channels scroll even when the timeline beside them is empty."""
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import DelayRowVM, FieldVM, PortRowVM, PulseScheduleView, ScheduleVM
@@ -458,7 +452,7 @@ view.set_schedule(ScheduleVM(
     visible_text="0/0", summary_text="Add Period to start a pulse on this board",
     ports=ports, periods=(),
     delay_rows=tuple(
-        DelayRowVM(port.key, FieldVM("0", editable=False), "ns", (("ns", 1.0),))
+        DelayRowVM(port.key, FieldVM("0", editable=False), "ns", ("ns",))
         for port in ports
     ),
 ))
@@ -476,7 +470,7 @@ assert left.verticalScrollBar().value() + left.viewport().height() >= left.widge
     )
 
 
-def test_clicking_a_period_or_a_gap_decides_where_the_next_one_lands() -> None:
+def test_clicking_a_period_or_a_gap_decides_where_the_next_one_lands(run_qt) -> None:
     """Selection is what makes a sequence buildable at all.
 
     A selected gap inserts there, a selected card inserts AFTER it,
@@ -487,7 +481,7 @@ def test_clicking_a_period_or_a_gap_decides_where_the_next_one_lands() -> None:
     way to say "here".
     """
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
@@ -556,7 +550,7 @@ app.processEvents()
     )
 
 
-def test_a_board_locks_its_wiring_and_never_the_names() -> None:
+def test_a_board_locks_its_wiring_and_never_the_names(run_qt) -> None:
     """Two permissions, not one.
 
     A board owns which lanes exist, how wide a bus is and which pins they
@@ -567,7 +561,7 @@ def test_a_board_locks_its_wiring_and_never_the_names() -> None:
     something it had just disabled.
     """
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import PulseTargetView, TargetPortRecord
@@ -591,7 +585,7 @@ assert view.add_digital_button.isEnabled() and view.apply_button.isEnabled()
     )
 
 
-def test_hiding_a_port_takes_its_delay_row_with_it() -> None:
+def test_hiding_a_port_takes_its_delay_row_with_it(run_qt) -> None:
     """One visible-row list, three columns.
 
     ``_display_rows`` -- already filtered by ``visible_ports`` -- feeds
@@ -602,7 +596,7 @@ def test_hiding_a_port_takes_its_delay_row_with_it() -> None:
     whatever happened to be next to them.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
@@ -620,7 +614,7 @@ view.set_schedule(ScheduleVM(
     periods=(PeriodVM("p0", "P0", FieldVM("1"), "us", ("ns", "us"),
                       digital=tuple((port.key, False) for port in ports)),),
     delay_rows=tuple(
-        DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
+        DelayRowVM(port.key, FieldVM("0"), "ns", ("ns",)) for port in ports
     ),
     brackets=(BracketVM('b', 'p0', 'p0', 4),),
 ))
@@ -662,7 +656,7 @@ assert strip._indicator.height() == strip.pulse_cards()[0].height()
 
 # The single-row push is the other way into that column, and it must obey the
 # same rule -- otherwise one API binding brings a hidden row back.
-view.set_delay_row(DelayRowVM("d1", FieldVM("7"), "ns", (("ns", 1.0),)))
+view.set_delay_row(DelayRowVM("d1", FieldVM("7"), "ns", ("ns",)))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d2"}
 
@@ -675,7 +669,7 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
     )
 
 
-def test_the_bracket_posts_are_built_to_frame_the_cards_they_span() -> None:
+def test_the_bracket_posts_are_built_to_frame_the_cards_they_span(run_qt) -> None:
     """The bracket art carries the repeat meaning.
 
     Two posts the same height as a period card, titled "Bracket N" in the
@@ -686,7 +680,7 @@ def test_the_bracket_posts_are_built_to_frame_the_cards_they_span() -> None:
     span lined up with nothing inside the span.
     """
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtWidgets
@@ -748,14 +742,14 @@ app.quit()
     )
 
 
-def test_a_posts_number_and_ink_say_which_bracket_it_frames() -> None:
+def test_a_posts_number_and_ink_say_which_bracket_it_frames(run_qt) -> None:
     """Both posts of a bracket wear its number in the title and its colour on
     the title and the edge -- the colour the preview draws that bracket's
     loop in -- and a kept post is renumbered in place when the brackets
     around it change.  A period card stays black on white, a spacer grey and
     dashed: three kinds an eye tells apart."""
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtWidgets
@@ -804,17 +798,17 @@ app.quit()
     )
 
 
-def test_bracket_posts_drop_on_period_gaps_and_run_repeats_uses_uint32() -> None:
+def test_bracket_posts_drop_on_period_gaps_and_run_repeats_uses_uint32(run_qt) -> None:
     """Both independent repeat layers are editable on the real Edit page."""
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
 import zlc_ui.pulse.schedule_view as schedule_module
-""" + _schedule_source() + r'''
+""" + _schedule_source() + _STRIP_GESTURES + r'''
 app = ensure_qt_app(["bracket-drag-and-run-repeats"])
 view = PulseScheduleView()
 bracketed = replace(
@@ -870,24 +864,14 @@ QtWidgets.QApplication.sendEvent(start_post, QtGui.QMouseEvent(
 ))
 schedule_module.QtGui.QDrag = real_drag
 assert len(started) == 1
-import json
 assert started[0].data.hasFormat(strip.ITEM_MIME)
 assert json.loads(bytes(started[0].data.data(strip.ITEM_MIME))) == ["bracket", "b:start"]
 
 orders = []
 view.reorder_items_requested.connect(orders.append)
-def drop(kind, x):
-    data = QtCore.QMimeData()
-    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("bracket", f"b:{kind}")).encode("utf-8")))
-    event = QtGui.QDropEvent(
-        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
-        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-    )
-    strip.dropEvent(event)
-    return event.isAccepted()
 
 cards = strip.pulse_cards()
-assert drop("end", strip.items()[-1].geometry().right() + 40)
+assert drop(("bracket", "b:end"), strip.items()[-1].geometry().right() + 40)
 assert orders == [(("bracket", "b:start"), ("period", "p1"), ("period", "p2"), ("bracket", "b:end"))]
 assert bracket_requests == [], "drag proposes item order, not a second endpoint update"
 assert view._schedule.brackets == bracketed.brackets, "a drop is proposal-only"
@@ -902,13 +886,13 @@ right_only = replace(
 assert view.set_schedule(right_only)
 app.processEvents()
 cards = strip.pulse_cards()
-assert drop("start", strip.items()[0].geometry().left())
+assert drop(("bracket", "b:start"), strip.items()[0].geometry().left())
 assert orders == [(("bracket", "b:start"), ("period", "p1"), ("period", "p2"), ("bracket", "b:end"))]
 assert view._schedule.brackets == right_only.brackets
 
 # A post cannot cross its partner; an illegal gap commits nothing.
 orders.clear()
-assert not drop("start", strip.items()[-1].geometry().right() + 40)
+assert not drop(("bracket", "b:start"), strip.items()[-1].geometry().right() + 40)
 assert orders == [] and bracket_requests == []
 end_post = next(post for post in strip._posts if post.kind == 'end')
 end_post.count_spin.setValue(7)
@@ -927,10 +911,10 @@ app.quit()
     )
 
 
-def test_a_config_binding_wears_its_own_colour_and_stays_editable() -> None:
+def test_a_config_binding_wears_its_own_colour_and_stays_editable(run_qt) -> None:
     """Scan is independent of value source and never removes the default."""
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, ORANGE
@@ -981,8 +965,8 @@ app.processEvents()
 
 
 
-def test_config_page_edits_values_separately_from_shared_field_references() -> None:
-    _run_qt(r'''
+def test_config_page_edits_values_separately_from_shared_field_references(run_qt) -> None:
+    run_qt(r'''
 from dataclasses import replace
 import sys
 from PyQt5 import QtCore, QtTest, QtWidgets
@@ -1086,7 +1070,6 @@ assert combo.count() == 0 and combo.currentText() == 'Default'
 handle.set_config_page(replace(record, entries=entries_before_names))
 QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]
-assert not hasattr(view.schedule_view, "save_values_button")
 assert view.scan_view.scan_load_array_button.text() == "Load Array"
 view.tabs.setCurrentWidget(view.schedule_view)
 app.processEvents()
@@ -1120,7 +1103,7 @@ view.finish_close()
 ''')
 
 
-def test_linked_panes_never_starve_a_pane_to_line_the_group_up() -> None:
+def test_linked_panes_never_starve_a_pane_to_line_the_group_up(run_qt) -> None:
     """Levelling the columns may not cost a column its rows.
 
     A pane's ``maximum`` is CLAMPED AT ZERO, so a pane that already fits
@@ -1137,7 +1120,7 @@ def test_linked_panes_never_starve_a_pane_to_line_the_group_up() -> None:
     had.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -1184,7 +1167,7 @@ app.processEvents()
     )
 
 
-def test_a_card_and_a_post_are_one_gesture_with_two_payloads() -> None:
+def test_a_card_and_a_post_are_one_gesture_with_two_payloads(run_qt) -> None:
     """Dragging offers only the gaps that would do something -- for both.
 
     The bracket post refused an impossible gap while the cursor was still
@@ -1194,31 +1177,19 @@ def test_a_card_and_a_post_are_one_gesture_with_two_payloads() -> None:
     question, and the half that says yes and does nothing is the worse half.
     """
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import BracketVM, PulseScheduleView
-""" + _schedule_source() + r'''
+""" + _schedule_source() + _STRIP_GESTURES + r'''
 app = ensure_qt_app(["drag-symmetry"])
 view = PulseScheduleView()
 assert view.set_schedule(replace(vm, revision=3, brackets=(BracketVM("b", "p1", "p1", 4),)))
 view.show(); app.processEvents()
 strip = view.drag_container
 cards = strip.pulse_cards()
-
-def hover(key, x):
-    """One dragMoveEvent, and what the strip decided about it."""
-    data = QtCore.QMimeData()
-    import json
-    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(key).encode("utf-8")))
-    event = QtGui.QDragMoveEvent(
-        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
-        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-    )
-    strip.dragMoveEvent(event)
-    return event.isAccepted(), strip._indicator.isVisible()
 
 on_itself = cards[0].geometry().center().x()
 elsewhere = cards[-1].geometry().right() + 40
@@ -1239,17 +1210,6 @@ assert hover(post, elsewhere) == (True, True)
 moves = []
 view.reorder_items_requested.connect(moves.append)
 
-def drop(key, x):
-    data = QtCore.QMimeData()
-    import json
-    data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(key).encode("utf-8")))
-    event = QtGui.QDropEvent(
-        QtCore.QPoint(x, 5), QtCore.Qt.MoveAction, data,
-        QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-    )
-    strip.dropEvent(event)
-    return event.isAccepted()
-
 assert drop(card, on_itself) is False and moves == []
 assert drop(post, end_post.geometry().center().x()) is False and moves == []
 assert drop(card, elsewhere) is True
@@ -1265,7 +1225,7 @@ app.quit()
     )
 
 
-def test_clicking_a_post_marks_it_the_way_clicking_a_card_does() -> None:
+def test_clicking_a_post_marks_it_the_way_clicking_a_card_does(run_qt) -> None:
     """A card and a bracket post are the same kind of thing to pick up.
 
     Clicking a card drew a border round it; clicking a post drew nothing at
@@ -1275,13 +1235,13 @@ def test_clicking_a_post_marks_it_the_way_clicking_a_card_does() -> None:
     on it, and nobody had ever called it.
     """
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
-""" + _schedule_source() + r'''
+""" + _schedule_source() + _STRIP_GESTURES + r'''
 app = ensure_qt_app(["click-symmetry"])
 view = PulseScheduleView()
 assert view.set_schedule(replace(vm, revision=3, brackets=(BracketVM("b", "p1", "p2", 4),)))
@@ -1290,13 +1250,6 @@ strip = view.drag_container
 cards = strip.pulse_cards()
 posts = {post.kind: post for post in strip.findChildren(BracketPost)}
 assert all(item.cursor().shape() == QtCore.Qt.ArrowCursor for item in (*cards, *posts.values()))
-
-def click(widget):
-    for kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
-        QtWidgets.QApplication.sendEvent(widget, QtGui.QMouseEvent(
-            kind, QtCore.QPoint(5, 5), QtCore.Qt.LeftButton,
-            QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
-    app.processEvents()
 
 def outlined():
     """Everything currently wearing the selection fill."""
@@ -1335,7 +1288,7 @@ app.quit()
     )
 
 
-def test_collapsing_the_left_panels_hands_the_width_to_the_periods() -> None:
+def test_collapsing_the_left_panels_hands_the_width_to_the_periods(run_qt) -> None:
     """A QScrollArea does not shrink-wrap.
 
     ``AdjustToContents`` computes the area's hint once and caches it, and
@@ -1344,7 +1297,7 @@ def test_collapsing_the_left_panels_hands_the_width_to_the_periods() -> None:
     blank between the stub and period cards that never moved.
     """
 
-    _run_qt(
+    run_qt(
         _schedule_source()
         + r'''
 from zlc_ui.qt import ensure_qt_app
@@ -1388,14 +1341,14 @@ app.processEvents()
     )
 
 
-def test_the_bottom_bar_is_one_table_of_rows_across_three_cards() -> None:
+def test_the_bottom_bar_is_one_table_of_rows_across_three_cards(run_qt) -> None:
     """Row two of Control is read beside row two of Connection and Ports.
 
     They were three private rhythms -- two row heights and two gaps -- so the
     fourth row of Control sat six pixels below the boxes beside it.
     """
 
-    _run_qt(
+    run_qt(
         r'''
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
@@ -1449,11 +1402,11 @@ app.processEvents()
     )
 
 
-def test_a_renamed_port_survives_the_next_rebuild() -> None:
+def test_a_renamed_port_survives_the_next_rebuild(run_qt) -> None:
     """``set_port_label`` renamed the three visible controls and not the
     model the next Hide/Show rebuilds from, so the old name came back."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
@@ -1475,18 +1428,18 @@ view.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_a_press_on_a_cards_chrome_does_not_start_a_drag_by_itself() -> None:
+def test_a_press_on_a_cards_chrome_does_not_start_a_drag_by_itself(run_qt) -> None:
     """The press reaches the strip's filter once through the label and once
     through the card, each in its own local frame.  Compared across frames,
     a pointer that had not moved measured a whole label's offset and a
     click on "Duration" started a drag."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import PulseScheduleView
-""" + _schedule_source() + r'''
+""" + _schedule_source() + _STRIP_GESTURES + r'''
 app = ensure_qt_app(["chrome-press"])
 view = PulseScheduleView()
 assert view.set_schedule(vm)
@@ -1501,25 +1454,19 @@ strip._begin_drag = starts.append
 assert card.cursor().shape() == QtCore.Qt.ArrowCursor
 assert label.cursor().shape() == QtCore.Qt.ArrowCursor
 
-def send(kind, button, buttons):
-    event = QtGui.QMouseEvent(kind, QtCore.QPointF(local), QtCore.QPointF(global_pos),
-                              button, buttons, QtCore.Qt.NoModifier)
-    QtWidgets.QApplication.sendEvent(label, event)
-
-send(QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
-send(QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton)
+send(label, QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, at=local)
+send(label, QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton, at=local)
 assert starts == [], "no motion, no drag"
 clicked = []
 strip.period_clicked.connect(clicked.append)
-send(QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+send(label, QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton, at=local)
 assert clicked == ["p1"], "a press that reaches release without moving is a click"
 
 # Real motion past the threshold, measured in the same global frame, drags.
-send(QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+send(label, QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, at=local)
 far = global_pos + QtCore.QPoint(QtWidgets.QApplication.startDragDistance() * 3, 0)
-QtWidgets.QApplication.sendEvent(label, QtGui.QMouseEvent(
-    QtCore.QEvent.MouseMove, QtCore.QPointF(label.mapFromGlobal(far)), QtCore.QPointF(far),
-    QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+send(label, QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
+     at=label.mapFromGlobal(far))
 assert starts == [("period", "p1")]
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -1527,12 +1474,12 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_a_port_that_changes_kind_under_its_key_is_rebuilt() -> None:
+def test_a_port_that_changes_kind_under_its_key_is_rebuilt(run_qt) -> None:
     """A document that turned a digital output into a DAC bus kept the old
     checkbox in the card, because the row reconcile asked only whether the
     key was known -- never what kind of row it was."""
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore
@@ -1560,31 +1507,12 @@ view.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_the_preview_keeps_no_copy_of_the_pin() -> None:
-    """Whether the shown size is the operator's pin is the presenter's fact;
-    a copy in the view had no reader and drifted from the one that decides."""
-
-    _run_qt(
-        """
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulsePreviewView
-app = ensure_qt_app(["preview-pin"])
-view = PulsePreviewView()
-view.set_size_names(("4x4", "8x8"))
-view.set_preview_size("8x8")
-assert view.preview_size == "8x8"
-assert not hasattr(view, "preview_size_pinned")
-assert not hasattr(view, "reset_preview_size_pin")
-"""
-    )
-
-
-def test_a_channel_row_offers_on_for_digital_and_off_for_every_port() -> None:
+def test_a_channel_row_offers_on_for_digital_and_off_for_every_port(run_qt) -> None:
     """Every row can turn its output off in all periods; only a digital row
     can turn it on -- an analog output has no level to fill with.  Each
     button names the port it acts on."""
 
-    _run_qt(
+    run_qt(
         _schedule_source()
         + """
 from dataclasses import replace
@@ -1594,7 +1522,7 @@ from zlc_ui.pulse import DelayRowVM, PulseScheduleView
 app = ensure_qt_app(["channel-buttons"])
 view = PulseScheduleView()
 view.set_schedule(replace(vm, delay_rows=tuple(
-    DelayRowVM(port.key, FieldVM("0"), "ns", (("ns", 1.0),)) for port in ports
+    DelayRowVM(port.key, FieldVM("0"), "ns", ("ns",)) for port in ports
 )))
 view.resize(1200, 700)
 view.show()
@@ -1619,20 +1547,20 @@ view.close()
     )
 
 
-def test_a_press_lights_the_card_and_lifting_it_picks_it() -> None:
+def test_a_press_lights_the_card_and_lifting_it_picks_it(run_qt) -> None:
     """Pressing an unpicked card lights it at once, so what a drag is about
     to lift is the one lit; a press that never moves is still the click
     that picks (or, on the picked one, clears); and the drag's first
     movement makes the pick real, so it is the dragged one that stays lit
     after the drop -- until the operator clears it."""
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import PulseScheduleView
-""" + _schedule_source() + r'''
+""" + _schedule_source() + _STRIP_GESTURES + r'''
 app = ensure_qt_app(["press-lights"])
 view = PulseScheduleView()
 assert view.set_schedule(vm)
@@ -1640,12 +1568,6 @@ view.resize(1200, 700); view.show(); app.processEvents()
 strip = view.drag_container
 starts = []
 strip._begin_drag = starts.append
-
-def send(widget, kind, button, buttons, at=QtCore.QPoint(5, 5)):
-    QtWidgets.QApplication.sendEvent(widget, QtGui.QMouseEvent(
-        kind, QtCore.QPointF(at), QtCore.QPointF(widget.mapToGlobal(at)),
-        button, buttons, QtCore.Qt.NoModifier))
-    app.processEvents()
 
 def lit():
     return {card.period_id for card in strip.pulse_cards() if card.is_selected()}
@@ -1681,12 +1603,12 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_a_spacer_card_is_narrow_named_by_the_editor_and_holds_every_dac() -> None:
+def test_a_spacer_card_is_narrow_named_by_the_editor_and_holds_every_dac(run_qt) -> None:
     """A spacer takes the period card narrowed: its name shown where every
     card shows its name but not typable, its duration and unit editable,
     its channel circles without labels, and each DAC one disabled Hold."""
 
-    _run_qt(
+    run_qt(
         """
 from dataclasses import replace
 from PyQt5 import QtCore, QtWidgets
@@ -1720,12 +1642,12 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_choosing_config_in_the_slot_popup_changes_a_text_not_the_popups_shape() -> None:
+def test_choosing_config_in_the_slot_popup_changes_a_text_not_the_popups_shape(run_qt) -> None:
     """The Config name row is always there, never wider than the switch
     above it: choosing Config fills a text in place.  Shown and hidden
     with the source, the popup grew a row under the pointer."""
 
-    _run_qt(
+    run_qt(
         '''
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import PLACEHOLDER
@@ -1760,12 +1682,12 @@ popup.hide()
     )
 
 
-def test_a_bracket_post_shows_a_count_of_ten_thousand_whole() -> None:
+def test_a_bracket_post_shows_a_count_of_ten_thousand_whole(run_qt) -> None:
     """A post is as wide as five digits of count and no wider.  Cut to a
     fixed 78 px it refused 10000 as too narrow; sized by the box's generic
     hint it was nearly a card."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app

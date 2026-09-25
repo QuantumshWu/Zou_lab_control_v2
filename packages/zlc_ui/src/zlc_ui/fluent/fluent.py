@@ -27,6 +27,7 @@ from zlc_data.units import (
 )
 
 from ..qt import ensure_qt_app
+from ..status import STATUS_SEVERITIES
 
 from .style import (
     ACCENT,
@@ -119,31 +120,15 @@ def set_fluent_scale(scale: float | None = None) -> float:
     is how two GUIs ended up with different control sizes on the same screen).
 
     The fluent scale is ONE process-wide value BY DESIGN: every GUI window on a
-    screen must agree on control sizes (the scale-sharing contract), so the
-    per-window ``scale=`` parameters of the ``show_*`` launchers all write THIS
-    value -- there is no per-window scale.  Changing it while FluentWindows are
-    already open therefore also retunes the app font and every widget those
-    windows create from now on; that conflict is logged as a warning.  Requesting
-    the value already in force (e.g. the automatic ``scale=None`` path resolving
-    to the same screen fit) stays silent."""
+    screen must agree on control sizes (the scale-sharing contract), so there is
+    no per-window scale, and the app font follows it."""
 
     global _FLUENT_SCALE, _FLUENT_SCALE_INITIALIZED
     if scale is None:
         scale = resolve_fluent_auto_scale()
-    new_scale = max(FLUENT_SCALE_MIN, min(FLUENT_SCALE_MAX, float(scale)))
-    app = QtWidgets.QApplication.instance()
-    if new_scale != _FLUENT_SCALE and app is not None:
-        live_windows = [w for w in app.topLevelWidgets() if isinstance(w, FluentWindow)]
-        if live_windows:
-            logging.getLogger(__name__).warning(
-                "set_fluent_scale(%.3g): the fluent scale is process-global; changing it from %.3g "
-                "with %d FluentWindow(s) open also resizes the app font and every widget those "
-                "windows create from now on.",
-                new_scale, _FLUENT_SCALE, len(live_windows))
-    _FLUENT_SCALE = new_scale
+    _FLUENT_SCALE = max(FLUENT_SCALE_MIN, min(FLUENT_SCALE_MAX, float(scale)))
     _FLUENT_SCALE_INITIALIZED = True
-    if app is not None:
-        app.setFont(QtGui.QFont(FONT, fluent_font_size()))
+    _apply_app_font()
     return _FLUENT_SCALE
 
 
@@ -159,10 +144,24 @@ def ensure_fluent_scale() -> float:
 
     if not _FLUENT_SCALE_INITIALIZED:
         return set_fluent_scale(None)
-    app = QtWidgets.QApplication.instance()
-    if app is not None:
-        app.setFont(QtGui.QFont(FONT, fluent_font_size()))
+    _apply_app_font()
     return _FLUENT_SCALE
+
+
+def _apply_app_font() -> None:
+    """The one writer of the application font: Segoe UI at the scaled size.
+
+    Qt broadcasts every ``setFont`` to every widget of every open window,
+    equal font or not, and each window and dialog opened asks for the font
+    again -- so an unchanged font is not written.
+    """
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    font = QtGui.QFont(FONT, fluent_font_size())
+    if app.font() != font:
+        app.setFont(font)
 
 
 def scaled_px(value: int | float, *, minimum: int = 1) -> int:
@@ -471,17 +470,9 @@ def stroke_card_border(widget: QtWidgets.QWidget, *, radius: int | None = None) 
 
     Cascade-proof (painted, not a stylesheet rule) so a container that nests its own widget type does
     not border every child.  Call from the widget's ``paintEvent`` AFTER its body is painted."""
-    r = float(_radius() if radius is None else radius)
-    painter = QtGui.QPainter(widget)
-    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-    pen = QtGui.QPen(QtGui.QColor(DIVIDER))
-    pen.setWidthF(1.0)
-    painter.setPen(pen)
-    painter.setBrush(QtCore.Qt.NoBrush)
-    # inset by half the pen width so the 1 px stroke sits fully inside the widget, unclipped
-    rect = QtCore.QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-    painter.drawRoundedRect(rect, r, r)
-    painter.end()
+    _paint_fluent_card(
+        widget, radius, QtGui.QColor(DIVIDER), QtGui.QColor(QtCore.Qt.transparent)
+    )
 
 
 @contextlib.contextmanager
@@ -734,6 +725,9 @@ def _paint_fluent_card(
     rect = QtCore.QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
     corner = float(_radius() if radius is None else radius)
     painter.drawRoundedRect(rect, corner, corner)
+    # Ended here, not at garbage collection: a QMenu paints its items with
+    # its own painter right after this card.
+    painter.end()
 
 
 class FluentOverlayFrame(QtWidgets.QWidget):
@@ -1362,19 +1356,36 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         high = None if top is None else _finite_decimal(top)
         available = _numeric_text_width(self)
         integral = kind == "int"
+        # An int|float box's text is its value's type, so a float keeps its
+        # point: rewritten as 10000000000000000, or narrowed to 12345678, a
+        # float read back as an int.
+        point = self._keeps_point(self.text())
         try:
-            rounded, text, minimum = _visible_decimal(number, low, high, integral, available, self.fontMetrics())
+            rounded, text, minimum = _visible_decimal(
+                number, low, high, integral, available, self.fontMetrics(), point=point,
+            )
             if self._res_step and not self._allow_any:
                 aligned = _finite_decimal(align_to_resolution(text, self._res_step, allow_any=False))
                 if aligned != rounded:
                     rounded, text, minimum = _visible_decimal(
                         aligned, aligned, aligned, integral, available, self.fontMetrics(),
+                        point=point,
                     )
         except ValueError as error:
             self.setProperty("numericError", str(error))
             self._queue_number_notification()
             return
         self.setProperty("numericError", "")
+        current = self.text()
+        if (
+            rounded == requested_number
+            and "e" not in current.lower()
+            and self.fontMetrics().horizontalAdvance(current) + 2 <= available
+        ):
+            # Normalization owns width and bounds, not spelling: a number it
+            # leaves unchanged that already fits keeps its text.  Rewritten,
+            # 100.0 became 100, and an int|float field read back an int.
+            text = current
         self._normalizing = True
         try:
             if text != self.text():
@@ -1388,6 +1399,18 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._numeric_layout_key = (self.text(), self.width(), *key[2:])
         if rounded != requested_number and not _args:
             self._queue_number_notification()
+
+    def _keeps_point(self, text: str) -> bool:
+        """Whether a rewrite of ``text`` must keep a decimal point.
+
+        Only an int|float box's text is its value's type: there ``1.5`` or
+        ``1e3`` is a float, and every spelling the box writes for it -- a
+        width rewrite, a bound it is pulled back to -- stays one.
+        """
+
+        return self._numeric_bounds[2] == "number" and any(
+            mark in text.lower() for mark in ".e"
+        )
 
     def _queue_number_notification(self) -> None:
         if self._normalization_timer is None:
@@ -1448,7 +1471,9 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         """Restrict typed input to a number (a numeric validator on the line edit).
 
         ``kind="float"`` accepts only digits, a decimal point, ``e``/``E`` and a sign
-        (scientific notation); ``kind="int"`` accepts only an integer.  Optional
+        (scientific notation); ``kind="int"`` accepts only an integer.  ``kind="number"``
+        types like a float and holds an ``int | float`` value whose text is its type, so
+        a float keeps its decimal point through every width rewrite.  Optional
         ``bottom``/``top`` bound the value (an int field with a ``top`` also blocks
         clearly-too-big entries as you type).  Other characters are simply rejected at
         the keystroke, so the field can never hold non-numeric junk.
@@ -1628,7 +1653,11 @@ class FluentLineEdit(QtWidgets.QLineEdit):
                 )
             )
             return
-        self.setText(str(clamped))
+        # Spelled as the box spells every number, in the type the operator
+        # typed: str() of the bound wrote 1.5 pulled back to an int bound as
+        # 1, and the int|float field committed the int its operator never
+        # typed (2 pulled back to a float bound 1.0 the other way round).
+        self.setText(_decimal_text(clamped, point=self._keeps_point(text)))
 
     def _snap_to_resolution(self) -> None:
         if self._normalization_timer is not None:
@@ -2111,17 +2140,8 @@ class _FluentRoundedMenu(QtWidgets.QMenu):
         )
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        # Paint the rounded card FIRST (fill + 1 px antialiased border), then let QMenu draw its items
-        # on top -- same drawRoundedRect recipe as FluentPopup (one visual source).
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        pen = QtGui.QPen(self._border)
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        painter.setBrush(self._fill)
-        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.drawRoundedRect(rect, self._radius, self._radius)
-        painter.end()
+        # Paint the rounded card FIRST, then let QMenu draw its items on top.
+        _paint_fluent_card(self, self._radius, self._border, self._fill)
         super().paintEvent(event)
 
 
@@ -2232,14 +2252,9 @@ class FluentCardDialog(QtWidgets.QDialog):
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        pen = QtGui.QPen(QtGui.QColor(DIVIDER))
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        painter.setBrush(QtGui.QColor("white"))
-        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.drawRoundedRect(rect, self._radius, self._radius)
+        _paint_fluent_card(
+            self, self._radius, QtGui.QColor(DIVIDER), QtGui.QColor("white")
+        )
 
 
 class _FluentMessageDialog(FluentCardDialog):
@@ -3414,6 +3429,16 @@ class FluentCycleComboBox(FluentComboBox):
             self._cycle_choice(first)[0], value
         ):
             return first
+        # A domain that locates a value itself (an axis's Scope domain) is
+        # asked, and one position is read; only a plain sequence is walked.
+        locate = getattr(choices, "position_of", None)
+        if locate is not None:
+            position = locate(value)
+            if position is not None and self._typed_equal(
+                self._cycle_choice(position)[0], value
+            ):
+                return int(position)
+            return -1
         return next(
             (
                 position
@@ -5688,12 +5713,15 @@ def _visible_decimal(
     integral: bool,
     available_width: int,
     metrics: QtGui.QFontMetrics,
+    *,
+    point: bool = False,
 ) -> tuple[Decimal, str, int]:
     """The most precise bounded decimal whose complete text fits the editor.
 
     The returned number, not an unrounded input, is what the control owns.
     Only fractional places are rounded. The same decimal grid is restricted
     to the real bounds; it never crosses them or uses scientific notation.
+    ``point`` keeps a decimal point in the text (``4.0``, never ``4``).
     """
     from decimal import ROUND_HALF_UP
 
@@ -5722,11 +5750,23 @@ def _visible_decimal(
                     or (high is not None and rounded > high)):
                 continue
             rounded = rounded.normalize() + Decimal(0)
-            fixed = format(rounded, "f")
+            fixed = _decimal_text(rounded, point=point)
             width = metrics.horizontalAdvance(fixed) + 2
             if width <= available_width:
                 return rounded, fixed, width
     raise ValueError("The numeric field is too narrow to display a value within its limits; choose another unit.")
+
+
+def _decimal_text(number: Decimal, *, point: bool = False) -> str:
+    """``number`` as a numeric box spells it: plain digits, never scientific.
+
+    ``point`` keeps a decimal point in the text (``4.0``, never ``4``).
+    """
+
+    fixed = format(number.normalize() + Decimal(0), "f")
+    if point and "." not in fixed:
+        fixed += ".0"
+    return fixed
 
 
 def _finite_decimal(value: object) -> Decimal:
@@ -6710,29 +6750,6 @@ class FluentDialogWindow(FluentWindow):
             release_window(self)
 
 
-def launch_qt_window(
-    factory,
-    *,
-    window_ratio: float = WINDOW_SCREEN_FRACTION,
-) -> QtWidgets.QWidget:
-    """Construct, size, retain, and show one frontend-owned Qt window."""
-
-    if not callable(factory):
-        raise TypeError("window factory must be callable")
-    application = ensure_qt_app()
-    if QtCore.QThread.currentThread() != application.thread():
-        raise RuntimeError("Qt windows must be opened on the GUI thread")
-    set_fluent_scale(None)
-    window = factory()
-    if not isinstance(window, QtWidgets.QWidget):
-        raise TypeError("window factory must return QWidget")
-    window.resize(screen_fit_window_size(float(window_ratio)))
-    retain_window(window)
-    window.show()
-    center_window_on_primary_screen(window, application)
-    return window
-
-
 def bind_body_close(window: "FluentWindow", body: QtWidgets.QWidget) -> None:
     """Pair a body that guards its own close with the window hosting it.
 
@@ -6883,19 +6900,6 @@ def open_fluent_window(
 # ---------------------------------------------------------------------------
 
 
-def measure_text_width(texts, *, padding: int = 16, minimum: int = 0, maximum: int | None = None) -> int:
-    """Return a label-column width that fits the widest of ``texts`` at the current scale."""
-
-    metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
-    widest = max([fluent_text_width(metrics, str(text)) for text in texts] + [0])
-    width = widest + scaled_px(padding)
-    if minimum:
-        width = max(width, scaled_px(minimum))
-    if maximum is not None:
-        width = min(width, scaled_px(maximum))
-    return int(width)
-
-
 class ElidedLabel(QtWidgets.QLabel):
     """A label that elides with ``...`` and exposes the full text as a tooltip."""
 
@@ -6956,15 +6960,21 @@ class FluentStatusStrip(FluentFrame):
     priority instead of rows appearing/disappearing (the old transient task banner shifted the
     whole layout under the pointer every time a task started/finished).
 
-    Severity is a DATA input mapped to the one palette here: ``info`` (grey), ``task``
-    (orange -- an ongoing run's progress line), ``warning`` (amber advisory), ``error`` (red).
+    Severity is a DATA input mapped to the one palette here, in the one status vocabulary
+    (``zlc_ui.status.STATUS_SEVERITIES``): ``idle`` (grey), ``task`` (orange -- an ongoing
+    run's progress line), ``warning`` (amber advisory), ``error`` (red).
     The shared precedent is the always-visible last-message-wins Log strip; this deviates
     consciously by adding severity colour + the action slot, which its separate popup/timer
     channels carried instead."""
 
-    #: severity -> (dot colour, text colour); the ONE mapping every consumer shares.
-    SEVERITIES = {"info": (GREY, GREY), "task": (ORANGE, ORANGE_DARK),
-                  "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED)}
+    #: severity -> (dot colour, text colour); the ONE mapping every consumer shares.  Keyed
+    #: by the status vocabulary itself: a word added there without a colour here fails at
+    #: import, not in the first Qt slot that shows it.
+    SEVERITIES = {
+        word: {"idle": (GREY, GREY), "task": (ORANGE, ORANGE_DARK),
+               "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED)}[word]
+        for word in STATUS_SEVERITIES
+    }
 
     action_clicked = QtCore.pyqtSignal()
 
@@ -6985,9 +6995,13 @@ class FluentStatusStrip(FluentFrame):
             self.action_button.setVisible(False)
             lay.addWidget(self.action_button)
         self._severity = None
-        self.show_message("", severity="info")
+        self.show_message("", severity="idle")
 
-    def show_message(self, text: str, *, severity: str = "info") -> None:
+    @property
+    def current_severity(self) -> str:
+        return self._severity
+
+    def show_message(self, text: str, *, severity: str = "idle") -> None:
         """Set the strip's line.  Change-gated so the per-tick caller never repolishes Qt
         styles for an unchanged state."""
         if severity not in self.SEVERITIES:

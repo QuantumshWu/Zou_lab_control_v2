@@ -9,6 +9,7 @@ second control for any of them.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -321,16 +322,6 @@ class PanelCardView(FluentGroupBox):
         self._press_at: QtCore.QPoint | None = None
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
-        #: Where the OPERATOR dragged this popup, for as long as it stays
-        #: open.  Placement has two owners -- the anchor beside the Setting
-        #: button, and the drag -- and the anchor used to re-assert itself
-        #: on every content resize, so picking a fit model (which adds the
-        #: parameter row) threw the popup back beside the button.
-
-        #: Whether what this card shows will deliver again.  A live panel
-        #: redraws on a beat and can be taken off the board; a saved figure
-        #: does neither, and must not offer controls for both.
-        self._editing_enabled = True
         self.settings_button = FluentButton("Setting", color=GREY)
         button_height = scaled_px(26, minimum=22)
         self.settings_button.setFixedSize(
@@ -943,14 +934,6 @@ class PanelCardView(FluentGroupBox):
     def selectors_enabled(self) -> bool:
         return self._selectors_on
 
-    def set_editing_enabled(self, enabled: bool) -> None:
-        """Gate persisted panel edits without disabling plot interaction."""
-
-        self._editing_enabled = bool(enabled)
-        self.settings_button.setEnabled(self._editing_enabled)
-        if not self._editing_enabled:
-            self.retire_settings_popup()
-
     def retire_settings_popup(self) -> None:
         """Hide the page-owned Setting overlay without removing its Panel."""
 
@@ -1397,29 +1380,14 @@ class PanelCardView(FluentGroupBox):
             value = self._settings_form.read_value(name)
             section, separator, parameter_key = name.partition("__")
             if separator and section in {"semantic", "display", "fit"}:
-                fields = tuple(
-                    parameter_fields(self._parameter_surface, section)
+                patch: dict[str, object] = parameter_edit_values(
+                    parameter_fields(self._parameter_surface, section),
+                    section,
+                    parameter_key,
+                    lambda key: self._settings_form.read_value(
+                        f"{section}__{key}"
+                    ),
                 )
-                selected = next(
-                    field
-                    for field in fields
-                    if str(field["key"]) == parameter_key
-                )
-                owner = str(selected.get("edit_section") or section)
-                owned = tuple(
-                    field
-                    for field in fields
-                    if str(field.get("edit_section") or section) == owner
-                )
-                patch: dict[str, object] = {
-                    owner: parameter_edit_values(
-                        owned,
-                        parameter_key,
-                        lambda key: self._settings_form.read_value(
-                            f"{section}__{key}"
-                        ),
-                    )
-                }
             elif name == "interval_ms":
                 patch = {name: int(value)}
             elif name in {"title", "signal", "overlay_signal", "size", "cell_kind"}:
@@ -1490,4 +1458,41 @@ class PanelCardView(FluentGroupBox):
         super().mouseReleaseEvent(event)
 
 
-__all__ = ["PanelCardView"]
+def new_panel_card(owner: Any, panel_id: str, title: str) -> PanelCardView:
+    """One board card, its choice policy projected and its intents relayed.
+
+    The console handle and the FigureViewer each own a board of these cards;
+    they are made and wired here, once, so the two boards cannot drift into
+    two kinds of card.  ``owner`` holds the projected ``_panel_sizes`` /
+    ``_panel_default_size``, ``_panel_intervals`` /
+    ``_panel_default_interval`` and ``_grid_cell_kinds``, and the four panel
+    signals the card's intents travel on.
+    """
+
+    key = str(panel_id)
+    if not owner._panel_sizes:
+        raise RuntimeError("panel size choices were not projected")
+    card = PanelCardView(key, str(title))
+    card.set_size_choices(owner._panel_sizes, owner._panel_default_size)
+    if owner._panel_intervals:
+        card.set_interval_choices(
+            owner._panel_intervals, owner._panel_default_interval
+        )
+    if owner._grid_cell_kinds:
+        card.set_cell_kind_choices(owner._grid_cell_kinds)
+    card.remove_requested.connect(
+        lambda _=None, pid=key: owner.panel_remove_requested.emit(pid)
+    )
+    card.edit_requested.connect(
+        lambda _=None, pid=key: owner.panel_edit_requested.emit(pid)
+    )
+    card.state_changed.connect(
+        lambda patch, pid=key: owner.panel_state_changed.emit(pid, patch)
+    )
+    card.plot_error.connect(
+        lambda message, pid=key: owner.panel_plot_error.emit(pid, str(message))
+    )
+    return card
+
+
+__all__ = ["PanelCardView", "new_panel_card"]

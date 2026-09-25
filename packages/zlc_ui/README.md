@@ -56,7 +56,13 @@ completion callbacks never re-enter the current close event. The Qt owner does
 not wait for device, node, archive or plot workers, and a refused close leaves
 the window visible. There is no raw `atexit` widget-deletion path standing in
 for application shutdown: Workbench must retire its real owners before the
-guard accepts the close.
+guard accepts the close. At interpreter exit Qt objects are left to the
+operating system (`sip.setdestroyonexit(False)`): no state lives in a Qt
+destructor, and C++ destructors run in Python's teardown order destroyed
+widgets after their QApplication. Before Python finalizes, one exit hook
+releases every top-level window's native window and delivers queued
+`deleteLater` deletions, without close events, so no close guard is asked;
+left to Qt's static teardown they crashed the process after its last line.
 
 ## Development
 
@@ -145,8 +151,9 @@ The package is organized as follows:
 - `zlc_ui.device_manager` — pure device-instance editor view; catalog and
   persistence stay with the host.
 
-Detailed view signatures are maintained in `docs/console-views.md`, including
-the device-manager contract.
+Detailed signatures are maintained in `docs/console-views.md` (the
+`TaskConsoleHandle` port, its internal views and the device-manager contract)
+and `docs/pulse-views.md` (the `PulseEditorHandle` port and its pages).
 
 ## FormRuntimeContext
 

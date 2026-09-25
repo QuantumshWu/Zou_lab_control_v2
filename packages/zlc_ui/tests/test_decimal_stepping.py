@@ -10,7 +10,6 @@ import pytest
 
 @pytest.fixture
 def box():
-    pytest.importorskip("PyQt5")
     from zlc_ui.qt import ensure_qt_app
     from zlc_ui.fluent import FluentDoubleSpinBox
 
@@ -132,7 +131,6 @@ def test_a_unit_redeclared_keeps_the_spelling_on_screen(box) -> None:
 
 
 def test_a_count_box_counts_in_32_bits() -> None:
-    pytest.importorskip("PyQt5")
     from zlc_ui.qt import ensure_qt_app
     from zlc_ui.fluent import fluent_count_box
 
@@ -426,7 +424,6 @@ def test_a_spelling_that_fits_clears_an_earlier_narrow_refusal() -> None:
     re-evaluation cleared it, so the next commit reported a number the box
     was already showing whole, and only a third edit went through."""
 
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtCore, QtTest, QtWidgets
     from zlc_ui.qt import ensure_qt_app
     from zlc_ui.fluent import FluentLineEdit
@@ -434,10 +431,14 @@ def test_a_spelling_that_fits_clears_an_earlier_narrow_refusal() -> None:
     from zlc_ui.fluent.fluent import _numeric_text_width
 
     app = ensure_qt_app(["narrow-refusal"])
-    edit = FluentLineEdit("1")
+    # Inside a window: a top-level edit on a real Windows screen cannot be
+    # narrower than the system's minimum window width, and the width below
+    # is narrower than that.
+    window = QtWidgets.QWidget()
+    edit = FluentLineEdit("1", window)
     edit.set_numeric_validator("int", bottom=0)
     edit.setFixedWidth(120)
-    edit.show()
+    window.show()
     try:
         app.processEvents()
         # Room for "1000" and not for "10000", whatever the font.
@@ -458,4 +459,4 @@ def test_a_spelling_that_fits_clears_an_earlier_narrow_refusal() -> None:
         app.processEvents()
         assert edit.text() == "1000" and not edit.property("numericError")
     finally:
-        edit.close()
+        window.close()

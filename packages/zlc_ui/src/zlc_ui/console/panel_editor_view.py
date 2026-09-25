@@ -590,22 +590,16 @@ class PanelEditorView(QtWidgets.QWidget):
 
     def _mapping_value_changed(self, section: str, key: str) -> None:
         try:
-            selected = self._parameter_fields[section][key]
-            owner = str(selected.get("edit_section") or section)
-            owned = tuple(
-                field
-                for field in self._parameter_fields[section].values()
-                if str(field.get("edit_section") or section) == owner
-            )
-            values = parameter_edit_values(
-                owned,
+            patch = parameter_edit_values(
+                self._parameter_fields[section].values(),
+                section,
                 key,
                 self.parameter_forms[section].read_value,
             )
         except (KeyError, TypeError, ValueError) as error:
             self.snapshot_label.setText(str(error))
             return
-        self.state_changed.emit({owner: values})
+        self.state_changed.emit(patch)
 
     def _open_producer(self) -> None:
         node_id = str(self._projection.get("producer_node_id") or "")
@@ -648,4 +642,39 @@ class PanelEditorView(QtWidgets.QWidget):
         return " · ".join(pieces)
 
 
-__all__ = ["PanelEditorView"]
+def panel_editor_projection(owner: Any, projection: object) -> dict[str, object]:
+    """An Edit projection carrying ``owner``'s projected size and interval choices."""
+
+    incoming = dict(projection)
+    incoming["interval_choices"] = owner._panel_intervals
+    incoming["size_choices"] = owner._panel_sizes
+    return incoming
+
+
+def new_panel_editor(owner: Any, panel_id: str, projection: object) -> PanelEditorView:
+    """One Edit page with its intents relayed to ``owner``'s panel signals.
+
+    The console handle and the FigureViewer both open these; made and wired
+    here, once, the two Edit pages stay one page.
+    """
+
+    key = str(panel_id)
+    editor = PanelEditorView(key, panel_editor_projection(owner, projection))
+    editor.state_changed.connect(
+        lambda patch, pid=key: owner.panel_state_changed.emit(pid, patch)
+    )
+    editor.snapshot_refresh_requested.connect(
+        lambda _=None, pid=key: owner.panel_snapshot_refresh_requested.emit(pid)
+    )
+    editor.save_figure_requested.connect(
+        lambda path, pid=key: owner.panel_save_figure_requested.emit(pid, str(path))
+    )
+    # The Edit surface's failures travel the same channel as the card's:
+    # one relay rule, one place a plot is reported.
+    editor.plot_error.connect(
+        lambda message, pid=key: owner.panel_plot_error.emit(pid, str(message))
+    )
+    return editor
+
+
+__all__ = ["PanelEditorView", "new_panel_editor", "panel_editor_projection"]

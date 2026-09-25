@@ -31,9 +31,9 @@ for _name in (
     "FluentCodeEdit", "FluentDoubleSpinBox", "fluent_count_box", "fluent_integer_box", "FluentCheckBox", "FluentScrollArea",
     "FluentPageBody", "FluentTableView",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
-    "bind_body_close", "launch_qt_window", "launch_fluent_window",
+    "bind_body_close", "launch_fluent_window",
     "open_fluent_window",
-    "measure_text_width", "ElidedLabel", "FluentStatusStrip",
+    "ElidedLabel", "FluentStatusStrip",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
@@ -41,8 +41,8 @@ for _name in (
     "CONFIG_GREEN", "CONFIG_GREEN_DARK", "CONFIG_GREEN_TINT",
     "CARD_PAD", "CARD_TITLE_PAD", "CARD_TITLE_PX",
     "COMBO_TRI_SIZE", "COMBO_WIDTH", "DIVIDER", "EDIT_PADDING_H", "FLUENT_SCALE_MAX",
-    "FLUENT_SCALE_MIN", "FONT", "FONT_SIZE", "GREEN", "GRAPHITE", "GREY", "HINT",
-    "HOVER", "MUTED_LABEL_STYLE", "ORANGE", "ORANGE_DARK", "ORANGE_TINT", "PADDING_H",
+    "FLUENT_SCALE_MIN", "FONT", "FONT_SIZE", "GREEN", "GRAPHITE", "GREY",
+    "HOVER", "MUTED_LABEL_STYLE", "ORANGE", "ORANGE_DARK", "ORANGE_TINT",
     "PADDING_V", "PLACEHOLDER", "RADIUS", "RED", "STEP_WIDTH", "SURFACE", "TEXT",
     "TITLE_LEFT_INSET", "WINDOW_PAD", "WINDOW_SCREEN_FRACTION", "YELLOW",
 ):

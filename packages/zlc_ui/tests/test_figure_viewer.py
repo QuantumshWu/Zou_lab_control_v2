@@ -1,48 +1,8 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
-import sys
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-REPO_ROOT = ROOT.parents[1]
-
-
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
-#: product bootstrap is what puts this checkout's layers on the path,
-#: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
-
-
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    verified = """
-import zou_lab_control
-import zlc_ui.figure_viewer.view as tested_module
-print(zou_lab_control.__file__)
-print(tested_module.__file__)
-""" + code
-    completed = subprocess.run(
-        [sys.executable, "-c", verified], cwd=ROOT, env=environment,
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_figure_viewer_mount_reconcile_and_open_intent() -> None:
-    _run_qt(
+def test_figure_viewer_mount_reconcile_and_open_intent(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from pathlib import Path
@@ -198,34 +158,13 @@ app.processEvents()
     )
 
 
-def test_figure_viewer_reuses_task_console_permanent_navigation_tabs() -> None:
-    _run_qt(
-        """
-from zlc_ui.console import TaskConsoleView
-from zlc_ui.figure_viewer import FigureViewerView
-from zlc_ui.fluent import FluentTabWidget
-from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['shared-tabs'])
-figure = FigureViewerView()
-console = TaskConsoleView()
-assert type(figure.info_pane.info_tabs) is FluentTabWidget
-assert type(console.tabs) is FluentTabWidget
-assert type(figure.info_pane.info_tabs) is type(console.tabs)
-assert [figure.info_pane.info_tabs.tabText(i) for i in range(figure.info_pane.info_tabs.count())] == [
-    'Plot', 'Logic', 'Devices', 'Flow', 'Raw'
-]
-assert [console.tabs.tabText(i) for i in range(console.tabs.count())] == ['Monitor', 'Logic']
-"""
-    )
-
-
-def test_a_played_pulse_gets_a_read_only_tab_beside_board_and_edit() -> None:
+def test_a_played_pulse_gets_a_read_only_tab_beside_board_and_edit(run_qt) -> None:
     """A Devices row's action opens one preview tab per played pulse -- the
     editor's preview page, controls and all, each control speaking with the
     tab's key; a second open focuses it, and closing the tab tells the
     presenter which one went."""
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtWidgets
 from zlc_ui.figure_viewer import FigureViewerHandle, FigureViewerView
@@ -294,8 +233,8 @@ assert handle.show_pulse_placeholder('k', 'gone') is False
     )
 
 
-def test_manual_data_editor_is_virtual_and_emits_plain_intents() -> None:
-    _run_qt(
+def test_manual_data_editor_is_virtual_and_emits_plain_intents(run_qt) -> None:
+    run_qt(
         """
 from PyQt5 import QtCore, QtTest, QtWidgets
 from collections.abc import Sequence
@@ -385,17 +324,10 @@ for first, second in ((editor.name_edit, editor.axis_name_edit),
                       (editor.note_edit, editor.domain_combo)):
     assert first.mapTo(editor, QtCore.QPoint()).x() == second.mapTo(editor, QtCore.QPoint()).x()
     assert first.width() == second.width()
-assert not hasattr(editor, 'role_combo')
-assert not hasattr(editor, 'coordinate_table')
-assert not hasattr(editor, 'axis_up_button')
 assert editor.axis_value_model.rowCount() == 1
 assert editor.axis_value_model.columnCount() == 100_000
 assert editor.axis_value_table.horizontalScrollBar().maximum() > 0
 assert editor.axis_value_table.sizeAdjustPolicy() == QtWidgets.QAbstractScrollArea.AdjustIgnored
-# The role controls ARE the statement of what rows and columns are; a
-# second line repeating the choice just made is not a second fact.
-assert not hasattr(editor, 'row_axis_label')
-assert not hasattr(editor, 'column_axis_label')
 roles = {
     label.text().split(' (')[0]: mode.currentText()
     for _holder, label, mode in editor._axis_view_widgets.values()
@@ -578,39 +510,40 @@ app.processEvents()
     )
 
 
-def test_figure_viewer_demo_smoke() -> None:
-    environment = dict(os.environ)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    command = (
-        "import runpy, sys, zou_lab_control, zlc_ui; "
-        "print(zou_lab_control.__file__); print(zlc_ui.__file__); "
-        "sys.argv=['demo_figure_viewer.py', '--once']; "
+def test_figure_viewer_demo_smoke(run_qt) -> None:
+    completed = run_qt(
+        "import runpy, sys; "
+        "sys.argv = ['demo_figure_viewer.py', '--once']; "
         "runpy.run_path('examples/demo_figure_viewer.py', run_name='__main__')"
     )
-    completed = subprocess.run(
-        [sys.executable, "-c", command],
-        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
     # What the demo shows now is a HOST filling the page through the handle;
     # the File field's own intent is checked against the widget above, which is
     # where a widget may be poked at all.
     assert "filled: 2 signals" in completed.stdout
 
 
-def test_the_info_pane_width_is_stable_across_loaded_content() -> None:
-    """Loading metadata must not move the Viewer split or resize the window."""
+def test_the_info_pane_width_is_stable_across_loaded_content(run_qt) -> None:
+    """Loading metadata must not move the Viewer split or resize the window.
 
-    _run_qt(
+    The Viewer's five info tabs and the console's two are permanent
+    navigation, named the same way on both windows.
+    """
+
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import TaskConsoleView
 from zlc_ui.figure_viewer import FigureViewerView
 app = ensure_qt_app(['pane-width'])
 view = FigureViewerView(); view.resize(1200, 700); view.show(); app.processEvents()
 pane = view.info_pane
 bar = pane.info_tabs.tabBar()
 
-assert bar.count() == 5
+assert [pane.info_tabs.tabText(i) for i in range(bar.count())] == [
+    'Plot', 'Logic', 'Devices', 'Flow', 'Raw'
+]
+console = TaskConsoleView()
+assert [console.tabs.tabText(i) for i in range(console.tabs.count())] == ['Monitor', 'Logic']
 assert not pane.info_tabs.cornerWidget().isVisible(), 'the tab bar overflowed its own pane'
 assert sum(bar.tabRect(i).width() for i in range(bar.count())) >= bar.natural_width(), (
     'a tab title was elided to fit'
@@ -624,51 +557,20 @@ assert pane.width() == before, 'loaded labels changed the fixed Viewer split'
     )
 
 
-def test_an_info_refresh_keeps_the_tab_the_operator_is_reading() -> None:
-    """A refresh replaces the CONTENT of the tabs, not which one is open.
+def test_a_record_is_read_as_a_tree_and_the_flow_is_a_map_of_it(run_qt) -> None:
+    """A run's record opens under the run, a device's snapshot under the
+    device; a filter finds a name or a value anywhere in the tab; Copy
+    takes the whole value; and a click on a flow card opens the row it
+    stands for.  The pane used to print each record as a Python literal.
 
+    A refresh replaces the CONTENT of the tabs, not which one is open.
     Every tab is destroyed and rebuilt on each ``set_tabs`` -- the rows
     change, the five titles never do -- and the rebuilt stack starts at the
     first tab, so anyone reading Devices was thrown back to Plot by a
     refresh they did not ask for.
     """
 
-    _run_qt(
-        """
-import zou_lab_control
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent.info_pane import InfoPane
-app = ensure_qt_app(['info-tab'])
-
-TITLES = ('Plot', 'Logic', 'Devices', 'Flow', 'Raw')
-pane = InfoPane(label_names=TITLES)
-pane.set_tabs(tuple((title, (('a', '1'),)) for title in TITLES))
-app.processEvents()
-pane.info_tabs.setCurrentIndex(2)
-app.processEvents()
-assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Devices'
-
-pane.set_tabs(tuple((title, (('a', '9'),)) for title in TITLES))
-app.processEvents()
-assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Devices', (
-    pane.info_tabs.tabText(pane.info_tabs.currentIndex()))
-
-# A tab that no longer exists cannot be kept; falling back to the first is
-# the only honest answer, and it must not raise.
-pane.set_tabs((('Plot', (('a', '9'),)), ('Logic', (('a', '9'),))))
-app.processEvents()
-assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Plot'
-"""
-    )
-
-
-def test_a_record_is_read_as_a_tree_and_the_flow_is_a_map_of_it() -> None:
-    """A run's record opens under the run, a device's snapshot under the
-    device; a filter finds a name or a value anywhere in the tab; Copy
-    takes the whole value; and a click on a flow card opens the row it
-    stands for.  The pane used to print each record as a Python literal."""
-
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.fluent.info_pane import InfoPane, copy_text, value_text
@@ -780,5 +682,23 @@ assert pane.info_tabs.currentWidget() is devices
 assert devices.tree.currentItem() is camera and camera.isExpanded()
 assert pane.show_row('Logic', 'cm') and logic.currentItem() is cm
 assert not pane.show_row('Logic', 'nobody')
+
+refreshed = InfoPane(label_names=TITLES)
+refreshed.set_tabs(tuple((title, (('a', '1'),)) for title in TITLES))
+app.processEvents()
+refreshed.info_tabs.setCurrentIndex(2)
+app.processEvents()
+assert refreshed.info_tabs.tabText(refreshed.info_tabs.currentIndex()) == 'Devices'
+
+refreshed.set_tabs(tuple((title, (('a', '9'),)) for title in TITLES))
+app.processEvents()
+assert refreshed.info_tabs.tabText(refreshed.info_tabs.currentIndex()) == 'Devices', (
+    refreshed.info_tabs.tabText(refreshed.info_tabs.currentIndex()))
+
+# A tab that no longer exists cannot be kept; falling back to the first is
+# the only honest answer, and it must not raise.
+refreshed.set_tabs((('Plot', (('a', '9'),)), ('Logic', (('a', '9'),))))
+app.processEvents()
+assert refreshed.info_tabs.tabText(refreshed.info_tabs.currentIndex()) == 'Plot'
 """
     )

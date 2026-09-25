@@ -2,41 +2,8 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
-import sys
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-
-#: Every snippet starts here: the product bootstrap is what puts THIS
-#: checkout's layers on the path.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
-
-
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=40,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_a_field_holds_digits_and_says_its_unit_beside_them() -> None:
+def test_a_field_holds_digits_and_says_its_unit_beside_them(run_qt) -> None:
     """The box is for the number; the row says what the number is in.
 
     Printing the symbol inside as well put the same fact in two places and
@@ -46,7 +13,7 @@ def test_a_field_holds_digits_and_says_its_unit_beside_them() -> None:
     the value on screen and one place that decides it.
     """
 
-    _run_qt(
+    run_qt(
         """
 from PyQt5 import QtGui
 from zlc_ui.qt import ensure_qt_app
@@ -72,7 +39,9 @@ form = FluentParameterForm(
 
 drive = form.widget_for('drive')
 assert drive.text() == '120000000', drive.text()
-assert drive.valueFromText('1050000') == 1050000.0
+# Qt's interpret commits what it reads (setValue follows at once), so the
+# probe reads the value the box already holds.
+assert drive.valueFromText('120000000') == 120000000.0
 assert drive.validate('120', 3)[0] == QtGui.QValidator.Acceptable
 assert drive.validate('1.05M', 5)[0] == QtGui.QValidator.Invalid, 'a prefix is picked'
 assert drive.validate('1.05 MHz', 8)[0] == QtGui.QValidator.Invalid
@@ -130,7 +99,7 @@ print('ok')
     )
 
 
-def test_an_unreadable_keystroke_never_ends_the_process() -> None:
+def test_an_unreadable_keystroke_never_ends_the_process(run_qt) -> None:
     """Qt calls both of these from inside its own event handling.
 
     An exception out of a Qt slot is not a traceback, it is the end of the
@@ -138,7 +107,7 @@ def test_an_unreadable_keystroke_never_ends_the_process() -> None:
     because value() interprets the text and would come straight back here.
     """
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentDoubleSpinBox
@@ -164,10 +133,10 @@ print('ok')
     )
 
 
-def test_a_device_reading_is_shown_the_way_its_editable_twin_is() -> None:
+def test_a_device_reading_is_shown_the_way_its_editable_twin_is(run_qt) -> None:
     """Device Control printed str(value) in the one column made to be read."""
 
-    _run_qt(
+    run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form.form import FormFieldProps, FormSpec
@@ -183,10 +152,10 @@ projection = {
     'fields': {
         'drive': {'current': 120000000.0, 'desired': 120000000.0, 'editable': True,
                   'live_apply': False, 'live_enabled': True, 'apply_enabled': True,
-                  'status': '', 'severity': 'info', 'reason': ''},
+                  'status': '', 'severity': 'ready', 'reason': ''},
         'mode': {'current': 'holding', 'desired': 'holding', 'editable': False,
                  'live_apply': False, 'live_enabled': False, 'apply_enabled': False,
-                 'status': '', 'severity': 'info', 'reason': ''},
+                 'status': '', 'severity': 'ready', 'reason': ''},
     },
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
 }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import Enum
+from functools import partial
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -367,7 +368,7 @@ class InfoTree(QtWidgets.QTreeWidget):
         size = button.sizeHint().expandedTo(button.minimumSize())
         item.setSizeHint(1, QtCore.QSize(size.width(), size.height() + 2 * padding))
         self.setItemWidget(item, 1, holder)
-        item.setData(1, QtCore.Qt.UserRole, str(value["text"]))
+        item.setData(1, QtCore.Qt.UserRole, partial(str, value["text"]))
 
     def _add_entry(
         self, parent: QtWidgets.QTreeWidgetItem | None, name: str, value: object
@@ -377,7 +378,10 @@ class InfoTree(QtWidgets.QTreeWidget):
             self.addTopLevelItem(item)
         else:
             parent.addChild(item)
-        item.setData(1, QtCore.Qt.UserRole, copy_text(value))
+        # What Copy puts on the clipboard, formatted only if it is asked for:
+        # an ancestor's text re-joins every leaf below it, and a tab of a few
+        # thousand rows paid that for every node while it was being built.
+        item.setData(1, QtCore.Qt.UserRole, partial(copy_text, value))
         if _is_composite(value):
             # How many rows are under it -- a count of what follows, not a
             # value of its own: set in the muted ink so the eye tells them
@@ -459,7 +463,8 @@ class InfoTree(QtWidgets.QTreeWidget):
         current = self.currentItem() if item is None else item
         if current is None:
             return ""
-        return str(current.data(1, QtCore.Qt.UserRole) or current.text(1))
+        copied = current.data(1, QtCore.Qt.UserRole)
+        return (str(copied()) if copied is not None else "") or current.text(1)
 
     def row_name(self, item: QtWidgets.QTreeWidgetItem | None = None) -> str:
         """The row's name from the top: ``devices.camera.exposure_seconds``."""

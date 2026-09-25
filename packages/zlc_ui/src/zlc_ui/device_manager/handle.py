@@ -42,19 +42,14 @@ class DeviceControlHandle(QtCore.QObject):
             "field_apply_requested",
         ):
             getattr(view, name).connect(getattr(self, name))
-        if window is not None and hasattr(window, "closed"):
+        if window is not None:
             window.closed.connect(self.closed)
 
     def restore(self) -> None:
         target = self._window if self._window is not None else self._view
-        if hasattr(target, "showNormal"):
-            target.showNormal()
-        else:
-            target.show()
-        if hasattr(target, "raise_"):
-            target.raise_()
-        if hasattr(target, "activateWindow"):
-            target.activateWindow()
+        target.showNormal()
+        target.raise_()
+        target.activateWindow()
 
     def set_device_label(self, label: str) -> None:
         self._window.setWindowTitle(f"{label} control")
@@ -94,7 +89,6 @@ class DeviceManagerHandle(QtCore.QObject):
     """One device manager, as the outside sees it."""
 
     # -- the window ------------------------------------------------------
-    close_requested = QtCore.pyqtSignal()
     closed = QtCore.pyqtSignal()
 
     # -- what the operator asks for --------------------------------------
@@ -142,16 +136,12 @@ class DeviceManagerHandle(QtCore.QObject):
         self._view = view
         for name in self._FORWARDED:
             getattr(view, name).connect(getattr(self, name))
-        if hasattr(view, "close_requested"):
-            view.close_requested.connect(self.close_requested)
-        if window is not None and hasattr(window, "closed"):
+        if window is not None:
             window.closed.connect(self.closed)
 
     # ------------------------------------------------------------ the window
 
     def close(self) -> None:
-        if hasattr(self._view, "finish_close"):
-            self._view.finish_close()
         if self._window is not None:
             self._window.close()
 
@@ -175,21 +165,15 @@ class DeviceManagerHandle(QtCore.QObject):
         """
 
         target = self._window if self._window is not None else self._view
-        if hasattr(target, "lower"):
-            target.lower()
+        target.lower()
 
     def restore(self) -> None:
         """Restore the existing top-level window; do not create another one."""
 
         target = self._window if self._window is not None else self._view
-        if hasattr(target, "showNormal"):
-            target.showNormal()
-        else:
-            target.show()
-        if hasattr(target, "raise_"):
-            target.raise_()
-        if hasattr(target, "activateWindow"):
-            target.activateWindow()
+        target.showNormal()
+        target.raise_()
+        target.activateWindow()
 
     def window_size(self) -> tuple[int, int]:
         target = self._window if self._window is not None else self._view

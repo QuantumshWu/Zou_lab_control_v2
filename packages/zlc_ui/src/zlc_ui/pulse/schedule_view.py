@@ -24,7 +24,7 @@ from zlc_ui.fluent import (
 
 from ._layout import (
     add_labeled_widget, channel_label_width,
-    card_gutter, channel_name_edit_width, channel_row_height, hide_button_width,
+    card_gutter, channel_name_edit_width, hide_button_width,
     panel_top_height, px, period_card_width, period_control_width, row_height,
     row_region_vmetrics, spacer_card_width, spacer_control_width, time_unit_width,
 )
@@ -257,7 +257,7 @@ class PeriodCard(FluentGroupBox):
                 if self.kind == PERIOD_KIND_SPACER:
                     widget.setToolTip(port.label)
                 widget.setChecked(bool(digital.get(port.key, False)))
-                widget.setFixedHeight(channel_row_height())
+                widget.setFixedHeight(row_height())
                 widget.toggled.connect(lambda checked, key=port.key: self.digital_committed.emit(self.period_id, key, bool(checked)))
                 self.checks[port.key] = widget
             else:
@@ -267,7 +267,7 @@ class PeriodCard(FluentGroupBox):
                     )
                 mode, field = analog[port.key]
                 widget = QtWidgets.QWidget()
-                widget.setFixedHeight(channel_row_height())
+                widget.setFixedHeight(row_height())
                 row_layout = QtWidgets.QHBoxLayout(widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(px(4, minimum=3))
@@ -305,7 +305,7 @@ class PeriodCard(FluentGroupBox):
                     ),
                 )
                 edit.set_numeric_validator("int", bottom=port.lo, top=port.hi)
-                edit.setFixedHeight(channel_row_height())
+                edit.setFixedHeight(row_height())
                 _apply_field(edit, field)
                 combo.currentIndexChanged[int].connect(
                     lambda _index, key=port.key: self._commit_analog(key)
@@ -446,9 +446,9 @@ class ChannelNamesPanel(FluentGroupBox):
                 row.setSpacing(px(5, minimum=3))
                 endpoint = FluentLabel(port.endpoint_text or port.key)
                 endpoint.setAlignment(QtCore.Qt.AlignCenter)
-                endpoint.setFixedSize(channel_label_width(), channel_row_height())
+                endpoint.setFixedSize(channel_label_width(), row_height())
                 field.setFixedWidth(channel_name_edit_width())
-                field.setFixedHeight(channel_row_height())
+                field.setFixedHeight(row_height())
                 row.addWidget(endpoint)
                 row.addWidget(field, 1)
                 self._layout.insertWidget(self._layout.count() - 1, holder)
@@ -466,8 +466,9 @@ class ChannelNamesPanel(FluentGroupBox):
         if key in self._rows:
             self._rows[key].setText(label)
 
-    def set_summary(self, total_text: str, period_count: int, visible_text: str) -> None:
+    def set_summary(self, total_text: str, total_tooltip: str, period_count: int, visible_text: str) -> None:
         self.total_label.setText(str(total_text))
+        self.total_label.setToolTip(str(total_tooltip))
         self.periods_label.setText(str(period_count))
         self.visible_label.setText(str(visible_text))
 
@@ -585,7 +586,7 @@ class ChannelPanel(FluentGroupBox):
                 holder_layout = QtWidgets.QHBoxLayout(holder)
                 holder_layout.setContentsMargins(0, 0, 0, 0)
                 label = FluentLabel(port.label)
-                label.setFixedSize(channel_label_width(), channel_row_height())
+                label.setFixedSize(channel_label_width(), row_height())
                 label.setAlignment(QtCore.Qt.AlignCenter)
                 holder_layout.addWidget(label)
                 holder_layout.addWidget(edit)
@@ -608,7 +609,7 @@ class ChannelPanel(FluentGroupBox):
             _apply_field(edit, row.value)
             with signals_blocked(combo):
                 combo.clear()
-                combo.addItems([unit for unit, _quantum in row.unit_quantums] or [row.unit])
+                combo.addItems(list(row.units) or [row.unit])
                 combo.setCurrentText(row.unit)
             self._rows[row.port_key] = current
         for key, (edit, _combo, _fill, _clear) in existing.items():
@@ -1254,7 +1255,6 @@ class PulseScheduleView(QtWidgets.QWidget):
     load_requested = QtCore.pyqtSignal()
     config_requested = QtCore.pyqtSignal()
     connection_requested = QtCore.pyqtSignal(str, str)
-    left_panels_collapsed = QtCore.pyqtSignal(bool)
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
@@ -1271,14 +1271,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(px(8, minimum=5), px(8, minimum=5), px(8, minimum=5), px(8, minimum=5))
         layout.setSpacing(px(8, minimum=5))
-
-        # The document title and summary belong to PulseEditorView's single
-        # top header.  Keep these two labels as non-owning presenter seams so
-        # the schedule API remains stable, but do not render a second header.
-        self.title_label = FluentLabel("")
-        self.title_label.hide()
-        self.summary_label = FluentLabel("")
-        self.summary_label.hide()
 
         # The fixed-width operator columns and the timeline are two panes of
         # ONE scrolling body: their rows line up, so they move together, and
@@ -1580,15 +1572,13 @@ class PulseScheduleView(QtWidgets.QWidget):
 
     def _reconcile(self, vm: ScheduleVM) -> None:
         """Update existing rows and move timeline items only when their order changes."""
-        self.title_label.setText(vm.document_name)
-        self.summary_label.setText(vm.summary_text)
         visible_count = sum(1 for port in vm.ports if port.visible)
         self.visible_label.setText(
             f"Visible {visible_count}/{len(vm.ports)} ports | "
             f"Hidden {max(0, len(vm.ports) - visible_count)}"
         )
         self.names_panel.set_ports(vm.document_name, vm.ports)
-        self.names_panel.set_summary(vm.total_text, len(vm.periods), vm.visible_text)
+        self.names_panel.set_summary(vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text)
         self.channel_panel.set_delay_rows(self._visible_delay_rows(vm), vm.ports)
         self.channel_panel.set_clock(vm.clock_text)
         self.channel_panel.set_scan_summary(vm.scan_summary_text)
@@ -1711,21 +1701,16 @@ class PulseScheduleView(QtWidgets.QWidget):
             return
         visible = set(str(key) for key in ports)
         updated = tuple(replace(port, visible=port.key in visible) for port in self._schedule.ports)
-        self._schedule = replace(self._schedule, ports=updated, visible_text=f"{len(visible)}/{len(updated)}")
+        # The rows only: the "N/M ports" text is the presenter's to word, and
+        # it arrives with set_summary.
+        self._schedule = replace(self._schedule, ports=updated)
         self._reconcile(self._schedule)
 
     def set_summary(self, total_text: str, total_tooltip: str, period_count: int, visible_text: str, summary_text: str, scan_summary_text: str) -> None:
         if self._schedule is None:
             return
         self._schedule = replace(self._schedule, total_text=str(total_text), total_tooltip=str(total_tooltip), period_count=int(period_count), visible_text=str(visible_text), summary_text=str(summary_text), scan_summary_text=str(scan_summary_text))
-        self.title_label.setToolTip(str(total_tooltip))
-        self.summary_label.setText(str(summary_text))
-        visible_count = sum(1 for port in self._schedule.ports if port.visible)
-        self.visible_label.setText(
-            f"Visible {visible_count}/{len(self._schedule.ports)} ports | "
-            f"Hidden {max(0, len(self._schedule.ports) - visible_count)}"
-        )
-        self.names_panel.set_summary(str(total_text), int(period_count), str(visible_text))
+        self.names_panel.set_summary(str(total_text), str(total_tooltip), int(period_count), str(visible_text))
         self.channel_panel.set_scan_summary(str(scan_summary_text))
 
     def set_connection(self, vm: ConnectionVM) -> None:
@@ -1996,7 +1981,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.left_panel_stub_holder.setVisible(visible)
         self.collapse_button.setText("Show Left" if visible else "Collapse")
         self._settle_left_pane_width()
-        self.left_panels_collapsed.emit(visible)
 
     def _show_left_panels(self) -> None:
         self.names_panel_holder.show()
@@ -2004,7 +1988,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.left_panel_stub_holder.hide()
         self.collapse_button.setText("Collapse")
         self._settle_left_pane_width()
-        self.left_panels_collapsed.emit(False)
 
 
 __all__ = [

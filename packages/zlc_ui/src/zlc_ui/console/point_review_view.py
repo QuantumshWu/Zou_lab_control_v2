@@ -221,7 +221,7 @@ class PointReviewView(FluentFrame):
         self.status.show_message(
             f"Detected {len(self._point_ids)} · Excluded {len(excluded)} "
             f"· Final {kept}{suffix}",
-            severity="task" if selected else "info",
+            severity="task" if selected else "idle",
         )
         self.exclude_selected_button.setEnabled(bool(selected))
         self.restore_selected_button.setEnabled(bool(selected))

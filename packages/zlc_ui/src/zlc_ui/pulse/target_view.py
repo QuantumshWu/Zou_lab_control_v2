@@ -36,7 +36,6 @@ _QT_SPINBOX_MAXIMUM = (1 << 31) - 1
 
 class PulseTargetView(QtWidgets.QWidget):
     apply_requested = QtCore.pyqtSignal(tuple)
-    feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None, *, endpoint_template: str = "endpoint:{key}[{bit}]") -> None:
         super().__init__(parent)
@@ -145,7 +144,6 @@ class PulseTargetView(QtWidgets.QWidget):
         self.dac_card.setTitle(f"DAC outputs · {sum(r.record.kind == 'dac' for r in self._rows)}")
 
     def set_feedback(self, text: str) -> None:
-        self.feedback_requested.emit(str(text))
         self.status_label.setText(str(text))
 
     def _make_row(self, record: TargetPortRecord) -> _TargetRowWidgets:
@@ -285,7 +283,6 @@ class PulseTargetView(QtWidgets.QWidget):
                 endpoints=endpoints,
                 clock_key=row.record.clock_key,
                 clock_endpoint=row.clock_endpoint.text().strip() if row.record.kind == "dac" else None,
-                lane_order=row.record.lane_order if len(row.record.lane_order) == len(endpoints) else tuple(range(len(endpoints))),
             ))
         return tuple(values)
 
@@ -299,7 +296,7 @@ class PulseTargetView(QtWidgets.QWidget):
             self.set_feedback(str(error))
             return
         key = self._allocate_key("digital")
-        record = TargetPortRecord(key, "digital", key, (f"endpoint:{key}",), lane_order=(0,))
+        record = TargetPortRecord(key, "digital", key, (f"endpoint:{key}",))
         split = next((index for index, row in enumerate(current) if row.kind == "dac"), len(current))
         self.set_ports(current[:split] + (record,) + current[split:], self._editable, self.status_label.text())
         self._queue_reveal_row(key)

@@ -142,15 +142,15 @@ def fake_schedule() -> ScheduleVM:
         brackets=(),
         run_repeats=0,
         delay_rows=(
-            DelayRowVM("ch00", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
-            DelayRowVM("ch01", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
-            DelayRowVM("ch02", _field("0", source="api"), "ns", (("ns", 1.0), ("us", 1000.0))),
-            DelayRowVM("ch03", _field("0"), "ns", (("ns", 1.0), ("us", 1000.0))),
+            DelayRowVM("ch00", _field("0"), "ns", ("ns", "us")),
+            DelayRowVM("ch01", _field("0"), "ns", ("ns", "us")),
+            DelayRowVM("ch02", _field("0", source="api"), "ns", ("ns", "us")),
+            DelayRowVM("ch03", _field("0"), "ns", ("ns", "us")),
             DelayRowVM(
                 "da_bias_y",
                 _field("0", validator_kind="int", validator_lo=0, validator_hi=100000),
                 "ns",
-                (("ns", 1.0), ("us", 1000.0)),
+                ("ns", "us"),
             ),
         ),
         scan_summary_text="2 slots · 16 pts",
@@ -215,7 +215,6 @@ def populate(editor) -> None:
         status="Offline (edit only)",
     ))
     scan = editor
-    scan.set_scan_repeats_range(0, 0)
     scan.set_scan_page(ScanPageRecord(
         slots_text="2 bound scan slots · fake table ready",
         table_text="0.0  1.0\n0.5  1.5\n1.0  2.0",
@@ -229,8 +228,8 @@ def populate(editor) -> None:
     target = editor
     target.set_target_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
     target.set_target_ports((
-        TargetPortRecord("digital_1", "digital", "Laser gate", ("d0",), lane_order=(0,)),
-        TargetPortRecord("da_bias_y", "dac", "da_bias_y", ("ch38", "ch37"), "da_bias_y_clock", "da_clk1", (0, 1)),
+        TargetPortRecord("digital_1", "digital", "Laser gate", ("d0",)),
+        TargetPortRecord("da_bias_y", "dac", "da_bias_y", ("ch38", "ch37"), "da_bias_y_clock", "da_clk1"),
     ), True, "Offline fake target · changes are draft-only until Apply")
     preview = editor
     preview.set_preview_size_names(("1x1", "2x2", "4x4"))
@@ -259,7 +258,6 @@ def populate(editor) -> None:
         (scan.scan_source_edited, "scan_source_edited"),
         (scan.scan_run_requested, "scan_run_requested"),
         (target.target_apply_requested, "target_apply_requested"),
-        (target.target_feedback_requested, "target_feedback_requested"),
         (preview.preview_include_off_toggled, "preview_include_off_toggled"),
         (preview.preview_save_requested, "preview_save_requested"),
     )

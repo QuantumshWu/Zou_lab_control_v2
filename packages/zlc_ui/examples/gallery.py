@@ -66,7 +66,7 @@ fill_grouped_choice_combo = _fluent.fill_grouped_choice_combo
 ElidedLabel = _fluent.ElidedLabel
 FluentWindow = _fluent.FluentWindow
 InfoPane = _fluent.InfoPane
-launch_qt_window = _fluent.launch_qt_window
+open_fluent_window = _fluent.open_fluent_window
 muted_note_label = _fluent.muted_note_label
 retire_widget = _fluent.retire_widget
 scaled_px = _fluent.scaled_px
@@ -79,7 +79,7 @@ FluentScanLineEdit = _pulse.FluentScanLineEdit
 class _InteractiveBindingField(QtWidgets.QWidget):
     """The production binding popup with injected Scan/source state."""
 
-    binding_changed = QtCore.pyqtSignal(object, object)
+    binding_changed = QtCore.pyqtSignal(bool, str)
 
     def __init__(
         self,
@@ -516,28 +516,23 @@ class _GalleryBody(QtWidgets.QWidget):
         print(f"gallery button: {value}", flush=True)
 
 
-class GalleryWindow(FluentWindow):
-    """The public gallery hosted by the reference frameless Fluent window."""
-
-    def __init__(self) -> None:
-        body = _GalleryBody()
-        super().__init__(
-            widget=body,
-            title="zlc_ui control gallery — fake data only",
-        )
-        self.body = body
-        self.scroll = body.scroll
-
-
 def create_window(
     argv: list[str] | None = None,
     *,
     window_ratio: float = WINDOW_SCREEN_FRACTION,
-) -> GalleryWindow:
-    """Create and show the non-blocking gallery window for scripts or Notebook cells."""
+) -> FluentWindow:
+    """Create and show the non-blocking gallery window for scripts or Notebook cells.
+
+    The gallery body is ``window.loaded``, hosted by the same launcher every
+    product window opens through.
+    """
 
     ensure_qt_app(["zlc-ui-gallery", *(argv or [])])
-    return launch_qt_window(GalleryWindow, window_ratio=float(window_ratio))
+    return open_fluent_window(
+        _GalleryBody,
+        title="zlc_ui control gallery — fake data only",
+        window_ratio=float(window_ratio),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

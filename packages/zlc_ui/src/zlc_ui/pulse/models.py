@@ -160,7 +160,7 @@ class DelayRowVM:
     port_key: str
     value: FieldVM
     unit: str
-    unit_quantums: tuple[tuple[str, float], ...] = ()
+    units: tuple[str, ...] = ()
 
 
 def _string_choice_values(
@@ -315,7 +315,6 @@ class TargetPortRecord:
     endpoints: tuple[str, ...] = ()
     clock_key: str | None = None
     clock_endpoint: str | None = None
-    lane_order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

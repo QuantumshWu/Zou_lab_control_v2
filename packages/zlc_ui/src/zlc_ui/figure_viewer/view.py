@@ -12,8 +12,18 @@ import math
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.console.board_view import ConsoleBoardView
-from zlc_ui.console.panel_card_view import PanelCardView, data_structure_fragments
-from zlc_ui.console.panel_editor_view import PanelEditorView
+from zlc_ui.console.panel_card_view import (
+    PanelCardView,
+    _escaped,
+    data_structure_fragments,
+    new_panel_card,
+)
+from zlc_ui.console.panel_editor_view import (
+    PanelEditorView,
+    new_panel_editor,
+    panel_editor_projection,
+)
+from zlc_ui.form.qt_form import being_edited
 from zlc_ui.pulse.preview_view import PulsePreviewView
 from zlc_ui.fluent import (
     retire_widget,
@@ -592,24 +602,14 @@ class _DataEditorView(QtWidgets.QWidget):
         if path:
             self._emit("save_as", path=path, note=self.note_edit.text())
 
-    @staticmethod
-    def _rich_text(value: object) -> str:
-        return (
-            str(value)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace(" ", "&nbsp;")
-        )
-
     def _set_structure(self, structure: object) -> None:
         shape, names = data_structure_fragments(structure)
 
         def html(fragments: object) -> str:
             return "".join(
-                self._rich_text(text)
+                _escaped(text)
                 if colour is None
-                else f'<span style="color:{colour}">{self._rich_text(text)}</span>'
+                else f'<span style="color:{colour}">{_escaped(text)}</span>'
                 for text, colour, _elide in tuple(fragments)
             )
 
@@ -688,12 +688,19 @@ class _DataEditorView(QtWidgets.QWidget):
         if selected is None and axes:
             selected = axes[0]
             selected_axis = str(selected.get("id", ""))
+
+        def project(edit: QtWidgets.QLineEdit, text: str) -> None:
+            # A preview landing re-projects the editor; the box the operator
+            # is typing in is theirs until they leave it.
+            if not being_edited(edit):
+                edit.setText(text)
+
         self._updating = True
         try:
-            self.name_edit.setText(str(dataset.get("name", "")))
+            project(self.name_edit, str(dataset.get("name", "")))
             _fill_choice_combo(self.dtype_combo, dataset.get("dtype_choices", ()), dataset.get("dtype"))
-            self.unit_edit.setText(str(dataset.get("unit", "")))
-            self.note_edit.setText(str(dataset.get("note", "")))
+            project(self.unit_edit, str(dataset.get("unit", "")))
+            project(self.note_edit, str(dataset.get("note", "")))
             self.source_note.setText(str(dataset.get("source", "")))
             self._save_suggested = str(data.get("save_suggested", "figure.npz"))
 
@@ -715,14 +722,17 @@ class _DataEditorView(QtWidgets.QWidget):
                     self._domain_choices,
                     None if selected is None else selected.get("domain"),
                 )
-                self.axis_name_edit.setText(
-                    "" if selected is None else str(selected.get("name", ""))
+                project(
+                    self.axis_name_edit,
+                    "" if selected is None else str(selected.get("name", "")),
                 )
-                self.axis_size_spin.setValue(
-                    1 if selected is None else max(1, int(selected.get("size", 1)))
-                )
-                self.axis_unit_edit.setText(
-                    "" if selected is None else str(selected.get("unit", ""))
+                if not being_edited(self.axis_size_spin):
+                    self.axis_size_spin.setValue(
+                        1 if selected is None else max(1, int(selected.get("size", 1)))
+                    )
+                project(
+                    self.axis_unit_edit,
+                    "" if selected is None else str(selected.get("unit", "")),
                 )
                 self.axis_mode_label.setText("Edit selected axis")
                 self.apply_axis_button.setText("Apply axis")
@@ -997,30 +1007,7 @@ class FigureViewerView(QtWidgets.QWidget):
         key = str(panel_id)
         if key in self._cards:
             return
-        if not self._panel_sizes:
-            raise RuntimeError("FigureViewer panel sizes were not projected")
-        card = PanelCardView(key, str(title))
-        card.set_size_choices(self._panel_sizes, self._panel_default_size)
-        if self._panel_intervals:
-            card.set_interval_choices(
-                self._panel_intervals,
-                self._panel_default_interval,
-            )
-        if self._grid_cell_kinds:
-            card.set_cell_kind_choices(self._grid_cell_kinds)
-        card.remove_requested.connect(
-            lambda _=None, pid=key: self.panel_remove_requested.emit(pid)
-        )
-        card.edit_requested.connect(
-            lambda _=None, pid=key: self.panel_edit_requested.emit(pid)
-        )
-        card.state_changed.connect(
-            lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
-        )
-        card.plot_error.connect(
-            lambda message, pid=key: self.panel_plot_error.emit(pid, str(message))
-        )
-        self._cards[key] = card
+        self._cards[key] = new_panel_card(self, key, title)
         self.board.set_cards(tuple(self._cards.values()))
         self._sync_monitor_empty()
 
@@ -1066,15 +1053,9 @@ class FigureViewerView(QtWidgets.QWidget):
         if isinstance(editor, PanelEditorView):
             editor.set_selectors_enabled(bool(enabled))
 
-    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
-        key = str(panel_id)
-        self._cards[key].set_editing_enabled(bool(enabled))
-        editor = self._editors.get(key)
-        if isinstance(editor, PanelEditorView):
-            editor.set_mutation_enabled(bool(enabled))
-
     def present_panel_front(self, panel_id: str, front: object) -> bool:
-        surface = self._cards[str(panel_id)].surface
+        card = self._cards.get(str(panel_id))
+        surface = None if card is None else card.surface
         present = getattr(surface, "present_front", None)
         return bool(callable(present) and present(front))
 
@@ -1107,34 +1088,15 @@ class FigureViewerView(QtWidgets.QWidget):
         self, panel_id: str, projection: object, title: str
     ) -> None:
         key = str(panel_id)
-        existing = self._editors.get(key)
-        if existing is not None:
-            incoming = dict(projection)
-            incoming["size_choices"] = self._panel_sizes
-            incoming["interval_choices"] = self._panel_intervals
-            existing.update_projection(incoming)
-            self.tabs.setCurrentWidget(existing)
-            return
-        incoming = dict(projection)
-        incoming["size_choices"] = self._panel_sizes
-        incoming["interval_choices"] = self._panel_intervals
-        editor = PanelEditorView(key, incoming)
-        editor.state_changed.connect(
-            lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
-        )
-        editor.snapshot_refresh_requested.connect(
-            lambda _=None, pid=key: self.panel_snapshot_refresh_requested.emit(pid)
-        )
-        editor.save_figure_requested.connect(
-            lambda path, pid=key: self.panel_save_figure_requested.emit(pid, str(path))
-        )
-        # The Edit surface's failures travel the same channel as the card's:
-        # one relay rule, one place the viewer reports a plot.
-        editor.plot_error.connect(
-            lambda message, pid=key: self.panel_plot_error.emit(pid, str(message))
-        )
-        self._editors[key] = editor
-        self.tabs.add_closable_tab(editor, str(title), focus=True)
+        editor = self._editors.get(key)
+        if editor is not None:
+            editor.update_projection(panel_editor_projection(self, projection))
+            self.tabs.setCurrentWidget(editor)
+        else:
+            editor = new_panel_editor(self, key, projection)
+            self._editors[key] = editor
+            self.tabs.add_closable_tab(editor, str(title), focus=True)
+        editor.set_selectors_enabled(self._cards[key].selectors_enabled)
 
     def open_data_editor(
         self, editor_id: str, projection: object, title: str
@@ -1287,6 +1249,9 @@ class FigureViewerView(QtWidgets.QWidget):
         editor = self._editors.pop(key, None)
         if editor is None:
             return False
+        # Unmount first: the host's widget is the host's, and is not retired
+        # with the page that showed it.
+        editor.set_surface(None)
         index = self.tabs.indexOf(editor)
         if index >= 0:
             self.tabs.removeTab(index)
@@ -1297,10 +1262,7 @@ class FigureViewerView(QtWidgets.QWidget):
         editor = self._editors.get(str(panel_id))
         if not isinstance(editor, PanelEditorView):
             return False
-        incoming = dict(projection)
-        incoming["size_choices"] = self._panel_sizes
-        incoming["interval_choices"] = self._panel_intervals
-        editor.update_projection(incoming)
+        editor.update_projection(panel_editor_projection(self, projection))
         return True
 
     def has_panel_editor(self, panel_id: str) -> bool:
@@ -1356,10 +1318,7 @@ class FigureViewerView(QtWidgets.QWidget):
     def show_status(self, text: str, severity: str) -> None:
         """Present the same ConsolePresenter status channel as TaskConsole."""
 
-        level = str(severity or "info")
-        if level == "idle":
-            level = "info"
-        self.info_pane.status.show_message(str(text), severity=level)
+        self.info_pane.status.show_message(str(text), severity=str(severity))
 
     def set_title(self, text: str) -> None:
         self.setWindowTitle(str(text))

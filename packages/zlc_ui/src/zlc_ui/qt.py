@@ -2,15 +2,46 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import threading
 from pathlib import Path
 from collections.abc import Sequence
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
-from .fluent.style import FONT, FONT_SIZE
+from .fluent.style import FONT
+
+# Interpreter exit must not run C++ destructors in Python's teardown order: a
+# widget destroyed after the QApplication it belonged to is an access violation
+# after the program's last line has run.  No state here lives in a Qt
+# destructor (files are written by close protocols), so the objects are left
+# for the OS to reclaim instead; only native windows and queued deletions are
+# handed back first (below).
+sip.setdestroyonexit(False)
+
+
+def _release_qt_at_exit() -> None:
+    """Hand back native windows and queued deletions while Python still runs.
+
+    Left alone, a live native window and the objects queued by deleteLater
+    met Qt's own static teardown after the interpreter had gone: an access
+    violation after the last line in about one exit in seven, measured on a
+    Logic editor's run (none in 80 with this).  No close event is sent -- a
+    window's close guard answers the operator, not interpreter exit.
+    """
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        widget.destroy()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+
+
+# Registered after PyQt's own exit hook, so it runs first.
+atexit.register(_release_qt_at_exit)
 
 
 _QT_ARGV: list[str] | None = None
@@ -27,10 +58,6 @@ _WINDOWS_FLUENT_FONT_FILES = (
     "segoeuil.ttf",
     "segoeuisl.ttf",
 )
-
-
-def _fluent_font_size() -> int:
-    return max(8, int(round(FONT_SIZE)))
 
 
 def _install_ipykernel_wake_timer(shell) -> None:
@@ -126,7 +153,8 @@ def _ensure_offscreen_fluent_fonts(app: QtWidgets.QApplication) -> bool:
 
 
 def _ensure_fluent_scale() -> None:
-    """Initialize the shared Fluent scale before callers construct widgets."""
+    """Initialize the shared Fluent scale, and with it the app font, before
+    callers construct widgets."""
 
     from .fluent.fluent import ensure_fluent_scale
 
@@ -148,16 +176,16 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
     """Return the owner-thread QApplication and configure Fluent once.
 
     This is the only QApplication constructor in the package.  It also
-    applies the shared HiDPI flags, the reference Segoe UI font, Windows
-    offscreen font registration, initializes the shared Fluent scale before
-    callers construct widgets, performs owner-thread checks, and installs the
-    optional IPython Qt event-loop hook.  It deliberately does not resize a
-    window: QApplication owns the screen/DPR environment, while
-    ``open_fluent_window(factory)`` (or the factory form of
+    applies the shared HiDPI flags and Windows offscreen font registration,
+    initializes the shared Fluent scale (and with it the reference Segoe UI
+    font) before callers construct widgets, performs owner-thread checks,
+    and installs the optional IPython Qt event-loop hook.  It deliberately
+    does not resize a window: QApplication owns the screen/DPR environment,
+    while ``open_fluent_window(factory)`` (or the factory form of
     ``launch_fluent_window``) owns the shared screen-fit window size.  An
-    existing QApplication must have been created
-    with the same HiDPI attributes; a pre-existing non-HiDPI app is rejected
-    because Qt cannot be repaired after construction.
+    existing QApplication must have been created with the same HiDPI
+    attributes; a pre-existing non-HiDPI app is rejected because Qt cannot
+    be repaired after construction.
     """
 
     global _QT_APP, _QT_ARGV
@@ -173,7 +201,6 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
                 "kernel and call ensure_qt_app() before constructing QApplication"
             )
         _ensure_offscreen_fluent_fonts(app)
-        app.setFont(QtGui.QFont(FONT, _fluent_font_size()))
         _ensure_fluent_scale()
         _QT_APP = app
         if app.windowIcon().isNull():
@@ -193,7 +220,6 @@ def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
     _QT_ARGV = list(sys.argv if argv is None else argv)
     _QT_APP = QtWidgets.QApplication(_QT_ARGV)
     _ensure_offscreen_fluent_fonts(_QT_APP)
-    _QT_APP.setFont(QtGui.QFont(FONT, _fluent_font_size()))
     _ensure_fluent_scale()
     _claim_taskbar_identity()
     _QT_APP.setWindowIcon(app_icon())

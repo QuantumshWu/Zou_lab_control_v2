@@ -226,6 +226,12 @@ class ConsoleBoardView(QtWidgets.QWidget):
         # not reflow the remaining cards or paint a dashed insertion ghost.
 
     def _card_dropped(self, card: PanelCardView, local_point: tuple[int, int]) -> None:
+        if card.panel_id not in self._cards:
+            # Retired mid-drag: the grabbing card still gets its release
+            # before its deferred delete runs, and there is no place left
+            # to drop it into.
+            self._active_card = None
+            return
         # A drop now always follows a drag that crossed the window
         # system's threshold, so this no longer covers for a click
         # arriving as a drop -- it covers a drag whose first move landed

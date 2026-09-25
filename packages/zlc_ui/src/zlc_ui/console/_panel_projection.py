@@ -163,8 +163,16 @@ def decode_parameter_value(edited: object) -> object:
     return edited
 
 
-def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, object]:
+def parameter_edit_values(
+    fields: object, section: str, key: str, read_value
+) -> dict[str, dict[str, object]]:
     """Read the parameter the operator edited, and anything edited WITH it.
+
+    The answer is the patch ``{owner section: values}``.  A field may be
+    edited under another section than the one it is shown in
+    (``edit_section``: a fit control whose value is display state); the
+    patch goes to that owner, and only that owner's fields are read with
+    it.  The Setting card and the Edit page both ask here.
 
     Which parameters have to move together is declared where the parameters
     are and reaches this layer on the descriptor, as ``co_edited_with``.
@@ -188,12 +196,20 @@ def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, obj
 
     if not callable(read_value):
         raise TypeError("read_value must be callable")
-    declared = {
-        str(field["key"]): dict(field) for field in tuple(fields or ())
-    }
     selected = str(key)
-    if selected not in declared:
+    fields = tuple(fields or ())
+    owners = {
+        str(field["key"]): str(field.get("edit_section") or section)
+        for field in fields
+    }
+    if selected not in owners:
         raise KeyError(selected)
+    owner = owners[selected]
+    declared = {
+        str(field["key"]): dict(field)
+        for field in fields
+        if owners[str(field["key"])] == owner
+    }
     edited = {
         selected: decode_parameter_value(read_value(selected))
     }
@@ -205,7 +221,7 @@ def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, obj
             # Theirs stands; the companion joins the next edit that can be
             # read.
             pass
-    return edited
+    return {owner: edited}
 
 def signal_form_runtime(groups_for) -> FormRuntimeContext:
     """Project producer groups into the existing keyed tree-choice form seam."""

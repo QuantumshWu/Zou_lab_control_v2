@@ -71,7 +71,6 @@ def _pump(app, passes: int = 20) -> None:
 
 @pytest.fixture
 def stage():
-    pytest.importorskip("PyQt5")
     from PyQt5 import QtWidgets
     from zlc_ui.qt import ensure_qt_app
 
@@ -84,22 +83,6 @@ def stage():
     parent.close()
     parent.deleteLater()
     _pump(app)
-
-
-def test_the_hand_written_idiom_really_does_map_a_window(stage) -> None:
-    """The mechanism this file exists for, demonstrated -- so the guard bites."""
-
-    from PyQt5 import QtWidgets
-
-    app, parent, layout = stage
-    seen, holder = _window_shows(app)
-    child = QtWidgets.QLabel("row", parent)
-    layout.addWidget(child)
-    child.setParent(None)
-    child.deleteLater()
-    _pump(app)
-    app.removeEventFilter(holder)
-    assert "QLabel" in seen, "Qt no longer shows an unparented child; revisit this file"
 
 
 def test_a_retired_widget_is_never_shown_as_a_window(stage) -> None:

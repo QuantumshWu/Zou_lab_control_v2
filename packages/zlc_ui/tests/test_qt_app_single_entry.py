@@ -3,21 +3,10 @@
 from __future__ import annotations
 
 import ast
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-
-
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT layer than the one beside it.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def _python_files() -> list[Path]:
@@ -80,30 +69,16 @@ def test_only_ensure_qt_app_constructs_qapplication() -> None:
     assert all(call.lineno < constructor.lineno for _, call in attribute_calls)
 
 
-def test_importing_package_does_not_create_qapplication() -> None:
+def test_importing_package_does_not_create_qapplication(run_qt) -> None:
     code = (
         "import zlc_ui; "
         "from PyQt5.QtWidgets import QApplication; "
         "assert QApplication.instance() is None"
     )
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
-def test_ensure_qt_app_sets_reference_font_and_owner_thread() -> None:
+
+def test_ensure_qt_app_sets_reference_font_and_owner_thread(run_qt) -> None:
     code = """
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import ensure_fluent_scale, fluent_font_size, resolve_fluent_auto_scale
@@ -116,45 +91,10 @@ assert abs(ensure_fluent_scale() - expected) < 1e-9
 assert app.font().family() == 'Segoe UI'
 assert app.font().pointSize() == fluent_font_size()
 """
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
 
-def _run(code: str) -> "subprocess.CompletedProcess[str]":
-    """Run one snippet against this checkout, the way the tests above do."""
-
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    return subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def test_opening_a_window_outside_a_notebook_never_imports_ipython() -> None:
+def test_opening_a_window_outside_a_notebook_never_imports_ipython(run_qt) -> None:
     """Two thirds of a second, paid by every window, to be told "no".
 
     The Qt hook a Jupyter kernel needs is installed by asking IPython for
@@ -172,11 +112,10 @@ ensure_qt_app(['probe'])
 found = sorted(name for name in sys.modules if name.startswith('IPython'))
 assert not found, found
 """
-    completed = _run(code)
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
 
-def test_a_shell_that_is_there_still_gets_the_qt_loop() -> None:
+def test_a_shell_that_is_there_still_gets_the_qt_loop(run_qt) -> None:
     """And the hook still installs for the kernel it is FOR."""
 
     code = """
@@ -192,11 +131,10 @@ from zlc_ui.qt import ensure_qt_app
 ensure_qt_app(['probe'])
 assert asked == [('gui', 'qt')], asked
 """
-    completed = _run(code)
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
 
-def test_ensure_qt_app_rejects_preexisting_non_high_dpi_application() -> None:
+def test_ensure_qt_app_rejects_preexisting_non_high_dpi_application(run_qt) -> None:
     code = """
 from PyQt5 import QtWidgets
 raw_app = QtWidgets.QApplication(['raw-app'])
@@ -209,25 +147,10 @@ else:
     raise AssertionError('a non-High-DPI QApplication must not be reused silently')
 assert QtWidgets.QApplication.instance() is raw_app
 """
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
 
-def test_resizable_fluent_launcher_cannot_fall_back_to_content_hint_size() -> None:
+def test_resizable_fluent_launcher_cannot_fall_back_to_content_hint_size(run_qt) -> None:
     code = """
 from PyQt5 import QtWidgets
 from zlc_ui.fluent import WINDOW_SCREEN_FRACTION, launch_fluent_window, screen_fit_window_size
@@ -241,25 +164,10 @@ assert window.size() == target, (window.size().width(), window.size().height(), 
 assert window.width() > body.sizeHint().width()
 window.close()
 """
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
 
-def test_reusable_capture_api_rejects_offscreen_ui_acceptance() -> None:
+def test_reusable_capture_api_rejects_offscreen_ui_acceptance(run_qt) -> None:
     code = """
 from PyQt5 import QtWidgets
 from zlc_ui.acceptance import capture_window
@@ -278,25 +186,10 @@ except RuntimeError as error:
 else:
     raise AssertionError('offscreen capture was accepted as UI acceptance evidence')
 """
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)
 
 
-def test_fluent_window_uses_reference_frameless_shell_and_top_margin() -> None:
+def test_fluent_window_uses_reference_frameless_shell_and_top_margin(run_qt) -> None:
     code = """
 from PyQt5 import QtWidgets
 from qframelesswindow import FramelessWindow
@@ -315,19 +208,4 @@ assert window.loaded.geometry().top() >= window.titleBar.geometry().bottom() + 1
     window.loaded.geometry().top(), window.titleBar.geometry().getRect()
 )
 """
-    environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = (
-        ""
-        if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(ROOT.parents[1]), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+    run_qt(code)

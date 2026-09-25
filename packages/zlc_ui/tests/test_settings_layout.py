@@ -13,47 +13,8 @@ Two defects are pinned here, both found by measuring real geometry:
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-
-
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
-#: product bootstrap is what puts this checkout's layers on the path,
-#: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
-
-
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        "" if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=40,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
 
 _SURFACE_PROLOGUE = """
-import zou_lab_control
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console.panel_card_view import PanelCardView
@@ -123,11 +84,34 @@ app.processEvents()
 """
 
 
-def test_the_switch_track_never_paints_under_its_neighbour() -> None:
-    _run_qt(
+def test_the_setting_popup_lays_out_from_measured_truth(run_qt) -> None:
+    run_qt(
         _SURFACE_PROLOGUE
         + """
 from zlc_ui.fluent import fluent_switch_width
+
+def assert_the_viewport_spans_the_body():
+    # The body is a width CONSUMER: nothing pins its minimum, and the popup
+    # is sized from the form's measured requirement plus the popup's real
+    # chrome -- so the viewport always spans the body and no row loses its
+    # right edge.
+    form = card._settings_form
+    body = card._settings_body
+    viewport = card._settings_scroll.viewport()
+    assert body.minimumWidth() == 0
+    assert body.width() <= viewport.width(), (body.width(), viewport.width())
+    margins = body.layout().contentsMargins()
+    required = form.minimum_content_width() + margins.left() + margins.right()
+    assert viewport.width() >= required, (viewport.width(), required)
+
+assert_the_viewport_spans_the_body()
+rows = [form._rows[key] for key in form.spec.keys]
+rects = [QtCore.QRect(row.mapTo(body, QtCore.QPoint(0, 0)), row.size()) for row in rows]
+for index, rect in enumerate(rects):
+    assert rect.right() <= body.width(), (form.spec.keys[index], rect)
+    for other in rects[index + 1:]:
+        assert not rect.intersects(other), (rect, other)
+
 # One width authority: the column reserved for an Auto switch is what the
 # switch itself will paint, and the paint never exceeds the widget's cell.
 for key, switch in form._auto_switches.items():
@@ -138,8 +122,16 @@ for key, switch in form._auto_switches.items():
     switch_right = switch.mapTo(row, QtCore.QPoint(switch._content_width(), 0)).x()
     control_left = control.mapTo(row, QtCore.QPoint(0, 0)).x()
     assert switch_right <= control_left, (key, switch_right, control_left)
+
+# A live projection replacement while the popup is open (the beat does this)
+# re-measures and re-presents through the card's one placement call.
+card.set_panel_projection(state, parameter_surface(14))
+app.processEvents()
+app.processEvents()
+assert_the_viewport_spans_the_body()
+
 # A deliberately squeezed switch clips its own track instead of overflowing.
-squeezed = next(iter(form._auto_switches.values()))
+squeezed = next(iter(card._settings_form._auto_switches.values()))
 squeezed.setFixedWidth(40)
 app.processEvents()
 assert squeezed._content_width() <= squeezed.width()
@@ -148,55 +140,9 @@ assert squeezed._content_width() <= squeezed.width()
     )
 
 
-def test_the_settings_body_is_never_clipped_by_the_viewport() -> None:
-    _run_qt(
-        _SURFACE_PROLOGUE
-        + """
-# The body is a width CONSUMER: nothing pins its minimum, and the popup is
-# sized from the form's measured requirement plus the popup's real chrome --
-# so the viewport always spans the body and no row loses its right edge.
-assert body.minimumWidth() == 0
-assert body.width() <= viewport.width(), (body.width(), viewport.width())
-margins = body.layout().contentsMargins()
-required = form.minimum_content_width() + margins.left() + margins.right()
-assert viewport.width() >= required, (viewport.width(), required)
-rows = [form._rows[key] for key in form.spec.keys]
-rects = [QtCore.QRect(row.mapTo(body, QtCore.QPoint(0, 0)), row.size()) for row in rows]
-for index, rect in enumerate(rects):
-    assert rect.right() <= body.width(), (form.spec.keys[index], rect)
-    for other in rects[index + 1:]:
-        assert not rect.intersects(other), (rect, other)
-"""
-        + _SURFACE_EPILOGUE
-    )
-
-
-def test_reprojection_while_open_reflows_without_clipping() -> None:
-    _run_qt(
-        _SURFACE_PROLOGUE
-        + """
-# A live projection replacement while the popup is open (the beat does this)
-# re-measures and re-presents through the card's one placement call.
-card.set_panel_projection(state, parameter_surface(14))
-app.processEvents()
-app.processEvents()
-form = card._settings_form
-body = card._settings_body
-viewport = card._settings_scroll.viewport()
-assert body.minimumWidth() == 0
-assert body.width() <= viewport.width(), (body.width(), viewport.width())
-margins = body.layout().contentsMargins()
-required = form.minimum_content_width() + margins.left() + margins.right()
-assert viewport.width() >= required, (viewport.width(), required)
-"""
-        + _SURFACE_EPILOGUE
-    )
-
-
-def test_reconcile_replaces_the_enabled_when_dependency_graph() -> None:
-    _run_qt(
+def test_reconcile_replaces_the_enabled_when_dependency_graph(run_qt) -> None:
+    run_qt(
         """
-import zou_lab_control
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
@@ -261,13 +207,11 @@ assert form.auto_switch_for('title').isChecked()
     )
 
 
-def test_compound_choice_only_cycles_its_large_domain_when_activated() -> None:
+def test_compound_choice_only_cycles_its_large_domain_when_activated(run_qt) -> None:
     """Scope stays one popup fate; its real coordinates belong to the wheel."""
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control, zlc_ui
-print(zou_lab_control.__file__, zlc_ui.__file__, flush=True)
 from PyQt5 import QtCore, QtGui, QtWidgets, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
@@ -411,7 +355,7 @@ scroll.close()
     )
 
 
-def test_every_field_applies_as_it_is_typed_and_none_is_written_over() -> None:
+def test_every_field_applies_as_it_is_typed_and_none_is_written_over(run_qt) -> None:
     """One rule for the whole form, and the operator owns their cursor.
 
     Text was the single commit-on-defocus kind in the registry -- a Y label
@@ -425,9 +369,8 @@ def test_every_field_applies_as_it_is_typed_and_none_is_written_over() -> None:
     mid-word when an emptied optional field flips to Auto.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form.form import FormFieldProps, FormSpec
@@ -492,7 +435,7 @@ print('ok')
     )
 
 
-def test_a_form_that_grows_a_row_does_not_scroll_itself() -> None:
+def test_a_form_that_grows_a_row_does_not_scroll_itself(run_qt) -> None:
     """Adding a control must not move the controls already on screen.
 
     Choosing a fit model adds one row, and the whole form jumped: every
@@ -505,7 +448,7 @@ def test_a_form_that_grows_a_row_does_not_scroll_itself() -> None:
     not the position, so every edit walked the form a little further.
     """
 
-    _run_qt(
+    run_qt(
         _SURFACE_PROLOGUE
         + """
 scroll = card._settings_scroll
@@ -565,7 +508,7 @@ assert after_rows[new_key] > max(before_rows.values()), (
     )
 
 
-def test_a_short_form_keeps_its_pitch_when_it_grows() -> None:
+def test_a_short_form_keeps_its_pitch_when_it_grows(run_qt) -> None:
     """A row's position depends on the rows above it and nothing else.
 
     A form shorter than its host had no trailing slack, so the surplus
@@ -575,7 +518,7 @@ def test_a_short_form_keeps_its_pitch_when_it_grows() -> None:
     second, independent way the same complaint appears.
     """
 
-    _run_qt(
+    run_qt(
         _SURFACE_PROLOGUE
         + """
 # Deliberately far short of the viewport: this is the regime where surplus
@@ -605,7 +548,7 @@ for key, y in before.items():
     )
 
 
-def test_the_scrollbar_appearing_does_not_narrow_every_control() -> None:
+def test_the_scrollbar_appearing_does_not_narrow_every_control(run_qt) -> None:
     """Width-bounded content reflows to the viewport, so the viewport is fixed.
 
     The bar was AsNeeded with no reserved gutter, so the very row that
@@ -618,9 +561,8 @@ def test_the_scrollbar_appearing_does_not_narrow_every_control() -> None:
     the same moment, and the two effects are not separable there.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentScrollArea, FluentLabel
@@ -669,7 +611,7 @@ app.processEvents()
     )
 
 
-def test_a_frame_carried_away_from_its_button_still_does_not_move() -> None:
+def test_a_frame_carried_away_from_its_button_still_does_not_move(run_qt) -> None:
     """The previous guard only ever tested the frame where it opens.
 
     Anchored, the frame is already pinned to its card-relative height cap and
@@ -683,7 +625,7 @@ def test_a_frame_carried_away_from_its_button_still_does_not_move() -> None:
     stays where the operator put it, and a new control goes below.
     """
 
-    _run_qt(
+    run_qt(
         _SURFACE_PROLOGUE
         + """
 from PyQt5 import QtGui
@@ -752,7 +694,7 @@ for position in (bar.maximum(), bar.maximum() // 2, 0):
     )
 
 
-def test_a_row_whose_key_left_the_spec_goes_even_under_the_cursor() -> None:
+def test_a_row_whose_key_left_the_spec_goes_even_under_the_cursor(run_qt) -> None:
     """The form never holds a widget it cannot answer for.
 
     Keeping the focused row from being REBUILT is the rule; keeping it
@@ -769,9 +711,8 @@ def test_a_row_whose_key_left_the_spec_goes_even_under_the_cursor() -> None:
     'overlay_signal', flipping live drops 'interval_ms'.
     """
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form.form import FormFieldProps, FormSpec
@@ -897,7 +838,7 @@ def test_a_growing_axis_does_not_rebuild_the_fate_popup() -> None:
     assert cleared["count"] == 1, "a new choice list must refill the popup"
 
 
-def test_the_setting_frame_says_the_panels_standing_condition() -> None:
+def test_the_setting_frame_says_the_panels_standing_condition(run_qt) -> None:
     """What the card's dot says is written where the operator goes to fix it.
 
     A red dot with a tooltip names the panel; an operator who opens Setting
@@ -905,7 +846,7 @@ def test_the_setting_frame_says_the_panels_standing_condition() -> None:
     frame in the dot's colour, follows every change, and leaves with it.
     """
 
-    _run_qt(_SURFACE_PROLOGUE + """
+    run_qt(_SURFACE_PROLOGUE + """
 from zlc_ui.fluent import GREY, RED
 card.set_status('its plot surface has been travelling for 37 s', error=True)
 card._open_settings()
@@ -1210,7 +1151,7 @@ def test_a_form_opens_on_the_values_it_is_given_and_an_int_has_no_width() -> Non
     assert form.read_value("n") == 2**40, "clamped exactly, in integers"
 
 
-def test_a_rows_field_is_built_one_row_at_a_time() -> None:
+def test_a_rows_field_is_built_one_row_at_a_time(run_qt) -> None:
     """A generic field of rows is edited as rows: Add puts
     an empty row on the form with a box per column and the cursor in its
     first box, × takes a row away, every keystroke applies like every other
@@ -1218,13 +1159,8 @@ def test_a_rows_field_is_built_one_row_at_a_time() -> None:
     the boxes -- nor does one carrying different rows while the operator is
     inside one of them."""
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
-from pathlib import Path
-import zlc_ui
-print('BOOTSTRAP', zou_lab_control.__file__)
-print('ROOT', Path(zou_lab_control.__file__).resolve().parents[1], 'PACKAGE', zlc_ui.__file__)
 from zlc_plot._kernel_cache import install
 install()
 from PyQt5 import QtCore, QtTest, QtWidgets

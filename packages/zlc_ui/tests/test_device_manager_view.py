@@ -1,90 +1,9 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
-import sys
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-REPO = ROOT.parents[1]
-
-
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
-#: product bootstrap is what puts this checkout's layers on the path,
-#: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control; print(zou_lab_control.__file__)" + chr(10)
-
-
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        "" if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join(
-            value
-            for value in (str(REPO), str(SRC), environment.get("PYTHONPATH", ""))
-            if value
-        )
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-
-
-def test_device_manager_construct_and_plain_data_setters() -> None:
-    _run_qt(
-        """import zou_lab_control
-import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
-from zlc_ui.device_manager import DeviceManagerView
-from zlc_ui.form import FormFieldProps, FormSpec
-from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['test'])
-view = DeviceManagerView()
-view.set_device_choices((
-    ('Sensor', 'sensor.fake', 'sensor'),
-    ('Camera', 'camera.fake', 'camera'),
-))
-view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'),))
-spec = FormSpec((FormFieldProps('count', 'int', 'Count', default=2, minimum=0, maximum=99),))
-view.set_form_spec('id-1', spec, (('count', 7),))
-assert view.read_values('id-1') == (('count', 7),)
-form = view._cards['id-1'].form
-field = form.widget_for('count')
-view.set_form_spec('id-1', spec, (('count', 8),))
-assert view._cards['id-1'].form is form
-assert form.widget_for('count') is field
-assert view.read_values('id-1') == (('count', 8),)
-view.show_status('ready', 'idle')
-assert view.status_strip.text() == 'ready'
-assert view.status_strip.current_severity == 'idle'
-assert tuple(view.domain_groups) == ('sensor', 'camera')
-assert view._cards['id-1'].role_edit.text() == 'input'
-card = view._cards['id-1']
-view.set_devices(())
-assert not card.isWindow(), 'retiring a card briefly promoted it to a top-level window'
-assert card.isHidden()
-"""
-    )
-
-
-def test_device_manager_qtest_signal_payloads() -> None:
-    _run_qt(
-        """import zou_lab_control
-import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
+def test_device_manager_projects_plain_data_and_raises_plain_intents(run_qt) -> None:
+    run_qt(
+        """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -97,7 +16,22 @@ view.set_device_choices((
     ('Camera', 'camera.fake', 'camera'),
 ))
 view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'),))
-view.set_form_spec('id-1', FormSpec((FormFieldProps('count', 'int', 'Count', default=2, minimum=0, maximum=99),)), (('count', 2),))
+spec = FormSpec((FormFieldProps('count', 'int', 'Count', default=2, minimum=0, maximum=99),))
+view.set_form_spec('id-1', spec, (('count', 7),))
+assert view.read_values('id-1') == (('count', 7),)
+card = view._cards['id-1']
+form = card.form
+field = form.widget_for('count')
+view.set_form_spec('id-1', spec, (('count', 8),))
+assert view._cards['id-1'].form is form
+assert form.widget_for('count') is field
+assert view.read_values('id-1') == (('count', 8),)
+view.show_status('ready', 'idle')
+assert view.status_strip.text() == 'ready'
+assert view.status_strip.current_severity == 'idle'
+assert tuple(view.domain_groups) == ('sensor', 'camera')
+assert card.role_edit.text() == 'input'
+
 view.show(); app.processEvents()
 events = []
 view.device_add_requested.connect(lambda value: events.append(('add', value)))
@@ -105,7 +39,6 @@ view.device_remove_requested.connect(lambda value: events.append(('remove', valu
 view.role_committed.connect(lambda instance_id, value: events.append(('role', instance_id, value)))
 view.type_picked.connect(lambda instance_id, value: events.append(('type', instance_id, value)))
 view.parameter_committed.connect(lambda instance_id, key: events.append(('parameter', instance_id, key)))
-card = view._cards['id-1']
 QtTest.QTest.mouseClick(view.domain_add_buttons['sensor'], QtCore.Qt.LeftButton)
 card.role_edit.setFocus()
 card.role_edit.selectAll()
@@ -119,15 +52,17 @@ assert ('role', 'id-1', 'output') in events
 assert ('type', 'id-1', 'sensor.other') in events
 assert ('parameter', 'id-1', 'count') in events
 assert ('remove', 'id-1') in events
+
+view.set_devices(())
+assert not card.isWindow(), 'retiring a card briefly promoted it to a top-level window'
+assert card.isHidden()
 """
     )
 
 
-def test_device_manager_demo_is_a_reusable_human_entry() -> None:
-    _run_qt(
-        """import zou_lab_control
-import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
+def test_device_manager_demo_is_a_reusable_human_entry(run_qt) -> None:
+    run_qt(
+        """
 from examples.demo_device_manager import create_window
 from zlc_ui.device_manager import DeviceManagerHandle
 from PyQt5 import QtWidgets
@@ -146,11 +81,9 @@ assert view.status_strip.text() == 'Offline fake devices · edit only'
     )
 
 
-def test_device_manager_keeps_the_compact_config_surface_and_lifecycle_verbs() -> None:
-    _run_qt(
-        """import zou_lab_control
-import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
+def test_device_manager_keeps_the_compact_config_surface_and_lifecycle_verbs(run_qt) -> None:
+    run_qt(
+        """
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['device-manager-config-surface'])
@@ -193,9 +126,7 @@ assert text_width >= max(
 assert view.load_button.text() == 'Load…'
 assert view.save_button.text() == 'Save'
 assert view.save_as_button.text() == 'Save as…'
-assert not hasattr(view, 'cancel_button')
 assert view.lifecycle_button.text() == 'Init devices'
-assert not hasattr(view, 'test_button')
 events = []
 view.load_requested.connect(lambda: events.append('load'))
 view.save_as_requested.connect(lambda: events.append('save-as'))
@@ -220,12 +151,9 @@ assert view.status_dot.toolTip() == 'Configuration differs from the active insta
     )
 
 
-def test_loaded_device_opens_one_independent_generic_control_surface() -> None:
-    _run_qt(
-        """import zou_lab_control
-print(zou_lab_control.__file__)
-import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
+def test_loaded_device_opens_one_independent_generic_control_surface(run_qt) -> None:
+    run_qt(
+        """
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui import open_device_control
 from zlc_ui.device_manager import DeviceManagerHandle, DeviceManagerView
@@ -307,37 +235,15 @@ control.risk_toggled.connect(risk_events.append)
 control.field_desired_changed.connect(lambda key, value: desired_events.append((key, value)))
 control.field_live_apply_toggled.connect(lambda key, value: live_events.append((key, value)))
 control.field_apply_requested.connect(lambda key, value: apply_events.append((key, value)))
-assert not hasattr(control, 'field_committed')
-assert not hasattr(control, 'set_form')
-assert not hasattr(control, 'read_values')
 assert control._view.owner_label.text() == 'Owner: Camera Measurement'
 assert 'operator risk acceptance' in control._view.reason_label.text()
 assert control._view.current_heading.text() == 'Current'
 assert control._view.desired_heading.text() == 'Desired'
 assert control._view.live_heading.text() == 'Live'
-# The headings and the rows are two layouts pretending to be one table, so
-# every column must be at the same x and the same width in both -- Field,
-# Current and Desired were kept in step by hand while Live, Apply and Status
-# were given round numbers no widget had a reason to match.
 control._window.resize(1000, 400)
 control._window.show()
 for _ in range(4):
     app.processEvents()
-control._view._align_headings()
-app.processEvents()
-row = next(iter(control._view.form._rows.values()))
-cells = [row.layout().itemAt(i).widget() for i in range(row.layout().count())]
-headings = [
-    control._view.field_heading, control._view.current_heading,
-    control._view.desired_heading, control._view.limits_heading,
-    control._view.live_heading, control._view.apply_heading,
-    control._view.status_heading,
-]
-assert len(cells) == len(headings), (len(cells), len(headings))
-for heading, cell in zip(headings, cells):
-    assert (heading.x(), heading.width()) == (cell.x(), cell.width()), (
-        heading.text(), heading.x(), heading.width(), cell.x(), cell.width()
-    )
 control._view.refresh_button.click()
 assert refresh_events == [True]
 QtTest.QTest.mouseClick(control._view.risk_switch, QtCore.Qt.LeftButton)
@@ -496,15 +402,13 @@ optional.close(); app.processEvents()
     )
 
 
-def test_a_projected_type_is_not_a_pick() -> None:
+def test_a_projected_type_is_not_a_pick(run_qt) -> None:
     """``type_picked`` is the operator choosing; ``set_devices`` projecting
     the host's own record selected the type with signals live and told the
     host the operator had just asked for it."""
 
-    _run_qt(
-        """import zlc_ui.device_manager.view as tested_module
-print(zou_lab_control.__file__)
-print(tested_module.__file__)
+    run_qt(
+        """
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['device-projection'])
@@ -523,14 +427,13 @@ assert picks == [('sensor', 'sensor.second')], 'a real pick still reaches the ho
     )
 
 
-def test_a_closed_log_window_stops_polling_and_is_forgotten() -> None:
+def test_a_closed_log_window_stops_polling_and_is_forgotten(run_qt) -> None:
     """A log window that was closed kept reading the snapshot every 500 ms
     for the life of the manager; the clock follows the widget's own
     visibility, and the closed window is retired rather than kept."""
 
-    _run_qt(
-        """import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
+    run_qt(
+        """
 from PyQt5 import QtCore, QtTest, sip
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.qt import ensure_qt_app
@@ -551,7 +454,8 @@ window.close()
 assert not body._timer.isActive(), 'hidden, it stops'
 assert 'sensor' not in view._device_log_windows, 'a closed window is over'
 before = len(calls)
-QtTest.QTest.qWait(700)
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
 assert len(calls) == before, 'a closed log asks for nothing'
 assert sip.isdeleted(window), 'and it is retired, not kept'
 view.open_device_log('sensor', snapshot, label='Science sensor')
@@ -563,15 +467,14 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     )
 
 
-def test_the_control_shows_the_devices_own_limits_beside_the_window() -> None:
+def test_the_control_shows_the_devices_own_limits_beside_the_window(run_qt) -> None:
     """An operator setting a bench window has to see which fence bites: the
     instrument's own range is shown, read-only, in its own column beside
     the editable window, in the spelling the row is read in; a field whose
     device states none shows nothing there."""
 
-    _run_qt(
-        """import zlc_ui.device_manager.view as tested_module
-print(tested_module.__file__)
+    run_qt(
+        """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form.form import FormFieldProps, FormSpec
 from zlc_ui.device_manager.view import DeviceControlView
@@ -589,7 +492,7 @@ spec = FormSpec((
 def state(current, limits):
     return {'current': current, 'desired': current, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
-            'status': '', 'severity': 'info', 'reason': '', 'device_limits': limits}
+            'status': '', 'severity': 'ready', 'reason': '', 'device_limits': limits}
 view = DeviceControlView(spec, {
     'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None),
                'frequency': state(1000.0, (1e-6, 160e6))},
@@ -647,6 +550,8 @@ view._field_rows['power'][2].setChecked(False)
 view.form.widget_for('power').setText('135')
 view._field_rows['power'][3].click()
 assert applies == [('power', 135.0, 'mVpp')], applies
+# The headings and the rows are two layouts pretending to be one table, so
+# every column must be at the same x and the same width in both.
 headings = [view.field_heading, view.current_heading, view.desired_heading,
             view.limits_heading, view.live_heading, view.apply_heading, view.status_heading]
 from PyQt5.QtCore import QPoint

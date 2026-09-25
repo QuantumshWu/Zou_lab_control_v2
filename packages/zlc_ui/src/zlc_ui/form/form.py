@@ -425,15 +425,20 @@ class FormFieldProps:
     def cycle_choice_for(self, value: object) -> tuple[int, object, str] | None:
         """Return ``(index, exact value, label)`` from the lazy wheel domain.
 
-        This is the one walk over the domain, and the domain may be a large
-        axis read lazily: a caller that already holds a position -- the
-        widget showing the value -- asks the widget first and comes here
-        only when the value really moved.
+        The domain may be a large axis read lazily.  One that can locate a
+        value itself (``position_of``, as an axis's Scope domain does) is
+        asked, and one position is read; only a plain sequence is walked.
         """
 
         if self.kind != "choice" or self.cycle_choices is None:
             return None
-        for index in range(len(self.cycle_choices)):
+        locate = getattr(self.cycle_choices, "position_of", None)
+        if locate is None:
+            positions = range(len(self.cycle_choices))
+        else:
+            position = locate(value)
+            positions = () if position is None else (position,)
+        for index in positions:
             chosen, label = self.cycle_choice_at(index)
             if _typed_equal(value, chosen):
                 return index, chosen, label

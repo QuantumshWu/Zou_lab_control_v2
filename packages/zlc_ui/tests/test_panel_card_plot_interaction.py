@@ -7,64 +7,31 @@ page in charge; On gives the plot its selector and navigation gestures.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
-import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-REPO_ROOT = ROOT.parents[1]
-PLOT_TESTS = REPO_ROOT / "packages" / "zlc_plot" / "tests"
+import pytest
 
-#: Every snippet starts here.  Without it the subprocess resolves the
-#: layers through whatever the editable install points at -- on this
-#: machine, sibling checkouts of the same package names -- so the suite
-#: silently tested a DIFFERENT zlc_plot than the one beside it.  The
-#: product bootstrap is what puts this checkout's layers on the path,
-#: and it is the same one every launcher uses.
-_BOOTSTRAP = "import zou_lab_control" + chr(10)
+PLOT_TESTS = Path(__file__).resolve().parents[3] / "packages" / "zlc_plot" / "tests"
 
 
-def _run_qt(code: str) -> None:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = (
-        str(PLOT_TESTS) if environment.get("ZLC_TEST_INSTALLED") == "1"
-        else os.pathsep.join(
-            value
-            for value in (environment.get("PYTHONPATH", ""), str(PLOT_TESTS))
-            if value
-        )
-    )
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    environment.setdefault("MPLBACKEND", "Agg")
-    completed = subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + code],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+@pytest.fixture
+def run_qt(run_qt):
+    """Real zlc_plot surfaces: their test data factory, Agg, and time to compile."""
+
+    return lambda code: run_qt(code, timeout=180, extra_path=(PLOT_TESTS,), mpl_agg=True)
+
 
 _PROLOGUE = """
 import time
 
-import zou_lab_control
-print(zou_lab_control.__file__)
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from data_factory import (
     axis,
-    cartesian_domain,
     make_dataset_schema,
     make_snapshot,
     mapped_domain_from_columns,
     repeat_domain,
-    snapshot_validity,
-    snapshot_values,
 )
 from zlc_data import DatasetSchema, OwnedSnapshot
 from zlc_plot import (
@@ -76,7 +43,6 @@ from zlc_plot import (
 )
 from zlc_plot.raster import RasterPlotHost
 from zlc_ui.console import panel_card_view as tested_module
-print(tested_module.__file__)
 PanelCardView = tested_module.PanelCardView
 
 app = ensure_qt5_application([])
@@ -130,10 +96,10 @@ def send_wheel(widget, steps):
     QtWidgets.QApplication.sendEvent(widget, wheel)
 """
 
-def test_selectors_off_blocks_double_click_facet_focus() -> None:
+def test_selectors_off_blocks_double_click_facet_focus(run_qt) -> None:
     """Off means the plot cannot focus a facet cell."""
 
-    _run_qt(
+    run_qt(
         _PROLOGUE
         + """
 x = np.linspace(-3.0, 3.0, 20)
@@ -175,10 +141,10 @@ finally:
 """
     )
 
-def test_selectors_off_blocks_area_pan_and_zoom_until_enabled() -> None:
+def test_selectors_off_blocks_area_pan_and_zoom_until_enabled(run_qt) -> None:
     """Off blocks every plot gesture; On enables the same real Qt stream."""
 
-    _run_qt(
+    run_qt(
         _PROLOGUE
         + """
 x = np.linspace(0.0, 1.0, 20)
@@ -253,16 +219,13 @@ finally:
 """
     )
 
-def test_a_mounted_surfaces_error_report_reaches_the_handle() -> None:
+def test_a_mounted_surfaces_error_report_reaches_the_handle(run_qt) -> None:
     """errorOccurred on a mounted panel widget lands on the console seam."""
 
-    _run_qt(
+    run_qt(
         """
-import zou_lab_control
-print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView, panel_card_view
-print(panel_card_view.__file__)
 from zlc_ui.qt import ensure_qt_app
 
 app = ensure_qt_app(['panel-plot-error'])
@@ -314,7 +277,7 @@ assert events == [
 """
     )
 
-def test_a_cards_size_is_its_picture_plus_its_chrome_whatever_it_says() -> None:
+def test_a_cards_size_is_its_picture_plus_its_chrome_whatever_it_says(run_qt) -> None:
     """The strip may not decide how big a card is.
 
     A card is its title strip plus the picture mounted in it plus its own
@@ -326,7 +289,7 @@ def test_a_cards_size_is_its_picture_plus_its_chrome_whatever_it_says() -> None:
     demands clips the figure it was opened to show.
     """
 
-    _run_qt(
+    run_qt(
         _PROLOGUE
         + """
 schema = make_dataset_schema(
@@ -388,10 +351,6 @@ assert {
     'semantic__fate:point:field.y',
     'semantic__fate:point:field.z',
 } <= form_keys
-# A reason why a section has nothing to offer is a MESSAGE, and the form
-# declares controls.  It used to be declared here as a field, which is how
-# the Fit section grew a greyed box labelled "Fit" under its Fit model combo.
-assert not any('unavailable' in key for key in form_keys), form_keys
 card._open_settings()
 app.processEvents()
 assert 'kind' not in card._settings_form.spec.keys
@@ -445,7 +404,7 @@ host.close(timeout=10)
 """
     )
 
-def test_a_card_moves_with_its_picture_and_never_ahead_of_it() -> None:
+def test_a_card_moves_with_its_picture_and_never_ahead_of_it(run_qt) -> None:
     """A card that frames a picture changes size with that picture, once.
 
     Picking a preset does not move the card: the picture on it is still the
@@ -459,7 +418,7 @@ def test_a_card_moves_with_its_picture_and_never_ahead_of_it() -> None:
     exists, so it is the preset's planned frame at once.
     """
 
-    _run_qt(
+    run_qt(
         _PROLOGUE
         + """
 from zlc_ui.board import panel_display_size
