@@ -159,6 +159,7 @@ def _draw_mot_roi(
     """Draw the requested ROI through real QMouseEvents and publish roi_frame."""
 
     from PyQt5 import QtCore, QtGui
+    from zlc_runtime import stable_signal_key
 
     _focus_autoplot_cell(bench, panel)
     payload = _image_payload(bench, panel)
@@ -225,7 +226,7 @@ def _draw_mot_roi(
         )
 
     bench.presenter.update_panel_published_outputs(panel.panel_id, {"roi_frame": True})
-    name = f"@logic/{panel.panel_id}/roi_frame"
+    name = stable_signal_key(panel.panel_id, "roi_frame")
     bench._until(
         lambda: bench.session.signal_plane.latest_publication(name) is not None,
         "MOT ROI signal",

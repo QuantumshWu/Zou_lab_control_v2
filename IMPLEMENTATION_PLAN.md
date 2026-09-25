@@ -287,9 +287,9 @@
 - Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
   返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
   接受，owner落后一版不得否决indexed front，Facet只忽略其自身focus cell这一层subject差异。
-- Panel title shape现由PanelCard独立accepted-data projection持有，不再从Setting parameter surface
-  读取；ROI selector导致派生Image/Histogram换schema时，每次surface accept都直接重投影三段shape
-  strip，PanelState/control相等不再阻止。FacetGrid新增display参数
+- Panel title shape现由presenter从accepted data独立投影，与Setting字段同在projected surface里
+  交给PanelCard，但不再从Setting字段推导；ROI selector导致派生Image/Histogram换schema时，每次
+  surface accept都直接重投影三段shape strip，PanelState/control相等不再阻止。FacetGrid新增display参数
   `facet_fit_parameter`，Workbench在fit model存在时把它放在Fit expression下方、通过通用
   `edit_section=display`写回display owner；普通下拉choices为`Model headline`加当前fit model
   parameters。切换仅重画cell annotation不重fit，model不兼容时回到`Model headline`。

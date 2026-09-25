@@ -1063,8 +1063,8 @@ def test_a_card_is_captioned_through_the_signal_key_grammar(presenter) -> None:
     assert caption() == f"{panel_id} {binding.state.title}"
 
     # Bound to a logic signal, the title IS the signal's name; the caption
-    # says its owner and output after the card's id.  An owner may itself
-    # contain a slash: the grammar reads it up to the LAST one.
+    # says its owner and output after the card's id, and an owner that
+    # itself contains a slash shows whole.
     signal = stable_signal_key("camera/left", "frames")
     assert presenter.update_panel_state(panel_id, {"signal": signal}) is True
     assert binding.state.title == signal
@@ -1074,6 +1074,12 @@ def test_a_card_is_captioned_through_the_signal_key_grammar(presenter) -> None:
     # Any other name that starts with "@" keeps its own prefix.
     assert presenter.update_panel_state(panel_id, {"title": "@figure/1/data"})
     assert caption() == f"{panel_id}@figure/1/data"
+
+    # So does a name that only looks like a signal's -- the prefix and one
+    # segment, no owner and output to read.  Only the grammar's reader
+    # refuses it; a card stripping the prefix itself called it "@orphan".
+    assert presenter.update_panel_state(panel_id, {"title": "@logic/orphan"})
+    assert caption() == f"{panel_id}@logic/orphan"
 
     # Renamed -- the title no longer its signal -- it shows its name.
     assert presenter.update_panel_state(panel_id, {"title": "MOT shot"})

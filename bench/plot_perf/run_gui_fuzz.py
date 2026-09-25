@@ -371,13 +371,14 @@ def pick_action(bench, rng, step):
 
 def perform_action(bench, action, beat, output):
     from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+    from zlc_runtime import stable_signal_key
     view = bench.view._view
     kind = action["kind"]
     def signal_name(spelling):
         if not spelling.startswith("$"):
             return spelling
         alias, leaf = spelling[1:].split("/", 1)
-        return f"@logic/{bench.nodes[alias]}/{leaf}"
+        return stable_signal_key(bench.nodes[alias], leaf)
 
     if kind in ("review_script", "manual_script"):
         from zlc_ui.console.point_review_view import PointReviewView
@@ -725,7 +726,7 @@ def perform_action(bench, action, beat, output):
         bench.nodes[action.get("as", action["api"])] = identity
         if action["api"] == "camera_measurement":
             bench.node = identity
-            bench.signal = f"@logic/{identity}/frames"
+            bench.signal = stable_signal_key(identity, "frames")
         return
     if kind.startswith("logic_"):
         identity = bench.nodes.get(action["node"], action["node"])
@@ -790,7 +791,7 @@ def perform_action(bench, action, beat, output):
             source = action["source"]
             if source.startswith("$"):
                 alias, output_name = source[1:].split("/", 1)
-                source = f"@logic/{bench.nodes[alias]}/{output_name}"
+                source = stable_signal_key(bench.nodes[alias], output_name)
             choose(editor.source_combo, source, bench.app)
         elif kind == "logic_device":
             choose(editor._device_combos[action["role"]], action["device"], bench.app)
@@ -987,6 +988,7 @@ def perform_action(bench, action, beat, output):
 def run_child(args, output):
     import zlc_workbench
     from PyQt5 import QtCore, QtTest
+    from zlc_runtime import stable_signal_key
     print("ROOT", zou_lab_control.__file__, "WORKBENCH", zlc_workbench.__file__, flush=True)
     rng = random.Random(args.seed)
     errors = []
@@ -1082,7 +1084,7 @@ def run_child(args, output):
                     if args.chain:
                         camera = next(iter(bench.presenter.panels))
                         setup = [dict(kind="roi", panel=camera, width=.07, height=.05)]
-                        name = f"@logic/{camera}/roi_frame"
+                        name = stable_signal_key(camera, "roi_frame")
                         setup.extend(dict(kind="add", plot=kind, source=name)
                                      for kind in ("histogram", "facet_grid", "curve"))
                         for index, action in enumerate(setup):
