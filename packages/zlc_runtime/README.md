@@ -15,7 +15,14 @@ their latest event. `index_by_source` declares only that a display-derived
 output is capable of history. Runtime exposes a window-bounded ordinary Dataset
 over a neutral `primary-index` only while a consumer holds a window lease;
 retention begins at the current event, uses the largest active window, and is
-dropped with the last lease. Missing computations inside that interval are
+dropped with the last lease. A window whose shots, times the newest event's
+bytes, less what is already held for it, exceed the machine's free physical
+memory is refused outright rather than truncated: the lease when it is taken or
+grown (less its live history), the commit when a generation's first shot meets
+a lease taken before it (a restored panel, a Stop and Start; less the window
+the dropped previous generation held, which its panel draws until this
+publication replaces it, so a restart is refused only by what its record grew).
+Missing computations inside that interval are
 invalid cells and bounded window materialization is independent of run length.
 Runtime is the only owner of data accumulated across publications. Changing a
 signal between latest-event and indexed-history representation advances that
@@ -33,8 +40,10 @@ event-varying metadata. A Processor can provide `describe_run(inputs)`; the Host
 calls it once after the first successful evaluation. Runtime owns the frozen
 declaration and rejects replacement; later commits do not re-compare a plan.
 
-Exact delivery has separate, explicit pending-event and payload-byte limits;
-these do not truncate scientific history. Overflow fails that consumer rather
+Exact delivery has separate, explicit pending-event and payload-byte limits
+(by default 1024 events and the larger of 128 MiB and 32 times the first
+event's bytes, ancestors pinned by an event counted with it); these do not
+truncate scientific history. Overflow fails that consumer rather
 than dropping data or blocking the producer. Finite replay reads existing
 chunks lazily. Historical ancestry retains event identities and records, not
 all ancestor arrays; active computations, coherent fronts and frozen snapshots
@@ -56,9 +65,21 @@ declare latest delivery, coalesce while busy, and run concurrently with other
 processors while remaining serial within one processor.
 
 A later acquisition failure preserves the verified partial prefix and signals
-failure to existing followers; it does not report normal end-of-stream. Stop
+failure to existing followers; it does not report normal end-of-stream.
+Retiring a generation (a Restart, a replaced owner) is not a failure: its
+followers see the stream end (`StreamEndedEarly`) and end cancelled.
+Publication callbacks receive the names of the signals a commit published, so
+a board can wake only for the signals it shows. Stop
 retains data. Explicit node removal or board replacement retires that owner's
 retention, without invalidating independently owned frozen snapshots.
+
+A signal is spelled `@logic/<owner>/<output>` by `stable_signal_key` and read
+back by `split_signal_key` (the owner is everything up to the last slash); no
+other package spells or parses that grammar.
+
+A region drawn on a Rolling panel publishes no signal: its shot bounds name no
+axis (index or shot time), so Runtime cannot map them to history rows. It only
+scopes that panel's own fit.
 
 Publication roots preserve lineage through exact replay and derived/follower
 routes. Accepted-fit outputs are presentation-paced followers of the exact

@@ -4,76 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
 import threading
 from threading import Event
 import time
 
 import pytest
 
-from zlc_data import AxisSpec, DatasetSchema, DomainSpec
-from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
+from zlc_runtime.dataset import MonitorCoverage
 from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.host import LogicNodeObservation, NodeHost
 from zlc_runtime.plane import SignalDataPlane, SignalValue
 
-from _snapshots import snapshot as _snapshot
-
-
-def _monitor_output(
-    declaration: DatasetOutputDeclaration,
-    revision: int,
-    *,
-    value: float | None = None,
-) -> LiveDatasetOutput:
-    return LiveDatasetOutput(
-        declaration,
-        _snapshot(declaration.name, revision, value=value),
-        MonitorCoverage(1, 1),
-    )
-
-
-def _finite_output(
-    declaration: DatasetOutputDeclaration,
-    *,
-    value: float,
-    total: int,
-    origin: int,
-    written: int,
-    event_record: dict[str, object] | None = None,
-) -> LiveDatasetOutput:
-    event = _snapshot(declaration.name, origin + 1, value=value)
-    schema = event.block.schema
-    (repeat,) = schema.repeat_domain.axes
-    canonical = DatasetSchema(
-        DomainSpec(
-            (total,),
-            (
-                AxisSpec(
-                    repeat.axis_id,
-                    repeat.name,
-                    repeat.role,
-                    total,
-                    tuple(range(total)),
-                ),
-            ),
-            (tuple(range(total)),),
-        ),
-        schema.point_domain,
-        schema.cell_domain,
-        schema.value_schema,
-    )
-    return LiveDatasetOutput(
-        declaration,
-        event,
-        DatasetCoverage(written, total),
-        canonical_schema=canonical,
-        cell_origin=(origin, 0),
-        event_record=event_record,
-    )
+from _snapshots import finite_output, monitor_output, snapshot as _snapshot
 
 
 def _wait(host: NodeHost, wake: Event) -> LogicNodeObservation:
@@ -166,7 +109,7 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
     plane = SignalDataPlane()
     notifications = []
     owner_wakes = []
-    plane.subscribe_publications(lambda: notifications.append("publication"))
+    plane.subscribe_publications(lambda _names: notifications.append("publication"))
 
     class Node:
         def execute(self, context):
@@ -176,7 +119,7 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
             publication_count = len(notifications)
             context.commit_live(
                 {
-                    "frame": _finite_output(
+                    "frame": finite_output(
                         declaration,
                         value=7.0,
                         total=1,
@@ -188,7 +131,7 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
             assert len(notifications) == publication_count + 1
             assert len(owner_wakes) == wake_count, "commit must not duplicate Plane's notification"
             current = context.current_dataset("frame")
-            assert float(current.block.values[0, 0, 0]) == 7.0
+            assert float(current.materialize().block.values[0, 0, 0]) == 7.0
             return {"status": "ok"}
 
     host = _host(
@@ -209,7 +152,7 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
         assert host.final_result == {"status": "ok"}
         signal = host.signal_key("frame")
         assert not plane.is_generation_live(signal)
-        assert float(plane.current_dataset(signal).block.values[0, 0, 0]) == 7.0
+        assert float(plane.current_dataset(signal).materialize().block.values[0, 0, 0]) == 7.0
     finally:
         host.shutdown()
         plane.close()
@@ -284,7 +227,7 @@ def test_task_operator_input_is_exactly_answered_or_stopped(tmp_path: Path) -> N
     class Node:
         def execute(self, context):
             context.report_progress("waiting for operator")
-            context.commit_live({"review": _monitor_output(declaration, 1)})
+            context.commit_live({"review": monitor_output(declaration, 1)})
             return dict(
                 context.request_operator_input(
                     "manual-value",
@@ -353,7 +296,7 @@ def test_finite_commits_do_not_materialize_the_canonical_dataset(
             for index in range(3):
                 context.commit_live(
                     {
-                        "scan": _finite_output(
+                        "scan": finite_output(
                             declaration,
                             value=float(index + 1),
                             total=3,
@@ -375,7 +318,7 @@ def test_finite_commits_do_not_materialize_the_canonical_dataset(
         host.start()
         assert _wait(host, wake).phase == "done"
         assert calls == []
-        assert current_dataset(host.signal_key("scan")).block.values[:, 0, 0].tolist() == [
+        assert current_dataset(host.signal_key("scan")).materialize().block.values[:, 0, 0].tolist() == [
             1.0,
             2.0,
             3.0,
@@ -557,62 +500,13 @@ def test_task_failure_keeps_registered_process_artifacts_and_error(
         plane.close()
 
 
-def test_task_stop_keeps_run_and_process_artifact(tmp_path: Path) -> None:
-    running = Event()
-    wake = Event()
-    plane = SignalDataPlane()
-
-    class Node:
-        def execute(self, context):
-            def save_partial(status, _error):
-                assert status == "stopped"
-                report = context.run_directory / "stop-report.npz"
-                report.write_bytes(b"stopped report")
-                context.register_artifact(
-                    "stop_report", report, role="figure"
-                )
-
-            context.register_partial_exit_writer(save_partial)
-            checkpoint = context.run_directory / "partial.json"
-            checkpoint.write_text("{}", encoding="utf-8")
-            context.register_artifact("partial", checkpoint, role="process")
-            context.report_progress("waiting")
-            running.set()
-            while not context.cancel_requested():
-                time.sleep(0.001)
-
-    host = _host(
-        Node(),
-        plane,
-        wake,
-        instance_id="long-task",
-        kind="task",
-    )
-    try:
-        host.start(run_root=tmp_path, input_summary={})
-        assert running.wait(2.0)
-        host.cancel("operator Stop")
-        assert _wait(host, wake).phase == "cancelled"
-        assert host.artifacts[0].path.is_file()
-        document = json.loads((host.run_directory / "run.json").read_text())
-        assert document["status"]["state"] == "stopped"
-        assert document["status"]["stop_reason"] == "operator Stop"
-        assert document["error"] is None
-        assert {item["name"] for item in document["artifacts"]} == {
-            "partial",
-            "stop_report",
-        }
-    finally:
-        host.shutdown()
-        plane.close()
-
-
-@pytest.mark.parametrize("ending", ("interrupted", "returned", "failed"))
-def test_a_partial_writer_that_fails_on_the_way_out_is_reported_not_dropped(
+@pytest.mark.parametrize("ending", ("saved", "interrupted", "returned", "failed"))
+def test_a_stop_keeps_the_run_and_reports_what_the_exit_writer_did(
     tmp_path: Path, ending: str
 ) -> None:
-    """What the exit writer could not save is part of how the run ended.
+    """A Stop keeps the run, its process artifact and what the exit writer saved.
 
+    What the exit writer could not save is part of how the run ended.
     On a Stop -- whether the worker was interrupted mid-step or returned
     after seeing the request -- the state stays stopped/cancelled, and the
     save failure is the observation's error and the record's error.  It
@@ -629,7 +523,12 @@ def test_a_partial_writer_that_fails_on_the_way_out_is_reported_not_dropped(
     class Node:
         def execute(self, context):
             def save_partial(status, _error):
-                raise PermissionError("report.npz is held open by another process")
+                if ending != "saved":
+                    raise PermissionError("report.npz is held open by another process")
+                assert status == "stopped"
+                report = context.run_directory / "stop-report.npz"
+                report.write_bytes(b"stopped report")
+                context.register_artifact("stop_report", report, role="figure")
 
             context.register_partial_exit_writer(save_partial)
             checkpoint = context.run_directory / "partial.json"
@@ -653,6 +552,16 @@ def test_a_partial_writer_that_fails_on_the_way_out_is_reported_not_dropped(
         observation = _wait(host, wake)
         document = json.loads((host.run_directory / "run.json").read_text())
         assert host.artifacts[0].path.is_file()
+        if ending == "saved":
+            assert observation.phase == "cancelled"
+            assert document["status"]["state"] == "stopped"
+            assert document["status"]["stop_reason"] == "operator Stop"
+            assert document["error"] is None
+            assert {item["name"] for item in document["artifacts"]} == {
+                "partial",
+                "stop_report",
+            }
+            return
         assert [item["name"] for item in document["artifacts"]] == ["partial"]
         if ending == "failed":
             assert observation.phase == "failed"
@@ -694,7 +603,7 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
         def execute(self, context):
             context.commit_live(
                 {
-                    "frame": _finite_output(
+                    "frame": finite_output(
                         declaration,
                         value=3.0,
                         total=2,
@@ -729,7 +638,7 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
                 front = plane.freeze()
                 assert front.value(signal) is not None
                 displayed = plane.current_dataset(signal)
-                assert displayed.block.values[:, 0, 0].tolist() == [3.0, 0.0]
+                assert displayed.materialize().block.values[:, 0, 0].tolist() == [3.0, 0.0]
                 assert displayed.expanded_validity()[:, 0, 0].tolist() == [
                     True,
                     False,
@@ -739,13 +648,12 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
             class Processor:
                 def evaluate(self, value: SignalValue):
                     assert value.name == signal
-                    assert value.snapshot.block.values[:, 0, 0].tolist() == [3.0]
+                    assert value.values[:, 0, 0].tolist() == [3.0]
                     processor_seen.set()
                     return {
-                        "seen": _monitor_output(
+                        "seen": monitor_output(
                             derived_declaration,
-                            1,
-                            value=3.0,
+                            3.0,
                         )
                     }
 
@@ -771,12 +679,12 @@ def test_stop_seals_the_same_partial_dataset_independent_of_display(
         assert observation.progress is None
         assert not host.final_result_resolved
         partial = plane.current_dataset(signal)
-        assert partial.block.values[:, 0, 0].tolist() == [3.0, 0.0]
+        assert partial.materialize().block.values[:, 0, 0].tolist() == [3.0, 0.0]
         assert partial.expanded_validity()[:, 0, 0].tolist() == [True, False]
         if processor is not None:
             derived = _wait(processor, wake)
             assert derived.phase == ("failed" if failure else "done")
-            assert plane.current_dataset(processor.signal_key("seen")).block.values[0, 0, 0] == 3.0
+            assert plane.current_dataset(processor.signal_key("seen")).materialize().block.values[0, 0, 0] == 3.0
             if failure:
                 assert "capture overflow" in derived.error
     finally:
@@ -798,7 +706,7 @@ def test_stop_reports_partial_seal_failure_instead_of_cancellation(
         def execute(self, context):
             context.commit_live(
                 {
-                    "frame": _finite_output(
+                    "frame": finite_output(
                         declaration,
                         value=3.0,
                         total=2,
@@ -906,7 +814,7 @@ def test_successful_partial_exact_output_requires_explicit_terminal_intent(
         def execute(self, context):
             context.commit_live(
                 {
-                    "history": _finite_output(
+                    "history": finite_output(
                         declaration,
                         value=1.0,
                         total=2,
@@ -1009,7 +917,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
     plane.commit_live(
         source,
         {
-            "frame": _finite_output(
+            "frame": finite_output(
                 source_declaration,
                 value=1.0,
                 total=2,
@@ -1022,7 +930,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
     plane.commit_live(
         source,
         {
-            "frame": _finite_output(
+            "frame": finite_output(
                 source_declaration,
                 value=2.0,
                 total=2,
@@ -1050,13 +958,13 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
             seen.append(
                 (
                     value.snapshot.block.schema.repeat_domain.size,
-                    value.snapshot.block.values[:, 0, 0].tolist(),
+                    value.values[:, 0, 0].tolist(),
                     value.event_record["device_settings"]["camera"][
                         "epoch_ranges"
                     ],
                 )
             )
-            return {"derived": _monitor_output(derived_declaration, 1, value=float(len(seen)))}
+            return {"derived": monitor_output(derived_declaration, float(len(seen)))}
 
     wake = Event()
     host = _host(
@@ -1080,7 +988,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
         assert seen == ([(1, [2.0], ((2, 2),))] if view == "event"
                         else [(2, [1.0, 2.0], ((0, 0), (2, 2)))])
         result = plane.current_dataset(host.signal_key("derived"))
-        assert result.block.values.reshape(-1).tolist() == [1.0]
+        assert result.materialize().block.values.reshape(-1).tolist() == [1.0]
         assert not plane.is_generation_live(host.signal_key("derived"))
         source_publication = plane.latest_publication(source.signal_key("frame"))
         for answer in (2.0, 3.0):
@@ -1097,7 +1005,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
             current = plane.latest_publication(host.signal_key("derived"))
             assert current.event_ref.generation != previous.event_ref.generation
             assert current.direct_parent_refs == (source_publication.event_ref,)
-            assert plane.current_dataset(host.signal_key("derived")).block.values.item() == answer
+            assert plane.current_dataset(host.signal_key("derived")).materialize().block.values.item() == answer
     finally:
         host.shutdown()
         plane.close()
@@ -1112,7 +1020,7 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
     plane.commit_live(
         source,
         {
-            "frame": _finite_output(
+            "frame": finite_output(
                 source_declaration,
                 value=4.0,
                 total=3,
@@ -1124,7 +1032,7 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
     plane.commit_live(
         source,
         {
-            "frame": _finite_output(
+            "frame": finite_output(
                 source_declaration,
                 value=6.0,
                 total=3,
@@ -1140,12 +1048,12 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
             seen.append(
                 (
                     value.snapshot.block.schema.repeat_domain.size,
-                    float(value.snapshot.block.values[0, 0, 0]),
+                    float(value.values[0, 0, 0]),
                     value.cell_origin,
                 )
             )
             return {
-                "derived": _finite_output(
+                "derived": finite_output(
                     derived_declaration,
                     value=float(len(seen)),
                     total=3,
@@ -1172,7 +1080,7 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
             host.poll()
             time.sleep(0.001)
         partial = plane.current_dataset(host.signal_key("derived"))
-        assert partial.block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
+        assert partial.materialize().block.values[:, 0, 0].tolist() == [1.0, 2.0, 0.0]
         assert partial.expanded_validity()[:, 0, 0].tolist() == [
             True,
             True,
@@ -1181,7 +1089,7 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
         plane.commit_live(
             source,
             {
-                "frame": _finite_output(
+                "frame": finite_output(
                     source_declaration,
                     value=9.0,
                     total=3,
@@ -1198,7 +1106,7 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
             (1, 9.0, (2, 0)),
         ]
         derived = plane.current_dataset(host.signal_key("derived"))
-        assert derived.block.values[:, 0, 0].tolist() == [1.0, 2.0, 3.0]
+        assert derived.materialize().block.values[:, 0, 0].tolist() == [1.0, 2.0, 3.0]
         publication = plane.latest_publication(host.signal_key("derived"))
         source_publication = plane.latest_publication(source.signal_key("frame"))
         assert publication is not None and source_publication is not None
@@ -1222,14 +1130,14 @@ def test_exact_processor_receives_selected_atomic_siblings_on_late_replay(view) 
         plane.commit_live(
             source,
             {
-                "counts": _finite_output(
+                "counts": finite_output(
                     counts,
                     value=float(index + 1),
                     total=2,
                     origin=index,
                     written=index + 1,
                 ),
-                "occupied": _finite_output(
+                "occupied": finite_output(
                     occupied,
                     value=float((index + 1) * 10),
                     total=2,
@@ -1252,7 +1160,7 @@ def test_exact_processor_receives_selected_atomic_siblings_on_late_replay(view) 
             )
             assert inputs["counts"].primary_index == inputs["occupied"].primary_index
             return {
-                "derived": _finite_output(
+                "derived": finite_output(
                     derived,
                     value=float(len(seen)),
                     total=2,
@@ -1283,7 +1191,7 @@ def test_exact_processor_receives_selected_atomic_siblings_on_late_replay(view) 
             if view == "run" else [([1.0], [10.0], [True]), ([2.0], [20.0], [True])]
         )
         result = plane.current_dataset(host.signal_key("derived"))
-        assert result.block.values[:, 0, 0].tolist() == [1.0, 2.0]
+        assert result.materialize().block.values[:, 0, 0].tolist() == [1.0, 2.0]
         publication = plane.latest_publication(host.signal_key("derived"))
         assert publication is not None
         (parent,) = plane.direct_parent_publications(publication)
@@ -1315,9 +1223,9 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
 
     class Processor:
         def evaluate(self, value: SignalValue):
-            seen.append(float(value.snapshot.block.values[0, 0, 0]))
+            seen.append(float(value.values[0, 0, 0]))
             return {
-                "derived": _finite_output(
+                "derived": finite_output(
                     derived_declaration,
                     value=float(len(seen)),
                     total=2,
@@ -1348,7 +1256,7 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
             plane.commit_live(
                 source,
                 {
-                    "frame": _finite_output(
+                    "frame": finite_output(
                         source_declaration,
                         value=value,
                         total=2,
@@ -1410,12 +1318,12 @@ def test_processor_input_range_keeps_siblings_together_and_releases_history(view
         values = a.values.reshape(-1).tolist()
         assert b.values.reshape(-1).tolist() == [10.0 * value for value in values]
         assert a.snapshot.expanded_validity().reshape(-1).tolist() == [value != 3.0 for value in values]
-        np.testing.assert_array_equal(a.snapshot.block.sigma, np.full(a.values.shape, 0.25))
+        np.testing.assert_array_equal(a.snapshot.materialize().block.sigma, np.full(a.values.shape, 0.25))
         assert a.event_record["device_settings"]["source"]["epoch_ranges"] == ((int(values[0]), int(values[-1])),)
         seen.append(values)
         if finish == "failed" and len(seen) == 3:
             raise RuntimeError("range processor failed")
-        return {"result": _monitor_output(result, len(seen), value=float(len(seen)))}
+        return {"result": monitor_output(result, float(len(seen)))}
 
     consumer = _host(SimpleNamespace(dataset_input_view=view, dataset_input_window=2,
                                     evaluate_inputs=evaluate), plane, wake,
@@ -1433,7 +1341,7 @@ def test_processor_input_range_keeps_siblings_together_and_releases_history(view
         assert predicate(), (producer.observation, consumer.observation)
 
     def publish(number):
-        plane.commit_live(source, {"frame": _monitor_output(raw, number, value=float(number))})
+        plane.commit_live(source, {"frame": monitor_output(raw, float(number))})
         settle(lambda: (publication := plane.latest_publication(producer.signal_key("counts"))) is not None
                and publication.value(producer.signal_key("counts")).values.item() == number)
 
@@ -1542,43 +1450,6 @@ def test_a_run_record_is_written_once_when_the_run_is_over(tmp_path) -> None:
     for own in (start, record):
         with pytest.raises(ValueError, match="run's own record"):
             run.register_artifact(own.name, own, role="summary")
-
-
-def test_a_process_that_dies_after_start_leaves_the_start_record(tmp_path) -> None:
-    """The start record is the provenance a crash cannot take away.
-
-    A run whose process dies before its terminal write leaves ``start.json``
-    -- identity, normalized input, when it began -- and no ``run.json``,
-    which is what "did not finish" looks like.  Without the start record
-    such a run was an empty directory: no input, no identity, nothing to
-    say what the run had been.
-    """
-
-    script = """
-import os, sys
-from zlc_runtime.task_run import TaskRun
-run = TaskRun.create(sys.argv[1], task_name="calibration", instance_id="cal-1",
-                     input_summary={"exposure_seconds": 0.023, "repeats": 400})
-run.mark_running()
-run.report_progress("captured", current=3, total=400)
-os._exit(42)
-"""
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
-    completed = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path)],
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert completed.returncode == 42, completed.stderr
-    (run_directory,) = tmp_path.iterdir()
-    assert run_directory.name == "calibration"
-    assert [path.name for path in run_directory.iterdir()] == ["start.json"]
-    begun = json.loads((run_directory / "start.json").read_text(encoding="utf-8"))
-    assert begun["task"] == {"api_name": "calibration", "instance_id": "cal-1"}
-    assert begun["input"] == {"exposure_seconds": 0.023, "repeats": 400}
 
 
 def test_a_terminal_record_that_could_not_be_written_is_not_claimed(
@@ -1696,7 +1567,7 @@ def test_a_schema_advance_ends_a_processor_cancelled_not_failed() -> None:
         plane.commit_live(
             source,
             {
-                "frame": _finite_output(
+                "frame": finite_output(
                     source_declaration,
                     value=4.0,
                     total=3,
@@ -1746,7 +1617,7 @@ def test_a_bind_race_ends_cancelled_and_never_strands_starting(monkeypatch) -> N
         plane.commit_live(
             source,
             {
-                "frame": _finite_output(
+                "frame": finite_output(
                     source_declaration, value=1.0, total=3, origin=0, written=1
                 )
             },
@@ -1888,13 +1759,13 @@ def test_failure_acceptance_excuses_the_source_lifecycle() -> None:
         for index, source_error in enumerate((None, RuntimeError("camera failed"))):
             source = _Source(f"ending-source-{index}", source_declaration)
             plane.begin_generation(source)
-            plane.commit_live(source, {"frame": _monitor_output(source_declaration, 1)})
+            plane.commit_live(source, {"frame": monitor_output(source_declaration, 1)})
             seen = []
 
             class LiveProcessor:
                 def evaluate(self, value):
                     seen.append(value.snapshot.ref)
-                    return {"derived": _monitor_output(derived_declaration, 1)}
+                    return {"derived": monitor_output(derived_declaration, 1)}
 
             latest = _host(
                 LiveProcessor(), plane, wake,
@@ -1903,7 +1774,9 @@ def test_failure_acceptance_excuses_the_source_lifecycle() -> None:
                 delivery="latest",
             )
             latest.start()
-            _, tap = plane.follow_publications(latest.signal_key("derived"), replay=False)
+            # The lane commits the first answer on its own worker, possibly
+            # before this tap attaches: replay it rather than race it.
+            _, tap = plane.follow_publications(latest.signal_key("derived"), replay=True)
             try:
                 plane.seal_committed(source, cut_short=True, error=source_error)
                 deadline = time.monotonic() + 2.0

@@ -23,7 +23,7 @@ from .plane import (
     RetainedPublicationExpired,
 )
 from .streams import (
-    DEFAULT_FOLLOW_MAX_BYTES, DEFAULT_FOLLOW_MAX_PENDING,
+    DEFAULT_FOLLOW_MAX_PENDING,
     FollowTap, SourceGenerationEnded, StreamEndedEarly,
 )
 
@@ -47,7 +47,39 @@ __all__ = [
     "NodeProgress",
     "TaskArtifact",
     "TaskRun",
+    "split_signal_key",
+    "stable_signal_key",
 ]
+
+
+_SIGNAL_KEY_PREFIX = "@logic/"
+
+
+def stable_signal_key(owner_id: str, output_name: str) -> str:
+    """The one spelling of a published signal: ``@logic/<owner>/<output>``.
+
+    NodeHost, SelectionBridge, a node that publishes on its own and a stopped
+    draft that names a signal before any host exists all spell it here.
+    """
+
+    return f"{_SIGNAL_KEY_PREFIX}{owner_id}/{output_name}"
+
+
+def split_signal_key(signal: str) -> tuple[str, str] | None:
+    """The ``(owner, output)`` a :func:`stable_signal_key` spells, else None.
+
+    The one reader of the grammar: the owner is everything between the prefix
+    and the last slash (an owner id may itself contain one; an output name
+    never does), so an output name is never guessed at from the middle.
+    """
+
+    text = str(signal)
+    if not text.startswith(_SIGNAL_KEY_PREFIX):
+        return None
+    owner, separator, output = text[len(_SIGNAL_KEY_PREFIX):].rpartition("/")
+    if not separator or not owner or not output:
+        return None
+    return owner, output
 
 
 _UNRESOLVED = object()
@@ -305,10 +337,9 @@ class NodeHost:
         input_siblings: Iterable[str] = (),
         input_delivery: str | None = None,
         follow_max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
-        follow_max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        follow_max_bytes: int | None = None,
         required_artifacts: Mapping[str, str] | None = None,
         task_name: str | None = None,
-        signal_namer: Callable[[str, str], str] | None = None,
     ) -> None:
         if not callable(getattr(data_plane, "freeze", None)):
             raise TypeError("data_plane must provide the SignalDataPlane surface")
@@ -316,10 +347,6 @@ class NodeHost:
             request_owner_wake = lambda: None
         if not callable(request_owner_wake):
             raise TypeError("request_owner_wake must be callable")
-        if signal_namer is None:
-            signal_namer = lambda owner, name: f"@logic/{owner}/{name}"
-        if not callable(signal_namer):
-            raise TypeError("signal_namer must be callable")
         identity = canonical_text(instance_id, "node instance_id")
         normalized_kind = canonical_text(
             str(getattr(kind, "value", kind)),
@@ -429,13 +456,11 @@ class NodeHost:
         self._task_name = selected_task_name
         self._data_plane = data_plane
         self._request_owner_wake = request_owner_wake
-        self._signal_namer = signal_namer
         self._execution_context = NodeExecutionContext(self)
         self._owner = (
             RunOwnerMailbox(
                 request_owner_wake,
                 thread_name_prefix=f"node-{identity}",
-                max_workers=1,
             )
             if mode == "worker"
             else None
@@ -476,8 +501,7 @@ class NodeHost:
         name = canonical_text(output_name, "node output name")
         if name not in {value.name for value in self._dataset_outputs}:
             raise KeyError(f"undeclared node output {name!r}")
-        result = self._signal_namer(self.instance_id, name)
-        return canonical_text(result, "signal key")
+        return stable_signal_key(self.instance_id, name)
 
     def published_signals(self) -> tuple[str, ...]:
         return tuple(self.signal_key(value.name) for value in self._dataset_outputs)
@@ -616,7 +640,6 @@ class NodeHost:
             owner = RunOwnerMailbox(
                 self._request_owner_wake,
                 thread_name_prefix=f"node-{self.instance_id}",
-                max_workers=1,
             )
             self._owner = owner
         return owner
@@ -655,10 +678,8 @@ class NodeHost:
     def poll(self) -> LogicNodeObservation:
         if self._mode == "worker":
             self._poll_worker()
-        elif self._processor_path == "frozen":
-            self._poll_frozen_processor()
-        elif self._processor_path == "follow":
-            self._poll_follow_processor()
+        elif self._processor_path in ("frozen", "follow"):
+            self._poll_processor()
         return self.observation
 
     def shutdown(self) -> None:
@@ -1388,47 +1409,49 @@ class NodeHost:
             inputs=inputs,
         )
 
-    def _poll_frozen_processor(self) -> None:
+    def _poll_processor(self) -> None:
+        """Reap a frozen or follow Processor's worker: one lifecycle for both.
+
+        They differ only in their success step.  A frozen Processor's worker
+        returns its one answer, which is committed and sealed here; a follow
+        Processor's worker committed as it went and sealed at its source's
+        end of stream.
+        """
+
         owner = self._owner
         if owner is None:
             return
         for completion in owner.drain_completions():
             if completion.generation != owner.generation:
                 continue
+            self._follow_tap = None
             try:
                 error = completion.future.exception()
-            except BaseException as error:
-                self._finish_frozen_processor_failure(error)
-                owner.mark_owner_reaped()
-                continue
+                publication = self._source_publication
+                if (
+                    error is None
+                    and not self.cancel_requested
+                    and self._processor_path == "frozen"
+                ):
+                    if publication is None:
+                        raise RuntimeError(
+                            "frozen Processor lost its exact source publication"
+                        )
+                    self._commit_processor(
+                        completion.future.result(),
+                        source_publication=publication,
+                        source_signals=tuple(
+                            self._processor_signal_names().values()
+                        ),
+                        retain=True,
+                    )
+                    self._data_plane.seal_processor(self)
+            except BaseException as failure:
+                error = failure
             if error is not None:
-                self._finish_frozen_processor_failure(error)
-                owner.mark_owner_reaped()
-                continue
-            outputs = completion.future.result()
-            if self.cancel_requested:
-                self._finish_frozen_processor_cancelled()
-                owner.mark_owner_reaped()
-                continue
-            publication = self._source_publication
-            if publication is None:
-                self._finish_frozen_processor_failure(
-                    RuntimeError("frozen Processor lost its exact source publication")
-                )
-                owner.mark_owner_reaped()
-                continue
-            try:
-                self._commit_processor(
-                    outputs,
-                    source_publication=publication,
-                    source_signals=tuple(
-                        self._processor_signal_names().values()
-                    ),
-                    retain=True,
-                )
-                self._data_plane.seal_processor(self)
-            except BaseException as error:
-                self._finish_frozen_processor_failure(error)
+                self._finish_processor_failure(error)
+            elif self.cancel_requested:
+                self._finish_processor_cancelled()
             else:
                 self._active = False
                 self._mark_terminal()
@@ -1438,7 +1461,7 @@ class NodeHost:
                 self._release_input_history()
             owner.mark_owner_reaped()
 
-    def _finish_frozen_processor_cancelled(self) -> None:
+    def _finish_processor_cancelled(self) -> None:
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
@@ -1447,20 +1470,19 @@ class NodeHost:
         self._error = None
         self._progress = None
 
-    def _finish_frozen_processor_failure(self, error: BaseException) -> None:
+    def _finish_processor_failure(self, error: BaseException) -> None:
         if (
             isinstance(error, (_StartSuppressed, *_SOURCE_LIFECYCLE))
             or self.cancel_requested
         ):
-            self._finish_frozen_processor_cancelled()
+            # A source that ended or moved on under a standing Processor is
+            # the source's lifecycle, not corrupt data. The host ends
+            # CANCELLED, which is the state an automatic re-follow
+            # restarts from.
+            self._finish_processor_cancelled()
             return
-        self._retire_plane_state()
-        self._result = _UNRESOLVED
-        self._active = False
-        self._mark_terminal()
-        self._phase = "failed"
-        self._error = f"{type(error).__name__}: {error}"
-        self._progress = None
+        self._release_input_history()
+        self._end_run("failed", error)
 
     def _start_follow_processor(
         self,
@@ -1557,54 +1579,6 @@ class NodeHost:
         finally:
             tap.close()
             self._release_input_history()
-
-    def _poll_follow_processor(self) -> None:
-        owner = self._owner
-        if owner is None:
-            return
-        for completion in owner.drain_completions():
-            if completion.generation != owner.generation:
-                continue
-            self._follow_tap = None
-            try:
-                error = completion.future.exception()
-            except BaseException as error:
-                self._finish_follow_processor_failure(error)
-                owner.mark_owner_reaped()
-                continue
-            if error is not None:
-                self._finish_follow_processor_failure(error)
-            elif self.cancel_requested:
-                self._finish_follow_processor_cancelled()
-            else:
-                self._active = False
-                self._mark_terminal()
-                self._phase = "done"
-                self._error = None
-                self._progress = None
-            owner.mark_owner_reaped()
-
-    def _finish_follow_processor_cancelled(self) -> None:
-        self._retire_plane_state()
-        self._result = _UNRESOLVED
-        self._active = False
-        self._mark_terminal()
-        self._phase = "cancelled"
-        self._error = None
-        self._progress = None
-
-    def _finish_follow_processor_failure(self, error: BaseException) -> None:
-        if (
-            isinstance(error, (_StartSuppressed, *_SOURCE_LIFECYCLE))
-            or self.cancel_requested
-        ):
-            # A source that ended or moved on under a standing follower is
-            # the source's lifecycle, not corrupt data. The host ends
-            # CANCELLED, which is the state an automatic re-follow
-            # restarts from.
-            self._finish_follow_processor_cancelled()
-            return
-        self._end_run("failed", error)
 
     def validate_processor_source(self, source: SignalValue | None) -> None:
         """Validate identity only; the descriptor owns exact/latest delivery."""

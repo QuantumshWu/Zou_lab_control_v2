@@ -40,12 +40,7 @@ from zlc_data import (
     materialize_derived_dataset,
 )
 from zlc_data import SelectionChange
-from zlc_data.snapshot_projection import (
-    restricted_schema,
-    restricted_values,
-    selection_indices,
-)
-from zlc_data.selection import IndexRangeSelection
+from zlc_data.snapshot_projection import restrict_snapshot, value_selection
 from zlc_data import canonical_text
 
 from .dataset import MonitorCoverage
@@ -55,6 +50,7 @@ from .dataset_output import (
 )
 from .plane import GenerationRetired, GenerationSchemaAdvanced, ObsoleteParentResult
 from .plane import SignalDataPlane, SignalPublication, SignalValue
+from .host import stable_signal_key
 
 FIT_PARAMETER_CONTRACT = "zlc.selection.fit.parameter"
 
@@ -287,9 +283,9 @@ _EVERY_SELECTION_OUTPUT = frozenset(
 #: cells outside it stop counting and the schema does not change.  It cannot
 #: be a Selection term, because a Selection cuts axes.
 #:
-#: The shot ordinal is NOT one of these.  It names which PUBLICATION answers,
-#: and a derivation only ever sees the newest one, so a rolling region
-#: derives nothing at all; its bounds are carried for the panel alone.
+#: The shot bound is NOT one of these, and cuts nothing: a rolling region
+#: publishes no signal (see ``selection_output_catalog``), so its bounds are
+#: carried for the panel alone and never reach ``_build_selection``.
 _FILTER_DOMAINS = frozenset({"value"})
 
 
@@ -301,12 +297,13 @@ def selection_output_catalog(
 
     Almost always a question about geometry alone -- Runtime reduces a
     selected area or a selected x range, and which Plot kind drew it does
-    not matter.  A ROLLING region is the exception, and it is a fact about
-    the DATA, not the drawing: its x is how many shots back a point is,
-    counted from the newest, and the derivation only ever sees the newest
-    publication.  Nothing it could publish would be the shots the operator
-    boxed, so it publishes nothing and the region stays what it also is on
-    every other kind -- the panel's own mark, which Fit and restore read.
+    not matter.  A ROLLING region is the exception: it PUBLISHES NO SIGNAL.
+    Its x bounds arrive as a bare "shot" range that names no axis -- they
+    are in whichever coordinate the panel's x shows, shots back from the
+    newest or seconds of shot time -- so nothing here can map them onto the
+    rows of the history window the bridge reads.  The region stays what it
+    also is on every other kind: the panel's own mark, which Fit and
+    restore read.
     """
 
     if str(plot_kind) == "rolling":
@@ -455,11 +452,11 @@ class SelectionRange:
             "repeat",
             "point",
             "cell_data",
-            # Two bounds name no Dataset axis: the measured VALUE, and
-            # the session's own SHOT ordinal -- the rolling history's x,
-            # which counts publications rather than rows of any one of
-            # them.  Both still cut the signal, by restricting validity
-            # rather than by selecting axis rows; see _FILTER_DOMAINS.
+            # Two bounds name no Dataset axis: the measured VALUE, which
+            # restricts validity rather than selecting axis rows (see
+            # _FILTER_DOMAINS), and the rolling history's SHOT bound,
+            # which a rolling region carries for its panel and which
+            # derives nothing (see selection_output_catalog).
             "value",
             "shot",
         }:
@@ -785,10 +782,6 @@ class _TriggeredOutputs(dict[str, LiveDatasetOutput]):
         self.trigger = trigger
 
 
-class _StaleFit(RuntimeError):
-    pass
-
-
 class _BridgeProcessor:
     def __init__(
         self,
@@ -800,6 +793,11 @@ class _BridgeProcessor:
         self._bridge = bridge
         self._role = role
         self.instance_id = instance_id
+        #: The region's last cut, segment by segment, for the next shot's.
+        #: A live finite prefix keeps every committed segment from shot to
+        #: shot, and without it each shot re-cut all of them.  One per route,
+        #: so it goes with the region and the run it cut.
+        self._slice_memo: dict = {}
         self.dataset_output_declarations = tuple(
             DatasetOutputDeclaration(
                 name,
@@ -1295,6 +1293,10 @@ class SelectionBridge:
                 # A fit signal is a presentation-paced follower: it advances
                 # only after its source presents, so it retains lineage but
                 # does not hold the source's coherent front waiting for it.
+                # Attached paused, like a region's route: its lane entry
+                # carries only its lifecycle, and must not reach the source's
+                # end of stream -- and seal -- before the answer it seals is
+                # committed below.
                 current = self._current_source_publication()
                 if current is None:
                     self._record_error(
@@ -1306,6 +1308,7 @@ class SelectionBridge:
                     source_name=self._source_signal,
                     initial_publication=current,
                     coherent=False,
+                    paused=True,
                 )
                 with self._lock:
                     install = (
@@ -1327,6 +1330,8 @@ class SelectionBridge:
                     publication,
                     trigger=("fit", trigger_revision),
                 )
+                if attach:
+                    self._plane.catch_up_latest_only_processor(processor)
             except ObsoleteParentResult:
                 return
             except RuntimeError as error:
@@ -1338,8 +1343,10 @@ class SelectionBridge:
                     )
                     if self._fit_processor is processor:
                         self._fit_processor = None
+                # Out of the slot, so out of the plane: a route left holding
+                # its names refused every later fit on this run as a conflict.
+                self._withdraw_processor(processor)
                 if stale:
-                    self._withdraw_processor(processor)
                     return
                 raise
             self._derivation_succeeded()
@@ -1630,37 +1637,28 @@ class SelectionBridge:
         source_publication: SignalPublication,
     ) -> Mapping[str, LiveDatasetOutput]:
         with self._lock:
-            if processor._role == "selection":
-                state = self._selection
-                if state is None:
-                    raise RuntimeError("SelectionBridge has no committed selection")
-                trigger = ("selection", state.revision)
-                event = None
-            else:
-                state = None
-                event = self._fit_event
-                trigger_revision = self._fit_trigger_revision
-                if event is None:
-                    raise RuntimeError("SelectionBridge has no accepted fit event")
-                trigger = ("fit", trigger_revision)
+            if processor._role != "selection":
+                # A fit answers the exact publication the panel fitted, and
+                # ``_publish_fit_event`` commits it directly the moment the
+                # plot reports it.  The lane entry carries only the route's
+                # lifecycle -- sealed at the source's end of stream, cancelled
+                # on withdraw -- so an evaluation here has nothing to add.
+                # Failing every newer shot as "stale" would drop the entry at
+                # the second shot, and the fit route would outlive its
+                # source: live after Stop, its followers never ending.
+                return _TriggeredOutputs({}, ("fit", self._fit_trigger_revision))
+            state = self._selection
+            if state is None:
+                raise RuntimeError("SelectionBridge has no committed selection")
+            trigger = ("selection", state.revision)
         snapshot, record = self._source_view(
-            source_publication, source_window=None if state is None else state.source_window,
+            source_publication, source_window=state.source_window,
         )
-        if event is not None and (
-            str(snapshot.ref.stream_generation.value) != event.source_generation
-            or snapshot.ref.revision.value != event.source_revision
-        ):
-            raise _StaleFit("fit result is stale for the current source publication")
         source_value = source_publication.value(self._source_signal)
         shot_time = None if source_value is None else source_value.shot_time
-        outputs = (
-            self._materialize_selection_outputs(
-                snapshot, state, event_record=record, shot_time=shot_time
-            )
-            if state is not None
-            else self._materialize_fit_outputs(
-                snapshot, event, event_record=record, shot_time=shot_time
-            )
+        outputs = self._materialize_selection_outputs(
+            snapshot, state, event_record=record, shot_time=shot_time,
+            slice_memo=processor._slice_memo,
         )
         return _TriggeredOutputs(outputs, trigger)
 
@@ -1724,26 +1722,17 @@ class SelectionBridge:
         source_publication: SignalPublication,
         result: Mapping[str, LiveDatasetOutput],
     ) -> None:
+        if not result:
+            # A fit route's evaluation, which answers nothing by design.
+            return
         trigger = getattr(result, "trigger", None)
         if not isinstance(trigger, tuple) or len(trigger) != 2:
             self._record_error(RuntimeError("SelectionBridge processor lost its trigger"))
             return
         with self._lock:
-            if processor._role == "selection":
-                current = self._selection
-                active = self._selection_processor
-                expected = (
-                    None
-                    if current is None
-                    else ("selection", current.revision)
-                )
-            else:
-                active = self._fit_processor
-                expected = (
-                    None
-                    if self._fit_event is None
-                    else ("fit", self._fit_trigger_revision)
-                )
+            current = self._selection
+            active = self._selection_processor
+            expected = None if current is None else ("selection", current.revision)
         # A worker may finish after a newer control event has already issued
         # the same source publication.  Do not let that older result overwrite
         # the newer trigger merely because both parents are otherwise exact.
@@ -1756,13 +1745,14 @@ class SelectionBridge:
                 source_publication,
                 trigger=trigger,
             )
-            if processor._role == "selection":
-                with self._lock:
-                    if self._selection_processor is processor:
-                        self._selection_publication = source_publication
+            with self._lock:
+                if self._selection_processor is processor:
+                    self._selection_publication = source_publication
         except (ObsoleteParentResult, GenerationRetired):
             return
-        except RuntimeError as error:
+        except (RuntimeError, GenerationSchemaAdvanced) as error:
+            # Handled here, on the lane worker that committed, so a region
+            # re-armed for a new shape re-derives off the Qt thread.
             self._accept_processor_failure(processor, error)
 
     def _accept_processor_failure(
@@ -1770,12 +1760,6 @@ class SelectionBridge:
         processor: _BridgeProcessor,
         error: Exception,
     ) -> None:
-        if isinstance(error, _StaleFit):
-            # The source can advance while the plot is still fitting its last
-            # accepted frame.  That is normal latest-only timing, not a failed
-            # signal generation: retain the last accepted Fit publication
-            # until the plot emits the next batch for this same panel.
-            return
         if (
             isinstance(error, GenerationSchemaAdvanced)
             and processor._role == "selection"
@@ -1819,14 +1803,18 @@ class SelectionBridge:
         return None
 
     def _accept_processor_ended(self, processor: _BridgeProcessor, error: Exception | None) -> None:
-        with self._lock:
-            active = (self._selection_processor if processor._role == "selection"
-                      else self._fit_processor)
-        if active is not processor:
-            return
-        # End this route, not the bridge: an operator may still edit the
-        # selector/fit over the retained stopped or failed source Dataset.
-        self._plane.seal_committed(processor, cut_short=True, error=error)
+        # Under the role's lock, as a claim is: a fit event checks that its
+        # source is live and then commits, on the render reader thread, and
+        # a seal landing between the two refused that commit.
+        with self._role_publish_lock(processor._role):
+            with self._lock:
+                active = (self._selection_processor if processor._role == "selection"
+                          else self._fit_processor)
+            if active is not processor:
+                return
+            # End this route, not the bridge: an operator may still edit the
+            # selector/fit over the retained stopped or failed source Dataset.
+            self._plane.seal_committed(processor, cut_short=True, error=error)
         if error is not None:
             self._record_error(error)
         self._processor_wake()
@@ -1952,7 +1940,7 @@ class SelectionBridge:
             callback()
 
     def _signal_key(self, name: str) -> str:
-        return f"@logic/{self.bridge_id}/{name}"
+        return stable_signal_key(self.bridge_id, name)
 
     @staticmethod
     def _contract_id(role: str, name: str) -> str:
@@ -2034,8 +2022,8 @@ class SelectionBridge:
     ) -> Selection | None:
         """The axis terms a region names, or None when it names no axis.
 
-        A region made only of value or shot bounds restricts what COUNTS,
-        not which rows exist, and a Selection cannot say "every row" -- it
+        A region made only of a value band restricts what COUNTS, not
+        which rows exist, and a Selection cannot say "every row" -- it
         requires a term.  Spelling that as a full-range term on the first
         Repeat axis assumed there is one, and a legal Dataset whose Repeat
         domain is a single unnamed row (the last Repeat axis removed) had
@@ -2060,10 +2048,10 @@ class SelectionBridge:
             ).terms[0]
 
         # A region restricts what its bounds NAME.  Bounds on Dataset axes
-        # become Selection terms; bounds on the measured value or on the
-        # shot ordinal restrict validity instead and are applied where the
-        # values are (see ``_selection_filters``), so a histogram band and a
-        # rolling window cut a signal exactly as an image box does.
+        # become Selection terms; a bound on the measured value restricts
+        # validity instead and is applied where the values are (see
+        # ``_selection_filters``), so a histogram band cuts a signal exactly
+        # as an image box does.
         axis_ranges = tuple(
             item for item in state.ranges if item.domain not in _FILTER_DOMAINS
         )
@@ -2074,39 +2062,16 @@ class SelectionBridge:
             terms = [range_term(first), range_term(second)]
         else:
             terms = [range_term(item) for item in axis_ranges]
-        for facet in state.facets:
-            axis_id, axis, kind = self._resolve_axis(
-                schema,
-                facet.domain,
-                facet.axis,
-            )
-            if isinstance(facet.value, str):
-                if axis.coordinates is None:
-                    raise ValueError(
-                        f"text facet {facet.axis!r} has no explicit coordinates"
-                    )
-                indices = tuple(
-                    index
-                    for index, value in enumerate(axis.coordinate_values())
-                    if value == facet.value
-                )
-                if len(indices) != 1:
-                    raise ValueError(
-                        f"text facet {facet.axis!r} must identify one source point"
-                    )
-                from zlc_data import IndexSelection
-
-                terms.append(IndexSelection(axis_id, indices[0]))
-            else:
-                frame = axis.coordinate_frame
-                terms.append(
-                    Selection.coordinate_range(
-                        axis_id,
-                        float(facet.value),
-                        float(facet.value),
-                        coordinate_frame=frame,
-                    ).terms[0]
-                )
+        if state.facets:
+            # A facet cell is "this axis, that coordinate": the one
+            # translation of that into terms is zlc_data's.  It finds the
+            # axis by id wherever it lives; the facet names the domain it
+            # meant, and an id found in another one is not that cell.
+            for facet in state.facets:
+                self._resolve_axis(schema, facet.domain, facet.axis)
+            terms.extend(value_selection(
+                schema, {AxisId(facet.axis): facet.value for facet in state.facets},
+            ).terms)
         if not terms:
             return None
         return Selection(tuple(terms))
@@ -2137,6 +2102,7 @@ class SelectionBridge:
         *,
         event_record: Mapping[str, object],
         shot_time: float | None,
+        slice_memo: dict | None = None,
     ) -> Mapping[str, LiveDatasetOutput]:
         """Cut one committed selection into signals that keep the parent's axes.
 
@@ -2156,61 +2122,35 @@ class SelectionBridge:
         whole bundle: the plane refuses siblings that disagree.
         """
 
-        source = source.materialize()
         source_schema = source.block.schema
-        selection = self._build_selection(source_schema, state)
-        if selection is None:
-            # No axis is restricted: every row and every cell survives, and
-            # the band below decides what counts.
-            repeat_indices: range | tuple[int, ...] = range(
-                source_schema.repeat_domain.size
-            )
-            point_indices: range | tuple[int, ...] = range(
-                source_schema.point_domain.size
-            )
-            data_indices: Mapping[AxisId, range | tuple[int, ...]] = {
-                axis.axis_id: range(axis.size)
-                for axis in source_schema.cell_domain.axes
-            }
-        else:
-            repeat_indices, point_indices, data_indices = selection_indices(
-                source_schema,
-                selection,
-            )
-        valid = expand_dataset_validity(source.block.validity, source_schema)
-
-        def restrict(plane: np.ndarray) -> np.ndarray:
-            return restricted_values(
-                plane,
-                source_schema,
-                repeat_indices,
-                point_indices,
-                data_indices,
-            )
-
-        values = restrict(source.block.values)
-        valid_values = restrict(valid)
-        # A sample's uncertainty is the sample's own and survives every
-        # restriction with it: a region cut from a fitted parameter keeps
-        # the error the fit reported for each value it keeps.  None stays
-        # None; NaN stays unknown.
-        sigma = source.block.sigma
-        region_sigma = None if sigma is None else restrict(sigma)
+        # Cut by the one cutter every restriction uses.  It cuts a segmented
+        # canonical prefix segment by segment, so a region on a live finite
+        # run densifies repeats x points x the region -- never the run's
+        # whole final shape of full frames, on every shot, for a few
+        # thousand pixels.  A region that names no axis keeps every row and
+        # cell, and the band below decides what counts.  Values, validity
+        # and a sample's own uncertainty are cut together.  ``slice_memo`` is
+        # the route's last cut: the segments this prefix shares with the
+        # previous shot's are not cut again.
+        region = restrict_snapshot(
+            source,
+            self._build_selection(source_schema, state),
+            reference_for=lambda schema: self._next_reference(source, "region", schema),
+            slice_memo=slice_memo,
+        ).block.materialize()
+        derived_schema = region.schema
+        values = region.values
+        region_sigma = region.sigma
+        region_validity = region.validity
+        valid_values = expand_dataset_validity(region_validity, derived_schema)
         value_band = _selection_filters(state)
         if value_band is not None:
             # A band on the measured value cuts no axis: the cells outside
             # it simply stop counting, which is what the region means on a
-            # histogram (and on the value half of a rolling region).
+            # histogram.
             low, high = value_band
             with np.errstate(invalid="ignore"):
                 valid_values = valid_values & (values >= low) & (values <= high)
-        derived_schema = restricted_schema(
-            source_schema,
-            repeat_indices,
-            point_indices,
-            data_indices,
-        )
-        if value_band is not None:
             value_schema = derived_schema.value_schema
             # The canonical scalar carrier has no components to vary over --
             # its value-level validity IS per cell -- and declaring one is
@@ -2231,6 +2171,7 @@ class SelectionBridge:
                         ),
                     ),
                 )
+            region_validity = compact_dataset_validity(valid_values, derived_schema)
         catalog = (
             _AREA_SELECTION_OUTPUTS
             if state.selector_kind == "area"
@@ -2248,7 +2189,7 @@ class SelectionBridge:
                 source.ref,
                 values,
                 schema=derived_schema,
-                validity=compact_dataset_validity(valid_values, derived_schema),
+                validity=region_validity,
                 sigma=region_sigma,
                 reference_for=lambda schema, output_name=name: self._next_reference(
                     source,

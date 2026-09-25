@@ -6,7 +6,6 @@ import gc
 from dataclasses import replace
 import threading
 from types import MappingProxyType
-from types import SimpleNamespace
 import weakref
 
 import numpy as np
@@ -30,7 +29,6 @@ from zlc_data import (
     IndexedWindow,
     DomainSpec,
     OwnedSnapshot,
-    SCALAR_DOMAIN,
     StreamGenerationId,
     ValidityContract,
     ValueSchema,
@@ -40,91 +38,21 @@ from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
 
-
-def _event(name: str, value: float) -> OwnedSnapshot:
-    repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
-    point = AxisSpec(
-        AxisId(f"{name}.point"),
-        "point",
-        SCAN_POINT,
-        1,
-        (0,),
-    )
-    schema = DatasetSchema(
-        DomainSpec((1,), (repeat,), ((0,),)),
-        DomainSpec((1,), (point,), ((0,),)),
-        SCALAR_DOMAIN,
-        ValueSchema.scalar(np.dtype("float64"), "count"),
-    )
-    block = DataBlock(
-        BlockId(f"{name}.plugin"),
-        DatasetRevision(77),
-        np.asarray([[[value]]], dtype=np.float64),
-        CellValidity(np.ones((1, 1), dtype=np.bool_)),
-        schema,
-    )
-    return OwnedSnapshot(block.ref(StreamGenerationId("plugin-generation")), block)
-
-
-def _finite(
-    declaration: DatasetOutputDeclaration,
-    *,
-    value: float,
-    total: int,
-    origin: int,
-    written: int,
-    event_record: dict[str, object] | None = None,
-) -> LiveDatasetOutput:
-    event = _event(declaration.name, value)
-    schema = event.block.schema
-    (repeat,) = schema.repeat_domain.axes
-    canonical = DatasetSchema(
-        DomainSpec(
-            (total,),
-            (
-                AxisSpec(
-                    repeat.axis_id,
-                    repeat.name,
-                    repeat.role,
-                    total,
-                    tuple(range(total)),
-                ),
-            ),
-            (tuple(range(total)),),
-        ),
-        schema.point_domain,
-        schema.cell_domain,
-        schema.value_schema,
-    )
-    return LiveDatasetOutput(
-        declaration,
-        event,
-        DatasetCoverage(written, total),
-        canonical,
-        (origin, 0),
-        event_record,
-    )
-
-
-def _latest(
-    declaration: DatasetOutputDeclaration,
-    value: float,
-    *,
-    event_record: dict[str, object] | None = None,
-) -> LiveDatasetOutput:
-    return LiveDatasetOutput(
-        declaration,
-        _event(declaration.name, value),
-        MonitorCoverage(1, 1),
-        event_record=event_record,
-    )
+from _snapshots import (
+    finite_output,
+    monitor_output,
+    paused_lane,
+    producer,
+    snapshot as event_snapshot,
+    snapshot_schema,
+)
 
 
 def _large_latest(
     declaration: DatasetOutputDeclaration,
     value: float,
 ) -> LiveDatasetOutput:
-    scalar = _event(declaration.name, value)
+    scalar = snapshot_schema(declaration.name)
     data_axis = AxisSpec(
         AxisId(f"{declaration.name}.sample"),
         "sample",
@@ -132,8 +60,8 @@ def _large_latest(
         200_000,
     )
     schema = DatasetSchema(
-        scalar.block.schema.repeat_domain,
-        scalar.block.schema.point_domain,
+        scalar.repeat_domain,
+        scalar.point_domain,
         DomainSpec((data_axis.size,), (data_axis,)),
         ValueSchema(
             ValidityContract.value(),
@@ -172,30 +100,6 @@ def _camera_epoch_record(epoch: int) -> dict[str, object]:
     }
 
 
-def _paused_lane(instance_id: str, declaration: DatasetOutputDeclaration):
-    """A latest-lane node whose results are committed by the test itself.
-
-    The paused lane is the existing public contract for a display-paced
-    derivation that already holds its answers; evaluating is an error.
-    """
-
-    def refuse(*_arguments):
-        raise AssertionError("paused processor must not evaluate")
-
-    return SimpleNamespace(
-        instance_id=instance_id,
-        dataset_output_declarations=(declaration,),
-        signal_key=lambda name: f"{instance_id}/{name}",
-        validate_processor_source=lambda _source: None,
-        evaluate_processor=refuse,
-        accept_processor_result=lambda *_arguments: None,
-        accept_processor_failure=refuse,
-        accept_processor_cancelled=lambda: None,
-        accept_processor_ended=lambda _error: None,
-        request_processor_owner_wake=lambda: None,
-    )
-
-
 def test_derived_monitor_materializes_every_source_primary_index() -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration(
@@ -209,58 +113,16 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         index_by_source=True,
     )
 
-    class Source:
-        instance_id = "indexed-source"
-        dataset_output_declarations = (source_declaration,)
-
-        @staticmethod
-        def signal_key(name: str) -> str:
-            return f"indexed-source/{name}"
-
-    class Derived:
-        instance_id = "indexed-derived"
-        dataset_output_declarations = (derived_declaration, latest_declaration)
-
-        @staticmethod
-        def signal_key(name: str) -> str:
-            return f"indexed-derived/{name}"
-
-        @staticmethod
-        def validate_processor_source(_source) -> None:
-            return None
-
-        @staticmethod
-        def evaluate_processor(_source, _publication):
-            raise AssertionError("paused processor must not evaluate")
-
-        @staticmethod
-        def accept_processor_result(_source, _publication, _result) -> None:
-            return None
-
-        @staticmethod
-        def accept_processor_failure(error: Exception) -> None:
-            raise error
-
-        @staticmethod
-        def accept_processor_cancelled() -> None:
-            return None
-
-        accept_processor_ended = staticmethod(lambda _error: None)
-
-        @staticmethod
-        def request_processor_owner_wake() -> None:
-            return None
-
-    source = Source()
-    derived = Derived()
+    source = producer("indexed-source", source_declaration)
+    derived = paused_lane("indexed-derived", derived_declaration, latest_declaration)
     plane = SignalDataPlane()
     wakes: list[int] = []
-    unsubscribe = plane.subscribe_publications(lambda: wakes.append(1))
+    unsubscribe = plane.subscribe_publications(lambda _names: wakes.append(1))
     history = small_history = None
 
     try:
         plane.begin_generation(source)
-        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        plane.commit_live(source, {"frame": monitor_output(source_declaration, 1.0)})
         first = plane.latest_publication("indexed-source/frame")
         assert first is not None
         plane.attach_latest_only_processor(
@@ -272,24 +134,24 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.commit_processor(
             derived,
             {
-                "value": _latest(derived_declaration, 11.0),
-                "latest": _latest(latest_declaration, 111.0),
+                "value": monitor_output(derived_declaration, 11.0),
+                "latest": monitor_output(latest_declaration, 111.0),
             },
             source_publication=first,
         )
         plane.commit_live(
             source,
-            {"frame": _latest(source_declaration, 2.0)},
+            {"frame": monitor_output(source_declaration, 2.0)},
         )
         second = plane.latest_publication("indexed-source/frame")
         assert second is not None
         plane.commit_processor(
             derived,
             {
-                "value": _latest(
+                "value": monitor_output(
                     derived_declaration, 22.0, event_record=_camera_epoch_record(2)
                 ),
-                "latest": _latest(
+                "latest": monitor_output(
                     latest_declaration, 222.0, event_record=_camera_epoch_record(2)
                 ),
             },
@@ -309,17 +171,17 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         for revision in (3, 4):
             plane.commit_live(
                 source,
-                {"frame": _latest(source_declaration, float(revision))},
+                {"frame": monitor_output(source_declaration, float(revision))},
             )
         fourth = plane.latest_publication("indexed-source/frame")
         assert fourth is not None
         plane.commit_processor(
             derived,
             {
-                "value": _latest(
+                "value": monitor_output(
                     derived_declaration, 44.0, event_record=_camera_epoch_record(4)
                 ),
-                "latest": _latest(
+                "latest": monitor_output(
                     latest_declaration, 444.0, event_record=_camera_epoch_record(4)
                 ),
             },
@@ -353,10 +215,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.commit_processor(
             derived,
             {
-                "value": _latest(
+                "value": monitor_output(
                     derived_declaration, 55.0, event_record=_camera_epoch_record(5)
                 ),
-                "latest": _latest(
+                "latest": monitor_output(
                     latest_declaration, 555.0, event_record=_camera_epoch_record(5)
                 ),
             },
@@ -443,32 +305,13 @@ def test_indexed_history_retains_only_the_requested_window(segmented) -> None:
         "test.value",
         index_by_source=True,
     )
-    source = _node("bounded-source", source_declaration)
-
-    class Derived:
-        instance_id = "bounded-derived"
-        dataset_output_declarations = (derived_declaration,)
-
-        @staticmethod
-        def signal_key(name: str) -> str:
-            return f"bounded-derived/{name}"
-
-        validate_processor_source = staticmethod(lambda _source: None)
-        evaluate_processor = staticmethod(
-            lambda _source, _publication: (_ for _ in ()).throw(AssertionError())
-        )
-        accept_processor_result = staticmethod(lambda *_args: None)
-        accept_processor_failure = staticmethod(lambda error: (_ for _ in ()).throw(error))
-        accept_processor_cancelled = staticmethod(lambda: None)
-        accept_processor_ended = staticmethod(lambda _error: None)
-        request_processor_owner_wake = staticmethod(lambda: None)
-
-    derived = Derived()
+    source = producer("bounded-source", source_declaration)
+    derived = paused_lane("bounded-derived", derived_declaration)
     plane = SignalDataPlane()
     history = None
     try:
         plane.begin_generation(source)
-        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        plane.commit_live(source, {"frame": monitor_output(source_declaration, 1.0)})
         publication = plane.latest_publication("bounded-source/frame")
         assert publication is not None
         plane.attach_latest_only_processor(
@@ -481,11 +324,11 @@ def test_indexed_history_retains_only_the_requested_window(segmented) -> None:
             if revision > 1:
                 plane.commit_live(
                     source,
-                    {"frame": _latest(source_declaration, float(revision))},
+                    {"frame": monitor_output(source_declaration, float(revision))},
                 )
                 publication = plane.latest_publication("bounded-source/frame")
                 assert publication is not None
-            output = _latest(derived_declaration, float(revision))
+            output = monitor_output(derived_declaration, float(revision))
             if segmented:
                 block = output.snapshot.block
                 point = block.schema.point_domain.axes[0]
@@ -539,11 +382,11 @@ def _indexed_lane(window: int, *, prefix: str):
         "test.value",
         index_by_source=True,
     )
-    source = _node(f"{prefix}-source", source_declaration)
-    derived = _paused_lane(f"{prefix}-derived", derived_declaration)
+    source = producer(f"{prefix}-source", source_declaration)
+    derived = paused_lane(f"{prefix}-derived", derived_declaration)
     plane = SignalDataPlane()
     plane.begin_generation(source)
-    plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+    plane.commit_live(source, {"frame": monitor_output(source_declaration, 1.0)})
     parent = plane.latest_publication(f"{prefix}-source/frame")
     assert parent is not None
     plane.attach_latest_only_processor(
@@ -555,7 +398,7 @@ def _indexed_lane(window: int, *, prefix: str):
     plane.commit_processor(
         derived,
         {
-            "value": _latest(
+            "value": monitor_output(
                 derived_declaration, 1.0, event_record=_camera_epoch_record(1)
             )
         },
@@ -584,11 +427,11 @@ def test_a_source_that_jumped_past_the_cached_window_leaves_legal_holes() -> Non
         assert cached.materialize().block.values.reshape(-1).tolist() == [1.0]
         for index in range(2, 6):
             plane.commit_live(
-                source, {"frame": _latest(source_declaration, float(index))}
+                source, {"frame": monitor_output(source_declaration, float(index))}
             )
         plane.commit_processor(
             derived,
-            {"value": _latest(derived_declaration, 5.0)},
+            {"value": monitor_output(derived_declaration, 5.0)},
             source_publication=plane.latest_publication("jump-source/frame"),
         )
         snapshot = plane.current_dataset("jump-derived/value")
@@ -627,12 +470,12 @@ def test_a_rolled_window_s_record_names_only_the_rows_it_kept() -> None:
                 plane.current_dataset_view("roll-derived/value")
             for index in (2, 3, 4):
                 plane.commit_live(
-                    source, {"frame": _latest(source_declaration, float(index))}
+                    source, {"frame": monitor_output(source_declaration, float(index))}
                 )
                 plane.commit_processor(
                     derived,
                     {
-                        "value": _latest(
+                        "value": monitor_output(
                             derived_declaration,
                             float(index),
                             event_record=_camera_epoch_record(index),
@@ -667,7 +510,7 @@ def _finite_grid_point(
     point_origin: int,
     written: int,
 ) -> LiveDatasetOutput:
-    event = _event(declaration.name, value)
+    event = event_snapshot(declaration.name, 1, value=value)
     schema = event.block.schema
     x_id = AxisId(f"{declaration.name}.grid-x")
     y_id = AxisId(f"{declaration.name}.grid-y")
@@ -693,23 +536,15 @@ def _finite_grid_point(
     )
 
 
-def _node(instance_id: str, *declarations: DatasetOutputDeclaration):
-    return SimpleNamespace(
-        instance_id=instance_id,
-        dataset_output_declarations=declarations,
-        signal_key=lambda name: f"{instance_id}/{name}",
-    )
-
-
 def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     with pytest.raises(ValueError, match="requires canonical placement"):
         LiveDatasetOutput(
             declaration,
-            _event("unplaced", 0.0),
+            event_snapshot("unplaced", 1, value=0.0),
             DatasetCoverage(1, 1),
         )
-    node = _node("camera", declaration)
+    node = producer("camera", declaration)
     mutable = {"camera": {"gain": 1}, "shape": [1, 1]}
     record = MappingProxyType(mutable)
     plane = SignalDataPlane()
@@ -721,7 +556,7 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
         value = plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=1.0,
                     total=1,
@@ -752,7 +587,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
     sibling = DatasetOutputDeclaration("counts", "test.counts")
-    node = _node("epoch-camera", declaration, sibling)
+    node = producer("epoch-camera", declaration, sibling)
     plane = SignalDataPlane()
     merge_calls = []
     real_merge = plane_module._merge_event_records
@@ -782,7 +617,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         first = plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=1.0,
                     total=2,
@@ -790,7 +625,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
                     written=1,
                     event_record=event(0),
                 ),
-                "counts": _finite(sibling, value=3.0, total=2, origin=0, written=1, event_record=event(0)),
+                "counts": finite_output(sibling, value=3.0, total=2, origin=0, written=1, event_record=event(0)),
             },
         )["epoch-camera/frame"]
         first_publication = plane.latest_publication("epoch-camera/frame")
@@ -805,7 +640,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         second = plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=2.0,
                     total=2,
@@ -813,7 +648,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
                     written=2,
                     event_record=event(2),
                 ),
-                "counts": _finite(sibling, value=4.0, total=2, origin=1, written=2, event_record=event(2)),
+                "counts": finite_output(sibling, value=4.0, total=2, origin=1, written=2, event_record=event(2)),
             },
         )["epoch-camera/frame"]
         assert first.event_record["device_settings"]["camera"][
@@ -847,7 +682,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
         with pytest.raises(TypeError):
             prefix_record["record_timing"]["camera"]["0"]["record_time_seconds"] = 99
         assert first.canonical_schema is second.canonical_schema
-        assert first.run_record == {"run": "same"}
+        assert first.run_record == {"run": "same", "node": node.instance_id}
         assert tuple(first_record["record_timing"]["camera"]) == ("0",)
         old_snapshot, old_record = plane.current_dataset_view("epoch-camera/frame", first_publication)
         assert tuple(old_record["record_timing"]["camera"]) == ("0",)
@@ -861,11 +696,11 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity(monkeyp
 
 def test_partial_current_has_invalid_future_and_overlap_is_rejected() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("partial", declaration)
+    node = producer("partial", declaration)
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
-        output = _finite(declaration, value=10.0, total=4, origin=0, written=1)
+        output = finite_output(declaration, value=10.0, total=4, origin=0, written=1)
         snapshot = output.snapshot
         output = replace(output, snapshot=OwnedSnapshot(
             snapshot.ref, snapshot.block.replacing(validity=VALID)))
@@ -885,7 +720,7 @@ def test_partial_current_has_invalid_future_and_overlap_is_rejected() -> None:
             plane.commit_live(
                 node,
                 {
-                    "frame": _finite(
+                    "frame": finite_output(
                         declaration,
                         value=99.0,
                         total=4,
@@ -901,14 +736,14 @@ def test_partial_current_has_invalid_future_and_overlap_is_rejected() -> None:
 
 def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_stop() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("repeat-display", declaration)
+    node = producer("repeat-display", declaration)
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
         event_value = plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=10.0,
                     total=30,
@@ -940,7 +775,7 @@ def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_sto
 @pytest.mark.parametrize("event_record", ({}, {"acquisition": "scan"}))
 def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive(event_record) -> None:
     declaration = DatasetOutputDeclaration("scan", "test.scan")
-    node = _node("grid-display", declaration)
+    node = producer("grid-display", declaration)
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
@@ -1011,7 +846,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive(event
 @pytest.mark.parametrize("mask_kind", ("components", "subset", "cell", "global"))
 def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes, mask_kind) -> None:
     declaration = DatasetOutputDeclaration("survival", "test.survival")
-    node = _node("repeat-title", declaration)
+    node = producer("repeat-title", declaration)
     plane = SignalDataPlane()
     repeat = AxisSpec(AxisId("scan"), "repeat", REPEAT, 3, (0, 1, 2))
     run = AxisSpec(AxisId("run"), "repeat", REPEAT, 2, (0, 1))
@@ -1023,7 +858,7 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes
         DomainSpec((len(point_codes),), (point,), (point_codes,)), DomainSpec((2, 3), (site, channel)),
         ValueSchema(ValidityContract.components(site.axis_id, channel.axis_id), np.dtype(bool)),
     )
-    scalar_event = _event("survival", 0.0).block.schema
+    scalar_event = snapshot_schema("survival")
     event_schema = replace(canonical, repeat_domain=scalar_event.repeat_domain,
                            point_domain=scalar_event.point_domain)
     # Missing scan cells stay absent; false/invalid sites in a committed cell
@@ -1072,7 +907,7 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes
         plane.close()
 
 
-def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
+def test_watching_a_run_grow_costs_the_shot_not_the_run(monkeypatch) -> None:
     """Assembling the view again places what ARRIVED, not everything.
 
     A canonical Dataset never rewrites a cell it already holds, so the
@@ -1085,36 +920,26 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
     from zlc_runtime import plane as plane_module
 
     declaration = DatasetOutputDeclaration("scan", "test.scan")
-    node = _node("grid-cost", declaration)
+    node = producer("grid-cost", declaration)
     plane = SignalDataPlane()
-    # Counted on EVERY assembler the plane owns, named or not, so the
-    # measurement is of the work done and not of which function did it.
+    # Every committed event the plane places goes through the one function
+    # that rehydrates its retained planes, so its calls are the work done.
     placed: list[int] = []
     merged: list[int] = []
+    retained_planes = plane_module._retained_planes
     merge_records = plane_module._merge_event_records
+
+    def place(chunk, schema, facts):
+        placed.append(1)
+        return retained_planes(chunk, schema, facts)
 
     def merge_new_records(records):
         records = tuple(records)
         merged.append(len(records))
         return merge_records(records)
 
-    plane_module._merge_event_records = merge_new_records
-    assemblers = {
-        name: getattr(plane_module, name)
-        for name in ("_assembled_planes", "_extended_planes")
-        if hasattr(plane_module, name)
-    }
-
-    def counting(original):
-        def assemble(*arguments):
-            head, tail = arguments[:-1], tuple(arguments[-1])
-            placed.append(len(tail))
-            return original(*head, tail)
-
-        return assemble
-
-    for name, original in assemblers.items():
-        setattr(plane_module, name, counting(original))
+    monkeypatch.setattr(plane_module, "_retained_planes", place)
+    monkeypatch.setattr(plane_module, "_merge_event_records", merge_new_records)
     try:
         plane.begin_generation(node)
         for point in range(4):
@@ -1132,7 +957,7 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
             # A values-only consumer asks for the run without provenance.
             view = plane.current_dataset("grid-cost/scan")
             assert view.materialize().block.values[0, point, 0] == float(point)
-        assert placed == [1, 1, 1, 1], placed
+            assert len(placed) == point + 1, "one read placed more than its new shot"
         assert merged == [], "snapshot-only reads must not build discarded event records"
         snapshot, record = plane.current_dataset_view("grid-cost/scan")
         assert snapshot is view, "requesting provenance must not rebuild prepared pixels"
@@ -1144,20 +969,18 @@ def test_watching_a_run_grow_costs_the_shot_not_the_run() -> None:
             plane.current_dataset("grid-cost/scan").materialize().block.values[0, :, 0],
             (0.0, 1.0, 2.0, 3.0),
         )
+        assert len(placed) == 4, "reading the prepared run again placed shots again"
     finally:
-        plane_module._merge_event_records = merge_records
-        for name, original in assemblers.items():
-            setattr(plane_module, name, original)
         plane.close()
 
 
 def test_monitor_to_finite_generation_changes_from_event_to_authored_shape() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("restart-shape", declaration)
+    node = producer("restart-shape", declaration)
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
-        plane.commit_live(node, {"frame": _latest(declaration, 1.0)})
+        plane.commit_live(node, {"frame": monitor_output(declaration, 1.0)})
         old_publication = plane.latest_publication("restart-shape/frame")
         assert old_publication is not None
         assert plane.describe_signals()[0].shape == (1, 1, 1)
@@ -1167,7 +990,7 @@ def test_monitor_to_finite_generation_changes_from_event_to_authored_shape() -> 
         plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=2.0,
                     total=30,
@@ -1187,7 +1010,7 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
     import zlc_runtime.plane as plane_module
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("presentation-cache", declaration)
+    node = producer("presentation-cache", declaration)
     calls = 0
     real = plane_module.SignalDataPlane._materialize_dataset
 
@@ -1203,7 +1026,7 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
         plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=1.0,
                     total=3,
@@ -1223,7 +1046,7 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
         plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=2.0,
                     total=3,
@@ -1256,14 +1079,14 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
 
 def test_canonical_prefix_is_bound_to_its_publication_when_next_event_wins_race() -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("publication-prefix", declaration)
+    node = producer("publication-prefix", declaration)
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
         plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=1.0,
                     total=3,
@@ -1277,7 +1100,7 @@ def test_canonical_prefix_is_bound_to_its_publication_when_next_event_wins_race(
         plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=2.0,
                     total=3,
@@ -1307,7 +1130,7 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
     import zlc_runtime.plane as plane_module
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("linear", declaration)
+    node = producer("linear", declaration)
     calls = 0
     real = plane_module.SignalDataPlane._materialize_dataset
 
@@ -1325,7 +1148,7 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
             value = plane.commit_live(
                 node,
                 {
-                    "frame": _finite(
+                    "frame": finite_output(
                         declaration,
                         value=float(index),
                         total=100,
@@ -1370,7 +1193,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation) -
     import zlc_runtime.plane as plane_module
 
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    node = _node("nonblocking-current", declaration)
+    node = producer("nonblocking-current", declaration)
     entered = threading.Event()
     release = threading.Event()
     reader_done = threading.Event()
@@ -1389,7 +1212,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation) -
         plane.commit_live(
             node,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     declaration,
                     value=1.0,
                     total=1,
@@ -1430,7 +1253,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation) -
 def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> None:
     history_declaration = DatasetOutputDeclaration("history", "test.history")
     phase_declaration = DatasetOutputDeclaration("phase", "test.phase")
-    node = _node("mixed", history_declaration, phase_declaration)
+    node = producer("mixed", history_declaration, phase_declaration)
     plane = SignalDataPlane()
     first_ref = None
     first = None
@@ -1440,14 +1263,14 @@ def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> 
             values = plane.commit_live(
                 node,
                 {
-                    "history": _finite(
+                    "history": finite_output(
                         history_declaration,
                         value=float(index + 1),
                         total=2,
                         origin=index,
                         written=index + 1,
                     ),
-                    "phase": _latest(phase_declaration, float(index + 1)),
+                    "phase": monitor_output(phase_declaration, float(index + 1)),
                 },
             )
             assert values["mixed/history"].canonical_schema is not None
@@ -1474,13 +1297,13 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     history_declaration = DatasetOutputDeclaration("history", "test.history")
     phase_declaration = DatasetOutputDeclaration("phase", "test.phase")
-    source = _node("causal-source", source_declaration)
-    first_processor = _node(
+    source = producer("causal-source", source_declaration)
+    first_processor = producer(
         "causal-first",
         history_declaration,
         phase_declaration,
     )
-    downstream = _node(
+    downstream = producer(
         "causal-downstream",
         DatasetOutputDeclaration("result", "test.result"),
     )
@@ -1508,7 +1331,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         plane.commit_processor(
             first_processor,
             {
-                "history": _finite(
+                "history": finite_output(
                     history_declaration,
                     value=10.0,
                     total=2,
@@ -1541,7 +1364,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         plane.commit_processor(
             first_processor,
             {
-                "history": _finite(
+                "history": finite_output(
                     history_declaration,
                     value=20.0,
                     total=2,
@@ -1587,13 +1410,13 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         assert parent.signal_names == ("causal-source/frame",)
         assert not parent.signals
         assert plane.publication_roots(replayed) == frozenset({first_event})
-        visible = _node("visible", history_declaration, phase_declaration)
+        visible = producer("visible", history_declaration, phase_declaration)
         plane.begin_generation(visible)
         plane.set_front_signals({"visible/history", "visible/phase"})
         _baseline, visible_tap = plane.follow_publications("visible/history", replay=False)
         try:
             plane.commit_live(visible, {
-                "history": _latest(history_declaration, 3.0),
+                "history": monitor_output(history_declaration, 3.0),
                 "phase": _large_latest(phase_declaration, 300.0),
             })
             pending = visible_tap.next(0.0)
@@ -1611,7 +1434,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
                 segment_shapes=np.ones((1, 2), dtype=np.int64),
             )
             plane.commit_live(visible, {
-                "history": _latest(history_declaration, 4.0),
+                "history": monitor_output(history_declaration, 4.0),
                 "phase": replace(output, snapshot=OwnedSnapshot(output.snapshot.ref, block)),
             })
             with pytest.raises(SourceFailed, match="payload bytes"):
@@ -1633,7 +1456,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
 @pytest.mark.parametrize("source_error", (None, RuntimeError("source failed after committed data")))
 def test_latest_processors_run_parallel_per_node_serial_and_coalesce(source_error) -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
-    source = _node("latest-source", source_declaration)
+    source = producer("latest-source", source_declaration)
     release_initial = threading.Event()
 
     class Processor:
@@ -1674,7 +1497,7 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce(source_erro
                     assert release_initial.wait(2.0)
                 else:
                     self.entered_latest.set()
-                return {"derived": _latest(self.declaration, float(sequence))}
+                return {"derived": monitor_output(self.declaration, float(sequence))}
             finally:
                 with self.lock:
                     self.active -= 1
@@ -1706,7 +1529,7 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce(source_erro
         plane.begin_generation(source)
         plane.commit_live(
             source,
-            {"frame": _latest(source_declaration, 1.0)},
+            {"frame": monitor_output(source_declaration, 1.0)},
         )
         initial = plane.latest_publication("latest-source/frame")
         assert initial is not None
@@ -1728,12 +1551,12 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce(source_erro
 
         plane.commit_live(
             source,
-            {"frame": _latest(source_declaration, 2.0)},
+            {"frame": monitor_output(source_declaration, 2.0)},
         )
         plane.freeze()
         plane.commit_live(
             source,
-            {"frame": _latest(source_declaration, 3.0)},
+            {"frame": monitor_output(source_declaration, 3.0)},
         )
         plane.freeze()
 
@@ -1769,7 +1592,7 @@ def test_freeze_preserves_publication_committed_while_processor_route_runs(
     monkeypatch,
 ) -> None:
     declaration = DatasetOutputDeclaration("frame", "test.frame")
-    source = _node("route-race-source", declaration)
+    source = producer("route-race-source", declaration)
     plane = SignalDataPlane()
     route_entered = threading.Event()
     release_route = threading.Event()
@@ -1788,7 +1611,7 @@ def test_freeze_preserves_publication_committed_while_processor_route_runs(
     monkeypatch.setattr(plane._lane, "route", gated_route)
     try:
         plane.begin_generation(source)
-        plane.commit_live(source, {"frame": _latest(declaration, 1.0)})
+        plane.commit_live(source, {"frame": monitor_output(declaration, 1.0)})
 
         def freeze_first_publication() -> None:
             try:
@@ -1803,7 +1626,7 @@ def test_freeze_preserves_publication_committed_while_processor_route_runs(
         # This commit lands after freeze cleared the work it captured, but
         # before it publishes the newly built front.  It must leave another
         # routing turn owed instead of being cleared by freeze's second lock.
-        plane.commit_live(source, {"frame": _latest(declaration, 2.0)})
+        plane.commit_live(source, {"frame": monitor_output(declaration, 2.0)})
         release_route.set()
         worker.join(2.0)
         assert not worker.is_alive(), "freeze did not leave the route gate"
@@ -1818,11 +1641,11 @@ def test_freeze_preserves_publication_committed_while_processor_route_runs(
 
 def test_direct_latest_commit_retires_without_cleanup_callbacks() -> None:
     declaration = DatasetOutputDeclaration("preview", "test.preview")
-    node = _node("preview", declaration)
+    node = producer("preview", declaration)
     plane = SignalDataPlane()
     try:
         plane.begin_generation(node)
-        plane.commit_live(node, {"preview": _latest(declaration, 1.0)})
+        plane.commit_live(node, {"preview": monitor_output(declaration, 1.0)})
         assert plane.retire(node) == frozenset({"preview/preview"})
         assert plane.latest_publication("preview/preview") is None
     finally:
@@ -1848,10 +1671,10 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
     measurement_declaration = DatasetOutputDeclaration("frame", "test.frame")
     roi_declaration = DatasetOutputDeclaration("value", "test.value")
     fit_declaration = DatasetOutputDeclaration("fit", "test.fit")
-    wire = _node("wire", wire_declaration)
-    measurement = _node("measurement", measurement_declaration)
-    roi = _node("roi", roi_declaration)
-    fit = _node("fit", fit_declaration)
+    wire = producer("wire", wire_declaration)
+    measurement = producer("measurement", measurement_declaration)
+    roi = producer("roi", roi_declaration)
+    fit = producer("fit", fit_declaration)
     plane = SignalDataPlane()
     roi_tap = None
     fit_tap = None
@@ -1859,7 +1682,7 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         plane.begin_generation(wire)
         plane.commit_live(
             wire,
-            {"frame": _finite(wire_declaration, value=1.0, total=1, origin=0, written=1)},
+            {"frame": finite_output(wire_declaration, value=1.0, total=1, origin=0, written=1)},
         )
         wire_publication = plane.latest_publication("wire/frame")
         assert wire_publication is not None
@@ -1868,7 +1691,7 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         plane.commit_live(
             measurement,
             {
-                "frame": _finite(
+                "frame": finite_output(
                     measurement_declaration, value=2.0, total=1, origin=0, written=1
                 )
             },
@@ -1885,7 +1708,7 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         )
         plane.commit_processor(
             roi,
-            {"value": _finite(roi_declaration, value=3.0, total=1, origin=0, written=1)},
+            {"value": finite_output(roi_declaration, value=3.0, total=1, origin=0, written=1)},
             source_publication=measured,
         )
         derived = plane.latest_publication("roi/value")
@@ -1904,7 +1727,7 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         )
         plane.commit_processor(
             fit,
-            {"fit": _finite(fit_declaration, value=4.0, total=1, origin=0, written=1)},
+            {"fit": finite_output(fit_declaration, value=4.0, total=1, origin=0, written=1)},
             source_publication=derived,
         )
         answered = plane.latest_publication("fit/fit")
@@ -1934,32 +1757,13 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         "test.value",
         index_by_source=True,
     )
-    source = _node("stamped-source", source_declaration)
-
-    class Derived:
-        instance_id = "stamped-derived"
-        dataset_output_declarations = (derived_declaration,)
-
-        @staticmethod
-        def signal_key(name: str) -> str:
-            return f"stamped-derived/{name}"
-
-        validate_processor_source = staticmethod(lambda _source: None)
-        evaluate_processor = staticmethod(
-            lambda _source, _publication: (_ for _ in ()).throw(AssertionError())
-        )
-        accept_processor_result = staticmethod(lambda *_args: None)
-        accept_processor_failure = staticmethod(lambda error: (_ for _ in ()).throw(error))
-        accept_processor_cancelled = staticmethod(lambda: None)
-        accept_processor_ended = staticmethod(lambda _error: None)
-        request_processor_owner_wake = staticmethod(lambda: None)
-
-    derived = Derived()
+    source = producer("stamped-source", source_declaration)
+    derived = paused_lane("stamped-derived", derived_declaration)
     plane = SignalDataPlane()
     history = None
     try:
         plane.begin_generation(source)
-        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        plane.commit_live(source, {"frame": monitor_output(source_declaration, 1.0)})
         publication = plane.latest_publication("stamped-source/frame")
         plane.attach_latest_only_processor(
             derived,
@@ -1970,12 +1774,12 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         for revision in range(1, 7):
             if revision > 1:
                 plane.commit_live(
-                    source, {"frame": _latest(source_declaration, float(revision))}
+                    source, {"frame": monitor_output(source_declaration, float(revision))}
                 )
                 publication = plane.latest_publication("stamped-source/frame")
             plane.commit_processor(
                 derived,
-                {"value": _latest(derived_declaration, float(revision))},
+                {"value": monitor_output(derived_declaration, float(revision))},
                 source_publication=publication,
             )
             if revision == 1:
@@ -1991,7 +1795,7 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         # every table carried across revisions must notice.
         plane.commit_processor(
             derived,
-            {"value": _latest(derived_declaration, 60.0)},
+            {"value": monitor_output(derived_declaration, 60.0)},
             source_publication=publication,
             trigger=("rerun", 1),
         )
@@ -2019,7 +1823,7 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
     from zlc_data.snapshot_projection import SHOT_TIME_AXIS_ID, indexed_history_layout
 
     declaration = DatasetOutputDeclaration("field", "test.field", index_by_source=True)
-    source = _node("stamped-source", declaration)
+    source = producer("stamped-source", declaration)
     plane = SignalDataPlane()
     lease = None
     try:
@@ -2031,7 +1835,7 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
                 {
                     "field": LiveDatasetOutput(
                         declaration,
-                        _event("field", value),
+                        event_snapshot("field", 1, value=value),
                         MonitorCoverage(1, 1),
                         shot_time_seconds=seconds,
                     )
@@ -2055,14 +1859,14 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
         with pytest.raises(ValueError, match="every shot"):
             plane.commit_live(
                 source,
-                {"field": LiveDatasetOutput(declaration, _event("field", 5.0), MonitorCoverage(1, 1))},
+                {"field": LiveDatasetOutput(declaration, event_snapshot("field", 1, value=5.0), MonitorCoverage(1, 1))},
             )
         with pytest.raises(ValueError, match="advance in time"):
             plane.commit_live(
                 source,
                 {
                     "field": LiveDatasetOutput(
-                        declaration, _event("field", 5.0), MonitorCoverage(1, 1),
+                        declaration, event_snapshot("field", 1, value=5.0), MonitorCoverage(1, 1),
                         shot_time_seconds=0.4,
                     )
                 },
@@ -2094,3 +1898,74 @@ def test_a_stamped_window_gives_every_row_a_distinct_ordered_time() -> None:
     # Distinct at any magnitude: a run half a year in still tells its rows apart.
     late = _row_times([None, None, 16777217.0])
     assert late[0] < late[1] < late[2] and len(set(late)) == 3
+
+
+def _trace(declaration: DatasetOutputDeclaration, samples: int) -> LiveDatasetOutput:
+    """One monitor shot of a ``samples``-long float64 record."""
+
+    scalar = snapshot_schema(declaration.name)
+    axis = AxisSpec(AxisId(f"{declaration.name}.sample"), "sample", SPATIAL_X, samples)
+    schema = DatasetSchema(
+        scalar.repeat_domain,
+        scalar.point_domain,
+        DomainSpec((samples,), (axis,)),
+        ValueSchema(ValidityContract.value(), np.dtype("float64"), "count"),
+    )
+    block = DataBlock(
+        BlockId(f"{declaration.name}.trace"),
+        DatasetRevision(1),
+        np.zeros((1, 1, samples), dtype=np.float64),
+        CellValidity(np.ones((1, 1), dtype=np.bool_)),
+        schema,
+    )
+    return LiveDatasetOutput(
+        declaration,
+        OwnedSnapshot(block.ref(StreamGenerationId("trace-generation")), block),
+        MonitorCoverage(1, 1),
+    )
+
+
+def test_a_restarted_window_is_priced_by_what_it_grew(monkeypatch) -> None:
+    """A lease that outlives its run meets the next run's first shot.
+
+    The window the dropped run kept is still drawn until the new run
+    replaces it, so only growth past it is new memory: a same-size restart
+    is taken, a record that grew is refused by name, and a lease released
+    and taken again prices its whole window.
+    """
+
+    from zlc_runtime import plane as plane_module
+
+    free = [2**40]
+    monkeypatch.setattr(plane_module, "_available_memory_bytes", lambda: free[0])
+    declaration = DatasetOutputDeclaration("trace", "test.trace", index_by_source=True)
+    source = producer("restart", declaration)
+    plane = SignalDataPlane()
+    window, samples = 4, 1000
+    lease = None
+    try:
+        plane.begin_generation(source)
+        lease = plane.acquire_indexed_history("restart/trace", window)
+        for _ in range(window):
+            plane.commit_live(source, {"trace": _trace(declaration, samples)})
+        # Far less than one window is free from here on.
+        free[0] = samples * 8
+
+        plane.seal_committed(source)
+        plane.begin_generation(source)
+        for _ in range(window):
+            plane.commit_live(source, {"trace": _trace(declaration, samples)})
+
+        plane.seal_committed(source)
+        plane.begin_generation(source)
+        with pytest.raises(MemoryError, match="restart/trace"):
+            plane.commit_live(source, {"trace": _trace(declaration, 2 * samples)})
+
+        lease.close()
+        lease = plane.acquire_indexed_history("restart/trace", window)
+        with pytest.raises(MemoryError, match="restart/trace"):
+            plane.commit_live(source, {"trace": _trace(declaration, samples)})
+    finally:
+        if lease is not None:
+            lease.close()
+        plane.close()

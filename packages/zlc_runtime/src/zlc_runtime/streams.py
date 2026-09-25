@@ -16,6 +16,12 @@ PayloadT = TypeVar("PayloadT")
 _FOLLOW_TOKEN = object()
 DEFAULT_FOLLOW_MAX_PENDING = 1024
 DEFAULT_FOLLOW_MAX_BYTES = 128 * 1024 * 1024
+#: The default byte budget never holds fewer than this many events of the
+#: follower's first one.  A fixed 128 MiB holds only a handful of full-frame
+#: camera cycles once the frames pinned behind each event are counted, so
+#: one short stall would fail an Occupancy or Derive follower for the rest
+#: of the run.
+DEFAULT_FOLLOW_EVENTS = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +99,7 @@ class FollowTap(Generic[PayloadT]):
         live_sequence: int,
         replay: Iterable[tuple[int, PayloadT]] = (),
         max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
-        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        max_bytes: int | None = None,
         project: Callable[[PayloadT], PayloadT] | None = None,
         payload_size: Callable[[PayloadT], int] | None = None,
     ) -> None:
@@ -101,7 +107,9 @@ class FollowTap(Generic[PayloadT]):
             raise PermissionError("FollowTap can only be minted by AcquisitionStream")
         self._stream = stream
         self._condition = threading.Condition()
-        if type(max_pending) is not int or max_pending < 1 or type(max_bytes) is not int or max_bytes < 1:
+        if type(max_pending) is not int or max_pending < 1 or (
+            max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1)
+        ):
             raise ValueError("exact follow limits must be positive integers")
         self._queue: deque[tuple[int, PayloadT, int]] = deque()
         self._replay = iter(replay)
@@ -126,6 +134,11 @@ class FollowTap(Generic[PayloadT]):
             try:
                 payload = payload if self._project is None else self._project(payload)
                 size = 0 if self._payload_size is None else self._payload_size(payload)
+                if self._max_bytes is None:
+                    # None is the default budget, sized once by the first event.
+                    self._max_bytes = max(
+                        DEFAULT_FOLLOW_MAX_BYTES, DEFAULT_FOLLOW_EVENTS * size
+                    )
                 if len(self._queue) >= self._max_pending or self._queued_bytes + size > self._max_bytes:
                     failure = SourceFailed(
                         f"exact follower overflow at sequence {sequence}: "
@@ -246,7 +259,7 @@ class AcquisitionStream(Generic[PayloadT]):
         *,
         replay_start_sequence: int | None = None,
         max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
-        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        max_bytes: int | None = None,
         project: Callable[[PayloadT], PayloadT] | None = None,
         payload_size: Callable[[PayloadT], int] | None = None,
     ) -> FollowTap[PayloadT]:

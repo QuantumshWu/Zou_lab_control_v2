@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 import threading
 from typing import Callable, NamedTuple
 
@@ -14,20 +14,24 @@ class OwnerCompletion(NamedTuple):
 
 
 class RunOwnerMailbox:
-    """Own asynchronous Run mechanics, never application product policy."""
+    """Own asynchronous Run mechanics, never application product policy.
+
+    Every operation runs on a daemon thread of its own.  A run is never
+    handed a second operation while one is still out (its host refuses a
+    Start until the last one was reaped), so nothing needs a pool -- and a
+    pool's worker is joined at interpreter exit: an operation that never
+    returns, an operator's Derive stuck in a loop or an SDK stop that hangs,
+    would hold the process open after the console had given up waiting.
+    """
 
     def __init__(
         self,
         request_owner_wake: Callable[[], None],
         *,
         thread_name_prefix: str,
-        max_workers: int = 2,
     ) -> None:
         self._wake = request_owner_wake
-        self._pool = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix=thread_name_prefix,
-        )
+        self._thread_name = thread_name_prefix
         self._lock = threading.Lock()
         self._tracked: set[Future] = set()
         self._completions: list[OwnerCompletion] = []
@@ -68,7 +72,7 @@ class RunOwnerMailbox:
         generation: int | None = None,
     ) -> Future:
         generation = self._generation if generation is None else generation
-        future = self._pool.submit(work)
+        future: Future = Future()
         with self._lock:
             self._tracked.add(future)
 
@@ -81,6 +85,28 @@ class RunOwnerMailbox:
             self._wake()
 
         future.add_done_callback(done)
+
+        def run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                result = work()
+            except BaseException as error:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
+
+        try:
+            threading.Thread(
+                target=run, name=f"{self._thread_name}-{kind}", daemon=True,
+            ).start()
+        except BaseException:
+            # No thread will ever finish this future: tracked, it would hold
+            # the owner busy for good -- every later Start refused, the close
+            # refused -- where the operation was simply never started.
+            with self._lock:
+                self._tracked.discard(future)
+            raise
         return future
 
     def drain_completions(self) -> tuple[OwnerCompletion, ...]:
@@ -94,7 +120,6 @@ class RunOwnerMailbox:
             raise RuntimeError("cannot close Run owner with pending work")
         if not self._owner_reaped:
             raise RuntimeError("cannot close Run owner before its handle is reaped")
-        self._pool.shutdown(wait=False)
 
 
 __all__ = ["OwnerCompletion", "RunOwnerMailbox"]

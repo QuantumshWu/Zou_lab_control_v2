@@ -26,8 +26,11 @@ from dataclasses import dataclass, field, replace
 from array import array
 import math
 import marshal
+import os
+import sys
 import threading
 from types import MappingProxyType
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Protocol, runtime_checkable
 import uuid
@@ -68,7 +71,6 @@ from .dataset import (
 from .streams import (
     AcquisitionStream,
     DEFAULT_FOLLOW_MAX_PENDING,
-    DEFAULT_FOLLOW_MAX_BYTES,
     EventRef,
     FollowTap,
     SourceFailed,
@@ -674,7 +676,16 @@ def _merge_event_records(
                 for source, entries in value.items():
                     if not isinstance(entries, Mapping):
                         raise TypeError("record_timing entries must be a mapping")
-                    target = record_timing.setdefault(str(source), {})
+                    target = record_timing.get(str(source))
+                    if target is None:
+                        # The first record naming a source has nothing to
+                        # conflict with, and on a provenance seed it is the
+                        # whole run so far: copied in one step, so merging a
+                        # seed with the few newest records is not a Python
+                        # walk over every record the run ever took.  Plane
+                        # records carry text keys only (_freeze_run_record).
+                        record_timing[str(source)] = dict(entries)
+                        continue
                     for ordinal, timing in entries.items():
                         ordinal = str(ordinal)
                         if ordinal in target and not _run_records_equal(target[ordinal], timing):
@@ -738,15 +749,30 @@ def _merge_event_records(
     return MappingProxyType(merged)
 
 
-def _merge_packed_event_records(records: tuple[bytes, ...]) -> Mapping[str, object]:
-    """Expand the exact retained records only for a provenance consumer."""
-    decoded: dict[bytes, Mapping[str, object]] = {b"": _EMPTY_MAPPING}
+def _merge_packed_event_records(
+    packed: list[bytes],
+    indices: array,
+    start: int,
+    stop: int,
+    seed: Mapping[str, object] | None = None,
+) -> Mapping[str, object]:
+    """Expand the retained records of commits ``start:stop`` for a provenance
+    consumer, after ``seed`` -- the merged record of the commits before them.
+
+    ``packed`` and ``indices`` are the generation's append-only record
+    buffers.  A committed prefix of them never changes, so they are read
+    here, outside the plane lock, and taking them costs the same whatever
+    the length of the run.
+    """
+    decoded: dict[int, Mapping[str, object]] = {0: _EMPTY_MAPPING}
     def unpack():
-        for packed in records:
-            record = decoded.get(packed)
+        if seed is not None:
+            yield seed
+        for index in indices[start:stop]:
+            record = decoded.get(index)
             if record is None:
-                record = _freeze_run_record(marshal.loads(packed))
-                decoded[packed] = record
+                record = _freeze_run_record(marshal.loads(packed[index]))
+                decoded[index] = record
             yield record
     return _merge_event_records(unpack())
 
@@ -852,6 +878,35 @@ def _indexed_schema(
         ),
         event_schema.cell_domain,
         event_schema.value_schema,
+    )
+
+
+def _generation_holds_schema(
+    pinned: DatasetSchema,
+    schema: DatasetSchema,
+    value: SignalValue,
+) -> bool:
+    """Whether a publication with ``schema`` stays in the generation pinned
+    to ``pinned``.
+
+    A schema is frozen per generation, with one exception that is not a
+    change of schema at all.  A result cut from a Runtime history window
+    carries the window's own coordinates -- a stamped history's shot times,
+    each record's sample-time origin -- and those move on every shot while
+    the shape, the axes, their roles and units stand still.  They belong to
+    the publication, as they do in the window it was cut from; judged as
+    schema, a region on a waveform panel would start a new generation --
+    and retire everything following it -- on every shot.  A window that
+    grows still changes shape, and generation.
+    """
+
+    if pinned == schema:
+        return True
+    return (
+        isinstance(value.coverage, MonitorCoverage)
+        and pinned.physical_shape == schema.physical_shape
+        and any(axis.axis_id == PRIMARY_INDEX_AXIS_ID for axis in schema.point_domain.axes)
+        and pinned.structure_fingerprint == schema.structure_fingerprint
     )
 
 
@@ -1003,6 +1058,81 @@ def _validate_indexed_event(
         # The time axis is a coordinate per shot: a later shot at an
         # earlier or equal time is a source whose clock does not advance.
         raise ValueError("a stamped history's shots advance in time")
+
+
+def _available_memory_bytes() -> int | None:
+    """Physical memory free right now, or None where the platform cannot say."""
+
+    if sys.platform == "win32":
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_ulong),
+                ("load", ctypes.c_ulong),
+                ("total_physical", ctypes.c_ulonglong),
+                ("available_physical", ctypes.c_ulonglong),
+                ("total_page_file", ctypes.c_ulonglong),
+                ("available_page_file", ctypes.c_ulonglong),
+                ("total_virtual", ctypes.c_ulonglong),
+                ("available_virtual", ctypes.c_ulonglong),
+                ("available_extended_virtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.available_physical)
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _shot_bytes(shot: DatasetSchema) -> int:
+    """What one shot's values of this schema hold."""
+
+    return math.prod(shot.physical_shape) * shot.value_schema.dtype.itemsize
+
+
+def _history_bytes(history: _IndexedHistory | None) -> int:
+    """What a history's retained shots hold; one generation's share a schema."""
+
+    if history is None:
+        return 0
+    return len(history.events) * _shot_bytes(
+        next(iter(history.events.values()))[1].block.schema
+    )
+
+
+def _refuse_unaffordable_window(
+    signal_name: str,
+    window: int,
+    shot: DatasetSchema,
+    held: int,
+) -> None:
+    """Refuse, by name, a history window this machine cannot hold.
+
+    The window is the operator's request and is never quietly shortened;
+    but a window of a thousand shots of a million-sample record is gigabytes,
+    and granting it only moves the failure to some later commit as a
+    MemoryError in the process that owns every signal.  The whole window is
+    priced at the newest shot's size, less the ``held`` bytes already in
+    memory for it, and weighed against the physical memory free now -- when
+    a lease is taken or grown (held: the live history), and when a
+    generation's first shot meets a lease taken before it (held: the window
+    a dropped generation kept, which its panel draws until this one
+    replaces it).  A record that grew is refused by what it grew.
+    """
+
+    needed = window * _shot_bytes(shot) - held
+    available = _available_memory_bytes()
+    if available is not None and needed > available:
+        raise MemoryError(
+            f"a history window of {window} shots of {signal_name!r} needs "
+            f"{needed / 2**30:.1f} GiB more memory; {available / 2**30:.1f} GiB is free"
+        )
 
 
 def _update_indexed_history(
@@ -1257,6 +1387,14 @@ class _GenerationState:
     occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
     materialized: dict[str, _MaterializedFinite] = field(default_factory=dict)
     indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
+    #: The records this generation's last reads handed out whole (not
+    #: deferred), newest last.  A derivation commits the very record it
+    #: read, one timing entry per shot its rows hold; recognising it here by
+    #: identity is what spares freezing it again on every commit.  The
+    #: caches above cannot say it: a panel's deferred read replaces theirs
+    #: while the derivation is still evaluating.  A few more reads than the
+    #: readers that derive from one source at once.
+    handed_records: deque = field(default_factory=lambda: deque(maxlen=8))
     committed_run_record: Mapping[str, object] | None = None
     processor_cleanup_complete: bool = False
     publication_stream_cleaned: bool = False
@@ -1269,13 +1407,18 @@ class _GenerationState:
             }
         )
 
+    def hand_out(self, record: object) -> None:
+        """Remember the record one read handed out whole; under the plane lock."""
+
+        if isinstance(record, Mapping):
+            self.handed_records.append(record)
+
 
 @dataclass(slots=True)
 class _ProcessorEntry:
     node: LatestProcessorControl
     source_name: str
     work_future: Future | None = None
-    work_publication: SignalPublication | None = None
     pending_publication: SignalPublication | None = None
     last_publication: SignalPublication | None = None
     cancel_requested: bool = False
@@ -1432,26 +1575,15 @@ class _LatestOnlyProcessorLane:
                     continue
                 work = entry.work_future
                 finished = work is not None and work.done()
-                publication = entry.work_publication
                 if finished:
                     entry.work_future = None
-                    entry.work_publication = None
             if finished:
                 if entry.cancel_requested:
                     self._cancelled_processor(entry)
                     continue
                 try:
-                    if publication is None:
-                        raise RuntimeError("Processor lane lost its exact publication")
-                    source = publication.value(entry.source_name)
-                    if source is None:
-                        raise RuntimeError("Processor publication lost its source")
-                    result = work.result()
-                    entry.node.accept_processor_result(
-                        source,
-                        publication,
-                        result,
-                    )
+                    # The result was already handed over on the worker.
+                    work.result()
                 except Exception as error:
                     self._fail_processor(entry, error)
                     continue
@@ -1531,19 +1663,39 @@ class _LatestOnlyProcessorLane:
             if source is None:
                 raise RuntimeError("Processor pending publication lost its source")
             future = self._executor.submit(
-                entry.node.evaluate_processor,
+                self._evaluate_and_accept,
+                entry,
                 source,
                 publication,
             )
         except Exception as error:
             self._processors.pop(_node_instance_id(entry.node), None)
             return error
-        entry.work_publication = publication
         entry.work_future = future
         future.add_done_callback(
             lambda _future, current=entry.node: self._wake_processor(current)
         )
         return None
+
+    @staticmethod
+    def _evaluate_and_accept(
+        entry: _ProcessorEntry,
+        source: SignalValue,
+        publication: SignalPublication,
+    ) -> None:
+        """Evaluate one publication and hand the owner its result, here.
+
+        The commit is the owner's and it runs on this worker.  Accepting in
+        ``drain_processors`` put it on whichever thread calls ``freeze()`` --
+        the Qt thread, every beat, keystroke and owner wake -- and a derived
+        commit is every output's restamp, validation and publish plus the
+        merged record's freeze.  A cancel that lands meanwhile is refused by
+        the owner itself: each checks its own route before it commits.
+        """
+
+        result = entry.node.evaluate_processor(source, publication)
+        if not entry.cancel_requested:
+            entry.node.accept_processor_result(source, publication, result)
 
     def _fail_processor(self, entry: _ProcessorEntry, error: Exception) -> None:
         with self._lock:
@@ -1636,17 +1788,27 @@ class SignalDataPlane:
         self._signal_descriptions: tuple[SignalDescription, ...] | None = None
         self._starting: set[str] = set()
         self._indexed_history_demands: dict[str, dict[object, int]] = {}
+        #: What a dropped generation's indexed history held, by signal, while
+        #: a lease still names it.  The panel that drew that window keeps it
+        #: until the signal's next publication replaces its view, so the next
+        #: history's first shot is priced by what it adds, not as a second
+        #: window: a large window that ran once is not refused at every Start.
+        self._released_history_bytes: dict[str, int] = {}
         self._front_signals: frozenset[str] = frozenset()
         self._membership_changed = False
         self._closed = False
         self._front = SignalFront({})
-        self._publication_callbacks: set[Callable[[], object]] = set()
+        self._publication_callbacks: set[Callable[[frozenset[str]], object]] = set()
 
     def subscribe_publications(
         self,
-        callback: Callable[[], object],
+        callback: Callable[[frozenset[str]], object],
     ) -> Callable[[], None]:
-        """Wake an owner once after each atomic live publication."""
+        """Call back once after each atomic live publication with its signal names.
+
+        Every commit of every producer calls every subscriber, so the names
+        are what lets one ignore the publications it does not read.
+        """
 
         if not callable(callback):
             raise TypeError("publication callback must be callable")
@@ -1776,7 +1938,22 @@ class SignalDataPlane:
         new_demand = self._indexed_history_demand_locked(signal_name)
         state = self._state_for_signal_locked(signal_name)
         try:
-            return self._update_indexed_history_locked(
+            value = (
+                None
+                if state is None or state.publication is None
+                else state.publication.value(signal_name)
+            )
+            if (
+                new_demand is not None
+                and (old_demand is None or new_demand > old_demand)
+                and value is not None
+                and isinstance(value.coverage, MonitorCoverage)
+            ):
+                _refuse_unaffordable_window(
+                    signal_name, new_demand, value.snapshot.block.schema,
+                    _history_bytes(state.indexed_history.get(signal_name)),
+                )
+            transition = self._update_indexed_history_locked(
                 state, signal_name, old_demand, new_demand
             )
         except BaseException:
@@ -1791,6 +1968,11 @@ class SignalDataPlane:
                 state, signal_name, new_demand, old_demand
             )
             raise
+        if new_demand is None:
+            # The last lease is gone, and with it the panel that still drew
+            # a dropped generation's window of this signal.
+            self._released_history_bytes.pop(signal_name, None)
+        return transition
 
     def _update_indexed_history_locked(
         self,
@@ -1833,6 +2015,12 @@ class SignalDataPlane:
                 state.indexed_history[signal_name] = history
         new_active = signal_name in state.indexed_history
         return new_active, old_active != new_active, data_changed
+
+    @property
+    def front_signals(self) -> frozenset[str]:
+        """The connected signal set the presentation last declared."""
+
+        return self._front_signals
 
     def set_front_signals(self, signal_names) -> None:
         """Set the connected continuous signal set whose front must be coherent."""
@@ -1908,6 +2096,9 @@ class SignalDataPlane:
         self._signal_descriptions = None
         state.retired = True
         state.publication = None
+        for name, history in state.indexed_history.items():
+            if name in self._indexed_history_demands:
+                self._released_history_bytes[name] = _history_bytes(history)
 
     def _processor_cleanup_completed(self, node: object) -> None:
         """Release a retired route only after its lane entry is truly gone."""
@@ -2121,6 +2312,10 @@ class SignalDataPlane:
         Freezing is outside the commit lock. Later events carry only their
         event-varying facts; neither mutable input nor a new mapping can
         replace this run's accepted declaration.
+
+        The record's ``node`` is the owner holding this generation -- the
+        Logic's own id, ``derive2`` beside ``derive`` -- stamped here, the one
+        place that knows it.  A node naming itself names its type.
         """
         owner_id = _node_instance_id(node)
         with self._lock:
@@ -2129,7 +2324,7 @@ class SignalDataPlane:
                 raise SourceGenerationEnded("run record requires an active generation")
             if state.committed_run_record is not None or state.publication is not None:
                 raise RuntimeError("run record has already been declared")
-        frozen = _freeze_run_record(record)
+        frozen = _freeze_run_record({**record, "node": owner_id})
         with self._lock:
             if self._states.get(owner_id) is not state or state.retired or state.terminal:
                 raise SourceGenerationEnded("generation ended while declaring its run record")
@@ -2325,6 +2520,21 @@ class SignalDataPlane:
         if source_publication is not None and worker_source is not None:
             raise ValueError("one commit cannot have processor and worker sources")
         kind = "producer" if source_publication is None else "processor"
+        # A derivation over a history window or a finite run's prefix carries
+        # the merged record its read was handed -- one timing entry per shot
+        # -- and freezing that again on every commit made a long finite run
+        # cost O(N^2).  A record the parent's generation handed out is
+        # already the plane's own frozen value; anything else is frozen here,
+        # before the lock.
+        event_record = _shared_event_record(outputs)
+        handed: tuple[Mapping[str, object], ...] = ()
+        if source_publication is not None:
+            with self._lock:
+                parent_state = self._states.get(source_publication.event_ref.stream_id.value)
+                if parent_state is not None:
+                    handed = tuple(parent_state.handed_records)
+        if not any(event_record is record for record in handed):
+            event_record = _freeze_run_record(event_record)
         with self._lock:
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
@@ -2414,7 +2624,6 @@ class SignalDataPlane:
             run_record = state.committed_run_record
             if run_record is None:
                 run_record = _freeze_run_record({})
-            event_record = _freeze_run_record(_shared_event_record(outputs))
 
             canonical_schemas = dict(state.canonical_schemas)
             occupied_cells = dict(state.occupied_cells)
@@ -2457,7 +2666,19 @@ class SignalDataPlane:
                     and history_demand is not None
                 ):
                     history = state.indexed_history.get(qualified)
-                    if history is not None:
+                    if history is None:
+                        # Demands outlive generations: a restored panel's
+                        # window, or the same window across a Stop and a
+                        # Start after the record grew, meets its first shot
+                        # here, with no lease change to have priced it.  The
+                        # window the dropped generation held is still drawn
+                        # until this publication replaces it: only the growth
+                        # beyond it is new memory.
+                        _refuse_unaffordable_window(
+                            qualified, history_demand, event.block.schema,
+                            self._released_history_bytes.get(qualified, 0),
+                        )
+                    else:
                         _validate_indexed_event(
                             history, event, primary_index, output.shot_time_seconds
                         )
@@ -2578,6 +2799,11 @@ class SignalDataPlane:
                     sequence,
                     history_demand,
                 )[0]
+            if self._released_history_bytes:
+                # This publication replaces the view a panel kept of the
+                # dropped window, indexed or not; that memory is going.
+                for qualified in state.output_names:
+                    self._released_history_bytes.pop(qualified, None)
             if source_publication is not None:
                 state.last_parent_sequence = source_publication.event_ref.sequence
                 state.last_parent_trigger = trigger
@@ -2613,9 +2839,10 @@ class SignalDataPlane:
                 )
             result = publication.signals
             callbacks = tuple(self._publication_callbacks)
+        names = frozenset(result)
         for callback in callbacks:
             try:
-                callback()
+                callback(names)
             except Exception:
                 # A presentation wake cannot roll back already-committed data.
                 continue
@@ -2642,9 +2869,8 @@ class SignalDataPlane:
             history_signals=history_signals,
             defer_record=defer_record,
         )
-        assert record is not None
-        if not defer_record and callable(record):
-            record = record()
+        # A reader that asked for the record gets the Mapping the plane kept.
+        assert record is not None and (defer_record or not callable(record))
         return snapshot, record
 
     def _materialize_current(
@@ -2665,6 +2891,7 @@ class SignalDataPlane:
         record_chunks = ()
         record_sequence = 0
         merge_record = False
+        exact: _MaterializedIndexed | None = None
         materialized_record: Mapping[str, object] | Callable[[], Mapping[str, object]] | None = None
         with self._lock:
             state = self._state_for_signal_locked(name)
@@ -2708,9 +2935,20 @@ class SignalDataPlane:
                     include_record=include_record,
                 )
                 if not isinstance(indexed_result, _IndexedMaterialization):
-                    return indexed_result
-                indexed_input = indexed_result
-                if include_record:
+                    snapshot, materialized_record = indexed_result
+                    if not include_record or defer_record or not callable(materialized_record):
+                        if include_record and not defer_record:
+                            state.hand_out(materialized_record)
+                        return indexed_result
+                    # A panel's deferred record answers this exact window.  It
+                    # is expanded once, below, and kept in its place, so the
+                    # region's and the fit's reads of the same window that
+                    # follow start from the Mapping instead of each merging
+                    # every retained row again.
+                    exact = history.materialized
+                else:
+                    indexed_input = indexed_result
+                if include_record and indexed_input is not None:
                     # Atomic siblings share event records, but their retained
                     # windows may differ. Reuse only the exact same range.
                     materialized_record = next((
@@ -2738,24 +2976,25 @@ class SignalDataPlane:
                     finite_input = self._materialization_input_locked(state, name, sequence)
                 # Snapshot and provenance consumers can advance independently.
                 # Keep their latest prepared answers in this existing cache.
+                # Every reader starts from the newest one: a deferred record
+                # too, which a reader that needs the record expands (below)
+                # and keeps -- a panel's deferred read must not leave the next
+                # region or run-input read nothing to start from but event 0.
+                # A deferred read builds on a Mapping only, never on another
+                # deferred record, so none of them nests.
                 seed = max((
                     item for item in state.materialized.values()
-                    if (isinstance(item.record, Mapping) and item.record_sequence <= sequence)
-                    or (defer_record and item.record is not None and item.record_sequence == sequence)
-                ), key=lambda item: item.record_sequence, default=None)
+                    if item.record is not None and item.record_sequence <= sequence
+                    and (not defer_record or isinstance(item.record, Mapping)
+                         or item.record_sequence == sequence)
+                ), key=lambda item: (item.record_sequence, isinstance(item.record, Mapping)),
+                    default=None)
                 if seed is not None:
                     materialized_record, record_sequence = seed.record, seed.record_sequence
                 if include_record and record_sequence != sequence:
-                    if defer_record:
-                        materialized_record = partial(_merge_packed_event_records, tuple(
-                            state.event_records[index]
-                            for index in state.commit_record_indices[:sequence]
-                        ))
-                        record_sequence = sequence
-                    else:
-                        # Only capture immutable chunk references under the lock.
-                        record_chunks = (state.event_records, state.commit_record_indices[record_sequence:sequence])
-                        merge_record = True
+                    # Only references to the append-only buffers, under the lock.
+                    record_chunks = (state.event_records, state.commit_record_indices)
+                    merge_record = True
         if snapshot is None:
             snapshot = (
                 _materialize_indexed_dataset(indexed_input)
@@ -2768,22 +3007,26 @@ class SignalDataPlane:
                     partial(_merge_event_records, indexed_input.records)
                     if defer_record else _merge_event_records(indexed_input.records)
                 )
-            elif merge_record:
-                packed_records, indices = record_chunks
-                decoded = {0: _EMPTY_MAPPING}
-                records = []
-                for index in indices:
-                    if index not in decoded:
-                        decoded[index] = _freeze_run_record(marshal.loads(packed_records[index]))
-                    records.append(decoded[index])
-                records = tuple(records)
-                materialized_record = _merge_event_records(
-                    records if materialized_record is None else (materialized_record, *records)
-                )
-                record_sequence = sequence
+            else:
+                if not defer_record and callable(materialized_record):
+                    materialized_record = materialized_record()
+                if merge_record:
+                    merged = partial(
+                        _merge_packed_event_records, *record_chunks,
+                        record_sequence, sequence, materialized_record,
+                    )
+                    materialized_record = merged if defer_record else merged()
+                    record_sequence = sequence
         with self._lock:
             if self._states.get(state.owner_id) is state and not state.retired:
-                if indexed_input is not None:
+                if exact is not None:
+                    history = state.indexed_history.get(name)
+                    if history is not None and history.materialized is exact:
+                        history.materialized = _MaterializedIndexed(
+                            exact.sequence, exact.snapshot, materialized_record,
+                            exact.start, exact.latest,
+                        )
+                elif indexed_input is not None:
                     history = state.indexed_history.get(name)
                     if history is not None:
                         current = history.materialized
@@ -2793,13 +3036,37 @@ class SignalDataPlane:
                         # afterwards.  A replacement committed since this
                         # build does not invalidate the STORE -- the
                         # basis honestly describes sequence; replaced_at
-                        # fences its reuse.
-                        if current is None or current.sequence <= sequence:
+                        # fences its reuse.  The WHOLE retained window
+                        # becomes the basis: a narrower reader (a region's
+                        # window, a Processor's input window) rolls from it,
+                        # while the panels reading the whole window would
+                        # otherwise lose their append to it every shot and
+                        # rebuild every retained row.  A narrower read
+                        # becomes the basis only where the kept one is no
+                        # wider, or serves no whole-window reader any more:
+                        # fenced by a replacement, or aged past the retained
+                        # history while the panels are paused or hidden.
+                        # Without that, a Processor reading every shot while
+                        # nobody read the whole window rebuilt its own
+                        # window from nothing every shot.
+                        if (
+                            (current is None or current.sequence <= sequence)
+                            and (
+                                indexed_input.start == history.first_index
+                                or current is None
+                                or history.replaced_at > current.sequence
+                                or current.latest < history.first_index
+                                or current.latest - current.start
+                                <= indexed_input.latest - indexed_input.start
+                            )
+                        ):
                             if (
                                 current is not None and current.sequence == sequence
                                 and current.start == indexed_input.start
                                 and current.latest == indexed_input.latest
                                 and current.record is not None
+                                and (isinstance(current.record, Mapping)
+                                     or not isinstance(materialized_record, Mapping))
                             ):
                                 materialized_record = current.record
                             history.materialized = _MaterializedIndexed(
@@ -2823,6 +3090,8 @@ class SignalDataPlane:
                             materialized_record,
                             record_sequence,
                         )
+                if include_record and not defer_record:
+                    state.hand_out(materialized_record)
         return snapshot, materialized_record
 
     def current_dataset(
@@ -3086,7 +3355,7 @@ class SignalDataPlane:
         replay: bool,
         selected_signals: tuple[str, ...] | None = None,
         max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
-        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        max_bytes: int | None = None,
     ) -> FollowTap[SignalPublication]:
         stream = self._ensure_publication_stream_locked(state)
         selected = (signal_name,) if selected_signals is None else selected_signals
@@ -3111,20 +3380,25 @@ class SignalDataPlane:
         def retained(index):
             nonlocal current
             # Recreate only the requested event and siblings from owned bytes.
+            # A replayed event is pulled one at a time, never queued, so only
+            # an explicit byte limit prices it -- the walk over its ancestry
+            # is not paid for nothing.
             if stop:
                 with self._lock:
                     sequence = index + 1
                     publication = self._retained_publication_locked(replay_input, sequence, payloads)
-                    size = self._publication_payload_bytes_locked(publication)
-                    if size > max_bytes:
-                        raise SourceFailed(f"exact replay event {sequence} has {size} payload bytes, limit {max_bytes}")
+                    if max_bytes is not None:
+                        size = self._publication_payload_bytes_locked(publication)
+                        if size > max_bytes:
+                            raise SourceFailed(f"exact replay event {sequence} has {size} payload bytes, limit {max_bytes}")
                 return sequence, publication
             if current is not None:
                 with self._lock:
                     publication, current = current, None
-                    size = self._publication_payload_bytes_locked(publication)
-                    if size > max_bytes:
-                        raise SourceFailed(f"exact replay event {publication.event_ref.sequence} has {size} payload bytes, limit {max_bytes}")
+                    if max_bytes is not None:
+                        size = self._publication_payload_bytes_locked(publication)
+                        if size > max_bytes:
+                            raise SourceFailed(f"exact replay event {publication.event_ref.sequence} has {size} payload bytes, limit {max_bytes}")
                 return publication.event_ref.sequence, publication
 
         return stream.follow(
@@ -3187,7 +3461,7 @@ class SignalDataPlane:
         *,
         replay: bool = True,
         max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
-        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        max_bytes: int | None = None,
     ) -> tuple[SignalPublication | None, FollowTap[SignalPublication]]:
         """Return the current event and an ordered replay/future payload tap.
 
@@ -3442,7 +3716,7 @@ class SignalDataPlane:
         source_publication: SignalPublication | None,
         source_signals: tuple[str, ...] | None = None,
         max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
-        max_bytes: int = DEFAULT_FOLLOW_MAX_BYTES,
+        max_bytes: int | None = None,
     ) -> FollowTap[SignalPublication]:
         """Bind one Processor to the current exact publication and its future events.
 
@@ -3775,14 +4049,14 @@ class SignalDataPlane:
         pinned = state.published_schemas
         if pinned is not None and all(name in pinned for name in schemas):
             for name, schema in schemas.items():
-                if pinned[name] != schema:
+                if not _generation_holds_schema(pinned[name], schema, values[name]):
                     raise GenerationSchemaAdvanced(
                         "signal publication schema changed inside one generation"
                     )
             return
         prior = {} if pinned is None else dict(pinned)
         for name, schema in schemas.items():
-            if name in prior and prior[name] != schema:
+            if name in prior and not _generation_holds_schema(prior[name], schema, values[name]):
                 raise GenerationSchemaAdvanced(
                     "signal publication schema changed inside one generation"
                 )
@@ -3926,8 +4200,13 @@ class SignalDataPlane:
         for state in states:
             producer = state.publication_stream
             if producer is not None and not state.publication_stream_cleaned:
+                # A retired generation publishes nothing more: its followers
+                # read the END of the stream, not a source failure.  A failure
+                # here would end every exact follower of a camera stopped
+                # before its first frame -- and every follower of a stopped
+                # derivation -- as FAILED, which the re-follow never restarts.
                 try:
-                    producer.fail(SourceFailed("signal generation retired"))
+                    producer.fail(StreamEndedEarly("signal generation retired"))
                 except (SourceFailed, StreamEndedEarly):
                     state.publication_stream_cleaned = True
                 except BaseException as error:
@@ -4011,6 +4290,7 @@ class SignalDataPlane:
             self._states.clear()
             self._signal_descriptions = None
             self._indexed_history_demands.clear()
+            self._released_history_bytes.clear()
             self._front_signals = frozenset()
             self._front = SignalFront({})
             self._publication_parents.clear()

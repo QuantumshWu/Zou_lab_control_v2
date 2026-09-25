@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from threading import Event, Thread
 import time
 
@@ -48,22 +48,7 @@ from zlc_runtime.selection_bridge import (
     SelectionState,
     selection_output_catalog,
 )
-from test_signal_plane import _latest, _paused_lane
-from zlc_runtime.selection_bridge import _StaleFit
-
-
-@dataclass
-class _Source:
-    declaration: DatasetOutputDeclaration
-
-    instance_id = "camera"
-
-    @property
-    def dataset_output_declarations(self):
-        return (self.declaration,)
-
-    def signal_key(self, name: str) -> str:
-        return f"camera/{name}"
+from _snapshots import monitor_output, paused_lane, producer
 
 
 class _Events:
@@ -87,8 +72,6 @@ class _Events:
         bridge = self._bridge
         if bridge is None:
             raise RuntimeError("selection test bridge has not started")
-        if change in {SelectionChange.ADDED, SelectionChange.UPDATED}:
-            return
         if change is SelectionChange.REMOVED:
             bridge.clear_selection()
             return
@@ -139,12 +122,11 @@ def _source_setup(
                             schema.repeat_domain.size * schema.point_domain.size),
         )
     }
-    source = _Source(declaration)
+    source = producer("camera", declaration)
     plane = SignalDataPlane()
     plane.begin_generation(source)
     plane.commit_live(source, state)
-    initial = plane.freeze()
-    return plane, source, None, state, initial
+    return plane, source, state, plane.freeze()
 
 
 def _source_generation(plane: SignalDataPlane) -> str:
@@ -199,24 +181,16 @@ def _finite_source_setup(
             cell_origin=origin,
         )
     }
-    source = _Source(declaration)
+    source = producer("camera", declaration)
     plane = SignalDataPlane()
     plane.begin_generation(source)
     plane.commit_live(source, state)
     return plane, source, state, plane.freeze()
 
 
-def _commit_source(
-    plane: SignalDataPlane,
-    source: _Source,
-    state: dict[str, LiveDatasetOutput],
-) -> None:
-    plane.commit_live(source, state)
-
-
 def _seal_source(
     plane: SignalDataPlane,
-    source: _Source,
+    source,
     output: LiveDatasetOutput,
 ) -> None:
     plane.retire(source)
@@ -312,7 +286,7 @@ def _expanded_validity(snapshot) -> np.ndarray:
     return expand_dataset_validity(block.validity, block.schema)
 
 
-def _close(bridge: SelectionBridge, plane: SignalDataPlane, source: _Source) -> None:
+def _close(bridge: SelectionBridge, plane: SignalDataPlane, source) -> None:
     bridge.close()
     plane.retire(source)
     plane.close()
@@ -322,7 +296,7 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
     schema = _image_schema()
     schema = replace(schema, value_schema=replace(schema.value_schema, name="photons"))
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, initial = _source_setup(schema, values)
+    plane, source, _state, initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {
@@ -370,7 +344,7 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
 def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() -> None:
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     derived = {
         name for name, _label in selection_output_catalog("area", "image")
@@ -433,7 +407,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
 def test_selection_commit_republishes_same_source_and_source_revision_follows(monkeypatch) -> None:
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, slot, state, _initial = _source_setup(schema, values)
+    plane, source, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/image/roi_mean"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="image")
@@ -489,7 +463,7 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows(mo
             _snapshot("frame", 2, schema, values + 100.0),
             MonitorCoverage(1, 1),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         front = _wait_for_signal(plane, "@logic/image/roi_mean", 2)
         publication = front.publication("@logic/image/roi_mean")
         assert publication is not None
@@ -505,7 +479,7 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
 ) -> None:
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, source_state, _initial = _source_setup(schema, values)
+    plane, source, source_state, _initial = _source_setup(schema, values)
     events = _Events()
     bridge = SelectionBridge(
         plane,
@@ -532,13 +506,11 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
         events.emit_selection(SelectionChange.COMMITTED, selection)
     real_materialize = bridge._materialize_selection_outputs
 
-    def gated_materialize(snapshot, state, *, event_record, shot_time):
+    def gated_materialize(snapshot, state, **options):
         entered.set()
         if not release.wait(2.0):
             raise TimeoutError("selection materialization gate did not open")
-        return real_materialize(
-            snapshot, state, event_record=event_record, shot_time=shot_time
-        )
+        return real_materialize(snapshot, state, **options)
 
     monkeypatch.setattr(
         bridge,
@@ -556,7 +528,7 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
                     _snapshot("frame", 2, schema, values + 1.0),
                     MonitorCoverage(1, 1),
                 )
-                _commit_source(plane, source, source_state)
+                plane.commit_live(source, source_state)
                 deadline = time.monotonic() + 1.0
                 while not entered.is_set() and time.monotonic() < deadline:
                     plane.freeze()
@@ -642,7 +614,7 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
             canonical_schema=canonical_schema,
             cell_origin=(1, 0),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         front = _wait_for_signal(plane, signal, 2)
         derived = front.value(signal)
         assert derived is not None, bridge.last_error
@@ -672,7 +644,7 @@ def test_a_selection_over_the_canonical_prefix_carries_the_prefix_s_event_record
     event_schema = _image_schema()
     canonical_schema = _with_repeat_size(event_schema, 2)
     declaration = DatasetOutputDeclaration("frame", "test.camera.frame")
-    source = _Source(declaration)
+    source = producer("camera", declaration)
     plane = SignalDataPlane()
     plane.begin_generation(source)
     bridge = SelectionBridge(
@@ -762,7 +734,7 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
         canonical_schema=canonical_schema,
         cell_origin=(1, 0),
     )
-    _commit_source(plane, source, state)
+    plane.commit_live(source, state)
     latest = plane.latest_publication("camera/frame")
     assert latest is not None and latest is not displayed
 
@@ -824,7 +796,7 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
             canonical_schema=canonical_schema,
             cell_origin=(2, 0),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         final = _wait_for_signal(plane, signal, 3)
         final_publication = final.publication(signal)
         assert final_publication is not None
@@ -899,7 +871,7 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
             canonical_schema=canonical_schema,
             cell_origin=(1, 0),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         plane.freeze()
         assert entered.wait(2.0)
 
@@ -910,7 +882,7 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
             canonical_schema=canonical_schema,
             cell_origin=(2, 0),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         release.set()
         deadline = time.monotonic() + 2.0
         while not observed and time.monotonic() < deadline:
@@ -919,7 +891,7 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         assert observed
         snapshot = observed[0]
         np.testing.assert_array_equal(
-            snapshot.block.values[:, 0, 0, 0],
+            snapshot.materialize().block.values[:, 0, 0, 0],
             np.asarray([1.0, 2.0, 0.0]),
         )
         np.testing.assert_array_equal(
@@ -934,7 +906,7 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
 def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     schema = _curve_schema(with_facet=True)
     values = np.asarray([[[1.0], [2.0], [10.0], [20.0], [30.0]]])
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({
         "camera/frame",
@@ -985,7 +957,8 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
         _close(bridge, plane, source)
 
 
-def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> None:
+@pytest.mark.parametrize("repeat_axis", (True, False), ids=("repeat-axis", "unnamed-repeat"))
+def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis(repeat_axis: bool) -> None:
     """A value band cuts the signal without cutting an axis; a rolling
     region cuts nothing at all.
 
@@ -993,6 +966,13 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
     Selection term, but it still restricts what COUNTS -- the cells outside
     it stop being valid and the schema stands.  Refusing to derive from it
     is what left a region drawn on a histogram with nowhere to go.
+
+    So a band needs no axis to name.  A Dataset whose Repeat domain is one
+    unnamed row is legal -- it is what the Viewer leaves behind when the
+    last Repeat axis is removed -- and a band drawn on its histogram used to
+    be spelled as a full-range term on the first Repeat axis, of which there
+    is none: IndexError out of the commit, where the band should simply
+    apply.
 
     A rolling trace's x is the shot ordinal, counted back from the newest,
     and the derivation only ever sees the newest publication.  Nothing it
@@ -1004,8 +984,10 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
     """
 
     schema = _image_schema()
+    if not repeat_axis:
+        schema = replace(schema, repeat_domain=DomainSpec((1,), (), ()))
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/band/roi_frame"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="band")
@@ -1021,7 +1003,7 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
             ),
         )
         frame = plane.freeze().value("@logic/band/roi_frame")
-        assert frame is not None
+        assert frame is not None, bridge.last_error
         # Nothing was cut out: the band names no axis, so the schema stands
         # and the cells outside it are simply not valid any more.
         np.testing.assert_array_equal(frame.snapshot.block.values, values)
@@ -1062,44 +1044,6 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
         _close(bridge, plane, source)
 
 
-def test_a_value_band_applies_to_a_dataset_whose_repeat_domain_names_no_axis() -> None:
-    """A band restricts what COUNTS, so it needs no axis to name.
-
-    A Dataset whose Repeat domain is one unnamed row is legal -- it is what
-    the Viewer leaves behind when the last Repeat axis is removed -- and a
-    band drawn on its histogram used to be spelled as a full-range term on
-    the first Repeat axis, of which there is none: IndexError out of the
-    commit, where the band should simply apply.
-    """
-
-    schema = replace(_image_schema(), repeat_domain=DomainSpec((1,), (), ()))
-    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
-    events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/band/roi_frame"})
-    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="band")
-    bridge.start()
-    try:
-        events.emit_selection(
-            SelectionChange.COMMITTED,
-            SelectionState(
-                "histogram",
-                "x_range",
-                (SelectionRange("", 3.0, 7.0, domain="value"),),
-                revision=1,
-            ),
-        )
-        frame = plane.freeze().value("@logic/band/roi_frame")
-        assert frame is not None, bridge.last_error
-        np.testing.assert_array_equal(frame.snapshot.block.values, values)
-        np.testing.assert_array_equal(
-            _expanded_validity(frame.snapshot),
-            (values >= 3.0) & (values <= 7.0),
-        )
-    finally:
-        _close(bridge, plane, source)
-
-
 def test_a_fitted_parameter_is_published_carrying_its_own_error() -> None:
     """One signal, not two that nothing relates to each other.
 
@@ -1112,7 +1056,7 @@ def test_a_fitted_parameter_is_published_carrying_its_own_error() -> None:
 
     schema = _curve_schema()
     values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/fit/x0"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
@@ -1215,7 +1159,7 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
 
     schema = _curve_schema()
     values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
-    plane, _source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/fit/x0"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
@@ -1236,7 +1180,7 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
         assert replayed is not None
         assert float(replayed.snapshot.block.values.reshape(-1)[0]) == 3.5
     finally:
-        bridge.close()
+        _close(bridge, plane, source)
 
 
 def test_a_region_cut_from_a_fitted_parameter_keeps_each_value_s_error() -> None:
@@ -1247,7 +1191,7 @@ def test_a_region_cut_from_a_fitted_parameter_keeps_each_value_s_error() -> None
     the next panel as numbers without the errors the fit had reported.
     """
 
-    plane, source, _slot, _state, _initial = _source_setup(
+    plane, source, _state, _initial = _source_setup(
         _curve_schema(), np.zeros((1, 5, 1))
     )
     fit_events = _Events()
@@ -1310,14 +1254,14 @@ def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> 
     derived_declaration = DatasetOutputDeclaration(
         "value", "test.value", index_by_source=True
     )
-    source = _Source(source_declaration)
-    derived = _paused_lane("derived", derived_declaration)
+    source = producer("camera", source_declaration)
+    derived = paused_lane("derived", derived_declaration)
     plane = SignalDataPlane()
     plane.begin_generation(source)
     lease = None
     bridge = None
     try:
-        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        plane.commit_live(source, {"frame": monitor_output(source_declaration, 1.0)})
         parent = plane.latest_publication("camera/frame")
         plane.attach_latest_only_processor(
             derived,
@@ -1328,7 +1272,7 @@ def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> 
         )
         plane.commit_processor(
             derived,
-            {"value": _latest(derived_declaration, 1.0)},
+            {"value": monitor_output(derived_declaration, 1.0)},
             source_publication=parent,
         )
         lease = plane.acquire_indexed_history("derived/value", 2)
@@ -1366,11 +1310,11 @@ def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> 
         # Every source index exists; the history window simply rolls on.
         for index in (2, 3):
             plane.commit_live(
-                source, {"frame": _latest(source_declaration, float(index))}
+                source, {"frame": monitor_output(source_declaration, float(index))}
             )
             plane.commit_processor(
                 derived,
-                {"value": _latest(derived_declaration, float(index))},
+                {"value": monitor_output(derived_declaration, float(index))},
                 source_publication=plane.latest_publication("camera/frame"),
             )
         assert not plane.retains("derived/value", held)
@@ -1398,7 +1342,7 @@ def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> 
 def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, _slot, _state, initial = _source_setup(schema, values)
+    plane, source, _state, initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {
@@ -1448,8 +1392,10 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
         assert front.value("@logic/batch/center_err") is None
         assert center.snapshot.block.schema.value_schema.value_unit == "pixel"
         assert width.snapshot.block.schema.value_schema.value_unit is None
+        # A scan-faceted fit keeps the scan role of the axis it was cut along.
         axis = center.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "x"
+        assert axis.role == SCAN_POINT
         assert tuple(axis.coordinate_values()) == (10.0, 20.0, 35.0)
         assert axis.unit == "V"
 
@@ -1466,7 +1412,7 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
 def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/text/center", "@logic/text/center_err"}
@@ -1514,7 +1460,7 @@ def _single_cell_facet_event(
 def test_single_cell_facet_is_a_valid_vector_fit() -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/one/center"}
@@ -1546,7 +1492,7 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
 def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, slot, state, _initial = _source_setup(schema, values)
+    plane, source, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/race/center"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="race")
@@ -1572,13 +1518,12 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
             _snapshot("frame", 2, schema, values + 1.0),
             MonitorCoverage(1, 5),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         plane.freeze()
 
         events.emit_fit(
             _batch_fit_event(plane, source_revision=2, batch_revision=2)
         )
-        bridge._accept_processor_failure(processor, _StaleFit(1))
         front = plane.freeze()
         newer = front.value("@logic/race/center")
         assert newer is not None
@@ -1589,6 +1534,23 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
         )
         assert newer.snapshot.ref.revision.value == 2
         assert bridge.last_error is None
+
+        # A shot newer than the fit keeps the route in the lane, so the
+        # source's end still reaches it: the fit seals with its run.
+        gate.set()
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 3, schema, values + 2.0),
+            MonitorCoverage(1, 5),
+        )
+        plane.commit_live(source, state)
+        plane.freeze()
+        assert plane.seal_committed(source, cut_short=True)
+        deadline = time.monotonic() + 2.0
+        while plane.is_generation_live("@logic/race/center") and time.monotonic() < deadline:
+            plane.freeze()
+            time.sleep(0.001)
+        assert not plane.is_generation_live("@logic/race/center")
     finally:
         gate.set()
         _close(bridge, plane, source)
@@ -1597,7 +1559,7 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
 def test_fit_batch_revision_is_retained_within_source_and_resets_on_restart() -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, slot, state, _initial = _source_setup(schema, values)
+    plane, source, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/revision/center"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="revision")
@@ -1623,7 +1585,7 @@ def test_fit_batch_revision_is_retained_within_source_and_resets_on_restart() ->
             _snapshot("frame", 2, schema, values + 1.0),
             MonitorCoverage(1, 5),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         plane.freeze()
         between = plane.freeze()
         assert between.value("@logic/revision/center") is first
@@ -1648,7 +1610,7 @@ def test_fit_batch_revision_is_retained_within_source_and_resets_on_restart() ->
             _snapshot("restarted-frame", 1, schema, values + 2.0),
             MonitorCoverage(1, 5),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         restarted_source = plane.latest_publication("camera/frame")
         assert restarted_source is not None
         assert _source_generation(plane) != previous_generation
@@ -1682,7 +1644,7 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
 
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, slot, state, _initial = _source_setup(schema, values)
+    plane, source, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/trail/center"})
 
@@ -1721,7 +1683,7 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
             _snapshot("frame", 2, schema, values + 1.0),
             MonitorCoverage(1, 5),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         plane.freeze()
         remember_current()
 
@@ -1753,40 +1715,10 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
         _close(bridge, plane, source)
 
 
-def test_added_and_updated_selection_events_do_not_publish() -> None:
-    schema = _curve_schema()
-    values = np.asarray([[[1.0], [2.0], [3.0], [4.0], [5.0]]])
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
-    events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
-    bridge.start()
-    state = SelectionState(
-        "curve",
-        "x_range",
-        (SelectionRange("x", 1.0, 3.0, domain="point"),),
-        revision=1,
-    )
-    try:
-        events.emit_selection(SelectionChange.ADDED, state)
-        events.emit_selection(
-            SelectionChange.UPDATED,
-            SelectionState(
-                "curve",
-                "x_range",
-                (SelectionRange("x", 0.0, 4.0, domain="point"),),
-                revision=2,
-            ),
-        )
-        assert plane.latest_publication("@logic/curve/roi_mean") is None
-    finally:
-        _close(bridge, plane, source)
-
-
 def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() -> None:
     schema = _curve_schema()
     values = np.asarray([[[1.0], [2.0], [3.0], [4.0], [5.0]]])
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
@@ -1832,11 +1764,12 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
     no further parent publication will arrive to re-cut it.  It is still a
     real question, and it gets its answer as a terminal generation of its own
     rather than an exception about machinery the operator never asked for.
+    Re-drawing it supersedes, not collides with, the previous answer.
     """
 
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, slot, state_map, _initial = _source_setup(schema, values)
+    plane, source, state_map, _initial = _source_setup(schema, values)
     plane.set_front_signals(
         {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_mean"}
     )
@@ -1846,19 +1779,23 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
     events = _Events()
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frozen")
     bridge.start()
-    try:
+
+    def box(upper: float, revision: int) -> None:
         events.emit_selection(
             SelectionChange.COMMITTED,
             SelectionState(
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+                    SelectionRange("x", 0.0, upper, domain="cell_data"),
                     SelectionRange("y", 20.0, 30.0, domain="cell_data"),
                 ),
-                revision=1,
+                revision=revision,
             ),
         )
+
+    try:
+        box(1.0, 1)
         front = plane.freeze()
         roi_frame = front.value("@logic/frozen/roi_frame")
         roi_mean = front.value("@logic/frozen/roi_mean")
@@ -1871,48 +1808,15 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
         # differs, and claiming to be live would be a lie about a run that is
         # over.
         assert not plane.is_generation_live("@logic/frozen/roi_frame")
-    finally:
-        bridge.close()
-        plane.retire(source)
-        plane.close()
 
-
-def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
-    """Re-drawing must supersede, not collide with, the previous answer."""
-
-    schema = _image_schema()
-    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, state_map, _initial = _source_setup(schema, values)
-    plane.set_front_signals(
-        {"camera/frame", "@logic/frozen/roi_frame", "@logic/frozen/roi_mean"}
-    )
-    _seal_source(plane, source, state_map["frame"])
-    events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frozen")
-    bridge.start()
-    try:
-        for revision, upper in ((1, 1.0), (2, 2.0)):
-            events.emit_selection(
-                SelectionChange.COMMITTED,
-                SelectionState(
-                    "image",
-                    "area",
-                    (
-                        SelectionRange("x", 0.0, upper, domain="cell_data"),
-                        SelectionRange("y", 20.0, 30.0, domain="cell_data"),
-                    ),
-                    revision=revision,
-                ),
-            )
+        box(2.0, 2)
         roi_frame = plane.freeze().value("@logic/frozen/roi_frame")
         assert roi_frame is not None, bridge.last_error
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values, values[:, :, 1:4, 1:3]
         )
     finally:
-        bridge.close()
-        plane.retire(source)
-        plane.close()
+        _close(bridge, plane, source)
 
 
 def test_the_plane_can_say_who_is_producing_what() -> None:
@@ -1926,7 +1830,7 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
 
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     plane.set_front_signals({"camera/frame", "@logic/topology/roi_frame"})
     events = _Events()
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="topology")
@@ -2091,7 +1995,7 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
             canonical_schema=canonical_schema,
             cell_origin=(0, 4),
         )
-        _commit_source(plane, source, state)
+        plane.commit_live(source, state)
         front = _wait_for_signal(plane, signal, 2)
         derived = front.value(signal)
         assert derived is not None, bridge.last_error
@@ -2116,7 +2020,7 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
 
     schema = _heatmap_schema()
     values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/grid/roi_frame", "@logic/grid/roi_mean"}
@@ -2166,7 +2070,7 @@ def test_repeat_domain_condition_narrows_a_grid_cut_to_the_focused_repeat() -> N
 
     schema = _heatmap_schema()
     values = np.arange(18, dtype=np.float64).reshape(2, 9, 1)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/focus/roi_frame", "@logic/focus/roi_mean"}
@@ -2235,11 +2139,20 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
     An image cell over the DATA spatial axes must still cut spatially, keep
     every frame row, and a facet condition on the 'frame' Point axis must
     select exactly one frame's rows.
+
+    A box consumes the IMAGE axes; it does not pool a cycle's frames.  The
+    frames of one acquisition cycle are POINTS -- they fire at different
+    moments of the pulse, so their physics differs.  ``roi_mean`` used to
+    average the whole point axis into a single scalar, so a scan watching it
+    silently mixed physically distinct frames into one number.
+
+    Every named domain axis enters the same selection projection: one area
+    can cut point and cell axes together.
     """
 
     schema = _frames_on_point_axis_schema()
     values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/frames/roi_frame", "@logic/frames/roi_mean"}
@@ -2259,12 +2172,33 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
                 revision=1,
             ),
         )
-        roi_frame = plane.freeze().value("@logic/frames/roi_frame")
+        front = plane.freeze()
+        roi_frame = front.value("@logic/frames/roi_frame")
+        roi_mean = front.value("@logic/frames/roi_mean")
         assert roi_frame is not None, bridge.last_error
+        assert roi_mean is not None
         np.testing.assert_array_equal(
             roi_frame.snapshot.block.values, values[:, :, 1:3, 1:4]
         )
         assert roi_frame.snapshot.block.schema.point_domain.size == 3
+
+        # One mean per (cycle, frame): the two repeats and the three frame
+        # points survive; only the two image data axes are consumed.
+        assert roi_mean.snapshot.block.values.shape == (2, 3, 1)
+        np.testing.assert_allclose(
+            roi_mean.snapshot.block.values.reshape(2, 3),
+            values[:, :, 1:3, 1:4].mean(axis=(2, 3)),
+        )
+        mean_schema = roi_mean.snapshot.block.schema
+        frame_schema = roi_frame.snapshot.block.schema
+        assert mean_schema.point_domain == frame_schema.point_domain
+        (axis,) = mean_schema.point_domain.axes
+        assert axis.name == "frame"
+        assert axis.role == READOUT_EVENT
+        assert tuple(axis.coordinate_values()) == (0.0, 1.0, 2.0)
+        assert mean_schema.repeat_domain == frame_schema.repeat_domain
+        assert mean_schema.cell_domain == SCALAR_DOMAIN
+        assert mean_schema.value_schema.value_unit == "counts"
 
         events.emit_selection(
             SelectionChange.COMMITTED,
@@ -2287,29 +2221,7 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
         axis = focused.snapshot.block.schema.point_domain.axes[0]
         assert axis.name == "frame"
         assert tuple(axis.coordinate_values()) == (1.0,)
-    finally:
-        _close(bridge, plane, source)
 
-
-def test_roi_mean_keeps_one_value_per_frame_point() -> None:
-    """A box consumes the IMAGE axes; it does not pool a cycle's frames.
-
-    The frames of one acquisition cycle are POINTS -- they fire at different
-    moments of the pulse, so their physics differs.  ``roi_mean`` used to
-    average the whole point axis into a single scalar, so a scan watching it
-    silently mixed physically distinct frames into one number.
-    """
-
-    schema = _frames_on_point_axis_schema()
-    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
-    events = _Events()
-    plane.set_front_signals(
-        {"camera/frame", "@logic/mean/roi_frame", "@logic/mean/roi_mean"}
-    )
-    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mean")
-    bridge.start()
-    try:
         events.emit_selection(
             SelectionChange.COMMITTED,
             SelectionState(
@@ -2317,35 +2229,16 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
                 "area",
                 (
                     SelectionRange("x", 1.0, 3.0, domain="cell_data"),
-                    SelectionRange("y", 1.0, 2.0, domain="cell_data"),
+                    SelectionRange("frame", 0.0, 1.0, domain="point"),
                 ),
-                revision=1,
+                revision=3,
             ),
         )
-        front = plane.freeze()
-        roi_frame = front.value("@logic/mean/roi_frame")
-        roi_mean = front.value("@logic/mean/roi_mean")
-        assert roi_frame is not None, bridge.last_error
-        assert roi_mean is not None
-
-        # One value per (cycle, frame): the two repeats and the three frame
-        # points survive; only the two image data axes are consumed.
-        assert roi_mean.snapshot.block.values.shape == (2, 3, 1)
-        np.testing.assert_allclose(
-            roi_mean.snapshot.block.values.reshape(2, 3),
-            values[:, :, 1:3, 1:4].mean(axis=(2, 3)),
+        mixed = plane.freeze().value("@logic/frames/roi_frame")
+        assert mixed is not None, bridge.last_error
+        np.testing.assert_array_equal(
+            mixed.snapshot.block.values, values[:, :2, :, 1:4]
         )
-
-        mean_schema = roi_mean.snapshot.block.schema
-        frame_schema = roi_frame.snapshot.block.schema
-        assert mean_schema.point_domain == frame_schema.point_domain
-        (axis,) = mean_schema.point_domain.axes
-        assert axis.name == "frame"
-        assert axis.role == READOUT_EVENT
-        assert tuple(axis.coordinate_values()) == (0.0, 1.0, 2.0)
-        assert mean_schema.repeat_domain == frame_schema.repeat_domain
-        assert mean_schema.cell_domain == SCALAR_DOMAIN
-        assert mean_schema.value_schema.value_unit == "counts"
     finally:
         _close(bridge, plane, source)
 
@@ -2356,7 +2249,7 @@ def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
     schema = _frames_on_point_axis_schema(cycles=1, frames=2)
     values = np.arange(40, dtype=np.float64).reshape(1, 2, 4, 5)
     values[0, 1] = np.nan
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/partial/roi_mean"})
     bridge = SelectionBridge(
@@ -2423,7 +2316,7 @@ def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() ->
 
     schema = _frames_on_point_axis_schema()
     values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/perframe/center", "@logic/perframe/center_err"}
@@ -2466,37 +2359,6 @@ def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() ->
         _close(bridge, plane, source)
 
 
-def test_a_scan_faceted_fit_still_publishes_a_scan_point_axis() -> None:
-    """The scan case is inherited from the parent axis, not hardcoded."""
-
-    schema = _curve_schema()
-    values = np.zeros((1, 5, 1), dtype=np.float64)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
-    events = _Events()
-    plane.set_front_signals(
-        {"camera/frame", "@logic/perscan/center", "@logic/perscan/center_err"}
-    )
-    bridge = SelectionBridge(
-        plane, "camera/frame", events, bridge_id="perscan"
-    )
-    bridge.start()
-    try:
-        events.emit_fit(
-            _frame_faceted_fit(
-                plane,
-                "x",
-                np.asarray([0.0, 1.0, 2.0]),
-            )
-        )
-        value = plane.freeze().value("@logic/perscan/center")
-        assert value is not None, bridge.last_error
-        (axis,) = value.snapshot.block.schema.point_domain.axes
-        assert axis.name == "x"
-        assert axis.role == SCAN_POINT
-    finally:
-        _close(bridge, plane, source)
-
-
 def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
     """Samples that ARE repeats stay on the repeat axis.
 
@@ -2506,7 +2368,7 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
 
     schema = _frames_on_point_axis_schema()
     values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/percycle/center", "@logic/percycle/center_err"}
@@ -2535,41 +2397,6 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
         assert value.snapshot.block.values.shape == (2, 1, 1)
         np.testing.assert_array_equal(
             value.snapshot.block.values.reshape(-1), np.asarray([0.0, 1.0])
-        )
-    finally:
-        _close(bridge, plane, source)
-
-
-def test_an_image_area_can_cut_point_and_cell_axes_together() -> None:
-    """Every named domain axis enters the same selection projection."""
-
-    schema = _frames_on_point_axis_schema()
-    values = np.arange(120, dtype=np.float64).reshape(2, 3, 4, 5)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
-    events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/mixed/roi_frame"})
-    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mixed")
-    bridge.start()
-    try:
-        events.emit_selection(
-            SelectionChange.COMMITTED,
-            SelectionState(
-                "image",
-                "area",
-                (
-                    SelectionRange("x", 1.0, 3.0, domain="cell_data"),
-                    SelectionRange(
-                        "frame", 0.0, 1.0, domain="point"
-                    ),
-                ),
-                revision=1,
-            ),
-        )
-        result = plane.freeze().value("@logic/mixed/roi_frame")
-        assert result is not None, bridge.last_error
-        np.testing.assert_array_equal(
-            result.snapshot.block.values,
-            values[:, :2, :, 1:4],
         )
     finally:
         _close(bridge, plane, source)
@@ -2626,7 +2453,7 @@ def test_two_fit_events_in_flight_never_own_one_name_twice() -> None:
 
     schema = _curve_schema()
     values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     plane.set_front_signals(
         {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
     )
@@ -2696,7 +2523,7 @@ def test_retiring_a_fit_route_frees_its_names_before_the_slot_reads_empty() -> N
 
     schema = _curve_schema()
     values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     plane.set_front_signals(
         {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
     )
@@ -2777,7 +2604,7 @@ def test_a_box_drawn_on_a_retired_run_answers_instead_of_raising() -> None:
 
     schema = _image_schema()
     values = np.arange(12, dtype=float).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, initial = _source_setup(schema, values)
+    plane, source, _state, initial = _source_setup(schema, values)
     plane.set_front_signals({"camera/frame", "@logic/box/roi_frame"})
     events = _Events()
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="box")
@@ -2846,7 +2673,7 @@ def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
 
     schema = _component_schema()
     values = np.zeros((1, 4, 3, 2), dtype=np.float64)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     plane.set_front_signals(
         {"camera/frame", "@logic/fit/center", "@logic/fit/center_err",
          "@logic/fit/width", "@logic/fit/width_err"}
@@ -2938,7 +2765,7 @@ def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
 
     schema = _image_schema()
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane, source, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
         {"camera/frame", "@logic/image/roi_frame", "@logic/image/roi_mean"}
@@ -2984,7 +2811,7 @@ def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
         _close(bridge, plane, source)
 
 
-def test_the_stacked_reduction_gives_the_per_cell_numbers(monkeypatch) -> None:
+def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
     """Whichever machine the cell count picks, the numbers are the same.
 
     A scan cut is thousands of short rows and a camera window is one long
@@ -2993,15 +2820,17 @@ def test_the_stacked_reduction_gives_the_per_cell_numbers(monkeypatch) -> None:
     is answered fastest by counting its sixty-five thousand levels.  The
     choice is a speed choice only, so it is asserted bit for bit -- and on
     both dtypes, because the counted path exists for the unsigned one and
-    a silent disagreement there would look exactly like a dtype bug.
+    a silent disagreement there would look exactly like a dtype bug.  A
+    catalog of Mean and Sum alone, whose two answers share one total, gives
+    numpy's numbers on one cell and on many.
     """
-
-    import numpy as np
 
     from zlc_runtime.selection_bridge import (
         _AREA_SELECTION_OUTPUTS,
         _Sample,
+        _mean,
         _roi_statistics,
+        _sum,
     )
 
     catalog = {
@@ -3029,32 +2858,11 @@ def test_the_stacked_reduction_gives_the_per_cell_numbers(monkeypatch) -> None:
             )
             assert bool(np.all(answered[name][1]))
 
-    import zlc_runtime.selection_bridge as module
-    totals = []
-    original_sum = np.sum
-    original_sum_rows = module._sum_rows
-
-    def total(values, *args, **kwargs):
-        totals.append(values.shape)
-        return original_sum(values, *args, **kwargs)
-
-    def total_rows(values):
-        totals.append(values.shape)
-        return original_sum_rows(values)
-
-    with monkeypatch.context() as selected:
-        selected.setattr(np, "bincount", lambda *_args: pytest.fail("Mean/Sum do not need a distribution"))
-        selected.setattr(np, "sum", total)
-        selected.setattr(module, "_sum_rows", total_rows)
-        selected.setattr(module, "_ROW_REDUCERS", {module._mean: module._mean_rows, module._sum: total_rows})
-        for shape in ((1, 1, 20, 30), (2, 3, 20, 30)):
-            values = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
-            totals.clear()
-            answers = _roi_statistics(values, np.ones(shape, dtype=bool),
-                                      {"mean": module._mean, "sum": module._sum})
-            assert len(totals) == 1
-            assert np.array_equal(answers["sum"][0], values.sum(axis=(-2, -1), dtype=np.float64))
-            assert np.array_equal(answers["mean"][0], values.mean(axis=(-2, -1), dtype=np.float64))
+    for shape in ((1, 1, 20, 30), (2, 3, 20, 30)):
+        values = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
+        answers = _roi_statistics(values, np.ones(shape, dtype=bool), {"mean": _mean, "sum": _sum})
+        assert np.array_equal(answers["sum"][0], values.sum(axis=(-2, -1), dtype=np.float64))
+        assert np.array_equal(answers["mean"][0], values.mean(axis=(-2, -1), dtype=np.float64))
 
 
 @pytest.mark.parametrize("source_error", (None, RuntimeError("camera read failed")))
@@ -3074,7 +2882,7 @@ def test_a_selection_on_a_stopped_run_still_derives(source_error) -> None:
 
     schema = _image_schema()
     values = np.arange(12, dtype=float).reshape(1, 1, 4, 3)
-    plane, source, _slot, _state, initial = _source_setup(schema, values)
+    plane, source, _state, initial = _source_setup(schema, values)
     plane.set_front_signals({"camera/frame", "@logic/box/roi_frame"})
     events = _Events()
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="box")

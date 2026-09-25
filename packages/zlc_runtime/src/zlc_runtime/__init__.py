@@ -30,7 +30,7 @@ from .selection_bridge import (
     SelectionState,
     selection_output_catalog,
 )
-from .host import NodeHost, OperatorInputRequest
+from .host import NodeHost, OperatorInputRequest, split_signal_key, stable_signal_key
 from .task_run import TaskArtifact, TaskRun
 
 __all__ = (
@@ -61,4 +61,6 @@ __all__ = (
     "SelectionState",
     "FitEventValue",
     "selection_output_catalog",
+    "split_signal_key",
+    "stable_signal_key",
 )

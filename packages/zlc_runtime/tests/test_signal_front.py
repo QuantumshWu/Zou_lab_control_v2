@@ -4,25 +4,7 @@ import gc
 import weakref
 from types import SimpleNamespace
 
-import numpy as np
-import pytest
-
-from zlc_data import (
-    REPEAT,
-    SCAN_POINT,
-    AxisId,
-    AxisSpec,
-    BlockId,
-    CellValidity,
-    DataBlock,
-    DatasetRevision,
-    DatasetSchema,
-    DomainSpec,
-    OwnedSnapshot,
-    SCALAR_DOMAIN,
-    StreamGenerationId,
-    ValueSchema,
-)
+from zlc_data import StreamGenerationId
 
 from zlc_runtime.dataset import MonitorCoverage
 from zlc_runtime.front import build_front
@@ -34,30 +16,13 @@ from zlc_runtime.plane import (
 from zlc_runtime.streams import EventRef, StreamId
 from zlc_runtime.dataset_output import LiveDatasetOutput, DatasetOutputDeclaration
 
+from _snapshots import snapshot
+
 
 def _output(name: str, revision: int) -> LiveDatasetOutput:
-    repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
-    point = AxisSpec(AxisId(f"{name}.point"), "point", SCAN_POINT, 1, (0,))
-    schema = DatasetSchema(
-        DomainSpec((1,), (repeat,), ((0,),)),
-        DomainSpec((1,), (point,), ((0,),)),
-        SCALAR_DOMAIN,
-        ValueSchema.scalar(np.dtype("float64"), "count"),
-    )
-    block = DataBlock(
-        BlockId(f"{name}-{revision}"),
-        DatasetRevision(revision),
-        np.asarray([[[float(revision)]]], dtype=np.float64),
-        CellValidity(np.ones((1, 1), dtype=np.bool_)),
-        schema,
-    )
-    snapshot = OwnedSnapshot(
-        block.ref(StreamGenerationId(f"{name}-generation")),
-        block,
-    )
     return LiveDatasetOutput(
         DatasetOutputDeclaration(name, f"test.{name}"),
-        snapshot,
+        snapshot(name, revision),
         MonitorCoverage(1, 1),
     )
 

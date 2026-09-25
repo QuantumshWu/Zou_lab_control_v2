@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from types import SimpleNamespace
 
 from zlc_data import (
     REPEAT,
-    SCAN_POINT,
     AxisId,
     AxisSpec,
     BlockId,
@@ -33,9 +31,7 @@ from zlc_data import (
     DomainSpec,
     IndexedWindow,
     OwnedSnapshot,
-    SCALAR_DOMAIN,
     StreamGenerationId,
-    ValueSchema,
 )
 from zlc_runtime import DatasetCoverage, DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.plane import (
@@ -44,18 +40,9 @@ from zlc_runtime.plane import (
     _materialize_indexed_dataset,
 )
 
+from _snapshots import producer, snapshot_schema
+
 GENERATION = StreamGenerationId("plane-rebuild")
-
-
-def _schema(name: str) -> DatasetSchema:
-    repeat = AxisSpec(AxisId(f"{name}.repeat"), "repeat", REPEAT, 1, (0,))
-    point = AxisSpec(AxisId(f"{name}.point"), "point", SCAN_POINT, 1, (0,))
-    return DatasetSchema(
-        DomainSpec((1,), (repeat,), ((0,),)),
-        DomainSpec((1,), (point,), ((0,),)),
-        SCALAR_DOMAIN,
-        ValueSchema.scalar(np.dtype("float64"), "count"),
-    )
 
 
 def _shot(
@@ -74,8 +61,7 @@ def _shot(
 
 def _finite_run(schema, chunks, read_after):
     declaration = DatasetOutputDeclaration("value", "test.value")
-    node = SimpleNamespace(instance_id="scan", dataset_output_declarations=(declaration,),
-                           signal_key=lambda name: "scan/" + name)
+    node = producer("scan", declaration)
     plane = SignalDataPlane()
     views = {}
     try:
@@ -103,60 +89,38 @@ def _finite_run(schema, chunks, read_after):
         plane.close()
 
 
-def test_indexed_history_keeps_each_shots_stated_error() -> None:
-    """The path a Rolling panel's lease turns on."""
+def test_indexed_history_keeps_each_shots_stated_error_and_its_window() -> None:
+    """The path a Rolling panel's lease turns on.
 
-    schema = _schema("fit")
-    events = tuple(
-        (index, _shot(schema, 4.0 + index, 0.1 * (index + 1)))
-        for index in range(3)
-    )
+    Each shot keeps the error it stated; a hole in the history is unknown,
+    and NaN is how that is written, not a zero; and where the block sits in
+    its history, in absolute shot numbers, is on the block.
+    """
+
+    schema = snapshot_schema("fit")
+    events = ((5, _shot(schema, 4.0, 0.1)), (7, _shot(schema, 6.0, 0.3)))
     built = _materialize_indexed_dataset(
         _IndexedMaterialization(
             "@logic/fit/amplitude",
             GENERATION,
-            7,
+            9,
             schema,
             None,
             events,
-            0,
-            2,
+            5,
+            7,
             None,
             (),
             None,
+            stable_since=4,
         )
     )
+    assert built.block.window == IndexedWindow(5, 7, 4)
+    assert built.block.revision == DatasetRevision(9)
     built = built.materialize()
-    assert built.block.sigma is not None
-    np.testing.assert_allclose(
-        np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2, 0.3)
-    )
-    np.testing.assert_allclose(
-        built.block.values.reshape(-1), (4.0, 5.0, 6.0)
-    )
-
-
-def test_an_index_nobody_published_has_an_unknown_error_not_a_zero_one() -> None:
-    """A hole in the history is unknown, and NaN is how that is written."""
-
-    schema = _schema("fit")
-    events = ((0, _shot(schema, 4.0, 0.1)), (2, _shot(schema, 6.0, 0.3)))
-    built = _materialize_indexed_dataset(
-        _IndexedMaterialization(
-            "@logic/fit/amplitude",
-            GENERATION,
-            7,
-            schema,
-            None,
-            events,
-            0,
-            2,
-            None,
-            (),
-            None,
-        )
-    )
-    sigma = np.asarray(built.materialize().block.sigma).reshape(-1)
+    values = built.block.values.reshape(-1)
+    assert (values[0], values[2]) == (4.0, 6.0)
+    sigma = np.asarray(built.block.sigma).reshape(-1)
     assert sigma[0] == pytest.approx(0.1)
     assert np.isnan(sigma[1])
     assert sigma[2] == pytest.approx(0.3)
@@ -165,7 +129,7 @@ def test_an_index_nobody_published_has_an_unknown_error_not_a_zero_one() -> None
 def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
     """Absent stays absent: a camera signal grows no sigma plane."""
 
-    schema = _schema("camera")
+    schema = snapshot_schema("camera")
     events = tuple(
         (index, _shot(schema, float(index), None)) for index in range(3)
     )
@@ -187,59 +151,6 @@ def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
     assert built.materialize().block.sigma is None
 
 
-def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
-    """The other materializer, on the finite/exact path."""
-
-    chunk_schema = _schema("run")
-    run_schema = DatasetSchema(
-        DomainSpec(
-            (2,),
-            (AxisSpec(AxisId("run.repeat"), "repeat", REPEAT, 2, (0, 1)),),
-            ((0, 1),),
-        ),
-        chunk_schema.point_domain,
-        chunk_schema.cell_domain,
-        chunk_schema.value_schema,
-    )
-    chunks = (
-        (_shot(chunk_schema, 4.0, 0.1), (0, 0)),
-        (_shot(chunk_schema, 5.0, 0.2), (1, 0)),
-    )
-    built = _finite_run(run_schema, chunks, (2,))[2].materialize()
-    assert built.block.sigma is not None
-    np.testing.assert_allclose(
-        np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2)
-    )
-
-
-def test_an_indexed_materialization_is_stamped_with_its_window() -> None:
-    """Where the block sits in its history, in absolute shot numbers, on the block."""
-
-    schema = _schema("camera")
-    events = tuple(
-        (index, _shot(schema, float(index), None)) for index in range(5, 8)
-    )
-    built = _materialize_indexed_dataset(
-        _IndexedMaterialization(
-            "camera/frame",
-            GENERATION,
-            9,
-            schema,
-            None,
-            events,
-            5,
-            7,
-            None,
-            (),
-            None,
-            stable_since=4,
-        )
-    )
-    assert built.block.window == IndexedWindow(5, 7, 4)
-    assert built.block.revision == DatasetRevision(9)
-
-
-
 def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
     """The basis is the same answer, reached without re-answering it.
 
@@ -247,10 +158,11 @@ def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
     cells assembled for an earlier sequence are still those cells at a
     later one.  What that buys is cost -- the shot instead of the run --
     and what it must not cost is a single different number, in any of
-    the three planes.
+    the three planes.  The exact run keeps the error of every chunk that
+    stated one.
     """
 
-    chunk_schema = _schema("run")
+    chunk_schema = snapshot_schema("run")
     run_schema = DatasetSchema(
         DomainSpec(
             (3,),
@@ -280,12 +192,15 @@ def test_extending_a_run_gives_what_rebuilding_it_would_have() -> None:
     np.testing.assert_array_equal(
         np.asarray(extended.block.sigma), np.asarray(whole.block.sigma)
     )
+    np.testing.assert_allclose(
+        np.asarray(whole.block.sigma).reshape(-1), (0.1, np.nan, 0.3)
+    )
 
 
 def test_a_run_that_states_no_error_gains_none_from_a_basis() -> None:
     """What is not stated stays unstated across an extension too."""
 
-    chunk_schema = _schema("plain")
+    chunk_schema = snapshot_schema("plain")
     run_schema = DatasetSchema(
         DomainSpec(
             (2,),

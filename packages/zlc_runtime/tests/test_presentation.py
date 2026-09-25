@@ -24,7 +24,6 @@ from zlc_data import (
     StreamGenerationId,
     ValueSchema,
 )
-from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.plane import SignalFront, SignalPublication, SignalValue
 from zlc_runtime.presentation import (
     BoardScheduler,
@@ -81,6 +80,14 @@ def _clock(intervals):
 
 
 def test_harmonic_clock_uses_the_global_smallest_tick() -> None:
+    """The cap is a RATE, and a panel idle past it draws the moment it can.
+
+    Against a grid running since the board opened, the phase between the
+    crossings and the shots is arbitrary: a panel that had shown nothing
+    for a second still waited for the next crossing, which on a live
+    console was most of a beat on every shot.
+    """
+
     now = [0]
     clock = HarmonicClock((100, 200, 800), now_ns=lambda: now[0])
     assert clock.base_ms == 100
@@ -99,20 +106,6 @@ def test_harmonic_clock_uses_the_global_smallest_tick() -> None:
     assert clock.group_due(clock.elapsed_ms(), 800, 800)
     now[0] += 1_000_000
     assert not clock.group_due(clock.elapsed_ms(), 800, 1650)
-
-
-def test_an_interval_is_measured_from_the_last_picture_not_from_a_grid() -> None:
-    """The cap is a RATE, and a panel idle past it draws the moment it can.
-
-    Against a grid running since the board opened, the phase between the
-    crossings and the shots is arbitrary: a panel that had shown nothing
-    for a second still waited for the next crossing, which on a live
-    console was most of a beat on every shot.
-    """
-
-    now = [0]
-    clock = HarmonicClock((100,), now_ns=lambda: now[0])
-    assert clock.group_due(0, 100, None)
     # 99 ms after its picture the panel is inside its interval, whatever
     # the wall clock is a multiple of.
     assert not clock.group_due(99, 100, 0)
@@ -408,7 +401,18 @@ def test_a_rebuilt_panel_marks_nobody_at_all() -> None:
     assert not healthy.rejected and len(healthy.finished) == 1
 
 
-def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None:
+@pytest.mark.parametrize(
+    ("first_ends", "second_ends"),
+    (
+        ("cancelled", "rendered"),
+        ("raised-cancellation", "rendered"),
+        ("cancelled", "cancelled"),
+        ("cancelled", "failed"),
+    ),
+)
+def test_a_superseded_member_abandons_its_whole_batch_without_an_error(
+    first_ends: str, second_ends: str
+) -> None:
     """A latest-only host cancels a queued render when a newer frame arrives.
 
     That is flow control, not failure -- so no member is rejected and no panel
@@ -417,16 +421,29 @@ def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None
     member whose render was coalesced away.  The whole batch therefore leaves
     unpresented, and the newer batch already queued behind it presents every
     member of the group together.
+
+    The worker may surface its own supersession as a raised CancelledError.
+    And a sibling's error still never marks anyone: the newer batch re-renders
+    the failed member too, so its error resurfaces there if it is real, while
+    a red mark for an abandoned batch would be a complaint about pixels nobody
+    was going to show.
     """
 
-    channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
+    arbiter = SurfaceBatchArbiter(_Sink())
     front = _front()
     first = _Port("one", "camera/frame")
     second = _Port("two", "camera/frame")
     assert arbiter.enqueue_group((first, second), front)
-    assert first.futures[0].cancel()
-    second.futures[0].set_result("second")
+    for port, ending in ((first, first_ends), (second, second_ends)):
+        future = port.futures[0]
+        if ending == "cancelled":
+            assert future.cancel()
+        elif ending == "raised-cancellation":
+            future.set_exception(CancelledError())
+        elif ending == "failed":
+            future.set_exception(RuntimeError("worker failed"))
+        else:
+            future.set_result(port.panel_id)
 
     arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
 
@@ -435,69 +452,6 @@ def test_a_superseded_member_abandons_its_whole_batch_without_an_error() -> None
     assert not first.rejected and not second.rejected
     assert not first.accepted and not second.accepted
     assert second.presented is None
-
-
-def test_a_render_that_raised_cancellation_is_superseded_not_failed() -> None:
-    """The worker may surface its own supersession as a raised CancelledError."""
-
-    channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
-    front = _front()
-    first = _Port("one", "camera/frame")
-    second = _Port("two", "camera/frame")
-    assert arbiter.enqueue_group((first, second), front)
-    first.futures[0].set_exception(CancelledError())
-    second.futures[0].set_result("second")
-
-    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
-
-    assert first.finished == [first.updates[0]]
-    assert second.finished == [second.updates[0]]
-    assert not first.rejected and not second.rejected
-    assert not first.accepted and not second.accepted
-
-
-def test_a_batch_whose_every_member_was_superseded_just_finishes() -> None:
-    channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
-    front = _front()
-    first = _Port("one", "camera/frame")
-    second = _Port("two", "camera/frame")
-    assert arbiter.enqueue_group((first, second), front)
-    assert first.futures[0].cancel()
-    assert second.futures[0].cancel()
-
-    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
-
-    assert first.finished == [first.updates[0]]
-    assert second.finished == [second.updates[0]]
-    assert not first.rejected and not second.rejected
-    assert not first.accepted and not second.accepted
-
-
-def test_a_sibling_error_still_never_marks_the_superseded_member() -> None:
-    """One member superseded, one failed: the batch is abandoned, not rejected.
-
-    Supersession means a newer batch for the same group is already queued;
-    that batch re-renders the failed member too, so its error resurfaces
-    there if it is real -- while a red mark for an abandoned batch would be a
-    complaint about pixels nobody was going to show.
-    """
-
-    channels = _Sink()
-    arbiter = SurfaceBatchArbiter(channels)
-    front = _front()
-    first = _Port("one", "camera/frame")
-    second = _Port("two", "camera/frame")
-    assert arbiter.enqueue_group((first, second), front)
-    assert first.futures[0].cancel()
-    second.futures[0].set_exception(RuntimeError("worker failed"))
-
-    arbiter.drain(lambda panel_id: {"one": first, "two": second}.get(panel_id))
-
-    assert first.finished == [first.updates[0]]
-    assert second.finished == [second.updates[0]]
-    assert not first.rejected and not second.rejected
 
 
 class _Plane:
