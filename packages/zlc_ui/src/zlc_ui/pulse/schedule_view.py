@@ -66,6 +66,21 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
         widget.setText(field.text)
 
 
+def _place_rows_in_order(layout: QtWidgets.QVBoxLayout, holders) -> None:
+    """Stack a column's row holders under its top block, in port order.
+
+    The columns are read across, so row N of each is the same output.  A row
+    kept keeps its slot and a new one is added above the stretch, so without
+    this a port shown again, or one inserted between two others, sat at the
+    bottom of its column while the cards showed it in its place.
+    """
+
+    for index, holder in enumerate(holders, start=1):
+        if layout.indexOf(holder) != index:
+            layout.removeWidget(holder)
+            layout.insertWidget(index, holder)
+
+
 class PeriodCard(FluentGroupBox):
     """One stable period card keyed by ``period_id``.
 
@@ -461,6 +476,7 @@ class ChannelNamesPanel(FluentGroupBox):
             holder = self._row_holders.pop(key, field)
             self._layout.removeWidget(holder)
             retire_widget(holder)
+        _place_rows_in_order(self._layout, [self._row_holders[port.key] for port in ports])
 
     def set_port_label(self, key: str, label: str) -> None:
         if key in self._rows:
@@ -618,6 +634,9 @@ class ChannelPanel(FluentGroupBox):
                 self._layout.removeWidget(holder)
                 retire_widget(holder)
             self._row_labels.pop(key, None)
+        _place_rows_in_order(
+            self._layout, [self._rows[row.port_key][0].parentWidget() for row in rows]
+        )
 
     def set_port_label(self, key: str, label: str) -> None:
         widget = self._row_labels.get(str(key))

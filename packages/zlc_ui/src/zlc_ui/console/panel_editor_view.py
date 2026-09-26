@@ -54,6 +54,7 @@ from ._panel_projection import (
 )
 from .panel_card_view import (
     _set_interaction,
+    _shows_unrecorded_pick,
     relay_surface_errors,
     release_surface_errors,
 )
@@ -78,7 +79,6 @@ class PanelEditorView(QtWidgets.QWidget):
     def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
         super().__init__(parent)
         self.panel_id = str(panel_id)
-        self._mutation_enabled = True
         self._science_locked = False
         self._projection: dict[str, object] = {}
         #: The projection minus what the snapshot half applies, as last
@@ -382,6 +382,10 @@ class PanelEditorView(QtWidgets.QWidget):
                 self.parameter_groups[section].setVisible(
                     bool(spec.fields) or bool(unavailable)
                 )
+        elif _shows_unrecorded_pick(self.panel_form, state):
+            # A refused pick comes back as the same projection; the picker
+            # that sent it goes back to what the panel draws.
+            self.panel_form.reconcile(FormSpec(tuple(fields)), values)
 
         self._update_snapshot_status()
         producer_node_id = str(incoming.get("producer_node_id") or "")
@@ -392,7 +396,7 @@ class PanelEditorView(QtWidgets.QWidget):
         )
         self.open_producer_button.setEnabled(bool(producer_node_id))
         self.set_producer_projection(incoming.get("producer_projection") or {})
-        self.set_mutation_enabled(self._mutation_enabled)
+        self._apply_science_lock()
 
     def set_producer_projection(self, projection: Mapping[str, object]) -> None:
         """Show linked draft fields without creating a second Logic editor."""
@@ -502,26 +506,18 @@ class PanelEditorView(QtWidgets.QWidget):
         self._selectors_on = bool(enabled)
         _set_interaction(self._surface, self._selectors_on)
 
-    def set_mutation_enabled(self, enabled: bool) -> None:
-        """Gate saved-state changes while leaving the frozen plot inspectable."""
+    def _apply_science_lock(self) -> None:
+        """A Task-protected panel keeps its signal, overlay and semantics."""
 
-        self._mutation_enabled = bool(enabled)
-        self.panel_form.setEnabled(self._mutation_enabled)
-        if self._mutation_enabled:
-            if "overlay_signal" in self.panel_form.spec.keys:
-                self.panel_form.widget_for("overlay_signal").setEnabled(
-                    not self._science_locked
-                )
-            if "signal" in self.panel_form.spec.keys:
-                self.panel_form.widget_for("signal").setEnabled(
-                    bool(self._signal_groups) and not self._science_locked
-                )
-        for section, form in self.parameter_forms.items():
-            form.setEnabled(
-                self._mutation_enabled
-                and not (section == "semantic" and self._science_locked)
+        if "overlay_signal" in self.panel_form.spec.keys:
+            self.panel_form.widget_for("overlay_signal").setEnabled(
+                not self._science_locked
             )
-        self.refresh_button.setEnabled(self._mutation_enabled)
+        if "signal" in self.panel_form.spec.keys:
+            self.panel_form.widget_for("signal").setEnabled(
+                bool(self._signal_groups) and not self._science_locked
+            )
+        self.parameter_forms["semantic"].setEnabled(not self._science_locked)
         self._update_save_controls()
 
     def _save_path(self) -> Path | None:
@@ -543,16 +539,10 @@ class PanelEditorView(QtWidgets.QWidget):
         return Path(directory_text).expanduser() / name
 
     def _update_save_controls(self, *_args: object) -> None:
-        editable = self._mutation_enabled
-        self.save_directory.setEnabled(editable)
-        self.save_auto_name.setEnabled(editable)
-        self.save_name.setEnabled(editable and not self.save_auto_name.isChecked())
-        self.save_format.setEnabled(editable)
+        self.save_name.setEnabled(not self.save_auto_name.isChecked())
         path = self._save_path()
         self.save_preview.setText("" if path is None else str(path))
-        self.save_button.setEnabled(
-            editable and self._snapshot_can_save and path is not None
-        )
+        self.save_button.setEnabled(self._snapshot_can_save and path is not None)
 
     def _save_figure(self) -> None:
         path = self._save_path()

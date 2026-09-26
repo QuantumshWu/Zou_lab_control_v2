@@ -273,7 +273,6 @@ class DeviceControlView(QtWidgets.QWidget):
             str,
             tuple[ElidedLabel, ElidedLabel, FluentSwitch, FluentButton, FluentStatusDot, ElidedLabel],
         ] = {}
-        self._field_states: dict[str, Mapping[str, object]] = {}
         self._live_timers: dict[str, QtCore.QTimer] = {}
         outer = QtWidgets.QVBoxLayout(self)
         pad = window_pad()
@@ -436,7 +435,11 @@ class DeviceControlView(QtWidgets.QWidget):
             headings.setSpacing(layout.spacing())
         if layout.count() < 7:
             return
-        pickers = tuple(self.form._unit_pickers.values())
+        pickers = tuple(
+            picker
+            for picker in map(self.form.unit_picker_for, self.form.keys)
+            if picker is not None
+        )
         if pickers:
             width = max(picker.sizeHint().width() for picker in pickers)
             for picker in pickers:
@@ -521,7 +524,6 @@ class DeviceControlView(QtWidgets.QWidget):
 
     def set_projection(self, spec: FormSpec, projection: Mapping[str, object]) -> None:
         fields = projection.get("fields", {})
-        self._field_states = dict(fields)
         desired = {key: fields[key]["desired"] for key in spec.keys}
         self.form.reconcile(spec, desired)
         self._prune_rows()
@@ -533,7 +535,6 @@ class DeviceControlView(QtWidgets.QWidget):
         self.risk_switch.setEnabled(bool(projection.get("risk_enabled", False)))
         colours = {"ready": GREEN, "task": ORANGE, "warning": ORANGE, "error": RED}
         units = {declared.key: declared.unit for declared in spec.fields}
-        self._units = units
         for key in spec.keys:
             field = fields[key]
             current, limits, live, apply, dot, status = self._field_rows[key]
@@ -554,7 +555,7 @@ class DeviceControlView(QtWidgets.QWidget):
                 )
             )
             editor = self.form.widget_for(key)
-            self._set_editable(key, bool(field.get("editable", False)))
+            self.form.set_editable(key, bool(field.get("editable", False)))
             with signals_blocked(live):
                 live.setChecked(bool(field.get("live_apply", False)))
             # Absent, not disabled: a control that can never be pressed is a
@@ -583,7 +584,7 @@ class DeviceControlView(QtWidgets.QWidget):
         # previous complete row until its owner supplies the converted number,
         # current reading and bounds together; no temporary 50-ohm value.
         self.form.widget_for(str(key)).setShownUnit(old_unit)
-        self.form._unit_pickers[str(key)].select_choice_key(old_unit)
+        self.form.unit_picker_for(str(key)).select_choice_key(old_unit)
         self.field_unit_requested.emit(str(key), symbol)
 
     def _desired_changed(self, key: str, *, live: bool = True) -> None:
@@ -596,19 +597,11 @@ class DeviceControlView(QtWidgets.QWidget):
             value = self.form.read_value(key)
         except (TypeError, ValueError):
             return
-        for name, state in self._field_states.items():
-            self._set_editable(name, bool(state.get("editable", False)))
         self.field_desired_changed.emit(str(key), value, self.form._field_for(key).unit or "")
         row = self._field_rows.get(str(key))
         toggle = None if row is None else row[2]
         if live and toggle is not None and toggle.isChecked() and toggle.isEnabled():
             self._live_timers[str(key)].start()
-
-    def _set_editable(self, key: str, enabled: bool) -> None:
-        self.form.widget_for(str(key)).setEnabled(bool(enabled))
-        automatic = self.form._auto_switches.get(str(key))
-        if automatic is not None:
-            automatic.setEnabled(bool(enabled))
 
     def _live_toggled(self, key: str, checked: bool) -> None:
         if not checked:
@@ -693,7 +686,6 @@ class DeviceManagerView(QtWidgets.QWidget):
     discovered_add_requested = QtCore.pyqtSignal(str)
     load_requested = QtCore.pyqtSignal()
     save_as_requested = QtCore.pyqtSignal()
-    cancel_requested = QtCore.pyqtSignal()
     lifecycle_requested = QtCore.pyqtSignal()
     device_remove_requested = QtCore.pyqtSignal(str)
     role_committed = QtCore.pyqtSignal(str, str)
@@ -719,8 +711,9 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._discovered_widgets: dict[str, tuple[FluentFrame, ElidedLabel, QtWidgets.QLabel, FluentButton]] = {}
         self._configured_discoveries: set[str] = set()
         self._loaded_cards: dict[str, _LiveDeviceCard] = {}
+        #: The live log window of each loaded device that has one open.
+        self._device_log_windows: dict[str, QtWidgets.QWidget] = {}
         self._remoted: set[str] = set()
-        self._dirty = False
         self._busy = False
         self._lifecycle_enabled = False
         self._discovery_enabled = False
@@ -846,13 +839,11 @@ class DeviceManagerView(QtWidgets.QWidget):
         :meth:`set_lifecycle` is its sole writer.
         """
 
-        self._dirty = bool(dirty)
         shown = f"{name}{'*' if dirty else ''}"
         self.document_name.setText(shown)
         self.document_name.setToolTip(
             f"{name} ({'saved' if saved and not dirty else 'unsaved draft'})"
         )
-        self._refresh_controls()
 
     def set_device_choices(
         self,
@@ -954,6 +945,13 @@ class DeviceManagerView(QtWidgets.QWidget):
             card = self._loaded_cards.pop(instance_id)
             self.loaded_layout.removeWidget(card)
             retire_widget(card)
+        # A log belongs to a loaded device and goes when the device does.
+        # Left open, a window that belongs to nobody polled a device that
+        # was gone -- and, the last window standing, kept the application
+        # running after the manager and the console had closed.
+        for instance_id, window in tuple(self._device_log_windows.items()):
+            if instance_id not in wanted:
+                window.close()
         for index, (instance_id, role, type_id) in enumerate(devices):
             instance_id = str(instance_id)
             card = self._loaded_cards.get(instance_id)
@@ -970,7 +968,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 str(type_id),
                 remote=instance_id in self._remoted,
             )
-            log = getattr(self, "_device_log_windows", {}).get(instance_id)
+            log = self._device_log_windows.get(instance_id)
             if log is not None:
                 log.setWindowTitle(f"{role} log@Zou lab")
         self.loaded_empty.setVisible(not devices)
@@ -979,9 +977,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         """Open (or re-front) the live log window of ONE published device."""
 
         key = str(instance_id)
-        windows = getattr(self, "_device_log_windows", None)
-        if windows is None:
-            windows = self._device_log_windows = {}
+        windows = self._device_log_windows
         window = windows.get(key)
         if window is not None and window.isVisible():
             window.setWindowTitle(f"{label} log@Zou lab")

@@ -134,6 +134,37 @@ assert asked == [('gui', 'qt')], asked
     run_qt(code)
 
 
+def test_the_kernel_wake_timer_quits_only_ipykernel_s_own_loop(run_qt) -> None:
+    """The notebook liveness timer only quits ipykernel's private loop.
+
+    A kernel without the dedicated QEventLoop idles in ``exec_()`` itself,
+    which a timer must never quit; one timer serves the whole process.
+    """
+
+    code = """
+import types
+from PyQt5 import QtTest
+from zlc_ui import qt
+app = qt.ensure_qt_app(['wake'])
+bare = types.SimpleNamespace(kernel=types.SimpleNamespace(app=types.SimpleNamespace()))
+qt._install_ipykernel_wake_timer(bare)
+assert qt._KERNEL_WAKE_TIMER is None
+quits = []
+loop = types.SimpleNamespace(quit=lambda: quits.append(1))
+shell = types.SimpleNamespace(
+    kernel=types.SimpleNamespace(app=types.SimpleNamespace(qt_event_loop=loop))
+)
+qt._install_ipykernel_wake_timer(shell)
+timer = qt._KERNEL_WAKE_TIMER
+assert timer is not None and timer.isActive() and timer.interval() == 50
+qt._install_ipykernel_wake_timer(shell)
+assert qt._KERNEL_WAKE_TIMER is timer
+QtTest.QTest.qWait(200)
+assert quits, 'the timer never quit the kernel loop'
+"""
+    run_qt(code)
+
+
 def test_ensure_qt_app_rejects_preexisting_non_high_dpi_application(run_qt) -> None:
     code = """
 from PyQt5 import QtWidgets

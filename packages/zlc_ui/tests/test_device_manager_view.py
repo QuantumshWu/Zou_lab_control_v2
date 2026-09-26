@@ -430,7 +430,8 @@ assert picks == [('sensor', 'sensor.second')], 'a real pick still reaches the ho
 def test_a_closed_log_window_stops_polling_and_is_forgotten(run_qt) -> None:
     """A log window that was closed kept reading the snapshot every 500 ms
     for the life of the manager; the clock follows the widget's own
-    visibility, and the closed window is retired rather than kept."""
+    visibility, and the closed window is retired rather than kept.  A
+    device that leaves the session closes its log the same way."""
 
     run_qt(
         """
@@ -461,7 +462,16 @@ assert sip.isdeleted(window), 'and it is retired, not kept'
 view.open_device_log('sensor', snapshot, label='Science sensor')
 again = view._device_log_windows['sensor']
 assert again is not window and again.loaded._timer.isActive()
-again.close(); app.processEvents()
+# A log belongs to its device.  Left open after the device was closed, the
+# window polled a device that was gone and kept the application running
+# after the manager itself had closed.
+view.set_loaded_devices((('sensor', 'Science sensor', 'sensor.fake'),))
+assert again.isVisible(), 'a loaded device keeps its log'
+view.set_loaded_devices(())
+assert not again.isVisible() and 'sensor' not in view._device_log_windows, (
+    'a device that left takes its log with it'
+)
+app.processEvents()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 """
     )
@@ -493,11 +503,19 @@ def state(current, limits):
     return {'current': current, 'desired': current, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
             'status': '', 'severity': 'ready', 'reason': '', 'device_limits': limits}
-view = DeviceControlView(spec, {
+initial = {
     'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None),
                'frequency': state(1000.0, (1e-6, 160e6))},
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
-})
+}
+view = DeviceControlView(spec, initial)
+# What the view was last told, kept here as its owner keeps it: the view
+# keeps no copy of the projection it drew.
+shown = initial['fields']
+def project(new_spec, projection):
+    global shown
+    shown = projection['fields']
+    view.set_projection(new_spec, projection)
 limits = {key: row[1] for key, row in view._field_rows.items()}
 assert limits['power'].text() == '-120 dBm to 30 dBm', limits['power'].text()
 assert limits['output'].text() == '', 'a device that states no range shows none'
@@ -507,21 +525,21 @@ def project_unit(key, unit):
     global spec, limits
     old = next(field for field in spec.fields if field.key == key)
     converted = lambda value: None if value is None else float(DEFAULT_UNITS.convert(value, old.unit, unit))
-    fields = {name: dict(value) for name, value in view._field_states.items()}
+    fields = {name: dict(value) for name, value in shown.items()}
     fields[key].update(current=converted(fields[key]['current']),
         desired=converted(fields[key]['desired']), desired_unit=unit,
         device_limits=tuple(converted(value) for value in fields[key]['device_limits']))
     spec = FormSpec(tuple(replace(field, unit=unit, minimum=converted(field.minimum),
         maximum=converted(field.maximum)) if field.key == key else field for field in spec.fields))
-    view.set_projection(spec, {'fields': fields, 'owners': (), 'reason': '',
-                              'risk_accepted': False, 'risk_enabled': False})
+    project(spec, {'fields': fields, 'owners': (), 'reason': '',
+                   'risk_accepted': False, 'risk_enabled': False})
     limits = {name: row[1] for name, row in view._field_rows.items()}
 view.field_unit_requested.connect(project_unit)
 view.form._shown_unit_picked('power', 'mW')
 assert limits['power'].text() == '0.000000000001 mW to 1000 mW', limits['power'].text()
 view.form._shown_unit_picked('power', 'dBm')
 assert limits['power'].text() == '-120 dBm to 30 dBm'
-view.set_projection(spec, {
+project(spec, {
     'fields': {'power': state(-3.0, (-110.0, 20.0)), 'output': state(False, None),
                'frequency': state(1000.0, (1e-6, 160e6))},
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
@@ -535,12 +553,12 @@ fields['power']['live_apply'] = True
 projection = {'fields': fields, 'owners': (), 'reason': '',
               'risk_accepted': False, 'risk_enabled': False}
 def desired(key, value, unit):
-    current = {name: dict(state) for name, state in view._field_states.items()}
+    current = {name: dict(state) for name, state in shown.items()}
     current[key].update(desired=value, desired_unit=unit, apply_enabled=True)
-    view.set_projection(spec, {**projection, 'fields': current})
+    project(spec, {**projection, 'fields': current})
 view.field_desired_changed.connect(desired)
 view.field_apply_requested.connect(lambda key, value, unit: applies.append((key, value, unit)))
-view.set_projection(spec, projection)
+project(spec, projection)
 view.form._shown_unit_picked('power', 'mVpp')
 QtTest.QTest.qWait(110)
 assert applies == [], 'choosing a display unit is not a hardware command'

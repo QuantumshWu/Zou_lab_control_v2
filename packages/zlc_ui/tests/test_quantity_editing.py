@@ -86,6 +86,17 @@ floor.setText('-3.0')
 floor.setShownUnit('mW')
 assert abs(form.read_value('floor') - -3.0) < 1e-9, form.read_value('floor')
 assert abs(float(floor.text()) - 0.5011872336272722) < 1e-9, floor.text()
+# A pick the number has no value in is refused -- -1 mW is no power in dBm --
+# and the picker goes back to the unit the box is still read in.  The tree
+# names the leaf before it asks; left there, the next number typed would be
+# read in a unit the picker does not say.
+form._shown_unit_picked('floor', 'mW')
+assert floor_picker.current_choice_key() == 'mW', floor_picker.current_choice_key()
+floor.setText('-1')
+floor_picker.select_choice_key('dBm')
+form._shown_unit_picked('floor', 'dBm')
+assert floor.shownUnit() == 'mW', floor.shownUnit()
+assert floor_picker.current_choice_key() == 'mW', floor_picker.current_choice_key()
 
 window = form.widget_for('window')
 assert window.suffix() == '', repr(window.suffix())
@@ -114,20 +125,21 @@ from zlc_ui.fluent import FluentDoubleSpinBox
 
 app = ensure_qt_app(['quantity-safety'])
 box = FluentDoubleSpinBox()
-box.setRange(-1e18, 1e18)
-box.setValueUnit('Hz')
+box.setRange(-1e18, 1e18, unit='Hz')
 box.setValue(1.0)
 assert box.valueFromText('nonsense') == 1.0
 assert box.valueFromText('') == 1.0
 assert box.valueFromText('5 pixel') == 1.0, 'a unit is not typed into a box'
 
-# A unit nobody registered is a defect where it was declared, not a reason
-# for the window to die while painting.  It simply has no ladder to offer.
+# A unit nobody registered is a defect where it was declared -- a form field
+# refuses it there -- not a reason for the window to die while painting.
+# Declared on the box all the same, the box says so, and shows no number in
+# a unit it cannot read.
 odd = FluentDoubleSpinBox()
-odd.setRange(0.0, 10.0)
-odd.setValueUnit('DAC code')
+assert not odd.setRange(0.0, 10.0, unit='DAC code')
 odd.setValue(4.0)
-assert odd.text() == '4', odd.text()
+assert 'DAC code' in odd.property('numericError'), odd.property('numericError')
+assert odd.text() == '', odd.text()
 print('ok')
 """
     )

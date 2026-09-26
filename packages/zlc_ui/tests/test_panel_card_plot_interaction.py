@@ -16,9 +16,9 @@ PLOT_TESTS = Path(__file__).resolve().parents[3] / "packages" / "zlc_plot" / "te
 
 @pytest.fixture
 def run_qt(run_qt):
-    """Real zlc_plot surfaces: their test data factory, Agg, and time to compile."""
+    """Real zlc_plot surfaces: their test data factory and time to compile."""
 
-    return lambda code: run_qt(code, timeout=180, extra_path=(PLOT_TESTS,), mpl_agg=True)
+    return lambda code: run_qt(code, timeout=180, extra_path=(PLOT_TESTS,))
 
 
 _PROLOGUE = """

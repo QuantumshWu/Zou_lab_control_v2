@@ -107,6 +107,7 @@ class PulseEditorHandle(QtCore.QObject):
         super().__init__()
         self._window = window
         self._view = view
+        self._closing = lambda: False
         schedule = view.schedule_view
         scan = view.scan_view
         config = view.config_view
@@ -153,19 +154,29 @@ class PulseEditorHandle(QtCore.QObject):
 
     # ------------------------------------------------------------ the window
 
-    def close(self) -> None:
-        """Ask the owning window to close through its lifecycle guard."""
+    def close(self) -> bool:
+        """Ask the owning window to close through its lifecycle guard.
+
+        True when it closed or its close is under way; False when it stays
+        open because its guard kept it -- the operator answered Cancel to a
+        discard question.
+        """
 
         if self._window is None:
             self._view.finish_close()
-            return
-        self._window.close()
+            return True
+        return bool(self._window.close()) or self._closing()
 
-    def set_close_guard(self, guard) -> None:
-        """Require plugin cleanup to finish before the window disappears."""
+    def set_close_guard(self, guard, closing) -> None:
+        """Require plugin cleanup to finish before the window disappears.
+
+        ``closing`` answers whether a close the guard accepted is still under
+        way, which a guard that holds the window cannot say by itself.
+        """
 
         if self._window is not None:
             self._window.set_close_guard(guard)
+        self._closing = closing
 
     def finish_close(self) -> None:
         self._view.finish_close()
@@ -231,6 +242,9 @@ class PulseEditorHandle(QtCore.QObject):
 
     def confirm_config_discard(self) -> bool:
         return self._view.confirm("Unsaved Config", "Discard unsaved Config edits?", "Discard", "Cancel")
+
+    def confirm_pulse_discard(self) -> bool:
+        return self._view.confirm("Unsaved pulse", "Discard unsaved pulse edits?", "Discard", "Cancel")
 
     def set_config_page(self, record: ConfigPageRecord) -> None:
         self._view.config_view.set_page(record)
@@ -334,8 +348,15 @@ class PulseEditorHandle(QtCore.QObject):
 
     # ------------------------------------------------------------ the target
 
-    def set_target_ports(self, records: tuple, editable: bool, status_text: str) -> None:
-        self._view.target_view.set_ports(records, editable, status_text)
+    def set_target_ports(
+        self,
+        records: tuple,
+        editable: bool,
+        status_text: str,
+        *,
+        reserved: tuple[str, ...] = (),
+    ) -> None:
+        self._view.target_view.set_ports(records, editable, status_text, reserved=reserved)
 
     def set_target_width_rules(self, digital: Any, dac: Any) -> None:
         self._view.target_view.set_width_rules(digital, dac)

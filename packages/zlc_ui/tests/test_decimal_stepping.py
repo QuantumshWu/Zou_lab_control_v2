@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import math
+import sys
 
 import pytest
 
@@ -77,8 +78,7 @@ def test_the_box_invents_no_bound_of_its_own(box) -> None:
 
 
 def test_a_prefix_shift_is_a_decimal_point_moving(box) -> None:
-    box.setRange(0.0, 1e12)
-    box.setValueUnit("Hz")
+    box.setRange(0.0, 1e12, unit="Hz")
     box.setValue(6834700000.0)
     box.setShownUnit("GHz")
     assert box.text() == "6.8347"
@@ -115,17 +115,17 @@ def test_a_unit_redeclared_keeps_the_spelling_on_screen(box) -> None:
     """Every projection re-configures the box it keeps; "s" said again is
     not a change, and the "ms" the operator chose to read it in is theirs."""
 
-    box.setRange(0.0, 10.0)
-    box.setValueUnit("s")
+    box.setRange(0.0, 10.0, unit="s")
     box.setValue(0.02)
     box.setShownUnit("ms")
     assert box.text() == "20"
-    box.setValueUnit("s")
+    # The owner widens the range and says "s" again, as a projection does.
+    box.setRange(0.0, 20.0, unit="s")
     assert box.shownUnit() == "ms"
     assert box.text() == "20"
     # A DIFFERENT owner unit is a change: the number is now in hertz, and
     # milliseconds are no spelling of that.
-    box.setValueUnit("Hz")
+    box.setRange(0.0, 20.0, unit="Hz")
     assert box.shownUnit() == "Hz"
     assert box.text() == "0.02"
 
@@ -182,7 +182,7 @@ def test_a_box_with_no_bound_steps_in_a_logarithmic_unit(box) -> None:
     line read in milliwatts is 10**(DBL_MAX / 10): a step that converted
     both ends before moving could not move at all."""
 
-    box.setValueUnit("dBm")
+    box.setRange(-sys.float_info.max, sys.float_info.max, unit="dBm")
     box.setValue(0.0)
     box.setShownUnit("mW")
     box.setSingleStep(0.1)
@@ -191,8 +191,7 @@ def test_a_box_with_no_bound_steps_in_a_logarithmic_unit(box) -> None:
     assert abs(box.value() - 10 * math.log10(1.1)) < 1e-12
     # A floor of 0 W is no floor in dBm: there is no dBm for it to be.
     power = type(box)()
-    power.setValueUnit("W")
-    power.setRange(0.0, 1.0)
+    power.setRange(0.0, 1.0, unit="W")
     power.setValue(0.001)
     power.setShownUnit("dBm")
     power.setSingleStep(1)
@@ -226,12 +225,12 @@ def test_visible_precision_is_the_value_and_resize_is_not_a_user_edit(box) -> No
         app.processEvents()
         assert not edited, "a resize is normalization, never a user valueChanged"
         assert Decimal(box.text()) == box.decimalValue()
-        box.setValueUnit("Hz")
+        box.setRange(-sys.float_info.max, sys.float_info.max, unit="Hz")
         box.setValue(123456789.123456)
         box.setShownUnit("MHz")
         assert box.decimalValue() == Decimal(box.text()) * Decimal(1000000)
         assert box.validate("1e-", 3)[0] == QtGui.QValidator.Intermediate
-        box.setValueUnit("1")
+        box.setRange(-sys.float_info.max, sys.float_info.max, unit="1")
         previous = box.value(), box.width(), box.minimum(), box.maximum()
         box.setRange(1.23456789012345, 1.23456789012346, reject_unrepresentable=True)
         app.processEvents()

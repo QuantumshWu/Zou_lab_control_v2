@@ -108,10 +108,12 @@ Bindings can reuse one name across multiple fields. Saved values are read-only
 facts from the presenter, never inferred from the unsaved table. Load Array is
 on Scan; Edit has only a compact jump-to-Config status button.
 
-`PulseTargetView` accepts `set_ports(records, editable, status_text)`,
-`set_width_rules(digital, dac)`, and `set_feedback(text)`. Its
-`apply_requested` payload is `tuple[TargetPortRecord, ...]`; manifest
-construction and domain validation stay in the presenter.
+`PulseTargetView` accepts `set_ports(records, editable, status_text,
+reserved=())`, `set_width_rules(digital, dac)`, and `set_feedback(text)`.
+`reserved` names ports the target holds with no row on the page (a clock no
+DAC latches with); Add never mints one. The `apply_requested` payload is
+`tuple[TargetPortRecord, ...]`; manifest construction and domain validation
+stay in the presenter.
 
 `PulsePreviewView` accepts `set_size_names(tuple[str, ...])`,
 `set_preview_size(size)`, `set_status`, `show_placeholder`, and
@@ -156,7 +158,8 @@ window to the Config page and never leaves it); the scan page's
 Methods: `close`, `set_close_guard`, `finish_close`, `is_visible`, `restore`,
 `window_size`, `window_title`, `set_device_label`, `set_title`, `set_summary`,
 `set_status_color`, `set_capabilities`, `show_done`, `show_warning`,
-`current_page`, `ask_open_path`, `ask_save_path`, `confirm_config_discard`;
+`current_page`, `ask_open_path`, `ask_save_path`, `confirm_config_discard`,
+`confirm_pulse_discard`;
 `set_config_page`; `set_schedule`, `set_period`, `set_delay_row`,
 `set_port_label`, `set_schedule_summary`, `set_visible_ports`,
 `set_control_state`, `set_connection`; `set_scan_page`,

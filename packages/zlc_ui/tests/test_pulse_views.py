@@ -10,7 +10,7 @@ _KERNEL_CACHE = "from zlc_plot._kernel_cache import install\ninstall()\n"
 
 @pytest.fixture
 def run_qt(run_qt):
-    return lambda code: run_qt(_KERNEL_CACHE + code, mpl_agg=True)
+    return lambda code: run_qt(_KERNEL_CACHE + code)
 
 
 def _schedule_source() -> str:
@@ -581,6 +581,29 @@ view.set_ports(records, True, "offline; author the target")
 row = view._rows[0]
 assert row.endpoints.isEnabled() and row.width.isEnabled()
 assert view.add_digital_button.isEnabled() and view.apply_button.isEnabled()
+
+# Offline the page authors lanes.  Add DAC built its record with one field
+# more than the record has, and a TypeError out of a clicked slot ends the
+# process -- the standalone editor, or the whole console that opened it.
+view.add_dac_button.click()
+view.add_digital_button.click()
+added = view._current_records()
+assert [(record.key, record.kind) for record in added] == [
+    ("d0", "digital"), ("digital_1", "digital"), ("dac_1", "dac"),
+], added
+assert added[-1].endpoints == ("endpoint:dac_1[0]", "endpoint:dac_1[1]"), added[-1]
+assert added[-1].clock_endpoint == f"endpoint:{added[-1].clock_key}", added[-1]
+
+# A name the target holds with no row here (a clock no DAC latches with) is
+# never minted, across the page's own re-projections: the presenter refuses
+# it, and nothing on the page renames what Add minted.
+view.set_ports(records, True, "offline; author the target", reserved=("digital_1", "dac_1_clock_1"))
+view.add_dac_button.click()
+view.add_digital_button.click()
+added = view._current_records()
+assert [(record.key, record.clock_key) for record in added] == [
+    ("d0", None), ("digital_2", None), ("dac_1", "dac_1_clock_2"),
+], added
 """
     )
 
@@ -588,12 +611,12 @@ assert view.add_digital_button.isEnabled() and view.apply_button.isEnabled()
 def test_hiding_a_port_takes_its_delay_row_with_it(run_qt) -> None:
     """One visible-row list, three columns.
 
-    ``_display_rows`` -- already filtered by ``visible_ports`` -- feeds
-    the names column, the delay column and every period card, so the three read
-    across as one table by construction.  Here the delay rows arrived as "every
-    output the board can delay" and were handed over unfiltered, so Hide Off
-    dropped rows from the cards and left their delays behind, aligned with
-    whatever happened to be next to them.
+    The names column and every period card show the ports marked visible,
+    and ``_visible_delay_rows`` gives the delay column the same filter, so the
+    three read across as one table by construction.  Before that the delay
+    rows arrived as "every output the board can delay" and were handed over
+    unfiltered, so Hide Off dropped rows from the cards and left their delays
+    behind, aligned with whatever happened to be next to them.
     """
 
     run_qt(
@@ -604,20 +627,32 @@ from zlc_ui.pulse import BracketVM, DelayRowVM, FieldVM, PeriodVM, PortRowVM, Pu
 app = ensure_qt_app(["schedule-hide-delay"])
 
 ports = tuple(PortRowVM(f"d{n}", "digital", f"Out {n}", f"d{n}") for n in range(3))
+
+def schedule(ports, revision):
+    return ScheduleVM(
+        document_generation=0, revision=revision, document_name="pulse",
+        clock_text="50 MHz", total_text="1 us", total_tooltip="", period_count=1,
+        visible_text=f"{len(ports)}/{len(ports)}", summary_text="",
+        ports=ports,
+        periods=(PeriodVM("p0", "P0", FieldVM("1"), "us", ("ns", "us"),
+                          digital=tuple((port.key, False) for port in ports)),),
+        delay_rows=tuple(
+            DelayRowVM(port.key, FieldVM("0"), "ns", ("ns",)) for port in ports
+        ),
+        brackets=(BracketVM('b', 'p0', 'p0', 4),),
+    )
+
+def delay_column():
+    panel = view.channel_panel
+    return sorted(panel._rows, key=lambda key: panel._layout.indexOf(panel._rows[key][0].parentWidget()))
+
+def names_column():
+    panel = view.names_panel
+    return sorted(panel._row_holders, key=lambda key: panel._layout.indexOf(panel._row_holders[key]))
+
 view = PulseScheduleView()
 view.resize(1100, 460); view.show()
-view.set_schedule(ScheduleVM(
-    document_generation=0, revision=0, document_name="pulse",
-    clock_text="50 MHz", total_text="1 us", total_tooltip="", period_count=1,
-    visible_text="3/3", summary_text="",
-    ports=ports,
-    periods=(PeriodVM("p0", "P0", FieldVM("1"), "us", ("ns", "us"),
-                      digital=tuple((port.key, False) for port in ports)),),
-    delay_rows=tuple(
-        DelayRowVM(port.key, FieldVM("0"), "ns", ("ns",)) for port in ports
-    ),
-    brackets=(BracketVM('b', 'p0', 'p0', 4),),
-))
+view.set_schedule(schedule(ports, 0))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}
 strip = view.drag_container
@@ -663,6 +698,15 @@ assert set(view.channel_panel._rows) == {"d0", "d2"}
 view.set_visible_ports(("d0", "d1", "d2"))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}, "Show All brings it back"
+# The columns are read across: a row shown again goes back to its place,
+# not to the bottom of its column, and so does a port added between two.
+assert delay_column() == ["d0", "d1", "d2"], delay_column()
+wider = ports[:1] + (PortRowVM("d9", "digital", "Out 9", "d9"),) + ports[1:]
+view.set_schedule(schedule(wider, 1))
+app.processEvents()
+order = [port.key for port in wider]
+assert names_column() == order, names_column()
+assert delay_column() == order, delay_column()
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 """

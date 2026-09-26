@@ -426,6 +426,22 @@ assert intents[-1] == (
     {'op': 'add_axis', 'name': 'shot', 'length': 2, 'unit': '',
      'domain': 'repeat'},
 )
+# A refused Create re-projects the axes that were already there.  The New
+# axis draft, and the Create that sends it, stay the operator's: cleared on
+# the press, the draft became the selected axis and its Apply renamed it.
+editor.update_projection(projection)
+assert editor.apply_axis_button.text() == 'Create axis'
+assert editor.axis_name_edit.text() == 'shot' and editor.axis_size_spin.value() == 2
+QtTest.QTest.mouseClick(editor.apply_axis_button, QtCore.Qt.LeftButton)
+assert intents[-1][1]['op'] == 'add_axis', intents[-1]
+# Create lands as a projection that selects the axis it made.
+landed = dict(projection, selected_axis='shot', axes=projection['axes'] + (
+    {'id': 'shot', 'domain': 'repeat', 'domain_label': 'Repeat',
+     'name': 'shot', 'size': 2, 'unit': ''},
+))
+editor.update_projection(landed)
+assert editor.apply_axis_button.text() == 'Apply axis'
+assert editor.remove_axis_button.isEnabled()
 
 # A Dataset with no named axis left can still get its first one.
 scalar = dict(projection)

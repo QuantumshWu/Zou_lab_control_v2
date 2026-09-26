@@ -994,6 +994,14 @@ def test_a_kept_edit_takes_the_bounds_its_owner_re_declared() -> None:
     form.reconcile(FormSpec((replace(optional, maximum=100.0),)), {"bound": 50.0})
     assert form.widget_for("bound") is edit, "same family: the control is kept"
     assert edit.validator().validate("50", 2)[0] == QtGui.QValidator.Acceptable
+    # Every projection re-declares the bounds.  Each declaration built a new
+    # validator, and the one it replaced stayed a child of the edit for the
+    # life of the window.
+    kept = edit.validator()
+    form.reconcile(FormSpec((replace(optional, maximum=100.0),)), {"bound": 50.0})
+    assert edit.validator() is kept, "the same bounds are the validator already there"
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert edit.findChildren(QtGui.QValidator) == [kept], "the replaced one is gone"
     QtWidgets.QApplication.sendEvent(
         edit,
         QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier),

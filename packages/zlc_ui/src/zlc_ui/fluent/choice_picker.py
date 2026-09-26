@@ -42,17 +42,23 @@ def grouped_choice_items(
     state_labels: tuple[str, str, str] | None = None,
     empty_source_label: str = "",
 ) -> list[tuple[str, str | None]]:
-    """Build flat ``(display, opaque_key)`` rows grouped by source."""
+    """Build flat ``(display, opaque_key)`` rows grouped by source.
 
-    names = sorted(str(name) for name in (names or []))
+    A choice is listed once, under the first source that names it: the tree
+    picker keys its leaves by choice and refuses a key listed twice, so a
+    signal two producers publish would otherwise fill the flat combo and
+    raise out of the tree one.
+    """
+
+    names = sorted({str(name) for name in (names or [])})
     sources = dict(sources or {})
     metadata = dict(metadata or {})
     labels = dict(labels or {})
     empty_source_label = str(empty_source_label)
     by_source: dict[str, list[str]] = {}
     for key in names:
-        for source in ([str(value) for value in (sources.get(key) or [])] or [empty_source_label]):
-            by_source.setdefault(source, []).append(key)
+        named = [str(value) for value in (sources.get(key) or [])]
+        by_source.setdefault(named[0] if named else empty_source_label, []).append(key)
 
     items: list[tuple[str, str | None]] = []
     for source in sorted(by_source, key=lambda value: (value == empty_source_label, value.lower())):
