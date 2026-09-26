@@ -44,6 +44,26 @@ def canvas_physical_size(canvas: Any) -> tuple[float, float]:
     return width, height
 
 
+def _read(
+    fraction: float,
+    canonical: tuple[float, float],
+    display: tuple[float, float],
+    scale: Scale,
+    canonical_scale: Scale | None,
+) -> float:
+    """The canonical value ``fraction`` of the way along one drawn axis."""
+
+    if canonical_scale is None:
+        return _interpolate(*canonical, fraction, scale)
+    # Drawn straight in its display unit, so interpolated between the
+    # limits it is DRAWN with and only the value under the pointer
+    # converted.  Between the converted limits instead, an axis panned
+    # below 0 mW on a dBm value had no lower limit to start from, and
+    # every reading on it was NaN.
+    start, stop = (axis_space(value, scale) for value in display)
+    return axis_value(start + fraction * (stop - start), canonical_scale)
+
+
 @dataclass(frozen=True, slots=True)
 class AxisTransform:
     """Exact top-origin plot box plus display and canonical coordinates."""
@@ -65,6 +85,42 @@ class AxisTransform:
     canonical_x_scale: Scale | None = None
     canonical_y_scale: Scale | None = None
 
+    def _axis(
+        self, name: str
+    ) -> tuple[tuple[float, float], tuple[float, float], Scale, Scale | None]:
+        """One axis' drawn limits, canonical limits, scale and unit mapping."""
+
+        if name == "x":
+            return self.x_limits, self.canonical_x_limits, self.x_scale, self.canonical_x_scale
+        return self.y_limits, self.canonical_y_limits, self.y_scale, self.canonical_y_scale
+
+    def interaction_scale(self, name: str) -> Scale:
+        """How a canonical value on one axis is placed where it is straight.
+
+        A display-unit axis converts it into the unit it is drawn in first
+        (``canonical_*_scale``); any other places it as drawn.  Hitting,
+        moving and letting go of a selector all measure in this one space.
+        """
+
+        _display, _canonical, scale, canonical_scale = self._axis(name)
+        return scale if canonical_scale is None else canonical_scale
+
+    def drawn_span(self, name: str) -> float:
+        """One drawn axis' length in :meth:`interaction_scale`'s space.
+
+        Between the limits :func:`_read` interpolates between: a display-unit
+        axis' drawn ones, which are numbers where its canonical ones may not
+        be (0 mW is -inf dBm); any other's canonical ones, which a linear
+        unit change (MHz shown in kHz) scales.
+        """
+
+        display, canonical, scale, canonical_scale = self._axis(name)
+        start, stop = (
+            axis_space(value, scale)
+            for value in (canonical if canonical_scale is None else display)
+        )
+        return abs(stop - start)
+
     def display_to_normalized(self, x: float, y: float) -> tuple[float, float]:
         """Map display-space axes data into top-origin widget coordinates."""
 
@@ -78,20 +134,22 @@ class AxisTransform:
     def canonical_from_normalized(self, nx: float, ny: float) -> CrosshairPoint:
         """Map top-origin normalized widget coordinates into canonical data."""
 
+        return CrosshairPoint(*self._canonical_values(nx, ny))
+
+    def _canonical_values(self, nx: float, ny: float) -> tuple[float, float]:
         left, top, right, bottom = self.bounds
         tx = (float(nx) - left) / (right - left)
         ty = (float(ny) - top) / (bottom - top)
         x0, x1 = self.canonical_x_limits
         y0, y1 = self.canonical_y_limits
-        x_scale = self.x_scale if self.canonical_x_scale is None else self.canonical_x_scale
-        y_scale = self.y_scale if self.canonical_y_scale is None else self.canonical_y_scale
         if self.role == "distribution":
             # The rail is the value axis stood on its side: its vertical
             # extent is the X pair, so it is the X scale that divides it.
-            return CrosshairPoint(_interpolate(x1, x0, ty, x_scale), 0.0)
-        return CrosshairPoint(
-            _interpolate(x0, x1, tx, x_scale),
-            _interpolate(y1, y0, ty, y_scale),
+            x_scale = self.x_scale if self.canonical_x_scale is None else self.canonical_x_scale
+            return _interpolate(x1, x0, ty, x_scale), 0.0
+        return (
+            _read(tx, (x0, x1), self.x_limits, self.x_scale, self.canonical_x_scale),
+            _read(ty, (y1, y0), self.y_limits[::-1], self.y_scale, self.canonical_y_scale),
         )
 
     def display_from_normalized(self, nx: float, ny: float) -> CrosshairPoint:
@@ -118,15 +176,25 @@ class AxisTransform:
         width, height = canvas_physical_size(canvas)
         return float(pixel_x) / width, 1.0 - float(pixel_y) / height
 
-    def canonical_point(self, event: Any, canvas: Any) -> CrosshairPoint | None:
-        """Map one Matplotlib event into canonical data coordinates."""
+    def canonical_reading(self, event: Any, canvas: Any) -> tuple[float, float] | None:
+        """Map one Matplotlib event into canonical data coordinates.
+
+        None for an event without a position.  Over the part of an axis its
+        canonical unit cannot express -- 0 mW and below, on a dBm value
+        shown in mW -- that coordinate reads NaN or infinite, and what that
+        means is the gesture's to say: a drag keeps the coordinate it last
+        read there.
+        """
 
         normalized = self._event_normalized(event, canvas)
-        return (
-            None
-            if normalized is None
-            else self.canonical_from_normalized(*normalized)
-        )
+        if normalized is None:
+            return None
+        if self.role == "distribution":
+            # The colour rail reads as it always has: what its limits allow
+            # is the colour-limit owner's to decide.
+            point = self.canonical_from_normalized(*normalized)
+            return point.x, point.y
+        return self._canonical_values(*normalized)
 
     def display_point(self, event: Any, canvas: Any) -> CrosshairPoint | None:
         """Map one Matplotlib event into display-space data coordinates."""

@@ -13,6 +13,7 @@ import base64
 from concurrent.futures import Future
 from dataclasses import fields
 import json
+import logging
 import math
 import struct
 import threading
@@ -43,14 +44,20 @@ def _axis_to_dict(axis: AxisTransform) -> dict[str, object]:
                 raise ValueError("notebook axis units must resolve exactly in the unit registry")
             return {"scale": mapping, "canonical_unit": canonical.symbol, "display_unit": display.symbol}
         return value
+    def limits(pair):
+        # JSON has no infinity and no NaN, and the browser's JSON.parse
+        # refuses the tokens Python writes for them: an axis drawn from
+        # 0 mW over a dBm value (-inf dBm) lost every frame.  ``float``
+        # reads the repr back (_axis_from_dict).
+        return [value if math.isfinite(value) else repr(float(value)) for value in pair]
     return {
         "role": axis.role,
         "cell_index": axis.cell_index,
         "bounds": list(axis.bounds),
-        "x_limits": list(axis.x_limits),
-        "y_limits": list(axis.y_limits),
-        "canonical_x_limits": list(axis.canonical_x_limits),
-        "canonical_y_limits": list(axis.canonical_y_limits),
+        "x_limits": limits(axis.x_limits),
+        "y_limits": limits(axis.y_limits),
+        "canonical_x_limits": limits(axis.canonical_x_limits),
+        "canonical_y_limits": limits(axis.canonical_y_limits),
         # The limits say where the ends are; only these say how the
         # space between them is divided.  Left out, the browser rebuilds
         # a linear map and stays broken after Qt is fixed -- two
@@ -182,7 +189,10 @@ def _front_packet(front: RasterFront) -> bytes:
     A notebook comm does not guarantee that separate synced traits are observed
     together in one browser turn.  Keeping the dimensions, interaction map and
     RGBA bytes behind one ``Bytes`` trait gives the browser a single frame
-    authority.
+    authority.  Strict JSON: a NaN or an infinity here raises ValueError in
+    Python rather than reaching the browser's parser, which drops the frame
+    without a word: :meth:`NotebookView.display` refuses a first front it
+    raises for, and :meth:`NotebookView._publish_front` reports a later one.
     """
 
     header = json.dumps(
@@ -200,6 +210,7 @@ def _front_packet(front: RasterFront) -> bytes:
             ],
         },
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return struct.pack("<I", len(header)) + header + front.buffer.pixels
 
@@ -565,6 +576,8 @@ class NotebookView:
         self._gesture_axes: AxisTransform | None = None
         self._pointer_serial = 0
         self._consumed_serial = -1
+        # Why the last front was not sent, while none has been since.
+        self._unsent: str | None = None
         self._kernel_lock = threading.RLock()
         # Latest-only front handoff: packet building and the ipywidgets comm
         # send cost milliseconds per multi-megabyte frame, and running them on
@@ -627,7 +640,14 @@ class NotebookView:
         # browser-side frame guards drop out-of-order sequences.
         callback()
 
-    def _publish_front(self, front: RasterFront) -> None:
+    def _publish_front(self, front: RasterFront, packet: bytes | None = None) -> None:
+        """Send ``front`` unless a newer one went first.
+
+        ``packet`` is the front already encoded: :meth:`display` encodes
+        its first front itself, so a header the browser cannot be sent is
+        refused to its caller before anything is shown.
+        """
+
         with self._kernel_lock:
             if self._closed:
                 return
@@ -641,7 +661,26 @@ class NotebookView:
             # arrive from the raster worker, the comm thread and the shell
             # thread, and interleaving would let an older frame land after a
             # newer one.
-            widget.frame_packet = _front_packet(front)
+            if packet is None:
+                try:
+                    packet = _front_packet(front)
+                except ValueError as error:
+                    # A header the browser cannot be sent: that frame is
+                    # skipped and said, once for as long as the reason
+                    # stands.  Raised, it ended the sender thread and the
+                    # view never painted again; said every frame, a live
+                    # view logged twenty warnings a second.
+                    if str(error) != self._unsent:
+                        self._unsent = str(error)
+                        logging.getLogger(__name__).warning(
+                            "notebook frames from %d are not sent while "
+                            "this lasts: %s",
+                            front.identity.sequence,
+                            error,
+                        )
+                    return
+            self._unsent = None
+            widget.frame_packet = packet
 
     def _on_front(self, front: RasterFront) -> None:
         with self._send_condition:
@@ -789,8 +828,6 @@ class NotebookView:
             raise BackendUnavailableError(
                 "NotebookView requires IPython and ipywidgets"
             ) from error
-        self._widget = widget_class()
-        self._widget.on_msg(self._on_widget_message)
         initial_front = self._host.wait_for_front()
         if self._pending_environment is not None:
             # The adopted pixel ratio republishes; ship that crisp front (and
@@ -803,12 +840,19 @@ class NotebookView:
             latest = self._host.front
             if latest is not None:
                 initial_front = latest
+        # Encoded before anything is shown or subscribed: a header the
+        # browser cannot be sent (an axis unit the notebook cannot name) is
+        # refused to the caller, who can answer it, and display() may be
+        # called again.  After this the sender skips such a front.
+        initial_packet = _front_packet(initial_front)
+        self._widget = widget_class()
+        self._widget.on_msg(self._on_widget_message)
         self._front_release = self._host.subscribe_front(self._on_front)
         # Let _publish_front install the first identity and send its complete
         # buffer.  Assigning _front before this call makes the monotonic guard
         # treat the initial frame as already published, leaving the widget at
         # its 1x1 empty default until the next live/fit promotion.
-        self._publish_front(initial_front)
+        self._publish_front(initial_front, initial_packet)
         if not InteractiveShell.initialized():
             # Without a running shell IPython's display() degrades to
             # print(); the raw bundle would dump the base64 PNG to stdout

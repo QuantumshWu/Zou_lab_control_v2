@@ -110,6 +110,21 @@ def fraction_of(value: float, low: float, high: float, scale: Scale) -> float:
     return (axis_space(value, scale) - start) / (stop - start)
 
 
+def placed(value: float, limits: tuple[float, float], scale: Scale) -> float:
+    """``value`` where the axis draws it, between ``limits``.
+
+    An end the scale cannot place -- 0 or below on a log axis, a box drawn
+    down to 0 on a linear count axis before log was turned on -- lies below
+    everything the axis shows, and Matplotlib draws it clipped at the low
+    wall.  The selector scene draws it there, the hit test grabs it there
+    and a body slide moves it from there.  Taken as it is, its handles sat
+    at -inf pixels, the middle of its sides was NaN (neither they nor the
+    sides were drawn), and a slide made the box the whole view.
+    """
+
+    return value if math.isfinite(axis_space(value, scale)) else min(limits)
+
+
 def midpoint(low: float, high: float, scale: Scale) -> float:
     """The value halfway between two others ON SCREEN.
 
@@ -131,4 +146,5 @@ __all__ = [
     "fraction_of",
     "interpolate",
     "midpoint",
+    "placed",
 ]

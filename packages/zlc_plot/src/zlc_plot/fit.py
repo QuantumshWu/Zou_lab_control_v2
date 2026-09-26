@@ -6,7 +6,10 @@ the symbols an operator types -- and the SOLVER is the compiled engine in
 parameters a panel publishes and never solves anything, while the render
 children solve and never list.  So the engine is reached from inside the
 functions that solve, and importing this module to read the catalogue costs
-a GUI process nothing it does not use.  A process that will solve warms the
+a GUI process nothing it does not use -- not numba, not llvmlite.  That
+includes a model's compiled descriptor: it holds the engine's dispatchers,
+so the catalogue names it and the first solve builds it
+(``FitModelSpec.compiled_descriptor``).  A process that will solve warms the
 engine on purpose instead: see :func:`zlc_plot._kernel_warm.warm_fit`,
 which a render child runs for its panel's own kind once that panel is
 showing -- and which a spare child, holding no panel, never runs at all.
@@ -19,7 +22,6 @@ child that never calls it never loads it.
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from functools import lru_cache, partial
 from enum import Enum
@@ -35,13 +37,13 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 import numpy as np
 from zlc_data import AxisSpec
 
-from . import _fit_compiled as _compiled_fit
 from ._validation import finite_real as _finite_real
 from ._validation import integer, text as _text
-from .evidence import DECISIVE_BIC_GAIN
+from .evidence import DECISIVE_BIC_GAIN, decisive
 from .kinds import AxisRef
 
 if TYPE_CHECKING:
+    from . import _fit_compiled as _compiled_fit
     from ._fit_scene import FitOverlay
 
 
@@ -53,9 +55,10 @@ FIT_TARGET_FIELDS = frozenset({
     "options", "fit_all_facets", "min_bic_gain",
 })
 
-# Models whose x origin is the start of the window they are fitted over.
-# Derived from the compiled descriptor's ``coordinate_origin`` (see
-# ``FitModelSpec``), never declared beside it.
+# Models whose x origin is the start of the window they are fitted over --
+# the ``t_0`` their formula writes.  Declared by the model, once: the SciPy
+# lane anchors by it, and the compiled lane by the descriptor origin
+# ``FitEngine._compiled_descriptor`` sets from it.
 _DOMAIN_ANCHORED = "domain_anchored"
 Evaluator = Callable[..., np.ndarray]
 Initializer = Callable[[ArrayTuple, np.ndarray], Sequence[float]]
@@ -407,7 +410,10 @@ class FitModelSpec:
     coordinate_relations: tuple[UnitRelation, ...] | None = None
     default_for: tuple[FitTarget, ...] = ()
     capabilities: frozenset[str] = frozenset()
-    compiled_descriptor: _compiled_fit.CompiledFitDescriptor | None = None
+    #: Builds this model's compiled descriptor, called with no arguments by
+    #: the solve that needs it: a descriptor holds the compiled engine's
+    #: dispatchers, and a catalogue that held one imported numba to be read.
+    compiled_descriptor: Callable[[], _compiled_fit.CompiledFitDescriptor] | None = None
     reduction: FitReductionSpec | None = None
 
     def __post_init__(self) -> None:
@@ -487,21 +493,10 @@ class FitModelSpec:
             raise TypeError("bounds_initializer must be callable or None")
         if self.jacobian is not None and not callable(self.jacobian):
             raise TypeError("jacobian must be callable or None")
-        if self.compiled_descriptor is not None and not isinstance(
-            self.compiled_descriptor,
-            _compiled_fit.CompiledFitDescriptor,
+        if self.compiled_descriptor is not None and not callable(
+            self.compiled_descriptor
         ):
-            raise TypeError(
-                "compiled_descriptor must be CompiledFitDescriptor or None"
-            )
-        if self.compiled_descriptor is not None:
-            # The compiled path anchors by the descriptor's origin and the
-            # scalar path by this capability; one declaration, the
-            # descriptor's, decides both.  The capability then survives a
-            # caller replacing the descriptor away.
-            capabilities = capabilities - {_DOMAIN_ANCHORED}
-            if self.compiled_descriptor.coordinate_origin is not None:
-                capabilities = capabilities | {_DOMAIN_ANCHORED}
+            raise TypeError("compiled_descriptor must be callable or None")
         if not isinstance(self.presentation, FitPresentationSpec):
             raise TypeError("presentation must be FitPresentationSpec")
         coordinate_relations = self.coordinate_relations
@@ -640,6 +635,9 @@ class FitModelSpec:
                 else partial(_anchored_initializer, self.bounds_initializer, origin)
             ),
             presentation=presentation,
+            # Anchored once, here: a fit handed this spec back must not
+            # move the origin again and evaluate f(x - 2*origin).
+            capabilities=self.capabilities - {_DOMAIN_ANCHORED},
         )
 
     def evaluate(self, coordinates: ArrayTuple, values: Sequence[float]) -> np.ndarray:
@@ -803,13 +801,14 @@ class FitOptions:
     #: that they could not.  ``None`` counts only the sweeps.
     max_point_evaluations: int | None = 10**9
     deadline_seconds: float | None = None
-    #: Curve fits with more finite points than this iterate on an x-binned
-    #: sufficient-statistics compression (bin means weighted by counts) and
-    #: keep the final model evaluation, residuals and quality on the full
-    #: data.  ``None`` solves every point exactly at any size.
+    #: Linear-loss curve fits with more than twice this many finite points
+    #: iterate on this many x-bins' sufficient statistics (bin means
+    #: weighted by counts) and keep the final model evaluation, residuals
+    #: and quality on the full data; a robust loss always sees every point.
+    #: ``None`` solves every point exactly at any size.
     max_exact_points: int | None = 4096
-    #: The BIC gain a two-population model must show over its nested
-    #: one-population model to keep its own answer; below it the nested
+    #: The BIC gain a two-population model must exceed over its nested
+    #: one-population model to keep its own answer; short of it the nested
     #: answer stands with the two components coinciding.  ``None`` never
     #: asks.  Only models that declare a reduction are ever weighed.
     min_bic_gain: float | None = DECISIVE_BIC_GAIN
@@ -921,13 +920,31 @@ class _DeferredFitData:
             return self._arrays
 
 
+def _regular_image_storage(dtype: Any) -> np.dtype | None:
+    """The storage a regular-image fit reads a plane of ``dtype`` in, or None.
+
+    A real plane is read in its own.  A bool plane -- an occupancy or
+    survival plane, which the image fits are offered on like any other -- is
+    read as its 0/1 counts in uint8, a view of the same bytes, so it is a
+    camera frame's compile and not one of its own.  Anything else is no
+    image's observations.  The one answer the input, the warm that compiles
+    each storage, and its test all read.
+    """
+
+    dtype = np.dtype(dtype)
+    if dtype.kind == "b":
+        return np.dtype(np.uint8)
+    return dtype if dtype.kind in "fiu" else None
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class RegularImageFitInput:
     """A Cartesian image without materialized per-pixel coordinate grids.
 
     Rows are identified by ``y_coordinates`` and columns by ``x_coordinates``;
     consequently ``observations.shape`` must be ``(len(y), len(x))``.  The
-    image storage is retained as a read-only view rather than copied.  Callers
+    image storage is retained as a read-only view rather than copied -- a
+    bool plane's as its uint8 counts (:func:`_regular_image_storage`).  Callers
     must therefore not mutate its backing storage while a fit is running.
     """
 
@@ -958,9 +975,12 @@ class RegularImageFitInput:
             raise ValueError(
                 "regular image observations must have shape (len(y), len(x))"
             )
-        if image.dtype.kind not in "fiu":
-            raise TypeError("regular image observations must be real numeric values")
-        image = image.view()
+        storage = _regular_image_storage(image.dtype)
+        if storage is None:
+            raise TypeError(
+                "regular image observations must be real numeric or bool values"
+            )
+        image = image.view(storage)
         image.setflags(write=False)
 
         valid = self.valid_mask
@@ -1426,11 +1446,16 @@ def _bimodal_classifier_metrics(
     stray count is that there is nowhere.  Every caller already treats a
     missing threshold as "no classifier", so the line, the label and the
     fidelity all disappear together until the shots arrive.
+
+    A threshold the operator placed stands whatever the fit says, and over
+    one population it still splits that population's shots; the fidelity,
+    how often a shot lands on its own state's side, is NaN, because there
+    is no second state.
     """
 
     if result.model.model_id != "bimodal_gaussian" or not result.success:
         raise ValueError("threshold classification requires a successful bimodal fit")
-    if result.reduced:
+    if result.reduced and threshold is None:
         # One population: there is nowhere two states separate.
         return (None, float("nan"), float("nan"), float("nan"))
     values = result.parameters
@@ -1488,7 +1513,11 @@ def _bimodal_classifier_metrics(
         threshold,
         left_fraction,
         1.0 - left_fraction,
-        left_weight * left_correct + right_weight * right_correct,
+        (
+            float("nan")
+            if result.reduced
+            else left_weight * left_correct + right_weight * right_correct
+        ),
     )
 
 
@@ -1652,48 +1681,6 @@ class FacetFitBatchResult:
 class FitEngine:
     def __init__(self, registry: FitModelRegistry | None = None) -> None:
         self.registry = registry or default_fit_registry()
-        self._compiled_context_lock = threading.RLock()
-        self._compiled_contexts: OrderedDict[tuple[Any, ...], np.ndarray] = (
-            OrderedDict()
-        )
-
-    def _compiled_context(
-        self,
-        descriptor: _compiled_fit.CompiledFitDescriptor,
-        coordinates: ArrayTuple,
-    ) -> np.ndarray:
-        """Return one immutable coordinate plan from a small exact LRU."""
-
-        digest = hashlib.blake2b(digest_size=20)
-        digest.update(descriptor.cache_key.encode("utf-8"))
-        signature: list[Any] = [descriptor.cache_key, len(coordinates)]
-        for axis in coordinates:
-            values = np.ascontiguousarray(axis, dtype=np.float64)
-            signature.extend((values.shape, values.dtype.str))
-            digest.update(memoryview(values).cast("B"))
-        key = (*signature, digest.digest())
-        with self._compiled_context_lock:
-            cached = self._compiled_contexts.get(key)
-            if cached is not None:
-                self._compiled_contexts.move_to_end(key)
-                return cached
-        built = _readonly(
-            np.asarray(
-                descriptor.context_builder(coordinates),
-                dtype=np.float64,
-            )
-        )
-        if built.ndim != 2:
-            raise ValueError("compiled fit context_builder must return a 2D array")
-        with self._compiled_context_lock:
-            existing = self._compiled_contexts.get(key)
-            if existing is not None:
-                self._compiled_contexts.move_to_end(key)
-                return existing
-            self._compiled_contexts[key] = built
-            while len(self._compiled_contexts) > 16:
-                self._compiled_contexts.popitem(last=False)
-        return built
 
     def _compiled_descriptor(
         self,
@@ -1704,16 +1691,25 @@ class FitEngine:
         ``dataclasses.replace`` is intentionally a customization boundary: a
         caller replacing an evaluator or Jacobian must not accidentally keep
         running the compiled callbacks attached to the original built-in.
+        An anchored model's descriptor subtracts the window start from its
+        one axis, as the model declares -- and only an anchored model's: an
+        origin the factory set is overwritten either way, so the SciPy lane,
+        which reads the model alone, anchors exactly the same fits.
         """
 
-        descriptor = model.compiled_descriptor
-        if descriptor is None:
+        build = model.compiled_descriptor
+        if build is None:
             return None
         try:
             registered = self.registry.get(model.model_id)
         except ValueError:
             return None
-        return descriptor if registered is model else None
+        if registered is not model:
+            return None
+        return replace(
+            build(),
+            coordinate_origin=0 if _DOMAIN_ANCHORED in model.capabilities else None,
+        )
 
     def _nested_population_fit(
         self,
@@ -2052,6 +2048,8 @@ class FitEngine:
     ) -> tuple[tuple[FitResult | None, ...], tuple[str | None, ...]]:
         """Pack finite cells, solve equal-size buckets, and restore metadata."""
 
+        from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
+
         opts = options or FitOptions()
         started = time.monotonic()
 
@@ -2201,6 +2199,7 @@ class FitEngine:
                     not counted
                     and bool(free_indices)
                     and model.independent_arity == 1
+                    and opts.loss == "linear"
                     and opts.max_exact_points is not None
                     and values.size > 2 * opts.max_exact_points
                 ):
@@ -2409,11 +2408,6 @@ class FitEngine:
                 )
             )
 
-            context = self._compiled_context(
-                descriptor,
-                shared_coordinates,
-            )
-
             try:
                 solve = (
                     _compiled_fit.solve_compiled_single
@@ -2427,7 +2421,6 @@ class FitEngine:
                     base_lower=base_lower,
                     base_upper=base_upper,
                     valid=None,
-                    context=context,
                     requested_lower=requested_lower,
                     requested_upper=requested_upper,
                     requested_mask=requested_mask,
@@ -2785,8 +2778,6 @@ class FitEngine:
             indices = indices[finite]
             if sigma is not None:
                 sigma = sigma[finite]
-        if _DOMAIN_ANCHORED in spec.capabilities:
-            spec = spec.anchored_at(float(np.min(coords[0])))
         counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
         requested_bounds = bounds
         bounds = _histogram_bounds(spec, coords, bounds)
@@ -2806,6 +2797,19 @@ class FitEngine:
         # A request that is already cancelled does no work at all -- not the
         # compression below, and not the one evaluation an all-fixed fit is.
         check()
+        # The request's own bounds first, then the gate, then the anchor --
+        # the compiled batch's order, so a request both lanes refuse is
+        # refused in the same words.  The defaults are not known until the
+        # initializer has seen the window; they are checked with it below.
+        _solver_bounds(spec, None, bounds)
+        # Refused before the window's start is read, as the compiled batch
+        # refuses it: an anchored model over a window with no finite point
+        # is short of points, not an empty reduction.
+        points = _observation_count(values, counted_observations)
+        if points <= len(free_indices):
+            raise _too_few_points(spec, len(free_indices), points)
+        if _DOMAIN_ANCHORED in spec.capabilities:
+            spec = spec.anchored_at(float(np.min(coords[0])))
         solver_coords, solver_values = coords, values
         weight_roots: np.ndarray | None = None
         binned_statistics = False
@@ -2818,6 +2822,7 @@ class FitEngine:
             free_indices
             and not counted_observations
             and spec.independent_arity == 1
+            and opts.loss == "linear"
             and opts.max_exact_points is not None
             and values.size > 2 * opts.max_exact_points
         ):
@@ -2834,9 +2839,6 @@ class FitEngine:
             else None
         )
         lower, upper = _solver_bounds(spec, default_bounds, bounds)
-        points = _observation_count(values, counted_observations)
-        if points <= len(free_indices):
-            raise _too_few_points(spec, len(free_indices), points)
         if not free_indices:
             check()
             fitted = spec.evaluate(coords, lower).reshape(-1)
@@ -3097,8 +3099,8 @@ class FitEngine:
         and the classifier drew a threshold through it.  So the nested model
         is fitted as well, and the BIC gain of the pair -- the Poisson
         deviance the second population saves, less its extra parameters
-        times the log of the shots -- has to reach ``min_bic_gain``.  Below
-        it, the answer is one population written in the wider model's own
+        times the log of the shots -- has to exceed ``min_bic_gain``.  Short
+        of it, the answer is one population written in the wider model's own
         parameters (the two components coincide), so every consumer reads
         the same names either way.
         """
@@ -3124,7 +3126,7 @@ class FitEngine:
         evidence = (deviance_narrow - deviance_wide) - extra * math.log(max(shots, 1.0))
         if not math.isfinite(evidence):
             return result
-        if evidence >= threshold:
+        if decisive(evidence, threshold):
             return result._clone(evidence=evidence)
         nested_values = nested.parameters
         count = len(spec.parameters)
@@ -3180,7 +3182,7 @@ class FitEngine:
             selected_indices=nested.selected_indices,
             source_revision=result.source_revision,
             success=True,
-            message=f"one population: BIC gain {evidence:.1f} is below {threshold:g}",
+            message=f"one population: BIC gain {evidence:.1f} does not exceed {threshold:g}",
             reduced_chi_square=nested.reduced_chi_square,
             covariance_valid=nested.covariance_valid,
             parameter_units=result.parameter_units,
@@ -3219,6 +3221,8 @@ def _binned_curve_statistics(
 ) -> tuple[ArrayTuple, np.ndarray, np.ndarray] | None:
     """X-binned means with count weights -- a curve's sufficient statistics.
 
+    For the linear loss only: a robust loss must see each point, and a bin
+    mean has averaged an outlier in before the loss could weigh it down.
     Weighted least squares on (bin mean x, bin mean y, sqrt(count)) agrees
     with the full-data solution up to second order in the model's curvature
     within one bin; at the default 4096 bins that error sits far below the
@@ -3325,6 +3329,11 @@ def _histogram_bounds(
     if not _confines_to_histogram(model):
         return bounds
     x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
+    if not x.size:
+        # A window holding no bins has no histogram to confine to; the
+        # observation count then refuses it the way it refuses any fit
+        # with too few points.
+        return bounds
     step = _histogram_step(x)
     low_edge = float(np.min(x)) - 0.5 * step
     high_edge = float(np.max(x)) + 0.5 * step
@@ -3718,32 +3727,38 @@ def _value_range(values: np.ndarray) -> float:
 
 
 def _lorentzian(x, center, fwhm, amplitude, offset):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (center, fwhm, amplitude, offset))
     return _compiled_fit._value_jacobian_lorentzian(coordinates, values, False)[0]
 
 
 def _lorentzian_jacobian(x, center, fwhm, amplitude, offset):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (center, fwhm, amplitude, offset))
     return _compiled_fit._value_jacobian_lorentzian(coordinates, values, True)[1]
 
 
 def _gaussian_offset(x, amplitude, offset, sigma, center):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, offset, sigma, center))
     return _compiled_fit._value_jacobian_gaussian(coordinates, values, False)[0]
 
 
 def _gaussian_offset_jacobian(x, amplitude, offset, sigma, center):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, offset, sigma, center))
     return _compiled_fit._value_jacobian_gaussian(coordinates, values, True)[1]
 
 
 def _histogram_gaussian(x, amplitude, center, sigma):
     """Gaussian shot counts; amplitude is the density's area (shots × bin width)."""
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma))
     return _compiled_fit._value_jacobian_histogram(coordinates, values, False)[0]
 
 
 def _histogram_gaussian_jacobian(x, amplitude, center, sigma):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma))
     return _compiled_fit._value_jacobian_histogram(coordinates, values, True)[1]
 
@@ -3757,6 +3772,7 @@ def _bimodal_b(x, amplitude, center, sigma, delta_center, sigma_b, ratio):
 
 
 def _bimodal_gaussian(x, *parameters):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), parameters)
     return _compiled_fit._value_jacobian_bimodal(coordinates, values, False)[0]
 
@@ -3764,6 +3780,7 @@ def _bimodal_gaussian(x, *parameters):
 def _bimodal_gaussian_jacobian(
     x, amplitude, center, sigma, delta_center, sigma_b, ratio
 ):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, center, sigma, delta_center, sigma_b, ratio))
     return _compiled_fit._value_jacobian_bimodal(coordinates, values, True)[1]
 
@@ -3792,11 +3809,13 @@ def _histogram_poisson_gaussian(x, amplitude, rate, sigma):
     implementation, the compiled kernel; the frozen anchors hold it to an
     independent one.  (A NumPy twin evaluated over a pixel-value histogram
     cost forty cells' overlays 240 ms.)"""
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coordinates, values, False)[0]
 
 
 def _histogram_poisson_gaussian_jacobian(x, amplitude, rate, sigma):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coordinates, values, True)[1]
 
@@ -3812,32 +3831,38 @@ def _poisson_bimodal_b(x, amplitude, rate, sigma, delta_rate, sigma_b, ratio):
 
 
 def _bimodal_poisson_gaussian(x, *parameters):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), parameters)
     return _compiled_fit._value_jacobian_poisson_bimodal(coordinates, values, False)[0]
 
 
 def _bimodal_poisson_gaussian_jacobian(x, *parameters):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), parameters)
     return _compiled_fit._value_jacobian_poisson_bimodal(coordinates, values, True)[1]
 
 
 def _symmetric_lorentzian_doublet(x, center, common_fwhm, component_amplitude, offset, center_splitting):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (center, common_fwhm, component_amplitude, offset, center_splitting))
     return _compiled_fit._value_jacobian_doublet(coordinates, values, False)[0]
 
 
 def _saturation(x, asymptote, numerator, shift):
     """Rational saturation (A*x+B)/(x+C), to the right of its pole."""
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (asymptote, numerator, shift))
     return _compiled_fit._value_jacobian_saturation(coordinates, values, False)[0]
 
 
 def _saturation_jacobian(x, asymptote, numerator, shift):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (asymptote, numerator, shift))
     return _compiled_fit._value_jacobian_saturation(coordinates, values, True)[1]
 
 
 def _saturation_candidates(coordinates, observations):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coords = np.array(coordinates, dtype=np.float64, order="C")
     coords.setflags(write=False)
     values = np.array(observations, dtype=np.float64, order="C")
@@ -3847,7 +3872,7 @@ def _saturation_candidates(coordinates, observations):
     count = descriptor.prepare(
         coords, values, np.broadcast_to(np.asarray(True), values.shape), seeds,
         lower, upper,
-        np.array(descriptor.context_builder(tuple(coords)), copy=True),
+        np.empty((0, 0), dtype=np.float64),
     )
     if count == 0:
         raise ValueError("saturation fit requires distinct finite coordinates")
@@ -3860,17 +3885,21 @@ def _init_saturation(coordinates, observations):
 
 def _release_recapture(t, amplitude, offset, eta, frequency):
     """Sudden radial 2D recapture, normalized at t=0; frequency is in cycles/time."""
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((t,), (amplitude, offset, eta, frequency))
     return _compiled_fit._value_jacobian_release_recapture(coordinates, values, False)[0]
 
 
 def _release_recapture_jacobian(t, amplitude, offset, eta, frequency):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((t,), (amplitude, offset, eta, frequency))
     return _compiled_fit._value_jacobian_release_recapture(coordinates, values, True)[1]
 
 
 def _release_recapture_candidates(coordinates, observations):
     """The same cold seeds in the SciPy and compiled solver lanes."""
+
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
 
     coords = np.array(coordinates, dtype=np.float64, order="C")
     coords.setflags(write=False)
@@ -3882,7 +3911,7 @@ def _release_recapture_candidates(coordinates, observations):
     upper = np.full(4, np.inf)
     count = descriptor.prepare(
         coords, values, valid, seeds, lower, upper,
-        np.array(descriptor.context_builder(tuple(coords)), copy=True),
+        np.empty((0, 0), dtype=np.float64),
     )
     if count == 0:
         raise ValueError("release-recapture fit requires finite time and survival data")
@@ -3901,31 +3930,37 @@ def _symmetric_lorentzian_doublet_jacobian(
     offset,
     center_splitting,
 ):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (center, common_fwhm, component_amplitude, offset, center_splitting))
     return _compiled_fit._value_jacobian_doublet(coordinates, values, True)[1]
 
 
 def _damped_sine(x, amplitude, offset, baseband_frequency, decay_time, phase):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, offset, baseband_frequency, decay_time, phase))
     return _compiled_fit._value_jacobian_damped(coordinates, values, False)[0]
 
 
 def _damped_sine_jacobian(x, amplitude, offset, baseband_frequency, decay_time, phase):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, offset, baseband_frequency, decay_time, phase))
     return _compiled_fit._value_jacobian_damped(coordinates, values, True)[1]
 
 
 def _exponential_decay(x, amplitude, offset, decay_time):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, offset, decay_time))
     return _compiled_fit._value_jacobian_exponential(coordinates, values, False)[0]
 
 
 def _exponential_decay_jacobian(x, amplitude, offset, decay_time):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x,), (amplitude, offset, decay_time))
     return _compiled_fit._value_jacobian_exponential(coordinates, values, True)[1]
 
 
 def _radial_gaussian_center(x, y, amplitude, offset, one_over_e_radius, center_x, center_y):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x, y), (amplitude, offset, one_over_e_radius, center_x, center_y))
     return _compiled_fit._value_jacobian_radial(coordinates, values, False)[0]
 
@@ -3939,6 +3974,7 @@ def _radial_gaussian_center_jacobian(
     center_x,
     center_y,
 ):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x, y), (amplitude, offset, one_over_e_radius, center_x, center_y))
     return _compiled_fit._value_jacobian_radial(coordinates, values, True)[1]
 
@@ -3953,6 +3989,7 @@ def _anisotropic_gaussian_center(
     center_x,
     center_y,
 ):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x, y), (amplitude, offset, radius_x, radius_y, center_x, center_y))
     return _compiled_fit._value_jacobian_anisotropic(coordinates, values, False)[0]
 
@@ -3967,6 +4004,7 @@ def _anisotropic_gaussian_center_jacobian(
     center_x,
     center_y,
 ):
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
     coordinates, values = _compiled_model_input((x, y), (amplitude, offset, radius_x, radius_y, center_x, center_y))
     return _compiled_fit._value_jacobian_anisotropic(coordinates, values, True)[1]
 
@@ -4496,6 +4534,8 @@ def _signal_weights(
     and the plain moment is the most the data supports.
     """
 
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
+
     deviation = sign * (values - offset)
     scale = float(np.median(np.abs(values - offset))) * _compiled_fit.MAD_TO_SIGMA
     floor = scale * math.sqrt(2.0 * math.log(max(values.size, 2)))
@@ -4623,14 +4663,28 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
     )
 
 
+def _builtin_descriptor(name: str) -> _compiled_fit.CompiledFitDescriptor:
+    """The descriptor ``_fit_compiled.<name>()`` builds for a built-in.
+
+    Named, not held, by the catalogue, and built by the solve that asks: this
+    is where a process that fits imports the compiled engine, and one that
+    only reads the catalogue never does.
+    """
+
+    from . import _fit_compiled as _compiled_fit  # noqa: PLC0415
+
+    return getattr(_compiled_fit, name)()
+
+
 def _compiled_bounds(
-    descriptor: _compiled_fit.CompiledFitDescriptor,
+    build: Callable[[], _compiled_fit.CompiledFitDescriptor],
     names: tuple[str, ...],
     coordinates: ArrayTuple,
     observations: np.ndarray,
 ) -> Mapping[str, tuple[float | None, float | None]]:
     """A built-in's data-derived bounds, as its compiled preparation sets them."""
 
+    descriptor = build()
     # The arrays take the callback's one ABI, the types the compiled batch
     # hands it, so this call never compiles a second layout.
     coords = np.array(
@@ -4642,11 +4696,12 @@ def _compiled_bounds(
     values = np.array(observations, dtype=np.float64, order="C").reshape(-1)
     lower = np.full(len(names), -np.inf)
     upper = np.full(len(names), np.inf)
-    # Zero seed rows: the bounds only, never discarded cold seeds.
+    # Zero seed rows: the bounds only, never discarded cold seeds.  And no
+    # context: a point model's preparation reads none.
     descriptor.prepare(
         coords, values, np.broadcast_to(np.asarray(True), values.shape),
         np.empty((0, len(names)), dtype=np.float64), lower, upper,
-        np.array(descriptor.context_builder(tuple(coords)), copy=True),
+        np.empty((0, 0), dtype=np.float64),
     )
     return {
         name: (
@@ -4687,7 +4742,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             jacobian=_lorentzian_jacobian,
             candidate_initializer=_lorentzian_candidates,
             default_for=(FitTarget.SERIES,),
-            compiled_descriptor=_compiled_fit.lorentzian_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "lorentzian_descriptor"),
         ),
         FitModelSpec(
             "gaussian_offset",
@@ -4711,7 +4766,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             (FitTarget.SERIES,),
             formula=r"$f(x)=A e^{-\frac{1}{2}((x-x_0)/\sigma)^2}+B$",
             jacobian=_gaussian_offset_jacobian,
-            compiled_descriptor=_compiled_fit.gaussian_offset_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "gaussian_offset_descriptor"),
         ),
         FitModelSpec(
             "histogram_gaussian",
@@ -4740,7 +4795,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 r"e^{-\frac{1}{2}((x-x_0)/\sigma)^2}$"
             ),
             jacobian=_histogram_gaussian_jacobian,
-            compiled_descriptor=_compiled_fit.histogram_gaussian_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "histogram_gaussian_descriptor"),
         ),
         FitModelSpec(
             "bimodal_gaussian",
@@ -4790,7 +4845,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 ),
             ),
             default_for=(FitTarget.HISTOGRAM,),
-            compiled_descriptor=_compiled_fit.bimodal_gaussian_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "bimodal_gaussian_descriptor"),
             reduction=FitReductionSpec(
                 "histogram_gaussian",
                 (
@@ -4837,8 +4892,8 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
             ),
             jacobian=_histogram_poisson_gaussian_jacobian,
-            compiled_descriptor=(
-                _compiled_fit.histogram_poisson_gaussian_descriptor()
+            compiled_descriptor=partial(
+                _builtin_descriptor, "histogram_poisson_gaussian_descriptor"
             ),
         ),
         FitModelSpec(
@@ -4893,8 +4948,8 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     FitComponentSpec("B", _poisson_bimodal_b),
                 ),
             ),
-            compiled_descriptor=(
-                _compiled_fit.bimodal_poisson_gaussian_descriptor()
+            compiled_descriptor=partial(
+                _builtin_descriptor, "bimodal_poisson_gaussian_descriptor"
             ),
             reduction=FitReductionSpec(
                 "histogram_poisson_gaussian",
@@ -4942,8 +4997,8 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_symmetric_lorentzian_doublet_jacobian,
             candidate_initializer=_doublet_candidates,
-            compiled_descriptor=(
-                _compiled_fit.symmetric_lorentzian_doublet_descriptor()
+            compiled_descriptor=partial(
+                _builtin_descriptor, "symmetric_lorentzian_doublet_descriptor"
             ),
         ),
         FitModelSpec(
@@ -4977,7 +5032,8 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_damped_sine_jacobian,
             candidate_initializer=_damped_sine_candidates,
-            compiled_descriptor=_compiled_fit.damped_sine_descriptor(),
+            capabilities=frozenset({_DOMAIN_ANCHORED}),
+            compiled_descriptor=partial(_builtin_descriptor, "damped_sine_descriptor"),
         ),
         FitModelSpec(
             "exponential_decay",
@@ -4999,7 +5055,8 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             formula=r"$f(t)=A e^{-(t-t_0)/\tau}+B$",
             jacobian=_exponential_decay_jacobian,
             candidate_initializer=_exponential_candidates,
-            compiled_descriptor=_compiled_fit.exponential_decay_descriptor(),
+            capabilities=frozenset({_DOMAIN_ANCHORED}),
+            compiled_descriptor=partial(_builtin_descriptor, "exponential_decay_descriptor"),
         ),
         FitModelSpec(
             "saturation",
@@ -5017,7 +5074,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             formula=r"$f(x)=(A x+B)/(x+C)$",
             jacobian=_saturation_jacobian,
             candidate_initializer=_saturation_candidates,
-            compiled_descriptor=_compiled_fit.saturation_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "saturation_descriptor"),
         ),
         FitModelSpec(
             "release_recapture",
@@ -5046,7 +5103,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_release_recapture_jacobian,
             candidate_initializer=_release_recapture_candidates,
-            compiled_descriptor=_compiled_fit.release_recapture_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "release_recapture_descriptor"),
         ),
         FitModelSpec(
             "anisotropic_gaussian_center",
@@ -5090,8 +5147,8 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             coordinate_relations=(AXIS_0, AXIS_1),
             capabilities=frozenset({"regular_image_separable"}),
-            compiled_descriptor=(
-                _compiled_fit.anisotropic_gaussian_center_descriptor()
+            compiled_descriptor=partial(
+                _builtin_descriptor, "anisotropic_gaussian_center_descriptor"
             ),
         ),
         FitModelSpec(
@@ -5133,7 +5190,7 @@ def _builtin_fit_models() -> tuple[FitModelSpec, ...]:
             coordinate_relations=(AXIS_0, AXIS_0),
             default_for=(FitTarget.IMAGE,),
             capabilities=frozenset({"regular_image_radial"}),
-            compiled_descriptor=_compiled_fit.radial_gaussian_center_descriptor(),
+            compiled_descriptor=partial(_builtin_descriptor, "radial_gaussian_center_descriptor"),
         ),
     )
 

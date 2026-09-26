@@ -10,8 +10,7 @@ reads or draws through an artist or a widget.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from time import monotonic
+from dataclasses import dataclass, replace
 from typing import Any, Callable, TypeAlias
 
 import numpy as np
@@ -25,6 +24,7 @@ from .selectors import (
     RectangleRange,
     Viewport,
     SelectorKind,
+    SelectorState,
     _drag_numeric_range,
 )
 
@@ -33,12 +33,18 @@ def range_endpoint_hit(
     value: NumericRange,
     coordinate: float,
     tolerance: float,
+    scale: Scale = LINEAR,
 ) -> tuple[float, DragHandle] | None:
-    """Resolve a bounded numeric drag against its nearest endpoint."""
+    """Resolve a bounded numeric drag against its nearest endpoint.
 
+    ``tolerance`` is measured where the axis is straight (``scale``), so an
+    end grabs as far off on screen wherever it sits on the axis.
+    """
+
+    position = axis_space(coordinate, scale)
     endpoints = (
-        (abs(coordinate - value.low) / tolerance, DragHandle.LOW),
-        (abs(coordinate - value.high) / tolerance, DragHandle.HIGH),
+        (abs(position - axis_space(value.low, scale)) / tolerance, DragHandle.LOW),
+        (abs(position - axis_space(value.high, scale)) / tolerance, DragHandle.HIGH),
     )
     score, handle = min(endpoints, key=lambda item: item[0])
     return (score, handle) if score <= 1.0 else None
@@ -171,45 +177,15 @@ class _ColorLimitDrag:
 
 @dataclass(slots=True)
 class _PointerGestureBase:
+    """What every pointer gesture holds.
+
+    No pacing here: a move renders as it arrives, and the host's pointer
+    coalescing is the flow control -- a burst that outruns the frames
+    reaches the session as its latest position.
+    """
+
     axes: Any
     transform: AxisTransform
-    _cadence_at: dict[str, tuple[float, float]] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-    )
-
-    def lane_due(self, lane: str, interval_ms: int) -> bool:
-        """Whether this lane may render again, paced by its OWN cost.
-
-        A fixed interval is a guess about how expensive a frame is, and it
-        is wrong in both directions: a 3 ms scene preview waited 30 ms for
-        no reason, and -- because a lane that is not due DROPS the motion
-        rather than deferring it -- the last move before release was often
-        thrown away, so the picture only caught up when the button came
-        up.  The honest pace is the one the work itself sustains: a lane
-        reopens once its previous frame's own duration has passed, with
-        the configured interval as the CEILING for frames so expensive
-        that pacing them is the point.
-        """
-
-        now = monotonic()
-        previous = self._cadence_at.get(lane)
-        if previous is not None:
-            started, duration = previous
-            if now - started < min(float(interval_ms) / 1000.0, duration):
-                return False
-        self._cadence_at[lane] = (now, float(interval_ms) / 1000.0)
-        return True
-
-    def lane_finished(self, lane: str) -> None:
-        """Record what this lane's frame actually cost."""
-
-        previous = self._cadence_at.get(lane)
-        if previous is None:
-            return
-        started, _ = previous
-        self._cadence_at[lane] = (started, max(monotonic() - started, 0.0))
 
 
 @dataclass(slots=True)
@@ -219,7 +195,13 @@ class _SelectorGesture(_PointerGestureBase):
     handle: DragHandle
     origin: CrosshairPoint
     origin_px: tuple[float, float]
+    #: Where the hand was last read, the press to begin with.  A coordinate
+    #: it cannot read (below 0 mW on a dBm value) is taken from here.
+    reading: CrosshairPoint
     started: bool = False
+    #: A move has left the press pixel.  Not ``started``: a new box's hand
+    #: over what nothing can be read from moves nothing, and is no click.
+    moved: bool = False
 
 
 @dataclass(slots=True)

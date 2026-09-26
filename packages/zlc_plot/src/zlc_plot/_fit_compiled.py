@@ -35,6 +35,10 @@ with_derivatives, context) -> (cost, raw_rss, finite)``
     columns, reconstructs SciPy's robust scaled
     Jacobian, and uses a strict SVD rank test for covariance.
 
+``context`` is what a caller hands a cell beside its coordinates: the
+regular-image refinement passes its per-cell moments.  No point model reads
+one, and a solve given none hands every cell an empty array.
+
 All Numba dispatchers are intentionally declared without explicit signatures.
 Importing this module therefore compiles nothing.  The first model actually
 used specializes the core lazily; ``cache=True`` stores that specialization in
@@ -51,7 +55,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import threading
-from typing import Any, Callable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -239,17 +243,15 @@ _PARALLEL_ABI_READY = False
 
 @dataclass(frozen=True, slots=True)
 class CompiledFitDescriptor:
-    """Callbacks and stable preparation identity for one compiled model.
+    """Callbacks for one compiled model.
 
     ``coordinate_origin`` names an independent-coordinate axis whose minimum
     is subtracted before callbacks run.  This is the compiled equivalent of an
-    anchored decay model.  A caller that has already supplied relative
-    coordinates sets ``coordinates_are_canonical=True`` at the solve entry.
-
-    ``context_builder`` is the only Python-level owner of coordinate-dependent
-    preparation data.  It receives the canonical tuple of coordinate arrays;
-    callers may cache its read-only result by ``cache_key`` plus their exact
-    coordinate fingerprint.  The solver itself has no model registry.
+    anchored decay model: the model declares its anchoring, and
+    :mod:`zlc_plot.fit` sets the origin on the descriptor it solves with.  A
+    caller that has already supplied relative coordinates sets
+    ``coordinates_are_canonical=True`` at the solve entry.  The solver itself
+    has no model registry.
 
     ``coordinate_layout="rectangular-grid"`` explicitly supplies independent
     x/y axes for a row-major image.  Its private callback buffer has two rows:
@@ -261,10 +263,8 @@ class CompiledFitDescriptor:
     prepare: Any
     objective: Any
     value_jacobian: Any
-    context_builder: Callable[[tuple[np.ndarray, ...]], np.ndarray]
     max_candidates: int
     coordinate_origin: int | None = None
-    cache_key: str = ""
     coordinate_layout: str = "points"
 
     def __post_init__(self) -> None:
@@ -274,8 +274,6 @@ class CompiledFitDescriptor:
             raise TypeError("compiled fit objective callback must be callable")
         if not callable(self.value_jacobian):
             raise TypeError("compiled fit value_jacobian callback must be callable")
-        if not callable(self.context_builder):
-            raise TypeError("compiled fit context_builder must be callable")
         count = int(self.max_candidates)
         if count <= 0:
             raise ValueError("compiled fit max_candidates must be positive")
@@ -288,7 +286,6 @@ class CompiledFitDescriptor:
             raise ValueError("rectangular-grid coordinates do not use coordinate_origin")
         object.__setattr__(self, "max_candidates", count)
         object.__setattr__(self, "coordinate_origin", None if origin is None else int(origin))
-        object.__setattr__(self, "cache_key", str(self.cache_key))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1617,13 +1614,18 @@ def _solve_cell(
             choose = True
         elif successful and not best_success:
             choose = True
-        elif successful == best_success and cost < (
-            best_cost - RSS_TIE_RELATIVE * max(1.0, abs(best_cost))
+        elif successful == best_success and (
+            cost < best_cost - RSS_TIE_RELATIVE * max(1.0, abs(best_cost))
+            if math.isfinite(best_cost)
+            else math.isfinite(cost)
         ):
             # Candidates compete on the quantity each of them minimised: the
             # robust cost, which is half the residual sum of squares only
             # under the linear loss.  Ranking by squared residuals would hand
-            # the outlier the decision the loss just took away from it.
+            # the outlier the decision the loss just took away from it.  A
+            # seed that went non-finite holds no cost to compete with: any
+            # finite one displaces it (the tie margin of inf is NaN, which
+            # no comparison passes).
             choose = True
         if choose:
             for index in range(full_count):
@@ -2197,44 +2199,21 @@ def _canonicalize_coordinates(
 
 
 def _context_stack(
-    descriptor: CompiledFitDescriptor,
-    coordinates: np.ndarray,
-    valid: np.ndarray,
     context: np.ndarray | Sequence[np.ndarray] | None,
     *,
     cells: int,
 ) -> np.ndarray:
-    if context is not None:
-        array = np.asarray(context, dtype=np.float64)
-        if array.ndim == 2:
-            array = np.broadcast_to(array, (cells, *array.shape))
-        elif array.ndim != 3 or array.shape[0] != cells:
-            raise ValueError("compiled fit context must be shared 2D or per-cell 3D")
-        if array.ndim == 3 and array.flags.c_contiguous and array.flags.writeable:
-            return array
-        return np.array(array, dtype=np.float64, order="C", copy=True)
-    built: list[np.ndarray] = []
-    shape: tuple[int, int] | None = None
-    for cell in range(cells):
-        compact = tuple(
-            np.asarray(
-                coordinates[0, axis, valid[cell]],
-                dtype=np.float64,
-            )
-            for axis in range(coordinates.shape[1])
-        )
-        item = np.asarray(descriptor.context_builder(compact), dtype=np.float64)
-        if item.ndim != 2:
-            raise ValueError("compiled fit context_builder must return a 2D array")
-        if shape is None:
-            shape = item.shape
-        elif item.shape != shape:
-            raise ValueError(
-                "compiled fit cells produced different context shapes; bucket them "
-                "by coordinate plan before solving"
-            )
-        built.append(item)
-    return np.ascontiguousarray(np.stack(built, axis=0), dtype=np.float64)
+    if context is None:
+        # No point model reads a context; every cell gets an empty one.
+        return np.empty((cells, 0, 0), dtype=np.float64)
+    array = np.asarray(context, dtype=np.float64)
+    if array.ndim == 2:
+        array = np.broadcast_to(array, (cells, *array.shape))
+    elif array.ndim != 3 or array.shape[0] != cells:
+        raise ValueError("compiled fit context must be shared 2D or per-cell 3D")
+    if array.ndim == 3 and array.flags.c_contiguous and array.flags.writeable:
+        return array
+    return np.array(array, dtype=np.float64, order="C", copy=True)
 
 
 def _compile_exact(dispatcher: Any, signature: Any, name: str) -> None:
@@ -2379,13 +2358,7 @@ def _solve_compiled(
     )
     coordinate_values = coordinate_values.view()
     coordinate_values.setflags(write=False)
-    contexts = _context_stack(
-        descriptor,
-        coordinate_values,
-        valid_values,
-        context,
-        cells=cells,
-    )
+    contexts = _context_stack(context, cells=cells)
 
     lower_input = np.asarray(base_lower, dtype=np.float64)
     if lower_input.ndim == 1:
@@ -2794,68 +2767,6 @@ def solve_compiled_single(
         parallel=False,
         finalize=bool(finalize),
     )
-
-
-def _readonly_context(values: np.ndarray) -> np.ndarray:
-    result = np.ascontiguousarray(values, dtype=np.float64)
-    result.setflags(write=False)
-    return result
-
-
-def series_context_builder(coordinates: tuple[np.ndarray, ...]) -> np.ndarray:
-    """The coordinate plan every one-dimensional built-in model shares.
-
-    Three rows over the sample count: the sort order, the sorted axis and a
-    row of span statistics.  A plan is a function of the coordinates alone
-    and a batch copies it once per cell, so it carries nothing a model could
-    derive from its observations instead -- the damped sine seeds itself
-    with a Goertzel scan of the observations inside its own prepare
-    callback, and an N-by-N trigonometric table here would be a hundred
-    megabytes per cell at the exact-point budget for nothing.
-    """
-
-    x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
-    if not x.size:
-        return _readonly_context(np.zeros((3, 1), dtype=np.float64))
-    order = np.argsort(x, kind="stable")
-    sorted_x = x[order]
-    span = max(float(np.ptp(x)), EPSILON)
-    differences = np.abs(np.diff(sorted_x))
-    differences = differences[differences != 0.0]
-    step = max(
-        float(np.median(differences)) if differences.size else span,
-        EPSILON,
-    )
-    context = np.zeros((3, x.size), dtype=np.float64)
-    context[0] = order
-    context[1] = sorted_x
-    context[2, 0] = float(np.min(x))
-    if x.size > 1:
-        context[2, 1] = float(np.max(x))
-    if x.size > 2:
-        context[2, 2] = span
-    if x.size > 3:
-        context[2, 3] = float(np.mean(x))
-    if x.size > 4:
-        context[2, 4] = step
-    return _readonly_context(context)
-
-
-def image_context_builder(coordinates: tuple[np.ndarray, ...]) -> np.ndarray:
-    x = np.asarray(coordinates[0], dtype=np.float64).reshape(-1)
-    y = np.asarray(coordinates[1], dtype=np.float64).reshape(-1)
-    context = np.zeros((1, 8), dtype=np.float64)
-    if x.size:
-        context[0, 0] = np.min(x)
-        context[0, 1] = np.max(x)
-        context[0, 2] = max(float(np.ptp(x)), EPSILON)
-        context[0, 4] = np.mean(x)
-    if y.size:
-        context[0, 3] = max(float(np.ptp(y)), EPSILON)
-        context[0, 5] = np.mean(y)
-        context[0, 6] = np.min(y)
-        context[0, 7] = np.max(y)
-    return _readonly_context(context)
 
 
 @njit(cache=True, inline="always")
@@ -4524,9 +4435,7 @@ def lorentzian_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_lorentzian,
         objective=_objective_lorentzian,
         value_jacobian=_value_jacobian_lorentzian,
-        context_builder=series_context_builder,
         max_candidates=2,
-        cache_key="lorentzian-v1",
     )
 
 
@@ -4535,9 +4444,7 @@ def gaussian_offset_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_gaussian,
         objective=_objective_gaussian,
         value_jacobian=_value_jacobian_gaussian,
-        context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="gaussian-offset-v1",
     )
 
 
@@ -4546,9 +4453,7 @@ def histogram_gaussian_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_histogram,
         objective=_objective_histogram,
         value_jacobian=_value_jacobian_histogram,
-        context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="histogram-gaussian-v4",
     )
 
 
@@ -4557,9 +4462,7 @@ def bimodal_gaussian_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_bimodal,
         objective=_objective_bimodal,
         value_jacobian=_value_jacobian_bimodal,
-        context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="bimodal-gaussian-v5",
     )
 
 
@@ -4568,9 +4471,7 @@ def histogram_poisson_gaussian_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_poisson_histogram,
         objective=_objective_poisson,
         value_jacobian=_value_jacobian_poisson,
-        context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="histogram-poisson-gaussian-v4",
     )
 
 
@@ -4579,9 +4480,7 @@ def bimodal_poisson_gaussian_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_poisson_bimodal,
         objective=_objective_poisson_bimodal,
         value_jacobian=_value_jacobian_poisson_bimodal,
-        context_builder=series_context_builder,
         max_candidates=1,
-        cache_key="bimodal-poisson-gaussian-v5",
     )
 
 
@@ -4590,9 +4489,7 @@ def symmetric_lorentzian_doublet_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_doublet,
         objective=_objective_doublet,
         value_jacobian=_value_jacobian_doublet,
-        context_builder=series_context_builder,
         max_candidates=8,
-        cache_key="symmetric-lorentzian-doublet-v1",
     )
 
 
@@ -4601,10 +4498,7 @@ def damped_sine_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_damped,
         objective=_objective_damped,
         value_jacobian=_value_jacobian_damped,
-        context_builder=series_context_builder,
         max_candidates=3,
-        coordinate_origin=0,
-        cache_key="damped-sine-v1",
     )
 
 
@@ -4613,10 +4507,7 @@ def exponential_decay_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_exponential,
         objective=_objective_exponential,
         value_jacobian=_value_jacobian_exponential,
-        context_builder=series_context_builder,
         max_candidates=2,
-        coordinate_origin=0,
-        cache_key="exponential-decay-v1",
     )
 
 
@@ -4867,9 +4758,7 @@ def saturation_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_saturation,
         objective=_objective_saturation,
         value_jacobian=_value_jacobian_saturation,
-        context_builder=series_context_builder,
         max_candidates=3,
-        cache_key="saturation-rational",
     )
 
 
@@ -4878,9 +4767,7 @@ def release_recapture_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_release_recapture,
         objective=_objective_release_recapture,
         value_jacobian=_value_jacobian_release_recapture,
-        context_builder=series_context_builder,
         max_candidates=4,
-        cache_key="release-recapture-v1",
     )
 
 
@@ -4889,9 +4776,7 @@ def radial_gaussian_center_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_radial,
         objective=_objective_radial,
         value_jacobian=_value_jacobian_radial,
-        context_builder=image_context_builder,
         max_candidates=2,
-        cache_key="radial-gaussian-center-v1",
     )
 
 
@@ -4900,9 +4785,7 @@ def anisotropic_gaussian_center_descriptor() -> CompiledFitDescriptor:
         prepare=_prepare_anisotropic,
         objective=_objective_anisotropic,
         value_jacobian=_value_jacobian_anisotropic,
-        context_builder=image_context_builder,
         max_candidates=2,
-        cache_key="anisotropic-gaussian-center-v1",
     )
 
 
@@ -5116,14 +4999,15 @@ def warm_production_cache() -> dict[str, Any]:
         np.asarray((infinity, infinity, infinity, infinity, infinity)),
     )
 
-    world_time = np.linspace(10.0, 14.0, 97, dtype=np.float64)
-    relative_time = world_time - world_time[0]
+    # The anchored models solve on time since the window start, which is
+    # what a fit hands them; subtracting the start is not compiled work.
+    relative_time = np.linspace(0.0, 4.0, 97, dtype=np.float64)
     damped = np.asarray((2.0, 0.2, 0.8, 2.5, 0.3), dtype=np.float64)
     damped_values = sample_values(_value_jacobian_damped, np.ascontiguousarray(relative_time.reshape(1, -1)), damped)
     run_single(
         "damped_sine",
         damped_sine_descriptor(),
-        (world_time,),
+        (relative_time,),
         damped_values,
         damped,
         np.asarray((0.0, -infinity, positive, positive, -math.pi)),
@@ -5135,7 +5019,7 @@ def warm_production_cache() -> dict[str, Any]:
     run_single(
         "exponential_decay",
         exponential_decay_descriptor(),
-        (world_time,),
+        (relative_time,),
         exponential_values,
         exponential,
         np.asarray((-infinity, -infinity, positive)),

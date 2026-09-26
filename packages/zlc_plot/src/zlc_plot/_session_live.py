@@ -9,10 +9,9 @@ from threading import Event
 from typing import TYPE_CHECKING, Callable
 
 from zlc_data import OwnedSnapshot
-from zlc_data.snapshot_projection import indexed_schemas_compatible
+from zlc_data.snapshot_projection import schemas_continue
 
 from .data_contract import (
-    schema_equal,
     snapshot_generation,
     snapshot_revision,
     snapshot_schema,
@@ -100,10 +99,7 @@ class LiveSessionMixin:
                     assert isinstance(self._projection.data, OwnedSnapshot)
                     previous_schema = snapshot_schema(self._projection.data)
                     next_schema = snapshot_schema(data)
-                    if not (
-                        schema_equal(previous_schema, next_schema)
-                        or indexed_schemas_compatible(previous_schema, next_schema)
-                    ):
+                    if not schemas_continue(previous_schema, next_schema):
                         raise ValueError("data schema must remain exactly constant")
                 if self.holds_live_revision(data, selected_revision):
                     # A new RUN restarts its revisions; within one run they

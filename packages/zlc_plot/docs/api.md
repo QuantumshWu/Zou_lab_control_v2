@@ -95,8 +95,8 @@ reduction 上它不起作用。窗口未填满时它就是「至今为止的均�
 窗口左端不足 `trailing` 枪时，那一点就是窗内已有那几枪的均值。
 
 `curve(...)`、`image(...)` 与 `rolling(...)` 都通过 `reduction=` 暴露与各自
-typed specification 相同的 reduction 选择；字符串简写只表示具名Point axis，
-其它domain使用显式`AxisRef`。
+typed specification 相同的 reduction 选择；坐标轴一律使用显式`AxisRef`，
+字符串不被接受。
 
 需要组合 FacetGrid、自定义 reduction 或长期保存 plot specification 的代码，使用下面的
 typed spec 接口。两种入口共享同一套 parameter schema、selector、fit、live 和 backend
@@ -655,6 +655,10 @@ warm candidate that competes with the fresh cold seeds and is cleared by a
 failed solve; it never replaces them. A custom model without a compiled
 descriptor takes SciPy's `least_squares`, with its declared analytic Jacobian
 or two-point numerical differentiation; SciPy is imported only on that path.
+Reading the catalogue — `builtin_fit_models()`, a model's parameter names and
+symbols, `FitOptions` — imports neither: `FitModelSpec.compiled_descriptor` is
+a zero-argument factory the first solve calls, so a process that never fits
+(the task console) never loads numba.
 
 自定义模型可作为 `FitModelSpec` 直接传给 `fit()`，或在
 `zlc_plot.fit.FitModelRegistry` 中注册后由 `zlc_plot.fit.FitEngine` 注入 session。参数的 canonical/display
@@ -739,7 +743,7 @@ session.update_data(next_snapshot)
 ```
 
 Run history、cadence和Stop由Runtime拥有；Notebook view只消费RasterHost front。
-Pointer cadence、selector hit radius和wheel zoom factor位于`DEFAULTS.interaction`。
+Double-click判定、selector hit radius和wheel zoom factor位于`DEFAULTS.interaction`；pointer move不另设节流，由宿主的pointer coalescing控制节奏。
 
 Missing dependencies raise `BackendUnavailableError` without making ordinary
 package import depend on Jupyter.

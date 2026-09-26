@@ -819,7 +819,7 @@ class _Pending:
 
 _REMOTE_METHODS = frozenset(
     {
-        "update_data", "update_image_overlay", "update_image_frame",
+        "update_data", "update_image_overlay",
         "set_parameter", "set_parameters", "configure", "describe_display",
         "describe_semantics", "replace_spec",
         "resolved_color_limits", "set_labels", "set_relim_mode",
@@ -1063,8 +1063,11 @@ class _RemoteRasterPlotHost:
 #: How many finished input segments one child's transport keeps to fill
 #: again rather than destroying.  A producer's shot and its overlay are one
 #: or two blocks, and a couple of shots may be in flight, so four covers the
-#: rotation; past that a block is given back to the operating system, which
-#: is what keeps a session that changed raster size from holding both.
+#: rotation; past that a block is given back to the operating system.  It is
+#: also how many uploads a free block may sit out before it is given back:
+#: a block in the rotation is filled again well within four, while the one
+#: a mount filled with a whole retained history, or a session's old raster
+#: size, is never wanted again.
 _INPUT_FREE_BLOCKS = 4
 
 #: How many children stand warm and unused before anything is drawing, so
@@ -1567,8 +1570,8 @@ class RenderProcess:
         #: ONE deque searched by size, never a bucket per size: bucketed,
         #: every raster size a session ever used kept a permanent cache of
         #: its own, which is the shape the front pool was already taught not
-        #: to have.
-        self._input_free: deque[SharedMemory] = deque()
+        #: to have.  Each entry is ``[segment, uploads it sat out]``.
+        self._input_free: deque[list] = deque()
         self._closing = False
         self._owners = 1
         self._close_started: float | None = None
@@ -1896,7 +1899,7 @@ class RenderProcess:
             self._release_inputs(tuple(input_tokens))
             raise
         transition = ""
-        if method in {"update_data", "update_image_frame"}:
+        if method == "update_data":
             transition = "replace"
         elif method == "update_image_overlay":
             transition = "overlay"
@@ -2125,8 +2128,9 @@ class RenderProcess:
                     tuple(shared)
                     if closing
                     else tuple(
-                        block for block in shared
-                        if not self._keep_input_block(block)
+                        given_back for block in shared
+                        if (given_back := self._keep_input_block(block))
+                        is not None
                     )
                 )
             self._discard_input_blocks(spare)
@@ -2717,14 +2721,40 @@ class RenderProcess:
             return
 
     def _take_input_block(self, nbytes: int) -> SharedMemory:
-        """One segment big enough to hold this buffer, reused if one is free."""
+        """The smallest free segment that fits this buffer, else a new one.
+
+        Not the FIRST that fits, and not one much larger: the first upload
+        after a mount carries the whole retained history the panel reads --
+        hundreds of megabytes of camera frames -- and first fit handed that
+        segment to every single-shot upload after it, so the console held
+        it, committed, for the life of the child.  Every free segment passed
+        over counts one upload sat out, and one that sat out
+        ``_INPUT_FREE_BLOCKS`` in a row goes back to the operating system.
+        """
 
         wanted = max(1, int(nbytes))
+        # Twice the size wanted, or a megabyte over it for a small upload:
+        # the operating system rounds a segment up to whole pages.
+        largest = max(2 * wanted, wanted + (1 << 20))
         with self._lock:
-            for index, block in enumerate(self._input_free):
-                if block.size >= wanted:
-                    del self._input_free[index]
-                    return block
+            chosen = None
+            for entry in self._input_free:
+                size = entry[0].size
+                if wanted <= size <= largest and (
+                    chosen is None or size < chosen[0].size
+                ):
+                    chosen = entry
+            if chosen is not None:
+                self._input_free.remove(chosen)
+            stale = []
+            for entry in tuple(self._input_free):
+                entry[1] += 1
+                if entry[1] >= _INPUT_FREE_BLOCKS:
+                    self._input_free.remove(entry)
+                    stale.append(entry[0])
+        self._discard_input_blocks(stale)
+        if chosen is not None:
+            return chosen[0]
         return SharedMemory(create=True, size=wanted)
 
     def _discard_input_blocks(self, blocks: Sequence[SharedMemory]) -> None:
@@ -2751,18 +2781,24 @@ class RenderProcess:
                 spare: tuple[SharedMemory, ...] = tuple(blocks)
             else:
                 spare = tuple(
-                    block for block in blocks
-                    if not self._keep_input_block(block)
+                    given_back for block in blocks
+                    if (given_back := self._keep_input_block(block)) is not None
                 )
         self._discard_input_blocks(spare)
 
-    def _keep_input_block(self, block: SharedMemory) -> bool:
-        """Put one segment back, up to the budget.  Called under the lock."""
+    def _keep_input_block(self, block: SharedMemory) -> SharedMemory | None:
+        """Put one segment back; answer the one to give back, if any.
 
-        if len(self._input_free) >= _INPUT_FREE_BLOCKS:
-            return False
-        self._input_free.append(block)
-        return True
+        Over the budget the segment given back is the one that sat out the
+        most uploads, never the one just used.  Called under the lock.
+        """
+
+        self._input_free.append([block, 0])
+        if len(self._input_free) <= _INPUT_FREE_BLOCKS:
+            return None
+        stalest = max(self._input_free, key=lambda entry: entry[1])
+        self._input_free.remove(stalest)
+        return stalest[0]
 
     def _receive_host_closed(self, host_id: str) -> None:
         with self._lock:
@@ -2835,7 +2871,7 @@ class RenderProcess:
         for token in tuple(self._input_uploads):
             self._finish_input_upload(token)
         with self._lock:
-            free = tuple(self._input_free)
+            free = tuple(entry[0] for entry in self._input_free)
             self._input_free.clear()
         self._discard_input_blocks(free)
         try:
@@ -3481,42 +3517,54 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: The same agreement for each Host's description vocabulary.
     described: dict[str, tuple[object, ...]] = {}
     described_lock = Lock()
+    #: Two threads publish: the Host worker's front callback and this loop
+    #: handing over the Host's opening front right after subscribing.  The
+    #: whole publication is one step.  With only the newer-sequence test
+    #: inside, both could pass for the same front and claim its lease twice
+    #: -- and the parent, dropping the duplicate, releases the lease it is
+    #: displaying; with the send and the interaction memo outside, two
+    #: newer fronts could reach the parent in the other order from the one
+    #: the memo recorded them in, and the next unchanged map crossed as
+    #: ``None`` for a map the parent no longer held.
+    front_sequence_lock = Lock()
 
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
-        if sequence <= last_front_sequence.get(host_id, -1):
-            return
-        last_front_sequence[host_id] = sequence
-        handoff = fronts.claim(front.buffer.pixels)
-        if handoff is None:
-            handoff = fronts.publish(front.buffer.pixels)
-        lease_id, shared_name, nbytes = handoff
-        # The interaction map is the SAME object frame after frame on a panel
-        # whose limits are not moving, and it is the whole non-pixel weight of
-        # this message: a 64-cell grid carries 128 transforms through pickle
-        # on every frame to say nothing changed.  Send it once and name it.
-        # Remembered only once it is on its way: remembered first, a send that
-        # failed would have the next front name a map the parent never got.
-        interaction = front.interaction
-        repeated = interaction == last_interaction.get(host_id)
-        send(
-            (
-                "front",
-                host_id,
-                front.identity,
-                tuple(front.logical_size),
-                float(front.logical_dpi),
-                float(front.device_pixel_ratio),
-                None if repeated else interaction,
-                lease_id,
-                shared_name,
-                nbytes,
-                int(front.buffer.width),
-                int(front.buffer.height),
+        with front_sequence_lock:
+            if sequence <= last_front_sequence.get(host_id, -1):
+                return
+            last_front_sequence[host_id] = sequence
+            handoff = fronts.claim(front.buffer.pixels)
+            if handoff is None:
+                handoff = fronts.publish(front.buffer.pixels)
+            lease_id, shared_name, nbytes = handoff
+            # The interaction map is the SAME object frame after frame on a
+            # panel whose limits are not moving, and it is the whole
+            # non-pixel weight of this message: a 64-cell grid carries 128
+            # transforms through pickle on every frame to say nothing
+            # changed.  Send it once and name it.  Remembered only once it
+            # is on its way: remembered first, a send that failed would have
+            # the next front name a map the parent never got.
+            interaction = front.interaction
+            repeated = interaction == last_interaction.get(host_id)
+            send(
+                (
+                    "front",
+                    host_id,
+                    front.identity,
+                    tuple(front.logical_size),
+                    float(front.logical_dpi),
+                    float(front.device_pixel_ratio),
+                    None if repeated else interaction,
+                    lease_id,
+                    shared_name,
+                    nbytes,
+                    int(front.buffer.width),
+                    int(front.buffer.height),
+                )
             )
-        )
-        if not repeated:
-            last_interaction[host_id] = interaction
+            if not repeated:
+                last_interaction[host_id] = interaction
         shown.set()
 
     def complete(request_id: int, completed: Future, host_id: str | None) -> None:

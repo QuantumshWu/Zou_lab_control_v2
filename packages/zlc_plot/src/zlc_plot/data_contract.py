@@ -64,6 +64,25 @@ def schema_repeat_count(schema: DatasetSchema) -> int:
     return int(schema.repeat_domain.size)
 
 
+def acquired_repeat_count(snapshot: OwnedSnapshot) -> int:
+    """How many leading Repeat rows a snapshot has begun.
+
+    Every row its schema declares, unless it is a live finite run: that
+    arrives as a segmented prefix of the run its schema already declares
+    whole, and the rows still to come are not shots yet.  Counted from the
+    declared end, a window of the last N held no data until the run was
+    nearly over, and "shots from latest" put the latest far from zero.
+    At least one row, as a shot history is never empty.
+    """
+
+    block = snapshot.block
+    declared = int(block.schema.repeat_domain.size)
+    if block.values is not None or not len(block.segments):
+        return declared if block.values is not None else min(1, declared)
+    ends = block.segment_origins[:, 0] + block.segment_shapes[:, 0]
+    return min(declared, max(1, int(ends.max())))
+
+
 def schema_value_unit(schema: DatasetSchema, registry: UnitRegistry) -> Unit:
     return resolve_unit(schema.value_schema.value_unit or "1", registry)
 
@@ -226,21 +245,6 @@ def classify_axes(schema: DatasetSchema) -> AxisFamilies:
     )
 
 
-def schema_equal(left: DatasetSchema, right: DatasetSchema) -> bool:
-    """Are these two schemas the same schema?
-
-    Directly, because both are in hand.  A digest is how a schema is recognised
-    across a process boundary, where only its name travelled; asking for two
-    digests to compare two objects is slower and answers the same question --
-    the dtype is canonicalised when a schema is built, so nothing is normalised
-    by the encoding that equality would miss.
-    """
-
-    if not isinstance(left, DatasetSchema) or not isinstance(right, DatasetSchema):
-        return False
-    return left == right
-
-
 def _resolve_annotation(annotation: str | None, registry: UnitRegistry) -> Unit:
     # ``None`` is the data-layer spelling for an unlabelled/dimensionless
     # coordinate; ``arb`` remains a public plotting alias for ``1``.
@@ -343,11 +347,11 @@ __all__ = [
     "OwnedSnapshot",
     "Unit",
     "UnitRegistry",
+    "acquired_repeat_count",
     "classify_axes",
     "image_axes",
     "resolve_unit",
     "resolve_axis",
-    "schema_equal",
     "schema_repeat_count",
     "schema_shape",
     "schema_value_unit",

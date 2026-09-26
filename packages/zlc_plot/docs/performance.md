@@ -272,10 +272,10 @@ it), made the rolling window a pure display selector over retained history,
 routed the live-fit budget through the controller's actual cadence, and
 stopped reporting superseded render futures as panel errors.
 
-> Superseded (2026-09-25): the per-revision mip pyramid is gone. The compiled
-> block sum reduces straight from the source in 0.7-2 ms, less than building
-> one level, so `ImageFrontStore` is only the prepared-front LRU (its
-> docstring keeps the measurement).
+> Superseded (2026-09-25): the per-revision mip pyramid is gone. Reducing
+> straight from the source takes 0.7-2 ms, less than building one level, so
+> `ImageFrontStore` is only the prepared-front LRU (its docstring keeps the
+> measurement).
 
 A later pass fixed the color-limit drag: the preview no longer rewrites the
 colorbar's endpoint labels (chrome whose edit forced a full background
@@ -286,8 +286,8 @@ One drag step (preview + overlay render + capture) went from 17.7 ms to
 6.8 ms median at bench size, and the per-step cost no longer scales with a
 full-figure Agg redraw at larger panels.  With the step that cheap, the
 color preview's own 100 ms throttle lane became the drag lag it once
-guarded against — the recolor now rides the same 30 ms pointer cadence as
-pan (`raster_preview_interval_ms` is gone), with same-key pointer-motion
+guarded against — the recolor now follows pointer motion like pan
+(`raster_preview_interval_ms` is gone), with same-key pointer-motion
 coalescing as flow control.  Measured through the live pointer path under
 concurrent 10 Hz 2048² updates: 7–8 ms per recolor for either handle.
 
@@ -478,8 +478,8 @@ Before display-sized raster preparation, the same 2048² path spent about
 206 ms per preview and about 269 ms per live commit because Matplotlib
 normalized, color-mapped and resampled the entire source image on each blit.
 
-> Superseded: the 100 ms remap lane was removed; the recolor rides the 30 ms
-> pointer cadence (`pointer_update_interval_ms`), as the overhaul section
+> Superseded: the 100 ms remap lane was removed; the recolor follows pointer
+> motion, paced only by the host's pointer coalescing, as the overhaul section
 > above records.
 
 DPR changes the preparation budget rather than stretching a low-resolution
@@ -539,29 +539,25 @@ represents an all-image selection by authority plus `sample_count`, without
 allocating a full index vector first. A 2048² all-image selection reported 4,194,304 samples with
 `selected_indices=None` and no measurable steady RSS increase.
 
-The radial Gaussian solver uses a bounded regular grid of at most 257×257 for
-its seed and primary parameter search, then checks the full-resolution
-objective and performs a bounded full-resolution convergence refinement when
-needed. The final fitted values, residuals, RSS and selected indices are always
-materialised from every selected source pixel, and the reported RSS and the
-information matrix behind the covariance come from one bounded-row exact pass
-over those pixels for every loss: the separable closed form only steers the
-all-valid linear solve, because differencing its six second moments cannot
-report a small RSS on a bright background. Thus optimization avoids
-repeatedly sweeping millions of pixels without turning a display-decimated
-raster into fit authority.
+The radial Gaussian solver seeds and searches on a proxy of at most 129×129
+samples taken at bounded indices of the native image (the image itself when
+it is no larger), then always runs one full-resolution refinement from the
+proxy's answer, on the frame centred on its first valid value so the moment
+sums do not cancel. For a complete (unmasked, all-finite) image under the
+linear loss the information matrix behind the covariance comes from the
+separable axis-Gram closed form, and the reported RSS from one final direct
+striped pass over every pixel; a masked, non-finite or robust-loss image takes
+both from one bounded-row striped pass over the selected pixels. Fitted values,
+residuals and selected indices are not materialised with the result: they are
+computed from the selected source pixels the first time a consumer reads them.
+Thus optimization avoids repeatedly sweeping millions of pixels without turning
+a display-decimated raster into fit authority.
 
 For regular images, the default lower radius bound is half the finest native
 coordinate spacing, not a fraction of the noise-sensitive moment seed. The
 moment initializer still supplies the upper radius and every other model
 bound; an explicitly authored bound remains authoritative. Radial and
-anisotropic Gaussian kernels use the same metadata-driven rule. When the
-bounded proxy is already the full image, a successful exact solve is also not
-invalidated merely because a retry without material cost improvement returns
-an unsuccessful status. A materially better retry is still retained and must
-pass its own status. This prevents a valid FitEvent from becoming a false gap
-without weakening the full-resolution objective or adding a model-specific
-acceptance path.
+anisotropic Gaussian kernels use the same metadata-driven rule.
 
 The `soft_l1` objective uses the stable equivalent
 `2*squared/(sqrt(1+squared)+1)`, avoiding cancellation close to an exact fit.
@@ -648,6 +644,13 @@ Isolated MOT-ROI cases (`run_mot_roi_isolated`): camera-grid render
 29.1 -> 18.2, facet-curve-fit-40 total 47.6 -> 34.2, facet-curve-40
 10.9 -> 6.5 ms.
 
+> Historical (2026-09-25): from 2026-09-15 `run_mot_roi_isolated` stopped
+> before measuring (a plane-private signature it called changed), and since
+> 2026-09-17 its Curve and Histogram cases read one shot under their "-40"
+> labels, because every panel now reads its own window (default one shot).
+> Both are fixed, so it measures forty shots again; the numbers here were
+> taken before either change and have not been re-measured.
+
 What changed: `raster_polylines` strokes disjoint clip lanes in parallel
 (the error-bar kernel's own grouping), and the facet caller applies a
 linear cell's transData as the affine it is; the whole-pixel cell-box
@@ -689,7 +692,8 @@ facet/fit/kernel round, measured on the same MOT-ROI chain
 (`run_mot_roi_chain`), the isolated same-source cases
 (`run_mot_roi_isolated`) and the 2x2 layout (`run_console`), all at DPR 3.
 Archives: `bench/results/final_dceb240` (before) and `bench/results/round2`
-(after, plus the band A/B runs).
+(after, plus the band A/B runs) -- on the measuring machine only;
+`/bench/results/` is not part of the repository.
 
 What the probes found, per frame of the focused camera cell (isolated
 compose 10.6 ms): 29 dynamic artists repainted through matplotlib, of
@@ -803,6 +807,11 @@ pushed baseline -> this tree:
 | 64 sites in the cell, no fit     | 1/3000 |         | 31 / 31 ms |
 | 35 sites as point rows, fit      |   3000 | 2636 ms | 77 ms |
 | rolling, 35 sites                | 1/3000 |  7 / 15 | 7 / 15 ms |
+
+> Historical (2026-09-25): from 2026-09-16 `run_indexed_history` could not
+> attach its processor, and its `--fit` timed a batch seam removed on
+> 2026-09-17.  It runs again against the current seams; the table has not
+> been re-measured.
 
 What changed:
 
@@ -968,6 +977,12 @@ forty overlays through the kernel at widths of tens of photons, where a
 bin's window is hundreds of nodes.  The lattice round measured 22.3 / 13.9
 here.
 
+> Historical (2026-09-25): `fit_total` and `numeric_fit_batch` were probes
+> on a panel's in-process session.  Every console panel now renders in its
+> own child, which no probe of the console reaches, so `run_mot_roi_chain`
+> reports the console-side stages and the causal critical path only; the two
+> rows cannot be reproduced with it.
+
 ## Process-isolated Monitor, Edit and Figure export (2026-09-03)
 
 The product now has one application-owned pair of plotting processes.  B, the
@@ -1093,6 +1108,12 @@ baseline -> this tree, medians over several runs:
 | change panel size               | --                           | 50-110 ms / 8-15 ms         |
 | add a histogram panel           | --                           | 95-140 ms / 11-27 ms        |
 
+> Historical (2026-09-25): since 2026-09-17 every panel reads its own window
+> (a curve's is one shot), and until 2026-09-25 this bench set the window on
+> the histogram only, so its grid reduced and its curve plotted one shot.  It
+> now gives the grid and the curve the same `--window`.  The table above was
+> measured before that change and has not been re-measured.
+
 What changed:
 
 * Refresh advances the editor's own host through `update_data`, the
@@ -1172,28 +1193,27 @@ thousandth.
 The count of each value is a sum over shots, so it is kept and moved rather
 than rebuilt.  Three pieces, each in the package that owns the fact:
 
-* **zlc_data** -- `IndexedWindow(start, latest, stable_since)` on
-  `DataBlock.window`: the absolute shot numbers a block holds and the last
-  sequence at which a retained shot was OVERWRITTEN.  A consumer may keep
-  work derived from an earlier revision of the same block exactly when that
-  revision is not older than `stable_since`; every shot the two revisions
-  share is then byte-equal.  `restrict_snapshot` keeps the stamp, because a
-  restriction that keeps the shot structure keeps the shots' numbers.
-* **zlc_runtime** -- every indexed materialization is stamped from the
-  history's `replaced_at`; a re-run for the same parent moves the fence.
+* **zlc_data** -- `IndexedWindow(start, latest)` on `DataBlock.window`:
+  the absolute shot numbers of the history window a block was read as.
+  `restrict_snapshot` keeps it, naming the source window a cut came from;
+  it marks a block as a history window and never counts the cut's shots.
+* **zlc_runtime** -- every indexed materialization is a segmented block made
+  of the retained shots' own immutable segments; a rolled window shares the
+  segments of the shots it kept, and a replaced shot brings new ones.
 * **zlc_plot** -- `DataView.window_frequency(window)` keeps one table
   (`counts[v - offset]`) per view, inherits the previous view's through the
   same `inherit_domains_from` hand-over the coordinate domains use, and
-  advances it by the shots that entered and left (matched by absolute shot
-  number, so holes and window changes are ordinary).  A narrow integer
+  advances it by the shots that entered and left (matched by the identity
+  of the immutable segments the two views share, so holes, replacements
+  and window changes are ordinary).  A narrow integer
   dtype gets its whole range (65 536 levels for 16-bit pixels); a wider one
   its observed span up to `_FREQUENCY_LEVEL_LIMIT`, growing as values
   arrive; floats and unindexed data get no table.  `_histogram_bins` reads
   the extrema off the table's first and last occupied level, and the
   aligned integer bins are summed from it (`_counts_from_frequency`, the
   same summation the from-values path already used).  Anything the table
-  cannot answer -- non-aligned edges, a reduction, a replacement past the
-  carried revision, more than a quarter of the window changed -- falls back
+  cannot answer -- non-aligned edges, a reduction, more than a quarter of
+  the window changed -- falls back
   to counting the values, so the answer is always the fresh count.
 
 Measured (`update_data` per shot, 128 x 132 uint16 ROI, window 1000,
@@ -1260,7 +1280,7 @@ Jacobian最大绝对误差4.19e-15；1201个Lambert W点对SciPy最大相对差1
 python -c "import zou_lab_control; import sys; sys.argv=['run_fit_models','--model','release_recapture','--rounds','20']; from bench.plot_perf.run_fit_models import main; raise SystemExit(main())"
 ```
 
-原始输出位于`bench/results/release_recapture.json`。
+原始输出位于测量机本地的`bench/results/release_recapture.json`（`/bench/results/`不入库）。
 # 2026-09-07：共享 Fit / foreground 实施结果
 
 当前性能worktree相同MOT、43×502 ROI、40-shot、DPR3四Panel，关闭细分探针窗口：

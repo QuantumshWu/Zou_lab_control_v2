@@ -481,6 +481,16 @@ class FitSessionMixin:
                 # no render, no new batch revision.  A static target only
                 # ever re-solves when something it depends on moved.
                 return None
+        return self._solve_fit_request(prepared, live=live).accepted.result
+
+    def _solve_fit_request(
+        self,
+        prepared: _LiveFitRequest,
+        *,
+        live: bool,
+    ) -> _FitPresentation:
+        """Make ``prepared`` the request and paint its answer for this data."""
+
         started = self._begin_fit_request(
             prepared.model,
             selector_kind=None,
@@ -503,7 +513,7 @@ class FitSessionMixin:
         if presentation is None:
             raise FitCancelled("fit target was superseded before acceptance")
         self._notify_fit(presentation.event)
-        return presentation.accepted.result
+        return presentation
 
     def _fit_batch(
         self,
@@ -1477,11 +1487,15 @@ class FitSessionMixin:
             )
             left_percent = round(100.0 * left, 1)
             right_percent = 100.0 - left_percent
-            labels.append(
+            reading = (
                 f"Threshold {displayed:.4g}\n"
-                f"L/R {left_percent:.1f}%/{right_percent:.1f}%\n"
-                f"Fidelity {100.0 * fidelity:.1f}%"
+                f"L/R {left_percent:.1f}%/{right_percent:.1f}%"
             )
+            # Over one population there is no second state to be faithful
+            # to: the split stands, and no fidelity is written.
+            if math.isfinite(fidelity):
+                reading += f"\nFidelity {100.0 * fidelity:.1f}%"
+            labels.append(reading)
         return tuple(labels)
 
     def _derived_threshold_classifier_selector(self) -> SelectorState | None:
@@ -1884,6 +1898,9 @@ class FitSessionMixin:
             with self._lock:
                 if (
                     self._closed
+                    # The same revision of another run is other data: a new
+                    # run counts its revisions from its own start.
+                    or started.projection.data_generation != self.data_generation
                     or result.source_revision != self.data_revision
                     or started.request_generation != self._fit_request_generation
                 ):
