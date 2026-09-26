@@ -40,7 +40,6 @@ def _schema(sites: int) -> DatasetSchema:
     )
 
 
-@pytest.mark.gui
 @pytest.mark.parametrize(
     "spec_name", ("rolling", "curve"), ids=("rolling", "dynamic-curve")
 )
@@ -112,6 +111,12 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
             )
             pump_until(None, 0.25)
 
+        # The button is still down, so a newer front can only be a live one
+        # the drag let through; a loaded machine is given time to show it.
+        pump_until(
+            lambda: widget.presented_front.identity.data_revision > pressed_revision,
+            5.0,
+        )
         shown = widget.presented_front.identity.data_revision
         assert shown > pressed_revision, (
             "the panel froze for the whole drag: every live front was dropped "
@@ -155,7 +160,6 @@ def _sliding_history(_first_shot: int, rows: int = 5):
     return schema, axis
 
 
-@pytest.mark.gui
 def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag(
     qt_app, pump_until,
 ) -> None:

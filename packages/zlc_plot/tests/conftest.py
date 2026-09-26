@@ -93,6 +93,29 @@ def pump_until(qt_app):
     return _pump
 
 
+@pytest.fixture(scope="session")
+def warm_kernel_cache() -> None:
+    """The disk cache a render child's timed bound was measured on.
+
+    A child that finds no machine code for a kernel compiles it: seconds,
+    against the tens of milliseconds such a bound allows.  A fresh worktree,
+    or any edit to a kernel module, therefore turned those tests red as
+    timeouts that said nothing about the code -- so a cold cache is named
+    here instead of surfacing as one.
+    """
+
+    from zlc_plot import _kernel_warm
+
+    cold = _kernel_warm.cold_kernels()
+    if cold:
+        pytest.fail(
+            f"{len(cold)} numba kernels have no current disk cache "
+            f"({', '.join(cold[:3])}{', ...' if len(cold) > 3 else ''}): "
+            "run bin\\warm_numba_cache.bat (zlc warm_numba) before timing a child",
+            pytrace=False,
+        )
+
+
 def _reference_logical_shape(preset: str = "2x2") -> tuple[int, int]:
     """The (height, width) a plan of this preset produces, DERIVED.
 

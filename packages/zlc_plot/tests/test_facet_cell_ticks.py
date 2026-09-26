@@ -335,6 +335,11 @@ def test_boundary_label_gating_refires_after_focus_round_trip() -> None:
     session = PlotSession(_frames_snapshot(), _FRAMES_SPEC, size="8x8")
     try:
         session.focus_facet(4)  # an interior cell: no labels in overview
+        # ... and no offset text: the corner cell writes the grid's one.
+        # Focused, the cell is the whole plot and states its own again.
+        focused = session._renderer.axes["facet_cell"][4]
+        assert focused.xaxis.get_offset_text().get_visible()
+        assert focused.yaxis.get_offset_text().get_visible()
         session.show_facet_overview()
         _assert_shared_marks_boundary_labels(session)
     finally:

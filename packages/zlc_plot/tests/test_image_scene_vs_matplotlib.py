@@ -122,7 +122,7 @@ def test_the_scene_paints_what_imshow_paints(dtype, seed: int) -> None:
     if geometry is not None:
         blit, clip, affine = geometry
         lut = cmap((np.arange(256, dtype=float) + 0.5) / 256.0, bytes=True)
-        single, vmin32, span32, vmin64, span64 = _normalize_arithmetic(values.dtype, vmin, vmax)
+        single, vmin64, span64 = _normalize_arithmetic(values.dtype, vmin, vmax)
         kernels.raster_prepared_images(
             kernels.readable(values[np.newaxis]),
             kernels.readable(valid[np.newaxis]),
@@ -131,8 +131,6 @@ def test_the_scene_paints_what_imshow_paints(dtype, seed: int) -> None:
             kernels.readable(np.asarray([clip], dtype=np.int32)),
             kernels.readable(np.asarray([affine], dtype=np.float64)),
             kernels.readable(np.asarray(lut, dtype=np.uint8)),
-            vmin32,
-            span32,
             vmin64,
             span64,
             single,

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import math
 import struct
 import time
 from threading import Event
 
 import numpy as np
+import pytest
 
 from data_factory import (
     axis,
@@ -16,6 +19,7 @@ from data_factory import (
     repeat_domain,
 )
 
+from zlc_data import SITE
 from zlc_plot import (
     AxisRef,
     CurvePlot,
@@ -29,6 +33,7 @@ from zlc_plot.notebook import (
     _WIDGET_ESM,
     _frame_context,
     _front_packet,
+    _painted_frame,
     _selector_state_to_dict,
     _snapshot_display_data,
     NotebookView,
@@ -127,15 +132,22 @@ def test_widget_esm_is_a_pure_frame_blitter_and_input_normalizer() -> None:
     assert "pointerleave" in _WIDGET_ESM
 
 
+def _browser_constant(name: str) -> float:
+    raise ValueError(f"JSON.parse refuses {name}")
+
+
 def _echoed_frame(front) -> dict:
     """What the browser sends back: the packet header's own frame context.
 
-    Through JSON both ways, exactly as the comm carries it.
+    Through JSON both ways, exactly as the comm carries it, and parsed as
+    the browser parses it: ``JSON.parse`` knows no NaN and no Infinity.
     """
 
     packet = _front_packet(front)
     (size,) = struct.unpack("<I", packet[:4])
-    header = json.loads(packet[4 : 4 + size].decode("utf-8"))
+    header = json.loads(
+        packet[4 : 4 + size].decode("utf-8"), parse_constant=_browser_constant
+    )
     return json.loads(json.dumps({"identity": header["identity"], "axes": header["axes"]}))
 
 
@@ -170,6 +182,132 @@ def test_a_pointer_is_read_through_the_frame_the_browser_painted() -> None:
         state = view.session.selector_state(SelectorKind.CROSSHAIR)
         assert state is not None
         assert abs(state.value.x - 5.0) < 0.2, state.value
+    finally:
+        view.close()
+
+
+def test_an_axis_ending_where_its_unit_has_no_value_reaches_the_browser() -> None:
+    """A dBm value shown in mW is drawn from 0 mW, which is -inf dBm.
+
+    The header wrote that limit as ``-Infinity``, which the browser's
+    ``JSON.parse`` refuses: the widget dropped every frame of the panel
+    and stayed blank.  The limit travels as text, and the pointer's echo
+    reads back the axes exactly as they were sent.
+    """
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+        cell_axes=(axis("site", values=(0., 1., 2., 3., 4.), role=SITE),),
+        dtype=np.float64,
+        value_unit="dBm",
+    )
+    session = PlotSession(
+        make_snapshot(schema, np.asarray((-30., -20., -10., -3., 0.)).reshape(1, 1, 5), 0),
+        CurvePlot(AxisRef.cell_data("site")),
+        parameters={"value_display_unit": "mW"},
+    )
+    view = NotebookView(session, close_session_on_close=True)
+    try:
+        front = view.host.wait_for_front(timeout=5.0)
+        main = next(item for item in front.interaction.axes if item.role == "main")
+        assert main.canonical_y_limits[0] == -math.inf
+        painted = _painted_frame({"frame": _echoed_frame(front)})
+        assert painted is not None
+        assert painted[1] == front.interaction.axes
+    finally:
+        view.close()
+
+
+def test_a_front_the_browser_cannot_be_sent_is_skipped_and_said_once(
+    monkeypatch, caplog
+) -> None:
+    """A header the browser cannot be sent costs that front, not the view.
+
+    Raised on the sender thread, it ended the thread and the view never
+    painted again; skipped and said every frame, a live view logged twenty
+    warnings a second.  It is said once while the reason stands, and again
+    only after a front got through.
+    """
+
+    from zlc_plot import notebook as notebook_module
+
+    view = NotebookView(_session(), close_session_on_close=True)
+    try:
+        host = view.host
+        host.wait_for_front(timeout=5.0)
+        fronts = [
+            host.set_x_limits(0.0, high).result(timeout=5.0).front
+            for high in (10.0, 20.0, 30.0, 40.0)
+        ]
+        sent = _front_packet(fronts[2])
+
+        def packet(front) -> bytes:
+            if front is fronts[2]:
+                return sent
+            raise ValueError("notebook axis units must resolve exactly in the unit registry")
+
+        class _Widget:
+            frame_packet = b""
+
+        widget = _Widget()
+        view._widget = widget
+        monkeypatch.setattr(notebook_module, "_front_packet", packet)
+        caplog.set_level(logging.WARNING, logger=notebook_module.__name__)
+
+        def send(front) -> None:
+            # Through the sender thread, one front at a time: it takes the
+            # front, then writes it or skips it under the kernel lock.
+            view._on_front(front)
+            deadline = time.monotonic() + 5.0
+            while view._front is not front:
+                assert time.monotonic() < deadline, "the sender never took the front"
+                time.sleep(0.005)
+            with view._kernel_lock:
+                pass
+
+        send(fronts[0])
+        send(fronts[1])
+        assert widget.frame_packet == b""
+        send(fronts[2])
+        assert widget.frame_packet == sent
+        send(fronts[3])
+        assert widget.frame_packet == sent
+        assert view._sender.is_alive()
+        said = [record for record in caplog.records if record.name == notebook_module.__name__]
+        assert len(said) == 2, [record.getMessage() for record in said]
+    finally:
+        view.close()
+
+
+def test_display_refuses_a_first_front_the_browser_cannot_be_sent(monkeypatch) -> None:
+    """The first front is display()'s, and its caller hears a refusal.
+
+    Skipped there like any later front, display() returned a blank widget
+    and said nothing.  Refused before anything is shown, display() can be
+    called again once the front can be sent.
+    """
+
+    import IPython.core.interactiveshell as interactiveshell
+    from zlc_plot import notebook as notebook_module
+
+    monkeypatch.setattr(
+        interactiveshell.InteractiveShell, "initialized", staticmethod(lambda: False)
+    )
+    encode = notebook_module._front_packet
+
+    def refused(front) -> bytes:
+        raise ValueError("notebook axis units must resolve exactly in the unit registry")
+
+    view = NotebookView(_session(), close_session_on_close=True)
+    try:
+        monkeypatch.setattr(notebook_module, "_front_packet", refused)
+        with pytest.raises(ValueError, match="unit registry"):
+            view.display()
+        with pytest.raises(RuntimeError):
+            view.widget
+        monkeypatch.setattr(notebook_module, "_front_packet", encode)
+        view.display()
+        assert len(view.widget.frame_packet) > 4
     finally:
         view.close()
 

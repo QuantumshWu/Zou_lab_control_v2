@@ -9,6 +9,8 @@ took one at all, whatever it was showing.
 
 from __future__ import annotations
 
+from functools import partial
+
 import matplotlib
 import pytest
 
@@ -17,6 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import zlc_plot.ticks as ticks_module
+from zlc_plot._axis_scale import axis_space, axis_value
 from zlc_plot.layout import Room
 from zlc_plot.ticks import (
     MIN_TICK_LABEL_PT,
@@ -193,6 +196,28 @@ def test_identical_tick_input_reuses_layout_but_range_and_extent_do_not(
         axes.set_position((0.2, 0.2, 0.35, 0.6))
         locator.tick_values(10.0, 0.0)
         assert calls == 3
+    finally:
+        plt.close(figure)
+
+def test_a_scale_set_again_gets_the_policy_back() -> None:
+    """``set_xscale`` puts Matplotlib's AutoLocator back on every call.
+
+    A nonuniform image axis sets its function scale again whenever its
+    coordinates change -- another run, another display unit, a grid cell
+    after a resize -- and the scale's NAME stays "function", so an axis whose
+    policy signature still matched was left on Matplotlib's defaults for good.
+    """
+
+    figure = plt.figure(figsize=(4.0, 3.0), dpi=100)
+    try:
+        axes = figure.add_subplot(111)
+        for coordinates in ((0.0, 1.0, 3.0), (0.0, 2.0, 3.0)):
+            axes.set_xscale("function", functions=(
+                partial(axis_space, scale=coordinates),
+                partial(axis_value, scale=coordinates),
+            ))
+            apply_smart_ticks(axes, "x", label_pt=LABEL_PT)
+            assert isinstance(axes.xaxis.get_major_locator(), SmartOffsetLocator)
     finally:
         plt.close(figure)
 

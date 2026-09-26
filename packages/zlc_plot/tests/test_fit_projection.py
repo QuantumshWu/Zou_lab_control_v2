@@ -228,6 +228,42 @@ def test_fit_expression_crosses_a_logarithmic_axis_as_the_unit_registry_does() -
     assert own.fit_expression_text(model, {"fixed": {"sigma": 1.5}}) == "sigma=1.5"
 
 
+def test_a_view_whose_wall_has_no_canonical_value_fits_what_is_on_screen() -> None:
+    """A dBm axis shown in mW and zoomed out below 0 mW has no dBm there.
+
+    Every fit over that view, each live frame's included, raised "range
+    low must be finite"; then it took the axis whole, the points beyond
+    the other wall with it.  Every point on screen is above that wall, so
+    the fit is the screen's.  A view wholly below 0 mW shows no point and
+    narrows nothing: the fit takes the axis whole and says so.
+    """
+
+    spec = CurvePlot(AxisRef.point("x"))
+    snapshot = _dbm_curve_snapshot()
+    model = FitEngine().registry.get("gaussian_offset")
+    shown = {"x_display_unit": "mW"}
+
+    # Up to 2 mW is up to 3.01 dBm: seven of the nine points.
+    selected = _projection(
+        spec, snapshot=snapshot, display=shown, viewport=(NumericRange(-0.1, 2.0), None),
+    ).fit_selection(model)
+    assert selected.scope is FitScope.VIEWPORT
+    assert selected.sample_count == 7
+
+    selected = _projection(
+        spec, snapshot=snapshot, display=shown, viewport=(NumericRange(-1.0, -0.5), None),
+    ).fit_selection(model)
+    assert selected.scope is FitScope.ALL
+    assert selected.sample_count == 9
+
+    # 0.5..2 mW is -3.01..3.01 dBm: five of the nine points.
+    selected = _projection(
+        spec, snapshot=snapshot, display=shown, viewport=(NumericRange(0.5, 2.0), None),
+    ).fit_selection(model)
+    assert selected.scope is FitScope.VIEWPORT
+    assert selected.sample_count == 5
+
+
 def test_fit_selection_seals_the_sigma_plane_with_the_others() -> None:
     """Every plane an accepted fit replays to its subscribers is read-only.
 

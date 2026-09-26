@@ -127,6 +127,7 @@ def test_naming_one_point_axis_collapses_that_coordinate() -> None:
     """
 
     from zlc_plot.data_view import DataView
+    from zlc_plot.specs import Reduction
 
     schema = make_dataset_schema(
         repeat_domain(size=1),
@@ -141,8 +142,10 @@ def test_naming_one_point_axis_collapses_that_coordinate() -> None:
     snapshot = make_snapshot(schema, np.arange(6.0).reshape(1, 6), revision=1)
     view = DataView(snapshot)
 
-    by_detuning = view.histogram(bins=4, reduce_axes=(AxisRef.point("detuning"),))
-    by_power = view.histogram(bins=4, reduce_axes=(AxisRef.point("power"),))
+    by_detuning = view._histogram_from_plan(
+        4, view._histogram_plan((), (AxisRef.point("detuning"),), Reduction.MEAN, 1))
+    by_power = view._histogram_from_plan(
+        4, view._histogram_plan((), (AxisRef.point("power"),), Reduction.MEAN, 1))
     # One mean per remaining coordinate, not one for the whole scan.
     assert int(by_detuning.counts.sum()) == 3
     assert int(by_power.counts.sum()) == 2
@@ -163,12 +166,10 @@ def test_first_is_the_first_value_and_not_the_largest(dtype) -> None:
     values = np.asarray([[1.0], [10.0], [5.0]], dtype=dtype)
     view = DataView(make_snapshot(schema, values, revision=1))
     edges = [0.0, 3.0, 8.0, 15.0]
-    first = view.histogram(
-        bins=edges, reduce_axes=(AxisRef.repeat("repeat"),), aggregation=Reduction.FIRST
-    )
-    largest = view.histogram(
-        bins=edges, reduce_axes=(AxisRef.repeat("repeat"),), aggregation=Reduction.MAX
-    )
+    first = view._histogram_from_plan(edges, view._histogram_plan(
+        (), (AxisRef.repeat("repeat"),), Reduction.FIRST, 1))
+    largest = view._histogram_from_plan(edges, view._histogram_plan(
+        (), (AxisRef.repeat("repeat"),), Reduction.MAX, 1))
     np.testing.assert_array_equal(first.counts, [[1, 0, 0]])
     np.testing.assert_array_equal(largest.counts, [[0, 0, 1]])
 

@@ -221,7 +221,8 @@ def test_large_integer_histogram_uses_one_native_uniform_count(
     for snapshot, edges, counts, peak_limit in expected:
         tracemalloc.start()
         tracemalloc.reset_peak()
-        payload = DataView(snapshot).histogram(bins=edges)
+        view = DataView(snapshot)
+        payload = view._histogram_from_plan(edges, view._histogram_plan((), (), Reduction.MEAN, 1))
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         np.testing.assert_array_equal(payload.edges.canonical, edges)
@@ -283,7 +284,8 @@ def test_extreme_uint64_histogram_falls_back_without_overflow() -> None:
         revision=0,
     )
 
-    payload = DataView(snapshot).histogram(bins=(-0.5, 0.5))
+    view = DataView(snapshot)
+    payload = view._histogram_from_plan((-0.5, 0.5), view._histogram_plan((), (), Reduction.MEAN, 1))
     np.testing.assert_array_equal(payload.edges.canonical, (-0.5, 0.5))
     np.testing.assert_array_equal(payload.counts, [[0]])
 

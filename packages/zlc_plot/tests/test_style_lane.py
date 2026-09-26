@@ -140,6 +140,7 @@ def test_building_a_style_does_not_reach_for_matplotlib(tmp_path) -> None:
         cwd=Path(__file__).resolve().parents[3],
         capture_output=True,
         text=True,
+        timeout=120,
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr

@@ -32,7 +32,7 @@ from data_factory import (
     repeat_domain,
 )
 from zlc_data import REPEAT, SITE
-from zlc_plot import AxisRef, HistogramPlot, ImagePlot, PlotSession, SelectorKind
+from zlc_plot import AxisRef, CurvePlot, HistogramPlot, ImagePlot, PlotSession, SelectorKind
 from zlc_plot._axis_scale import LINEAR, LOG, axis_space, axis_value, midpoint
 from zlc_plot._axis_transform import AxisTransform
 from zlc_plot.selectors import DragHandle, NumericRange, SelectorState, _drag_numeric_range
@@ -185,6 +185,300 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
             image.close()
 
 
+def test_a_curve_shown_in_another_unit_points_where_it_draws() -> None:
+    """A curve's axis is drawn straight in its DISPLAY unit.
+
+    Only the image built a pointer scale for a nonlinear unit pair; every
+    other surface interpolated in the canonical unit between converted
+    limits, so on a dBm axis shown in mW a press at the middle of the plot
+    read -15 dBm where the picture says -3 -- and a range or a threshold
+    was committed there.
+    """
+
+    from zlc_data.units import DEFAULT_UNITS
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+        cell_axes=(axis("power", values=(-30., -20., -10., -3., 0.), role=SITE, unit="dBm"),),
+        dtype=np.float64,
+    )
+    session = PlotSession(
+        make_snapshot(schema, np.arange(5.).reshape(1, 1, 5), 0),
+        CurvePlot(AxisRef.cell_data("power")),
+        parameters={"x_display_unit": "mW"},
+    )
+    try:
+        session.rgba()
+        transform = session._axis_transform_for_axis(
+            session._renderer.primary_axes, session._projected
+        )
+        left, top, right, bottom = transform.bounds
+        middle = top + 0.5 * (bottom - top)
+        for fraction in (0.1, 0.5, 0.9):
+            nx = left + fraction * (right - left)
+            shown = transform.display_from_normalized(nx, middle).x
+            pointed = transform.canonical_from_normalized(nx, middle).x
+            assert pointed == pytest.approx(float(DEFAULT_UNITS.convert(shown, "mW", "dBm")))
+    finally:
+        session.close()
+
+
+def test_an_axis_ending_where_its_unit_has_no_value_still_takes_a_drag() -> None:
+    """A dBm value shown in mW is drawn from 0 mW, and 0 mW is -inf dBm.
+
+    The selector bounds were built from that end, and the press and every
+    move of every drag on the axis raised.  A hand below the axis, where no
+    dBm exists at all, reads nothing there: a new box stays where the last
+    reading drew it, and letting go there keeps it.  A box slid down past
+    0 mW stops there on that axis alone; a hand that went there is no
+    click; an Area's side, its body and an X range follow what the hand
+    still reads there; and a threshold on the axis is grabbed within a
+    fraction of what is drawn.
+    """
+
+    from zlc_data.units import DEFAULT_UNITS
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+        cell_axes=(axis("site", values=(0., 1., 2., 3., 4.), role=SITE),),
+        dtype=np.float64,
+        value_unit="dBm",
+    )
+    session = PlotSession(
+        make_snapshot(schema, np.asarray((-30., -20., -10., -3., 0.)).reshape(1, 1, 5), 0),
+        CurvePlot(AxisRef.cell_data("site")),
+        parameters={"value_display_unit": "mW"},
+    )
+    try:
+
+        def hand(*steps: tuple[str, float, float]) -> AxisTransform:
+            # One left-button gesture, read through the frame drawn as it
+            # begins, at fractions of the plot box, top-origin like the box.
+            session.rgba()
+            transform = session._axis_transform_for_axis(
+                session._renderer.primary_axes, session._projected
+            )
+            left, top, right, bottom = transform.bounds
+            for action, fraction_x, fraction_y in steps:
+                session._raster_pointer_event(
+                    action,
+                    left + fraction_x * (right - left),
+                    top + fraction_y * (bottom - top),
+                    button=1,
+                    axes_snapshot=transform,
+                )
+            return transform
+
+        def mw(value: float) -> float:
+            return float(DEFAULT_UNITS.convert(value, "dBm", "mW"))
+
+        transform = hand(
+            ("press", 0.1, 0.1),
+            ("move", 0.3, 0.6),
+            ("move", 0.35, 1.05),
+            ("release", 0.35, 1.05),
+        )
+        assert transform.y_limits[0] == 0.0
+        assert transform.canonical_y_limits[0] == -math.inf
+        (area,) = session.selectors
+        assert area.kind is SelectorKind.AREA
+        top_mw = transform.y_limits[1]
+        assert mw(area.value.y.low) == pytest.approx(0.4 * top_mw, rel=0.05)
+        assert mw(area.value.y.high) == pytest.approx(0.9 * top_mw, rel=0.05)
+        x_low, x_high = transform.x_limits
+        span = x_high - x_low
+        assert area.value.x.high == pytest.approx(x_low + 0.3 * span, abs=0.02 * span)
+
+        # Slid 0.2 down, then 0.5 down and 0.1 right, where its bottom
+        # would be below 0 mW: it stays where the last move drew it on y
+        # and still slides on x.  Every such move raised.
+        hand(
+            ("press", 0.2, 0.35),
+            ("move", 0.2, 0.55),
+            ("move", 0.3, 0.85),
+            ("release", 0.3, 0.85),
+        )
+        (area,) = session.selectors
+        assert mw(area.value.y.low) == pytest.approx(0.2 * top_mw, rel=0.05)
+        assert mw(area.value.y.high) == pytest.approx(0.7 * top_mw, rel=0.05)
+        assert area.value.x.low == pytest.approx(x_low + 0.2 * span, abs=0.02 * span)
+
+        # A new box dragged straight below the axis read nothing on the
+        # way, and letting go there took the committed one away as a click.
+        hand(("press", 0.7, 0.97), ("move", 0.75, 1.05), ("release", 0.75, 1.05))
+        assert session.selectors == (area,)
+
+        # Its left side moves x alone, so it follows a hand that drifts
+        # below the axis, where y reads nothing.  Required of both, it
+        # stayed where it was.
+        hand(("press", 0.2, 0.55), ("move", 0.1, 1.05), ("release", 0.1, 1.05))
+        (area,) = session.selectors
+        assert area.value.x.low == pytest.approx(x_low + 0.1 * span, abs=0.02 * span)
+        assert area.value.x.high == pytest.approx(x_low + 0.4 * span, abs=0.02 * span)
+        assert mw(area.value.y.low) == pytest.approx(0.2 * top_mw, rel=0.05)
+
+        # Its body, carried a little down and then with the hand below the
+        # axis, keeps the height the last reading gave and still slides
+        # along x, as it does when the box itself reaches 0 mW.
+        hand(
+            ("press", 0.25, 0.55),
+            ("move", 0.3, 0.6),
+            ("move", 0.45, 1.05),
+            ("release", 0.45, 1.05),
+        )
+        (area,) = session.selectors
+        assert area.value.x.low == pytest.approx(x_low + 0.3 * span, abs=0.02 * span)
+        assert mw(area.value.y.low) == pytest.approx(0.15 * top_mw, rel=0.05)
+        assert mw(area.value.y.high) == pytest.approx(0.65 * top_mw, rel=0.05)
+
+        # A fraction of a canonical span ending at -inf dBm reached
+        # nothing: the threshold could not be grabbed.
+        session.set_threshold_selector(0.5 * top_mw)
+        hand(("press", 0.8, 0.5), ("move", 0.8, 0.7), ("release", 0.8, 0.7))
+        threshold = session.selector_state(SelectorKind.THRESHOLD)
+        assert mw(threshold.value) == pytest.approx(0.3 * top_mw, rel=0.05)
+
+        # An X range reads x alone: it follows a hand that drifts below the
+        # axis, where y reads nothing, and is let go there.
+        session.set_x_selector(x_low + 0.6 * span, x_low + 0.9 * span)
+        hand(("press", 0.75, 0.2), ("move", 0.8, 1.05), ("release", 0.8, 1.05))
+        x_range = session.selector_state(SelectorKind.X_RANGE)
+        assert x_range.value.low == pytest.approx(x_low + 0.65 * span, abs=0.02 * span)
+        assert session.selector_state(SelectorKind.AREA) == area
+    finally:
+        session.close()
+
+
+def test_a_unit_with_no_value_for_a_selector_names_it_and_lets_the_view_go() -> None:
+    """A mW value drawn from 0 mW has nothing in dBm at its floor: -inf.
+
+    A box dragged to the bottom of that axis refused the switch to dBm as
+    "range low must be finite", with nothing to say which selector to
+    move.  The refusal names it, and nothing changed; a fixed value limit
+    there is refused by name the same way, where it was stored as -inf
+    and refused by the drawing unnamed.  A view reaching below 0 mW is
+    where the hand left it, not a choice to keep: that axis lets go of its
+    navigation and the switch goes through.  A curve's fit reads x alone
+    and stays current; an image's keeps to the rows on screen, and letting
+    its y go takes the fit's domain with it.
+    """
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+        cell_axes=(axis("site", values=(0., 1., 2., 3., 4.), role=SITE),),
+        dtype=np.float64,
+        value_unit="mW",
+    )
+    session = PlotSession(
+        make_snapshot(schema, np.asarray((0.5, 1., 2., 4., 8.)).reshape(1, 1, 5), 0),
+        CurvePlot(AxisRef.cell_data("site")),
+    )
+    try:
+        session.rgba()
+        session.set_area_selector(NumericRange(1.0, 3.0), NumericRange(0.0, 4.0))
+        before = session.display_state.values
+        with pytest.raises(ValueError, match="area selector y low 0 mW has no value in dBm"):
+            session.set_parameters({"value_display_unit": "dBm"})
+        assert session.display_state.values == before
+        (area,) = session.selectors
+        assert area.value.y.low == 0.0
+
+        session.remove_selector(SelectorKind.AREA)
+        session.set_parameters({"relim_mode": "fixed", "y_min": 0.0, "y_max": 4.0})
+        fixed = session.display_state.values
+        with pytest.raises(ValueError, match="y_min 0 mW has no value in dBm"):
+            session.set_parameters({"value_display_unit": "dBm"})
+        assert session.display_state.values == fixed
+        session.set_parameters({"relim_mode": before["relim_mode"]})
+
+        session.set_viewport(NumericRange(1.0, 3.0), NumericRange(-1.0, 9.0))
+        generation = session._fit_context_generation
+        session.set_parameters({"value_display_unit": "dBm"})
+        assert session.display_state["value_display_unit"] == "dBm"
+        x, y = session.viewport
+        assert (x.low, x.high) == pytest.approx((1.0, 3.0))
+        assert y is None
+        assert session._fit_context_generation == generation
+        assert np.asarray(session.rgba()).size
+    finally:
+        session.close()
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+        cell_axes=(axis("power", values=(0.5, 1., 1.5), role=SITE, unit="mW"),
+                   axis("site", values=(0., 1., 2.), role=SITE)),
+        dtype=np.float64,
+    )
+    image = PlotSession(
+        make_snapshot(schema, np.arange(9.).reshape(1, 1, 3, 3), 0),
+        ImagePlot(AxisRef.cell_data("site"), AxisRef.cell_data("power")),
+    )
+    try:
+        image.rgba()
+        image.set_viewport(NumericRange(0.0, 2.0), NumericRange(-1.0, 1.5))
+        x, y = image.viewport
+        assert y.low < 0.0
+        generation = image._fit_context_generation
+        image.set_parameters({"y_display_unit": "dBm"})
+        assert image.viewport == (x, None)
+        assert image._fit_context_generation == generation + 1
+    finally:
+        image.close()
+
+
+def test_a_view_where_its_canonical_unit_has_no_value_is_not_navigated_there() -> None:
+    """A dBm value shown in mW and zoomed out below 0 mW has no dBm there.
+
+    Converted to dBm whole, that view raised "range low must be finite"
+    after it had been committed and drawn: no viewport notice went out,
+    and every unit switch -- back to dBm included -- was refused until the
+    view was reset.  That axis is not navigated in dBm: the notice carries
+    x alone, and the switch lets y go.  An edit that leaves y's own unit
+    alone -- a window -- leaves y's view as drawn; rebuilt through a dBm it
+    has none in, the zoom was let go.
+    """
+
+    schema = make_dataset_schema(
+        repeat_domain(size=1), mapped_domain_from_columns({"shot": [0.]}),
+        cell_axes=(axis("site", values=(0., 1., 2., 3., 4.), role=SITE),),
+        dtype=np.float64,
+        value_unit="dBm",
+    )
+    session = PlotSession(
+        make_snapshot(schema, np.asarray((-30., -20., -10., -3., 0.)).reshape(1, 1, 5), 0),
+        CurvePlot(AxisRef.cell_data("site")),
+        parameters={"value_display_unit": "mW"},
+    )
+    notices: list = []
+    try:
+        session.rgba()
+        session.subscribe_viewport(notices.append)
+        session.set_viewport(NumericRange(1.0, 3.0), NumericRange(-0.1, 1.1))
+        (notice,) = notices
+        assert notice.display == session.viewport
+        x, y = notice.canonical
+        assert (x.low, x.high) == pytest.approx((1.0, 3.0))
+        assert y is None
+
+        view = session.viewport
+        session.set_parameters({"window": 2})
+        assert session.viewport == view
+
+        # A curve's fit reads x alone, so letting y go leaves a fit in
+        # flight, and a repeated one, where they were.
+        generation = session._fit_context_generation
+        session.set_parameters({"value_display_unit": "dBm"})
+        assert session.display_state["value_display_unit"] == "dBm"
+        x, y = session.viewport
+        assert (x.low, x.high) == pytest.approx((1.0, 3.0))
+        assert y is None
+        assert session._fit_context_generation == generation
+        assert notices[-1].display == session.viewport
+        assert np.asarray(session.rgba()).size
+    finally:
+        session.close()
+
+
 def test_concurrent_live_draws_and_exports_share_one_safe_mathtext_parser(
     tmp_path,
 ) -> None:
@@ -243,6 +537,75 @@ def test_a_body_drag_slides_the_box_instead_of_stretching_it() -> None:
     assert straight.low == pytest.approx(20.0)
     assert straight.high == pytest.approx(110.0)
 
+    # A nonuniform image lattice draws its coordinates as equal cells: a box
+    # over four cells grabbed at 1.5 and carried three cells right covers
+    # the next four, not a thirteen-and-a-half wide shift of the numbers.
+    lattice = (0.0, 1.0, 2.0, 3.0, 10.0, 20.0, 30.0)
+    carried = _drag_numeric_range(
+        NumericRange(0.0, 3.0),
+        handle=DragHandle.BODY,
+        origin=1.5,
+        position=15.0,
+        scale=lattice,
+    )
+    assert carried.low == pytest.approx(3.0)
+    assert carried.high == pytest.approx(30.0)
+
+    # The wall stops the slide where the axis is straight too.  Pushed back
+    # by a data delta, a decade-tall box slid 0.1 decade into the top of a
+    # (0.8, 1200) count axis came back a decade and a quarter tall, and
+    # 0.2 decade made it the whole axis.
+    for decades in (0.1, 0.2):
+        walled = _drag_numeric_range(
+            NumericRange(100.0, 1000.0),
+            handle=DragHandle.BODY,
+            origin=10.0,
+            position=10.0 * 10.0**decades,
+            bounds=NumericRange(0.8, 1200.0),
+            scale=LOG,
+        )
+        assert walled.high == pytest.approx(1200.0)
+        assert walled.high / walled.low == pytest.approx(10.0)
+    # A box sticking out of a view zoomed to (10, 1200) is pulled inside
+    # as the box it is.  Pushed inside by a data delta first, (1, 100)
+    # became (10, 109): one decade where there were two.
+    held = _drag_numeric_range(
+        NumericRange(1.0, 100.0),
+        handle=DragHandle.BODY,
+        origin=50.0,
+        position=50.0,
+        bounds=NumericRange(10.0, 1200.0),
+        scale=LOG,
+    )
+    assert held.low == pytest.approx(10.0)
+    assert held.high == pytest.approx(1000.0)
+    # A box drawn down to 0 on a linear count axis, then shown on a log
+    # one, has an end the scale cannot place: it is drawn from the bottom
+    # of the view and slides from there.  Taken at -inf, it became the
+    # whole view at the first move.
+    lifted = _drag_numeric_range(
+        NumericRange(0.0, 60.0),
+        handle=DragHandle.BODY,
+        origin=10.0,
+        position=100.0,
+        bounds=NumericRange(0.8, 1200.0),
+        scale=LOG,
+    )
+    assert lifted.low == pytest.approx(8.0)
+    assert lifted.high == pytest.approx(600.0)
+    # Carried five cells right against the end of the lattice, the
+    # four-cell box stops three cells over, not stretched over the axis.
+    stopped = _drag_numeric_range(
+        NumericRange(0.0, 3.0),
+        handle=DragHandle.BODY,
+        origin=1.5,
+        position=35.0,
+        bounds=NumericRange(0.0, 30.0),
+        scale=lattice,
+    )
+    assert stopped.low == pytest.approx(3.0)
+    assert stopped.high == pytest.approx(30.0)
+
 
 def test_an_edge_handle_sits_on_the_edge_it_belongs_to() -> None:
     """``(low + high) / 2`` is the middle of the box only on a linear axis."""
@@ -260,6 +623,45 @@ def test_an_edge_handle_sits_on_the_edge_it_belongs_to() -> None:
     )
     geometric = transform.display_to_normalized(0.0, midpoint(0.8, 1200.0, LOG))[1]
     assert geometric == pytest.approx(0.5)
+
+
+def test_a_box_end_a_log_axis_cannot_place_is_grabbed_where_it_is_drawn() -> None:
+    """A box drawn down to 0 counts, then shown on a log count axis.
+
+    0 is -inf on a log axis: the bottom handles sat at -inf pixels and the
+    middle of the sides was NaN, so neither the side handles nor the sides
+    were drawn, and a press on the left side took the body and slid the
+    whole box.  Drawn and grabbed at the wall it is clipped to, the side
+    moves alone.
+    """
+
+    session = _histogram_session()
+    try:
+        session.rgba()
+        transform = session._axis_transform_for_axis(
+            session._renderer.primary_axes, session._projected
+        )
+        x_low, x_high = transform.x_limits
+        left, right = x_low + 0.3 * (x_high - x_low), x_low + 0.6 * (x_high - x_low)
+        top = 0.5 * transform.y_limits[1]
+        session.set_area_selector(NumericRange(left, right), NumericRange(0.0, top))
+        session.set_parameters({"log_y": True})
+        session.rgba()
+        transform = session._axis_transform_for_axis(
+            session._renderer.primary_axes, session._projected
+        )
+        nx, ny = transform.display_to_normalized(
+            left, midpoint(transform.y_limits[0], top, LOG)
+        )
+        for action, x in (("press", nx), ("move", nx - 0.05), ("release", nx - 0.05)):
+            session._raster_pointer_event(action, x, ny, button=1, axes_snapshot=transform)
+        area = session.selector_state(SelectorKind.AREA)
+        assert area.value.x.low < left
+        assert area.value.x.high == pytest.approx(right)
+        assert area.value.y.low == 0.0
+        assert area.value.y.high == pytest.approx(top)
+    finally:
+        session.close()
 
 
 def test_axis_space_is_reversible_and_guards_a_stale_value() -> None:

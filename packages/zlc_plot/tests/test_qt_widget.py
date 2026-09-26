@@ -23,7 +23,6 @@ from zlc_plot import (
 )
 from zlc_plot.raster import RasterPlotHost
 
-@pytest.mark.gui
 def test_qt_widget_receives_front_and_commits_area_drag(qt_app, pump_until) -> None:
     from PyQt5.QtCore import QEvent, QPoint, Qt
     from PyQt5.QtTest import QTest
@@ -115,7 +114,6 @@ def test_qt_widget_receives_front_and_commits_area_drag(qt_app, pump_until) -> N
             widget.close_adapter()
         host.close(timeout=10)
 
-@pytest.mark.gui
 def test_staged_widget_accepts_its_exact_current_front_idempotently(qt_app) -> None:
     from PyQt5 import QtCore, QtGui, QtTest
 
@@ -186,7 +184,6 @@ def test_staged_widget_accepts_its_exact_current_front_idempotently(qt_app) -> N
             widget.close_adapter()
         host.close(timeout=10)
 
-@pytest.mark.gui
 def test_qt_double_click_focus_repaints_a_static_facet_host(qt_app, pump_until) -> None:
     """The focus-rendered front supersedes the in-flight gesture's surface.
 
@@ -270,7 +267,6 @@ def test_qt_double_click_focus_repaints_a_static_facet_host(qt_app, pump_until) 
             widget.close_adapter()
         host.close(timeout=10)
 
-@pytest.mark.gui
 def test_the_widget_asks_the_screen_before_it_subscribes(qt_app, pump_until) -> None:
     """The correction starts at construction, not one render later.
 
@@ -377,7 +373,6 @@ def test_a_bare_hover_is_not_a_hand_but_every_part_of_a_drag_is() -> None:
     assert _is_a_hand("key", False) is True
     assert _is_a_hand("cancel", False) is True
 
-@pytest.mark.gui
 def test_a_drag_stays_a_hand_from_press_to_release(qt_app, pump_until) -> None:
     """Every move of a drag must reach the host carrying its button.
 

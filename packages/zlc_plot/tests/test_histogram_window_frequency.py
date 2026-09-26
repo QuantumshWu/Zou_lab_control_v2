@@ -58,12 +58,9 @@ class _History:
         self.shots: dict[int, np.ndarray] = {}
         self.invalid: dict[int, np.ndarray] = {}
         self.revision = 0
-        self.stable_since = -1
 
     def publish(self, index: int, *, frame: np.ndarray | None = None, invalid: np.ndarray | None = None):
         self.revision += 1
-        if index in self.shots:
-            self.stable_since = self.revision
         self.shots[index] = _frame(index, self.dtype, self.high) if frame is None else frame
         if invalid is not None:
             self.invalid[index] = invalid
@@ -82,7 +79,7 @@ class _History:
             validity=validity,
             block_id="roi.indexed",
             stream_generation="roi",
-            window=IndexedWindow(start, latest, self.stable_since),
+            window=IndexedWindow(start, latest),
         )
 
 
@@ -141,10 +138,9 @@ def test_the_table_moves_with_the_window_and_stays_exact(monkeypatch) -> None:
         view = DataView(snapshot, inherit_domains_from=previous)
         _assert_exact(view, snapshot, window)
 
-    # A retained shot replaced: the fence moves past the carried revision,
-    # so the table is recounted rather than moved -- and is still exact.
+    # A retained shot replaced: its segment is a new one, so the table
+    # does not carry the old shot's counts -- and is still exact.
     previous, snapshot = view, history.publish(13, frame=np.full((HEIGHT, WIDTH), 7, dtype=np.uint16))
-    assert snapshot.block.window.stable_since == history.revision
     view = DataView(snapshot, inherit_domains_from=previous)
     _assert_exact(view, snapshot, window)
 
@@ -244,7 +240,7 @@ def test_an_unchanged_snapshot_shares_the_table_and_no_provenance_means_no_table
         schema=_schema((-1, 0), np.float64),
         values=np.stack([_frame(1), _frame(2)])[None].astype(np.float64),
         revision=1,
-        window=IndexedWindow(0, 1, -1),
+        window=IndexedWindow(0, 1),
     )
     assert DataView(floats).window_frequency(2) is None
     assert DataView(floats, inherit_domains_from=view)._frequency_carry is None
@@ -270,7 +266,7 @@ def test_an_unchanged_snapshot_shares_the_table_and_no_provenance_means_no_table
     block = DataBlock._from_owned_segments(
         BlockId("repeated"), plain.ref.revision, repeated_schema, (planes, planes),
         origins=np.asarray(((0, 0), (0, 2))), shapes=np.asarray(((1, 2), (1, 2))),
-        window=IndexedWindow(0, 3, -1),
+        window=IndexedWindow(0, 3),
     )
     repeated = type(plain)(block.ref(plain.ref.stream_generation), block)
     view = DataView(repeated)

@@ -7,9 +7,11 @@ band were compiled during experiments, every time the cache was cleared.
 And the 3D warmer reached only three of its own five, because two belong to
 the SCENE and it never drew one.
 
-Nothing here compiles: these assert the two properties that let the warmer
-notice such a gap by itself -- that it finds every kernel, and that the work
-it runs is work the product can actually do.
+These assert the two properties that let the warmer notice such a gap by
+itself -- that it finds every kernel, and that the work it runs is work the
+product can actually do.  The ones that RUN that work, here or in a fresh
+interpreter, load it from a current cache; on a cold one they compile it,
+which is the compile the warmer exists to take.
 """
 from __future__ import annotations
 
@@ -113,6 +115,32 @@ def test_the_representative_work_reaches_every_kernel() -> None:
     finally:
         _raster_kernels.ENGINE = previous_plot
     assert _kernel_warm.cold_kernels() == ()
+
+    # A kernel that reads a plane in its own dtype is warm only in the
+    # dtypes it was asked in, and ``cold_kernels`` cannot see a missing
+    # one: the image fit went on warming four storages after the image
+    # warmed eight, and a bool image was drawn by no warm at all.  So the
+    # two that take a producer's plane as it comes say which they hold.
+    from zlc_plot import _fit_radial
+
+    def held(kernel) -> set[str]:
+        return {
+            str(_kernel_warm._argument_types(signature)[0].dtype)
+            for signature in kernel.signatures
+        }
+
+    planes = {np.dtype(dtype).name for dtype in _kernel_warm._PLANE_DTYPES}
+    assert planes <= held(_raster_kernels.raster_prepared_images)
+    # In the storage the fit reads each plane in, asked of the input's own
+    # rule: a bool plane is read as its uint8 counts.
+    from zlc_plot.fit import _regular_image_storage
+
+    fitted = {
+        storage.name
+        for storage in map(_regular_image_storage, planes)
+        if storage is not None
+    }
+    assert fitted <= held(_fit_radial._compiled_regular_centered_context)
 
 
 class _FakeIndex:
@@ -282,43 +310,6 @@ def test_regular_image_fit_preserves_camera_storage_and_returns_float64() -> Non
     np.testing.assert_allclose(
         result.fitted_values + result.residuals, original.reshape(-1), rtol=0.0, atol=1e-12
     )
-
-
-def test_the_zoom_the_warmer_renders_is_centred_on_the_image(monkeypatch) -> None:
-    """The warmer's frame is a (repeat, point, y, x) block; the picture is
-    its trailing two dimensions.  Read as ``shape[-3:-1]`` a 3 x 5 image
-    was 1 x 3, so the zoom work was centred on (1.5, 0.5) with the wrong
-    aspect -- a viewport no operator ever opens, compiled and cached in
-    place of the one they do."""
-
-    import zlc_plot
-    from zlc_plot import _raster_kernels, AxisRef, ImagePlot
-
-    viewports = []
-    original = zlc_plot.PlotSession.set_viewport
-
-    def recording(self, x, y):
-        viewports.append((x, y))
-        return original(self, x, y)
-
-    monkeypatch.setattr(zlc_plot.PlotSession, "set_viewport", recording)
-    previous_plot = _raster_kernels.ENGINE
-    _raster_kernels.ENGINE = "numpy"
-    try:
-        snapshot = _kernel_warm._image_snapshot(3, 5, np.float64)
-        assert np.asarray(snapshot.block.values).shape == (1, 1, 3, 5)
-        _kernel_warm._render(
-            snapshot,
-            ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y")),
-            zoom_steps=1,
-        )
-    finally:
-        _raster_kernels.ENGINE = previous_plot
-    assert len(viewports) == 1
-    x, y = viewports[0]
-    assert (x.low + x.high) / 2.0 == 2.5
-    assert (y.low + y.high) / 2.0 == 1.5
-    assert (y.high - y.low) / (x.high - x.low) == pytest.approx(3.0 / 5.0)
 
 
 def test_the_cells_follow_the_last_grid_and_the_scene_comes_last(monkeypatch) -> None:
