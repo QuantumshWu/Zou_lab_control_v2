@@ -109,13 +109,13 @@ def test_indexed_history_keeps_each_shots_stated_error_and_its_window() -> None:
             events,
             5,
             7,
+            5,
             None,
             (),
             None,
-            stable_since=4,
         )
     )
-    assert built.block.window == IndexedWindow(5, 7, 4)
+    assert built.block.window == IndexedWindow(5, 7)
     assert built.block.revision == DatasetRevision(9)
     built = built.materialize()
     values = built.block.values.reshape(-1)
@@ -143,6 +143,7 @@ def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
             events,
             0,
             2,
+            0,
             None,
             (),
             None,

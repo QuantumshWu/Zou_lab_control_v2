@@ -48,8 +48,9 @@ from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
 )
-from .plane import GenerationRetired, GenerationSchemaAdvanced, ObsoleteParentResult
+from .plane import GenerationSchemaAdvanced, ObsoleteParentResult
 from .plane import SignalDataPlane, SignalPublication, SignalValue
+from .streams import SourceGenerationEnded
 from .host import stable_signal_key
 
 FIT_PARAMETER_CONTRACT = "zlc.selection.fit.parameter"
@@ -355,10 +356,16 @@ def _roi_statistics(
     shape = values.shape[:2]
     flat_values = values.reshape(*shape, -1)
     flat_finite = finite.reshape(*shape, -1)
+    # A cell counts whole, in part (a band, or an invalid pixel inside it),
+    # or not at all -- every cell of a live finite run not yet written.
     # Asked once for the whole set rather than per cell: where nothing is
     # excluded the sample IS the row, and compacting it through a boolean
     # mask copies every pixel of the region to arrive at the same numbers.
-    everything_counts = bool(flat_finite.all())
+    whole = (
+        flat_finite.all(axis=-1) if flat_values.shape[-1]
+        else np.zeros(shape, dtype=np.bool_)
+    )
+    everything_counts = bool(whole.all())
 
     # HOW MANY CELLS, NOT WHICH DTYPE, DECIDES.  A scan cut is thousands of
     # short rows and a camera window is one long one, and the two want
@@ -371,39 +378,52 @@ def _roi_statistics(
     # levels answer all five questions in one pass where the stacked form
     # partitions four million pixels twice.  Both give the same numbers,
     # bit for bit; ``test_the_stacked_reduction_gives_the_per_cell_numbers``
-    # is where that is asserted.
+    # is where that is asserted.  The whole cells are stacked even when
+    # others are not: a live run's unwritten cells used to send every cell
+    # of the canonical run, written or not, through the per-cell loop.
     rows = [_ROW_REDUCERS.get(reducer) for reducer in reducers.values()]
-    if (
-        everything_counts
-        and flat_values.shape[0] * flat_values.shape[1] > 1
-        and flat_values.shape[-1]
-        and all(row is not None for row in rows)
-    ):
-        stacked = np.ascontiguousarray(flat_values)
+    counted_whole = int(np.count_nonzero(whole))
+    answers = None
+    if counted_whole > 1 and all(row is not None for row in rows):
+        stacked = (
+            np.ascontiguousarray(flat_values) if everything_counts
+            else flat_values[whole]
+        )
         total = (
             _sum_rows(stacked)
             if _mean_rows in rows and _sum_rows in rows else None
         )
-        result = {}
+        answers = {}
         for (name, _reducer), row in zip(reducers.items(), rows):
             assert row is not None
             if total is not None and row is _sum_rows:
-                result[name] = total
+                answers[name] = total
             elif total is not None and row is _mean_rows:
-                result[name] = total / stacked.shape[-1]
+                answers[name] = total / stacked.shape[-1]
             else:
-                result[name] = row(stacked)
-        valid = np.broadcast_to(np.asarray(True), shape)
-        return MappingProxyType(
-            {name: (answer, valid) for name, answer in result.items()}
-        )
-
+                answers[name] = row(stacked)
+        if everything_counts:
+            valid = np.broadcast_to(np.asarray(True), shape)
+            return MappingProxyType(
+                {name: (answer, valid) for name, answer in answers.items()}
+            )
     result = {name: np.zeros(shape, dtype=np.float64) for name in reducers}
     valid = np.zeros(shape, dtype=np.bool_)
+    # The cells the loop below answers: every cell with a sample that
+    # counts, less those the stack answered.  Where every cell counts
+    # whole, ``whole`` already says which -- asking ``any`` would walk the
+    # region's mask a second time for the same answer.
+    per_cell = whole if everything_counts else flat_finite.any(axis=-1)
+    if answers is not None:
+        for name, answer in answers.items():
+            result[name][whole] = answer
+        valid |= whole
+        per_cell &= ~whole
+
     counted = any(reducer in (_bottom_10_mean, _top_10_mean) for reducer in reducers.values())
-    for index in np.ndindex(shape):
+    for index in zip(*np.nonzero(per_cell)):
         sample = flat_values[index]
-        if not everything_counts:
+        if not whole[index]:
             sample = sample[flat_finite[index]]
         elif not sample.flags.c_contiguous:
             # A region cut out of a frame is a strided window, and five
@@ -412,8 +432,6 @@ def _roi_statistics(
             # packed copy behind; say so on purpose rather than paying for
             # it by accident.
             sample = np.ascontiguousarray(sample)
-        if not sample.size:
-            continue
         valid[index] = True
         summary = _Sample(sample, counted=counted)
         for name, reducer in reducers.items():
@@ -1234,9 +1252,12 @@ class SelectionBridge:
             # longer holds are not a public value any more.  Left standing,
             # a Frozen panel's fit over an expired history parent kept the
             # previous solve readable under the condition that said it
-            # derives nothing.
+            # derives nothing.  Said as what it is: a live run whose history
+            # window moved past the shot is still held.
             self._release_route("fit")
             self._record_condition(
+                "this shot has left the history window, so its fit derives nothing"
+                if self._same_run(publication) else
                 "this run is no longer held, so its fit derives nothing"
             )
             return
@@ -1269,11 +1290,14 @@ class SelectionBridge:
                 if publication is not self._current_source_publication():
                     # The generation finished on a NEWER shot than this
                     # fit's; a terminal answer must describe the final
-                    # snapshot.
-                    self._record_error(
-                        RuntimeError(
-                            "fit event trails a finished source generation"
-                        )
+                    # snapshot.  This one is superseded flow control, as
+                    # when the panel moved past a fit's shot: the final
+                    # shot's own fit answers once the panel presents it,
+                    # and clears this LEVEL -- the one a box drawn on the
+                    # same picture raises.
+                    self._record_condition(
+                        "this picture is not the finished run's final shot, "
+                        "so its fit derives nothing"
                     )
                     return
                 # Whatever holds the route now is withdrawn by the terminal
@@ -1346,7 +1370,9 @@ class SelectionBridge:
                 # Out of the slot, so out of the plane: a route left holding
                 # its names refused every later fit on this run as a conflict.
                 self._withdraw_processor(processor)
-                if stale:
+                if stale or isinstance(error, SourceGenerationEnded):
+                    # A route retired under this commit (a source restart)
+                    # is flow control: the next fit attaches afresh.
                     return
                 raise
             self._derivation_succeeded()
@@ -1422,6 +1448,9 @@ class SelectionBridge:
                 # cannot-answer-right-now: the next region that derives
                 # clears it.
                 self._record_condition(
+                    "this shot has left the history window, so a selection "
+                    "drawn on it derives nothing"
+                    if self._same_run(publication) else
                     "this run is no longer held, so a selection drawn "
                     "on it derives nothing"
                 )
@@ -1496,6 +1525,18 @@ class SelectionBridge:
             # being refused because the only machinery on offer was the live
             # kind.
             if not self._plane.is_generation_live(self._source_signal):
+                if publication is not self._current_source_publication():
+                    # That answer describes the run's FINAL shot, and this
+                    # picture is an earlier one: a paused or held display
+                    # the run stopped behind.  A LEVEL, as for a run no
+                    # longer held; forgotten, so presenting the final shot
+                    # re-commits the box and it derives there.
+                    self._record_condition(
+                        "this picture is not the finished run's final shot, "
+                        "so a selection drawn on it derives nothing"
+                    )
+                    self._forget_selection()
+                    return
                 self._publish_terminal("selection", outputs, publication)
                 return
 
@@ -1508,12 +1549,21 @@ class SelectionBridge:
                     return
                 self._selection_publication = publication
                 processor = self._new_processor("selection", output_names)
-            self._plane.attach_latest_only_processor(
-                processor,
-                source_name=self._source_signal,
-                initial_publication=publication,
-                paused=True,
-            )
+            try:
+                self._plane.attach_latest_only_processor(
+                    processor,
+                    source_name=self._source_signal,
+                    initial_publication=publication,
+                    paused=True,
+                )
+            except BaseException:
+                # No route, so nothing derived from this publication: the
+                # next presented frame's re-commit must derive again rather
+                # than return early as though this one had.
+                with self._lock:
+                    if self._selection is state:
+                        self._selection_publication = None
+                raise
             with self._lock:
                 install = (
                     not self._closed
@@ -1549,8 +1599,13 @@ class SelectionBridge:
                     stale = self._closed or self._selection is not state
                     if self._selection_processor is processor:
                         self._selection_processor = None
+                    if not stale:
+                        # As above: the route is gone, so is its answer.
+                        self._selection_publication = None
                 self._withdraw_processor(processor)
-                if stale:
+                if stale or isinstance(error, SourceGenerationEnded):
+                    # Retired under this commit: the next presented frame
+                    # re-commits the box on the run that replaced it.
                     return
                 raise
 
@@ -1678,6 +1733,19 @@ class SelectionBridge:
 
         return bool(self._plane.retains(self._source_signal, publication))
 
+    def _same_run(self, publication: SignalPublication) -> bool:
+        """Is ``publication`` from the source generation the plane holds now?
+
+        Asked when the plane no longer retains that publication: the same
+        run means its history window moved past the shot, not that the run
+        was let go.
+        """
+
+        current = self._current_source_publication()
+        return current is not None and (
+            current.event_ref.stream_id, current.event_ref.generation
+        ) == (publication.event_ref.stream_id, publication.event_ref.generation)
+
     def _forget_selection(self) -> None:
         """Stop remembering a region this commit could not derive from.
 
@@ -1748,7 +1816,9 @@ class SelectionBridge:
             with self._lock:
                 if self._selection_processor is processor:
                     self._selection_publication = source_publication
-        except (ObsoleteParentResult, GenerationRetired):
+        except (ObsoleteParentResult, SourceGenerationEnded):
+            # Superseded, or the route was retired (a source restart) under
+            # this commit: flow control, never a failure of the region.
             return
         except (RuntimeError, GenerationSchemaAdvanced) as error:
             # Handled here, on the lane worker that committed, so a region
@@ -1765,17 +1835,14 @@ class SelectionBridge:
             and processor._role == "selection"
         ):
             # Not a failure: what this region derives changed shape, which
-            # a new generation is exactly the answer to.  A panel pooling a
-            # window hands its own ROI a source that grows one shot per
-            # publication while the window fills, so this fires once per
-            # shot until it is full and then stops.  Releasing instead --
-            # which is what an unnamed ValueError got -- retired the
+            # a new generation is exactly the answer to.  Releasing instead
+            # -- which is what an unnamed ValueError got -- retired the
             # region's outputs for good, and the operator saw the ROI they
-            # had drawn stop publishing the moment they set a window.
+            # had drawn stop publishing.
             #
             # Not recorded either: the operator has nothing to do about a
-            # window filling, and a panel that reports an error on every
-            # shot of it looks broken while it is working.
+            # source changing shape, and a panel that reports an error for
+            # it looks broken while it is working.
             self._release_processor(processor)
             with self._lock:
                 state = self._selection

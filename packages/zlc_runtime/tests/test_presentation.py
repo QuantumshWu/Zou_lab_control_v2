@@ -659,6 +659,41 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
     assert len(camera.accepted) == len(trace.accepted) == 1
 
 
+def test_a_paused_board_still_closes_a_join_window_nobody_joins() -> None:
+    """Pause withholds staging, not the display ticks a join window counts.
+
+    A shot's cohort formed before Pause holds its complete source batch for
+    its follower (a fit trace).  When the follower never comes -- its fit
+    failed, or was superseded -- the window still closes after its fallback
+    boundaries and the render already travelling presents, as Pause
+    promises; it used to wait for Resume.
+    """
+
+    camera_front = _front("camera/frame", sequence=7)
+    camera_publication = camera_front.publication("camera/frame")
+    assert camera_publication is not None
+    plane = _Plane(camera_front)
+    plane.edges = frozenset({("camera/frame", "@logic/panel/center")})
+    arbiter = SurfaceBatchArbiter(_Sink())
+    camera = _Port("camera", "camera/frame", interval=100)
+    trace = _Port("trace", "@logic/panel/center", interval=100)
+    clock = _clock((100, 200, 400, 800))
+    scheduler = BoardScheduler(plane, clock, arbiter, lambda: (camera, trace))
+    ports = {"camera": camera, "trace": trace}
+
+    scheduler.on_tick()
+    assert len(camera.updates) == 1 and not trace.updates
+    camera.futures[0].set_result("camera")
+    arbiter.drain(ports.get)
+    assert not camera.accepted
+
+    for _ in range(2):
+        scheduler.on_tick(stage=False)
+    arbiter.drain(ports.get)
+    assert camera.presented is camera_publication
+    assert not trace.updates
+
+
 def test_completion_wake_does_not_bypass_a_not_due_follower() -> None:
     camera_front = _front("camera/frame", sequence=7)
     camera_publication = camera_front.publication("camera/frame")
