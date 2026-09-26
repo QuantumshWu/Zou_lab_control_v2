@@ -3,7 +3,7 @@
 # streaming scan, JTAG-to-AXI control.  ONE clean build (no variants).
 #
 # Frozen 35T geometry: 512 period rows + two bank_size=2048 scan banks (4096
-# bank-local slots at one time).  The host preloads the first two chunks and its
+# scan points resident at one time).  The host preloads the first two chunks and its
 # sole observer refills each released bank through the frozen mailbox; total N
 # is not limited by the two-bank window, and the FPGA remains the timing owner.
 #
@@ -13,7 +13,7 @@
 # output registers) so the engine's RD_LAT=2 prefetch is deterministic; the dump
 # MUST show latency 2 or 1-tick playback will be off-by-cycles. ***
 #
-# Geometry MUST match zlc_pulse_streamer_top.v localparams AND host.wire:
+# Geometry MUST match zlc_pulse_streamer_top.v localparams AND zlc_pulse.wire:
 #   ROW_ADDR_WIDTH=9 (512 rows), ROW_WORDS=4:
 #     rows  BRAM 32b(A)/128b(B)  port-A depth 2048, port-B depth 512
 #   BANK_SIZE=2048 -> scan depth 2*2048=4096:
@@ -53,7 +53,7 @@ proc zlc_project_dir {project_dir project_root project_name} {
     }
     set debug_tmp [zlc_debug_tmp_path $out $project_name]
     if {[string length $debug_tmp] > 146} {
-        error "Vivado debug-core temp path too long ($debug_tmp).\n  The build must stay under fpga/build, so the REPO is checked out too deep.\n  Check out the repo at a shorter path (e.g. C:/src/zlc) and rebuild, or set ZLC_PS_PROJECT_DIR to a shorter in-repo dir."
+        error "Vivado debug-core temp path too long ($debug_tmp).\n  The build must stay under fpga/build, so the REPO is checked out too deep.\n  Check out the repo at a shorter path (e.g. C:/src/zlc) and rebuild."
     }
     return $out
 }

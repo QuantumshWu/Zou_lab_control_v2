@@ -72,15 +72,21 @@ def test_axi_burst_split_preserves_4kb_boundary(tmp_path) -> None:
     transport.close()
 
 
-def test_uart_open_disables_modem_control_lines_before_any_write(monkeypatch) -> None:
+def test_uart_open_lowers_modem_control_lines_before_the_port_opens(monkeypatch) -> None:
     records: dict[str, object] = {}
 
     class FakeSerialPort:
         def __init__(self, *args, **kwargs):
             records["args"] = args
             records["kwargs"] = kwargs
+            self.port = None
             self.dtr = True
             self.rts = True
+
+        def open(self):
+            # pyserial drives the lines as the port opens: they must already
+            # be low, or every probed port sees a DTR/RTS pulse.
+            records["opened"] = (self.port, self.dtr, self.rts)
 
         def close(self):
             records["closed"] = True
@@ -89,7 +95,8 @@ def test_uart_open_disables_modem_control_lines_before_any_write(monkeypatch) ->
     link = PySerialLink("COM7")
     link.open()
     serial_port = link._serial
-    assert records["args"] == ("COM7", DEFAULT_UART_BAUD)
+    assert records["args"] == (None, DEFAULT_UART_BAUD)
+    assert records["opened"] == ("COM7", False, False)
     assert records["kwargs"] == {
         "timeout": 0.05,
         "write_timeout": 1.0,

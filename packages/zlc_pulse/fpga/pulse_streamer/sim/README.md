@@ -14,20 +14,23 @@ code zero after `$fatal`.
 The maintained benches are self-contained except where explicitly noted:
 
 - `tb_1tick.v`, `tb_gapsweep.v`, and `tb_loop.v` cover
-  exact 1/2-row finite one-shots, dense one-tick rows around a prefetch
-  bubble, gap-dependent complete-Pulse Run repeats, and a non-zero-start
+  exact 1/2-row finite one-shots, a FIRE after LOAD/SAFE at each of the 64
+  phases of the arm period (the top's `arm` strobe), dense one-tick rows around
+  a prefetch bubble, gap-dependent complete-Pulse Run repeats, and a non-zero-start
   finite nested bracket (outer x3 with an inner x2) with distinct
   preamble/body/tail on TTL and DAC, then one-tick rows through four nested
   brackets that share start rows and end rows (every tick's mask against the
   hand-expanded play order).
 - `tb_scan_wrap.v` covers a whole-timeline bracket, per-row Run repeats, finite
-  Scan repeats, a streamed three-chunk table, cumulative row cursor, and the
-  cyclic two-bank wrap through the scan-point prefetcher.
+  Scan repeats, a streamed three-chunk table refilled by the host's protocol
+  (banks stay armed; a bank's words first, its chunk register last), cumulative
+  row cursor, and the cyclic two-bank wrap through the scan-point prefetcher.
 - `tb_delay_sched.v`, `tb_delay_compact.v`, `tb_evt_depth.v`, and
   `tb_bus_delay.v` cover the current 32-bit TTL event and DAC action delay
   schedulers.
 - `tb_ramp_scan.v` and `tb_da_ttl_align.v` cover slot-targeted DAC ramps
-  (gentle and steep Bresenham), a late bank held with UNDERFLOW and resumed,
+  (gentle and steep Bresenham), a late bank (armed, its chunk register not yet
+  written) held with UNDERFLOW and resumed,
   and TTL/DAC alignment.
 - `tb_real_engine.v` uses the generated row BRAM simulation model.
 - `../tb_uart_pipeline.v` and `../tb_uart_read_tap.v` require exact write
@@ -54,10 +57,14 @@ issue-to-data latency of the generated IP), so they run without a build.
 Build artifacts for Xilinx IP simulation models are required. A build is only
 performed inside the separately approved evidence-driven hardware workflow.
 With those artifacts already available, invoke `xvlog`, `xelab`, and `xsim`
-from this directory, for example:
+from this directory, from the release that generated the IP models: the folder
+of `ZLC_PS_VIVADO_BIN` when it is set, else the newest release under
+`C:` or `D:` `/Xilinx/Vivado` or `/AMD/Vivado` -- the rule
+`zlc_pulse.transport.axi._default_vivado` keeps for the build, the JTAG session
+and `diff/run_diff.py`.  For example:
 
 ```sh
-VIV=/c/Xilinx/Vivado/2019.1/bin
+VIV=$(python -c "from pathlib import Path; from zlc_pulse.transport.axi import _default_vivado; print(Path(_default_vivado()).resolve().parent.as_posix())")
 IPR=../../build/ps/ps.srcs/sources_1/ip
 "$VIV/xvlog" -i .. ../zlc_period_streamer.v   "$IPR/blk_mem_gen_rows/sim/blk_mem_gen_rows.v"   "$IPR/blk_mem_gen_rows/simulation/blk_mem_gen_v8_4.v"   tb_real_engine.v
 "$VIV/xelab" work.tb_real_engine -s sreal

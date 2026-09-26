@@ -44,7 +44,7 @@ module tb_da_ttl_align;
   wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
   zlc_period_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(3),.run_repeat_count(32'd0),
+    .clk(clk),.reset(reset),.start(start),.arm(1'b0),.prog_count(3),.run_repeat_count(32'd0),
     .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
     .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
     .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),

@@ -26,6 +26,34 @@ def _fake_python(path: Path) -> Path:
     return path
 
 
+def _run_cmd(command, *, cwd: Path, env: dict) -> subprocess.CompletedProcess[str]:
+    """Run one cmd.exe command line with a stdin that never ends.
+
+    ``ZLC_NO_PAUSE`` is all that keeps a launcher from waiting for a key.
+    pytest points its own stdin at NUL, and ``pause`` reading NUL returns at
+    once, so a launcher that stopped honouring the variable would still pass.
+    An empty pipe whose write end stays open here never answers ``pause``: a
+    regressed launcher blocks into the timeout and the test goes red.  (The
+    prompt's wording is the locale's, so it is not asserted on.)
+    """
+
+    read_end, write_end = os.pipe()
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=read_end,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+
 def _run_batch(*args: str, cwd: Path, python_path: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
@@ -41,15 +69,7 @@ def _run_batch(*args: str, cwd: Path, python_path: Path) -> subprocess.Completed
         f'"{arg}"' if not arg or " " in arg else arg for arg in args
     )
     command = f'cmd.exe /d /s /c ""{LAUNCHER}" {arguments}"'
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=20,
-        check=False,
-    )
+    return _run_cmd(command, cwd=cwd, env=env)
 
 
 def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path) -> None:
@@ -100,13 +120,10 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
         ZLC_NO_PAUSE="1",
         PYTHONPATH="",
     )
-    estimate = subprocess.run(
+    estimate = _run_cmd(
         ["cmd.exe", "/d", "/c", str(ESTIMATE_LAUNCHER)],
         cwd=ROOT,
         env=estimate_environment,
-        text=True,
-        capture_output=True,
-        check=False,
     )
     assert estimate.returncode == 0, estimate.stdout + estimate.stderr
     assert "within the configured budget" in estimate.stdout
@@ -118,16 +135,19 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
         encoding="utf-8",
     )
     estimate_environment["ZLC_FPGA_PYTHON"] = str(failing)
-    failed = subprocess.run(
+    failed = _run_cmd(
         ["cmd.exe", "/d", "/c", str(ESTIMATE_LAUNCHER)],
         cwd=ROOT,
         env=estimate_environment,
-        text=True,
-        capture_output=True,
-        check=False,
     )
     assert failed.returncode == 7
     assert "failed with code 7" in failed.stdout
+
+    # The shared launcher pauses only on a failure, so only a failing
+    # command reaches the guard every bin\ window goes through.
+    launched = _run_batch(cwd=ROOT, python_path=failing)
+    assert launched.returncode == 7, launched.stdout + launched.stderr
+    assert "pulse_editor exited with code 7" in launched.stdout
 
 
 def _assert_every_python_line_enters_through_the_bootstrap(launcher: Path) -> None:
@@ -172,14 +192,10 @@ def test_a_stored_python_path_is_honoured_under_either_expansion_mode(tmp_path) 
     for name in ("ZLC_PY_CMD", "ZLC_PY_PATH", "ZLC_FPGA_PYTHON"):
         env.pop(name, None)
     for expansion in ("/v:off", "/v:on"):
-        result = subprocess.run(
+        result = _run_cmd(
             f'cmd.exe /d /s {expansion} /c ""{TOOLS_RESOLVER}" python "{repo}""',
             cwd=tmp_path,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
         )
         assert result.returncode == 0, expansion + result.stdout + result.stderr
         assert f"ZLC Python: {stored}" in result.stdout, expansion + result.stdout
@@ -188,14 +204,10 @@ def test_a_stored_python_path_is_honoured_under_either_expansion_mode(tmp_path) 
 
     # A stored path that no longer exists is said to be stale, by name.
     (repo / ".zlc_python_path").write_text(f"{tmp_path / 'gone.bat'}\n", encoding="utf-8")
-    stale = subprocess.run(
+    stale = _run_cmd(
         f'cmd.exe /d /s /v:off /c ""{TOOLS_RESOLVER}" python "{repo}""',
         cwd=tmp_path,
         env=env,
-        text=True,
-        capture_output=True,
-        timeout=20,
-        check=False,
     )
     assert f"Ignoring stale .zlc_python_path: {tmp_path / 'gone.bat'}" in stale.stdout
 

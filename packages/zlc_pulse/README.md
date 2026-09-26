@@ -130,8 +130,9 @@ runbook requires `try/finally`, verified SAFE, and close.
 
 This repository tracks the RTL, board description, Vivado Tcl, and simulations
 under `packages\zlc_pulse\fpga\`. `bin\build_and_program.bat` is the explicit
-build/recovery entry; its default action builds only. Programming or flashing
-requires a separately approved explicit target. Generated
+build/recovery entry; its default action builds if needed and then PROGRAMS the
+connected FPGA's volatile configuration, `--build-only` builds without touching
+hardware, and flashing is always its own explicit `--flash`. Generated
 Vivado products, the deployed `.bit`/`.ltx`, and the FPGA's volatile or flash
 programmed state are external machine artifacts, not Python package data.
 Normal experiment startup uses the already deployed bitstream and never builds

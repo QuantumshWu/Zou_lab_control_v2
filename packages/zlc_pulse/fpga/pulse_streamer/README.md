@@ -109,7 +109,6 @@ SCAN_ENABLE
 RUN_REPEAT_COUNT          complete Pulse executions per row; 0 = infinite
 SCAN_REPEAT_COUNT         complete table sweeps; 0 = infinite
 LOOP_TABLE_COUNT          loop-table entries in use (nested brackets, outermost first)
-BANK_SIZE / SLOT_COUNT
 CURSOR      top -> host   cumulative row-visit ordinal; unchanged by Run repeats
                           current table row is CURSOR modulo SCAN_COUNT
 BANK_READY  host -> top   bit b = bank b is loaded and ready
@@ -127,9 +126,11 @@ entry), and per-channel TTL delays and per-bus DA delays through the dedicated
 DELAY register region (one 32-bit word per channel and per bus; see
 `zlc_pulse.wire.region_bases`).
 
-Lifecycle: `prepare` (SAFE, upload the static image and first two scan chunks,
-arm both banks, LOAD) / `fire` (FIRE) / `wait_done` (the sole observer polls and
-refills released banks) / `safe_state`.
+Lifecycle (`zlc_pulse.device.PulseStreamer`): `open` (layout handshake) /
+`load` (SAFE, upload the static image, arm both banks, LOAD) / `fire` (put the
+first two scan chunks back when the banks do not hold them, then FIRE) /
+`wait_done` (the sole observer polls and refills released banks) / `safe` /
+`close`.
 `STATUS_UNDERFLOW` is fatal evidence that seamless timing was not achieved; the
 run is rejected. Current Python tests compare bounded prefetch, streamed-scan,
 stale-seed, TTL-delay, and DAC-delay cases against reference models; when Vivado

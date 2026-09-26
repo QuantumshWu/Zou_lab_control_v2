@@ -24,6 +24,7 @@ from zlc_pulse.device import DoneReport, PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.wire import (
     CMD_FIRE,
+    CMD_RESET,
     CMD_SAFE,
     CtrlWords,
     STATUS_DONE,
@@ -141,7 +142,7 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     assert words[bases["rows"] + geom.row_words] == 2
     assert words[bases["rows"] + geom.row_words + 1] == 0
     assert hashlib.sha256(payload).hexdigest() == (
-        "38ecf02049ec6d257d377afe7a25c7db34a8f1b64d4e6bfbcb9bc536a7dc877d"
+        "0e195086042ce598a96424a21678cdb1b3535c83ec1351efb038537f81d6d535"
     )
     # Every TTL lane lives in the one mask field of its row; the final
     # physical clock above bit 63 maps to bus 3 rather than a third CTRL word.
@@ -166,7 +167,6 @@ def test_pack_loops_and_slot_rows_into_their_own_regions() -> None:
     assert words[CtrlWords.SCAN_ENABLE] == 0
     assert words[CtrlWords.RUN_REPEAT_COUNT] == 1
     assert words[CtrlWords.SCAN_REPEAT_COUNT] == 1
-    assert words[CtrlWords.SLOT_COUNT] == 1
     bases = region_bases(geom)
     assert not any(bases["scan"] <= address < bases["loop"] for address in words)
     # Row 0 reads its duration from slot 1; its literal is the authored value.
@@ -410,7 +410,7 @@ def test_delay_capacity_covers_execution_repeat_seams_and_terminal_safe() -> Non
         terminal_streamer.fire(run_repeats=1, scan_repeats=2)
 
 
-def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
+def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it(monkeypatch) -> None:
     """The capacity walk keeps a Pulse's true length however long its Bracket.
 
     A body that changes no level adds no queue entry, so the Runs after it
@@ -418,6 +418,14 @@ def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
     22 ticks per Pulse, never more than two edges in any closed 20-tick
     window.  Walking a SHORTENED loop moved the later Runs closer and refused
     the program for three entries in flight that never coexist.
+
+    And it walks only the bodies a delay window can meet: over 4-tick bodies
+    a 20-tick window meets at most 20 // 4 + 2 of them, so the walk keeps
+    that many and the possibly different first replay at each end of the
+    loop -- not the depth + 2 = 66 a 64-entry queue would allow, per level
+    of nesting, inside fire(), with the operator waiting on Run.  Each
+    Bracket counts by its own body: a loop of long bodies around that train
+    keeps the few a window can meet of THEM, not the train's count.
     """
 
     geometry = replace(
@@ -454,6 +462,49 @@ def test_a_constant_bracket_body_does_not_crowd_the_runs_after_it() -> None:
             assert streamer.wait_done(1.0) is not None
         finally:
             streamer.close()
+
+    import zlc_pulse.loops as loops_module
+
+    walked: list[tuple[int, int | None]] = []
+    iterations = loops_module.bracket_iterations
+
+    def recorded(loop_count, bodies):
+        walked.append((loop_count, bodies))
+        return iterations(loop_count, bodies)
+
+    monkeypatch.setattr(loops_module, "bracket_iterations", recorded)
+    deep = replace(geometry, evt_fifo_depth=32, bus_evt_fifo_depth=64)
+
+    def walked_by_fire(source: PulseSequence) -> set[tuple[int, int | None]]:
+        streamer, _ = _open_streamer(deep)
+        try:
+            streamer.load(compile_sequence(source, deep, 50e6), source=source)
+            walked.clear()
+            streamer.fire(run_repeats=3)
+            assert streamer.wait_done(1.0) is not None
+        finally:
+            streamer.close()
+        return set(walked)
+
+    assert walked_by_fire(constant_body(100_000)) == {(100_000, 20 // 4 + 3)}
+    # 3 + 1000 x 4 + 100 ticks per outer body: a 20-tick window meets at
+    # most two of them, so three are kept at each end.
+    train = PulseSequence(
+        target=_BOARD_TARGET,
+        time_step_ns=20,
+        periods=(
+            PulsePeriod("pre", 60, "ns", low),
+            PulsePeriod("body", 80, "ns", tuple(high)),
+            PulsePeriod("gap", 2000, "ns", low),
+            PulsePeriod("post", 60, "ns", low),
+        ),
+        brackets=(
+            PulseBracket("outer", "pre", "gap", 50),
+            PulseBracket("train", "body", "body", 1000),
+        ),
+        delays=(OutputDelay(_DIGITAL_PORT.key, 400, "ns"),),
+    )
+    assert walked_by_fire(train) == {(50, 20 // 4103 + 3), (1000, 20 // 4 + 3)}
 
     # A body whose edges really do crowd the queue is still refused, however
     # deep in the loop the crowding would happen.
@@ -752,6 +803,90 @@ def test_safe_does_not_claim_observer_exit_when_transport_ignores_stop() -> None
         transport.release_observer.set()
         observer.join(1.0)
         streamer.safe()
+        streamer.close()
+
+
+def test_a_stop_during_fire_preparation_keeps_that_fire_off_the_board(monkeypatch) -> None:
+    """A Stop that queues while a FIRE is prepared wins: the FIRE is never sent.
+
+    Preparation (Config reread, recompile, reload) runs under the streamer's
+    lock, so a Stop from another thread waits behind it and the FIRE must
+    see it rather than go out after it.  The reload's own SAFE, run on the
+    firing thread under that lock, must not lower the other thread's Stop.
+    """
+
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
+    program = compile_sequence(_sequence(), geom, 50e6)
+    streamer, transport = _open_streamer(geom)
+    streamer.load(program)
+    preparing, release = threading.Event(), threading.Event()
+
+    def held_preparation() -> None:
+        preparing.set()
+        assert release.wait(5.0)
+        streamer.safe()  # a reload's own SAFE, on the firing thread
+
+    monkeypatch.setattr(streamer, "_refresh_config_file", held_preparation)
+    refused: list[BaseException] = []
+    stopped: list[object] = []
+
+    def fire() -> None:
+        try:
+            streamer.fire(run_repeats=1)
+        except RuntimeError as error:
+            refused.append(error)
+
+    firing = threading.Thread(target=fire)
+    stopper = threading.Thread(target=lambda: stopped.append(streamer.safe()))
+    firing.start()
+    assert preparing.wait(5.0)
+    stopper.start()
+    deadline = time.monotonic() + 5.0
+    while not streamer._stopping and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert streamer._stopping, "the Stop never queued behind the preparation"
+    release.set()
+    firing.join(5.0)
+    stopper.join(5.0)
+    try:
+        assert not firing.is_alive() and not stopper.is_alive()
+        assert len(refused) == 1 and "was not sent" in str(refused[0])
+        commands = [
+            code
+            for batch in transport.write_batches
+            for address, code in batch
+            if address == CtrlWords.COMMAND
+        ]
+        assert CMD_FIRE not in commands
+        assert len(stopped) == 1 and stopped[0].stable
+    finally:
+        streamer.close()
+
+
+def test_a_refused_fire_makes_the_next_load_write_the_image_again() -> None:
+    """A board that lost its image is loaded again, not skipped as unchanged.
+
+    Loading the program the host believes the board holds skips the upload.
+    A refused FIRE says that belief is wrong -- the board was reconfigured or
+    browned out behind a live link -- so the next load of the unchanged pulse
+    uploads and LOADs again instead of every Run being refused until the
+    device is reopened.
+    """
+
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
+    program = compile_sequence(_sequence(), geom, 50e6)
+    streamer, transport = _open_streamer(geom)
+    try:
+        streamer.load(program)
+        # The board drops its resident image behind this host's back.
+        transport.command(CMD_RESET, 0x7FFF0001)
+        with pytest.raises(RuntimeError, match="FIRE was not accepted"):
+            streamer.fire(run_repeats=1)
+        assert streamer.applied() is None
+        streamer.load(program)
+        streamer.fire(run_repeats=1)
+        assert streamer.wait_done(1.0) is not None
+    finally:
         streamer.close()
 
 

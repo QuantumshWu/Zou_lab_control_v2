@@ -39,8 +39,12 @@
 //
 // While reset is held (LOAD/SAFE) both prefetchers are flushed and refilled
 // every 2^ARM_PERIOD_BITS clocks, so at FIRE they hold the program the host
-// finished uploading.  The top waits longer than one period before it
-// releases reset.
+// finished uploading.  The period restarts when reset rises and on every
+// `arm` strobe, which the top raises when it accepts a FIRE and then releases
+// reset more than two periods later: the last flush is then a fixed ~18
+// clocks before the release, never the few clocks before it that leave the
+// FIFOs empty at start (a FIRE after LOAD/SAFE arrives at any phase of the
+// free-running period).
 //
 // OUTPUT DELAY -- TTL channels queue value-change events; each DAC bus queues resolved action
 //   descriptors and replays its ramp stepper after one shared delay.  Both implement
@@ -96,6 +100,7 @@ module zlc_period_streamer #(
     input  wire clk,
     input  wire reset,
     input  wire start,
+    input  wire arm,                            // one-clock strobe: restart the arm period now
 
     // held program scalars (top regfile)
     input  wire [ROW_ADDR_WIDTH:0] prog_count,       // rows in the table
@@ -341,12 +346,14 @@ module zlc_period_streamer #(
 
     reg reset_meta = 1'b0, reset_sync = 1'b0;
     reg start_meta = 1'b0, start_sync = 1'b0, start_prev = 1'b0;
+    reg arm_meta = 1'b0, arm_sync = 1'b0, arm_prev = 1'b0;
     reg [TICK_WIDTH+BUS_WIDTH:0] bus_accum_next;
     reg [BUS_WIDTH:0] bus_inc;        // this tick's ramp movement: step or step+1
     reg [BUS_WIDTH:0] bus_v_next;     // widened value+inc for target saturation
     reg [2*BUS_WIDTH+1:0] bus_qr;     // {step, rem} from the deferred ramp divmod
 
     wire start_event = start_sync && !start_prev;
+    wire arm_event = arm_sync && !arm_prev;
 
     // ---- per-channel / per-bus held delay slices ----
     function [TTL_DELAY_WIDTH-1:0] zlc_delay_ch_at;
@@ -800,6 +807,7 @@ module zlc_period_streamer #(
     always @(posedge clk) begin
         reset_meta <= reset; reset_sync <= reset_meta;
         start_meta <= start; start_sync <= start_meta; start_prev <= start_sync;
+        arm_meta <= arm; arm_sync <= arm_meta; arm_prev <= arm_sync;
 
         // DAC action-delay capture strobe: default LOW EVERY cycle so it is a clean 1-cycle pulse
         // regardless of which path runs (zlc_bus_apply_action during RUN, or the done-tail SAFE
@@ -821,8 +829,9 @@ module zlc_period_streamer #(
             // The host uploads the table WHILE the engine is in reset (CMD_SAFE/CMD_LOAD) and
             // releases reset on CMD_FIRE, so the FIFOs must keep re-reading the most recent
             // table.  One period is 2^ARM_PERIOD_BITS clocks; a refill takes ~FIFO_DEPTH+PIPE.
+            // The FIRE's arm strobe restarts the period, so the release never lands in a refill.
             arm_timer <= arm_timer + 1'b1;
-            if (!arm_kicked || arm_timer == {ARM_PERIOD_BITS{1'b1}}) begin
+            if (!arm_kicked || arm_event || arm_timer == {ARM_PERIOD_BITS{1'b1}}) begin
                 arm_kicked <= 1'b1; arm_timer <= {ARM_PERIOD_BITS{1'b0}};
                 flush = 1'b1;
             end

@@ -103,6 +103,7 @@ def test_geometry_header_regenerates_through_the_documented_package_command(tmp_
         env=environment,
         capture_output=True,
         text=True,
+        timeout=120,
         check=False,
     )
     assert result.returncode == 0, result.stderr

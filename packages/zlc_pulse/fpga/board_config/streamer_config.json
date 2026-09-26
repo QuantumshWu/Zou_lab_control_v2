@@ -36,7 +36,7 @@
     "loop_depth": "How many brackets may be nested inside one another; the row walker keeps one remaining-count register per level.  Must not exceed max_loops.",
     "evt_fifo_depth": "Per-TTL-CHANNEL event-FIFO depth = max output TOGGLES in flight per channel while a delay is applied (out[t] = in[t-d]).  Power of two (ring pointer).  Deeper = denser delayable pulse trains, more distributed RAM (LUTRAM).  NOT the delay LENGTH (that is ttl_delay_max_ticks).",
     "bus_evt_fifo_depth": "Per-DAC-BUS action-FIFO depth = max RESOLVED bus actions (edge/ramp) in flight while a bus delay is applied (density-independent: one dense ramp = 1 action).  Power of two.",
-    "delay_region_words": "Reserved 32-bit words in the R_DELAY register region (one delay word per delay-eligible signal: channels then buses).  Must be >= channel_count + bus_count (= 67); 128 gives headroom and a stable layout across configs.",
+    "delay_region_words": "Reserved 32-bit words in the R_DELAY register region (one delay word per delay-eligible signal: channels then buses).  Must be >= the TTL pin count (channel_count less each bus's data and latch pins) + bus_count, as wire.check_rtl_assumptions checks; 128 gives headroom and a stable layout across configs.",
     "ttl_delay_max_ticks": "HOST-side validation cap on a single output delay, in ticks (the 32-bit R_DELAY field; (1<<31)-1 ~= 42.9 s at 20 ns).  Host-only -- it is NOT folded into the fingerprint, so tuning it needs no rebuild.  The real working limit is toggles IN FLIGHT (the FIFO depths above), checked at fire time."
   },
 

@@ -9,7 +9,7 @@ every edge -- so they live here, below all three, and there is one walk.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from itertools import chain
 
@@ -19,14 +19,16 @@ def bracket_iterations(loop_count: int, bodies: int | None) -> Iterable[int]:
 
     A delay-FIFO check needs the TRUE elapsed time of a Pulse -- so the
     Pulses after it land where they really land -- but not every body of a
-    Bracket that replays a billion times.  The bodies are identical, so once
-    ``bodies`` of them have played a queue has either overflowed or repeats
-    its state, and the last ``bodies`` see the loop out exactly the way the
-    first saw it in; the ones between are the same again at ticks no window
-    can tell apart from those.  Walking a SHORTENED loop instead moved every
-    later Pulse earlier, and a body that changed no level at all -- which
-    adds no entry to any queue -- was refused for crowding runs together
-    that the board plays comfortably apart.  ``None`` walks every replay.
+    Bracket that replays a billion times.  The bodies are identical and a
+    delay window meets only the few of them its length spans (or, past a
+    queue's depth, has overflowed it), so once ``bodies`` of them have played
+    every window across them has been seen, and the last ``bodies`` see the
+    loop out exactly the way the first saw it in; the ones between are the
+    same again at ticks no window can tell apart from those.  Walking a
+    SHORTENED loop instead moved every later Pulse earlier, and a body that
+    changed no level at all -- which adds no entry to any queue -- was
+    refused for crowding runs together that the board plays comfortably
+    apart.  ``None`` walks every replay.
     """
 
     if bodies is None or loop_count <= 2 * bodies:
@@ -108,9 +110,17 @@ def frame_ticks(durations: Sequence[int], loops: Sequence[tuple[int, int, int]])
 def frame_visits(
     durations: Sequence[int],
     loops: Sequence[tuple[int, int, int]],
-    bracket_bodies: int | None = None,
+    bracket_bodies: Callable[[int], int] | None = None,
 ) -> tuple[tuple[int, int], ...]:
-    """Every row one Pulse enters, as ``(row, start tick)``, in the board's order."""
+    """Every row one Pulse enters, as ``(row, start tick)``, in the board's order.
+
+    ``bracket_bodies`` says, from how many ticks one replay of a Bracket's
+    body lasts, how many of its first and last replays to walk (see
+    :func:`bracket_iterations`): each Bracket its own count, since a delay
+    window meets fewer of a long body than of a short one, and the walk
+    costs the product of the counts of the Brackets nested in each other.
+    None walks every replay.
+    """
 
     visits: list[tuple[int, int]] = []
     _walk_rows(loop_tree(loops), 0, len(durations) - 1, 0, durations, bracket_bodies, visits)
@@ -123,7 +133,7 @@ def _walk_rows(
     last_row: int,
     tick: int,
     durations: Sequence[int],
-    bodies: int | None,
+    bracket_bodies: Callable[[int], int] | None,
     visits: list[tuple[int, int]],
 ) -> int:
     row = first_row
@@ -132,10 +142,13 @@ def _walk_rows(
             visits.append((index, tick))
             tick += durations[index]
         span = _loop_span(node, durations)
+        bodies = None if bracket_bodies is None else bracket_bodies(span)
         previous = -1
         for iteration in bracket_iterations(node.count, bodies):
             tick += (iteration - previous - 1) * span
-            tick = _walk_rows(node.children, node.start, node.end, tick, durations, bodies, visits)
+            tick = _walk_rows(
+                node.children, node.start, node.end, tick, durations, bracket_bodies, visits
+            )
             previous = iteration
         tick += (node.count - 1 - previous) * span
         row = node.end + 1

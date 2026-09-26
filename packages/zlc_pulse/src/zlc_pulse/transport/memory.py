@@ -52,9 +52,6 @@ class MemoryRegisterTransport:
         self._resident = False
         self._last_command_id = 0
         self._last_command_reply = (0, 0)
-        #: How many command writes this twin ignored because the bits were
-        #: already high.  A real board ignores them the same way, silently.
-        self.dropped_commands = 0
         self._lock = threading.RLock()
 
     def start(self) -> None:
@@ -93,11 +90,11 @@ class MemoryRegisterTransport:
                     # level-sensitive, so a host that forgot to zero between
                     # commands passed here and dropped the second command on
                     # hardware -- the one failure this twin exists to catch.
+                    # A write whose bits were already high is ignored, as the
+                    # board ignores it: silently.
                     written = value
                     risen = written & ~self._command_seen
                     self._command_seen = written
-                    if written and not risen:
-                        self.dropped_commands += 1
                     value = risen
                     if value:
                         self._complete_command(

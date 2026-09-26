@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from importlib.metadata import PackageNotFoundError, distribution
 from numbers import Integral
@@ -92,8 +91,6 @@ class CtrlWords:
     SCAN_ENABLE = 5
     RUN_REPEAT_COUNT = 6   # complete Pulse executions per scan row; 0 = infinite
     LOOP_TABLE_COUNT = 7   # loop-table entries in use (nested brackets, outermost first)
-    BANK_SIZE = 13        # scan points per ping-pong bank
-    SLOT_COUNT = 14
     CURSOR = 15           # top -> host: cumulative row-visit ordinal; unchanged by Run repeats
     BANK_READY = 16       # host -> top: bit b = bank b is loaded/ready
     BANK0_CHUNK = 17      # host -> top: sweep-chunk index currently resident in bank 0
@@ -111,10 +108,11 @@ CTRL_WORDS = 64
 def _shipped_config() -> dict:
     """Read shipped deployment defaults once."""
     try:
-        raw = json.loads(
+        raw = strict_json_loads(
             _fpga_asset_path("board_config", "streamer_config.json").read_text(
                 encoding="utf-8"
-            )
+            ),
+            "streamer_config.json",
         )
         return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
@@ -442,8 +440,6 @@ def pack_program(program, params: StreamerParams | None = None, *, target) -> di
     w[CtrlWords.RUN_REPEAT_COUNT] = 1
     w[CtrlWords.SCAN_REPEAT_COUNT] = 1
     w[CtrlWords.LOOP_TABLE_COUNT] = len(loops)
-    w[CtrlWords.BANK_SIZE] = p.bank_size
-    w[CtrlWords.SLOT_COUNT] = slot_count
 
     for i in range(n_rows):
         words = pack_row(p, durations[i], duration_slots[i], masks[i], actions_by_row.get(i, {}))
@@ -780,12 +776,14 @@ FROZEN_CLOCK_HZ = 50_000_000.0
 _PARAM_FIELD_NAMES = tuple(f.name for f in _dataclass_fields(StreamerParams))
 
 def _config_search_paths() -> list[Path]:
-    rel = Path("fpga") / "board_config" / DEFAULT_CONFIG_FILENAME
+    # The explicit override, then the package's own copy -- never whatever a
+    # launch directory holds: a bench started beside another checkout would
+    # otherwise serve that checkout's geometry while its editor limits read
+    # this one's.
     paths: list[Path] = []
     env = os.environ.get("ZLC_PS_CONFIG")
     if env and env.strip():
         paths.append(Path(env))
-    paths.append(Path.cwd() / rel)
     paths.append(_fpga_asset_path("board_config", DEFAULT_CONFIG_FILENAME))
     return paths
 
@@ -826,7 +824,9 @@ def load_streamer_config(path: str | Path | None = None) -> dict:
     for candidate in candidates:
         try:
             if candidate.exists():
-                raw = json.loads(candidate.read_text(encoding="utf-8"))
+                # Forgiving about what is missing, never about what is
+                # ambiguous: a duplicated key is an unreadable file.
+                raw = strict_json_loads(candidate.read_text(encoding="utf-8"), "streamer_config.json")
                 source = candidate
                 break
         except (OSError, ValueError) as exc:
@@ -1077,7 +1077,7 @@ def emit_geom_tcl(params: "StreamerParams") -> str:
     #                                 emitters together, never writing a half-updated .vh/geom.tcl pair
     ip = build_ip_sizes(params)
     return (
-        "# AUTO-GENERATED from streamer_config.json by image.emit_geom_tcl -- do not edit.\n"
+        "# AUTO-GENERATED from streamer_config.json by zlc_pulse.wire.emit_geom_tcl -- do not edit.\n"
         "# BRAM-IP sizing vars for create_project.tcl (all derived from the config geometry).\n"
         f"set zlc_row_addr_width {params.row_addr_width}\n"
         f"set zlc_row_portb_bits {ip['row_portb_bits']}\n"

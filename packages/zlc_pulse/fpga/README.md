@@ -23,11 +23,11 @@ document is a second source of truth.
   Vivado's deep run/.Xil temp path under the Windows MAX_PATH limit while the
   build stays in-repo. The default server state dir is `fpga\build\state`.
 
-The root `bin\pulse_editor.bat` is the direct frontend entry point. The
-sequencer-only `remote_pulse` installation and the complete `hardware`
-installation (remote FPGA + qCMOS DCAM + Pylon MOT camera) both use this same
-server contract; camera qualification remains on the client installation
-machine. Human launchers stay together in root `bin\`; the hardware sources and
+The root `bin\pulse_editor.bat` is the direct frontend entry point. Every
+bench that drives the board -- the machine it is plugged into
+(`sequencer.local`) and a peer (`sequencer.hardware`) -- uses this same server
+contract; camera qualification remains on the client machine. Human launchers
+stay together in root `bin\`; the hardware sources and
 generated build tree remain owned here, separate from GUI and camera SDKs.
 
 ## Runtime Chain
@@ -104,12 +104,14 @@ Vivado 2019 debug cores are path-length sensitive. Keep the checkout short
 (`D:\ZLC`). The batch files print `ZLC build root` / `ZLC project dir`; those
 printed paths are the source of truth for the generated
 `impl_1\zlc_pulse_streamer_top.{bit,ltx}`. All FPGA launchers share the same
-resolver: an explicit `ZLC_FPGA_PYTHON` override wins, then the stored
-`.zlc_python_path`, then PATH and the usual installation roots. A repository
+resolver: `ZLC_PY_CMD` wins, then an explicit `ZLC_FPGA_PYTHON`, then the
+stored `.zlc_python_path`, then PATH, conda and the usual installation roots.
+A repository
 `.venv` is never preferred: this project installs its dependencies globally,
 and a venv without pyserial made the UART probe fail silently and the server
-fall back to JTAG forever. Vivado comes from `ZLC_PS_VIVADO_BIN`, known
-installation roots, then PATH. Set
+fall back to JTAG forever. Vivado comes from `ZLC_PS_VIVADO_BIN`, else the
+newest release under the known installation roots (the pulse server's JTAG
+backend picks the same one), then PATH. Set
 `ZLC_NO_PAUSE=1` for automation.
 
 ## Hardware acceptance runbook

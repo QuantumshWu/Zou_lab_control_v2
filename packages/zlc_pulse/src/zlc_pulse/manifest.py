@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import re
+
+from zlc_durable import strict_json_loads
 
 from .model import PORT_CLOCK, PORT_DAC, PulsePortSpec, PulseTarget
 from .wire import StreamerParams, _fpga_asset_path, load_streamer_config
@@ -34,7 +35,7 @@ _COMMON_KEYS = {
 
 def _board_lanes(path: Path, params: StreamerParams) -> tuple[_Lane, ...]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = strict_json_loads(path.read_text(encoding="utf-8"), f"board manifest {path.name}")
     except (OSError, ValueError) as exc:
         raise ValueError(f"cannot read board manifest {path}: {exc}") from exc
     board = raw.get("board") if isinstance(raw, dict) else None

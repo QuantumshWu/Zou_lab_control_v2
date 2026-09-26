@@ -1,1 +1,1 @@
-"""Affine edge-table pulse streamer: RTL, benches and Vivado scripts."""
+"""Period-table pulse streamer: RTL, benches and Vivado scripts."""

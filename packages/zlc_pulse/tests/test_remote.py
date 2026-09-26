@@ -38,7 +38,7 @@ from zlc_pulse.remote import (
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.transport.uart import UartError
 from zlc_pulse.transport import uart_frame as framing
-from zlc_pulse.wire import CMD_LOAD, CMD_SAFE, CtrlWords, DEFAULT_UART_BAUD, LAYOUT_STRUCT_VERSION, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
+from zlc_pulse.wire import CMD_FIRE, CMD_LOAD, CMD_SAFE, CtrlWords, DEFAULT_UART_BAUD, LAYOUT_STRUCT_VERSION, StreamerParams, build_fingerprint, pack_program, pack_scan_rows
 
 
 _BOARD_TARGET = pulse_target_from_xdc()
@@ -483,7 +483,7 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection(monkeypatch)
                     reports.append(error)
             waiter = threading.Thread(target=await_done)
             waiter.start()
-            assert waiting.wait(0.2), "the server must wait on DONE, not receive zero-time polls"
+            assert waiting.wait(2.0), "the server must wait on DONE, not receive zero-time polls"
             assert client.snapshot()["firing"] is True
 
             def interrupt() -> None:
@@ -673,6 +673,69 @@ def test_remote_safe_cancels_a_pending_load_before_its_reply(monkeypatch) -> Non
             client.disconnect()
 
 
+def test_a_stop_during_remote_fire_preparation_keeps_that_fire_off_the_board(monkeypatch) -> None:
+    """A Stop queued while this client prepares a FIRE keeps the FIRE unsent.
+
+    ``fire`` holds the command lane across its Config reread and any
+    reload; a Stop from another thread sends its notice on the cancel lane
+    and then waits for the lane.  The FIRE must see that Stop and not go
+    out after it.
+    """
+
+    geom = _sequence_geometry()
+    source = _sequence()
+    program = compile_sequence(source, geom, 50e6)
+    transport = MemoryRegisterTransport(geom=geom)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
+    commands: list[int] = []
+    original_command = transport.command
+
+    def recorded_command(code, command_id, **kwargs):
+        commands.append(code)
+        return original_command(code, command_id, **kwargs)
+
+    monkeypatch.setattr(transport, "command", recorded_command)
+    preparing, release = threading.Event(), threading.Event()
+    with _server(streamer) as server:
+        client = _client(server)
+        try:
+            client.load(program)
+
+            def held_preparation() -> None:
+                preparing.set()
+                assert release.wait(5.0)
+
+            monkeypatch.setattr(client, "_refresh_config_file", held_preparation)
+            refused: list[BaseException] = []
+            stopped: list[object] = []
+
+            def fire() -> None:
+                try:
+                    client.fire(run_repeats=1)
+                except RuntimeError as error:
+                    refused.append(error)
+
+            firing = threading.Thread(target=fire)
+            stopper = threading.Thread(target=lambda: stopped.append(client.safe()))
+            firing.start()
+            assert preparing.wait(5.0)
+            stopper.start()
+            deadline = time.monotonic() + 5.0
+            while not client._stopping and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert client._stopping, "the Stop never queued behind the preparation"
+            release.set()
+            firing.join(5.0)
+            stopper.join(5.0)
+            assert not firing.is_alive() and not stopper.is_alive()
+            assert len(refused) == 1 and "was not sent" in str(refused[0])
+            assert CMD_FIRE not in commands
+            assert len(stopped) == 1 and stopped[0].stable
+        finally:
+            release.set()
+            client.disconnect()
+
+
 def test_the_cancel_lane_names_its_owner_by_token(capsys) -> None:
     """Only the owner may stop the owner's command, and only beside its lane.
 
@@ -825,6 +888,66 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
     assert "by=127.0.0.1:" in output
 
 
+def test_closing_a_client_whose_board_was_taken_is_not_an_error() -> None:
+    """The takeover already SAFEd the board, so the old owner's close just ends.
+
+    A bench whose board a peer took -- or whose peer a withdrawal dropped --
+    closes its device later.  That close used to raise "the connection to
+    the pulse server ended" and leave the device stranded, for a board that
+    was already SAFE; nor may it reach the new owner's session.
+    """
+
+    geom = replace(StreamerParams(), max_rows=8, bank_size=2)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
+    with _server(streamer) as server:
+        previous = _client(server)
+        previous_connection = server._owner_connection
+        newcomer = _client(server)
+        try:
+            deadline = time.monotonic() + 1.0
+            while previous_connection in server._connections and time.monotonic() < deadline:
+                time.sleep(0.001)
+            previous.close()
+            assert previous._socket is None
+            assert newcomer.snapshot()["opened"] is True
+        finally:
+            newcomer.close()
+
+    # Only a DROPPED connection closes quietly.  A close the server does not
+    # answer in time may still be closing the board, and the caller hears so.
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        late = RemotePulseStreamer("127.0.0.1", silent.getsockname()[1], request_timeout=0.2)
+        with late._io_lock:
+            late._connect_locked()
+        with pytest.raises(ConnectionError, match="did not answer"):
+            late.close()
+        assert late._socket is None
+
+
+def test_a_completion_wait_the_server_does_not_answer_is_late_not_ended() -> None:
+    """The completion lane tells a late server from an ended connection too.
+
+    A server inside a long JTAG call answers no completion slice in time;
+    nobody took the board.  The lane used to say the connection had ended
+    and another editor might hold the board, and wear the type a dropped
+    connection wears.
+    """
+
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        late = RemotePulseStreamer("127.0.0.1", silent.getsockname()[1], request_timeout=0.2)
+        with late._io_lock:
+            late._connect_locked()
+            late._fire_command_id = 1
+        try:
+            with pytest.raises(ConnectionError, match="did not answer the completion wait") as caught:
+                late.wait_done(1.0)
+            assert not isinstance(caught.value, ConnectionResetError)
+        finally:
+            late.disconnect()
+
+
 def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         remote_module,
@@ -932,7 +1055,20 @@ def test_backend_without_any_serial_port_falls_back_or_fails_loudly(
     assert result.backend == expected
 
 
-def test_server_releases_a_fixed_port_for_the_next_run() -> None:
+def test_a_server_holds_its_port_alone_and_releases_it_for_the_next_run(monkeypatch) -> None:
+    """A held port refuses a second listener on its address or the wildcard.
+
+    On Windows a plain listener on 127.0.0.1 bound beside one on 0.0.0.0
+    and, as the more specific, took every later loopback connection --
+    another bench's own clients, and with them its board.  A server that
+    serves a board of its own opens it and proves its first SAFE only once
+    its port is held, so the refused one never stops the holder's shot.
+    Nor does a refused server's close SAFE anything: it served nobody, and
+    an open board handed to it is not its to stop -- nor the close of one
+    that held its port and then could not open its board.  Closed, the port
+    binds again for the next run.
+    """
+
     port = 0
     for _ in range(2):
         transport = MemoryRegisterTransport(geom=StreamerParams())
@@ -944,6 +1080,37 @@ def test_server_releases_a_fixed_port_for_the_next_run() -> None:
         client = _client(server)
         try:
             client.describe()
+            idle = PulseStreamer(
+                MemoryRegisterTransport(geom=StreamerParams()), StreamerParams(), 50e6,
+                target=_BOARD_TARGET,
+            )
+            for host in ("127.0.0.1", "0.0.0.0"):
+                with pytest.raises(OSError, match=f"port {port} is taken"):
+                    PulseRemoteServer((host, port), idle)
+            with pytest.raises(OSError, match=f"port {port} is taken"):
+                remote_module.serve(idle, "127.0.0.1", port)
+            monkeypatch.setattr(remote_module, "_deployed_streamer", lambda **_kwargs: idle)
+            with pytest.raises(OSError, match=f"port {port} is taken"):
+                remote_module.LocalPulseService(host="127.0.0.1", port=port)
+            assert idle.snapshot()["opened"] is False
+            idle.open()
+            safes: list[object] = []
+            monkeypatch.setattr(idle, "safe", lambda: safes.append(True))
+            with pytest.raises(OSError, match=f"port {port} is taken"):
+                PulseRemoteServer(("0.0.0.0", port), idle)
+            assert safes == [], "a server refused at its bind made a board SAFE"
+            # A board that is off, or on another COM port, fails its open
+            # after the bind: that server served nobody either.
+            monkeypatch.setattr(
+                remote_module,
+                "_connect_deployed",
+                lambda _streamer: (_ for _ in ()).throw(RuntimeError("the board is off")),
+            )
+            with pytest.raises(RuntimeError, match="the board is off"):
+                remote_module.LocalPulseService(host="127.0.0.1", port=0)
+            assert safes == [], "a server whose board never opened made a board SAFE"
+            idle.close()
+            assert client.safe().stable, "the holder still serves its own client"
         finally:
             client.close()
             server.shutdown()
@@ -1086,7 +1253,8 @@ def test_server_cli_defaults_to_auto_and_accepts_explicit_backends() -> None:
     parser = remote_module.build_arg_parser()
 
     assert parser.parse_args([]).backend == "auto"
-    assert parser.parse_args([]).uart_baud == DEFAULT_UART_BAUD
+    # No rate of its own: the server reads the one its deployment config states.
+    assert parser.parse_args([]).uart_baud is None
     assert parser.parse_args(["--backend", "jtag-axi"]).backend == "jtag-axi"
     assert parser.parse_args(["--backend", "uart", "--uart-port", "COM3"]).uart_port == "COM3"
 

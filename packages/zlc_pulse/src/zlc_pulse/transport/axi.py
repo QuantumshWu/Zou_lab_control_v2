@@ -27,16 +27,27 @@ VIVADO_SEARCH_ROOTS = tuple(
 
 
 def _default_vivado() -> str:
+    """The Vivado this JTAG session runs: the one the build uses.
+
+    ``fpga/_resolve_tools.bat vivado`` keeps the same rule for the build and
+    programming launcher: ZLC_PS_VIVADO_BIN, else the newest release under
+    the default install roots (release folders are named YYYY.N, so names
+    order as versions; a tie keeps the earlier root), else PATH.
+    """
+
     configured = os.environ.get("ZLC_PS_VIVADO_BIN")
     if configured:
         return configured
-    candidates: list[Path] = []
+    newest: Path | None = None
     for root in VIVADO_SEARCH_ROOTS:
         if root.is_dir():
-            candidates.extend(path for path in root.glob("*/bin/vivado.bat") if path.is_file())
-    if candidates:
-        candidates.sort(key=lambda path: str(path.parent.parent), reverse=True)
-        return str(candidates[0])
+            for path in root.glob("*/bin/vivado.bat"):
+                if path.is_file() and (
+                    newest is None or path.parent.parent.name > newest.parent.parent.name
+                ):
+                    newest = path
+    if newest is not None:
+        return str(newest)
     return shutil.which("vivado.bat") or shutil.which("vivado") or "vivado"
 
 

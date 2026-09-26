@@ -11,7 +11,7 @@ that the rows read at run time.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 import math
@@ -19,6 +19,7 @@ import math
 from .canonical import canonical_digest
 from .loops import frame_ticks, frame_visits, loop_nesting_depth
 from .model import (
+    ANALOG_MODES,
     FIELD_DAC,
     FIELD_DURATION,
     MAXIMUM_REPEAT_COUNT,
@@ -30,9 +31,6 @@ from .model import (
     exact_ticks,
 )
 from .wire import StreamerParams, build_fingerprint
-
-
-BUS_MODES = frozenset(("edge", "ramp"))
 
 
 @dataclass(frozen=True)
@@ -71,7 +69,7 @@ class TargetBusAction:
                 raise ValueError(f"{name} must be a non-negative integer")
         if not isinstance(self.bus_name, str) or not self.bus_name:
             raise ValueError("bus_name must be non-empty text")
-        if self.mode not in BUS_MODES:
+        if self.mode not in ANALOG_MODES:
             raise ValueError("bus action mode must be 'edge' or 'ramp'")
 
 
@@ -235,15 +233,15 @@ class CompiledProgram:
         self,
         point: Sequence[int] = (),
         *,
-        bracket_bodies: int | None = None,
+        bracket_bodies: Callable[[int], int] | None = None,
     ) -> tuple[tuple[int, int], ...]:
         """Every row the board enters in one Pulse, as ``(row, start tick)``.
 
         Loops are expanded in the board's own order.  ``bracket_bodies``
-        walks only the first and last that many replays of every loop, at
-        their true ticks (see :func:`bracket_iterations`), which is what
-        bounds a capacity check over a loop that replays a body a billion
-        times.
+        walks only the first and last few replays of every loop -- as many
+        as it answers for that loop's one-replay length in ticks -- at their
+        true ticks (see :func:`bracket_iterations`), which is what bounds a
+        capacity check over a loop that replays a body a billion times.
         """
 
         return frame_visits(self.resolved_durations(point), self.loops, bracket_bodies)
