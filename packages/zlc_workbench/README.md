@@ -16,9 +16,10 @@ grow separate paths, the split has failed.
 
 TaskConsole and Pulse Editor are two windows over that same `Experiment`
 session, named devices, virtual world, and sequencer; no second session or IPC
-service is introduced. Workbench arbitrates multiple `OBSERVE` readers and one
-`EXCLUSIVE` Logic Node owner per concrete device instance. It validates a new
-request before stopping only the old nodes that conflict with that instance.
+service is introduced. Workbench admits one exclusive owner per concrete device
+instance (`DeviceClaim.exclusive`); a use that only reads a device conflicts with
+nobody. It validates a new request before stopping only the old nodes that
+conflict with that instance.
 
 ## TaskConsole product wiring
 
@@ -130,8 +131,8 @@ this.
 
 Workbench supplies the workspace save root but does not allocate run folders
 while an editor or draft is merely open. NodeHost allocates one unique folder
-when the worker actually starts, establishes `run.json`, and gives the execution
-context the only artifact-registration path. Workbench projects that lifecycle;
+when the worker actually starts, writes `start.json` then and `run.json` when the
+run is over, and gives the execution context the only artifact-registration path. Workbench projects that lifecycle;
 it does not maintain a second Task status or plugin-specific report manager.
 
 Calibration and SLM Feedback both use the same TaskRun contract.
@@ -191,18 +192,22 @@ Completion callbacks return to the Qt owner and queue the final guarded close;
 timeouts report what is still active but never claim the window or worker is
 closed.
 
-Pulse Editor never talks to the board on the Qt owner.  Its window has one
-serial device worker and one SAFE worker; every conversation a control starts
--- the 100 ms "what is the board doing" poll, On Pulse, Hold, Step, Sync,
-Connect -- runs on the device worker and is shown when it delivers.  A status
-question is one at a time (a request while one is pending only queues its
-follow-up), is not sent while a command is in progress (the command reports
-the board it left), and an answer from before a command started is dropped.
-On the experiment machine the pulse server answers only between UART
-transactions, and the poll used to hold the GUI thread for that wait.  The
-presenter's public methods (`refresh_run_state`, `connect_to`, `hold_scan_point`,
-`sync_from_sequencer`, ...) still answer before returning: they are what a
-notebook, a test and the app's start-up call.
+Pulse Editor never talks to the board on the Qt owner.  Its window -- the
+standalone one and the one bound to a console session alike -- has four
+workers: a serial device worker, a SAFE worker (Stop and the close), a
+completion worker that waits out a finite run, and a preview worker that
+draws and saves the preview and runs the scan program.  Every conversation a
+control starts -- the 100 ms "what is the board doing" poll, On Pulse, Hold,
+Step, Sync, Connect -- runs on the device worker and is shown when it
+delivers.  A status question is one at a time (a request while one is pending
+only queues its follow-up), is not sent while a command is in progress (the
+command reports the board it left), and an answer from before a command
+started is dropped.  On the experiment machine the pulse server answers only
+between UART transactions, and the poll used to hold the GUI thread for that
+wait.  A presenter built without workers -- a notebook, a test -- answers its
+public methods (`refresh_run_state`, `connect_to`, `hold_scan_point`,
+`sync_from_sequencer`, ...) before returning; the app's start-up uses only
+`connect_to`.
 
 ## Check the environment first
 
@@ -211,5 +216,5 @@ zlc check
 ```
 
 The command reads the installed manifest projection, prints all eight module
-origins, verifies that each file belongs to `zou-lab-control`, and rejects the
-retired monolith names. It is independent of the working directory.
+origins and verifies that each file belongs to `zou-lab-control`. It is
+independent of the working directory.

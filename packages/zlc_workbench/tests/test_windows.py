@@ -18,14 +18,10 @@ So one test asserts the rule mechanically, and one checks the result.
 from __future__ import annotations
 
 import ast
-import os
 import time
 from pathlib import Path
 
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 APPS = Path(__file__).resolve().parents[1] / "src" / "zlc_workbench" / "apps"
 

@@ -1,11 +1,7 @@
-import os
 import time
 from types import SimpleNamespace
 
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_workbench.apps.task_console import build_console
 from zlc_runtime import stable_signal_key

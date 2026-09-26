@@ -11,16 +11,12 @@ writer and the reader agree with each other and not with the file.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import time
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
@@ -747,6 +743,50 @@ def test_two_open_working_copies_publish_as_two_producers() -> None:
     finally:
         _close_presenter(presenter)
 
+def test_a_working_copy_keeps_an_invalid_sample_and_closing_it_honours_the_answer() -> None:
+    """Two answers a working copy did not keep.
+
+    Apply zeroed the values under invalid samples in the copy itself (and a
+    Discard rebuilt the copy from those zeros), so a sample marked valid
+    again after an Apply came back as 0 and was saved so.  And "Close anyway" on an applied copy discarded nothing: it stayed
+    applied and unsaved, refused every later archive open, and was asked
+    about again at close.
+    """
+
+    view = _ViewerView()
+    view.confirm_discard = lambda _text: True
+    presenter = _built_presenter(view)
+    try:
+        view.new_data_requested.emit()
+        (editor_id,) = tuple(presenter._data_drafts)
+        draft = presenter._data_drafts[editor_id]
+        for component, text in (("values", "7.5"), ("validity", "false")):
+            view.data_editor_intent.emit(
+                editor_id,
+                {"op": "set_cells", "component": component, "cells": ((0, 0, text),)},
+            )
+        view.data_editor_intent.emit(editor_id, {"op": "apply_preview", "note": ""})
+        signal = draft["producer"].data_signal
+        publication = presenter._signal_plane.latest_publication(signal)
+        assert publication.value(signal).snapshot.block.values.reshape(-1)[0] == 0
+        view.data_editor_intent.emit(
+            editor_id,
+            {"op": "set_cells", "component": "validity", "cells": ((0, 0, "true"),)},
+        )
+        assert np.asarray(draft["values"]).reshape(-1)[0] == 7.5
+        view.data_editor_intent.emit(editor_id, {"op": "discard"})
+        assert np.asarray(draft["values"]).reshape(-1)[0] == 7.5
+        assert not np.asarray(draft["validity"]).reshape(-1)[0]
+
+        panel_id = str(draft["panel_id"])
+        assert panel_id in presenter.panels
+        assert presenter.close_data_editor(editor_id) is True
+        assert presenter._data_drafts == {}
+        assert panel_id not in presenter.panels
+        assert not any(error for _text, error in view.status), view.status
+    finally:
+        _close_presenter(presenter)
+
 def test_moving_an_axis_between_repeat_and_point_keeps_the_scalar_carrier(
     monkeypatch,
 ) -> None:
@@ -1126,6 +1166,79 @@ def test_existing_archive_manual_edit_saves_reopens_and_keeps_lineage(
     finally:
         _close_presenter(presenter)
 
+def test_a_copy_its_preview_kind_cannot_hold_gets_a_new_preview_or_keeps_the_old(
+    saved, tmp_path
+) -> None:
+    """A Panel's kind is fixed, and a later Apply can leave it behind.
+
+    A camera copy with both pixel axes deleted is no image: a Panel the data
+    chooses replaces the image preview, and Save follows the replacement.  A
+    copy with every axis deleted is something no plot kind can show, and is
+    refused before anything is published or removed -- the preview stays on
+    the last Apply, which a Discard can still save.
+    """
+
+    import zlc_workbench.viewer as viewer_module
+
+    path, _snapshot = saved
+    view = _ViewerView()
+    view.confirm_discard = lambda _text: True
+    presenter = _built_presenter(view)
+    try:
+        presenter.open(str(path))
+        _wait_until(lambda: not presenter._busy)
+        view.edit_data_requested.emit("archive:data")
+        editor_id, draft = next(iter(presenter._data_drafts.items()))
+
+        def accepted() -> bool:
+            presenter.beat()
+            binding = presenter.panels.get(str(draft["panel_id"]))
+            frozen = None if binding is None else binding.frozen_data
+            return frozen is not None and frozen.publication is draft["publication"]
+
+        def saves(target: Path) -> None:
+            view.data_editor_intent.emit(
+                editor_id, {"op": "save_as", "path": str(target), "note": ""}
+            )
+            _wait_until(lambda: target.is_file() and not presenter._busy)
+
+        view.data_editor_intent.emit(editor_id, {"op": "apply_preview", "note": ""})
+        image_id = str(draft["panel_id"])
+        assert presenter.panels[image_id].state.kind == "image", view.status
+
+        pixels = [
+            str(axis.axis_id)
+            for axis in draft["cell_axes"]
+            if str(axis.role).startswith("spatial")
+        ]
+        assert len(pixels) == 2
+        for axis_id in pixels:
+            view.data_editor_intent.emit(editor_id, {"op": "delete_axis", "axis_id": axis_id})
+        view.data_editor_intent.emit(editor_id, {"op": "apply_preview", "note": ""})
+        replacement = str(draft["panel_id"])
+        assert replacement != image_id and image_id not in presenter.panels, view.status
+        assert presenter.panels[replacement].state.kind != "image"
+        _wait_until(accepted)
+        saves(tmp_path / "pixels-deleted.npz")
+
+        applied = draft["publication"]
+        for axis in viewer_module._visible_axes(draft):
+            view.data_editor_intent.emit(
+                editor_id, {"op": "delete_axis", "axis_id": str(axis.axis_id)}
+            )
+        assert not viewer_module._visible_axes(draft), view.status
+        view.data_editor_intent.emit(editor_id, {"op": "apply_preview", "note": ""})
+        assert any(error and "no plot kind" in text for text, error in view.status)
+        assert str(draft["panel_id"]) == replacement and replacement in presenter.panels
+        assert draft["publication"] is applied
+        signal = draft["producer"].data_signal
+        assert presenter._signal_plane.latest_publication(signal) is applied
+
+        view.data_editor_intent.emit(editor_id, {"op": "discard"})
+        saves(tmp_path / "after-refusal.npz")
+    finally:
+        _close_presenter(presenter)
+
 def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved) -> None:
     """The Devices page names the pulse a run played and offers to draw it;
     the tab draws the recorded document through the editor's own preview
@@ -1171,11 +1284,14 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
         "the record itself is untouched"
     )
 
+    from threading import Event
+
     view = _ViewerView()
     presenter = _built_presenter(view)
     try:
         built: list[tuple[object, str]] = []
         resized: list[tuple[object, str]] = []
+        started, drawing = Event(), Event()
 
         class _Host:
             closed = False
@@ -1183,8 +1299,9 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
             saved: list[Path] = []
             logical_size = (300, 200)
 
-            def close(self) -> None:
+            def close(self, *, timeout=None) -> bool:
                 self.closed = True
+                return True
 
             def set_interaction_enabled(self, enabled: bool) -> None:
                 self.interaction = bool(enabled)
@@ -1194,6 +1311,8 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
                 self.saved.append(Path(target))
 
         def make(timeline, *, size):
+            started.set()
+            drawing.wait(5.0)
             built.append((timeline, size))
             return _Host()
 
@@ -1209,31 +1328,38 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
         tab = view.pulse_tabs[played.key]
         assert tab["title"] == "Pulse · imaging"
         assert tab["size_names"], "the tab offers the same sizes the editor's preview does"
-        _wait_until(lambda: tab["host"] is not None and not presenter._busy)
+        # Show off rows ticked while the first drawing is made, when there is
+        # no host yet to redraw: the drawing that lands is redrawn with them.
+        assert started.wait(5.0)
+        presenter.set_pulse_include_off(played.key, True)
+        drawing.set()
+        _wait_until(lambda: tab["mounts"] == 2 and not presenter._busy)
         ((timeline, size),) = built
         assert timeline.total_duration > 0 and size
         assert [channel.label for channel in timeline.channels]
         assert [mark.name for mark in timeline.periods] == [
             period.name or period.period_id for period in played_sequence.periods
         ]
+        assert len(resized) == 1 and len(resized[0][0].channels) >= len(timeline.channels)
         host = tab["host"]
-        assert (tab["size"], tab["mounts"]) == (size, 1)
         assert host.interaction is False
         presenter.info_action(f"pulse:{played.key}")
         assert built == [(timeline, size)], "a second open focuses the tab, it does not redraw"
 
-        # The controls act on the drawing: size and off rows redraw the
-        # standing host, selectors gate its interaction, Save writes it.
+        # The controls act on the drawing: size redraws the standing host,
+        # selectors gate its interaction, Save writes it.
         presenter.set_pulse_size(played.key, "4x4")
-        _wait_until(lambda: tab["mounts"] == 2 and not presenter._busy)
-        assert resized[-1][1] == "4x4" and tab["size"] == "4x4"
-        presenter.set_pulse_include_off(played.key, True)
         _wait_until(lambda: tab["mounts"] == 3 and not presenter._busy)
-        assert len(resized[-1][0].channels) >= len(timeline.channels)
+        assert resized[-1][1] == "4x4" and tab["size"] == "4x4"
         presenter.set_pulse_selectors(played.key, True)
         assert host.interaction is True
         presenter.save_pulse_image(played.key)
-        _wait_until(lambda: host.saved and not presenter._busy)
+        # A size asked for while the Save holds the worker is drawn once it
+        # is free -- it was refused, leaving the control and the drawing apart.
+        assert presenter._busy
+        presenter.set_pulse_size(played.key, "2x2")
+        _wait_until(lambda: host.saved and tab["mounts"] == 4 and not presenter._busy)
+        assert resized[-1][1] == "2x2" and tab["size"] == "2x2"
         assert host.saved[0].parent == path.parent.resolve() and host.saved[0].suffix == ".png"
         saved_name = next(
             text[len("saved "):] for text, _error in view.status if text.startswith("saved ")
@@ -1600,22 +1726,34 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
         )
         assert accepted[2] is staged[0].host
         original_read = viewer_module.read_archive
+        import threading
+
+        readers: list[threading.Thread] = []
+        release_read = threading.Event()
 
         def slow_failed_read(candidate):
             if Path(candidate).name == "broken.npz":
-                time.sleep(0.25)
+                readers.append(threading.current_thread())
+                release_read.wait(10.0)
                 raise OSError("slow unreadable archive")
             return original_read(candidate)
 
         monkeypatch.setattr(viewer_module, "read_archive", slow_failed_read)
-        started = time.monotonic()
-        window.path_committed.emit(str(path.with_name("broken.npz")))
-        submitted_in = time.monotonic() - started
+        try:
+            window.path_committed.emit(str(path.with_name("broken.npz")))
+            # The commit returned with the read still held open, and the read
+            # is not on the Qt thread -- which goes on turning under it.
+            _wait_until(lambda: bool(readers))
+            assert readers[0] is not threading.main_thread(), (
+                "the File commit performed archive I/O on the Qt thread"
+            )
+            turns = len(owner_turns)
+            _wait_until(lambda: len(owner_turns) >= turns + 3)
+        finally:
+            release_read.set()
         _wait_until(lambda: not window.presenter._busy)
         timer.stop()
 
-        assert submitted_in < 0.05, "the File commit performed archive I/O"
-        assert len(owner_turns) >= 5, "Qt stopped turning during archive I/O"
         assert (
             window.presenter.path,
             window.presenter.description,
@@ -1762,19 +1900,34 @@ def test_formal_window_waits_for_guarded_host_work_without_blocking_or_hiding(
             _wait_until(lambda: not window.is_visible())
 
 def test_the_projection_needs_no_session_and_no_qt() -> None:
-    """It answers in a notebook too, which is where most reading happens."""
+    """It answers in a notebook too, which is where most reading happens.
 
-    import ast
+    Asked of a fresh interpreter's ``sys.modules`` after the import, not of
+    the module's own import lines: those miss ``import PyQt5``, relative
+    imports and everything the imports import -- the edges this is about.
+    """
 
-    import zlc_workbench.viewer as module
+    import subprocess
+    import sys
 
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    imported = {
-        node.module
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.ImportFrom) and node.module
-    }
-    assert not any(name.startswith(("PyQt5", "zlc_atom")) for name in imported), imported
+    script = (
+        "import sys\n"
+        "import zou_lab_control  # noqa: F401\n"
+        "import zlc_workbench.viewer  # noqa: F401\n"
+        "carried = [name for name in ('PyQt5', 'zlc_atom', 'zlc_workbench.session')\n"
+        "           if name in sys.modules]\n"
+        "assert not carried, carried\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
 
 def test_save_image_captures_the_whole_window_in_today_folder(saved, monkeypatch) -> None:
     from PyQt5 import QtGui, QtTest

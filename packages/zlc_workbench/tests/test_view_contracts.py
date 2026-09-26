@@ -18,12 +18,8 @@ the real view would refuse.
 from __future__ import annotations
 
 import inspect
-import os
 
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from PyQt5 import QtCore
 

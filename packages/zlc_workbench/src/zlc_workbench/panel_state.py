@@ -101,11 +101,15 @@ def panel_data_shape(
         for field in tuple(getattr(semantics, "fields", ()))
         if str(field.name).startswith("fate:") and is_scope_fate(field.value)
     )
+    repeat_axes = schema.repeat_domain.axes
+    counts = (0,) * len(repeat_axes) if source is None else source.repeat_counts
     return {
         "data_structure": schema_structure(schema),
-        "data_valid": (
-            tuple(0 for _axis in schema.repeat_domain.axes)
-            if source is None else source.repeat_counts
+        # Counted per Repeat axis, and paired by position with the structure's
+        # Repeat group, which names only primary axes: an alternative
+        # coordinate moves with its primary and is not a factor of its own.
+        "data_valid": tuple(
+            count for axis, count in zip(repeat_axes, counts) if axis.coordinate_of is None
         ),
         "data_scope": pinned,
     }
@@ -304,12 +308,12 @@ def panel_surface_from_description(
         if "min_bic_gain" in accepted_fit:
             # A two-population model asks whether the data has two, and
             # the evidence it demands is the operator's to set: the BIC
-            # gain of two populations over one, ten by default.  Below it
-            # the fit reports one population.
+            # gain of two populations over one, ten by default.  Short of
+            # exceeding it the fit reports one population.
             fit_fields.append(
                 {
                     "key": "min_bic_gain",
-                    "label": "Two populations if ΔBIC ≥",
+                    "label": "Two populations if ΔBIC >",
                     "kind": "number",
                     "value": accepted_fit["min_bic_gain"],
                     "allow_none": False,
@@ -318,8 +322,8 @@ def panel_surface_from_description(
                     "maximum": None,
                     "step": 1.0,
                     "description": (
-                        "the evidence two populations must show over one; "
-                        "below it the fit reports one population"
+                        "the evidence two populations must exceed over one; "
+                        "short of it the fit reports one population"
                     ),
                 }
             )
@@ -828,7 +832,12 @@ class PanelState:
 
     @classmethod
     def from_document(cls, document: object) -> "PanelState":
-        """Restore current UI fields; missing fields use their current defaults."""
+        """Restore current UI fields; missing fields use their current defaults.
+
+        A field this build no longer declares is ignored; a value is still
+        judged strictly -- an unknown fit model refuses the document, as the
+        layout authority says (IMPLEMENTATION_PLAN.md section 1).
+        """
 
         if not isinstance(document, Mapping):
             raise TypeError("panel state must be an object")

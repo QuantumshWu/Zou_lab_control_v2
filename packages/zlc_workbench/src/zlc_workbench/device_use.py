@@ -169,6 +169,21 @@ class DeviceUseCoordinator:
         with self._lock:
             return self._device_owner_revisions.get(str(device_key), 0)
 
+    def command_holders(self, device_keys: Sequence[str]) -> tuple[str, ...]:
+        """Who drives these devices outside any Logic right now -- a
+        Control's tune, an editor, a publication: what ``prepare_logic``
+        refuses a candidate for, asked before the candidate is built."""
+
+        keys = frozenset(str(key) for key in device_keys)
+        with self._lock:
+            return tuple(
+                dict.fromkeys(
+                    lease.label
+                    for lease in self._leases.values()
+                    if lease.kind != "logic" and _claims_keys(lease.claims) & keys
+                )
+            )
+
     def field_policy(
         self,
         device_key: str,

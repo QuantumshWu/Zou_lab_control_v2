@@ -16,8 +16,8 @@ Line endings are the kind of thing a checkout silently decides, which is why
 this is a test and not a note: the experiment machine gets its code by pull.
 
 And every wrapper in bin/ selects one installed manifest command exactly once:
-it never reaches past the entry into a layer module, and never hides why a
-python step failed.
+it never reaches past the entry into a layer module, never hides why a
+python step failed, and never waits for a key while ZLC_NO_PAUSE is set.
 """
 
 from __future__ import annotations
@@ -101,6 +101,28 @@ def test_no_launcher_hides_the_reason_a_python_step_failed() -> None:
         if "2>nul" in line
         and "%ZLC_PY_CMD%" in line
         and not line.lstrip().lower().startswith("rem")
+    ]
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_every_pause_yields_to_automation() -> None:
+    """A bare ``pause`` blocks whatever runs the window for a key nobody presses.
+
+    ``ZLC_NO_PAUSE`` is the one switch automation and the tests set, so every
+    ``pause`` in every batch file -- the shared _launch.bat's included -- is
+    guarded by it.  test_launcher reaches only two of them at runtime (a
+    failing command through _launch.bat, and estimate_resources.bat); this
+    holds the rest.
+    """
+
+    guarded = 'if "%ZLC_NO_PAUSE%"=="" pause'
+    offenders = [
+        f"{path.name}:{number}: {line.strip()}"
+        for path in _authored_batch_files()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"\bpause\b", line, re.IGNORECASE)
+        and not line.lstrip().lower().startswith("rem")
+        and line.strip() != guarded
     ]
     assert offenders == [], "\n".join(offenders)
 

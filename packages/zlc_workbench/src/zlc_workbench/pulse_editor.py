@@ -94,6 +94,7 @@ _LOG = logging.getLogger(__name__)
 
 __all__ = [
     "PulseEditorPresenter",
+    "preview_candidate",
     "programmable_ports",
     "project_ports",
     "project_schedule",
@@ -254,7 +255,9 @@ def programmable_ports(target: object) -> tuple:
 
     So: digital ports and DAC ports, in catalog order, and every clock port
     that belongs to a DAC folded into it.  A clock port owned by nothing is
-    still shown, because an unexplained lane is worse than an odd row.
+    still shown on the Edit tab, because an unexplained lane is worse than an
+    odd row; the Target page gives it no row, carries it unchanged and never
+    mints its name (``project_target``, ``refresh_target``).
     """
 
     owned = {
@@ -342,7 +345,10 @@ def project_target(
 
     A DAC carries its latch clock here too, as its own field, because that is
     the one wire of the bundle a pulse never drives and an operator still has
-    to find on the board.
+    to find on the board.  A clock no DAC latches with has no row: the page
+    has digital and DAC outputs only, and applying it carries such a clock
+    over unchanged, until a DAC with no latch clock names its wire as its
+    latch endpoint and takes it (``_target_from_records``).
     """
 
     from zlc_ui import TargetPortRecord
@@ -357,6 +363,8 @@ def project_target(
 
     records = []
     for port in programmable_ports(target):
+        if port.kind == "clock":
+            continue
         clock_key = port.latch_clock if port.kind == "dac" else None
         records.append(
             TargetPortRecord(
@@ -964,6 +972,39 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     )
 
 
+def preview_candidate(
+    sequence: PulseSequence,
+    include_off: bool,
+    pinned_size: str | None,
+) -> tuple[object, str, int, int, float]:
+    """The one timeline/size/status value every drawing of a pulse uses.
+
+    The editor's Preview page and the Figure viewer's Pulse tab both draw
+    through it: the viewer used to repeat the size rule beside its own copy
+    of the timeline call, and never said how long the pulse played.
+    """
+
+    data = timeline_of(sequence, include_off=include_off)
+    rows = len(getattr(data, "channels", ())) + len(
+        getattr(data, "analog_traces", ())
+    )
+    if pinned_size:
+        size = pinned_size
+    else:
+        from zlc_plot import recommended_pulse_preset
+
+        size = recommended_pulse_preset(rows, len(sequence.periods))
+    return (
+        data,
+        size,
+        rows,
+        len(sequence.periods),
+        # The header says how long the board PLAYS the pulse: the pass
+        # the axis shows, with every bracket expanded.
+        sequence.played_nanoseconds(),
+    )
+
+
 # ------------------------------------------------------------------- presenter
 
 
@@ -1057,6 +1098,8 @@ class PulseEditorPresenter:
             raise TypeError("device command and SAFE workers must be callable")
         self._preview_busy = False
         self._preview_pending: tuple[PulseSequence, bool, str | None] | None = None
+        #: A scan program is running on the preview worker.
+        self._scan_running = False
         self._preview_close_requested = False
         self._preview_mounted = False
         #: The plotting host behind the preview.  Built once and updated,
@@ -1276,6 +1319,10 @@ class PulseEditorPresenter:
         assembled differently from the one that will fire.
         """
 
+        # Asked BEFORE the dialog, as Config's Load asks: choosing a file and
+        # then being told the edits on screen would go wastes the choice.
+        if not self._discard_pulse_edits():
+            return False
         start = str(Path(self.path).parent if self.path else self.pulses_directory or "")
         chosen = self.view.ask_open_path(
             "Open pulse", start,
@@ -1286,7 +1333,13 @@ class PulseEditorPresenter:
         return self.open_pulse(chosen)
 
     def open_pulse(self, path: str) -> bool:
-        """Replace what is being edited with one ``zlc.pulse`` JSON file."""
+        """Replace what is being edited with one ``zlc.pulse`` JSON file.
+
+        Attached, a pulse written for other wiring is moved onto the board
+        exactly as Connect moves the one already open: the file's own wiring
+        was a target the board then refused to load.  One written for this
+        board's wiring and clock opens as its file has it.
+        """
 
         try:
             candidate = read_pulse(path)
@@ -1296,6 +1349,8 @@ class PulseEditorPresenter:
         self._saved_state = candidate
         self.path = str(path)
         self._accept_state(candidate)
+        if self.board is not None and self.sequence is not None:
+            self._align_sequence_to(self.board)
         self.refresh()
         return True
 
@@ -1312,6 +1367,21 @@ class PulseEditorPresenter:
             return None
         return base.parent / CONFIG_VALUES_DIRECTORY
 
+    def _save_folder(self) -> Path:
+        """Where a file written beside this pulse goes: the pulse's folder,
+        or before it has one the workspace's pulses folder.
+
+        Not the process's working directory, which is wherever the launcher
+        happened to be started from; only an editor with no workspace at all
+        (a notebook) is left with that.
+        """
+
+        if self.path:
+            return Path(self.path).parent
+        if self.pulses_directory:
+            return Path(self.pulses_directory)
+        return Path.cwd()
+
     def _binding_records(self) -> tuple[BindingRecord, ...]:
         """Read-only physical fields, never separately authored aliases."""
         if self.sequence is None:
@@ -1326,6 +1396,16 @@ class PulseEditorPresenter:
 
     def _discard_config_edits(self) -> bool:
         return not self._config_dirty() or self.view.confirm_config_discard()
+
+    def _discard_pulse_edits(self) -> bool:
+        """Whether the pulse on screen may be replaced, asked only when it
+        differs from its file -- the difference the Save button already shows.
+
+        Close, Load and Clear All each threw the draft away and asked nothing,
+        while the Config tab beside it, holding far less work, asked first.
+        """
+
+        return self._state == self._saved_state or self.view.confirm_pulse_discard()
 
     def new_config(self) -> None:
         if not self._discard_config_edits():
@@ -1407,6 +1487,9 @@ class PulseEditorPresenter:
                 values = read_config_values(path) if path else {}
             return values
 
+        # Delivered even after a Stop: the file is written (and maybe
+        # activated) by then, and a Config page left on the old table would
+        # offer to save the edits that already went.
         def delivered(values: object, error: BaseException | None) -> None:
             if error is not None:
                 self._warn(f"cannot update Config: {error}")
@@ -1425,7 +1508,9 @@ class PulseEditorPresenter:
             self.refresh()
 
         if self._run_device_work is not None:
-            return self._run_device_command(work, delivered, summary="Updating Config...")
+            return self._run_device_command(
+                work, delivered, summary="Updating Config...", always_deliver=True
+            )
         try:
             values = work(0)
         except Exception as error:
@@ -1915,9 +2000,13 @@ class PulseEditorPresenter:
         )
 
     def clear_all(self) -> None:
-        """Clear authored content to one safe period, retaining file context."""
+        """Clear authored content to one safe period, retaining file context.
 
-        if self.sequence is None:
+        Asked first, as Config's New is: the path is kept, so a Save made by
+        reflex afterwards overwrites the file with the blank pulse.
+        """
+
+        if self.sequence is None or not self._discard_pulse_edits():
             return
         sequence = self.sequence
         safe = (0,) * len(sequence.target.raw_lanes)
@@ -2146,7 +2235,14 @@ class PulseEditorPresenter:
             if not had_sequence:
                 self.start_new_pulse()
 
-        return self._run_device_command(work, delivered, summary="Connecting...")
+        # Delivered even after a Stop or a close began: by then the worker has
+        # already hung up the previous board and dialled the new one, and only
+        # this delivery lets go of the one and takes the other.  Skipped, the
+        # editor went on naming -- and holding its lease on -- a board it had
+        # closed, and every later Stop, Connect and close failed on it.
+        return self._run_device_command(
+            work, delivered, summary="Connecting...", always_deliver=True
+        )
 
     @staticmethod
     def _hang_up(sequencer: object, holding_lease: bool) -> BaseException | None:
@@ -2284,25 +2380,59 @@ class PulseEditorPresenter:
         in different slots must not silently swap what a period drives.  A lane
         the board does not have cannot be driven, and is reported rather than
         dropped quietly.
+
+        A name is not enough on its own.  Kept only where the board has the
+        same KIND of thing under it: a level on a lane the board drives as a
+        digital output, a step, delay or binding on a port of the kind it was
+        written for.  Matching names alone handed the model a level on a DAC
+        data lane, or a DAC step on a digital port, and its refusal escaped
+        the Connect delivery -- the operator was told nothing and the status
+        stayed "Connecting...".  What still does not fit (a DAC value outside
+        this board's range, a duration off its clock) is said, and the pulse
+        keeps the wiring it was written for.
+
+        A pulse already on this board's wiring and clock is left as it is,
+        and where one is moved the names its author gave the outputs go with
+        the outputs that keep their kind.  Taking the board's target whole
+        put the XDC names back over every renamed output, and made a file
+        just opened read as edited -- a Save then wrote the loss.
         """
 
         current = self.sequence
+        if (
+            current.target.abi_fingerprint == board.target.abi_fingerprint
+            and current.time_step_ns == float(board.time_step_ns)
+        ):
+            return
         board_lanes = board.target.raw_lanes
+        digital_lanes = {
+            port.lanes[0] for port in board.target.ports if port.kind == "digital"
+        }
         was = {lane: index for index, lane in enumerate(current.target.raw_lanes)}
         lost = sorted(
             lane
             for index, lane in enumerate(current.target.raw_lanes)
-            if lane not in set(board_lanes)
+            if lane not in digital_lanes
             and any(period.states[index] for period in current.periods)
         )
-        ports = {port.key for port in board.target.ports}
-        dropped_steps = sorted(
+        board_kinds = {port.key: port.kind for port in board.target.ports}
+        written = current.target.by_key
+
+        def fits(key: str) -> bool:
+            return board_kinds.get(key) == written[key].kind
+
+        target = self._retarget_labels(
+            board.target,
+            {key: port.label for key, port in written.items() if fits(key)},
+        ) or board.target
+        dropped_ports = sorted(
             {
                 step.port
                 for period in current.periods
                 for step in period.analog_steps
-                if step.port not in ports
+                if not fits(step.port)
             }
+            | {delay.port for delay in current.delays if not fits(delay.port)}
         )
 
         # replace(), so every other field of a period -- its kind above all:
@@ -2311,33 +2441,42 @@ class PulseEditorPresenter:
             replace(
                 period,
                 states=tuple(
-                    period.states[was[lane]] if lane in was else 0
+                    period.states[was[lane]]
+                    if lane in was and lane in digital_lanes else 0
                     for lane in board_lanes
                 ),
                 analog_steps=tuple(
-                    step for step in period.analog_steps if step.port in ports
+                    step for step in period.analog_steps if fits(step.port)
                 ),
             )
             for period in current.periods
         )
-        delays = tuple(delay for delay in current.delays if delay.port in ports)
+        delays = tuple(delay for delay in current.delays if fits(delay.port))
         bindings = tuple(
             binding for binding in current.bindings
-            if binding.field_ref.port is None or binding.field_ref.port in ports
+            if binding.field_ref.port is None or fits(binding.field_ref.port)
         )
         dropped_bindings = sorted(
             field_label(current, b.field_ref) for b in current.bindings if b not in bindings
         )
-        candidate = PulseSequence(
-            name=current.name,
-            target=board.target,
-            time_step_ns=float(board.time_step_ns),
-            periods=periods,
-            bindings=bindings,
-            delays=delays,
-            brackets=current.brackets,
-            run_repeats=current.run_repeats,
-        )
+        try:
+            candidate = PulseSequence(
+                name=current.name,
+                target=target,
+                time_step_ns=float(board.time_step_ns),
+                periods=periods,
+                bindings=bindings,
+                delays=delays,
+                brackets=current.brackets,
+                run_repeats=current.run_repeats,
+            )
+        except ValueError as error:
+            self._warn(
+                f"this pulse does not fit the attached board ({error}); it keeps "
+                "the wiring it was written for, which this board will not load: "
+                "edit it to fit, save it and open it again"
+            )
+            return
         state_changes: dict[str, Any] = {"sequence": candidate}
         if len(candidate.scan_bindings) != len(current.scan_bindings):
             state_changes.update(
@@ -2345,10 +2484,10 @@ class PulseEditorPresenter:
                 scan_source_dirty=bool(self._state.scan_source),
             )
         self._edit_state(**state_changes)
-        if lost or dropped_steps or dropped_bindings:
-            missing = ", ".join(lost + dropped_steps + dropped_bindings)
+        if lost or dropped_ports or dropped_bindings:
+            missing = ", ".join(lost + dropped_ports + dropped_bindings)
             self._warn(
-                f"this board has no {missing}; those outputs or bindings were dropped from "
+                f"this board has no matching {missing}; those outputs or bindings were dropped from "
                 "the pulse rather than driven blind"
             )
 
@@ -2526,6 +2665,11 @@ class PulseEditorPresenter:
                     point = None
                 if adopted == point:
                     held = self._held_point
+        # Replacing the draft with another pulse asks first, as Load and
+        # Clear All do -- only then: a board playing this draft keeps it.
+        if held is None and adopted is not self.sequence and not self._discard_pulse_edits():
+            self._adopt_board_state(board_state)
+            return False
         if held is None:
             # EVERY execution fact the sync point later compares is adopted
             # here, because this is the one door the board's answer comes
@@ -2737,6 +2881,10 @@ class PulseEditorPresenter:
         self._run_device_command(work, delivered, summary="Starting...", finite_run=finite)
 
     def _device_available(self) -> bool:
+        if self._preview_close_requested:
+            # Closing retires the drive on the SAFE worker; a command taken
+            # now would hold its lease past the window that took it.
+            return False
         if self._device_busy or self._stop_busy:
             self._warn("a pulse command is already in progress")
             return False
@@ -2749,6 +2897,7 @@ class PulseEditorPresenter:
         *,
         summary: str,
         finite_run: bool | None = None,
+        always_deliver: bool = False,
     ) -> bool:
         """Change the board on the device worker; show the outcome here.
 
@@ -2760,6 +2909,14 @@ class PulseEditorPresenter:
         touching the device once it is stale; ``delivered`` takes the result
         and the error, exactly one of them None.  ``_device_done`` is set the
         moment the device work ends, whichever way, for Stop to wait on.
+        The ``summary`` it puts up ("Syncing...") comes down when the outcome
+        is delivered, back to the editor's resting sentence; a delivery with
+        more to say says it after.
+
+        ``always_deliver`` is for work whose delivery is bookkeeping rather
+        than a report on the board -- a connection changed, a Config file
+        written.  That work has happened whatever superseded it, so its
+        delivery runs regardless.
         """
 
         runner = self._run_device_work
@@ -2786,6 +2943,12 @@ class PulseEditorPresenter:
             self._device_busy = False
             try:
                 if operation == self._device_operation:
+                    # Only a delivery that refreshes the document writes the
+                    # line, so a declined Sync, a Hold or a failed Connect
+                    # would leave the busy sentence up.  A superseded command
+                    # leaves the line to the Stop or command that superseded it.
+                    self.view.set_summary(self._document_summary())
+                if always_deliver or operation == self._device_operation:
                     delivered(result, error)
             finally:
                 # A delivery that raised (its error is reported at the Qt
@@ -3011,16 +3174,25 @@ class PulseEditorPresenter:
         doing first.
         """
 
-        if self._stop_busy:
+        # A close retires the drive itself, SAFE first; a Stop taken once that
+        # has begun would take a lease the closed window then kept.  Until
+        # then a close waits on a command or status answer, and Stop is what
+        # cuts that short (SAFE goes on the cancel lane); it runs on the SAFE
+        # worker ahead of the retire, which releases any lease it left.
+        if self._stop_busy or self._retiring():
             return
-        self._device_operation += 1
-        self._finite_run = None
         if self._run_safe_work is None:
+            self._device_operation += 1
+            self._finite_run = None
             self._safe_drive(release=True)
             return
         sequencer = self.sequencer
         if sequencer is None or not self._acquire_command():
             return
+        # Only a Stop that goes ahead supersedes the command in progress; one
+        # refused its lease must not cancel anything.
+        self._device_operation += 1
+        self._finite_run = None
 
         command_done = self._device_done
         self._stop_busy = True
@@ -3042,8 +3214,21 @@ class PulseEditorPresenter:
             return self._board_state_for(sequencer), error
 
         def delivered(result: object) -> None:
+            if self._device_busy:
+                # The command this Stop superseded has not delivered: a
+                # Connect may yet change which board this editor holds, and
+                # says what became of the old one.  Heard after it.
+                self._status_followups.append(lambda: delivered(result))
+                return
             state, error = result
             self._stop_busy = False
+            if sequencer is not self.sequencer:
+                # A Connect delivered while this Stop ran: the board it
+                # stopped is no longer this editor's, and the Connect has
+                # said what became of it.  Its state is not this board's.
+                self._render_run_state()
+                self._wake_close_guard()
+                return
             self._board_state = state
             worked = error is None and state.answering and not state.firing
             if worked:
@@ -3282,6 +3467,11 @@ class PulseEditorPresenter:
 
         if then is not None:
             self._status_followups.append(then)
+        if self._preview_close_requested:
+            # The board is being let go of on the SAFE worker; a question
+            # sent now would race that, and the close waits for any answer.
+            self._run_status_followups()
+            return False
         runner = self._run_device_work
         if runner is None or self.sequencer is None:
             try:
@@ -3313,6 +3503,9 @@ class PulseEditorPresenter:
             ):
                 answered(answer)
             self._run_status_followups()
+            # A close that found this answer outstanding waits for it: the
+            # device worker cannot be closed while it is still asking.
+            self._wake_close_guard()
 
         return self._submit_work(
             runner,
@@ -3401,17 +3594,23 @@ class PulseEditorPresenter:
         dot and the buttons cannot disagree.
         """
 
-        live = self.sequencer is not None and self.sequence is not None
+        # A closing window offers nothing but Stop, and Stop only until the
+        # close is retiring the drive, SAFE first.
+        attached = self.sequencer is not None and not self._preview_close_requested
+        live = attached and self.sequence is not None
+        idle = not self._device_busy and not self._stop_busy
         synchronized = False if self._device_busy else bool(self.synchronized)
         self.view.set_control_state(
             running=bool(self.running),
             synchronized=synchronized,
             file_dirty=self._state != self._saved_state,
-            can_run=live and not self._device_busy and not self._stop_busy,
+            can_run=live and idle,
             # Going safe needs a board and nothing else.  Requiring a pulse to
             # be open, or the window to believe the board is busy, makes Stop
             # unavailable in exactly the situations it exists for.
-            can_stop=self.sequencer is not None and not self._stop_busy,
+            can_stop=(
+                self.sequencer is not None and not self._stop_busy and not self._retiring()
+            ),
         )
         # Capabilities go through the shell, which also gates the Scan page's
         # hold and step -- those need a board just as much as Sync does.
@@ -3419,9 +3618,9 @@ class PulseEditorPresenter:
             # Sync READS the board, so it needs a board and not a pulse -- an
             # editor with nothing open is exactly when pulling what the
             # hardware is holding is worth doing.
-            can_sync=self.sequencer is not None,
-            can_hold=live and not self._device_busy and not self._stop_busy,
-            can_step=live and bool(self._state.scan_rows) and not self._device_busy and not self._stop_busy,
+            can_sync=attached,
+            can_hold=live and idle,
+            can_step=live and bool(self._state.scan_rows) and idle,
         )
         self.view.set_status_color(self._status_token())
 
@@ -3516,7 +3715,8 @@ class PulseEditorPresenter:
         only the display names can be edited -- renaming a signal is a label,
         not a re-wiring, and the ABI fingerprint never moves.  Offline the
         target comes from a pulse file, and authoring one IS the point, so the
-        page opens up.
+        page opens up.  A pulse the board refused to take on keeps its file's
+        wiring, and the page says that is what it shows.
         """
 
         target = self._current_target()
@@ -3530,16 +3730,25 @@ class PulseEditorPresenter:
             view.set_target_width_rules(
                 TargetWidthRule(1, 1, 1), TargetWidthRule(2, width, width)
             )
-        view.set_target_ports(
-            project_target(target, pins=self.pins),
-            not attached,
-            (
-                f"Wiring read from the attached board; rename freely, the "
-                f"topology is the board's ({len(programmable_ports(target))} outputs)."
-                if attached
-                else "Offline: this target came from the pulse file and can be edited."
-            ),
+        records = project_target(target, pins=self.pins)
+        # A clock no DAC latches with has no row, and its name is still taken:
+        # the page's Add must not mint it, since nothing there renames a port.
+        reserved = tuple(
+            port.key for port in programmable_ports(target) if port.kind == "clock"
         )
+        if not attached:
+            caption = "Offline: this target came from the pulse file and can be edited."
+        elif target.abi_fingerprint == self.board.target.abi_fingerprint:
+            caption = (
+                f"Wiring read from the attached board; rename freely, the "
+                f"topology is the board's ({len(records)} outputs)."
+            )
+        else:
+            caption = (
+                "The pulse file's own wiring, which the attached board will not "
+                "load: edit the pulse to fit, save it and open it again."
+            )
+        view.set_target_ports(records, not attached, caption, reserved=reserved)
 
     def _current_target(self) -> object | None:
         if self.sequence is not None:
@@ -3567,7 +3776,9 @@ class PulseEditorPresenter:
         records = tuple(records)
         if self.board is not None:
             wanted = {str(record.key): str(record.signal).strip() for record in records}
-            keys = {port.key for port in programmable_ports(target)}
+            keys = {
+                port.key for port in programmable_ports(target) if port.kind != "clock"
+            }
             if set(wanted) != keys:
                 self.view.set_target_feedback(
                     "this target is the attached board's; ports cannot be added or "
@@ -3824,41 +4035,90 @@ class PulseEditorPresenter:
         -- a restricted expression language -- is a second language to learn
         for no safety anyone here needs.  What it must produce is checked:
         ``scan_table``, two-dimensional, one column per bound slot.
-        """
 
-        from zlc_pulse import scan_columns_for, validate_scan_table
+        In this process, not on its GUI thread.  A window runs it on its
+        preview worker, so a program that loops, or builds a table one Python
+        point at a time, holds that worker and not the event loop: Stop still
+        answers, and in the editor bound to a console every console panel
+        does too.  Without a worker (a notebook) it runs here and is answered
+        before this returns; with one, True means it was started.
+        """
 
         if self.sequence is None or not self._has_scan_slots():
             return False
         source = self._state.scan_source
-        namespace: dict = {}
-        try:
-            exec(compile(source, "<scan program>", "exec"), namespace)  # noqa: S102
-        except Exception as error:
-            self._scan_progress = f"scan program failed: {error}"
-            self._warn(f"scan program failed: {error}")
-            self._refresh_scan_page()
+        runner = self._run_preview_work
+        if runner is None:
+            try:
+                table = _scan_table_of(source)
+            except Exception as error:
+                return self._scan_program_refused(f"scan program failed: {error}")
+            return self._take_scan_program_table(source, table)
+        if self._preview_close_requested:
             return False
-        table = namespace.get("scan_table")
+        if self._scan_running:
+            self._warn("the scan program is still running")
+            return False
+        # Queued behind any drawing on that worker, and never counted as
+        # one: it touches nothing a close retires, so the retire does not
+        # wait for it.  The window does -- its preview worker cannot close
+        # under a running program -- and says what it is waiting for.
+        self._scan_running = True
+        self._scan_progress = "running the scan program…"
+        self._refresh_scan_page()
+
+        def delivered(table: object) -> None:
+            self._scan_running = False
+            if self._preview_close_requested:
+                self._wake_close_guard()
+                return
+            self._take_scan_program_table(source, table)
+
+        def failed(error: BaseException) -> None:
+            self._scan_running = False
+            if self._preview_close_requested:
+                self._wake_close_guard()
+                return
+            self._scan_program_refused(f"scan program failed: {error}")
+
+        self._submit_work(runner, lambda: _scan_table_of(source), delivered, failed)
+        return True
+
+    def _scan_program_refused(self, message: str) -> bool:
+        """Say why a run left no table, where its progress was being shown."""
+
+        self._scan_progress = message
+        self._warn(message)
+        self._refresh_scan_page()
+        return False
+
+    def _take_scan_program_table(self, source: str, table: object) -> bool:
+        """Keep the table a scan program produced, if it is one."""
+
+        from zlc_pulse import scan_columns_for, validate_scan_table
+
         if table is None:
-            self._warn("the scan program did not assign scan_table")
+            return self._scan_program_refused("the scan program did not assign scan_table")
+        if self.sequence is None:
             return False
         # Through zlc_pulse, which owns what a legal table is.  This window
         # used to decide it here and again on the file-load path, and the two
-        # did not agree: the loader skipped the width check entirely.
+        # did not agree: the loader skipped the width check entirely.  Checked
+        # against the fields bound NOW, which is what the table will drive.
         try:
             rows = validate_scan_table(
                 table,
                 scan_columns_for(self.sequence),
             )
         except Exception as error:
-            self._warn(str(error))
-            return False
+            return self._scan_program_refused(str(error))
         self._accept_state(
             replace(
                 self._state,
                 scan_rows=tuple(tuple(value for value in row) for row in rows),
-                scan_source_dirty=False,
+                # Typed over while it ran: what is in the box now is not what
+                # made this table.
+                scan_source_dirty=self._state.scan_source != source,
             )
         )
         self._scan_progress = f"{len(self._state.scan_rows)} scan point(s) ready"
@@ -3890,10 +4150,18 @@ class PulseEditorPresenter:
             return False
         try:
             path = Path(chosen)
-            data = np.load(path) if path.suffix == ".npy" else np.loadtxt(path, delimiter=",")
-            self._take_scan_rows(
-                validate_scan_table(data, scan_columns_for(self.sequence))
-            )
+            columns = scan_columns_for(self.sequence)
+            if path.suffix == ".npy":
+                data = np.load(path)
+                if data.ndim == 1 and len(columns) == 1:
+                    # One field, one value per point, however it was saved.
+                    data = data.reshape(-1, 1)
+            else:
+                # A one-column file is one field's points, not one point of
+                # many fields: without ndmin the reader squeezed it flat, and
+                # the commonest sweep file was refused on its column count.
+                data = np.loadtxt(path, delimiter=",", ndmin=2)
+            self._take_scan_rows(validate_scan_table(data, columns))
         except Exception as error:
             self._warn(f"cannot read {Path(chosen).name}: {error}")
             return False
@@ -3930,14 +4198,17 @@ class PulseEditorPresenter:
         if not self._state.scan_rows:
             self._warn("there is no scan table to save")
             return ""
-        folder = Path(self.path).parent if self.path else Path.cwd()
         values = np.asarray(self._state.scan_rows, dtype=float)
-        target = unique_path(
-            folder,
-            f"{(self.sequence.name if self.sequence else 'scan')}-scan",
-            ".npy",
-            writer=lambda temporary: np.save(temporary, values),
-        )
+        try:
+            target = unique_path(
+                self._save_folder(),
+                f"{(self.sequence.name if self.sequence else 'scan')}-scan",
+                ".npy",
+                writer=lambda temporary: np.save(temporary, values),
+            )
+        except Exception as error:
+            self._warn(f"cannot save the scan table: {error}")
+            return ""
         self._scan_progress = f"saved {target.name}"
         self._refresh_scan_page()
         return str(target)
@@ -4252,11 +4523,7 @@ class PulseEditorPresenter:
                 else replace(EMPTY_SCHEDULE, revision=self.revision)
             )
             self.view.set_title("PulseGUI - no pulse")
-            self.view.set_summary(
-                f"{len(target.ports)} port(s) on this board - Add Period to start a pulse"
-                if target is not None
-                else EMPTY_SCHEDULE.summary_text
-            )
+            self.view.set_summary(self._document_summary())
             self.view.show_preview_placeholder("Load a pulse to see its timeline")
             self._show_connection(self._connection_status)
             self.refresh_target()
@@ -4275,14 +4542,21 @@ class PulseEditorPresenter:
             )
         )
         self.view.set_title(f"PulseGUI - {self.sequence.name}")
-        self.view.set_summary(
-            f"{self.path or self.sequence.name} - "
-            f"{len(self.sequence.periods)} period(s)"
-        )
+        self.view.set_summary(self._document_summary())
         self._show_connection(self._connection_status)
         self.refresh_target()
         self._refresh_scan_page()
         self.refresh_preview()
+
+    def _document_summary(self) -> str:
+        """The status line's resting sentence: what the editor holds."""
+
+        if self.sequence is not None:
+            return f"{self.path or self.sequence.name} - {len(self.sequence.periods)} period(s)"
+        target = self._current_target()
+        if target is None:
+            return EMPTY_SCHEDULE.summary_text
+        return f"{len(target.ports)} port(s) on this board - Add Period to start a pulse"
 
     def _on_include_off(self, _included: bool) -> None:
         """Showing every channel changes how many rows are drawn.
@@ -4319,34 +4593,6 @@ class PulseEditorPresenter:
         self._preview_selectors = bool(enabled)
         if self._preview_host is not None:
             self._preview_host.set_interaction_enabled(self._preview_selectors)
-
-    @staticmethod
-    def _preview_candidate(
-        sequence: PulseSequence,
-        include_off: bool,
-        pinned_size: str | None,
-    ) -> tuple[object, str, int, int, float]:
-        """Build the one timeline/size/status value every preview path uses."""
-
-        data = timeline_of(sequence, include_off=include_off)
-        rows = len(getattr(data, "channels", ())) + len(
-            getattr(data, "analog_traces", ())
-        )
-        if pinned_size:
-            size = pinned_size
-        else:
-            from zlc_plot import recommended_pulse_preset
-
-            size = recommended_pulse_preset(rows, len(sequence.periods))
-        return (
-            data,
-            size,
-            rows,
-            len(sequence.periods),
-            # The header says how long the board PLAYS the pulse: the pass
-            # the axis shows, with every bracket expanded.
-            sequence.played_nanoseconds(),
-        )
 
     def refresh_preview(self) -> None:
         """Redraw the preview from what is on screen, IF it is on screen.
@@ -4390,7 +4636,7 @@ class PulseEditorPresenter:
         self.view.set_preview_status("drawing preview…")
 
         def work() -> object:
-            data, size, rows, periods, total_ns = self._preview_candidate(
+            data, size, rows, periods, total_ns = preview_candidate(
                 sequence,
                 include_off,
                 pinned_size,
@@ -4472,13 +4718,13 @@ class PulseEditorPresenter:
         preview rather than a second drawing of the same pulse.
         """
 
-        if not self._check_bracket():
+        if not self._check_bracket() or self._preview_close_requested:
             return
         if self._preview_host is None:
             self._warn("there is no preview to save")
             return
         name = (self.sequence.name if self.sequence is not None else "pulse") or "pulse"
-        folder = Path(self.path).parent if self.path else Path.cwd()
+        folder = self._save_folder()
         # The HOST writes the file.  The widget is a Qt view onto it and has
         # never had a save(), so this always answered "cannot save itself" in
         # the shipped window while the test substituted a fake that could.
@@ -4499,8 +4745,13 @@ class PulseEditorPresenter:
         def work() -> object:
             def write(temporary: Path) -> None:
                 result = save(temporary)
+                # Waited out, not given five seconds: the render child writes
+                # this temporary, and a writer that gave up on it left the
+                # file it then wrote behind in the pulses folder.  The render
+                # child answers, or fails every request when it dies, and the
+                # wait is on the preview worker, not Qt.
                 if hasattr(result, "result"):
-                    result.result(timeout=5.0)
+                    result.result()
 
             return unique_path(folder, name, ".png", writer=write)
 
@@ -4743,27 +4994,47 @@ class PulseEditorPresenter:
             self._request_preview_close()
 
     def may_close(self) -> bool:
-        """Whether unsaved Config edits may go; asked once per close."""
+        """Whether unsaved pulse and Config edits may go; asked once per close."""
 
-        return self._preview_close_requested or self._discard_config_edits()
+        return self._preview_close_requested or (
+            self._discard_pulse_edits() and self._discard_config_edits()
+        )
 
     def prepare_preview_close(self) -> bool:
-        """Stop accepting work and report when every owned delivery is idle."""
+        """Stop accepting work and report when every owned delivery is idle.
+
+        A status question on its way counts: the device worker cannot be
+        closed while it is asking, and its answer wakes the close.  A scan
+        program does not: it touches nothing the retire closes, so only the
+        preview worker it runs on waits for it, and the window says so.
+        """
 
         if not self._preview_close_requested:
             self._device_operation += 1
-        self._preview_close_requested = True
+            self._preview_close_requested = True
         self._preview_pending = None
-        return not (
+        # Rendered on every wake: Stop stays offered until the retire starts.
+        self._render_run_state()
+        retiring = self._retiring()
+        if retiring and self._scan_running:
+            self.view.set_summary("Stopping... waiting for the scan program to finish")
+        return retiring
+
+    def _retiring(self) -> bool:
+        """Closing with every owned delivery idle: the retire has the drive."""
+
+        return self._preview_close_requested and not (
             self._preview_busy
             or self._device_busy
             or self._stop_busy
+            or self._status_in_flight
         )
 
     def cancel_preview_close(self) -> None:
         """Resume preview requests after owned retirement was refused."""
 
         self._preview_close_requested = False
+        self._render_run_state()
 
     def close(self, *, present: bool = True) -> None:
         """Let go of the board and the preview -- both, whichever fails.
@@ -4841,6 +5112,15 @@ def _target_from_records(target: object, records: Sequence[object]) -> PulseTarg
     pins = dict(target.package_pins)
     lane_of_pin = {pin: lane for lane, pin in pins.items()}
     old = {port.key: port for port in target.ports}
+    # A clock no DAC latches with has no row on the page: it keeps its name
+    # and its wire, both booked before the page's outputs, so an output
+    # written onto either is refused in the clock's words -- the page lists
+    # no such port to look for.  The page's one way to it is a DAC with no
+    # latch clock naming its wire as the latch endpoint: that DAC takes it.
+    carried = [port for port in programmable_ports(target) if port.kind == "clock"]
+    clock_on = {port.lanes[0]: port.key for port in carried}
+    # A clock a DAC takes leaves ``clock_on`` but keeps its name booked.
+    wire_of_clock = {key: lane for lane, key in clock_on.items()}
     lanes: list[str] = []
     new_pins: dict[str, str] = {}
 
@@ -4861,9 +5141,29 @@ def _target_from_records(target: object, records: Sequence[object]) -> PulseTarg
         else:
             lane = text
         if lane in lanes:
-            raise ValueError(f"{key}: wire {text!r} is already used by another output")
+            raise ValueError(
+                f"{key}: wire {text!r} is held by clock {clock_on[lane]}, "
+                "which no DAC latches with"
+                if lane in clock_on
+                else f"{key}: wire {text!r} is already used by another output"
+            )
         lanes.append(lane)
         return lane
+
+    def unclaimed(key: str) -> str:
+        lane = wire_of_clock.get(key)
+        if lane is not None:
+            raise ValueError(
+                f"{key}: that name is taken by the clock on wire "
+                f"{pins.get(lane, lane)!r}, "
+                + (
+                    "which no DAC latches with; a DAC without a latch clock "
+                    "takes it by naming that wire as its latch endpoint"
+                    if lane in clock_on
+                    else "which another DAC latches with in this apply"
+                )
+            )
+        return key
 
     def port_spec(key: str, *parts: object, **fields: object) -> PulsePortSpec:
         try:
@@ -4885,9 +5185,12 @@ def _target_from_records(target: object, records: Sequence[object]) -> PulseTarg
     bus_of = {
         str(dac_records[index].key): bus for bus, index in enumerate(dac_order)
     }
-    ports: list[PulsePortSpec] = []
+    for port in carried:
+        lane = port.lanes[0]
+        wire(pins.get(lane, lane), port.key, 0, lane)
+    ports: list[PulsePortSpec] = list(carried)
     for record in records:
-        key = str(record.key)
+        key = unclaimed(str(record.key))
         kind = str(record.kind)
         label = str(record.signal).strip()
         endpoints = tuple(record.endpoints)
@@ -4901,8 +5204,24 @@ def _target_from_records(target: object, records: Sequence[object]) -> PulseTarg
                 wire(endpoint, key, bit, f"{key}_{bit}")
                 for bit, endpoint in enumerate(endpoints)
             )
-            clock_key = str(record.clock_key or f"{key}_clock")
-            clock_lane = wire(record.clock_endpoint, clock_key, 0, clock_key)
+            # A DAC may have no latch clock; it gets one only when a clock
+            # wire is written for it, never a clock wired to "None".  Written
+            # onto the wire of a clock no DAC latches with, it latches with
+            # that clock, already booked, which from here on is its own.
+            clock_text = str(record.clock_endpoint or "").strip()
+            taken = (
+                None if record.clock_key or not clock_text
+                else clock_on.pop(lane_of_pin.get(clock_text) if pins else clock_text, None)
+            )
+            clock_key = (
+                taken if taken is not None
+                else unclaimed(str(record.clock_key)) if record.clock_key
+                else unclaimed(f"{key}_clock") if clock_text else None
+            )
+            clock_lane = (
+                None if clock_key is None or taken is not None
+                else wire(record.clock_endpoint, clock_key, 0, clock_key)
+            )
             same_width = (
                 previous is not None
                 and previous.kind == "dac"
@@ -4918,13 +5237,14 @@ def _target_from_records(target: object, records: Sequence[object]) -> PulseTarg
                 safe_value=previous.safe_value if same_width else None,
                 latch_clock=clock_key,
             ))
-            clock = old.get(clock_key)
-            ports.append(port_spec(
-                clock_key,
-                "clock",
-                (clock_lane,),
-                label=clock.label if clock is not None else "",
-            ))
+            if clock_key is not None and taken is None:
+                clock = old.get(clock_key)
+                ports.append(port_spec(
+                    clock_key,
+                    "clock",
+                    (clock_lane,),
+                    label=clock.label if clock is not None else "",
+                ))
         else:
             raise ValueError(f"{key}: unknown output kind {kind!r}")
     position = {port.key: index for index, port in enumerate(target.ports)}
@@ -5009,6 +5329,14 @@ def _carried_onto(sequence: PulseSequence, target: PulseTarget) -> dict[str, Any
         "periods": tuple(periods),
         "delays": tuple(delay for delay in sequence.delays if delay.port in kept),
     }
+
+
+def _scan_table_of(source: str) -> object:
+    """What one scan program leaves in ``scan_table``, or None; any thread."""
+
+    namespace: dict = {}
+    exec(compile(source, "<scan program>", "exec"), namespace)  # noqa: S102
+    return namespace.get("scan_table")
 
 
 def _unique_id(existing: Sequence[str], stem: str) -> str:

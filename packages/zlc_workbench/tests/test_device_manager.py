@@ -7,16 +7,11 @@ between a mute view and the apparatus file a session will open tomorrow.
 from __future__ import annotations
 
 import json
-import os
-import time
 from types import SimpleNamespace
 
 import pytest
 
 from zlc_ui import STATUS_SEVERITIES
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
@@ -51,7 +46,6 @@ class _ManagerView:
         self.discovered_add_requested = _Signal()
         self.load_requested = _Signal()
         self.save_as_requested = _Signal()
-        self.cancel_requested = _Signal()
         self.lifecycle_requested = _Signal()
         self.device_remove_requested = _Signal()
         self.role_committed = _Signal()
@@ -134,6 +128,27 @@ class _ManagerView:
                 f"severity {severity!r} is not one of {STATUS_SEVERITIES}"
             )
         self.status.append((str(severity), str(text)))
+
+
+@pytest.fixture(autouse=True)
+def _private_fabric(monkeypatch):
+    """Announce on a port of this test's own, on this machine only.
+
+    The presenter's announcer takes the bench fabric's real port on every
+    interface: a rig PC whose console has Remote on already holds it (and
+    now refuses a second announcer), and a peer's broadcast would find
+    these throwaway devices.
+    """
+
+    from functools import partial
+
+    from zlc_atom.devices.remote import fabric
+
+    monkeypatch.setattr(
+        fabric,
+        "DeviceAnnouncer",
+        partial(fabric.DeviceAnnouncer, host="127.0.0.1", port=0),
+    )
 
 
 @pytest.fixture
@@ -458,13 +473,46 @@ def test_installation_missing_required_fields_is_reported(tmp_path) -> None:
         encoding="utf-8",
     )
 
+    before = path.read_text(encoding="utf-8")
     view = _ManagerView()
     presenter = DeviceManagerPresenter(view, path, confirm_overwrite=lambda _p: True)
 
     assert presenter.devices == []
     assert view.status[-1][0] == "error"
     assert "exactly" in view.status[-1][1]
+    # The empty draft never came from that file: it shows unsaved, and a
+    # Save after an edit asks where (Save As -- this view cannot ask)
+    # rather than replace the rig file with every other device in it.
+    assert view.apparatus[1] is True, "a draft the file does not hold is unsaved"
+    presenter.add_device("camera.virtual")
+    assert presenter.save() == ""
+    assert "where to save" in view.status[-1][1]
+    assert path.read_text(encoding="utf-8") == before
     del presenter
+
+    # A failed Open leaves the window on the file it had, so a Save never
+    # replaces the file that could not be read.
+    other = tmp_path / "other.json"
+    manager = DeviceManagerPresenter(view, other, confirm_overwrite=lambda _p: True)
+    assert manager.load(path) is False
+    assert manager.path == other
+    manager.save()
+    assert path.read_text(encoding="utf-8") == before
+
+    # A template the window starts from is the draft INSTEAD of the file.
+    templated = DeviceManagerPresenter(
+        view,
+        path,
+        initial_config=_apparatus(("camera", "camera", "camera.virtual", {})),
+        confirm_overwrite=lambda _p: True,
+    )
+    assert [item.instance_id for item in templated.devices] == ["camera"]
+    assert "apparatus.json not loaded" in view.status[-1][1]
+    # Nor does it pass for that file: it shows unsaved, and Save asks where
+    # (Save As -- this view cannot ask) rather than replace the file.
+    assert view.apparatus[1] is True, "a draft the file does not hold is unsaved"
+    assert templated.save() == ""
+    assert path.read_text(encoding="utf-8") == before
 
 
 def test_a_family_this_machine_cannot_build_is_named_with_its_reason(tmp_path, monkeypatch) -> None:
@@ -577,7 +625,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
     manager.set_role("camera", "camera_edited")
     assert view.lifecycle[:3] == ("Apply device changes", True, True)
     assert view.lifecycle[4] is True
-    manager.cancel()
+    manager.set_role("camera", "camera")
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
     manager.toggle_lifecycle()
@@ -890,33 +938,36 @@ def test_scan_families_share_one_total_deadline(tmp_path, monkeypatch) -> None:
 
     deadline = 0.03
     monkeypatch.setattr(tested_module, "_FAMILY_SCAN_DEADLINE_SECONDS", deadline)
+    # What each family is given to answer in, not how long the wall clock
+    # says it took: three families that each waited the whole deadline
+    # would be given about three deadlines between them.
+    joins: list[float] = []
+
+    class _RecordingThread(tested_module.Thread):
+        def join(self, timeout=None):
+            joins.append(timeout)
+            super().join(timeout)
+
+    monkeypatch.setattr(tested_module, "Thread", _RecordingThread)
     view = _ManagerView()
     manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
-    # The last family answers only when the test lets it, so "still
-    # answering" below is a fact of the test, not a race against a sleep.
+    # Every family answers only when the test lets it, so "missed the
+    # deadline" and "still answering" below are facts of the test, not a
+    # race against a sleep.
     hung = Event()
-
-    def slow(delay: float):
-        def discover():
-            time.sleep(delay)
-            return ()
-
-        return discover
 
     def held():
         hung.wait(5.0)
-        return ()
+        return (), ()
 
     manager.types = {
-        f"slow-{index}": SimpleNamespace(type_id=f"slow-{index}", discover=discover)
-        for index, discover in enumerate((slow(0.06), slow(0.09), held))
+        f"slow-{index}": SimpleNamespace(type_id=f"slow-{index}", discover=held)
+        for index in range(3)
     }
     try:
-        started = time.monotonic()
         _found, failures = manager._scan_families()
-        elapsed = time.monotonic() - started
 
-        assert elapsed < deadline * 2.2, elapsed
+        assert len(joins) == 3 and sum(joins) < 2 * deadline, joins
         # Three families missed it for one reason, so it is one line that
         # names all three.
         (line,) = failures
@@ -929,6 +980,43 @@ def test_scan_families_share_one_total_deadline(tmp_path, monkeypatch) -> None:
         assert manager.close() is True
     finally:
         hung.set()
+
+
+def test_a_scan_names_what_a_family_could_not_ask_beside_what_it_found(
+    tmp_path,
+) -> None:
+    """A fabric announcer that could not be listed is named on the scan's line.
+
+    It used to go only to a log no view shows, while the scan reported a
+    clean "discovered N device(s)" and that machine's devices were simply
+    missing from it.
+    """
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    board = DeviceInstanceConfig(
+        instance_id="remote_board",
+        role="pulse",
+        type_id="sequencer.hardware",
+        parameters={"host": "192.0.2.7", "port": 18861},
+    )
+    skipped = (
+        "the announcer at 192.0.2.8:18859 speaks fabric version 1 and this "
+        "machine speaks 2; update the older side and restart it"
+    )
+    manager.types = {
+        "remote.tunable": SimpleNamespace(
+            type_id="remote.tunable", discover=lambda: ((board,), (skipped,))
+        )
+    }
+    try:
+        assert manager.discover() is True
+        assert manager.discovered == (board,)
+        assert view.status[-1] == (
+            "warning", f"discovered 1 device(s); remote.tunable: {skipped}"
+        )
+    finally:
+        manager.close()
 
 
 def test_busy_presenter_refuses_close_then_closes_its_worker_and_rejects_work(
@@ -1246,19 +1334,54 @@ def test_each_published_device_reads_only_its_own_log(rf_bench) -> None:
     )
 
 
-def test_devices_from_the_fabric_or_another_machine_refuse_remote(tmp_path) -> None:
+def test_devices_from_the_fabric_or_another_machine_refuse_remote(
+    tmp_path, monkeypatch
+) -> None:
     """Publishing is for hardware THIS machine serves.
 
     A remote.tunable came over the fabric -- republishing it would only
     build a relay loop -- and an endpoint client whose server lives on
-    another machine has nothing of this machine's to announce.
+    another machine has nothing of this machine's to announce; the refusal
+    says which addresses and names it judged by, the spellings to write.
+    One of this machine's own addresses, and its own name, are this machine
+    all the same, as the board identity already says; its full name is
+    not, even where it dials this machine: only a resolver says so, and
+    none is asked.  They are listed whenever devices are loaded -- at Init,
+    and at the Apply that loads a client authored with an address this
+    machine gained after Init -- on the device worker, never by a press on
+    the GUI thread: listing them resolves this machine's name.
     """
 
+    import socket
+
+    from zlc_pulse import endpoint
+
+    def listed_on_a_press():
+        raise AssertionError("Remote listed this machine's addresses on the GUI thread")
+
+    # Whatever this test machine's own addresses are, 10.0.0.7 is not one.
+    monkeypatch.setattr(endpoint, "local_ipv4_addresses", lambda: ("10.0.0.5",))
+    # This machine's full name, which dials it: the board identity's
+    # resolve leads it back to 10.0.0.5.
+    monkeypatch.setattr(socket, "getfqdn", lambda name="": "Bench.Lab.Test")
+    resolve = socket.getaddrinfo
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *rest: (
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+            if host == "bench.lab.test" else resolve(host, *rest)
+        ),
+    )
+    assert endpoint.dialled_address("BENCH.lab.test") == "127.0.0.1"
     session = _session(
         {
             "borrowed": SimpleNamespace(device=object(), admit_peers=None),
             "faraway": SimpleNamespace(device=object(), admit_peers=None),
-        }
+            "named": SimpleNamespace(device=object(), admit_peers=None),
+            "full": SimpleNamespace(device=object(), admit_peers=None),
+        },
+        device_use=DeviceUseCoordinator(),
     )
     view = _ManagerView()
     manager = DeviceManagerPresenter(
@@ -1272,17 +1395,46 @@ def test_devices_from_the_fabric_or_another_machine_refuse_remote(tmp_path) -> N
                 {"host": "192.0.2.9", "port": 18859, "instance_id": "rf"},
             ),
             ("faraway", "sequencer", "sequencer.hardware", {"host": "10.0.0.7", "port": 18861}),
+            ("named", "board", "sequencer.hardware", {"host": socket.gethostname(), "port": 18863}),
+            ("full", "rig", "sequencer.hardware", {"host": "BENCH.lab.test", "port": 18865}),
         ),
         initialize_session=lambda _candidate: session,
+        prepare_reconcile=lambda active, _candidate, _keys: lambda: active,
     )
     assert manager.toggle_lifecycle() is True
+    monkeypatch.setattr(endpoint, "local_ipv4_addresses", listed_on_a_press)
     try:
         assert manager.toggle_remote("borrowed") is False
         assert "comes from the bench fabric" in view.status[-1][1]
         assert manager.toggle_remote("faraway") is False
-        assert "publish it from that machine" in view.status[-1][1]
+        name = socket.gethostname().strip().lower()
+        assert (
+            f"10.0.0.7 is none of this machine's addresses or names (10.0.0.5, "
+            f"{name}) -- publish it from the machine its server lives on, or "
+            "write one of these"
+        ) in view.status[-1][1]
+        # The full name is refused, naming the spellings to write instead.
+        assert manager.toggle_remote("full") is False
+        assert "BENCH.lab.test is none of this machine's" in view.status[-1][1]
         assert manager._announcer is None, "nothing was ever announced"
         assert view.remoted == ()
+        # The address a standalone pulse server offers other computers is
+        # this machine's own -- one a cable or a DHCP lease brought after
+        # Init too, once Applied.
+        monkeypatch.setattr(
+            endpoint, "local_ipv4_addresses", lambda: ("10.0.0.5", "10.0.0.7")
+        )
+        view.values["faraway"]["port"] = 18862
+        assert manager.commit_parameters("faraway", "port") is True
+        assert manager.toggle_lifecycle() is True, "applied on 10.0.0.7"
+        monkeypatch.setattr(endpoint, "local_ipv4_addresses", listed_on_a_press)
+        assert manager.toggle_remote("faraway") is True
+        # So is this machine's own name, in any case; its full name is
+        # still not, after the Apply too.
+        assert manager.toggle_remote("named") is True
+        assert manager.toggle_remote("full") is False
+        assert "BENCH.lab.test is none of this machine's" in view.status[-1][1]
+        assert view.remoted == ("faraway", "named")
     finally:
         manager.close()
 

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager
-import os
 from threading import Event
 import time
 from dataclasses import replace
@@ -25,9 +24,6 @@ import pytest
 
 from zlc_ui import STATUS_SEVERITIES
 from zlc_plot import SelectorKind
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
@@ -578,6 +574,14 @@ def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
             return
         time.sleep(0.005)
     raise AssertionError("panel hosts did not settle")
+
+
+def _kill_render_child(host) -> None:
+    """What render_process._failed leaves on a host whose child died."""
+
+    with host._condition:
+        host._startup_error = RuntimeError("the render child stopped")
+    host.service_failure = True
 
 
 def _started_camera(
@@ -1616,6 +1620,7 @@ def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
         node.signal_key("frames"), snapshot, kind="image"
     )
     original = binding.state
+    projected = len(presenter.view.panel_state_updates)
 
     assert presenter.update_panel_state(
         binding.panel_id,
@@ -1625,10 +1630,13 @@ def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
     # Not "no RUNNING node": a stopped run's data stays on the bench, so what
     # makes this choice invalid is that no node here publishes that signal.
     assert any(
-        "this console publishes no" in text
+        text.startswith(f"{binding.panel_id}: this console publishes no")
         for severity, text in presenter.view.status
         if severity == "error"
     )
+    # The overlay picker that sent it is still showing it: the kept record
+    # goes back to every view, and that projection is what puts it back.
+    assert (binding.panel_id, original) in presenter.view.panel_state_updates[projected:]
 
 
 def test_a_contradictory_display_state_is_refused_at_the_write(
@@ -3030,6 +3038,35 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     presenter.view.panel_editor_closed.emit(first.panel_id)
     assert binding.editor_host is None and binding.editor_selections is None
     assert replacement_editor_host.closing
+
+
+def test_a_refused_retarget_releases_everything_the_old_signal_drove(
+    presenter, session
+) -> None:
+    """The record already names the new signal, so the card goes dark -- and
+    nothing of the old signal keeps running behind it: not its host, and not
+    the selection bridge that went on publishing ROI/fit results derived
+    from it."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    _settle_panel_hosts(presenter, lambda: binding.bridge is not None)
+    old_host = binding.host
+    other, _other_snapshot = _one_shot(session, producer="cm2")
+    assert presenter.update_panel_state(
+        binding.panel_id, {"signal": other.signal_key("frames")}
+    )
+    kind, _old_port, candidate, _update, _target = binding.configuration
+    assert kind == "retarget"
+    candidate.can_accept = lambda *_args: False
+    # The beat that refuses it; a later one mounts the new signal afresh.
+    _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+    assert binding.port is None and binding.host is None
+    assert binding.bridge is None and binding.selections is None
+    assert old_host.closing
+    assert any(
+        "no longer current" in text for _severity, text in presenter.view.status
+    ), presenter.view.status
 
 
 def test_panel_editor_selection_uses_only_its_current_frozen_publication(
@@ -4875,8 +4912,8 @@ def test_task_terminal_removes_only_its_auto_previews(
     task_id = presenter.add_logic("calibration", open_editor=False)
     task = presenter.logic[task_id]
     presenter._auto_task_previews[task_id] = {
-        retained.panel_id: sealed_signal,
-        missing.panel_id: "@logic/task/retired-preview",
+        retained.panel_id,
+        missing.panel_id,
     }
 
     presenter._reconcile_task_previews(task)
@@ -5422,6 +5459,451 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
     _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "image")
     assert binding.state.cell_kind == "image"
     assert not binding.reported_condition
+
+
+def test_a_cell_kind_the_live_port_cannot_prepare_is_refused(
+    presenter, session
+) -> None:
+    """Camera -> ROI -> a facet grid over the ROI sum, then image cells.
+
+    A sum is one number per frame: there is no image cell to draw it in.
+    The pick used to be ACCEPTED while the live port and host kept drawing
+    curve cells -- the record, the form and a saved board claimed image
+    cells the card never drew -- and the next display edit found no such
+    plot to match the host to: an internal error, raised after it had
+    already retargeted the port at the undrawable record, which froze the
+    card.  While a live port draws, a change of what it draws that nothing
+    can prepare is refused, whether the signal is published or retired.
+    """
+
+    _camera_id, camera_signal, publication = _started_camera(
+        presenter, session, node_id="roi-cells"
+    )
+    image = presenter.add_panel(
+        camera_signal,
+        publication.value(camera_signal).snapshot,
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: image.host is not None and image.bridge is not None,
+    )
+    presenter.set_deriving(True)
+    _commit_area(image.host, lower_fraction=0.3, upper_fraction=0.7)
+    presenter.commit_surfaces()
+    roi_sum = f"@logic/{image.panel_id}/roi_sum"
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.latest_publication(roi_sum) is not None,
+    )
+    grid = presenter.add_panel(
+        roi_sum,
+        session.signal_plane.current_dataset(roi_sum),
+        kind="facet_grid",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: grid.host is not None
+        and grid.accepted_surface is not None
+        and grid.configuration is None,
+    )
+    host = grid.host
+
+    # Any other panel may be pointed at the ROI outputs; the panel that
+    # publishes them may not -- the pick clears its selector and closes the
+    # very bridge that publishes them.  Card and Edit offer the same.
+    presenter.beat()
+    offers = {
+        panel_id: {
+            producer: {name for _label, name in leaves}
+            for producer, leaves in presenter.view._cards[panel_id].choices
+        }
+        for panel_id in (image.panel_id, grid.panel_id)
+    }
+    assert roi_sum in offers[grid.panel_id][image.panel_id]
+    assert image.panel_id not in offers[image.panel_id]
+    assert any(camera_signal in names for names in offers[image.panel_id].values())
+    assert image.panel_id not in dict(
+        presenter.panel_editor_projection(image.panel_id)["signal_options"]
+    )
+
+    def toggle_grid_lines() -> bool:
+        shown = bool(grid.state.display.get("show_grid", False))
+        return presenter.update_panel_state(
+            grid.panel_id, {"display": {"show_grid": not shown}}
+        )
+
+    projected = len(presenter.view.panel_state_updates)
+    assert presenter.update_panel_state(
+        grid.panel_id, {"cell_kind": "image"}
+    ) is False
+    assert grid.state.cell_kind == ""
+    assert grid.host is host
+    assert (
+        "warning",
+        f"{grid.panel_id}: {roi_sum} cannot be drawn as a facet grid of "
+        "image cells",
+    ) in presenter.view.status
+    # The form that sent the pick is still showing it: the kept record goes
+    # back to every view, and that projection is what puts the row back.
+    assert (grid.panel_id, grid.state) in presenter.view.panel_state_updates[projected:]
+    # The edit that used to raise PanelNotDrawable out of the slot.
+    assert toggle_grid_lines() is True
+    _settle_panel_hosts(presenter, lambda: grid.configuration is None)
+    assert grid.host is not None
+    assert grid.state.cell_kind == ""
+
+    # Removing its owner retires the ROI sum; nothing can prepare the
+    # change now, and the refusal says so.
+    presenter.remove_panel(image.panel_id)
+    for _beat in range(10):
+        presenter.beat()
+        time.sleep(0.005)
+    assert session.signal_plane.latest_publication(roi_sum) is None
+    projected = len(presenter.view.panel_state_updates)
+    assert presenter.update_panel_state(
+        grid.panel_id, {"cell_kind": "image"}
+    ) is False
+    assert grid.state.cell_kind == ""
+    assert (
+        "warning", f"{grid.panel_id}: {roi_sum} has not published yet"
+    ) in presenter.view.status
+    assert (grid.panel_id, grid.state) in presenter.view.panel_state_updates[projected:]
+    toggle_grid_lines()
+    _settle_panel_hosts(presenter, lambda: grid.configuration is None)
+    assert grid.host is not None
+    assert grid.state.cell_kind == ""
+
+    # Its render child dies now.  This is what that leaves on the host
+    # (render_process._failed): a startup failure it cannot outlive, flagged
+    # as the service's.  The resubmitted repair has nothing to replace it
+    # with -- the ROI sum has no value -- and kept the dead port, so it ran
+    # again on every beat and said "has not published yet" every time.  The
+    # panel lets go of it once and waits portless for the next run.
+    dead = grid.host
+    _kill_render_child(dead)
+    ready = f"{roi_sum} has not published yet; {grid.panel_id} remains ready"
+    said = presenter.view.status.count(("warning", ready))
+    for _beat in range(5):
+        presenter.beat()
+        time.sleep(0.005)
+    assert grid.port is None
+    assert presenter.view._cards[grid.panel_id].surface is None
+    assert presenter.view.status.count(("warning", ready)) == said + 1
+    assert grid.state.cell_kind == ""
+
+
+def test_a_panel_is_not_offered_what_is_cut_from_its_own_outputs(
+    presenter, monkeypatch
+) -> None:
+    """Its own outputs, and anything derived from them however many hops away.
+
+    Another panel's ROI on this panel's ROI frame, or a Logic node following
+    that ROI's sum, starves the moment this panel's pick closes the bridge
+    publishing what it was cut from.  A chain that loops ends where it loops.
+    """
+
+    rows = (
+        ("@logic/cm/frames", "frames", "live", "cm", ""),
+        ("@logic/panel-1/roi_frame", "roi_frame", "live", "panel-1",
+         "@logic/cm/frames"),
+        ("@logic/panel-2/roi_sum", "roi_sum", "live", "panel-2",
+         "@logic/panel-1/roi_frame"),
+        ("@logic/fit/amplitude", "amplitude", "live", "fit",
+         "@logic/panel-2/roi_sum"),
+        ("@logic/a/x", "x", "live", "a", "@logic/b/y"),
+        ("@logic/b/y", "y", "live", "b", "@logic/a/x"),
+    )
+    monkeypatch.setattr(
+        presenter, "offered_signals", lambda *, include_shown=False: rows
+    )
+
+    def offer(panel_id: str) -> set[str]:
+        return {
+            name
+            for _producer, leaves in presenter.signal_groups(panel_id)
+            for _label, name in leaves
+        }
+
+    assert offer("panel-1") == {"@logic/cm/frames", "@logic/a/x", "@logic/b/y"}
+    assert offer("panel-2") == {
+        "@logic/cm/frames", "@logic/panel-1/roi_frame",
+        "@logic/a/x", "@logic/b/y",
+    }
+    assert offer("") == {row[0] for row in rows}
+
+
+def test_a_vacancy_during_a_retarget_lets_go_of_the_port_drawing_the_old_cells(
+    presenter, session
+) -> None:
+    """A cell-kind retarget in flight, then a fate edit that vacates x.
+
+    The retarget moves the record first, so the vacancy is judged on the
+    new cells.  It cancelled the retarget but kept the old port: the record
+    named curve cells while the card kept drawing image cells, nothing ever
+    remounted it, and the edit that filled the role sent the curve table to
+    the image host.  The panel lets go of that port and waits portless; the
+    repair mounts the new cells through the ordinary portless path.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="facet_grid"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None and binding.configuration is None,
+    )
+
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    assert binding.configuration is not None
+    assert binding.configuration[0] == "retarget"
+    x_holder = next(
+        str(entry["key"])
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]).startswith("fate:") and entry["value"] == "x"
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "reduce"}}
+    )
+    assert binding.vacancy
+    assert binding.state.cell_kind == "curve"
+    assert binding.configuration is None
+    assert binding.port is None, "the port drawing image cells must go"
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "x"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None and binding.configuration is None,
+    )
+    assert not binding.vacancy
+    assert binding.state.cell_kind == "curve"
+    assert binding.accepted_surface.target.cell_kind == "curve"
+
+
+def test_a_render_child_that_dies_under_a_vacant_table_takes_nothing_with_it(
+    presenter, session
+) -> None:
+    """A vacancy is the operator's to repair, on a dead host as on a live one.
+
+    Resubmitted, the same table is judged on the same accepted schema and
+    finds the same vacancy, so nothing but the repair can replace the dead
+    host.  Letting go of it anyway closed the selection bridge -- whose ROI
+    outputs need no host -- released the history lease and blanked the last
+    picture, and a Task lock refusing the repair kept them that way.  The
+    panel keeps all of it and resubmits nothing; the repair remounts.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="facet_grid"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.accepted_surface is not None
+        and binding.accepted_surface.target.cell_kind == "curve"
+        and binding.bridge is not None
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    x_holder = next(
+        str(entry["key"])
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]).startswith("fate:") and entry["value"] == "x"
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "reduce"}}
+    )
+    assert binding.vacancy
+    assert binding.configuration is None
+
+    # Its render child dies now (what render_process._failed leaves).
+    dead, port, bridge = binding.host, binding.port, binding.bridge
+    _kill_render_child(dead)
+    for _beat in range(5):
+        presenter.beat()
+        time.sleep(0.005)
+    assert binding.port is port
+    assert binding.host is dead
+    assert binding.bridge is bridge
+    assert presenter.view._cards[binding.panel_id].surface is not None
+    assert binding.vacancy
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "x"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and binding.host is not dead
+        and binding.configuration is None,
+    )
+    assert not binding.vacancy
+    assert binding.accepted_surface.target.cell_kind == "curve"
+
+
+def test_a_cell_kind_pick_that_repairs_a_vacancy_takes_its_mark_with_it(
+    presenter, session
+) -> None:
+    """A vacancy ends when the table draws again, whichever edit did it.
+
+    Other cells start the fate table over, so a vacated x is repaired by
+    the pick as surely as by a fate edit.  Only a fate edit recorded the
+    panel's vacancy, so the card went on saying "settings not applied --"
+    the old role over a picture of the new cells with every setting in it.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="facet_grid"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.accepted_surface is not None
+        and binding.accepted_surface.target.cell_kind == "curve"
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    x_holder = next(
+        str(entry["key"])
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]).startswith("fate:") and entry["value"] == "x"
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "reduce"}}
+    )
+    assert binding.vacancy
+    card = presenter.view._cards[binding.panel_id]
+    _settle_panel_hosts(presenter, lambda: "not applied" in card.status[0])
+
+    assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"})
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.accepted_surface is not None
+        and binding.accepted_surface.target.cell_kind == "image",
+    )
+    assert not binding.vacancy
+    for _beat in range(5):
+        presenter.beat()
+        time.sleep(0.005)
+    assert "not applied" not in card.status[0], card.status
+
+
+def test_a_drawing_panel_whose_render_child_dies_is_replaced_whatever_its_mark_said(
+    presenter, session
+) -> None:
+    """The dead-host gates judge the table, not the mark.
+
+    ``vacancy`` is what the card last said, and an earlier table or newer
+    data can leave it standing over a table that draws.  Both gates took it
+    on trust: a healthy panel whose render child died was never replaced,
+    and the card and Edit froze on their last pictures.  The card's gate
+    judges the table on the schema the resubmit would, Edit's on the data
+    Edit holds.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None and binding.configuration is None,
+    )
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None,
+    )
+
+    stale = "x has no axis to hold its role"
+    binding.vacancy = stale
+    dead = binding.host
+    _kill_render_child(dead)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and binding.host is not dead
+        and binding.configuration is None,
+    )
+    assert not binding.vacancy, "the gate's judgement is the panel's condition"
+
+    binding.vacancy = stale
+    dead = binding.editor_host
+    _kill_render_child(dead)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_host is not dead
+        and binding.editor_configuration is None,
+    )
+
+
+def test_a_vacant_record_opens_edit_without_building_a_host(
+    presenter, session, monkeypatch
+) -> None:
+    """Edit judges the record on its frozen data before it builds anything.
+
+    A table with a vacant role has nothing to draw there, and the host
+    built for it anyway was refused and retired -- a render build on every
+    Edit open, Refresh and title edit.  Nothing is built, the refusal is
+    still said, and the repair mounts Edit.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and binding.configuration is None
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    x_holder = next(
+        str(entry["key"])
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]).startswith("fate:") and entry["value"] == "x"
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "reduce"}}
+    )
+    vacancy = binding.vacancy
+    assert vacancy
+    built: list[object] = []
+    original_make = presenter._make_editor_host
+
+    def counting(plot_input, state):
+        host = original_make(plot_input, state)
+        built.append(host)
+        return host
+
+    monkeypatch.setattr(presenter, "_make_editor_host", counting)
+    assert presenter.edit_panel(binding.panel_id)
+    assert built == []
+    assert (
+        "error",
+        f"cannot mount {binding.state.title} plot editor: {vacancy}",
+    ) in presenter.view.status
+    # A title edit offers the mount again, and builds nothing either.
+    assert presenter.update_panel_state(binding.panel_id, {"title": "renamed"})
+    assert built == []
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"semantic": {x_holder: "x"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None,
+    )
+    assert len(built) == 1
 
 
 def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
@@ -6890,7 +7372,7 @@ def test_a_replacement_host_mounts_the_view_the_operator_just_committed(
         presenter._retire_plot_host(host)
 
 
-def test_the_console_answers_the_manual_axis_question_the_engine_asks(
+def test_the_console_routes_every_operator_question_a_node_asks(
     session,
 ) -> None:
     """One vocabulary, two packages, and a test that keeps them equal.
@@ -6898,9 +7380,11 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
     A request kind cannot be imported across this wall -- the workbench
     may not reach into a node leaf -- so it is a literal at both ends.
     What keeps two literals one word is this: the kind the scan engine
-    raises is fed to the console, and the console has to route it.
+    raises and the kind the calibration task raises are fed to the
+    console, and the console has to route each to its own question.
     """
 
+    from zlc_atom.nodes.calibration import SITE_REVIEW_REQUEST
     from zlc_atom.nodes.scan import MANUAL_AXIS_REQUEST
     from zlc_runtime import OperatorInputRequest
     from zlc_workbench.logic import LogicBinding
@@ -6948,6 +7432,19 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
         presenter._handle_operator_request(binding)
         assert host.answered == [("req-1", {})]
         assert "stopped the manual scan" in host.cancelled
+
+        # The site review reaches the point review, which reads its image
+        # off the plane -- here there is none, and that is what it says,
+        # rather than that the console knows no such question.
+        host.operator_request = OperatorInputRequest(
+            "req-3",
+            SITE_REVIEW_REQUEST,
+            "Review detected calibration sites",
+            "Exclude unwanted sites.",
+            {"producer": "review", "output_name": "sites", "point_ids": ()},
+        )
+        presenter._handle_operator_request(binding)
+        assert "no published image" in host.cancelled, host.cancelled
 
 
 def test_a_refused_parameter_expression_is_said_where_messages_are_said(

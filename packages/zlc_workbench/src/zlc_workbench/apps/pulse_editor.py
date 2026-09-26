@@ -101,6 +101,25 @@ def dial(mode: str, endpoint: str):
     raise ValueError(f"unknown connection mode {mode!r}")
 
 
+def connection_argument(text: str) -> tuple[str, str]:
+    """``--connect``'s MODE[:ENDPOINT], refused before anything is built.
+
+    Refused by the presenter it was, after the window, its four workers and
+    its render child already existed: a typo at the command line was a
+    traceback, and from a notebook an orphan window nothing held.
+    """
+
+    from ..pulse_editor import STANDALONE_CONNECTION_CHOICES
+
+    mode, _, endpoint = str(text).partition(":")
+    modes = tuple(str(choice.value) for choice in STANDALONE_CONNECTION_CHOICES)
+    if mode not in modes:
+        raise ValueError(
+            f"unknown connection mode {mode!r}; choose one of {', '.join(modes)}"
+        )
+    return mode, endpoint
+
+
 def default_endpoint() -> str:
     """Where a board is usually reached, as one line for a window to offer.
 
@@ -217,6 +236,10 @@ def _guard_window_close(
     on its own, and waiting for it here is what stops the wait from landing
     on a Qt turn or being skipped altogether.
     """
+    # The presenter was asked to stop taking work.  The close then waits for
+    # its deliveries, each of which asks again when it lands -- and is not
+    # asked the question, or told "Stopping...", a second time.
+    stopping = False
     closing = False
     retired = False
 
@@ -225,8 +248,9 @@ def _guard_window_close(
         release_render()
 
     def failed(error: BaseException) -> None:
-        nonlocal closing
+        nonlocal closing, stopping
         closing = False
+        stopping = False
         window.presenter.cancel_preview_close()
         message = f"PulseGUI could not close: {error}"
         window.set_summary(message)
@@ -243,18 +267,23 @@ def _guard_window_close(
         request_close()
 
     def guard() -> bool:
-        nonlocal closing
+        nonlocal closing, stopping
         if retired:
             return all(close() for close in close_workers)
         if closing:
             return False
-        # Asked before anything stops, so a Cancel leaves the window as it
-        # was: its board-status beat running and its summary untouched.
-        if not window.presenter.may_close():
-            return False
-        if refresh_timer is not None:
-            refresh_timer.stop()
-        window.set_summary("Stopping...")
+        if not stopping:
+            # Asked before anything stops, so a Cancel leaves the window as
+            # it was: its board-status beat running and its summary untouched.
+            # Asked once: a close re-entered inside the question's modal
+            # loop never gets here -- Qt answers it True while this
+            # window's closeEvent is running.
+            if not window.presenter.may_close():
+                return False
+            if refresh_timer is not None:
+                refresh_timer.stop()
+            window.set_summary("Stopping...")
+            stopping = True
         if not window.presenter.prepare_preview_close():
             return False
         closing = True
@@ -268,7 +297,10 @@ def _guard_window_close(
             failed(error)
         return False
 
-    window.set_close_guard(guard)
+    # Under way from the accepted question until the window goes, or until
+    # retiring fails and the window stays (``failed``).  A console shutting
+    # down reads it: a close the operator refused is not one to wait for.
+    window.set_close_guard(guard, closing=lambda: stopping)
 
 
 def create_window(
@@ -287,8 +319,9 @@ def create_window(
 
     import zlc_plot as plot
     from zlc_ui import open_pulse_editor
-    from ..board import attach_qt_owner_turn, attach_qt_worker
+    from ..board import attach_qt, attach_qt_owner_turn, attach_qt_worker
 
+    connection = None if not connect else connection_argument(connect)
     space, state, path = resolve(workspace, pulse)
     # The preview's render child, started before the window so it warms
     # while the window builds and the operator reads the Edit page.
@@ -327,16 +360,22 @@ def create_window(
         render.close(timeout=0.0)
         window.close()
         raise
+    # The same board-status beat as the bound window.  Without it this window
+    # showed whatever the board last said in answer to a button: green and
+    # "running" over a board another client had taken over, or a server that
+    # had restarted, until the operator pressed something.
+    refresh_timer = attach_qt(window.presenter.ask_run_state, interval_ms=100)
+    window._device_control_refresh_timer = refresh_timer
     _guard_window_close(
         window,
         run_close_work=run_safe_work,
         close_workers=close_workers,
         request_close=request_close,
         release_render=lambda: render.release(timeout=30.0),
+        refresh_timer=refresh_timer,
     )
-    if connect:
-        mode, _, endpoint = str(connect).partition(":")
-        window.presenter.connect_to(mode, endpoint)
+    if connection is not None:
+        window.presenter.connect_to(*connection)
     return window
 
 
@@ -437,8 +476,12 @@ def main(argv: list[str] | None = None) -> int:
 
     application = ensure_qt_app([])
     try:
+        connection = (
+            None if not arguments.connect else connection_argument(arguments.connect)
+        )
         space, state, path = resolve(arguments.workspace, arguments.pulse)
-    except (FileNotFoundError, NotADirectoryError, ValueError) as error:
+    except (FileNotFoundError, NotADirectoryError, ValueError, TypeError) as error:
+        # TypeError is the pulse codec's word for a malformed editor section.
         print(f"error: {error}", file=sys.stderr)
         return 2
     print(f"workspace: {space.root}")
@@ -465,8 +508,8 @@ def main(argv: list[str] | None = None) -> int:
             request_close=lambda: None,
         )
         try:
-            if arguments.connect:
-                mode, _, endpoint = str(arguments.connect).partition(":")
+            if connection is not None:
+                mode, endpoint = connection
                 if not presenter.connect_to(mode, endpoint):
                     print(
                         f"error: could not connect via {arguments.connect}",

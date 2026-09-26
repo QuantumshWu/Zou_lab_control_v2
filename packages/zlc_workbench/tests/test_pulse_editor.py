@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
-import os
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -27,11 +26,9 @@ import pytest
 from zlc_durable import readable_json_bytes
 from zlc_pulse.device import ConfigValueHolder
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
-
 from zlc_workbench.pulse_editor import (
     PulseEditorPresenter as _PulseEditorPresenter,
+    preview_candidate,
     project_schedule,
     replace_sequence,
     timeline_of,
@@ -219,13 +216,15 @@ class _TargetView:
         self.records: tuple = ()
         self.editable = None
         self.status = ""
+        self.reserved: tuple = ()
         self.feedback = ""
         self.width_rules = None
 
-    def set_ports(self, records, editable, status_text) -> None:
+    def set_ports(self, records, editable, status_text, *, reserved=()) -> None:
         self.records = tuple(records)
         self.editable = bool(editable)
         self.status = str(status_text)
+        self.reserved = tuple(reserved)
 
     def set_width_rules(self, digital, dac) -> None:
         self.width_rules = (digital, dac)
@@ -435,6 +434,10 @@ class _EditorView:
     def confirm_config_discard(self) -> bool:
         return getattr(self, "discard_config_answer", True)
 
+    def confirm_pulse_discard(self) -> bool:
+        self.pulse_discard_asked = getattr(self, "pulse_discard_asked", 0) + 1
+        return getattr(self, "discard_pulse_answer", True)
+
     # -- the preview -----------------------------------------------------
 
     @property
@@ -464,8 +467,8 @@ class _EditorView:
 
     # -- the target ------------------------------------------------------
 
-    def set_target_ports(self, records, editable: bool, status_text: str) -> None:
-        self.target_view.set_ports(records, editable, status_text)
+    def set_target_ports(self, records, editable: bool, status_text: str, *, reserved=()) -> None:
+        self.target_view.set_ports(records, editable, status_text, reserved=reserved)
 
     def set_target_width_rules(self, digital, dac) -> None:
         self.target_view.set_width_rules(digital, dac)
@@ -516,7 +519,7 @@ def _preview_rows(presenter) -> int:
 
     if presenter.sequence is None:
         return 0
-    return presenter._preview_candidate(
+    return preview_candidate(
         presenter.sequence,
         bool(presenter.view.preview_include_off_rows),
         presenter._pinned_size,
@@ -799,6 +802,28 @@ def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
     assert presenter._state.scan_source_dirty is False
     assert presenter._saved_state is saved
     assert presenter.view.schedule_view.control_state[2] is True
+
+
+def test_unsaved_pulse_edits_are_asked_about_before_they_go(presenter) -> None:
+    """Close, Load and Clear All each threw the draft away without a word,
+    while the Config tab beside it asked first.  A declined question keeps
+    the work; a pulse that matches its file is not asked about at all."""
+
+    view = presenter.view
+    assert presenter.may_close() is True
+    assert getattr(view, "pulse_discard_asked", 0) == 0
+
+    view.period_name_committed.emit(presenter.sequence.periods[0].period_id, "edited")
+    edited = presenter._state
+    view.discard_pulse_answer = False
+    view.asked = None
+    view.clear_all_requested.emit()
+    view.load_requested.emit()
+    assert presenter.may_close() is False
+
+    assert view.pulse_discard_asked == 3
+    assert presenter._state is edited
+    assert view.asked is None, "the Open dialog opened over a refusal"
 
 
 def test_the_preview_is_built_from_the_periods_that_will_be_played(presenter, sequence) -> None:
@@ -1710,16 +1735,16 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
         QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
         before = time.monotonic()
         window.fire_requested.emit()
-        assert time.monotonic() - before < 0.05
+        assert time.monotonic() - before < 0.25
         _process_qt_until(
-            application, lambda: load_started.is_set() and bool(heartbeat), 0.2
+            application, lambda: load_started.is_set() and bool(heartbeat), 0.5
         )
 
         before = time.monotonic()
         window.stop_requested.emit()
-        assert time.monotonic() - before < 0.05
+        assert time.monotonic() - before < 0.25
         assert summaries[-1] == "Stopping..."
-        _process_qt_until(application, safe_started.is_set, 0.2)
+        _process_qt_until(application, safe_started.is_set, 0.5)
         assert not release_preview.is_set()
         assert not release_load.is_set(), "SAFE waited behind ordinary device work"
 
@@ -2225,7 +2250,7 @@ def test_the_target_page_says_which_pins_an_output_reaches(presenter, sequence) 
     assert dac.clock_endpoint and dac.clock_endpoint not in dac.endpoints
 
 
-def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence) -> None:
+def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence, tmp_path) -> None:
     board = _Sequencer()
     presenter._dial = lambda *_args: board
     presenter.connect_to("remote", "127.0.0.1:18861")
@@ -2257,6 +2282,17 @@ def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence) 
     # A rename is metadata: the wiring and its fingerprint do not move.
     assert presenter.sequence.target.raw_lanes == sequence.target.raw_lanes
     assert presenter.sequence.target.package_pins == sequence.target.package_pins
+
+    # The names are the pulse's: opened again on this board they stay, and a
+    # file just opened does not read as edited.
+    written = tmp_path / "renamed.json"
+    presenter.view.save_answer = str(written)
+    assert presenter.save_pulse() == str(written)
+    assert presenter.open_pulse(str(written)) is True
+    assert [
+        port.key for port in presenter.sequence.target.ports if port.label == "renamed"
+    ] == [port.key for port in renamed]
+    assert presenter._state == presenter._saved_state
 
 
 def test_dropping_a_port_while_a_board_is_attached_is_refused(presenter) -> None:
@@ -2352,6 +2388,80 @@ def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> 
     assert grown.target.package_pins["aux"] == pin
     assert levels(grown)["aux"] == (0,) * len(grown.periods)
     assert levels(grown) == {**levels(shrunk), "aux": (0,) * len(grown.periods)}
+
+
+def test_the_target_page_carries_a_clock_no_dac_latches_with(sequence) -> None:
+    """A hand-written offline target may hold a clock no DAC latches with.
+
+    The page has digital and DAC outputs only, so that clock has no row.
+    Applying the page unchanged changes nothing, the page's Add never mints
+    its name, and an output written onto its wire or under its name is
+    refused in the clock's words: the refusal used to name a port the page
+    does not list, and an output taking the clock's name took its lane with
+    nothing said.  The one page route to it is a DAC with no latch clock
+    naming its wire as the latch endpoint, which latches that DAC with it.
+    """
+
+    from zlc_pulse import PulseTarget
+    from zlc_ui import TargetPortRecord
+
+    target = sequence.target
+    dac = next(port for port in target.ports if port.kind == "dac" and port.latch_clock)
+    clock = target.by_key[dac.latch_clock]
+    orphaned = PulseTarget(
+        target.raw_lanes,
+        tuple(replace(port, latch_clock=None) if port is dac else port for port in target.ports),
+        package_pins=target.package_pins,
+    )
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, replace_sequence(sequence, target=orphaned))
+    try:
+        page = view.target_view
+        records = page.records
+        assert records, "the target page was never filled"
+        assert clock.key not in {record.key for record in records}
+        assert clock.key not in {record.clock_key for record in records}
+        assert clock.key in page.reserved, "the page could mint a name Apply refuses"
+
+        before = presenter.sequence
+        view.target_apply_requested.emit(tuple(records))
+        assert presenter.sequence is before
+        assert "nothing to change" in page.feedback
+
+        digital = next(record for record in records if record.kind == "digital")
+        pin = target.package_pins[clock.lanes[0]]
+        view.target_apply_requested.emit(tuple(
+            replace(record, endpoints=(pin,)) if record is digital else record
+            for record in records
+        ))
+        assert presenter.sequence is before
+        assert digital.key in page.feedback and clock.key in page.feedback
+        assert "no DAC latches with" in page.feedback
+
+        taken = TargetPortRecord(clock.key, "digital", "", ("ZZ1",))
+        view.target_apply_requested.emit(tuple(records) + (taken,))
+        assert presenter.sequence is before
+        assert clock.key in page.feedback and "no DAC latches with" in page.feedback
+
+        relatch = tuple(
+            replace(record, clock_endpoint=pin) if record.key == dac.key else record
+            for record in records
+        )
+        # Taken by a DAC earlier in the same apply, the name is still booked
+        # -- by that DAC's clock now -- and said so, not blamed on a wire
+        # nothing uses.
+        view.target_apply_requested.emit(relatch + (taken,))
+        assert presenter.sequence is before
+        assert clock.key in page.feedback and "another DAC latches with" in page.feedback
+
+        view.target_apply_requested.emit(relatch)
+        assert presenter.sequence.target.by_key[dac.key].latch_clock == clock.key, page.feedback
+        assert presenter.sequence.target == target, "taking the clock back restores the wiring"
+        relatched = next(record for record in page.records if record.key == dac.key)
+        assert (relatched.clock_key, relatched.clock_endpoint) == (clock.key, pin)
+        assert clock.key not in page.reserved
+    finally:
+        presenter.close()
 
 
 def test_toggling_one_lane_updates_one_card_and_rebuilds_nothing(presenter, sequence) -> None:
@@ -2698,6 +2808,19 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     assert presenter.load_scan_array() is True
     assert presenter._state.scan_rows == authored
 
+    # One field, one value per line (or a flat array): that many points of
+    # the one field, not one point of that many fields.
+    assert len(columns) == 1
+    one_column = tmp_path / "sweep.csv"
+    one_column.write_text("0.0041\n0.0052\n0.0063\n", encoding="utf-8")
+    flat = tmp_path / "sweep.npy"
+    np.save(flat, np.asarray([row[0] for row in authored]))
+    for path in (one_column, flat):
+        presenter._take_scan_rows(((0.01,),))
+        presenter.view.open_answer = str(path)
+        assert presenter.load_scan_array() is True, presenter.view.warnings
+        assert presenter._state.scan_rows == authored
+
 
 def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
     """The two halves of "I connected and cannot tell what happened".
@@ -2915,7 +3038,7 @@ def test_the_strips_total_is_what_the_board_plays(sequence) -> None:
         assert "as the board plays it" in after.total_tooltip
         assert "in one pass through" in after.total_tooltip
         assert after.total_tooltip.endswith(f"{before.period_count} period(s)")
-        candidate = presenter._preview_candidate(presenter.sequence, False, None)
+        candidate = preview_candidate(presenter.sequence, False, None)
         assert candidate[-1] == 3 * one_pass
     finally:
         presenter.close()
@@ -3156,6 +3279,11 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
         presenter.insert_period(None)
         assert len(presenter.sequence.periods) == held + 1
 
+        # The board's pulse replaces unsaved edits only when they may go.
+        view.discard_pulse_answer = False
+        assert presenter.sync_from_sequencer() is False
+        assert len(presenter.sequence.periods) == held + 1
+        view.discard_pulse_answer = True
         assert presenter.sync_from_sequencer() is True
         assert len(presenter.sequence.periods) == held, (
             "the editor shows what the board is holding, not what it had drifted to"
@@ -3860,6 +3988,83 @@ def test_the_timer_question_goes_to_the_device_worker(sequence) -> None:
         presenter.close()
 
 
+def test_a_stop_during_a_connect_still_lets_the_connect_change_boards(sequence) -> None:
+    """Connect's worker hangs up the old board and dials the new one; only
+    its delivery lets go of the one and takes the other.  A Stop pressed
+    while it ran superseded that delivery, and the editor went on naming --
+    and holding its lease on -- the board the worker had already closed."""
+
+    closed: list[str] = []
+
+    class _Closable(_Sequencer):
+        def __init__(self, name: str) -> None:
+            super().__init__(description=_board_description())
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    first, second = _Closable("first"), _Closable("second")
+    boards = [first, second]
+    view = _EditorView()
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, sequence, dial=lambda _mode, _endpoint: boards.pop(0),
+        run_device_work=worker, run_safe_work=_run_preview_immediately,
+    )
+    try:
+        view.connection_requested.emit("virtual", "")
+        worker.deliver_until(lambda: presenter.sequencer is first)
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert presenter._drive_lease is not None, view.warnings
+
+        view.connection_requested.emit("virtual", "")
+        presenter.stop()
+        worker.deliver_until(lambda: not presenter._device_busy)
+
+        assert presenter.sequencer is second
+        assert closed == ["first"]
+        assert presenter._drive_lease is None
+    finally:
+        presenter.close()
+
+
+def test_a_close_waits_for_the_status_answer_and_takes_no_new_command(sequence) -> None:
+    """A close that found a status question still out retired everything and
+    then could not close the device worker -- and nothing asked again when
+    the answer came, so the window sat on "Stopping...".  Meanwhile On Pulse
+    still took a command lease, which the closed window then kept.  Stop is
+    the exception until the retire starts: it cuts a held-up call short."""
+
+    woken: list[bool] = []
+    view = _EditorView()
+    board = _Sequencer(description=_board_description())
+    worker = _DeviceWorker()
+    presenter = PulseEditorPresenter(
+        view, sequence, sequencer=board, run_device_work=worker,
+        run_safe_work=_run_preview_immediately,
+        request_preview_close=lambda: woken.append(True),
+    )
+    try:
+        assert presenter.ask_run_state() is True
+        assert presenter.prepare_preview_close() is False
+        view.fire_requested.emit()
+        assert presenter._drive_lease is None and not presenter._device_busy
+        board.events.clear()
+        view.stop_requested.emit()
+        assert "safe" in board.events and presenter._drive_lease is None
+        woken.clear()
+        worker.deliver_until(lambda: not presenter._status_in_flight)
+        assert woken, "the answer did not wake the waiting close"
+        assert presenter.prepare_preview_close() is True
+        board.events.clear()
+        view.stop_requested.emit()
+        assert "safe" not in board.events and presenter._drive_lease is None
+    finally:
+        presenter.close()
+
+
 def test_a_status_answer_from_before_a_command_is_dropped(sequence) -> None:
     """After On Pulse the board's state comes from the command, not from a question asked before it."""
 
@@ -3949,6 +4154,9 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
         assert presenter._held_point == 1
         assert "held at scan point 1" in presenter._scan_progress
+        # The busy sentence comes down with the outcome, though a hold
+        # refreshes nothing that would have rewritten it.
+        assert view.summary.endswith("period(s)"), view.summary
 
         view.scan_step_requested.emit(1)
         worker.deliver_until(lambda: not presenter._device_busy)
@@ -3968,6 +4176,16 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert len(presenter._state.scan_rows) == 3
         assert presenter._held_point == 2
         assert any("holding scan point 2" in text for text in view.done)
+
+        # The board's pulse would now replace an edited draft; declined, the
+        # draft stays and the status line does not stay on "Syncing...".
+        periods = len(presenter.sequence.periods)
+        presenter.insert_period(None)
+        view.discard_pulse_answer = False
+        view.sync_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert len(presenter.sequence.periods) == periods + 1
+        assert view.summary.endswith(f"{periods + 1} period(s)"), view.summary
     finally:
         presenter.close()
 

@@ -12,12 +12,7 @@ model is a claim about something else.
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_workbench.pulse_editor import programmable_ports, project_schedule
 

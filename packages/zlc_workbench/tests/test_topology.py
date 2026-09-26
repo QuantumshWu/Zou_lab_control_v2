@@ -16,16 +16,12 @@ Two properties are worth holding still:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import time
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
@@ -171,6 +167,20 @@ def test_a_reserved_output_waits_until_its_first_publication() -> None:
     (row,) = project_signals(plane.describe_signals())
     assert row.state == "waiting"
     assert row.label == "frames  [—]"
+    # A Figure Viewer's signal is not a logic key: it is called by the name
+    # its file gave it, not by the whole qualified path.
+    (row,) = project_signals((
+        SimpleNamespace(
+            name="@figure/12/data",
+            owner_id="figure",
+            shape=None,
+            schema=None,
+            failure=None,
+            live=False,
+            source_name=None,
+        ),
+    ))
+    assert row.label == "data  [—]"
 
 
 def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:

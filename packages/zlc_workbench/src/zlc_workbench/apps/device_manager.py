@@ -65,6 +65,7 @@ def build(
     shutdown_session=None,
     on_shutdown=None,
     on_device_open=None,
+    on_device_published=None,
     run_off_thread=None,
     close_worker=None,
 ) -> object:
@@ -95,6 +96,7 @@ def build(
             shutdown_session=shutdown_session,
             on_shutdown=on_shutdown,
             on_device_open=on_device_open,
+            on_device_published=on_device_published,
             run_off_thread=run_off_thread,
             # An injected worker belongs to the enclosing composition; this
             # window retires its own state but never closes that shared owner.
@@ -120,6 +122,7 @@ def create_window(
     shutdown_session=None,
     on_shutdown=None,
     on_device_open=None,
+    on_device_published=None,
     run_off_thread=None,
     close_worker=None,
 ):
@@ -144,6 +147,7 @@ def create_window(
             shutdown_session=shutdown_session,
             on_shutdown=on_shutdown,
             on_device_open=on_device_open,
+            on_device_published=on_device_published,
             run_off_thread=run_off_thread,
             close_worker=close_worker,
         )

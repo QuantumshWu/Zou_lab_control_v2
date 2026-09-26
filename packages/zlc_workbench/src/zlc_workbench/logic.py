@@ -504,12 +504,17 @@ def finalize_logic_draft(
     artifact_paths: dict[str, str] = {}
     artifacts: dict[str, ResolvedArtifact] = {}
     data_root = Path(getattr(workspace, "data", Path.cwd())).resolve()
-    # One decode per file: several frames naming the same calibration read
-    # it once, and the processor then holds one object for all of them.
-    decoded: dict[Path, ResolvedArtifact] = (
+    # One decode per file AND contract: several frames naming the same
+    # calibration read it once, and the processor then holds one object for
+    # all of them; the same path offered to an input of another contract is
+    # decoded (and suffix-checked) by that contract's own codec.
+    decoded: dict[tuple[str, Path], ResolvedArtifact] = (
         {}
         if previous is None
-        else {Path(item.path): item for item in previous.artifacts.values()}
+        else {
+            (item.contract_id, Path(item.path)): item
+            for item in previous.artifacts.values()
+        }
     )
     for spec in artifact_specs:
         for frame, key in ((None, spec.name), *sorted(frame_keys[spec.name])):
@@ -530,7 +535,8 @@ def finalize_logic_draft(
             if not selected_path.is_absolute():
                 selected_path = data_root / selected_path
             selected_path = selected_path.resolve()
-            resolved = decoded.get(selected_path)
+            cache_key = (spec.codec.contract_id, selected_path)
+            resolved = decoded.get(cache_key)
             if resolved is None:
                 try:
                     resolved = spec.codec.resolve(selected_path)
@@ -539,7 +545,7 @@ def finalize_logic_draft(
                         f"{spec.contract_id} artifact {text!r} is invalid: {error}"
                     )
                     continue
-                decoded[selected_path] = resolved
+                decoded[cache_key] = resolved
             artifact_paths[key] = str(resolved.path)
             artifacts[key] = resolved
 

@@ -18,11 +18,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-import json
 from pathlib import Path
 from typing import Any
 
-from zlc_durable import write_readable_json
+from zlc_durable import strict_json_loads, write_readable_json
 from zlc_runtime import split_signal_key, stable_signal_key
 
 from .logic import (
@@ -165,7 +164,7 @@ class LayoutDocument:
     @classmethod
     def read(cls, path: str | Path) -> "LayoutDocument":
         source = Path(path)
-        return cls.from_tree(json.loads(source.read_text(encoding="utf-8")))
+        return cls.from_tree(strict_json_loads(source.read_text(encoding="utf-8"), f"console layout {source.name}"))
 
     def to_tree(self) -> dict[str, Any]:
         return {

@@ -11,11 +11,6 @@ prepared from -- is test_presentation's companion-only change test.
 
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
-
 from zlc_runtime.presentation import HarmonicClock, SurfaceBatchArbiter
 from zlc_workbench.presentation import PlotPanelPort
 

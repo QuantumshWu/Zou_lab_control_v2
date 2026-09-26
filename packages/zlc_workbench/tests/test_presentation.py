@@ -12,7 +12,6 @@ host, driven by the real scheduler.
 
 from __future__ import annotations
 
-import os
 import time
 from contextlib import contextmanager
 from dataclasses import replace
@@ -22,9 +21,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from zlc_data import StreamGenerationId, owned_snapshot_from_arrays
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.camera_measurement.measurement import (

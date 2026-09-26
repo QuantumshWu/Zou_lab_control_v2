@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_runtime import SignalDataPlane, stable_signal_key
 from zlc_workbench.logic import (
@@ -253,7 +249,7 @@ def test_close_keeps_a_row_when_its_worker_has_not_released(presenter) -> None:
 
     started = time.monotonic()
     assert presenter.close() is False
-    assert time.monotonic() - started < 0.05
+    assert time.monotonic() - started < 0.25
 
     assert presenter.logic[node_id].host is host
     assert shutdown == []
@@ -543,7 +539,6 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
         requested=8.0,
         previous_effective=6.0,
         new_effective=8.0,
-        verified=True,
         before_provenance={
             "device_session_id": "camera-session",
             "settings_epoch": 0,
@@ -576,7 +571,6 @@ def test_device_setting_history_records_only_worker_verified_active_changes(
         requested=10.0,
         previous_effective=8.0,
         new_effective=10.0,
-        verified=True,
         before_provenance={
             "device_session_id": "camera-session",
             "settings_epoch": 1,

@@ -5,7 +5,8 @@ never did.  They arrived the same way each time: something that is needed
 to DO a job got imported in order to READ a declaration, or to ask whether
 a job applied at all.  One import of IPython, to be told there was no
 notebook.  One float taken from a solver, so a console that renders nothing
-in its own process carried numba and llvmlite.  The fixes are in the
+in its own process carried numba and llvmlite -- and, again, a fit model's
+parameter names, read to restore a saved panel.  The fixes are in the
 modules; these are the statements that keep them fixed, written where the
 whole application is composed rather than inside the layer that slipped.
 
@@ -32,9 +33,12 @@ PACKAGES = REPO_ROOT / "packages"
 #: list to construct that style.  ``scipy`` is not here, and only because
 #: the VIRTUAL bench's simulated panel holds a startup hologram -- 15 ms to
 #: solve and 0.39 s to import the transforms with; a real bench's console
-#: has no such device and no scipy.
+#: has no such device and no scipy.  The fit CATALOGUE is not here: a
+#: console restores a panel's fit against its models' parameter names; the
+#: engine that solves one, ``zlc_plot._fit_compiled``, is.
 FOREIGN_TO_A_CONSOLE = ("numba", "llvmlite", "IPython", "matplotlib",
-                        "zlc_plot.fit", "zlc_plot.raster", "zlc_plot.session")
+                        "zlc_plot._fit_compiled", "zlc_plot.raster",
+                        "zlc_plot.session")
 
 
 def _sources() -> tuple[Path, ...]:
@@ -102,7 +106,10 @@ def test_opening_the_console_leaves_the_engines_to_the_render_children() -> None
     node's implementation to read its descriptor and one of those reached a
     constant through the fit engine: 1.31 s and a couple of hundred
     megabytes of numba, llvmlite and scipy, in a process whose panels are
-    all drawn somewhere else.
+    all drawn somewhere else.  And a board with a fitted panel brought them
+    back when it was loaded, because the fit catalogue it restores against
+    held the compiled descriptors -- so the window checked here has loaded
+    one.
     """
 
     script = f'''
@@ -115,6 +122,7 @@ import zou_lab_control  # noqa: F401
 sys.path.insert(0, str(Path({str(REPO_ROOT)!r}) / "packages" / "zlc_workbench" / "tests"))
 from pulse_fixtures import write_ordinary_pulse
 from zlc_workbench.apps.task_console import create_window
+from zlc_workbench.console_layout import LAYOUT_FORMAT
 from zlc_workbench.session import Workspace
 
 root = Path(tempfile.mkdtemp(prefix="zlc-weight-"))
@@ -122,6 +130,21 @@ try:
     Workspace(root).prepare()
     write_ordinary_pulse(root)
     window = create_window(workspace=root, template="virtual", window_ratio=0.25)
+    # Load Layout with a fitted panel: its fit is restored against the
+    # model's parameter names and FitOptions -- the catalogue, not a solve.
+    assert window.presenter.apply_layout({{
+        "format": LAYOUT_FORMAT,
+        "panels": [{{
+            "panel_id": "fitted",
+            "kind": "histogram",
+            "signal": "nothing.publishes.this",
+            "fit": {{
+                "model": "bimodal_gaussian",
+                "fixed": {{"ratio": 0.3}},
+                "options": {{"loss": "linear"}},
+            }},
+        }}],
+    }})
     carried = [
         name for name in {FOREIGN_TO_A_CONSOLE!r}
         if name in sys.modules
@@ -140,6 +163,7 @@ finally:
         env=environment,
         capture_output=True,
         text=True,
+        timeout=300,
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
