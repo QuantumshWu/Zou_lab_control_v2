@@ -99,16 +99,25 @@ def editor_checkpoint(panel, editor=None):
         result["description"] = {
             "kind": description.kind.value, "size": description.size,
             "focus": description.facet_focus,
+            # A Viewport is the (x, y) pair of ranges, either one unset.
             "viewport": None if viewport is None else [
-                [viewport.x.low, viewport.x.high], [viewport.y.low, viewport.y.high]],
+                None if span is None else [span.low, span.high] for span in viewport],
             "selector_count": len(description.selectors),
             "selector_coordinate_space": "canonical",
             "selectors": _selector_values(description.selectors[:8], include_revision=True),
         }
         if front is not None:
+            # A threshold classifier paints its line from the record's
+            # classifier_thresholds, in place of any authored threshold: the
+            # authored selectors are what the two sides must share.
+            classifier = bool(description.display_state.values.get("threshold_classifier"))
+
+            def authored(states):
+                return [(item.kind, item.facet_index, item.revision) for item in states
+                        if not (classifier and item.kind.value == "threshold")]
+
             result["selector_metadata_match"] = (
-                [(item.kind, item.facet_index, item.revision) for item in description.selectors]
-                == [(item.kind, item.facet_index, item.revision) for item in front.interaction.selectors])
+                authored(description.selectors) == authored(front.interaction.selectors))
     if front is not None:
         result["front"]["selector_coordinate_space"] = "display"
         result["front"]["selectors"] = _selector_values(
@@ -117,43 +126,69 @@ def editor_checkpoint(panel, editor=None):
 
 
 def _snapshot_shape(snapshot, source=None):
-    """Derive title factors from Dataset axes and compact validity directly.
+    """Derive title factors from Dataset axes and written placement directly.
 
-    Fixes this accepted publication's last written Repeat/Point position and
-    the last coordinate of every Cell-data axis while counting each Repeat axis.
+    Fixes this accepted publication's last written Repeat/Point position while
+    counting each primary Repeat axis; Cell-data has no current coordinate for
+    a title.
     Does not call production count/projection helpers or the title formatter.
-    The small checkpoint oracle never expands validity over image pixels.
+    The card counts WRITTEN Repeat rows, never scientific validity: a
+    segmented block (an indexed window, a finite run) is written where its
+    segments are placed, whatever their marks say, and a contiguous block --
+    at a console panel, a complete Monitor event -- on every carrier row.
     """
     import numpy as np
-    from zlc_data import Valid, Invalid, DatasetComponentValidity
     from zlc_data.axis import SCALAR
 
     block, schema = snapshot.block, snapshot.block.schema
     domains = (schema.repeat_domain, schema.point_domain, schema.cell_domain)
+    # An alternative coordinate moves with its primary: it is no factor of
+    # the card's structure, in any domain.
     structure = [[(str(axis.name), int(axis.size)) for axis in domain.axes
-                  if index != 2 or axis.role != SCALAR]
+                  if (index != 2 or axis.role != SCALAR) and axis.coordinate_of is None]
                  for index, domain in enumerate(domains)]
-    validity = block.validity
     repeat, point = schema.repeat_domain, schema.point_domain
-    mask = None if isinstance(validity, (Valid, Invalid)) else validity.mask
-    work = len(repeat.axes) * (repeat.size + point.size + (0 if mask is None else mask.size))
+    physical = schema.physical_shape
+    segmented = block.values is None
+    misplaced = []
+    if segmented:
+        # _from_owned_segments attaches Runtime's layout without DataBlock's
+        # placement checks, so they are made here, on layout only: each
+        # segment inside the declared Repeat x Point storage, and its planes
+        # the (*extent, *cell) shape its extent claims.
+        component_ids = schema.value_schema.validity_contract.component_axis_ids
+        component_shape = tuple(axis.size for axis in schema.cell_domain.axes if axis.axis_id in component_ids)
+        origins, extents = block.segment_origins, block.segment_shapes
+        outside = (np.any(origins < 0, axis=1) | np.any(extents < 1, axis=1)
+                   | np.any(origins + extents > physical[:2], axis=1))
+        for index, ((values, mark, sigma), extent) in enumerate(
+                zip(block.segments, extents.tolist(), strict=True)):
+            planes = (*extent, *physical[2:])
+            if (outside[index] or values.shape != planes
+                    or not isinstance(mark, bool) and np.shape(mark) != (*extent, *component_shape)
+                    or sigma is not None and sigma.shape != planes):
+                misplaced.append(index)
+    # A segmented block's written storage cells are one (Repeat, Point) plane,
+    # filled once per segment.
+    written_size = repeat.size * point.size if segmented else 0
+    work = len(repeat.axes) * (repeat.size + point.size + written_size)
     row_work = len(repeat.axes) * repeat.size
     unchecked = None
     positions = {}
     landed = []
-    if isinstance(validity, Invalid):
-        landed = [0 for _axis in repeat.axes]
-    elif work > 250_000 or row_work > 2048:
-        # This runs on the Qt owner. A large component mask is explicitly
-        # unverified, never silently pooled or expanded into a pixel mask.
+    if misplaced:
         landed = None
-        unchecked = (f"compact Repeat-count work {work}, row visits bound {row_work}; "
+        unchecked = "segment layout disagrees with the declared domains"
+    elif work > 250_000 or row_work > 2048:
+        # This runs on the Qt owner. A large written plane is explicitly
+        # unverified, never silently pooled.
+        landed = None
+        unchecked = (f"Repeat-count work {work}, row visits bound {row_work}; "
                      "checkpoint budgets are 250000 values and 2048 rows")
     elif repeat.axes:
         for domain in (repeat, point):
             for axis in domain.axes:
                 positions[axis.axis_id] = int(domain.codes(axis.axis_id)[-1])
-        positions.update({axis.axis_id: axis.size - 1 for axis in schema.cell_domain.axes})
         if source is not None:
             event = source.snapshot.block.schema
             declared = source.canonical_schema or event
@@ -170,43 +205,54 @@ def _snapshot_shape(snapshot, source=None):
                         position = axis.coordinate_position(coordinate)
                         if position is not None:
                             positions[axis.axis_id] = int(position)
-        if isinstance(validity, DatasetComponentValidity):
-            mask = mask[(slice(None), slice(None),
-                         *(positions[axis_id] for axis_id in validity.axis_ids))]
         point_rows = np.arange(point.size)
         for axis in point.axes:
             point_rows = point_rows[point.codes(axis.axis_id)[point_rows] == positions[axis.axis_id]]
+        if segmented:
+            # From the placements alone: a segment's mark is its event's
+            # validity, which never stands in for written coverage.
+            # Unwritten storage rows stay False.
+            cells = np.zeros((repeat.size, point.size), dtype=bool)
+            for (first_row, first_point), (row_count, point_count) in zip(
+                    block.segment_origins.tolist(), block.segment_shapes.tolist()):
+                cells[first_row:first_row + row_count, first_point:first_point + point_count] = True
+            written = np.any(cells[:, point_rows], axis=1)
+        else:
+            written = np.full(repeat.size, point_rows.size > 0)
         codes = [repeat.codes(axis.axis_id) for axis in repeat.axes]
-        for target, axis in enumerate(repeat.axes):
-            rows = np.arange(repeat.size)
+        # An alternative coordinate moves with its primary, so neither holds
+        # the other fixed, and it is counted with its primary, not beside it.
+        primary = [axis.coordinate_of or axis.axis_id for axis in repeat.axes]
+        for target, target_axis in enumerate(repeat.axes):
+            if target_axis.coordinate_of is not None:
+                continue
+            rows = np.flatnonzero(written)
             for other, other_axis in enumerate(repeat.axes):
-                if other != target:
+                if primary[other] != primary[target]:
                     rows = rows[codes[other][rows] == positions[other_axis.axis_id]]
-            if not rows.size or not point_rows.size:
-                landed.append(0)
-                continue
-            if mask is None:
-                landed.append(len(set(map(int, codes[target][rows]))))
-                continue
             # All other coordinates are fixed, so duplicate storage rows
             # may contribute to the same target coordinate only once.
-            observed = {int(codes[target][row]) for row in rows
-                        if np.any(mask[row, point_rows])}
-            landed.append(len(observed))
+            landed.append(len(set(map(int, codes[target][rows]))))
     sizes, names = [], []
+    # Every domain is a group on the card, an axis-free one too: its count
+    # is 1 and its name a dash, not an absent group.
     for index, group in enumerate(structure):
-        if group:
-            counts = landed if index == 0 else [size for _name, size in group]
-            if counts is not None:
-                sizes.append("(" + " × ".join(str(count) for count in counts) + ")")
-            names.append("(" + " × ".join(name for name, _size in group) + ")")
+        counts = landed if index == 0 else [size for _name, size in group]
+        if counts is not None:
+            sizes.append("(" + (" × ".join(str(count) for count in counts) or "1") + ")")
+        names.append("(" + (" × ".join(name for name, _size in group) or "—") + ")")
     return {"structure": _plain(structure), "landed": landed,
             "repeat_counts_status": "unchecked" if unchecked else "checked",
             "repeat_counts_unchecked": unchecked,
             "repeat_count_positions": {str(key.value): value for key, value in positions.items()},
             "domain_shapes": [list(domain.shape) for domain in domains],
-            "values_shape": list(block.values.shape),
-            "schema_physical_shape": list(schema.physical_shape),
+            # A segmented block has no one plane: its segments' placement is
+            # what is checked, with at most eight offenders kept as evidence.
+            "values_shape": None if segmented else list(block.values.shape),
+            "segments": None if not segmented else {
+                "count": len(block.segments), "misplaced": misplaced[:8],
+                "misplaced_count": len(misplaced)},
+            "schema_physical_shape": list(physical),
             "title_sizes": None if unchecked else " × ".join(sizes), "title_names": " × ".join(names)}
 
 
@@ -332,7 +378,8 @@ def check_panel(panel, card=None, *, stable=False, before=None, editor=None):
     shape = current["shape"]
     card_state = current.get("card")
     if shape is not None:
-        if shape["values_shape"] != shape["schema_physical_shape"]:
+        if (shape["values_shape"] not in (None, shape["schema_physical_shape"])
+                or shape["segments"] is not None and shape["segments"]["misplaced_count"]):
             report("snapshot_physical_shape", "Shown values disagree with their declared physical domains", shape=shape)
         if card_state is not None and front is not None:
             if (card_state["structure"] != shape["structure"]
@@ -444,14 +491,19 @@ def install_observers(bench, emit):
     Set bench.feedback_scope_probe=True BEFORE this call for optional B-side
     Feedback stages, remote description timing and GC spans over 20 ms. This
     does not install anything in A/C or change GC/Numba configuration.
+    bench.control_projections keeps the last projection each generic Control
+    view was handed, its constructor's included: what that window was told.
     """
     from time import perf_counter_ns
+    from weakref import WeakKeyDictionary
     from zlc_plot.backends import Qt5PlotWidget
+    from zlc_ui.device_manager.view import DeviceControlView
 
     counts = {"install": 0, "paint": 0, "events": 0, "observer_errors": 0,
               "paint_data_mismatches": 0}
     connections, originals = [], {}
     scope_cleanup = None
+    bench.control_projections = WeakKeyDictionary()
 
     def record(event, **facts):
         counts["events"] += 1
@@ -495,7 +547,7 @@ def install_observers(bench, emit):
 
     def watch(name, label):
         original = getattr(Qt5PlotWidget, name)
-        originals[name] = original
+        originals[Qt5PlotWidget, name] = original
 
         def wrapped(widget, *args):
             counts[label] += 1
@@ -523,6 +575,19 @@ def install_observers(bench, emit):
 
         setattr(Qt5PlotWidget, name, wrapped)
 
+    def watch_control():
+        # The CLASS again: a view's first projection arrives in its own
+        # constructor, before any instance could be wrapped.
+        original = DeviceControlView.set_projection
+        originals[DeviceControlView, "set_projection"] = original
+
+        def wrapped(view, spec, projection):
+            answer = original(view, spec, projection)
+            bench.control_projections[view] = projection
+            return answer
+
+        DeviceControlView.set_projection = wrapped
+
     def listen(name):
         signal = getattr(bench.view, name)
 
@@ -540,8 +605,8 @@ def install_observers(bench, emit):
 
     def cleanup():
         scope_summary = None if scope_cleanup is None else scope_cleanup()
-        for name, original in originals.items():
-            setattr(Qt5PlotWidget, name, original)
+        for (owner, name), original in originals.items():
+            setattr(owner, name, original)
         originals.clear()
         for signal, callback in connections:
             try:
@@ -564,6 +629,7 @@ def install_observers(bench, emit):
             scope_cleanup = _install_feedback_scope_probe(bench, record)
         watch("_install_front", "install")
         watch("paintEvent", "paint")
+        watch_control()
         for name in ("panel_state_changed", "add_panel_requested", "panel_remove_requested",
                      "panel_edit_requested", "panel_snapshot_refresh_requested", "panel_save_figure_requested",
                      "pause_toggled", "selectors_toggled", "panel_order_committed", "panel_plot_error",
@@ -1010,9 +1076,11 @@ def _install_feedback_scope_probe(bench, record):
 
     Futures are observed only after completion, never awaited. Class wrappers
     avoid storing a bound-method closure on a host (which would manufacture
-    the very GC cycles this probe investigates). A/C PIDs come from the two
-    existing factory closures; there is deliberately no child injection/JIT
-    claim. All patches and the GC callback are removed by the outer cleanup.
+    the very GC cycles this probe investigates). The A/C services are named
+    from the two existing factory closures; A is a pool of children with no
+    one PID, so every child PID rides on the host facts of the hosts it
+    draws. There is deliberately no child injection/JIT claim. All patches
+    and the GC callback are removed by the outer cleanup.
     """
     import gc
     import inspect
@@ -1028,7 +1096,7 @@ def _install_feedback_scope_probe(bench, record):
     patches, totals, gc_starts = [], {}, {}
     serial = itertools.count(1)
     lock = threading.RLock()
-    first_created, first_front = weakref.WeakSet(), weakref.WeakSet()
+    first_front = weakref.WeakSet()
     gc_counts = {"cycles": 0, "slow_spans": 0, "slow_ns": 0}
 
     def emit(event, **facts):
@@ -1106,12 +1174,18 @@ def _install_feedback_scope_probe(bench, record):
         return wrapped
 
     def created(original):
-        def wrapped(host, description):
-            answer = original(host, description)
-            if host not in first_created:
-                first_created.add(host)
-                emit("scope.remote.initial_metadata", **host_facts(host))
-            return answer
+        # A child answers a host's ``create`` once; the answer carries no
+        # description any more (descriptions cross only when they change),
+        # so what is observed is the moment the child has the host.
+        def wrapped(process, action, *payload, **kwargs):
+            pending = original(process, action, *payload, **kwargs)
+            host = process._hosts.get(kwargs.get("host_id")) if action == "create" else None
+            if host is not None:
+                def answered(done):
+                    if active and not done.cancelled() and done.exception() is None:
+                        emit("scope.remote.created", **host_facts(host))
+                pending.add_done_callback(answered)
+            return pending
         return wrapped
 
     def accepted_front(original):
@@ -1163,7 +1237,7 @@ def _install_feedback_scope_probe(bench, record):
             factory = getattr(bench.presenter, attribute)
             service = inspect.getclosurevars(factory).nonlocals.get(cell)
             services[role] = (None if service is None else {
-                "pid": service._process.pid, "name": service.name, "owner_id": id(service)})
+                "kind": type(service).__name__, "name": service.name, "owner_id": id(service)})
         emit("scope.services", services=services, A_compile_observed=False)
         for name in ("_readout_frames", "_fit_contrasts"):
             def dimensions(args, kwargs):
@@ -1173,7 +1247,7 @@ def _install_feedback_scope_probe(bench, record):
             patch(feedback, name, timed(getattr(feedback, name), name, dimensions))
         patch(feedback.SlmFeedbackTask, "_shoot", timed(feedback.SlmFeedbackTask._shoot, "_shoot",
             lambda args, kwargs: {"object_id": id(args[0]), "node": args[0].instance_id,
-                                  "iteration": args[3], "shots": args[0].shots}))
+                                  "iteration": args[2], "shots": args[0].shots}))
         factory = bench.presenter._make_monitor_host
         patch(bench.presenter, "_make_monitor_host", timed(factory, "_make_monitor_host",
             lambda args, kwargs: {"input_id": id(args[0]), "signal": args[1].signal,
@@ -1181,7 +1255,7 @@ def _install_feedback_scope_probe(bench, record):
             lambda host: host_facts(host) if isinstance(host, _RemoteRasterPlotHost)
                          else {"returned_type": type(host).__name__}))
         patch(RenderProcess, "_call", describe_call(RenderProcess._call))
-        patch(_RemoteRasterPlotHost, "_created", created(_RemoteRasterPlotHost._created))
+        patch(RenderProcess, "_request", created(RenderProcess._request))
         patch(_RemoteRasterPlotHost, "_accept_front", accepted_front(_RemoteRasterPlotHost._accept_front))
         gc.callbacks.append(garbage_collection)
     except BaseException:

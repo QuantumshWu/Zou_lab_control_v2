@@ -1,7 +1,7 @@
 """Shared plumbing for the plot performance matrix.
 
-Everything here measures the worktree copy of the packages: the bootstrap
-prepends this worktree's package sources to sys.path before any zlc import.
+Everything here measures the worktree copy of the packages: the product's
+own bootstrap (``zou_lab_control``) runs before any zlc import.
 Layer conventions:
 
 * "session" numbers time PlotSession.update_data alone (projection + Agg
@@ -23,6 +23,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 def bootstrap() -> None:
     """Put this worktree's packages first.  It does NOT choose a platform.
 
+    Through the product's one bootstrap, the way every launcher starts: it
+    puts EVERY layer of this checkout first and sets the product's thread
+    policy.  Prepending only zlc_plot and zlc_data left each other layer they
+    import to whatever an editable install points at -- on this machine the
+    stale split-out copies -- so a runner measured a mix of two codebases
+    and a later full bootstrap refused the process outright.
+
     Defaulting to offscreen here used to be invisible: every runner that
     imported this module inherited a device pixel ratio of 1 and a surface
     one ninth the area of the real display, and pixel-bound numbers came
@@ -30,10 +37,9 @@ def bootstrap() -> None:
     plot-layer ones ask for offscreen, the console one refuses it.
     """
 
-    for pkg in ("zlc_plot", "zlc_data"):
-        path = str(ROOT / "packages" / pkg / "src")
-        if path not in sys.path:
-            sys.path.insert(0, path)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import zou_lab_control  # noqa: F401
     tests = str(ROOT / "packages" / "zlc_plot" / "tests")
     if tests not in sys.path:
         sys.path.insert(0, tests)
@@ -207,14 +213,10 @@ class StaticFeed:
 def pulse_feed() -> StaticFeed:
     """The product's imaging template through the editor's own projection.
 
-    The plot layer alone cannot author a pulse; the product bootstrap puts
-    this checkout's every layer first, the way run_console reaches the
-    pulse fixtures.
+    The plot layer alone cannot author a pulse; the editor's own projection
+    does, through the layers ``bootstrap`` already put first.
     """
 
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    import zou_lab_control  # noqa: F401
     from zlc_pulse.codec import read_pulse_document
     from zlc_workbench.pulse_editor import timeline_of
 

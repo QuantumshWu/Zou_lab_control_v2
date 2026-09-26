@@ -45,11 +45,14 @@ zlc slm_server        separated DVI-default / explicit-USB SLM owner
 zlc fpga              FPGA geometry/resource tool
 zlc check             installed-product provenance check
 zlc evidence          formal evidence lanes
+zlc warm_numba        compile or verify every numba kernel's disk cache
+zlc capture           capture one window on the real screen for acceptance
 ```
 
 The Windows files in `bin\` are thin shortcuts. Their shared Python resolver
 anchors imports to the current checkout, then they select one manifest command
-and forward the original argument vector once. `install_requirements.bat` is
+(the two `migrate_*` launchers run their checkout tool instead) and forward the
+original argument vector once. `install_requirements.bat` is
 the sole installed-only mode, so its final check cannot be masked by source.
 
 ```text
@@ -59,6 +62,11 @@ bin\figure_viewer.bat          Figure Viewer
 bin\estimate_resources.bat     current checkout geometry/resource estimate
 bin\build_and_program.bat      build if needed, then program volatile FPGA;
                                build-only/flash remain explicit modes
+bin\warm_numba_cache.bat       zlc warm_numba from this checkout
+bin\migrate_pulses.bat         one-shot offline migration of saved pulses and
+                               Config files (originals kept beside them)
+bin\migrate_units.bat          one-shot rewrite of saved pulses to one unit
+                               spelling (originals kept beside them)
 ```
 
 The machine a board or SLM head is plugged into serves it from the bench
@@ -228,7 +236,7 @@ does not silently choose another port.
 The FPGA host validates part/device identity, target ABI, clock, geometry,
 counts and delay-FIFO capacity before Load. SAFE independently gates TTL/DAC;
 DONE waits through final FIFO/latch completion. Vivado scratch stays under the
-FPGA build root. `run_server` never programs hardware; the default
+FPGA build root. The pulse server never programs hardware; the default
 `build_and_program` path builds/reuses a valid project and then programs volatile
 FPGA state, while flash is always explicit. Timing/build evidence and the
 remaining board acceptance boundary are recorded in `IMPLEMENTATION_PLAN.md`
@@ -239,8 +247,9 @@ and `packages/zlc_pulse/fpga/README.md`.
 Figure uses stable `zlc.figure`; Calibration uses
 `zlc.calibration.readout`; Pulse uses `zlc.pulse`; Target uses `zlc.slm.target`;
 Science Context uses `zlc.slm.science-context`. Readers accept only the current
-complete grammar. Existing workspace files are not converted and may be outside
-the current grammar; formats have no alias or numeric version.
+complete grammar and never convert what they read: a workspace file outside it
+is refused, and the `bin\migrate_*` launchers are the explicit one-shot
+converters. Formats have no alias or numeric version.
 
 A Figure NPZ is the primary artifact and contains typed Dataset data, exact Plot
 recipe, overlay, viewport and causal lineage. PNG is only its preview.

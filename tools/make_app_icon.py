@@ -23,13 +23,19 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-#: The product's own tokens (zlc_ui.fluent.style ACCENT / TEXT / SURFACE).
-ACCENT = "#77AADD"
-INK = "#323130"
-SURFACE = "#FFFFFF"
+# This checkout's layers, through the product's own bootstrap, so the tokens
+# below are this tree's and not an installed copy's.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+import zou_lab_control  # noqa: E402,F401
+
+#: The product's own tokens, read from where the windows read them.
+from zlc_ui.fluent.style import ACCENT, SURFACE, TEXT as INK  # noqa: E402
 #: The chrome's typeface.  Only needed to DRAW the icon, never to show it.
 TYPEFACE = "C:/Windows/Fonts/segoeuib.ttf"
 

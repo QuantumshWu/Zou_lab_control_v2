@@ -4,6 +4,12 @@ Each case names a feed, a spec, the interactions that make sense on it,
 and (optionally) a fit request.  The runner interprets interaction tags
 against the painted front's axis roles, so a tag means the same gesture on
 every kind that offers the role.
+
+A hover chooses one series among several, so only a case that draws more
+than one series lists ``hover_series``/``click_series``: a lone curve, a
+Rolling trace, a FacetGrid overview (a chooser of cells) and the pulse
+timeline do not answer a hover, by design, and listing them measured
+nothing but "no hover-responsive position found".
 """
 from __future__ import annotations
 
@@ -91,7 +97,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_2M",
             lattice_2m,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series", "click_series", "drag_main", "pan_drag", "wheel_main"),
+            ("drag_main", "pan_drag", "wheel_main"),
         ),
         Case(
             "curve_tensor_group_2M",
@@ -116,7 +122,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_20M",
             lattice_20m,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series", "drag_main"),
+            ("drag_main",),
         ),
         Case(
             "hist_2M",
@@ -181,7 +187,7 @@ def catalog() -> tuple[Case, ...]:
             "rolling_2M",
             lattice_2m,
             lambda: RollingPlot(),
-            ("hover_series",),
+            (),
         ),
         Case(
             "facet_frame3_2M",
@@ -189,7 +195,7 @@ def catalog() -> tuple[Case, ...]:
             lambda: FacetGridPlot(
                 AxisRef.cell_data("frame"), CurvePlot(AxisRef.point("ax"))
             ),
-            ("hover_series", "dclick_cell"),
+            ("dclick_cell",),
         ),
         Case(
             "facet_scan10_2M",
@@ -207,7 +213,7 @@ def catalog() -> tuple[Case, ...]:
             lambda: FacetGridPlot(
                 AxisRef.cell_data("site"), CurvePlot(AxisRef.point("ax"))
             ),
-            ("hover_series", "dclick_cell"),
+            ("dclick_cell",),
             notes="64 curve cells",
         ),
         Case(
@@ -261,14 +267,14 @@ def catalog() -> tuple[Case, ...]:
             "curve_small",
             lattice_small,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series", "drag_main"),
+            ("drag_main",),
             notes="one repeat, 200 points",
         ),
         Case(
             "curve_plain_2M",
             lattice_2m,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series", "drag_main"),
+            ("drag_main",),
             parameters={"uncertainty": False},
             notes="error bars OFF -- curve_2M is this same measurement with "
             "them on, which is the default, so the pair prices the band",
@@ -277,7 +283,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_plain_small",
             lattice_small,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series",),
+            (),
             parameters={"uncertainty": False},
             notes="error bars OFF on one repeat, against curve_small",
         ),
@@ -307,7 +313,7 @@ def catalog() -> tuple[Case, ...]:
             "rolling_plain_2M",
             lattice_2m,
             lambda: RollingPlot(),
-            ("hover_series",),
+            (),
             parameters={"uncertainty": False, "side_distribution": False},
             notes="band and side distribution OFF -- both DEFAULT to on, so "
             "rolling_2M was this same measurement under a second name",
@@ -350,7 +356,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_partial_2M",
             lattice_partial_2m,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series", "drag_main"),
+            ("drag_main",),
             notes="a run still filling: a quarter landed, holes inside it. "
             "curve_2M is the same measurement wholly valid",
         ),
@@ -376,7 +382,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_partial_small",
             lattice_partial_small,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series",),
+            (),
             notes="few shots and holes: the curve's isolated-point channel "
             "is only reached by a series with gaps",
         ),
@@ -394,10 +400,9 @@ def catalog() -> tuple[Case, ...]:
             "pulse_timeline_imaging",
             pulse_feed,
             lambda: _pulse_spec(),
-            ("hover_series", "drag_main", "wheel_main"),
+            ("drag_main", "wheel_main"),
             notes="the editor's preview: the imaging template through the "
-            "presenter's own projection; hover is the crosshair, the drag "
-            "an x-range selector",
+            "presenter's own projection; the drag an x-range selector",
         ),
     )
 

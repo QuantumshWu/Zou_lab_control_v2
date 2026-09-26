@@ -61,7 +61,7 @@ def visible(widget, app):
     return widget.isVisible() and widget.isEnabled()
 
 
-def click(widget, app):
+def click(widget, app, *, x=None):
     from PyQt5 import QtCore, QtTest, QtWidgets
     from PyQt5 import sip
     if not visible(widget, app):
@@ -77,6 +77,8 @@ def click(widget, app):
     if exposed.isEmpty():
         raise UnavailableAction(f"target is clipped out of its viewport: {type(widget).__name__}")
     point = exposed.center()
+    if x is not None:
+        point.setX(int(x))
     if (isinstance(widget, QtWidgets.QAbstractButton) and sip.ispycreated(widget)
             and not widget.hitButton(point)):
         # A form's column minimum also enlarges sizeHint, while the painted
@@ -93,15 +95,27 @@ def click(widget, app):
     QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton, pos=point)
 
 
-def choose(combo, wanted, app):
-    """Select a real popup row, including a leaf in the signal tree."""
-    from PyQt5 import QtCore, QtTest
-    from enum import Enum
-    click(combo, app)
+def open_popup(combo, app):
+    """Open a choice's popup the way a hand does, and return its view."""
+    if getattr(combo, "isCycleSelected", lambda: False)():
+        # A cycled choice's text toggles its wheel; only its arrow opens
+        # the popup.
+        _left, _right, drop_width = combo._collapsed_text_chrome()
+        click(combo, app, x=combo.width() - max(1, drop_width // 2))
+    else:
+        click(combo, app)
     app.processEvents()
     view = combo._popup_view
     if view is None or not view.isVisible():
         raise RuntimeError("choice popup did not open")
+    return view
+
+
+def choose(combo, wanted, app):
+    """Select a real popup row, including a leaf in the signal tree."""
+    from PyQt5 import QtCore, QtTest
+    from enum import Enum
+    view = open_popup(combo, app)
     model = view.model()
 
     def find(parent=QtCore.QModelIndex()):
@@ -369,6 +383,38 @@ def pick_action(bench, rng, step):
     return action
 
 
+def finite_ledger(plane, source, publication, max_events):
+    """Every exact commit of ``source`` up to ``publication``: its event
+    value, its placement and its direct parents, re-read from the plane's
+    own append-only ledger.
+
+    Public live replay refuses sealed generations. The diagnostic alone
+    reads the EXISTING finite ledger under its owner lock -- through the
+    plane's own replay of one retained commit, so it reads the ledger's
+    layout, never a copy of it -- retaining a bounded local tuple only until
+    the action returns. No tap/observer, extra history lease, queue or
+    cross-action payload retention. Like the plane's own follow replay it
+    takes the lock per event, never for the whole ledger: the console this
+    audit drives keeps committing while it reads.
+    """
+
+    with plane._lock:
+        state = plane._state_for_signal_locked(source)
+        assert state is not None and state.generation == publication.event_ref.generation
+        committed = state.commit_chunks.get(source)
+        count = 0 if committed is None else len(committed[2]) - 1
+        assert count <= max_events, "Finite ledger exceeds audit budget"
+        replay = plane._replay_input_locked(state, (source,))
+        payloads = plane._parent_payloads_locked()
+    ledger = []
+    for sequence in range(1, min(count, publication.event_ref.sequence) + 1):
+        with plane._lock:
+            retained = plane._retained_publication_locked(replay, sequence, payloads)
+            event = retained.value(source)
+            ledger.append((event, event.cell_origin, plane._resolved_direct_parents_locked(retained)))
+    return tuple(ledger)
+
+
 def perform_action(bench, action, beat, output):
     from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
     from zlc_runtime import stable_signal_key
@@ -492,7 +538,7 @@ def perform_action(bench, action, beat, output):
                     "sequence": ref.sequence}
 
         facts = {"source": source, "event": ref_key(publication.event_ref),
-                 "shape": list(snapshot.block.values.shape), "domains": [],
+                 "shape": list(schema.physical_shape), "domains": [],
                  "direct_parents": [ref_key(ref) for ref in publication.direct_parent_refs]}
         bench.dataset_checks.append(facts)
         for domain in (schema.repeat_domain, schema.point_domain, schema.cell_domain):
@@ -515,7 +561,11 @@ def perform_action(bench, action, beat, output):
             "total": coverage.total_cells, "complete": coverage.complete})
         budget = int(action.get("max_values", 100_000))
         valid = None
-        if snapshot.block.values.size <= budget:
+        if int(np.prod(schema.physical_shape)) <= budget:
+            # A finite run or an indexed window is segmented: its planes
+            # are made contiguous only inside the budget, where the audits
+            # below read them.
+            snapshot = snapshot.materialize()
             valid = np.asarray(snapshot.expanded_validity())
             facts.update(valid=int(np.count_nonzero(valid)), elements=int(valid.size))
         else:
@@ -536,15 +586,10 @@ def perform_action(bench, action, beat, output):
             assert schema == value.canonical_schema, "Expected canonical finite Dataset"
             expected_root = bench.marks[action["root_generation_as"]]
             parent_source = signal_name(action["parent_source"])
-            with plane._lock:
-                state = plane._state_for_signal_locked(source)
-                assert state is not None and state.generation == publication.event_ref.generation
-                retained = state.commit_chunks.get(source, ())
-                assert len(retained) <= int(action.get("max_events", 2_000)), "Finite ledger exceeds audit budget"
-                chunks = tuple(entry for entry in retained if entry[0] <= publication.event_ref.sequence)
-            assert chunks and tuple(parent.event_ref for parent in chunks[-1][3]) == publication.direct_parent_refs
+            chunks = finite_ledger(plane, source, publication, int(action.get("max_events", 2_000)))
+            assert chunks and tuple(parent.event_ref for parent in chunks[-1][2]) == publication.direct_parent_refs
             written = np.zeros((schema.repeat_domain.size, schema.point_domain.size), dtype=bool)
-            for _sequence, event, origin, parents in chunks:
+            for event, origin, parents in chunks:
                 assert len(parents) == 1, "Expected one exact source publication per event"
                 parent = parents[0]
                 actual_source = parent.value(parent_source)
@@ -599,23 +644,14 @@ def perform_action(bench, action, beat, output):
         assert record["source_signal"] == expected_source
         assert len(record["plan"]["axes"]) == 1
         assert tuple(record["plan"]["axes"][0]["values"]) == coordinates
-        # Public live replay refuses sealed generations. The diagnostic alone
-        # reads the EXISTING finite ledger under its owner lock, retaining a
-        # bounded local tuple only until this action returns. No tap/observer,
-        # extra history lease, queue or cross-action payload retention.
-        with plane._lock:
-            state = plane._state_for_signal_locked(source)
-            assert state is not None and state.generation == publication.event_ref.generation
-            retained = state.commit_chunks.get(source, ())
-            assert len(retained) <= int(action.get("max_events", 2_000)), "Scan ledger exceeds audit budget"
-            chunks = tuple(entry for entry in retained if entry[0] <= publication.event_ref.sequence)
+        chunks = finite_ledger(plane, source, publication, int(action.get("max_events", 2_000)))
         assert chunks, "Scan has no retained exact commit ledger"
-        assert tuple(parent.event_ref for parent in chunks[-1][3]) == publication.direct_parent_refs
+        assert tuple(parent.event_ref for parent in chunks[-1][2]) == publication.direct_parent_refs
         root_generations = set()
         expected_root = (bench.marks[scan["root_generation_as"]]
                          if "root_generation_as" in scan else None)
         source_schema = None
-        for index, (_sequence, event, origin, parents) in enumerate(chunks):
+        for index, (event, origin, parents) in enumerate(chunks):
             assert len(parents) == 1, "Scan event needs its one actual source publication"
             parent = parents[0]
             actual_source = parent.value(expected_source)
@@ -888,8 +924,7 @@ def perform_action(bench, action, beat, output):
         if action["field"] not in form.keys:
             return "scope field replaced by preceding edit"
         combo = form.widget_for(action["field"])
-        click(combo, bench.app)
-        popup = combo._popup_view
+        popup = open_popup(combo, bench.app)
         index = popup.model().index(combo._cycle_row, 0)
         if not index.isValid():
             return "scope action changed before the click"
@@ -1371,17 +1406,22 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
             bench.fuzz_device_objects["control:" + action["remember_control"]] = control
         if "same_control_as" in action:
             assert control is bench.fuzz_device_objects["control:" + action["same_control_as"]], facts
-        if view is not None and hasattr(view, "_field_states"):
+        if view is not None and device in flow._device_control_models:
+            # A generic Control, read in the last projection its view was
+            # handed (install_observers records it): what the window shows,
+            # never a projection its owner would compute now.
+            def control_fields():
+                return bench.control_projections.get(view, {}).get("fields", {})
             expected_current = action.get("current", {})
             if expected_current and not beat.run_until(lambda: all(
-                    view._field_states.get(field, {}).get("current") == expected
+                    control_fields().get(field, {}).get("current") == expected
                     for field, expected in expected_current.items()), float(action.get("timeout", 5))):
                 failure = AssertionError(f"Control readback did not arrive: {expected_current}")
                 # Preserve the failed human flow before outer cleanup changes
                 # ownership or hides Control. No Refresh or replacement write.
                 facts["timeout"] = {"device": device, "expected_current": expected_current,
                                     "error": str(failure), "action": dict(action)}
-                facts["control"] = {"fields": dict(view._field_states),
+                facts["control"] = {"fields": dict(control_fields()),
                     "risk_enabled": view.risk_switch.isEnabled(),
                     "risk_accepted": view.risk_switch.isChecked(),
                     "owners": view.owner_label.text(), "reason": view.reason_label.text(),
@@ -1412,7 +1452,7 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
                     print(f"Control timeout evidence could not be completed: {evidence_error}", flush=True)
                     raise failure from evidence_error
                 raise failure
-            facts["control"] = {"fields": dict(view._field_states),
+            facts["control"] = {"fields": dict(control_fields()),
                                 "risk_enabled": view.risk_switch.isEnabled(),
                                 "risk_accepted": view.risk_switch.isChecked(),
                                 "owners": view.owner_label.text()}
@@ -1422,12 +1462,12 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
                 assert view.risk_switch.isChecked() == action["risk_accepted"], facts
             for field, expected in action.get("editable", {}).items():
                 assert view.form.widget_for(field).isEnabled() == expected, facts
-                assert view._field_states[field]["editable"] == expected, facts
+                assert facts["control"]["fields"][field]["editable"] == expected, facts
             for field, expected in action.get("current", {}).items():
-                assert view._field_states[field]["current"] == expected, facts
+                assert facts["control"]["fields"][field]["current"] == expected, facts
             for property_name in ("desired", "desired_unit"):
                 for field, expected in action.get(property_name, {}).items():
-                    assert view._field_states[field][property_name] == expected, facts
+                    assert facts["control"]["fields"][field][property_name] == expected, facts
         elif any(key in action for key in ("current", "risk_enabled", "risk_accepted", "editable", "desired", "desired_unit")):
             raise AssertionError("the requested generic Control readback is absent")
         if "report_contains" in action:

@@ -5,9 +5,9 @@ about the harness rather than the product.  Each one names the failure it
 prevents; read the docstring before deciding to pass it a waiver.
 
 None of these reimplement product behaviour.  They ASK the product objects
-what they are doing -- the renderer for its density, the board for its
-interval, the plane for its revisions -- so a change in product logic moves
-the guard with it instead of silently invalidating it.
+what they are doing -- the presented front for its density, the board for
+its interval, the plane for its revisions -- so a change in product logic
+moves the guard with it instead of silently invalidating it.
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ class HarnessError(AssertionError):
 
 
 # ---------------------------------------------------------------- density
-def display_density(renderer) -> dict:
-    """The pixel count this renderer is actually working on.
+def require_real_density(facts: dict, *, minimum_ratio: float = 2.0) -> dict:
+    """Refuse to report timings taken on a toy surface.
 
     Offscreen Qt hands out a small surface at device pixel ratio 1.  A 4x4
     panel measured there is 826x609 -- one NINTH of the 2478x1827 the real
@@ -28,27 +28,10 @@ def display_density(renderer) -> dict:
     to nine times too cheap.  A whole per-kind matrix was collected that
     way before anyone noticed the header.
 
-    Returns the facts; :func:`require_real_density` is the assertion.
+    ``facts`` are the presented front's own ``figure_px`` and
+    ``device_pixel_ratio``; they are returned when the surface is real.
     """
 
-    figure = renderer.figure
-    return {
-        "figure_px": (
-            int(round(float(figure.bbox.width))),
-            int(round(float(figure.bbox.height))),
-        ),
-        "device_pixel_ratio": float(renderer.plan.device_pixel_ratio),
-        "dpi": float(renderer.plan.dpi),
-        "megapixels": round(
-            float(figure.bbox.width) * float(figure.bbox.height) / 1e6, 2
-        ),
-    }
-
-
-def require_real_density(renderer, *, minimum_ratio: float = 2.0) -> dict:
-    """Refuse to report timings taken on a toy surface."""
-
-    facts = display_density(renderer)
     if facts["device_pixel_ratio"] < minimum_ratio:
         raise HarnessError(
             "device pixel ratio %s: this is an offscreen or low-density "
@@ -254,7 +237,7 @@ def require_effect(before, after, what: str):
 
     Synthesised pointer calls into ``host._pointer_event`` build the gesture
     but silently drop its moves: a middle-button orbit reported an
-    ``_OrbitGesture`` and ``height_bars_dragging`` true, and twelve moves
+    ``_OrbitGesture`` and a renderer confined to the scene, and twelve moves
     later the camera had not turned.  Only real QMouseEvents on the widget
     drive it.  A bench cannot tell the difference by looking at latency, so
     it has to look at the QUANTITY THE GESTURE OWNS -- the camera angle, the

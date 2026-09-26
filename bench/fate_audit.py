@@ -26,13 +26,16 @@ import numpy as np
 from zlc_data import (
     AxisId,
     AxisSpec,
-    COMPONENT,
+    CoordinateFrameId,
     DatasetSchema,
     DomainSpec,
     PRIMARY_INDEX,
+    READOUT_EVENT,
     REPEAT,
     SCAN_POINT,
     SITE,
+    SPATIAL_X,
+    SPATIAL_Y,
     ValidityContract,
     ValueSchema,
 )
@@ -58,33 +61,46 @@ def mapped_domain(axes, codes):
     return DomainSpec((rows,), tuple(axes), tuple(tuple(code) for code in codes))
 
 
-def dataset(repeat, point, cell_axes, validity, unit="1"):
+def dataset(repeat, point, cell_axes, validity, unit="1", dtype="<f8"):
     return DatasetSchema(
         mapped_domain((repeat,), (range(repeat.size),)),
         point,
         DomainSpec(tuple(axis.size for axis in cell_axes), tuple(cell_axes)),
-        ValueSchema(validity, np.dtype("<f8"), unit),
+        ValueSchema(validity, np.dtype(dtype), unit),
     )
 
 
+# The two producers' tables in the roles they publish them with -- fate
+# offers are read off roles, so an audit of any other roles describes a
+# table no operator sees.
 def survival_schema():
+    """FrameSurvival's output: the frame axis becomes the forward-pair
+    readout event on Point; the verdict is boolean per site."""
+
     repeat = AxisSpec(AxisId("sv.repeat"), "repeat", REPEAT, 4, tuple(range(4)))
-    pair = AxisSpec(AxisId("sv.pair"), "pair", COMPONENT, 3,
+    pair = AxisSpec(AxisId("sv.pair"), "pair", READOUT_EVENT, 3, (0, 1, 2),
                     coordinate_labels=("0-1", "0-2", "1-2"))
     site = AxisSpec(AxisId("sv.site"), "site", SITE, 5, tuple(range(5)))
     return dataset(
         repeat,
-        mapped_domain((), ()),
-        (pair, site),
-        ValidityContract.components(pair.axis_id, site.axis_id),
+        mapped_domain((pair,), (range(3),)),
+        (site,),
+        ValidityContract.components(site.axis_id),
+        dtype="?",
     )
 
 
 def camera_schema():
+    """A camera measurement's frames: the frame is a readout event on
+    Point, the picture two spatial axes in sensor pixels."""
+
     repeat = AxisSpec(AxisId("cm.repeat"), "repeat", REPEAT, 2, (0, 1))
-    ys = AxisSpec(AxisId("cm.spatial-y"), "spatial-y", SITE, 96, tuple(range(96)))
-    xs = AxisSpec(AxisId("cm.spatial-x"), "spatial-x", SITE, 128, tuple(range(128)))
-    frame = AxisSpec(AxisId("cm.frame"), "frame", SCAN_POINT, 3, (0.0, 1.0, 2.0))
+    sensor = CoordinateFrameId("sensor_pixel_xy")
+    ys = AxisSpec(AxisId("cm.spatial-y"), "spatial-y", SPATIAL_Y, 96,
+                  tuple(range(96)), unit="pixel", coordinate_frame=sensor)
+    xs = AxisSpec(AxisId("cm.spatial-x"), "spatial-x", SPATIAL_X, 128,
+                  tuple(range(128)), unit="pixel", coordinate_frame=sensor)
+    frame = AxisSpec(AxisId("cm.frame"), "frame", READOUT_EVENT, 3, (0, 1, 2))
     return dataset(
         repeat,
         mapped_domain((frame,), (range(3),)),
@@ -118,7 +134,7 @@ def indexed_schema():
     repeat = AxisSpec(AxisId("oc.repeat"), "repeat", REPEAT, 1, (0,))
     site = AxisSpec(AxisId("oc.site"), "site", SITE, 4, tuple(range(4)))
     shots = AxisSpec(AxisId("zlc_data.primary-index"), "source index",
-                     PRIMARY_INDEX, 6, tuple(range(6)))
+                     PRIMARY_INDEX, 6, tuple(range(-5, 1)))
     return dataset(
         repeat,
         mapped_domain((shots,), (range(6),)),
@@ -128,7 +144,7 @@ def indexed_schema():
 
 
 SCHEMAS = {
-    "survival (repeat x [pair x site])": survival_schema(),
+    "survival (repeat x pair x [site])": survival_schema(),
     "camera (repeat x frame x [y x x])": camera_schema(),
     "scan (repeat x [field.x,field.y] x site)": scan_schema(),
     "indexed (shots x site)": indexed_schema(),

@@ -20,8 +20,17 @@ ROOT = Path(__file__).resolve().parent.parent
 def _configure_compiled_worker_threads() -> None:
     """Size the native pools, bound each ZLC worker team, and let them sleep.
 
-    Parallel compiled kernels in this product run on Numba's OpenMP pool.
-    Its worker threads busy-wait after each parallel
+    Parallel compiled kernels in this product run on Numba's OpenMP pool,
+    and that layer is pinned rather than left to Numba's choice.  Its
+    default takes TBB when one is installed -- where none of the measured
+    policy below applies -- and, with neither runtime loadable, silently
+    falls back to "workqueue", which is not thread-safe: a render child
+    launches kernels from its raster thread and its analysis workers at
+    once, and concurrent launches on that layer can abort the child.
+    Pinned, a machine without the OpenMP runtime fails its first parallel
+    kernel with Numba naming the missing layer.
+
+    The OpenMP pool's worker threads busy-wait after each parallel
     region rather than sleeping, so once the first kernel has run the pool
     keeps burning cores for as long as the process lives.  Measured on this
     machine: arming the camera took the console from 5 per cent of one core
@@ -53,7 +62,10 @@ def _configure_compiled_worker_threads() -> None:
     microseconds at the simulation's 128 x 128 -- because past four,
     threads on a matrix of that size wait on each other, and on the render
     children they share the machine with.  A render child sets its own to
-    one, over this.
+    one, over this.  OpenBLAS is what the pip wheels this product installs
+    with (``constraints.txt``) carry; a numpy linked against MKL -- a conda
+    interpreter the launchers also accept -- reads ``MKL_NUM_THREADS`` and
+    is not bounded here.
 
     Set every policy here because the environment must be in place before
     Numba/OpenMP and OpenBLAS initialize, and this bootstrap is what every
@@ -70,6 +82,7 @@ def _configure_compiled_worker_threads() -> None:
     else:
         os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", authored)
     os.environ.setdefault("OPENBLAS_NUM_THREADS", team)
+    os.environ.setdefault("NUMBA_THREADING_LAYER", "omp")
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 

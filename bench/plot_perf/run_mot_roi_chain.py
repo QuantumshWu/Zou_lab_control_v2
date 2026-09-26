@@ -23,7 +23,7 @@ import numpy as np
 
 from . import guards
 from .common import Pointer, axis_center, provenance, stats, write_result
-from .run_console import ConsoleBench, render_cost
+from .run_console import ConsoleBench
 
 
 def _normalized(text: object) -> str:
@@ -384,19 +384,17 @@ def _seam(rows: list[dict], name: str) -> dict | None:
 
 
 def _stage_summary(rows: list[dict], labels: tuple[str, ...], frames: dict) -> list[dict]:
-    render_rows = {row["panel"]: row for row in render_cost(rows, frames)}
+    """The console-side stages of each panel's frame.
+
+    Projection, fit and render run in the panel's render child, where no
+    probe of this process reaches; the causal timeline carries that round
+    trip whole.  These are the stages this process runs itself.
+    """
+
     answer = []
     for label in labels:
         names = {
             "route_materialize": f"PanelPort[{label}]._project_input",
-            "data_projection": f"PlotSession[{label}]._prepare_live_frame_worker",
-            "fit_total": f"PlotSession[{label}]._solve_live_pair",
-            "fit_batch_setup": f"PlotSession[{label}]._fit_facet_batch",
-            "numeric_fit_batch": f"FitEngine[{label}].fit_batch",
-            "numeric_fit_single": f"FitEngine[{label}].fit",
-            "commit_and_render": f"PlotSession[{label}].commit_live_frame",
-            "renderer_present": f"MatplotlibRenderer[{label}].present",
-            "compose": f"MatplotlibRenderer[{label}]._compose_frame",
             "qt_accept": f"PanelPort[{label}]._put_on_screen",
             "qt_widget": f"QtWidget[{label}].present_front",
         }
@@ -415,7 +413,6 @@ def _stage_summary(rows: list[dict], labels: tuple[str, ...], frames: dict) -> l
                 "panel": label,
                 "frames": frames.get(label, 0),
                 "stages": stages,
-                "render_self_rollup": render_rows.get(label),
             }
         )
     return answer
@@ -620,6 +617,10 @@ def run(
         if panel3 == "curve":
             grid_assignments.update({"spatial-x": "x", "spatial-y": "reduced"})
         grid_roles = _assign_roles(bench, grid, grid_assignments)
+        # Each panel reads its OWN authored history window, not whatever a
+        # sibling's lease keeps retained: the forty source-index cells exist
+        # only once this grid asks for forty shots itself.
+        bench.edit_setting(grid, "display", window=40)
         fit_activation = bench.edit_setting(
             grid,
             "fit",
@@ -655,6 +656,7 @@ def run(
             curve,
             {"source index": "x", "spatial-x": "reduced", "spatial-y": "group"},
         )
+        bench.edit_setting(curve, "display", window=40)
 
         panels = (camera, histogram, grid, curve)
         guards.require_panels(bench.presenter, 4)
@@ -740,7 +742,6 @@ def run(
 
         instrumented = {}
         for panel in panels:
-            bench.instrument(panel, module_seams=False)
             instrumented[bench.label(panel)] = bench.instrument_pipeline(panel)
         # ``probe.watch`` replaces the instance method wrappers used by the
         # baseline timeline.  Reattach outside those timed wrappers so the
@@ -760,7 +761,6 @@ def run(
         measured["causal_timeline"] = timeline.summary(labels)
         timeline.close()
         frames = {row["panel"]: row["frames"] for row in measured["panels"]}
-        measured["render_cost"] = render_cost(measured["seams"], frames)
         measured["stage_summary"] = _stage_summary(
             measured["seams"], labels, frames
         )
