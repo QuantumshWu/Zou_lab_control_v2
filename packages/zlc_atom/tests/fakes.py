@@ -40,6 +40,7 @@ def camera_cycle_snapshot(
     signal: str = "frames",
     generation: str = "test",
     revision: int = 1,
+    value_unit: str | None = None,
 ) -> OwnedSnapshot:
     """Author one camera-shaped publication: (cycles) x (frames) x (y, x).
 
@@ -78,6 +79,7 @@ def camera_cycle_snapshot(
             ),
         ),
         cell_axes=(SPATIAL_Y, SPATIAL_X),
+        value_unit=value_unit,
         generation=generation,
         revision=revision,
     )

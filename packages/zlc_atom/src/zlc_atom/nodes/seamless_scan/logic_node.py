@@ -1,8 +1,10 @@
 """The seamless scan Measurement: a plan the BOARD plays from its scan table.
 
-One load, one fire, every point back to back.  What the operator authors is
-the template, the plan, how many whole sweeps and how many in-place shots per
-point. There is nothing to say about how a fresh value is taken: the fired cycle drives
+The board's axes play from one load, every point back to back; a manual,
+device or API axis is moved by the host between fires, one fire per host
+point, and a point that moves an API value is compiled and loaded again
+first.  What the operator authors is the template, the plan, how many
+whole sweeps and how many in-place shots per point. There is nothing to say about how a fresh value is taken: the fired cycle drives
 the source, so its publications ARE the played rows, in order.
 
 The loop this node offers is ``scan.SeamlessScanMeasurement``; this module

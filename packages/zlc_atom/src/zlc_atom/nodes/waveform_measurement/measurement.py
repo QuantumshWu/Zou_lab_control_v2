@@ -573,8 +573,13 @@ class WaveformMeasurementNode:
             return FiniteCapture(
                 self, owns_generation=owns_generation, should_stop=should_stop
             )
-        except BaseException:
-            self.sampler.finish_record_capture()
+        except BaseException as error:
+            # A sampler still holding the last capture's failure raises it
+            # from finish: noted, never in place of this one, retire still runs.
+            try:
+                self.sampler.finish_record_capture()
+            except BaseException as cleanup:
+                error.add_note(f"sampler cleanup also failed: {cleanup}")
             if owns_generation:
                 self.signal_plane.retire(self)
             raise
@@ -602,8 +607,13 @@ class WaveformMeasurementNode:
             return MonitorCapture(
                 self, owns_generation=owns_generation, commit_live=commit_live
             )
-        except BaseException:
-            self.sampler.finish_record_capture()
+        except BaseException as error:
+            # A sampler still holding the last capture's failure raises it
+            # from finish: noted, never in place of this one, retire still runs.
+            try:
+                self.sampler.finish_record_capture()
+            except BaseException as cleanup:
+                error.add_note(f"sampler cleanup also failed: {cleanup}")
             if owns_generation:
                 self.signal_plane.retire(self)
             raise

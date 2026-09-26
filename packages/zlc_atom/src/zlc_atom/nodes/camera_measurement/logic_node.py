@@ -40,15 +40,13 @@ def _validate_measurement(values: dict[str, object]) -> None:
         raise ValueError("camera ROI requires all four fields or none for the full sensor")
 
 
-def _spatial_range(selection: SelectionState, role: str) -> SelectionRange:
+def _spatial_range(selection: SelectionState, role: str) -> SelectionRange | None:
     matches = tuple(
         value
         for value in selection.ranges
         if value.axis == role or value.axis.endswith(f".{role}")
     )
-    if len(matches) != 1:
-        raise ValueError(f"image area must contain exactly one {role!r} range")
-    return matches[0]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _selected_sensor_interval(
@@ -118,6 +116,12 @@ def _image_area_to_roi_patch(
 ) -> dict[str, int] | None:
     x_range = _spatial_range(selection, SPATIAL_X.value)
     y_range = _spatial_range(selection, SPATIAL_Y.value)
+    if x_range is None or y_range is None:
+        # An image whose axes are not the sensor plane -- a frame or a site
+        # put on one of them -- has an Area that names no crop.  It still
+        # derives its ROI; raised here, it failed the gesture as an internal
+        # error.
+        return None
     del draft
     sensor_height, sensor_width = _current_sensor_shape(context)
     binning_y, binning_x = _current_binning(context)

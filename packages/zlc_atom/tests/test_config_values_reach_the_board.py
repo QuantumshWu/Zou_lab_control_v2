@@ -58,7 +58,7 @@ def test_the_archive_carries_the_program_and_the_pulse_that_played() -> None:
     """
 
     from zlc_pulse import resolve_api_parameters
-    from tests.pulse_fixture import pulse_sequence
+    from pulse_fixture import pulse_sequence
 
     sequencer = SequencerDevice(VirtualPulseStreamer(world=SimulationWorld()))
     sequencer.open()

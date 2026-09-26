@@ -123,11 +123,10 @@ def test_every_model_recovers_the_occupancy_that_produced_the_frames() -> None:
     box_report = result.report["models"]["box"]
     box_model = result.calibration.select_model(ReadoutModelKind.BOX)
     honest = np.asarray(box_report["predictions"], dtype=bool)
+    signals = np.asarray(box_report["short_signals"], dtype=float)
     for mutated in (
-        classify_threshold(box_report["short_signals"], box_model.thresholds + 17.3),
-        classify_threshold(
-            box_report["short_signals"], box_model.thresholds, bright_above=False
-        ),
+        classify_threshold(signals, box_model.thresholds + 17.3),
+        signals < box_model.thresholds,
     ):
         mutated = np.asarray(mutated, dtype=bool)
         assert not np.array_equal(mutated, honest)
@@ -257,9 +256,7 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     np.testing.assert_array_equal(fallback_report["threshold_fallback"], [True])
     np.testing.assert_allclose(fallback_report["site_fidelity"], [1.0])
     assert np.isnan(fallback_report["site_gaussian_fidelity"][0])
-    assert _empirical_threshold(
-        [0.0, 10.0], [0.0, 10.0], bright_above=True
-    ) == 5.0
+    assert _empirical_threshold([0.0, 10.0], [0.0, 10.0]) == 5.0
 
 
 def test_the_crossing_is_stable_when_the_two_widths_nearly_agree() -> None:
@@ -276,14 +273,12 @@ def test_the_crossing_is_stable_when_the_two_widths_nearly_agree() -> None:
 
     from zlc_atom.nodes.calibration.bimodal import optimal_gaussian_threshold
 
-    equal, above = optimal_gaussian_threshold(0.0, 1.0, 4.0, 1.0, 0.4, 0.6)
-    assert above
+    equal = optimal_gaussian_threshold(0.0, 1.0, 4.0, 1.0, 0.4, 0.6)
     assert equal == pytest.approx(1.8986337229729588, abs=1e-12)
     for delta in (1e-10, 1e-12, 1e-14, 1e-15):
-        threshold, above = optimal_gaussian_threshold(
+        threshold = optimal_gaussian_threshold(
             0.0, 1.0, 4.0, 1.0 + delta, 0.4, 0.6
         )
-        assert above
         assert threshold == pytest.approx(equal, abs=1e-8), delta
         width = 1.0 + delta
         dark_log_curve = np.log(0.4) - 0.5 * threshold**2

@@ -17,7 +17,7 @@ from zlc_atom.execution import (
     ResourceKey,
     bind_verified_device,
 )
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
+from pulse_fixture import IMAGING_PULSE_RESOURCE
 
 
 def test_real_and_virtual_cameras_share_one_runtime_contract() -> None:
@@ -44,7 +44,7 @@ def test_virtual_camera_preserves_frames_and_reports_bounded_intake_failure() ->
     camera.arm(None, source_group_sizes=None, buffer_frame_count=3, timeout=1.0)
     camera.trigger(3)
     deadline = time.monotonic() + 1.0
-    while camera.produced_count < 3 and time.monotonic() < deadline:
+    while camera._records.produced_count < 3 and time.monotonic() < deadline:
         time.sleep(0.001)
     terminal = camera.finish_record_capture()
     records = camera.read_frame_records(3, timeout=0.0, exact=True)
@@ -86,7 +86,7 @@ def test_virtual_camera_preserves_frames_and_reports_bounded_intake_failure() ->
     camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
     camera.trigger()
     with camera._condition:
-        assert camera._condition.wait_for(lambda: camera.produced_count == 1, timeout=1.0)
+        assert camera._condition.wait_for(lambda: camera._records.produced_count == 1, timeout=1.0)
     tail = weakref.ref(camera._records._queue[0].image)
     camera.finish_record_capture()
     assert tail() is not None, "Stop preserves unread complete records"
@@ -123,12 +123,12 @@ def test_a_close_that_could_not_join_the_producer_waits_for_it_again() -> None:
     with pytest.raises(RuntimeError, match="did not join"):
         camera.close()
     assert camera.capture_state() is True, "reported closed while the producer still ran"
-    assert camera.produced_count == 0
+    assert camera._records.produced_count == 0
 
     release.set()
     camera.close()
     assert camera.capture_state() is False
-    assert camera.produced_count == 1
+    assert camera._records.produced_count == 1
     terminal = camera.finish_record_capture()
     assert terminal.produced_count == 1 and terminal.source_stopped and terminal.joined
 

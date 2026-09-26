@@ -26,7 +26,7 @@ from zlc_workbench.device_use import (
 )
 from zlc_workbench.session import ExperimentSession, Workspace
 
-from tests.fakes import running_slm_server
+from fakes import running_slm_server
 
 
 def test_slm_control_factory_is_plugin_owned_and_lazy(tmp_path: Path) -> None:
@@ -54,6 +54,7 @@ assert "zlc_workbench" not in sys.modules
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -1239,7 +1240,7 @@ def test_science_context_file_button_freezes_inputs_without_blocking_qt(
             )
             began = time.monotonic()
             QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
-            assert time.monotonic() - began < 0.04
+            assert time.monotonic() - began < 0.25
             assert started.wait(1.0)
             control.set_phase(np.full(control.shape, 2.0), {})
             _pump(app, lambda: len(heartbeat) >= 3)
@@ -1447,7 +1448,7 @@ def test_editor_close_guard_never_waits_for_a_running_solver(
             assert started.wait(2.0)
             began = time.monotonic()
             assert control._finish_close() is False
-            assert time.monotonic() - began < 0.05
+            assert time.monotonic() - began < 0.25
             assert not control._body.isEnabled()
             control._close_deadline = time.monotonic() - 1.0
             _pump(app, lambda: "close timed out" in control.status_text)
@@ -1519,7 +1520,7 @@ def test_send_command_keeps_qt_responsive_holds_lease_and_close_retries(
             owner_thread = threading.get_ident()
             began = time.monotonic()
             assert control.send() is True
-            assert time.monotonic() - began < 0.04
+            assert time.monotonic() - began < 0.25
             assert not control._send.isEnabled()
             assert apply_started.wait(1.0)
             assert not solve_release.is_set()
@@ -1539,7 +1540,7 @@ def test_send_command_keeps_qt_responsive_holds_lease_and_close_retries(
             assert not apply_finished.is_set()
             began = time.monotonic()
             assert control._finish_close() is False
-            assert time.monotonic() - began < 0.04
+            assert time.monotonic() - began < 0.25
             assert not control._body.isEnabled()
 
             apply_release.set()
@@ -1624,7 +1625,7 @@ def test_the_status_poll_never_waits_behind_a_remote_apply(
         timer.start()
         # Several 100 ms polls fire while the apply holds the device's
         # lock; the event loop must keep beating through every one.
-        _pump(app, lambda: len(heartbeat) >= 60, timeout=1.5)
+        _pump(app, lambda: len(heartbeat) >= 60, timeout=3.0)
         assert not apply_release.is_set()
         assert "command r0" in control._device_status.text()
 

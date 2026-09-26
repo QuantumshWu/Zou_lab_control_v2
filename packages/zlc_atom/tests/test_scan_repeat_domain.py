@@ -12,7 +12,7 @@ from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
 from zlc_data import REPEAT, AxisId, DatasetSchema, DomainSpec
 
 from zlc_atom.nodes.scan import scan_dataset_schema, scan_repeat_domain
-from tests.fakes import camera_cycle_snapshot, scan_source_schema
+from fakes import camera_cycle_snapshot, scan_source_schema
 
 
 def _source_value(size: int = 64):

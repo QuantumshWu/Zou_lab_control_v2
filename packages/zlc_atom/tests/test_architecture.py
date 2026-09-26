@@ -30,8 +30,8 @@ from zlc_atom.nodes.calibration import (
     ReadoutModelKind,
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from tests.fakes import FakePlane, camera_cycle_snapshot, imported_modules, module_name
-from tests.pulse_fixture import (
+from fakes import FakePlane, camera_cycle_snapshot, imported_modules, module_name
+from pulse_fixture import (
     IMAGING_PULSE_RESOURCE,
     PULSE_ROOT,
     calibration_request,

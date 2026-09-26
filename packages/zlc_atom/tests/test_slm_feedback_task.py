@@ -67,7 +67,7 @@ from zlc_atom.nodes.slm_feedback.task import (
     _usable_plant_slope,
     validate_target_registration,
 )
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
+from pulse_fixture import IMAGING_PULSE_RESOURCE
 
 
 _IMAGING_SEQUENCE = IMAGING_PULSE_RESOURCE.value

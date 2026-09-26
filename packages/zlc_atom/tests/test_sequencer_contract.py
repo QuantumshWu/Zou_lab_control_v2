@@ -63,7 +63,7 @@ def test_the_installed_device_forwards_the_whole_streamer_surface() -> None:
         ), f"SequencerDevice.{name} does not take what PulseStreamer.{name} takes"
 
 
-def _real_streamer():
+def _real_streamer(*, opened: bool = True):
     """The real host, talking to a memory-backed register file."""
 
     from zlc_pulse import compile_sequence, load_streamer_config, pulse_target_from_xdc
@@ -92,14 +92,15 @@ def _real_streamer():
         config["clock_hz"],
         target=target,
     )
-    streamer.open()
+    if opened:
+        streamer.open()
     return streamer, program
 
 
 def _virtual_streamer():
     """The twin, with a program shaped like the one the real host takes."""
 
-    from tests.pulse_fixture import build_calibration_pulse
+    from pulse_fixture import build_calibration_pulse
 
     streamer = VirtualPulseStreamer(
         world=SimulationWorld(SimulationWorldConfig(seed=0))
@@ -217,18 +218,19 @@ def test_safe_is_answerable_at_any_time(sequencer) -> None:
     assert streamer.safe() is not None
 
 
-def test_a_streamer_the_broker_refuses_is_closed() -> None:
-    """A device refused a place in the installation has nobody else to close it.
+def test_a_streamer_the_broker_refuses_is_closed(monkeypatch) -> None:
+    """A board another leaf holds is refused before it is opened, and closed.
 
-    The hardware factory dialled (or was handed) a streamer, opened it and
-    bound it; the broker refused it -- the same physical identity was
-    already bound -- and the open connection was dropped on the floor: not
-    in any leaf, not in the returned Installation, not closable by anyone.
-    The factory owns what it opened until it returns a leaf, and the
-    admission that refuses that leaf closes it.
+    Opening a pulse board takes it from whoever held it, so the identity is
+    the board the endpoint reaches -- not the leaf's key -- and it is claimed
+    before the first command: a second leaf on one board used to open it
+    (SAFEing the owner's run) and be refused only afterwards.  The refused
+    streamer is dropped on no floor either: not in any leaf, not in the
+    returned Installation, it would be closable by no one, so the factory
+    that dialled it closes it.
     """
 
-    from zlc_atom.devices.sequencer.binding import bind_sequencer
+    from zlc_atom.devices.sequencer.binding import bind_sequencer, pulse_board_identity
     from zlc_atom.devices.sequencer.hardware.device_types import DEVICE_TYPES
     from zlc_atom.execution import DeviceBroker
     from zlc_atom.install import (
@@ -238,9 +240,53 @@ def test_a_streamer_the_broker_refuses_is_closed() -> None:
         InstallationFactoryContext,
         create_installation,
     )
+    from zlc_pulse import DEFAULT_PORT, endpoint
+
+    import socket
+
+    # Every spelling of this machine names one board -- its own name too,
+    # which is this machine without asking a resolver.
+    this_board = pulse_board_identity("127.0.0.1", DEFAULT_PORT)
+    assert {
+        pulse_board_identity(host, DEFAULT_PORT)
+        for host in ("localhost", " 127.0.0.2 ", "::1", socket.gethostname())
+    } == {this_board}
+    # And so do the LAN address a standalone pulse server offers other
+    # computers, and any name that resolves to it; a name that resolves to
+    # another machine is that machine's board.
+    with monkeypatch.context() as patched:
+        resolve = socket.getaddrinfo
+        resolved = {"bench-alias.test": "10.0.0.5", "far-board.test": "10.0.0.7"}
+        patched.setattr(endpoint, "local_ipv4_addresses", lambda: ("10.0.0.5",))
+        patched.setattr(
+            socket,
+            "getaddrinfo",
+            lambda host, *rest: (
+                [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (resolved[host], 0))]
+                if host in resolved else resolve(host, *rest)
+            ),
+        )
+        assert {
+            pulse_board_identity(host, DEFAULT_PORT)
+            for host in ("10.0.0.5", "Bench-Alias.test")
+        } == {this_board}
+        assert pulse_board_identity("far-board.test", DEFAULT_PORT) == (
+            f"pulse-server:10.0.0.7:{DEFAULT_PORT}"
+        )
+    # A name no resolver can even be asked (an empty label) reaches nothing
+    # and is kept as written: the dial is what reports it.
+    assert pulse_board_identity("Pulse..Lab", DEFAULT_PORT) == (
+        f"pulse-server:pulse..lab:{DEFAULT_PORT}"
+    )
 
     first, _program = _real_streamer()
-    second, _program = _real_streamer()
+    # Fresh, as a dialled streamer is: opening it is what takes the board,
+    # so every open and close of it is counted.
+    second, _program = _real_streamer(opened=False)
+    calls: list[str] = []
+    open_second, close_second = second.open, second.close
+    second.open = lambda: calls.append("open") or open_second()
+    second.close = lambda: calls.append("close") or close_second()
     broker = DeviceBroker()
     existing = Installation(
         {
@@ -248,7 +294,9 @@ def test_a_streamer_the_broker_refuses_is_closed() -> None:
                 InstallationFactoryContext(None, broker),
                 "seq",
                 SequencerDevice(first),
-                "sequencer:seq",
+                # This machine's own board, reached under another spelling
+                # of this machine: one board all the same.
+                pulse_board_identity("localhost", DEFAULT_PORT),
                 "sequencer.hardware",
             )
         },
@@ -259,7 +307,6 @@ def test_a_streamer_the_broker_refuses_is_closed() -> None:
         item for item in DEVICE_TYPES if item.type_id == "sequencer.hardware"
     )
     try:
-        assert second.snapshot()["opened"] is True
         refused = create_installation(
             (DeviceSpec("seq", "sequencer.hardware"),),
             world=object(),
@@ -269,9 +316,11 @@ def test_a_streamer_the_broker_refuses_is_closed() -> None:
         )
         try:
             assert "already bound" in str(refused.failures["seq"])
-            assert second.snapshot()["opened"] is False, (
-                "the refused streamer was left open with no owner"
+            assert "open" not in calls, (
+                "the refused streamer was opened -- taking the board from "
+                "its owner -- before its claim was refused"
             )
+            assert "close" in calls, "the refused streamer was left with no owner"
         finally:
             refused.close()
     finally:

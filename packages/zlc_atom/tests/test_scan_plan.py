@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.install import create_installation, tunable_devices
-from tests.pulse_fixture import pulse_document, pulse_sequence
+from pulse_fixture import pulse_document, pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
@@ -25,7 +25,7 @@ from zlc_atom.nodes.scan import (
 )
 from zlc_atom.nodes.scan.plan import plan_from_authored, plan_input_rows, scan_axis_ids
 from zlc_atom.nodes.seamless_scan import LOGIC_NODE as SEAMLESS_NODE
-from tests.fakes import scan_source_schema
+from fakes import scan_source_schema
 
 
 BIAS_PORTS = tuple(
@@ -280,7 +280,10 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
 def test_a_range_drawn_in_a_shown_power_unit_reaches_the_plan_in_its_unit() -> None:
     """A range drawn on a power axis the panel shows in mVpp or Vpp reaches
     the plan in the Dataset's own mVpp; an explicitly authored list keeps
-    its text, and a draft whose unit changed since gets the range converted.
+    its text, and a draft whose unit changed since gets the range converted
+    -- or, where a wall has no value in that unit, a refusal naming it.  On
+    a device's knob only a prefix move converts here: any other unit change
+    is the device's, through its load and waveform, and is refused by name.
     """
 
     import numpy as np
@@ -344,14 +347,48 @@ def test_a_range_drawn_in_a_shown_power_unit_reaches_the_plan_in_its_unit() -> N
             roi = SelectionState("image", "area", (SelectionRange("camera.x", 1.0, 2.0, domain="cell_data"),))
             assert SEAMLESS_NODE.selection_patch(roi, draft={"plan": json.dumps(raw)}, context={}) is None
         # The draft can have changed unit since this exact Dataset was shown.
-        changed = ScanAxis(power.port, tuple(DEFAULT_UNITS.convert(power.values, "mVpp", "dBm")), "dBm")
+        # A prefix move is the same number anywhere; dBm is the channel's
+        # load and waveform away, which the device answers and the registry's
+        # 50-ohm sine does not.
+        prefixed = ScanAxis(power.port, tuple(DEFAULT_UNITS.convert(power.values, "mVpp", "Vpp")), "Vpp")
         patch = SEAMLESS_NODE.selection_patch(
-            selected, draft={"plan": json.dumps(ScanPlan((changed,)).to_tree())}, context=context,
+            selected, draft={"plan": json.dumps(ScanPlan((prefixed,)).to_tree())}, context=context,
         )
         authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
-        converted = DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", "dBm")
+        assert authored.unit == "Vpp"
+        assert authored.values == tuple(np.linspace(*DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", "Vpp"), 10))
+        changed = ScanAxis(power.port, tuple(DEFAULT_UNITS.convert(power.values, "mVpp", "dBm")), "dBm")
+        with pytest.raises(
+            ValueError,
+            match="'scan.rf.ch1_power' row is in dBm, region drawn in mVpp: that conversion is the device's",
+        ):
+            SEAMLESS_NODE.selection_patch(
+                selected, draft={"plan": json.dumps(ScanPlan((changed,)).to_tree())}, context=context,
+            )
+        # A power drawn in mW is the same dBm into any load: it converts.
+        in_watts = {**context, "axis_units": {key: "mW" for key in context["axis_units"]}}
+        patch = SEAMLESS_NODE.selection_patch(
+            selected, draft={"plan": json.dumps(ScanPlan((changed,)).to_tree())}, context=in_watts,
+        )
+        authored = ScanPlan.from_tree(json.loads(patch["plan"])).axes[0]
         assert authored.unit == "dBm"
-        assert authored.values == tuple(np.linspace(*converted, 10))
+        assert authored.values == tuple(np.linspace(*DEFAULT_UNITS.convert((150.0, 220.0), "mW", "dBm"), 10))
+    # A knob no device owns converts through the registry.  A range drawn
+    # from below 0 mVpp has no dBm there: written as NaN, the draft was no
+    # plan and the editor reading it back retired every row.
+    manual = ScanAxis(MANUAL_PARAM_FAMILY + "rf_power", changed.values, "dBm")
+    manual_id = scan_axis_ids(("rf_power",))[0]
+    manual_context = {"axis_units": {manual_id: "mVpp"}}
+    draft = {"plan": json.dumps(ScanPlan((manual,)).to_tree())}
+    drawn = SelectionState("curve", "x_range", (SelectionRange(manual_id, 150.0, 220.0, domain="point"),))
+    authored = ScanPlan.from_tree(json.loads(
+        SEAMLESS_NODE.selection_patch(drawn, draft=draft, context=manual_context)["plan"]
+    )).axes[0]
+    assert authored.unit == "dBm"
+    assert authored.values == tuple(np.linspace(*DEFAULT_UNITS.convert((150.0, 220.0), "mVpp", "dBm"), 10))
+    below = SelectionState("curve", "x_range", (SelectionRange(manual_id, -20.0, 220.0, domain="point"),))
+    with pytest.raises(ValueError, match=f"{manual_id!r} low -20 mVpp has no value in dBm"):
+        SEAMLESS_NODE.selection_patch(below, draft=draft, context=manual_context)
 
 
 def test_api_parameters_are_host_walked_ports_unless_a_slot_sweeps_them() -> None:

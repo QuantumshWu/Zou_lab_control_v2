@@ -232,12 +232,260 @@ def test_withdrawing_removes_the_record(announcer) -> None:
     assert list_remote_devices("127.0.0.1", announcer.port) == ()
 
 
-def test_named_peers_are_probed_where_a_broadcast_cannot_reach(announcer) -> None:
-    """A cross-subnet bench names its peer once, not per device."""
+def test_a_peer_speaking_another_fabric_version_is_refused_by_name(announcer, monkeypatch) -> None:
+    """Two machines updated at different times meet as a named version skew,
+    not as an unknown method or a missing key halfway through an editor.
+    Each side says so: the server of a request, the client of an answer, a
+    scan of a broadcast reply."""
 
-    found = discover_announcers(
+    import socket
+
+    from zlc_atom.devices.remote import fabric as module
+
+    older = module.FABRIC_VERSION - 1
+    with socket.create_connection(("127.0.0.1", announcer.port)) as connection:
+        module._send_frame(connection, {"fabric": older, "method": "list"})
+        answer = module._recv_frame(connection)
+    assert answer["fabric"] == module.FABRIC_VERSION
+    assert f"fabric version {older}" in answer["error"]["message"]
+    # Version 1 stamped only its list answer and broadcast reply: a request
+    # with no version at all is a v1 peer, not a peer of version None.
+    with socket.create_connection(("127.0.0.1", announcer.port)) as connection:
+        module._send_frame(connection, {"method": "list"})
+        answer = module._recv_frame(connection)
+    assert "unversioned (fabric v1)" in answer["error"]["message"]
+
+    # The broadcast reply says its version too, and an announcer of another
+    # version is named, not listed: listing it ended the whole scan.
+    load = module.strict_json_loads
+    monkeypatch.setattr(
+        module,
+        "strict_json_loads",
+        lambda text, what: {**load(text, what), "fabric": older}
+        if what == "fabric announcement" else load(text, what),
+    )
+    found, (skipped,) = discover_announcers(
+        timeout_seconds=0.6, port=announcer.port, extra_hosts=("127.0.0.1",)
+    )
+    assert found == ()
+    assert f"announcer at 127.0.0.1:{announcer.port} speaks fabric version {older}" in skipped
+
+    receive = module._recv_frame
+    monkeypatch.setattr(
+        module, "_recv_frame", lambda connection: {**receive(connection), "fabric": older}
+    )
+    with pytest.raises(ConnectionError, match="update the older side"):
+        list_remote_devices("127.0.0.1", announcer.port)
+
+
+def test_named_peers_are_probed_where_a_broadcast_cannot_reach(
+    announcer, monkeypatch
+) -> None:
+    """A cross-subnet bench names its peer once, not per device.
+
+    A named peer where nothing listens is no reason to stop, and neither is
+    a scanner that left before its answer came: Windows reports either as a
+    connection reset on the socket's NEXT read, which ended the scan before
+    the live answers were read -- and the responder, for good.  So did a
+    stray datagram longer than the responder reads, which Windows refuses
+    rather than truncates.  A name no resolver answers is no reason either,
+    but it is named with the seconds it took, not dropped unseen; so is one
+    a fallback resolver answered only after those seconds.
+    """
+
+    import socket
+
+    from zlc_atom.devices.remote import fabric
+    from zlc_atom.devices.remote.fabric import PROBE_MESSAGE
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as gone:
+        gone.sendto(PROBE_MESSAGE, ("127.0.0.1", announcer.port))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as stray:
+        stray.sendto(b"x" * 1000, ("127.0.0.1", announcer.port))
+    found, skipped = discover_announcers(
         timeout_seconds=0.6,
         port=announcer.port,
-        extra_hosts=("127.0.0.1",),
+        extra_hosts=("127.0.0.2", "no..such..peer", "127.0.0.1"),
     )
     assert ("127.0.0.1", announcer.port) in found
+    assert len(skipped) == 1
+    assert skipped[0].startswith("the named peer 'no..such..peer' was not probed: ")
+    assert skipped[0].endswith("s)")
+    # A name the resolver cannot encode is named the same way, not the end
+    # of the scan.
+    found, skipped = discover_announcers(
+        timeout_seconds=0.6, port=announcer.port, extra_hosts=("pc2\u200e.lab", "127.0.0.1"),
+    )
+    assert ("127.0.0.1", announcer.port) in found
+    assert len(skipped) == 1
+    assert skipped[0].startswith(f"the named peer {'pc2\u200e.lab'!r} was not probed: ")
+    # Every probe is slow once the bar is below zero: probed, and named.
+    monkeypatch.setattr(fabric, "_SLOW_PEER_SECONDS", -1.0)
+    found, slow = discover_announcers(
+        timeout_seconds=0.6, port=announcer.port, extra_hosts=("127.0.0.1",)
+    )
+    assert ("127.0.0.1", announcer.port) in found
+    assert len(slow) == 1
+    assert slow[0].startswith("the named peer '127.0.0.1' took ")
+    assert slow[0].endswith("s to resolve; write its address")
+
+
+def test_an_announcer_that_cannot_be_listed_leaves_the_others_devices(
+    announcer, monkeypatch
+) -> None:
+    """The scan offers what every other announcer publishes, and names the rest.
+
+    One announcer of another version, or one gone between its broadcast
+    reply and its list, used to end the whole scan -- or, skipped, to be
+    named only in a log no view shows.  Nor do announcers that answered the
+    broadcast and then never list add up: asked one after another, two of
+    them cost the whole family its deadline, every live device with it.
+    """
+
+    import threading
+    import time
+
+    import zlc_atom.devices.remote.tunable.device_types as family
+
+    announcer.publish(
+        PublishedDevice(
+            instance_id="board",
+            role="pulse",
+            type_id="sequencer.hardware",
+            parameters={"host": "127.0.0.1", "port": 18861},
+        )
+    )
+    skew = (
+        "the announcer at 192.0.2.8:18859 speaks fabric version 1 and this "
+        "machine speaks 2; update the older side and restart it"
+    )
+    monkeypatch.setattr(
+        family,
+        "discover_announcers",
+        lambda **_peers: (
+            (
+                ("192.0.2.7", 18859),
+                ("192.0.2.9", 18859),
+                ("192.0.2.11", 18859),
+                ("127.0.0.1", announcer.port),
+            ),
+            (skew,),
+        ),
+    )
+    monkeypatch.setattr(family, "_LISTING_DEADLINE_SECONDS", 0.5)
+    listed = family.list_remote_devices
+    released = threading.Event()
+
+    def list_unless_gone(host, port):
+        if host == "192.0.2.7":
+            raise ConnectionRefusedError("refused")
+        if host in {"192.0.2.9", "192.0.2.11"}:
+            # A firewall that lets the broadcast through and drops TCP.
+            released.wait(10.0)
+            raise TimeoutError("timed out")
+        return listed(host, port)
+
+    monkeypatch.setattr(family, "list_remote_devices", list_unless_gone)
+    try:
+        entries, notes = family._discover_fabric()
+    finally:
+        released.set()
+    assert [(entry.instance_id, entry.type_id) for entry in entries] == [
+        ("remote_board", "sequencer.hardware")
+    ]
+    assert notes == (
+        skew,
+        "the announcer at 192.0.2.7:18859 did not list: refused",
+        "the announcer at 192.0.2.9:18859 did not list within 0.5s",
+        "the announcer at 192.0.2.11:18859 did not list within 0.5s",
+    )
+
+    # Named peers no resolver answers can take the whole window: the live
+    # announcer is then not the one blamed.
+    unresolved = "the named peer 'pc3' was not probed: getaddrinfo failed (0.6s)"
+
+    def probing_all_window(**_peers):
+        time.sleep(0.6)
+        return (("127.0.0.1", announcer.port),), (unresolved,)
+
+    held = threading.Event()
+    monkeypatch.setattr(family, "discover_announcers", probing_all_window)
+    monkeypatch.setattr(
+        family, "list_remote_devices", lambda host, port: held.wait(10.0) or listed(host, port)
+    )
+    try:
+        entries, notes = family._discover_fabric()
+    finally:
+        held.set()
+    assert entries == ()
+    assert notes == (
+        unresolved,
+        f"the announcer at 127.0.0.1:{announcer.port} was not listed: probing "
+        "the named peers took the whole 0.5s",
+    )
+
+
+def test_a_name_two_announcers_publish_is_offered_once_and_the_other_named(
+    monkeypatch,
+) -> None:
+    """Two benches that each publish their default ``rf`` are two devices.
+
+    Named by instance alone they were one card, and the second could not be
+    added, with no line saying why.  The lower address's is offered (by
+    number, not by spelling), whichever answered the broadcast first, so the
+    card reaches the same bench on every scan; the other is named beside the
+    scan result.
+    """
+
+    import zlc_atom.devices.remote.tunable.device_types as family
+
+    monkeypatch.setattr(
+        family,
+        "discover_announcers",
+        lambda **_peers: ((("192.0.2.10", 18859), ("192.0.2.9", 18859)), ()),
+    )
+    monkeypatch.setattr(
+        family,
+        "list_remote_devices",
+        lambda _host, _port: (
+            {"instance_id": "rf", "role": "rf", "type_id": "rf.vaunix_lms",
+             "parameters": {"serial": 7}, "tunable": True},
+        ),
+    )
+    entries, notes = family._discover_fabric()
+    assert [(entry.instance_id, entry.parameters["host"]) for entry in entries] == [
+        ("remote_rf", "192.0.2.9")
+    ]
+    assert notes == (
+        "'rf' at 192.0.2.10:18859 is not offered: the announcer at "
+        "192.0.2.9:18859 publishes one by that name, or is the same machine "
+        "reached at another address",
+    )
+
+
+def test_a_published_knob_is_named_by_the_machine_it_reaches(monkeypatch) -> None:
+    """Every spelling of one announcer names one knob, as it names one board.
+
+    The leaf's identity was the host as written, so one published knob
+    reached as localhost and as 127.0.0.1 was two devices to the broker, and
+    a scan on one raced Control on the other with nothing refused.
+    """
+
+    from types import SimpleNamespace
+
+    import zlc_atom.devices.remote.tunable.device_types as family
+    from zlc_atom.execution import DeviceBroker
+    from zlc_atom.install import InstallationFactoryContext
+
+    monkeypatch.setattr(
+        family, "RemoteTunableDevice", lambda **_dialled: SimpleNamespace(close=lambda: None)
+    )
+    context = InstallationFactoryContext(None, DeviceBroker())
+    assert {
+        family._remote_tunable_factory(
+            context,
+            f"knob_{index}",
+            {"host": host, "port": 18859, "instance_id": "rf_main"},
+        ).physical_identity.stable_device_identity
+        for index, host in enumerate(("127.0.0.1", "localhost", " ::1 "))
+    } == {"fabric:127.0.0.1:18859/rf_main"}

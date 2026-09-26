@@ -553,6 +553,47 @@ def test_a_refused_handle_release_keeps_the_handle_for_the_next_close() -> None:
     assert closes() == 2
 
 
+def test_an_open_that_outlives_the_lane_wait_is_released_behind_it(monkeypatch) -> None:
+    """A slow open's handle is released, not stranded on an adapter nobody holds.
+
+    The lane answers within a bound, but an SDK call it is already inside
+    goes on running: an open that finished after its caller was told it
+    failed left the camera open under nobody, and the next Init found it
+    busy.  A release queued behind it with a bound of its own was withdrawn
+    in turn, so an open slower than both bounds stranded the handle all the
+    same.  The lane's last command cannot be withdrawn: this open returns
+    only after every wait has given up, and its handle still goes.
+    """
+
+    from zlc_atom.devices.camera.dcam import _owner_lane
+
+    monkeypatch.setattr(_owner_lane, "LANE_STOP_SECONDS", 0.5)
+    driver = _FakeDcamDriver()
+    open_device = driver.open_device
+    returns = threading.Event()
+
+    def slow_open(index: int) -> _FakeDcamDevice:
+        assert returns.wait(5.0), "the test never let the open return"
+        return open_device(index)
+
+    driver.open_device = slow_open
+    with pytest.raises(TimeoutError, match="this or an earlier SDK call") as caught:
+        DcamCameraAdapter(_config(), driver=driver)
+    assert any("did not stop" in note for note in caught.value.__notes__), (
+        "the lane still running the open is reported beside the open's failure"
+    )
+    (lane,) = (
+        thread for thread in threading.enumerate()
+        if thread.name == "zlc-dcam-camera-owner"
+    )
+    returns.set()
+    lane.join(5.0)
+    assert not lane.is_alive()
+    assert [name for name, _thread in driver.calls].count("close") == 1, (
+        "the late open's handle was never released"
+    )
+
+
 def test_the_default_driver_takes_the_dll_from_the_camera_vendor_folder_only(
     monkeypatch,
 ) -> None:

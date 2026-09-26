@@ -3,10 +3,10 @@
 This module is the single owner of the normal CDF, Gaussian overlap, and
 threshold classification primitives used by calibration and runtime readout.
 It intentionally has no device, runtime, or GUI imports, and none that
-carry a solver: from the plot package it takes one number, the evidence two
+carry a solver: from the plot package it takes one rule, the evidence two
 populations must show over one, which the plot's bimodal fit decides by as
-well, and it takes it from the module that owns the number rather than from
-the fit engine that also reads it.
+well, and it takes it from the module that owns the rule rather than from
+the fit that also applies it.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from math import erf, isfinite, log, pi, sqrt
 
 import numpy as np
-from zlc_plot.evidence import DECISIVE_BIC_GAIN
+from zlc_plot import evidence
 
 _SIGMA_FLOOR = 1e-12
 
@@ -28,8 +28,8 @@ _SIGMA_FLOOR = 1e-12
 #: a contrast of 10.9 photoelectrons, one hundred times under its
 #: neighbours: the uniformity ratio read 116 and the observable count 33.
 #: The calibration asks the same question of a site's reference frames: one
-#: that never loaded has no two states to label them by.  The number is
-#: ``zlc_plot.evidence.DECISIVE_BIC_GAIN``: the plot's bimodal fit decides by it
+#: that never loaded has no two states to label them by.  The rule is
+#: ``zlc_plot.evidence.decisive``: the plot's bimodal fit decides by it
 #: too, and it has one owner.
 
 #: What keeps a "state" off a handful of samples.  A Gaussian mixture's
@@ -73,16 +73,11 @@ def _threshold_error(
     dark_sigma: float,
     bright_mean: float,
     bright_sigma: float,
-    bright_above: bool,
     dark_weight: float,
     bright_weight: float,
 ) -> float:
-    if bright_above:
-        dark_error = 1.0 - float(normal_cdf(threshold, dark_mean, dark_sigma))
-        bright_error = float(normal_cdf(threshold, bright_mean, bright_sigma))
-    else:
-        dark_error = float(normal_cdf(threshold, dark_mean, dark_sigma))
-        bright_error = 1.0 - float(normal_cdf(threshold, bright_mean, bright_sigma))
+    dark_error = 1.0 - float(normal_cdf(threshold, dark_mean, dark_sigma))
+    bright_error = float(normal_cdf(threshold, bright_mean, bright_sigma))
     return dark_weight * dark_error + bright_weight * bright_error
 
 
@@ -93,8 +88,12 @@ def optimal_gaussian_threshold(
     bright_sigma: float,
     dark_weight: float = 0.5,
     bright_weight: float = 0.5,
-) -> tuple[float, bool]:
-    """Return the relevant Bayes crossing for two weighted Gaussians."""
+) -> float:
+    """Return the relevant Bayes crossing for two weighted Gaussians.
+
+    Bright is the state above the cut: a bright mean that is not above the
+    dark one has no crossing to answer, and is NaN.
+    """
 
     dark_mean = float(dark_mean)
     bright_mean = float(bright_mean)
@@ -102,48 +101,39 @@ def optimal_gaussian_threshold(
     bright_sigma = abs(float(bright_sigma))
     dark_weight = float(dark_weight)
     bright_weight = float(bright_weight)
-    bright_above = bright_mean >= dark_mean
     if not all(
         isfinite(value)
         for value in (dark_mean, dark_sigma, bright_mean, bright_sigma)
     ) or min(dark_sigma, bright_sigma) <= 0.0:
-        return float("nan"), bright_above
+        return float("nan")
     if (
         not isfinite(dark_weight)
         or not isfinite(bright_weight)
         or min(dark_weight, bright_weight) <= 0.0
     ):
-        return float("nan"), bright_above
+        return float("nan")
     weight_sum = dark_weight + bright_weight
     dark_weight /= weight_sum
     bright_weight /= weight_sum
 
-    if bright_above:
-        low_mean, low_sigma = dark_mean, dark_sigma
-        high_mean, high_sigma = bright_mean, bright_sigma
-        low_weight, high_weight = dark_weight, bright_weight
-    else:
-        low_mean, low_sigma = bright_mean, bright_sigma
-        high_mean, high_sigma = dark_mean, dark_sigma
-        low_weight, high_weight = bright_weight, dark_weight
-    separation = high_mean - low_mean
+    separation = bright_mean - dark_mean
     if separation <= 0.0:
-        return float("nan"), bright_above
+        return float("nan")
 
     # In x=(threshold-midpoint)/separation coordinates the component means
     # are exactly -1/2 and +1/2.  Equating their log densities gives one
     # linear or quadratic equation without the large count-scale offsets of
     # the raw camera values.
-    low_width = max(low_sigma / separation, _SIGMA_FLOOR)
-    high_width = max(high_sigma / separation, _SIGMA_FLOOR)
-    low_inverse_variance = 1.0 / (low_width * low_width)
-    high_inverse_variance = 1.0 / (high_width * high_width)
-    a = 0.5 * (low_inverse_variance - high_inverse_variance)
-    b = 0.5 * (low_inverse_variance + high_inverse_variance)
+    dark_width = max(dark_sigma / separation, _SIGMA_FLOOR)
+    bright_width = max(bright_sigma / separation, _SIGMA_FLOOR)
+    dark_inverse_variance = 1.0 / (dark_width * dark_width)
+    bright_inverse_variance = 1.0 / (bright_width * bright_width)
+    a = 0.5 * (dark_inverse_variance - bright_inverse_variance)
+    b = 0.5 * (dark_inverse_variance + bright_inverse_variance)
     c = (
-        0.125 * (low_inverse_variance - high_inverse_variance)
-        - log(high_width / low_width)
-        - log(low_weight / high_weight)
+        0.125 * (dark_inverse_variance - bright_inverse_variance)
+        - log(bright_width / dark_width)
+        - log(dark_weight / bright_weight)
     )
     scale = max(abs(a), abs(b), abs(c), 1.0)
     roots: tuple[float, ...]
@@ -152,7 +142,7 @@ def optimal_gaussian_threshold(
     else:
         discriminant = b * b - 4.0 * a * c
         if discriminant < 0.0:
-            return float("nan"), bright_above
+            return float("nan")
         # Cancellation-free roots.  ``b`` is half the sum of two inverse
         # variances and always positive, so ``-b - sqrt(D)`` is a sum of
         # like signs; the other root is the product of roots, ``c/a``,
@@ -165,12 +155,12 @@ def optimal_gaussian_threshold(
         q = -0.5 * (b + sqrt(max(discriminant, 0.0)))
         roots = (q / a, c / q)
     candidates = tuple(
-        0.5 * (low_mean + high_mean) + value * separation
+        0.5 * (dark_mean + bright_mean) + value * separation
         for value in roots
         if isfinite(value) and -0.5 <= value <= 0.5
     )
     if not candidates:
-        return float("nan"), bright_above
+        return float("nan")
     threshold = min(
         candidates,
         key=lambda value: _threshold_error(
@@ -179,12 +169,11 @@ def optimal_gaussian_threshold(
             dark_sigma,
             bright_mean,
             bright_sigma,
-            bright_above,
             dark_weight,
             bright_weight,
         ),
     )
-    return float(threshold), bright_above
+    return float(threshold)
 
 
 def gaussian_fidelity(
@@ -193,11 +182,13 @@ def gaussian_fidelity(
     bright_mean: float,
     bright_sigma: float,
     threshold: float,
-    bright_above: bool = True,
     dark_weight: float = 0.5,
     bright_weight: float = 0.5,
 ) -> tuple[float, float, float]:
-    """Return dark, bright, and weighted classification fidelity."""
+    """Return dark, bright, and weighted classification fidelity.
+
+    Bright is the state above ``threshold``, as ``fit_bimodal`` orders it.
+    """
 
     values = (
         dark_mean,
@@ -217,12 +208,8 @@ def gaussian_fidelity(
     total = dark_weight + bright_weight
     dark_weight /= total
     bright_weight /= total
-    if bright_above:
-        dark = float(normal_cdf(threshold, dark_mean, dark_sigma))
-        bright = 1.0 - float(normal_cdf(threshold, bright_mean, bright_sigma))
-    else:
-        dark = 1.0 - float(normal_cdf(threshold, dark_mean, dark_sigma))
-        bright = float(normal_cdf(threshold, bright_mean, bright_sigma))
+    dark = float(normal_cdf(threshold, dark_mean, dark_sigma))
+    bright = 1.0 - float(normal_cdf(threshold, bright_mean, bright_sigma))
     return dark, bright, dark_weight * dark + bright_weight * bright
 
 
@@ -381,7 +368,6 @@ class BimodalFit:
     bright_fraction: float
     dark_fidelity: float
     bright_fidelity: float
-    bright_above: bool
     #: The evidence for two populations over one: the BIC gain of the fitted
     #: pair against a single Gaussian on the same shots.
     bic_gain: float
@@ -397,7 +383,7 @@ class BimodalFit:
         that overlap can be as real as the evidence for them is weak."""
 
         return bool(
-            self.ok and isfinite(self.bic_gain) and self.bic_gain > DECISIVE_BIC_GAIN
+            self.ok and isfinite(self.bic_gain) and evidence.decisive(self.bic_gain)
         )
 
 
@@ -426,11 +412,12 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
 
     ``ok`` says whether the shots are two states far enough apart, and both
     populated enough, for a shot to be assigned to one of them; ``decisive``
-    adds the evidence that two Gaussians beat one at all (``bic_gain`` over
-    ``DECISIVE_BIC_GAIN``).  A site that never loaded has its one Gaussian
-    split in two like any other sample, and the evidence is what says it
-    did not; two populations that overlap at sixty shots are ``ok`` and not
-    ``decisive``, and their crossing is still the best threshold there is.
+    adds the evidence that two Gaussians beat one at all (``bic_gain``
+    judged by ``zlc_plot.evidence.decisive``).  A site that never loaded
+    has its one Gaussian split in two like any other sample, and the
+    evidence is what says it did not; two populations that overlap at
+    sixty shots are ``ok`` and not ``decisive``, and their crossing is
+    still the best threshold there is.
     """
 
     samples = np.asarray(values, dtype=float).reshape(-1)
@@ -451,7 +438,6 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
             bright_fraction=np.nan,
             dark_fidelity=np.nan,
             bright_fidelity=np.nan,
-            bright_above=True,
             bic_gain=np.nan,
             ok=False,
         )
@@ -513,8 +499,9 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     # The crossing of the curves as the shots populate them, not as if each
     # state held half: the minimum-error cut, and the one every other reader
     # of a readout histogram draws.  An equal-prior cut sat several widths
-    # low at low loading and counted dark shots as loaded.
-    threshold, bright_above = optimal_gaussian_threshold(
+    # low at low loading and counted dark shots as loaded.  The pair is
+    # ordered by mean, so the bright state is the one above the cut.
+    threshold = optimal_gaussian_threshold(
         dark_mean, dark_sigma, bright_mean, bright_sigma, 1.0 - fraction, fraction
     )
     dark_fidelity, bright_fidelity, fidelity = gaussian_fidelity(
@@ -523,9 +510,8 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         bright_mean,
         bright_sigma,
         threshold,
-        bright_above,
-        1.0 - fraction,
-        fraction,
+        dark_weight=1.0 - fraction,
+        bright_weight=fraction,
     )
     bic_gain = _bic_gain(samples, likelihood) if isfinite(likelihood) else float("nan")
     separation = (bright_mean - dark_mean) / max(
@@ -549,7 +535,6 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         bright_fraction=fraction,
         dark_fidelity=dark_fidelity,
         bright_fidelity=bright_fidelity,
-        bright_above=bright_above,
         bic_gain=bic_gain,
         ok=separated,
     )

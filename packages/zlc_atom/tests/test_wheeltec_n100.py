@@ -667,6 +667,34 @@ def test_a_write_that_silences_the_module_is_put_back() -> None:
         source.close()
 
 
+def test_a_module_that_comes_back_off_its_ladder_says_so_on_the_next_tune() -> None:
+    """The value is in flash and the module restarted on it: not a refusal.
+
+    A stream on a rate with no rung leaves nothing to turn, and the next
+    tune says THAT -- not that a configuration console failed to answer,
+    which nothing asked.
+    """
+
+    class _OffTheLadder(_FakeModule):
+        """Reads rung 7 as 137 Hz, which no rung is."""
+
+        def _rate_of(self, name: str) -> float:
+            rate = super()._rate_of(name)
+            return 137.0 if rate == 100.0 else rate
+
+    module = _OffTheLadder(rate_hz=50.0)
+    source = _source(module)
+    try:
+        off_the_ladder = r"sending 137\.0 Hz, which is not one of its rates"
+        with pytest.raises(RuntimeError, match=off_the_ladder):
+            source.tune(IMU_PACKET_NAME, "100")
+        assert source.tunable_fields() == ()
+        with pytest.raises(ValueError, match=off_the_ladder):
+            source.tune(IMU_PACKET_NAME, "50")
+    finally:
+        source.close()
+
+
 # ------------------------------------------------------ leaving the console
 def test_a_heartbeat_is_not_a_navigating_module() -> None:
     """The module emits a 1 Hz heartbeat whose first byte is a frame header.

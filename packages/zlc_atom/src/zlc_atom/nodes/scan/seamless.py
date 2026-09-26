@@ -61,7 +61,7 @@ _BOARD_POLL_SECONDS = 0.5
 
 
 class SeamlessScanMeasurement:
-    """Load the plan as the board's scan table, fire once, take what plays."""
+    """Load the plan as the board's scan table, fire it per host point, take what plays."""
 
     def __init__(
         self,
@@ -446,9 +446,11 @@ class SeamlessScanMeasurement:
         this loop shows the growing scan while it runs.
 
         A plan the board owns entirely plays from ONE fire.  A plan carrying a
-        manual axis plays one fire per manual point instead, and ``repeats``
-        walks the whole plan again rather than lengthening a fire -- the same
-        sentence either way, spent where the plan leaves room for it.
+        host axis -- manual, device or API -- plays one fire per host point
+        instead, a point that moves an API value compiled and loaded again
+        first, and ``repeats`` walks the whole plan again rather than
+        lengthening a fire -- the same sentence either way, spent where the
+        plan leaves room for it.
         """
 
         board = self.sequencer.describe()

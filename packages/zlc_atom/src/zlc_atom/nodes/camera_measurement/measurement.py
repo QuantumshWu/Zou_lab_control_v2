@@ -13,6 +13,7 @@ from zlc_data import (
     AxisRoleId,
     AxisSpec,
     CoordinateFrameId,
+    DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
     READOUT_EVENT,
@@ -231,15 +232,22 @@ def _finite_cycle_output(
         value_unit=node.frame_value_unit,
     )
     event_schema = event.block.schema
-    (repeat_axis,) = event_schema.repeat_domain.axes
-    canonical = replace(
-        event_schema,
-        repeat_domain=DomainSpec(
-            (node.repeat,),
-            (replace(repeat_axis, size=node.repeat),),
-            (tuple(range(node.repeat)),),
-        ),
-    )
+    # Built once per run: the event schema is one cached object for the whole
+    # run, and the canonical one rebuilt from an O(repeat) code vector on
+    # every cycle was also a new object the plane compared code by code.
+    built = node._canonical
+    if built is None or built[0] is not event_schema:
+        (repeat_axis,) = event_schema.repeat_domain.axes
+        built = (event_schema, replace(
+            event_schema,
+            repeat_domain=DomainSpec(
+                (node.repeat,),
+                (replace(repeat_axis, size=node.repeat),),
+                (tuple(range(node.repeat)),),
+            ),
+        ))
+        node._canonical = built
+    canonical = built[1]
     frames = node.frames_per_cycle
     return LiveDatasetOutput(
         CAMERA_FRAMES_OUTPUT,
@@ -754,6 +762,9 @@ class CameraMeasurementNode:
         if not self.instance_id:
             raise ValueError("producer must be non-empty")
         self._generation: object | None = None
+        #: The event schema a finite run's canonical schema was built from,
+        #: and that canonical schema (``_finite_cycle_output``).
+        self._canonical: tuple[DatasetSchema, DatasetSchema] | None = None
 
     @property
     def request(self) -> CameraMeasurementRequest:
@@ -822,6 +833,7 @@ class CameraMeasurementNode:
         self._actual_working_point = None
         self._run_record = None
         self._next_record_ordinal = 0
+        self._canonical = None
         # This measurement owns both: it exists to point the camera.  The
         # geometry first, because it is the expensive one to get wrong.
         self.camera.set_roi(self.request.roi_xywh)

@@ -389,7 +389,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
         SURVIVAL_OUTPUTS,
         FrameSurvivalProcessor,
     )
-    from tests.pulse_fixture import (
+    from pulse_fixture import (
         CALIBRATION_FRAMES_PER_CYCLE,
         build_calibration_pulse,
     )

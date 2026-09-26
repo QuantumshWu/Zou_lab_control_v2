@@ -33,8 +33,8 @@ from zlc_atom.nodes.calibration.calibration import ReadoutModelKind
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_runtime import SignalValue
 
-from tests.fakes import FakePlane, camera_cycle_snapshot
-from tests.pulse_fixture import calibration_request, calibration_task
+from fakes import FakePlane, camera_cycle_snapshot
+from pulse_fixture import calibration_request, calibration_task
 
 
 def test_the_qcmos_states_the_conversion_its_configuration_gives_it() -> None:
@@ -159,7 +159,13 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
 
 
 def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
-    """Not discovered in the data: refused where the two records meet."""
+    """Not discovered in the data: refused where the two records meet.
+
+    The frames say their unit themselves, with no camera run record beside
+    them -- a scan of them, or a derive of them, carries no such record, and
+    a check made only against it let counts through to thresholds trained
+    in photoelectrons.
+    """
 
     with calibration_task(
         replace(calibration_request(repeats=8), photoelectrons=True),
@@ -173,13 +179,9 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
 
     def arriving(photoelectrons: bool) -> SignalValue:
         return SignalValue(
-            "camera/frames",
-            camera_cycle_snapshot(frames),
+            "scan/frames",
+            camera_cycle_snapshot(frames, value_unit=None if photoelectrons else "count"),
             None,
-            run_record={
-                "parameters": {PHOTOELECTRONS: photoelectrons},
-                "device_snapshots": {"camera": {}},
-            },
         )
 
     with pytest.raises(ValueError, match="thresholds do not apply"):

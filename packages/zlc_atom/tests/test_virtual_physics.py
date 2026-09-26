@@ -51,7 +51,7 @@ from zlc_pulse import (
     resolve_api_parameters,
 )
 from zlc_pulse.wire import CtrlWords, STATUS_DONE, STATUS_RUNNING
-from tests.pulse_fixture import (
+from pulse_fixture import (
     CAMERA_CHANNEL,
     IMAGING_PULSE_RESOURCE,
 )

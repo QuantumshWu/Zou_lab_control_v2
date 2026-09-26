@@ -21,8 +21,8 @@ from zlc_atom.nodes.camera_measurement import (
 from zlc_atom.nodes.calibration import CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from tests.fakes import camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
+from fakes import camera_cycle_snapshot
+from pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
 
 
 def test_the_packages_run_the_virtual_chain_from_fire_to_calibration(
