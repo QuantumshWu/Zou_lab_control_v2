@@ -56,7 +56,10 @@ can use it directly. The complete flushed file is then published without
 replacement -- by a hard link, or, on a volume without hard links (FAT32, exFAT,
 some shares), by claiming the name exclusively and moving the file onto it.
 Concurrent processes therefore cannot select the same final name, and a failed
-writer publishes no partial artifact. An empty suffix instead
+writer publishes no partial artifact. The claim is the one window without a
+hard link: until the move lands, the final name is an empty file a folder
+watcher can see, and a process killed inside that window leaves it empty for
+good (a move that fails removes it). An empty suffix instead
 performs an exclusive `mkdir`; it takes no writer.
 
 ## What is deliberately not here

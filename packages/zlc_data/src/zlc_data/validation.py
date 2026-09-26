@@ -30,19 +30,16 @@ def canonical_text(value: object, field: str, *, empty: bool = False) -> str:
     return value
 
 
-def digest_text(value: object, field: str, *, optional: bool = False) -> str | None:
+def digest_text(value: object, field: str) -> str:
     """Validate one lowercase content name without recomputing it."""
 
-    if optional and value is None:
-        return None
     if (
         not isinstance(value, str)
         or len(value) != DIGEST_HEX
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        suffix = " or None" if optional else ""
         raise ValueError(
-            f"{field} must be a lowercase {DIGEST_BITS}-bit content name{suffix}"
+            f"{field} must be a lowercase {DIGEST_BITS}-bit content name"
         )
     return value
 

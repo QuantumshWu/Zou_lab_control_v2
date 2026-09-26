@@ -27,6 +27,11 @@ def test_a_peak_to_peak_amplitude_is_a_power_into_the_load() -> None:
     assert float(DEFAULT_UNITS.convert(0.0, "dBm", "Vpp")) == pytest.approx(
         math.sqrt(8 * RF_LOAD_OHMS * 1e-3)
     )
+    # An amplitude below zero delivers no power at all, as a level has none
+    # for a power below zero.  Squared, -0.04 Vpp was the power of +0.04 Vpp.
+    assert math.isnan(float(DEFAULT_UNITS.convert(-0.04, "Vpp", "dBm")))
+    assert math.isnan(float(DEFAULT_UNITS.convert(-0.04, "Vrms", "mW")))
+    assert float(DEFAULT_UNITS.convert(0.0, "Vpp", "W")) == 0.0
 
 
 def test_vpp_takes_a_prefix_and_round_trips() -> None:
