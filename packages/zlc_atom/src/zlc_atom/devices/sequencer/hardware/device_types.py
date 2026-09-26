@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
+from zlc_atom.devices.sequencer.binding import (
+    bind_sequencer,
+    open_sequencer_control,
+    pulse_board_identity,
+)
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse import (
@@ -31,9 +35,9 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
     """Reach the real board at the endpoint the configuration writes down.
 
     The streamer is this factory's to own from here: on success the leaf's
-    closer closes it, and a failure between open and bind -- a Config file
-    that will not load, say -- closes it here, because a device that never
-    became a leaf has nobody else to close it.
+    closer closes it, and a failure before it is a leaf -- a Config file that
+    will not load, a board another leaf already holds -- closes it here,
+    because a device that never became a leaf has nobody else to close it.
     """
 
     authored = HARDWARE_SEQUENCER_SCHEMA.project_values(values)
@@ -54,9 +58,13 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
         raise TypeError("sequencer.hardware needs a zlc_pulse device")
     device = SequencerDevice(streamer)
     try:
-        device.open()
+        # Claimed by the board it reaches, and opened only once claimed:
+        # beside another leaf on this endpoint -- this machine's own local
+        # board, say -- this one is refused and that one keeps its board.
         return bind_sequencer(
-            context, key, device, f"sequencer:{key}", "sequencer.hardware",
+            context, key, device,
+            pulse_board_identity(authored["host"], authored["port"]),
+            "sequencer.hardware",
             config_file=authored["config_file"],
         )
     except BaseException as error:

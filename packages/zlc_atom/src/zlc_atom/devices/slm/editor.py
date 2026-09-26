@@ -1465,8 +1465,11 @@ class SlmEditorControl(QtCore.QObject):
         self._window = None
         return True
 
-    def close(self) -> None:
-        self._window.close()
+    def close(self) -> bool:
+        """Whether the window closed or its close is under way -- this
+        Editor refuses none, so once asked it is closing."""
+
+        return bool(self._window.close()) or self._closed
 
     def restore(self) -> None:
         self._window.showNormal()

@@ -63,10 +63,11 @@ adopts the frozen phase without solving and never writes hardware. Target uses
 version. Readers accept only the current complete grammar and never fill missing
 fields.
 Only **Send to SLM** takes an exclusive claim
-and applies the composed science phase. If a Task changes the command or
-correction mapping, the Editor shows the divergence and refuses the old draft
-until explicit Adopt or Context reload; closing preserves the currently
-commanded phase.
+and applies the composed science phase. If a Task commands another phase, the
+Editor shows the divergence and refuses the old draft until explicit Adopt or
+Context reload; closing preserves the currently commanded phase. The vendor
+correction is an Init field of the device, so it changes only when the device
+is initialized again.
 
 The X15213 server defaults to the established DVI path: it selects the sole
 non-primary `1280 x 1024` display at approximately 60 Hz, presents an exact
@@ -221,12 +222,14 @@ def factory(context, key, values):
     # against its contract type) or close it if it cannot be bound
     return bind_leaf(context, key, "example.device", device, "example:serial-1", "rf.source")
 
-DEVICE_TYPE = DeviceTypeDescriptor(
-    "example.device", "example", AuthoringSchema(()), ("rf.source",), factory=factory
+DEVICE_TYPES = (
+    DeviceTypeDescriptor(
+        "example.device", "example", AuthoringSchema(()), ("rf.source",), factory=factory
+    ),
 )
 ```
 
-Place that descriptor in a `device_types.py` of its own folder,
+Place that tuple in a `device_types.py` of its own folder,
 `src/zlc_atom/devices/<family>/<device>/`, and the rglob discovery test will
 collect it without editing the graph. One folder is one device: the driver,
 its `vendor/` folder, and the manifest that declares it, with nothing outside
@@ -339,18 +342,14 @@ pre-existing device-state requirement. Every candidate owns exactly one
 canonical Camera Measurement generation under the stable companion
 producer `<task>/camera`: current mode `qcmos_bright_dark` requires exactly one
 camera frame per cycle, commits all `repeat=N` cycles, seals them, and uses the
-same single-frame Dataset for preview and estimation. It never adds a second
-batch at an unchanged phase once that phase has been measured. A batch the
-board reports faulted is kept when the only fault is the host's own
-observation of the board (the pulse observer's UART poll), no underflow was
-seen and the camera delivered every requested cycle; any other board fault --
-reported after every trigger, or mid-batch so that the camera times out first
-(the board's report is read before the camera is blamed) -- repeats the whole
-batch once, and a second fault fails the candidate naming both. The candidate
-records the fault it was accepted with and the fault it was repeated after.
-The pulse program is loaded for every shot batch, a repeated batch included,
-the way calibration loads it for every shot; nothing relies on the board's
-resident image being replayed. The Pulse resource is an
+same single-frame Dataset for preview and estimation. The resolved Pulse is
+loaded once for the whole run, and every candidate fires its one shot batch
+from that load; a normal DONE adds no SAFE, only a failure or Stop does. Any
+board fault, or a completion the board cannot prove, fails the candidate --
+mid-batch too, where the camera would time out first (the board's report is
+read before the camera is blamed): the camera's frame count never stands in
+for the board's DONE, and a batch is never repeated at an unchanged phase.
+The Pulse resource is an
 explicit operator selection; camera exposure is a separate visible/editable
 field with a `0.1 s` default. Feedback neither derives one from the other nor
 reuses Calibration exposure.

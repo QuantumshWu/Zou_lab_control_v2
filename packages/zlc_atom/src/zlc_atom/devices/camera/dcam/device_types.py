@@ -50,7 +50,7 @@ DCAM_CAMERA_SCHEMA = AuthoringSchema(
 )
 
 
-def _discover_dcam() -> tuple[DeviceInstanceConfig, ...]:
+def _discover_dcam() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     # A count read.  Scanning used to start the whole vendor runtime and tear
     # it down again per button press, which on a bench with a qCMOS attached
     # is most of what "scan hardware" cost -- and it collided with any camera
@@ -65,7 +65,7 @@ def _discover_dcam() -> tuple[DeviceInstanceConfig, ...]:
             parameters=DCAM_CAMERA_SCHEMA.project_values({"device_index": index}),
         )
         for index in range(driver.device_count)
-    )
+    ), ()
 
 
 def _dcam_factory(context, key: str, values: dict) -> InstalledLeaf:

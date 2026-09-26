@@ -169,7 +169,10 @@ class DeviceBroker:
         instrument reached the broker first is thread timing.  The claim is
         made where the installation admits its leaves, one at a time in the
         operator's order, so of two specs naming one device it is always the
-        later one refused.  The owner claiming again is a no-op.
+        later one refused.  The owner claiming again is a no-op.  A pulse
+        board is claimed earlier, before it is opened, because opening one
+        takes it from whoever held it (``bind_sequencer``); its admission
+        is then that owner claiming again.
         """
 
         if not isinstance(binding, BoundDevice):
@@ -242,7 +245,8 @@ def bind_verified_device(
     capability types before it registers the binding, so a refused
     capability leaves no binding behind that the caller never received and
     could not release.  The identity itself is claimed -- and a duplicate
-    refused -- when an installation admits the leaf (``DeviceBroker.claim``).
+    refused -- when an installation admits the leaf (``DeviceBroker.claim``),
+    except a pulse board's, which ``bind_sequencer`` claims before it opens it.
     """
 
     identity = broker.verify_identity(identity_probe)

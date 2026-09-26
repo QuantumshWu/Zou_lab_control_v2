@@ -5,15 +5,15 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from typing import TypeVar
 
 
 _T = TypeVar("_T")
 
-#: How long a lane that has been told to stop is given to stop.  Generous: an
-#: SDK call already in flight may be a long exposure.  The point is that it is
-#: finite.
+#: How long a lane that has been told to stop is given to stop, and how long
+#: a command waits for the lane to answer it.  Generous: an SDK call already
+#: in flight may be a long exposure.  The point is that it is finite.
 LANE_STOP_SECONDS = 30.0
 
 
@@ -69,16 +69,41 @@ class CameraSdkOwnerLane:
             if self._closed:
                 raise RuntimeError(f"{self._name} is closed")
             self._commands.put((function, future))
+        # Bounded, as close() is: a lane wedged inside the driver would
+        # otherwise hold Stop and device close forever, and the bounded join
+        # behind them would never be reached.  A command still queued is
+        # withdrawn, so it cannot run after its caller was told it failed.
+        if not wait((future,), timeout=LANE_STOP_SECONDS).done:
+            future.cancel()
+            raise TimeoutError(
+                f"{self._name} did not answer within {LANE_STOP_SECONDS:g}s; "
+                "this or an earlier SDK call is still running"
+            )
         return future.result()
 
-    def close(self) -> None:
+    def close(self, last: Callable[[], object] | None = None) -> None:
+        """Retire the lane, running ``last`` on it first when given.
+
+        ``last`` is queued behind every command already queued and ahead of
+        the stop, where nothing withdraws it: it runs whenever the lane gets
+        to it, even after the bounded join below has given up -- a release
+        behind an SDK call that outlived every wait still lets its handle go
+        before the lane exits.  Its failure is raised once the lane stopped.
+        """
+
         if threading.get_ident() == self._owner_ident:
             raise RuntimeError("camera SDK owner lane cannot join itself")
+        final: Future[object] | None = None
         with self._lifecycle_lock:
             if self._closed:
+                if last is not None:
+                    raise RuntimeError(f"{self._name} is closed")
                 should_join = self._thread.is_alive()
             else:
                 self._closed = True
+                if last is not None:
+                    final = Future()
+                    self._commands.put((last, final))
                 self._commands.put(self._STOP)
                 should_join = True
         if should_join:
@@ -97,6 +122,8 @@ class CameraSdkOwnerLane:
                     f"{self._name} did not stop within {LANE_STOP_SECONDS:g}s "
                     "after being told to; it is still holding the SDK handle"
                 )
+        if final is not None:
+            final.result()
 
 
 __all__ = ["CameraSdkOwnerLane"]

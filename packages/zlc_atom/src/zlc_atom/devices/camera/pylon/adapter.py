@@ -598,9 +598,11 @@ class PylonCameraAdapter:
             dtype=np.dtype("uint8"),
             count_unit="count",
             exposure_seconds=exposure,
-            required_external_trigger_interval_seconds=(
-                None if free_running else exposure
-            ),
+            # Not the exposure: a Basler takes its next trigger only once the
+            # sensor has also been read out, which this readback does not
+            # ask, so the exposure would be archived -- and printed beside a
+            # frame timeout -- as a spacing the camera cannot keep.
+            required_external_trigger_interval_seconds=None,
             external_trigger_integration_start_offset_seconds=(
                 None if free_running else 0.0
             ),

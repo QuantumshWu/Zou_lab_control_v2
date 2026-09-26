@@ -23,7 +23,6 @@ def _sequencer_factory(context, key: str, values: dict) -> InstalledLeaf:
         raise TypeError("sequencer.virtual requires the installation SimulationWorld")
     device = SequencerDevice(VirtualPulseStreamer(world=context.world))
     try:
-        device.open()
         return bind_sequencer(
             context,
             key,

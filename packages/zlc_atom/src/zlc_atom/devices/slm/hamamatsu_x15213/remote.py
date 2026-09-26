@@ -20,7 +20,12 @@ from typing import Mapping
 
 import numpy as np
 from zlc_durable import strict_json_loads
-from zlc_pulse.endpoint import drop_connection, drop_peer_connections, is_loopback_host
+from zlc_pulse.endpoint import (
+    bind_exclusive,
+    drop_connection,
+    drop_peer_connections,
+    is_loopback_host,
+)
 
 from ..device import SlmAdapter, _shape, _validated_state, canonical_phase
 
@@ -213,6 +218,10 @@ def _open_slm_server(
         """The listener, with the say over WHO it serves."""
 
         peers = False
+
+        def server_bind(self) -> None:
+            bind_exclusive(self.socket, self.server_address)
+            self.server_address = self.socket.getsockname()
 
         def verify_request(self, request, client_address) -> bool:
             """Admit this machine always; admit a peer only while on offer."""

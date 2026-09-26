@@ -446,22 +446,22 @@ _DEFAULT_PUPILS: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 #: element).  Planes below the threshold run inline.
 _STRIPE_THRESHOLD = 1 << 18
 _STRIPE_COUNT = 4
-_stripe_pool: ThreadPoolExecutor | None = None
+#: One pool for every solve, made here rather than on first use: two solves
+#: at once (the Editor's and a Feedback run's) each found none and each made
+#: one.  An executor starts no thread until work is submitted to it.
+_STRIPE_POOL = ThreadPoolExecutor(
+    max_workers=_STRIPE_COUNT,
+    thread_name_prefix="slm-solver-stripe",
+)
 
 
 def _stripes(operation: Callable[[slice], None], rows: int, size: int) -> None:
-    global _stripe_pool
     if size < _STRIPE_THRESHOLD or rows < _STRIPE_COUNT:
         operation(slice(0, rows))
         return
-    if _stripe_pool is None:
-        _stripe_pool = ThreadPoolExecutor(
-            max_workers=_STRIPE_COUNT,
-            thread_name_prefix="slm-solver-stripe",
-        )
     step = (rows + _STRIPE_COUNT - 1) // _STRIPE_COUNT
     futures = [
-        _stripe_pool.submit(operation, slice(start, min(rows, start + step)))
+        _STRIPE_POOL.submit(operation, slice(start, min(rows, start + step)))
         for start in range(0, rows, step)
     ]
     for future in futures:

@@ -991,14 +991,13 @@ class SimulationWorld:
         event_ticks = sorted(
             cooling_rises | set(release_ends) | set(cameras_by_tick)
         )
+        dac_at_events = _dac_values_at_ticks(program, row, event_ticks)
 
         with self._lock:
             self._ensure_slm_propagation()
             self._fire_count += 1
-            for tick in event_ticks:
-                self._dac_values.update(
-                    _dac_values_at_tick(program, row, tick)
-                )
+            for tick, dac_values in zip(event_ticks, dac_at_events, strict=True):
+                self._dac_values.update(dac_values)
                 release_start = release_ends.get(tick)
                 if release_start is not None:
                     self._lose_atoms((tick - release_start) / clock)
@@ -1050,16 +1049,22 @@ def _overlap_ticks(
     return sum(max(0.0, min(end, stop) - max(start, begin)) for begin, stop in windows)
 
 
-def _dac_values_at_tick(
+def _dac_values_at_ticks(
     program: CompiledProgram,
     table: np.ndarray | None,
-    tick: int,
-) -> dict[str, int]:
-    """Project the compiled DAC buses at one physical playback tick.
+    ticks: list[int],
+) -> list[dict[str, int]]:
+    """Project the compiled DAC buses at each physical playback tick, ascending.
 
     The board applies a row's action when the row is entered: an edge takes
     its code on that tick, a ramp climbs from the carried level to its code
     over the row, ``held + floor(k * delta / span)`` on the k-th tick.
+
+    One walk of the point per bus answers every tick, the walk advanced as
+    the ticks advance.  Asked one tick at a time, each tick rebuilt the
+    point's durations, its whole Bracket expansion and its actions and walked
+    them from the start: a Bracket of camera edges paid events x visits x
+    buses per virtual shot.
     """
 
     point = () if table is None else tuple(int(value) for value in table.reshape(-1))
@@ -1072,30 +1077,41 @@ def _dac_values_at_tick(
     actions: dict[int, dict[int, object]] = {}
     for action in program.bus_actions:
         actions.setdefault(int(action.row), {})[int(action.bus_index)] = action
-    values: dict[str, int] = {}
+    values: list[dict[str, int]] = [{} for _tick in ticks]
     for bus_index, bus_name in enumerate(program.bus_names):
         safe = int(program.bus_safe_values[bus_index])
-        phase = int(tick) - delays.get(bus_index, 0)
-        code = safe
-        if phase >= 0:
-            held = safe
-            for row, start in visits:
-                if start > phase:
-                    break
-                action = actions.get(row, {}).get(bus_index)
-                if action is None:
-                    continue
-                target = program.resolved_bus_value(action, point)
-                span = int(durations[row])
-                elapsed = phase - start
-                if action.mode == "ramp" and span > 0 and elapsed < span:
-                    distance = abs(target - held)
-                    moved = elapsed * distance // span
-                    code = held + moved if target >= held else held - moved
-                else:
-                    code = target
-                held = target
-        values[bus_name] = code - safe
+        delay = delays.get(bus_index, 0)
+        # This bus's own actions, in the order the point enters their rows.
+        steps: list[tuple[int, int, str, int]] = []
+        for row, start in visits:
+            action = actions.get(row, {}).get(bus_index)
+            if action is not None:
+                steps.append((
+                    start,
+                    int(durations[row]),
+                    action.mode,
+                    program.resolved_bus_value(action, point),
+                ))
+        taken = 0
+        # The level the last action entered started from, and its own code.
+        before = held = safe
+        for position, tick in enumerate(ticks):
+            phase = int(tick) - delay
+            code = safe
+            if phase >= 0:
+                while taken < len(steps) and steps[taken][0] <= phase:
+                    before, held = held, steps[taken][3]
+                    taken += 1
+                if taken:
+                    start, span, mode, target = steps[taken - 1]
+                    elapsed = phase - start
+                    if mode == "ramp" and span > 0 and elapsed < span:
+                        distance = abs(target - before)
+                        moved = elapsed * distance // span
+                        code = before + moved if target >= before else before - moved
+                    else:
+                        code = target
+            values[position][bus_name] = code - safe
     return values
 
 

@@ -45,7 +45,7 @@ def _factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _discover() -> tuple[DeviceInstanceConfig, ...]:
+def _discover() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     def named(resource: str, identity: str) -> str:
         fields = identity_fields(identity)
         tail = fields[2] if len(fields) > 2 and fields[2] else "".join(
@@ -61,7 +61,7 @@ def _discover() -> tuple[DeviceInstanceConfig, ...]:
             parameters=TEK_SCOPE_SCHEMA.project_values({"resource": resource}),
         )
         for resource, identity in discover_tek_scopes()
-    )
+    ), ()
 
 
 DEVICE_TYPES = (

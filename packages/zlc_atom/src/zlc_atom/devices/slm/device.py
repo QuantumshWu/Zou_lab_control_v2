@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 import numpy as np
@@ -10,10 +9,6 @@ import numpy as np
 if TYPE_CHECKING:
     from zlc_atom.install.descriptors import InstalledLeaf
 
-
-#: The server's narration channel: the machine that owns the SLM shows these
-#: records in its bench window, where a dedicated console used to scroll.
-_LOG = logging.getLogger(__name__)
 
 _TWO_PI = 2.0 * np.pi
 _MAX_WRAPPED_PHASE = np.nextafter(np.float32(_TWO_PI), np.float32(0.0))

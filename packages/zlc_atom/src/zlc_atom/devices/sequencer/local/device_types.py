@@ -6,7 +6,11 @@ from dataclasses import replace
 import logging
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
-from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
+from zlc_atom.devices.sequencer.binding import (
+    bind_sequencer,
+    open_sequencer_control,
+    pulse_board_identity,
+)
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse import DEFAULT_PORT, DEFAULT_REQUEST_TIMEOUT
@@ -71,9 +75,10 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
             "127.0.0.1", service.port, request_timeout=DEFAULT_REQUEST_TIMEOUT
         )
         device = SequencerDevice(streamer)
-        device.open()
         leaf = bind_sequencer(
-            context, key, device, f"sequencer:{key}", "sequencer.local",
+            context, key, device,
+            pulse_board_identity("127.0.0.1", service.port),
+            "sequencer.local",
             config_file=authored["config_file"],
         )
     except BaseException:

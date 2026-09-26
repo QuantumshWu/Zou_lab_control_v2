@@ -23,9 +23,12 @@ What every remote device SHARES is only this:
   plane: fields / tune / values / provenance over the same socket.
 
 Wire format: length-prefixed JSON, serialized requests on an owned connection.
+Every request and every answer carries ``FABRIC_VERSION``, and either side
+refuses a peer of another version by name.
 A broken connection fails its current request without replaying a write; the
 next request dials again.
-The UDP responder answers the broadcast with the TCP port; everything else is TCP.
+The UDP responder answers the broadcast with its version and the TCP port, and
+a scan skips an announcer of another version by name; everything else is TCP.
 """
 
 from __future__ import annotations
@@ -42,11 +45,17 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 from typing import Any, Mapping
 
 from zlc_durable import strict_json_loads
+from zlc_pulse.endpoint import bind_exclusive
 
-FABRIC_VERSION = 1
+#: The wire vocabulary.  It moves with the vocabulary -- a new method, a
+#: changed key -- and each side refuses a peer that speaks another, naming
+#: both: PC1 and PC2 updated at different times otherwise met as an
+#: "unknown fabric method" halfway through an editor, or a missing key.
+FABRIC_VERSION = 2
 DEFAULT_FABRIC_PORT = 18859
 PROBE_MESSAGE = b"zlc-device-fabric?"
 _HEADER = struct.Struct("!I")
@@ -56,6 +65,30 @@ _REQUEST_TIMEOUT_SECONDS = 10.0
 #: than a question: an N100 rate change is six console writes 1.2 s apart, a
 #: restart and a re-timing of its stream, and undoing one takes longer still.
 _TUNE_TIMEOUT_SECONDS = 120.0
+#: A named peer whose probe took longer than this was resolved only by a
+#: fallback, after a resolver that never answered: the scan names it with
+#: its seconds, which came out of the time to list the announcers, so its
+#: address can be written instead.
+_SLOW_PEER_SECONDS = 1.0
+
+
+def _version_skew(peer: str, spoken: object) -> str:
+    """Why ``peer``, speaking fabric version ``spoken``, is refused.
+
+    Version 1 stamped only its broadcast reply and its list answer, so a v1
+    peer's other words carry no version at all: that is a v1 peer, not a
+    peer of version None.
+    """
+
+    said = (
+        "is unversioned (fabric v1)"
+        if spoken is None
+        else f"speaks fabric version {spoken!r}"
+    )
+    return (
+        f"{peer} {said} and this machine speaks {FABRIC_VERSION}; "
+        "update the older side and restart it"
+    )
 
 
 def _send_frame(connection: socket.socket, value: Any) -> None:
@@ -151,6 +184,7 @@ class DeviceAnnouncer:
                                 "message": str(error),
                             }
                         }
+                    response = {"fabric": FABRIC_VERSION, **response}
                     try:
                         _send_frame(self.request, response)
                     except OSError:
@@ -158,7 +192,12 @@ class DeviceAnnouncer:
 
         class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
             daemon_threads = False
-            allow_reuse_address = True
+
+            def server_bind(self):
+                # A second announcer on this port fails here, where the
+                # presenter reports it, instead of announcing into the void.
+                bind_exclusive(self.socket, self.server_address)
+                self.server_address = self.socket.getsockname()
 
             def get_request(self):
                 connection, address = super().get_request()
@@ -186,8 +225,15 @@ class DeviceAnnouncer:
         # broadcasts one datagram, every announcer on the subnet answers
         # with its TCP port.
         self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._udp.bind((host, self.port))
+        try:
+            bind_exclusive(self._udp, (host, self.port))
+        except BaseException:
+            # An announcer that cannot answer the broadcast is none, and its
+            # listener must not outlive it: the next Remote-on binds anew.
+            self._udp.close()
+            self._server.shutdown()
+            self._server.server_close()
+            raise
         self._udp_thread = threading.Thread(
             target=self._answer_probes,
             name="zlc-fabric-udp",
@@ -207,9 +253,19 @@ class DeviceAnnouncer:
         )
 
     def withdraw(self, instance_id: str) -> None:
+        """Take one device off offer, and back from any peer using it.
+
+        Returns only once a peer's request that found the device before it
+        was withdrawn is finished with it -- a tune can take minutes -- so
+        the machine it is handed back to never has a peer's write land
+        after its own run began, or a close under it.
+        """
+
         with self._registry_lock:
             known = self._published.pop(str(instance_id), None)
         if known is not None:
+            with known.lock:
+                pass
             _LOG.info("FABRIC WITHDRAW device=%s", instance_id)
 
     def close(self) -> None:
@@ -230,11 +286,34 @@ class DeviceAnnouncer:
 
     # ------------------------------------------------------------ serving
     def _answer_probes(self) -> None:
+        failing = False
         while True:
             try:
                 message, sender = self._udp.recvfrom(256)
-            except OSError:
-                return
+            except ConnectionResetError:
+                # Windows hands an earlier answer's ICMP port-unreachable (a
+                # scanner that had already closed) to the NEXT read as a
+                # reset: news of one datagram, not of this socket.
+                continue
+            except OSError as error:
+                if self._udp.fileno() == -1:
+                    # Closed: the one way this responder ends.
+                    return
+                # Anything else fails a read, not the responder: Windows
+                # refuses a datagram longer than the buffer instead of
+                # truncating it, and ending here left the machine published
+                # and unfindable until Remote was switched off and on.  An
+                # error every read repeats (the network stack gone) is said
+                # once and retried at a walk, not spun on at a full core.
+                if not failing:
+                    _LOG.warning(
+                        "FABRIC PROBE READ FAILED error=%s: %s -- still answering",
+                        type(error).__name__, error,
+                    )
+                failing = True
+                time.sleep(0.1)
+                continue
+            failing = False
             if message != PROBE_MESSAGE:
                 continue
             try:
@@ -258,6 +337,9 @@ class DeviceAnnouncer:
     def _dispatch(self, request: Any) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise TypeError("fabric request must be an object")
+        spoken = request.get("fabric")
+        if spoken != FABRIC_VERSION:
+            raise ValueError(_version_skew("the peer", spoken))
         method = str(request.get("method", ""))
         if method == "list":
             with self._registry_lock:
@@ -265,27 +347,40 @@ class DeviceAnnouncer:
                     self._published[key].record()
                     for key in sorted(self._published)
                 ]
-            return {"fabric": FABRIC_VERSION, "devices": records}
+            return {"devices": records}
         device = self._device(request)
         if device.tunable is None:
             raise TypeError(
                 f"{device.instance_id!r} is served by its own protocol; the "
                 "fabric only lists it"
             )
+        with device.lock:
+            # Asked again under the lock ``withdraw`` waits on: a request
+            # that found the device before it was withdrawn, and reached the
+            # lock after, must not touch a device handed back.
+            with self._registry_lock:
+                if self._published.get(device.instance_id) is not device:
+                    raise LookupError(f"no published device {device.instance_id!r}")
+            return self._serve(device, method, request)
+
+    def _serve(
+        self, device: PublishedDevice, method: str, request: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """One request on a published tunable, under its lock."""
+
         if method in {"fields", "read_tunable_in_unit"}:
-            with device.lock:
-                if method == "fields":
-                    from zlc_atom.authoring import refresh_tunable_fields
+            if method == "fields":
+                from zlc_atom.authoring import refresh_tunable_fields
 
-                    fields = (refresh_tunable_fields(device.tunable) if request.get("refresh", False)
-                              else device.tunable.tunable_fields())
-                else:
-                    from zlc_atom.authoring import read_tunable_in_unit
+                fields = (refresh_tunable_fields(device.tunable) if request.get("refresh", False)
+                          else device.tunable.tunable_fields())
+            else:
+                from zlc_atom.authoring import read_tunable_in_unit
 
-                    fields = (read_tunable_in_unit(
-                        device.tunable, str(request.get("name", "")),
-                        str(request.get("unit", "")),
-                    ),)
+                fields = (read_tunable_in_unit(
+                    device.tunable, str(request.get("name", "")),
+                    str(request.get("unit", "")),
+                ),)
             return {
                 "fields": [
                     {
@@ -311,25 +406,23 @@ class DeviceAnnouncer:
         if method == "convert_tunable_value":
             from zlc_atom.authoring import convert_tunable_value
 
-            with device.lock:
-                value = convert_tunable_value(
-                    device.tunable, str(request.get("name", "")), request.get("value"),
-                    str(request.get("source_unit", "")), str(request.get("target_unit", "")),
-                )
+            value = convert_tunable_value(
+                device.tunable, str(request.get("name", "")), request.get("value"),
+                str(request.get("source_unit", "")), str(request.get("target_unit", "")),
+            )
             return {"value": value}
         if method in {"tune", "tune_in_unit"}:
             name = str(request.get("name", ""))
             value = request.get("value")
             try:
-                with device.lock:
-                    if method == "tune":
-                        effective = device.tunable.tune(name, value)
-                    else:
-                        from zlc_atom.authoring import tune_in_unit
+                if method == "tune":
+                    effective = device.tunable.tune(name, value)
+                else:
+                    from zlc_atom.authoring import tune_in_unit
 
-                        effective = tune_in_unit(
-                            device.tunable, name, value, str(request.get("unit", ""))
-                        )
+                    effective = tune_in_unit(
+                        device.tunable, name, value, str(request.get("unit", ""))
+                    )
             except Exception as error:
                 _LOG.info(
                     "FABRIC TUNE REFUSED device=%s field=%s value=%r error=%s: %s",
@@ -342,22 +435,23 @@ class DeviceAnnouncer:
             )
             return {"effective": effective}
         if method == "values":
-            with device.lock:
-                return {"values": dict(device.tunable.tunable_values())}
+            return {"values": dict(device.tunable.tunable_values())}
         if method == "provenance":
-            with device.lock:
-                return {
-                    "provenance": dict(device.tunable.settings_provenance())
-                }
+            return {"provenance": dict(device.tunable.settings_provenance())}
         raise ValueError(f"unknown fabric method {method!r}")
 
 
 # --------------------------------------------------------------- consuming
 def _call(connection: socket.socket, request: Mapping[str, Any]) -> dict[str, Any]:
-    _send_frame(connection, dict(request))
+    _send_frame(connection, {"fabric": FABRIC_VERSION, **request})
     response = _recv_frame(connection)
     if not isinstance(response, Mapping):
         raise TypeError("fabric response must be an object")
+    spoken = response.get("fabric")
+    if spoken != FABRIC_VERSION:
+        # Before anything else it says is read: a peer of another version may
+        # mean something else by the same words, its errors included.
+        raise ConnectionError(_version_skew("the peer", spoken))
     error = response.get("error")
     if error is not None:
         raise RuntimeError(
@@ -371,45 +465,84 @@ def discover_announcers(
     timeout_seconds: float = 1.0,
     port: int = DEFAULT_FABRIC_PORT,
     extra_hosts: tuple[str, ...] = (),
-) -> tuple[tuple[str, int], ...]:
+) -> tuple[tuple[tuple[str, int], ...], tuple[str, ...]]:
     """Every fabric on the subnet, by one broadcast -- plus any named peers.
 
     ``extra_hosts`` is for the bench whose machines sit on different
     subnets, where a broadcast cannot reach: name the peer once in
     configuration and it is probed directly, same protocol.
+
+    Returns the announcers to list, and why each other one that answered is
+    not listed.  An announcer of another version is not: every answer it
+    gave would be refused, and the first refusal ended the whole scan,
+    every other announcer's devices with it.  It is named instead, for the
+    scan to report beside what the others publish.  So is a named peer that
+    could not be probed, or whose probe took more than
+    ``_SLOW_PEER_SECONDS``, with the seconds it took: its name is resolved
+    as it is probed, seconds for one no resolver answers or only a fallback
+    does, and those seconds come out of the scan's time to list the
+    announcers.
     """
 
     found: dict[tuple[str, int], None] = {}
+    skewed: dict[tuple[str, int], object] = {}
+    peer_notes: list[str] = []
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         probe.settimeout(0.2)
-        targets = [("255.255.255.255", int(port))] + [
-            (str(host), int(port)) for host in extra_hosts
-        ]
-        for target in targets:
+        try:
+            probe.sendto(PROBE_MESSAGE, ("255.255.255.255", int(port)))
+        except OSError:
+            pass
+        for host in extra_hosts:
+            began = time.monotonic()
             try:
-                probe.sendto(PROBE_MESSAGE, target)
-            except OSError:
+                probe.sendto(PROBE_MESSAGE, (str(host), int(port)))
+            except (OSError, TypeError) as error:
+                # A name the resolver cannot even encode (a copied
+                # left-to-right mark, an empty label) is a TypeError here.
+                peer_notes.append(
+                    f"the named peer {host!r} was not probed: {error} "
+                    f"({time.monotonic() - began:.1f}s)"
+                )
                 continue
-        import time
-
+            took = time.monotonic() - began
+            if took > _SLOW_PEER_SECONDS:
+                peer_notes.append(
+                    f"the named peer {host!r} took {took:.1f}s to resolve; "
+                    "write its address"
+                )
         deadline = time.monotonic() + float(timeout_seconds)
         while time.monotonic() < deadline:
             try:
-                message, sender = probe.recvfrom(1024)
-            except socket.timeout:
+                # Any datagram fits: Windows refuses one longer than the
+                # buffer instead of truncating it, and that ended the scan.
+                message, sender = probe.recvfrom(65535)
+            except (socket.timeout, ConnectionResetError):
+                # A reset is Windows reporting a probe that reached a named
+                # peer where nothing listens -- an earlier send, not this read.
+                # Stopping there closed the port every live announcer was
+                # still answering.
                 continue
             except OSError:
                 break
             try:
                 answer = strict_json_loads(message.decode("utf-8"), "fabric announcement")
-                found[(str(sender[0]), int(answer["port"]))] = None
+                announcer = (str(sender[0]), int(answer["port"]))
+                spoken = answer.get("fabric")
             except (ValueError, KeyError, TypeError):
                 continue
+            if spoken == FABRIC_VERSION:
+                found[announcer] = None
+            else:
+                skewed[announcer] = spoken
     finally:
         probe.close()
-    return tuple(found)
+    return tuple(found), (*peer_notes, *(
+        _version_skew(f"the announcer at {host}:{port}", spoken)
+        for (host, port), spoken in skewed.items()
+    ))
 
 
 def list_remote_devices(host: str, port: int) -> tuple[dict[str, Any], ...]:

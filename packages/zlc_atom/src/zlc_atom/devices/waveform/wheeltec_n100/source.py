@@ -504,14 +504,12 @@ class WheeltecN100WaveformSource:
         self._magnetic_field: tuple[float, float, float] | None = None
         self._magnetic_changes = 0
         self._magnetic_packets = 0
-        #: What the module last said its settings were.  Empty until it has
-        #: been asked, and empty for good on a module whose firmware does
-        #: not answer the configuration console -- such a module streams
-        #: perfectly well and simply has nothing an operator can turn.
+        #: The one setting this bench turns, the rate, as the stream shows
+        #: it (``_note_the_rate``).  Empty while the stream is on a rate with
+        #: no rung -- such a module streams perfectly well and simply has
+        #: nothing an operator can turn -- and ``_settings_refusal`` says so.
         self._settings: dict[str, object] = {}
-        self._settings_refusal: str | None = None
-        #: Whether the module enumerated its own packets, or the IMU rate
-        #: below was measured off the stream because it would not.
+        self._settings_refusal = ""
         #: The last console command and its verbatim reply, for the record.
         self._last_exchange: tuple[str, str] = ("", "")
         self._records = RecordQueue(
@@ -1024,10 +1022,12 @@ class WheeltecN100WaveformSource:
         selected = str(name)
         with self._settings_lock:
             if selected not in self._settings:
+                # Nothing offered means the stream is on a rate with no rung,
+                # and ``_note_the_rate`` wrote down which.
                 offered = ", ".join(repr(key) for key in sorted(self._settings))
                 raise ValueError(
-                    f"this module has no setting {selected!r}; it offers "
-                    f"{offered or 'none -- its configuration console did not answer'}"
+                    f"this module has no setting {selected!r}; "
+                    + (f"it offers {offered}" if offered else self._settings_refusal)
                 )
             previous = self._settings.get(selected)
             spelling = _spelling_of(value, standing_at=previous)
@@ -1049,20 +1049,24 @@ class WheeltecN100WaveformSource:
             # what it is sending.
             self._remeasure_rate()
             measured = 1.0 / self._sample_interval if self._sample_interval else 0.0
-            taken = _rung_the_stream_is_on(measured)
+            # What the stream shows is what this session holds now, asked for
+            # or not: the value is in flash and the module restarted on it, so
+            # the reading from before the write is no longer true -- which is
+            # why a module that came back elsewhere is not a TuneRefused.
+            self._note_the_rate()
+            taken = self._settings.get(selected)
             if taken is None:
-                raise TuneRefused(
+                raise RuntimeError(
                     f"the module came back sending {measured:.1f} Hz, which is "
                     "not one of its rates; this bench will not stamp records "
                     "with a rate it cannot name"
                 )
             wanted = _as_number(value)
             if wanted is not None and abs(taken - wanted) > 1e-6:
-                raise TuneRefused(
+                raise RuntimeError(
                     f"asked this module for {wanted:g} Hz and it came back "
                     f"sending {taken:g} Hz"
                 )
-            self._settings[selected] = taken
             return self._field_for(selected, taken).current
 
     def _put_back(

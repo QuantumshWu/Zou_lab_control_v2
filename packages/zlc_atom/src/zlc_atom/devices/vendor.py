@@ -10,8 +10,9 @@ a path nobody can see or change.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from zlc_durable import strict_json_loads
 
 MANIFEST_NAME = "vendor.json"
 
@@ -39,7 +40,7 @@ def resolve_vendor_file(anchor_file: str, filename: str, *, what: str) -> str:
     manifest = directory / MANIFEST_NAME
     if manifest.is_file():
         try:
-            mapping = json.loads(manifest.read_text(encoding="utf-8"))
+            mapping = strict_json_loads(manifest.read_text(encoding="utf-8"), MANIFEST_NAME)
         except ValueError as error:
             raise FileNotFoundError(
                 f"{manifest} is not valid JSON: {error}"
