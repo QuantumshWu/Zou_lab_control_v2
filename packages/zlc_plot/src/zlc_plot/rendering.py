@@ -18,13 +18,14 @@ import pickle
 from io import BytesIO
 import math
 from numbers import Real
+import os
 from pathlib import Path
 import sys
 import re
 from threading import RLock
 from enum import Enum
-from time import perf_counter
-from types import MappingProxyType
+from time import time
+from types import CodeType, MappingProxyType
 from typing import Any, Iterable, Mapping, Sequence
 import weakref
 
@@ -79,7 +80,7 @@ from .specs import (
     semantic_spec,
 )
 from .state import DisplayState
-from .style import PlotStyleConfig, style_context
+from .style import PlotStyleConfig, style_context, style_rc_values
 from .ticks import (
     DeclaredLocator,
     MIN_TICK_LABEL_PT,
@@ -1259,7 +1260,7 @@ def _box_on_aspect(
 
 def _normalize_arithmetic(
     dtype: Any, vmin: float, vmax: float
-) -> tuple[bool, np.float32, np.float32, np.float64, np.float64]:
+) -> tuple[bool, np.float64, np.float64]:
     """The numbers ``Normalize`` scales a plane with, in the precision it does.
 
     The plane is promoted with float32 -- a sixteen-bit camera frame is
@@ -1267,16 +1268,14 @@ def _normalize_arithmetic(
     ``process_value`` as a one-element LIST, whose ``min_scalar_type`` is
     float64, so they stay float64 numbers; the subtraction and the
     division are then float64 operations whose results are stored back
-    into the plane's own dtype.  Returns ``(single, vmin32, span32, vmin64,
-    span64)``: whether the plane scales in float32, and the float64 limit
-    and span (the float32 pair is the same numbers, kept for a kernel that
-    reads the float32 plane through them).
+    into the plane's own dtype.  Returns ``(single, vmin, span)``: whether
+    the plane scales in float32, and the float64 limit and span.
     """
 
     single = np.promote_types(dtype, np.float32) == np.dtype(np.float32)
     low = np.float64(float(vmin))
     span = np.float64(float(vmax)) - low
-    return bool(single), np.float32(low), np.float32(span), low, span
+    return bool(single), low, span
 
 
 def _view_nearest_map(
@@ -1735,6 +1734,10 @@ class _FitAnnotationDetail(str, Enum):
 
 _FIT_DIAGNOSTIC_SINGLE_MAX_CHARS = 72
 _FIT_DIAGNOSTIC_FACET_MAX_CHARS = 24
+#: The fit-ellipse centre dot's edge, stroked in its face colour.  Agg
+#: paints the disc out to half the marker size PLUS half this edge, so the
+#: overview kernel, which paints the same dot without an artist, adds it too.
+_FIT_CENTER_EDGE_PT = 1.0
 
 
 def _truncate_fit_diagnostic(message: str, maximum: int) -> str:
@@ -2198,7 +2201,25 @@ def _axes_prototype_path(style: PlotStyleConfig, cells: int, plain: int) -> Any:
     Keyed on everything the bytes depend on: this Python and this
     Matplotlib build the objects, the STYLE is baked into an axes at
     construction (which is why the reserve answers for one style only),
-    and the tick floor decides how many tick artists ride along on a cell.
+    the tick floor decides how many tick artists ride along on a cell, and
+    :func:`_build_axes` decides the rest -- a cell's tick length, its labels
+    off, its pinned title -- so its code is part of the key, as a kernel's
+    source is part of the kernel cache's: an edit there that the mount does
+    not restate would otherwise never reach a machine holding the old bytes.
+    The code THIS PROCESS LOADED (:func:`_code_text`), not the file: a
+    notebook that imported this module before a merge landed read the new
+    text at the old line, and keyed the old code's bytes by it -- or raised
+    on every mount, where that line opened a string.  And it builds them
+    under the rc mapping the lane RESOLVES, not the style as declared:
+    which params that mapping sets -- the line cycle among them -- is code
+    of its own, and the font family is whichever of the declared ones this
+    machine has, so both are keyed by their resolved values.  Beneath the
+    style lie the params this Matplotlib started with, keyed by their
+    digest (:func:`_started_rc_params`).
+
+    Everything but the counts names a GENERATION, the file's prefix: the
+    bytes one code, style and Matplotlib build, of which a write prunes
+    the others (:func:`revive_axes`).
     """
 
     import matplotlib  # noqa: PLC0415
@@ -2208,13 +2229,75 @@ def _axes_prototype_path(style: PlotStyleConfig, cells: int, plain: int) -> Any:
     parts = (
         sys.version.split()[0],
         matplotlib.__version__,
-        str(int(cells)),
-        str(int(plain)),
         str(int(TICKS_FLOOR)),
         repr(style),
+        repr(sorted(style_rc_values(style).items())),
+        _started_rc_params()[1],
+        _code_text(_build_axes.__code__),
     )
-    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
-    return _kernel_cache.kernel_cache_dir() / "grid_cells" / f"{digest}.pickle"
+    generation = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+    return (
+        _kernel_cache.kernel_cache_dir()
+        / "grid_cells"
+        / f"{generation}_{int(cells)}_{int(plain)}.pickle"
+    )
+
+
+@lru_cache(maxsize=1)
+def _started_rc_params() -> tuple[Mapping[str, Any], str]:
+    """The rc params this Matplotlib started with, and their digest.
+
+    Matplotlib's defaults and the matplotlibrc it read on import
+    (``rcParamsOrig``), less the backend: ``rc_context`` does not put back
+    a backend it was handed, and pyplot rewrites this one in
+    ``rcParamsOrig`` when it settles on one, so it is neither safe to lay
+    nor steady to key.  Nothing else in it moves, and whatever else it
+    holds that no style sets -- ``interactive`` and the like -- the lane
+    puts back on its way out.  :func:`_build_axes` lays the style over
+    these and not over the live rcParams, because the bytes are shared by
+    every process on the machine: a notebook's runtime edit was baked into
+    them once and revived into every panel after, under a key that never
+    saw it.  A render child never edits its rcParams, so for the product
+    these ARE the live ones.  Fixed for the life of the process, so read
+    once -- and read from ``matplotlib`` alone: ``matplotlib.style``, which
+    names the params no style file may set, parses every style Matplotlib
+    ships on import, and no product process imports it otherwise.
+    """
+
+    import matplotlib  # noqa: PLC0415
+
+    params = {
+        name: value
+        for name, value in matplotlib.rcParamsOrig.items()
+        if name != "backend"
+    }
+    digest = hashlib.sha256(
+        repr(sorted(params.items())).encode("utf-8")
+    ).hexdigest()
+    return MappingProxyType(params), digest
+
+
+@lru_cache(maxsize=None)
+def _code_text(code: CodeType) -> str:
+    """What a function does, as the code this process loaded says it.
+
+    Its instructions (unspecialised: ``co_code`` reads them back as
+    compiled), the names they reach and the constants they carry -- its
+    docstring among them -- and the same of any code nested in it.  A
+    set's order follows this process' string hashing, so it is written
+    sorted.  Neither the file nor a line number is in it: a moved line or
+    a reworded comment builds the same bytes.  Read once per process.
+    """
+
+    parts = [code.co_code.hex(), repr(code.co_names)]
+    for constant in code.co_consts:
+        if isinstance(constant, CodeType):
+            parts.append(_code_text(constant))
+        elif isinstance(constant, frozenset):
+            parts.append(repr(sorted(map(repr, constant))))
+        else:
+            parts.append(repr(constant))
+    return "|".join(parts)
 
 
 def _build_axes(
@@ -2226,7 +2309,16 @@ def _build_axes(
     from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: PLC0415
     from matplotlib.figure import Figure  # noqa: PLC0415
 
-    with style_context(style, {}):
+    # Over the params Matplotlib started with, not the live ones: these
+    # bytes are revived by every process on the machine.  A different
+    # mapping from a panel's, so it waits for the process's drawing panels
+    # to drain and then SHUTS THEM OUT until it is built -- 207 ms for a
+    # grid's sixty-four cells (:func:`revive_axes`) -- once per machine,
+    # generation and count, on a miss.  A render child meets that on its
+    # warm thread, before its panel draws, unless the panel arrived
+    # mid-fill.  Never entered from inside a panel's style, which the lane
+    # refuses a thread.
+    with style_context(style, beneath=_started_rc_params()[0]):
         # The size is the panel's to decide and is set when it arrives;
         # this one only has to exist.
         figure = Figure(figsize=(1.0, 1.0), dpi=100.0, layout=None)
@@ -2314,6 +2406,17 @@ def revive_axes(
                 FigureCanvasAgg,
             )
 
+            # A hit is a USE, and the prune below ages a file by its mtime:
+            # aged by its write, a generation revived every day was taken
+            # for dead a day after it was written, and another generation's
+            # write deleted it.  Touched at most hourly, so a file used in
+            # the last twenty-three hours outlives any prune.  A cache that
+            # will not take the touch is still read.
+            try:
+                if time() - path.stat().st_mtime > 3600.0:
+                    os.utime(path)
+            except OSError:
+                pass
             FigureCanvasAgg(figure)
             for axis in spare:
                 figure.delaxes(axis)
@@ -2323,6 +2426,22 @@ def revive_axes(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(pickle.dumps(figure, protocol=pickle.HIGHEST_PROTOCOL))
+        # Another generation's bytes are bytes no key reaches once their
+        # code, style or Matplotlib has moved on -- megabytes a set, a set
+        # per edit.  A write prunes them, but only those nobody has revived
+        # for a day (a hit refreshes the mtime they are aged by): a console
+        # and a notebook with its own style or matplotlibrc are two live
+        # generations, and neither prunes what the other still uses.
+        generation = path.name.split("_", 1)[0]
+        stale = path.stat().st_mtime - 86400.0
+        for other in path.parent.glob("*.pickle"):
+            if other.name.split("_", 1)[0] == generation:
+                continue
+            try:
+                if other.stat().st_mtime < stale:
+                    other.unlink()
+            except OSError:  # another process pruned or is reading it
+                pass
     except (OSError, Exception):  # noqa: BLE001 -- writing is an optimisation
         pass
     for axis in made + others:
@@ -4273,11 +4392,15 @@ class MatplotlibRenderer:
             for entry in texts:
                 artist = entry[0]
                 clip = artist.get_clip_box()
+                # A pulse name (``SpanLabel``) prints only where its span is
+                # wide enough on screen, so the span it names decides the
+                # mask as much as its text does.
                 key = (artist.get_text(), artist.get_visible(), artist.get_position(), artist.get_rotation(),
                        str(artist.get_color()), artist.get_alpha(), hash(artist.get_fontproperties()),
                        id(artist.get_transform()), artist.get_clip_on(), None if clip is None else tuple(clip.bounds),
                        id(artist.get_clip_path()), id(artist.get_bbox_patch()), artist.get_usetex(),
-                       tuple(map(id, artist.get_path_effects())), artist.get_antialiased())
+                       tuple(map(id, artist.get_path_effects())), artist.get_antialiased(),
+                       getattr(artist, "span", None), getattr(artist, "pad_pt", None))
                 if entry[1] != key:
                     entry[1] = key
                     entry[2] = self._foreground_text(artist, renderer) if artist.get_visible() else []
@@ -5051,7 +5174,7 @@ class MatplotlibRenderer:
                     return False, frozenset()
                 continue
             blits[row], clips[row], affines[row] = geometry
-        single, vmin32, span32, vmin64, span64 = _normalize_arithmetic(values.dtype, low, high)
+        single, vmin64, span64 = _normalize_arithmetic(values.dtype, low, high)
         # An all-valid plane is a stride-0 broadcast; handed over as it is,
         # ``readable`` copied it into a full bool plane every frame.
         use_valid = not _all_true(valid)
@@ -5063,8 +5186,6 @@ class MatplotlibRenderer:
             kernels.readable(clips),
             kernels.readable(affines),
             kernels.readable(np.asarray(command["lut"], dtype=np.uint8)),
-            vmin32,
-            span32,
             vmin64,
             span64,
             single,
@@ -5306,7 +5427,10 @@ class MatplotlibRenderer:
                 max(
                     0.5,
                     0.5
-                    * math.sqrt(self.style.artists.fit_ellipse_center_area_pt2)
+                    * (
+                        math.sqrt(self.style.artists.fit_ellipse_center_area_pt2)
+                        + _FIT_CENTER_EDGE_PT
+                    )
                     * float(self._figure.dpi)
                     / 72.0,
                 ),
@@ -5401,9 +5525,13 @@ class MatplotlibRenderer:
             center_colours[index] = np.clip(
                 np.rint(center_rgba * 255.0), 0, 255
             ).astype(np.uint8)
+            # Agg's disc: half the marker size plus half its edge stroke.
             center_radii[index] = max(
                 0.5,
-                0.5 * float(center.get_markersize()) * float(self._figure.dpi) / 72.0,
+                0.5
+                * (float(center.get_markersize()) + float(center.get_markeredgewidth()))
+                * float(self._figure.dpi)
+                / 72.0,
             )
             box = axis.bbox
             clips[index] = (
@@ -6210,9 +6338,9 @@ class MatplotlibRenderer:
         ):
             return False
         # The copy OVERWRITES; a full draw alpha-BLENDS.  They agree only
-        # when every pixel is opaque -- a translucent front (the 3D
-        # scene outside its pane, a NaN-holed image) must take the real
-        # draw or it would punch its transparency into the buffer.
+        # when every pixel is opaque -- a translucent front (a NaN-holed
+        # image) must take the real draw or it would punch its
+        # transparency into the buffer.
         if not self._front_is_opaque(shown):
             return False
         if artist.get_interpolation() != "nearest":
@@ -8429,13 +8557,6 @@ class MatplotlibRenderer:
             self._height_bars_axes() if bool(dragging) else None
         )
 
-    @property
-    def height_bars_dragging(self) -> bool:
-        """Whether a hand is turning THIS scene right now."""
-
-        axes = self._height_bars_axes()
-        return axes is not None and self._confined_gesture_axes is axes
-
     def set_view_dragging(self, axes: Any | None) -> None:
         """Confine the frame to one axes while a hand drags its view.
 
@@ -8950,13 +9071,15 @@ class MatplotlibRenderer:
         # label and the line they sit on.  Collected first and emitted
         # after one batched occlusion test, because the test is a raster
         # lookup and asking it per tick would walk the scene thirty times.
+        # Each tick also names the axis it ticks, for the thinning below.
         ticks: list[tuple[tuple[float, float, float],
                           tuple[float, float],
                           tuple[float, float],
+                          str,
                           str]] = []
 
-        def add_tick(anchor, direction, at, text):
-            ticks.append((anchor, direction, at, text))
+        def add_tick(anchor, direction, at, text, axis_name):
+            ticks.append((anchor, direction, at, text, axis_name))
 
         # ---- z axis at the picture's d corner
         axis_edges.append(
@@ -8970,7 +9093,7 @@ class MatplotlibRenderer:
                 scene.project(near_a, near_b, float(tick)),
             )
             add_tick(
-                (left_a, left_b, float(tick)), (ux, uy), f, label
+                (left_a, left_b, float(tick)), (ux, uy), f, label, "z"
             )
 
         # ---- base coordinate labels along the two front edges
@@ -8991,7 +9114,7 @@ class MatplotlibRenderer:
                 ((near_a, near_b, base_value), (near_a, far_b, base_value))
             )
 
-            def a_tick(centre: float, label: str) -> None:
+            def a_tick(centre: float, label: str, axis_name: str) -> None:
                 grid_edges.append(
                     ((centre, far_b, wall_low), (centre, far_b, wall_high))
                 )
@@ -9003,10 +9126,10 @@ class MatplotlibRenderer:
                     scene.project(centre, near_b + in_b, base_value),
                 )
                 add_tick(
-                    (centre, near_b, base_value), (ux, uy), f, label
+                    (centre, near_b, base_value), (ux, uy), f, label, axis_name
                 )
 
-            def b_tick(centre: float, label: str) -> None:
+            def b_tick(centre: float, label: str, axis_name: str) -> None:
                 grid_edges.append(
                     ((far_a, centre, wall_low), (far_a, centre, wall_high))
                 )
@@ -9018,7 +9141,7 @@ class MatplotlibRenderer:
                     scene.project(near_a + in_a, centre, base_value),
                 )
                 add_tick(
-                    (near_a, centre, base_value), (ux, uy), f, label
+                    (near_a, centre, base_value), (ux, uy), f, label, axis_name
                 )
 
             # The rot90 fold hands each source axis to a DIFFERENT front
@@ -9032,23 +9155,19 @@ class MatplotlibRenderer:
                 x_ticks = x_ticks[:-1]
             # The tick table carries SOURCE indices -- the very indices the
             # label value is computed from -- and fold_cell speaks source
-            # indices too (it does the pooling divide itself).  Multiplying
-            # by the pool factor first cancelled that divide, so on any
-            # grid dense enough to pool (the large scans pooling exists
-            # for) every tick but the first stood at up to pool_y times
-            # its own position, and the far ones fell off the scene.
+            # indices too, so a tick stands on the bar its label names.
             for column, label in x_ticks:
                 a, b = scene.fold_cell(0, column)
                 if even:
-                    a_tick(a + 0.5, label)
+                    a_tick(a + 0.5, label, "x")
                 else:
-                    b_tick(b + 0.5, label)
+                    b_tick(b + 0.5, label, "x")
             for row, label in y_ticks:
                 a, b = scene.fold_cell(row, 0)
                 if even:
-                    b_tick(b + 0.5, label)
+                    b_tick(b + 0.5, label, "y")
                 else:
-                    a_tick(a + 0.5, label)
+                    a_tick(a + 0.5, label, "y")
 
         # ---- what the scene does not hide of its own ticks
         if ticks:
@@ -9061,9 +9180,11 @@ class MatplotlibRenderer:
             standing = np.isfinite(sampled.reshape(len(ticks), 3)[:, 0])
         else:
             standing = ()
-        for (_anchor, (ux, uy), f, text), shown in zip(ticks, standing):
+        projected_axes: list[str] = []
+        for (_anchor, (ux, uy), f, text, axis_name), shown in zip(ticks, standing):
             if not shown:
                 continue
+            projected_axes.append(axis_name)
             segments_x.extend(
                 (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
             )
@@ -9156,31 +9277,45 @@ class MatplotlibRenderer:
         # Only the PROJECTED labels are thinned against one another: the
         # corner scales below are not on the scene, do not move with the
         # camera, and are what make the ticks short enough to fit.
-        self._thin_overlapping_chrome(texts[: len(projected_texts)])
+        self._thin_overlapping_chrome(texts[: len(projected_texts)], projected_axes)
 
-    def _thin_overlapping_chrome(self, texts: list) -> None:
+    def _thin_overlapping_chrome(self, texts: list, axes_of: Sequence[str]) -> None:
         """Drop 3D labels that would print across one already kept.
 
         Rotation is continuous and the labels move with it, so any fixed
         stride is wrong at some angle: two ticks that were a centimetre
         apart meet when the axis turns edge-on.  What can be measured is
         whether two labels actually collide, so that is what decides --
-        and the ENDS are kept first, because an axis whose extremes are
-        legible still says what it spans, while one thinned from the
-        outside in says nothing at all.
+        and EVERY axis' ends are kept first, because an axis whose extremes
+        are legible still says what it spans, while one thinned from the
+        outside in says nothing at all.  ``axes_of`` names the axis each
+        label ticks: the ends of the whole list were the first z label and
+        the last y label, and an x end lost to an inner z label.
         """
 
-        visible = [text for text in texts if text.get_visible()]
+        visible = [
+            (text, axis_name)
+            for text, axis_name in zip(texts, axes_of)
+            if text.get_visible()
+        ]
         if len(visible) < 2:
             return
-        renderer = getattr(visible[0].figure.canvas, "get_renderer", None)
+        renderer = getattr(visible[0][0].figure.canvas, "get_renderer", None)
         if renderer is None:
             return
         renderer = renderer()
-        order = [0, len(visible) - 1] + list(range(1, len(visible) - 1))
+        ends: list[int] = []
+        inner: list[int] = []
+        for name in dict.fromkeys(axis_name for _text, axis_name in visible):
+            members = [
+                index for index, (_text, axis_name) in enumerate(visible)
+                if axis_name == name
+            ]
+            ends.extend(dict.fromkeys((members[0], members[-1])))
+            inner.extend(members[1:-1])
         kept: list[Any] = []
-        for position in order:
-            text = visible[position]
+        for position in ends + inner:
+            text = visible[position][0]
             try:
                 extent = text.get_window_extent(renderer)
             except (RuntimeError, ValueError):
@@ -9655,11 +9790,15 @@ class MatplotlibRenderer:
         vmin, vmax = (float(value) for value in color_limits)
         if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
             return None
-        cache_key = (id(prepared), cmap_name, vmin, vmax)
+        # The front itself is held and compared by identity: keyed by its
+        # id alone, a front that left the store and was freed could be
+        # succeeded at the same address by another, which then got this
+        # picture's colours.
+        cache_key = (cmap_name, vmin, vmax)
         cache_name = f"{key}:rgba_front"
         cached = self._artists.get(cache_name)
-        if cached is not None and cached[0] == cache_key:
-            return cached[1]
+        if cached is not None and cached[0] is prepared and cached[1] == cache_key:
+            return cached[2]
         lut = self._image_color_lut(cmap_name, cmap)
         values = np.asarray(prepared.values)
         if values.dtype.kind == "u" and values.dtype.itemsize <= 2:
@@ -9685,23 +9824,24 @@ class MatplotlibRenderer:
                 self._artists["image:direct_color_table"] = (table_key, table)
             rgba = table[values]
         else:
-            # ONE SLOT RULE, and the kernel owns it: the offset off, the
-            # range divided out, the colormap's 256 slots multiplied in,
-            # in that order.  Folding the last two into a single reciprocal
-            # was a different last bit from the scene that paints the same
-            # array, and the scene is the one that is imshow byte for byte.
-            # The three run at the values' OWN precision: narrowing a 1e10
-            # background to float32 before subtracting it left a one-unit
-            # colour range as a single colour.  Only the residue, already
-            # inside [0, 256), is narrowed for the lookup, where a 256-level
-            # quantisation is the same one the colormap applies anyway.
+            # The kernel's slot ORDER: the offset off, the range divided
+            # out, the colormap's 256 slots multiplied in; folding the last
+            # two into a single reciprocal moved last bits the scene does
+            # not.  The three run at the values' OWN precision: narrowing a
+            # 1e10 background to float32 before subtracting it left a
+            # one-unit colour range as a single colour.  (The scene, like
+            # ``Normalize``, subtracts a float32 plane's limit in float64;
+            # this front, shown only on a frame the scene cannot paint, is
+            # not its byte-for-byte twin.)  Only the residue, already inside
+            # [0, 256), is narrowed for the lookup, where a 256-level
+            # quantisation is the colormap's own anyway.
             scaled = np.asarray(
                 (values - vmin) / (vmax - vmin) * 256.0, dtype=np.float32
             )
             np.clip(scaled, 0.0, 255.0, out=scaled)
             rgba = lut[scaled.astype(np.uint8)]
         rgba.setflags(write=False)
-        self._artists[cache_name] = (cache_key, rgba)
+        self._artists[cache_name] = (prepared, cache_key, rgba)
         return rgba
 
     def _update_horizontal_histogram(
@@ -11913,6 +12053,15 @@ class MatplotlibRenderer:
                 curve_series[selected_index],
                 label_pt=self.style.fonts.tick_pt,
             )
+        # The overview hid every cell's offset text but the corner's, which
+        # writes the grid's one "x1e-6" / "+3.84e11"; focused, this cell is
+        # the whole plot and states its own again.  Its policy signature is
+        # the one the overview installed, so no installer above revisits it.
+        for coordinate in (selected.xaxis, selected.yaxis):
+            signature = getattr(coordinate, "_zlc_tick_signature", None)
+            offset = coordinate.get_offset_text()
+            if signature and str(signature[0]).startswith("smart-") and not offset.get_visible():
+                offset.set_visible(True)
         if (
             not selected.xaxis.get_tick_params().get("labelbottom", False)
             or not selected.yaxis.get_tick_params().get("labelleft", False)
@@ -13004,7 +13153,7 @@ class MatplotlibRenderer:
                 ),
                 markerfacecolor=self.style.artists.fit_ellipse_color,
                 markeredgecolor=self.style.artists.fit_ellipse_color,
-                markeredgewidth=1.0,
+                markeredgewidth=_FIT_CENTER_EDGE_PT,
                 clip_on=True,
                 zorder=self.style.artists.fit_ellipse_zorder,
             )

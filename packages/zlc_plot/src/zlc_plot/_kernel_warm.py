@@ -30,7 +30,6 @@ import hashlib
 import os
 import pathlib
 import sys
-import tempfile
 from typing import Any, Callable
 
 import numpy as np
@@ -203,6 +202,20 @@ def cold_kernels() -> tuple[str, ...]:
 
 
 # ------------------------------------------------------------ the work
+#: EVERY DTYPE A PRODUCER PUBLISHES A PLANE IN, and each one is another
+#: compile of every kernel that reads a plane in its own dtype.  A camera is
+#: unsigned and may be either width; a derived plane is floating and may be
+#: either width; a derived COUNT is int64 -- every ``count`` reduction of a
+#: derive expression, loaded shots per site among them; a comparison or an
+#: ``any``/``all`` is bool -- an occupancy or survival plane.  ONE tuple for
+#: every warm loop a producer's dtype reaches: the image fit kept a copy of
+#: its own and went on warming four of these after the image warmed eight.
+_PLANE_DTYPES = (
+    np.bool_, np.uint8, np.uint16, np.uint32, np.int16, np.int32, np.int64,
+    np.float32, np.float64,
+)
+
+
 def _image_snapshot(
     height: int, width: int, dtype: Any, *, holes: bool = False
 ) -> Any:
@@ -237,7 +250,11 @@ def _image_snapshot(
         ValueSchema(ValidityContract.value(), np.dtype(dtype), None),
     )
     generator = np.random.default_rng(0)
-    if np.dtype(dtype).kind in "ui":
+    kind = np.dtype(dtype).kind
+    if kind == "b":
+        # An occupancy or survival plane holds both answers; it has no hole.
+        values = generator.random((1, 1, height, width)) < 0.5
+    elif kind in "ui":
         values = generator.integers(0, 4000, (1, 1, height, width)).astype(dtype)
     else:
         values = generator.normal(0.0, 1.0, (1, 1, height, width)).astype(dtype)
@@ -384,12 +401,10 @@ def _render(
     spec: Any,
     parameters: dict | None = None,
     *,
-    zoom_steps: int = 0,
     size: str = "2x2",
     fit: bool = False,
 ) -> None:
     from . import PlotSession  # noqa: PLC0415
-    from .selectors import NumericRange  # noqa: PLC0415
 
     session = PlotSession(snapshot, spec, size=size, parameters=parameters)
     try:
@@ -410,78 +425,6 @@ def _render(
             models = session.fit_models
             if models:
                 session.configure(fit={"model": str(models[0].model_id)})
-        if not zoom_steps:
-            return
-        # A ZOOM IS NOT THE SAME WORK.  Cropping the viewport changes the
-        # reduction ratio, so a frame that was reducing starts drawing
-        # pixel for pixel through the direct colour table instead -- and a
-        # cropped view is strided, so making it contiguous COPIES, which
-        # is where a writable plane came from before every input was
-        # sealed.  Warming only the opening view left an operator's first
-        # wheel notch compiling.  The picture is the cell's trailing two
-        # dimensions of the (repeat, point, ..., y, x) block.
-        height, width = (
-            int(size) for size in snapshot.block.schema.physical_shape[-2:]
-        )
-        span = float(width)
-        for _ in range(zoom_steps):
-            span /= 1.7
-            half = span / 2.0
-            session.set_viewport(
-                NumericRange(width / 2.0 - half, width / 2.0 + half),
-                NumericRange(
-                    height / 2.0 - half * height / width,
-                    height / 2.0 + half * height / width,
-                ),
-            )
-            session.rgba()
-    finally:
-        session.close()
-
-
-def _save(
-    snapshot: Any,
-    spec: Any,
-    parameters: dict | None = None,
-    *,
-    zoom_steps: int = 0,
-) -> None:
-    """Render through the export path, which materializes what native leaves lazy.
-
-    A native draw is the pixel consumer of a live image and rasterizes no
-    fallback picture for it: the block reductions, the colour tables and the
-    view-filling gather that turn a prepared front into RGBA answer only when
-    the scene is MATERIALIZED -- a Save, or a facet overview.  Those are
-    production renders too, and an operator's first Save compiling for a
-    minute is the wheel-notch compile in another place, so the warmer asks
-    for them the way Save does.
-    """
-
-    from . import PlotSession  # noqa: PLC0415
-    from .selectors import NumericRange  # noqa: PLC0415
-
-    session = PlotSession(snapshot, spec, size="2x2", parameters=parameters)
-    try:
-        with tempfile.TemporaryDirectory() as folder:
-            target = pathlib.Path(folder) / "warm.png"
-            session.save(target)
-            if not zoom_steps:
-                return
-            height, width = (
-                int(size) for size in snapshot.block.schema.physical_shape[-2:]
-            )
-            span = float(width)
-            for _ in range(zoom_steps):
-                span /= 1.7
-                half = span / 2.0
-                session.set_viewport(
-                    NumericRange(width / 2.0 - half, width / 2.0 + half),
-                    NumericRange(
-                        height / 2.0 - half * height / width,
-                        height / 2.0 + half * height / width,
-                    ),
-                )
-                session.save(target)
     finally:
         session.close()
 
@@ -510,7 +453,7 @@ def representative_work(
         # kernel that converges to the wrong answer.  It was written to be
         # called from the repository warmer and never was.
         _fit_compiled.self_check()
-        _fit_radial.warm_production_cache()
+        _fit_radial.warm_production_cache(_PLANE_DTYPES)
     if not include_render:
         return
 
@@ -529,44 +472,26 @@ def representative_work(
 
     image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
 
-    # EVERY DTYPE A PRODUCER PUBLISHES IS ANOTHER COMPILE.  A camera is
-    # unsigned and may be either width; a derived plane is floating and may
-    # be either width; a signed or wide integer plane is neither.  Warming
-    # one of them leaves the others to the operator's first frame of each.
-    #
-    # Frame SIZE is not a type -- numba does not see a shape -- but it does
-    # decide which kernel runs at all: a frame small enough to draw pixel
-    # for pixel takes the direct colour table, an oversampled one reduces
-    # and is then coloured from the float mean.  A zoom crosses between the
-    # two, which is the wheel notch that used to compile mid-gesture.
-    #
-    # Every dtype now shares the wide-accumulating block-mean kernel, but
-    # its input dtype remains part of the compiled signature. Small unsigned
-    # fronts also exercise the direct colour-table path before reduction.
-    for dtype in (np.uint8, np.uint16):
-        _render(_image_snapshot(96, 96, dtype), image)
-        _render(_image_snapshot(1200, 1920, dtype), image, zoom_steps=5)
-    for dtype in (np.uint32, np.int16, np.int32, np.float32, np.float64):
-        _render(_image_snapshot(1200, 1920, dtype), image, zoom_steps=5)
-    for dtype in (np.float32, np.float64):
-        # With holes: the masked block sum, which also counts.
-        _render(_image_snapshot(1200, 1920, dtype, holes=True), image)
-    # The same pictures materialized, as a Save materializes them: the
-    # exact unsigned block sum and the direct colour table for a narrow
-    # unsigned frame, the counting block mean and the float colour table
-    # for a floating one, and the view-filling gather of a zoomed front.
-    _save(_image_snapshot(96, 96, np.uint16), image)
-    _save(_image_snapshot(1200, 1920, np.uint16), image, zoom_steps=2)
-    _save(_image_snapshot(1200, 1920, np.float64, holes=True), image, zoom_steps=2)
+    # Every plane dtype (:data:`_PLANE_DTYPES`), because warming one of them
+    # leaves the others to the operator's first frame of each.  One frame
+    # of each is all a dtype asks.  The image kernel reads the whole sealed
+    # source and colours it in the source's own dtype, so the frame's size
+    # is not a type, a zoom moves only the kernel's affine, and a Save hands
+    # the raw array to Matplotlib, which compiles nothing.
+    for dtype in _PLANE_DTYPES:
+        _render(_image_snapshot(1200, 1920, dtype), image)
+        if np.dtype(dtype).kind == "f":
+            # With holes: the same kernels over a plane with NaN in it.
+            _render(_image_snapshot(1200, 1920, dtype, holes=True), image)
 
     series = _series_snapshot(8, 400)
     # The centred second moment and fused curve validity/bounds pass.
     _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True})
     # The band's centred moments read a camera or derived plane in its own
     # dtype -- a dense profile and a scan-point fold alike -- so each
-    # storage is its own compile of that kernel (float64 is the series;
-    # bool is an occupancy or survival band).
-    for dtype in (np.bool_, np.uint8, np.uint16, np.uint32, np.int16, np.int32, np.float32):
+    # storage is its own compile of that kernel (bool is an occupancy or
+    # survival band, int64 a derived count's).
+    for dtype in _PLANE_DTYPES:
         _render(
             _image_snapshot(8, 16, dtype),
             CurvePlot(AxisRef.cell_data("x")),
@@ -600,9 +525,11 @@ def representative_work(
         RollingPlot(group=AxisRef.cell_data("site")),
         {"trailing": 4, "uncertainty": True},
     )
-    for dtype in (np.float32, np.float64):
-        # A floating ROI pooled into grouped shot means and a centred SEM
-        # reaches the same axis-code kernel as an indexed Rolling window.
+    for dtype in _PLANE_DTYPES:
+        # A ROI pooled into grouped shot means and a centred SEM reaches the
+        # same axis-code kernel as an indexed Rolling window, and a histogram
+        # bins its values, both in the STORED dtype: a site-grouped history
+        # of occupancy or survival is bool, a camera's counts are integers.
         _render(_image_snapshot(8, 16, dtype),
                 RollingPlot(group=AxisRef.cell_data("x")), {"uncertainty": True})
         _render(_image_snapshot(8, 16, dtype, holes=True), HistogramPlot())
@@ -679,10 +606,13 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     A short slice of :func:`representative_work`, and a cheap one: a
     request that arrives while this runs shares the process with it, so
     every second here is a second that request may wait.  The pictures a
-    panel most often opens on -- a camera frame drawn larger than it is
-    and one reduced, a floating derived plane, a histogram, a curve with
-    its band, a grid of cells -- on frames just big enough to take each
-    path; not the zooms or saves, which have first uses of their own.
+    panel most often opens on -- grids of camera frames, floating planes,
+    histograms and curves, a single camera frame and a floating derived
+    plane of either width, the curves and the image whose shape selects a
+    signature of its own -- each once, in its storage: the image kernel
+    colours the whole source in its own dtype, so a frame's size is not a
+    type, a zoom moves only the kernel's affine, and a Save compiles
+    nothing.
 
     ORDER IS THE WHOLE DESIGN, because this gets cut off.  ``proceed`` is
     asked before every step and answers False from the moment a panel is
@@ -724,9 +654,9 @@ def warm_process(proceed: Callable[[], bool] = lambda: True) -> None:
     )
     if not proceed():
         return
-    # The same grid over a floating frame: a grid's cells colour a small
-    # frame straight from the table, one kernel per dtype, and a grid of
-    # small float images still loaded the float one on its first frame.
+    # The same grid over a floating frame: a grid's scene paints its cells
+    # through the image kernel, compiled per dtype, and a grid of small
+    # float images still loaded the float one on its first frame.
     _render(
         _image_snapshot(96, 128, np.float32), FacetGridPlot(None, image), size="4x4"
     )
@@ -1016,10 +946,9 @@ def warm(force: bool = False) -> str:
 def main() -> int:
     """``warm_numba_cache``: compile-or-verify every kernel, say which.
 
-    A MISSING DEPENDENCY IS NOT A FAILURE HERE -- ``warm`` says so and
-    returns, because the numpy reference engines still draw.  So anything
-    that reaches this handler is a defect in the warmer or a kernel, and the
-    operator is told that rather than told to install something they have.
+    numba is a dependency of every kernel module, not an option, so a
+    failure here is reported as it is: the traceback names the kernel or the
+    render that raised.
     """
 
     try:
@@ -1029,10 +958,6 @@ def main() -> int:
 
         traceback.print_exc()
         print(f"\nwarmup failed: {type(error).__name__}: {error}")
-        print(
-            "This is a defect in the warmer or a kernel, not a missing "
-            "package: numba's absence is reported, never raised."
-        )
         return 1
     return 0
 

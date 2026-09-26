@@ -1201,9 +1201,15 @@ def apply_smart_ticks(
         scale = str(axis.get_xscale() if name == "x" else axis.get_yscale())
         # Reinstalling a locator resets the axis' tick artists, which both
         # reallocates them every frame and leaves them unpositioned until the
-        # next full Axis draw.  Install once per configuration.
+        # next full Axis draw.  Install once per configuration -- and only
+        # while the policy is still THERE: every ``set_xscale`` puts
+        # Matplotlib's default locator and formatter back, and a function
+        # scale set again for new coordinates keeps the same scale name, so
+        # the signature alone said "installed" over an AutoLocator for good.
         signature = (f"smart-{name}", scale, size_pt)
-        if getattr(target, "_zlc_tick_signature", None) == signature:
+        if getattr(target, "_zlc_tick_signature", None) == signature and isinstance(
+            target.get_major_locator(), SmartOffsetLocator
+        ):
             continue
         locator = SmartOffsetLocator(measure=_label_size_pt, label_pt=size_pt)
         offset_xy, offset_coords, offset_ha, offset_va = _OFFSET_PLACEMENT[name]

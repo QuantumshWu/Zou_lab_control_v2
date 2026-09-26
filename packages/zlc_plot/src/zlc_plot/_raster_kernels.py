@@ -1510,8 +1510,6 @@ def raster_prepared_images(
     clips,
     affines,
     lut,
-    vmin32,
-    span32,
     vmin64,
     span64,
     single,
@@ -1537,7 +1535,8 @@ def raster_prepared_images(
     it -- ``(sx, shy, shx, sy, tx, ty)``, mapping a point of the resampled
     picture, x rightward and y UPWARD from its bottom-left corner, to
     array pixel coordinates.  ``single`` says the promoted dtype is
-    float32 (``vmin32``/``span32``), else float64.
+    float32, else float64; the limit and the span are float64 either way,
+    as ``Normalize`` holds them.
     """
 
     cells, source_rows, source_columns = values.shape

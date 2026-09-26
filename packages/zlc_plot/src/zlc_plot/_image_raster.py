@@ -295,18 +295,14 @@ class ImageFrontStore:
     so a gesture's preparation cost O(display pixels) instead of O(source
     pixels).
 
-    IT WAS WRITTEN BEFORE THE COMPILED BLOCK SUM EXISTED, and that kernel
-    took its reason away -- reducing straight from the source is now 0.7 to
-    2 ms, while building one level costs 7 to 14 ms on a floating frame.
-    Measured across three dtypes at 2048 square: on a first frame reducing
-    directly won by 3.3x and 10.5x; over a zoom the two were within a fifth
-    of each other either way, so at best the level paid itself back after a
-    hundred and thirty steps and at worst never; panning at a fixed zoom,
-    twelve cases across two display densities, it won none and tied one.
-
-    A source narrow enough to sum exactly already bypassed it, by a judge
-    written for exactly this reason.  That judge, the levels, their cache
-    and the token that invalidated it are all gone with it.
+    Reducing straight from the source (:func:`_area_mean`) is 0.7 to 2 ms,
+    while building one level cost 7 to 14 ms on a floating frame.  Measured
+    across three dtypes at 2048 square: on a first frame reducing directly
+    won by 3.3x and 10.5x; over a zoom the two were within a fifth of each
+    other either way, so at best the level paid itself back after a hundred
+    and thirty steps and at worst never; panning at a fixed zoom, twelve
+    cases across two display densities, it won none and tied one.  The
+    levels, their cache and the token that invalidated them are gone.
     """
 
     _LRU_CAPACITY = 6
