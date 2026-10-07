@@ -306,6 +306,10 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         assert datasets
         loaded, recipe = read_figure_plot(info, arrays, datasets, next(iter(datasets)))
         assert loaded is not None and recipe["spec"] is not None
+        if name == "trajectory_2d":
+            selected = e.task._plan["source_indices"]
+            assert loaded.overlay.point_ids == tuple(e.task._overlay_geometry["point_ids"][i] for i in selected)
+            assert loaded.overlay.labels == tuple(e.task._overlay_geometry["labels"][i] for i in selected)
         from zlc_workbench.viewer import describe_archive
         description = describe_archive(info, arrays)
         assert e.task.instance_id in dict(dict(description.tabs)["Logic"])

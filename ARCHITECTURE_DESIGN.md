@@ -371,6 +371,7 @@ Node new chunk
 - 自动附加run静态geometry与动态companion overlay共用Plot的同一匹配判据：image axis IDs及coordinate frame必须一致。相机站点geometry不能画到SLM phase等另一坐标系的Image，不按output name特判。
 - Data、Fit和Overlay共同使用同一个scope/axis/fate projection；动态Overlay读取其exact publication，并跟随主图已物化快照的范围：主图没有`DataBlock.window`时读取canonical prefix，不受其它Panel对companion的history lease影响，也不用最后event chunk覆盖finite前缀；主图有window时读取相同start/latest，不能拿另一个保留范围拼图。范围事实只由Runtime提供，不按axis名字猜测。公共`projection_scope`将`Last`化为各Reduced axis声明顺序的末coordinate，随后与显式Scope和facet走同一限制；不是最后valid值，不回退到之前已采位置。Overlay只借Repeat/Point确定对应采集cell，保留自身完整site向量，不把图像pixel axis当site axis。Mean没有另外一套Boolean归约/共识判断；scope后仍有多个Repeat/Point cells就不画离散判决。无法唯一对齐则拒绝。
 - 图像数据更新是一份完整presentation输入；新数据未携overlay表示该帧没有overlay，直接更新与Host管线都必须清除旧层。同一数据上的显式overlay-only编辑仍是独立配置事务。动态status的invalid或无法唯一选定状态不画判断圈；静态Calibration/point-review显式标记不受该数据有效性规则影响。
+- 有序XY路径复用同一ImagePointOverlay的site图标、status颜色与贴点编号，不按path另分配palette。路径比site轮廓细，只在实际末端放一个箭头；同状态的site、路径及箭头先形成几何并集，再应用一次alpha，连接、交叉和共线覆盖不能重复加深。普通无path SiteMap保持原画法。完整顶点仍在typed数据里；图面只给共有帧范围及必要的等待/折返顺序标记，保留全部显式site编号，不能用密集文字替代路径。屏幕、导出和重开共用同一renderer与最终几何。
 - ROI/binning坐标只由一个transform owner处理。
 - 分组颜色直接按源坐标序号读取公共line cycle，不跳过首槽：group[0]与未分组曲线均为原灰色#808080，其余依次使用共享色表。Curve/Rolling/Histogram、Facet overview/focus及meter共用同一映射；颜色不随当前可见子集重新编号。
 - Producer联动只修改下一次运行的唯一Logic草稿，不改正在执行的运行。删除ROI时恢复联动前对应字段的草稿值，不从设备readback或Panel显示范围猜初值；必要的撤销记录留在现有authoring owner，不成为另一份可编辑草稿。每个字段只由最近写入它的Panel持有撤销权，多Panel不堆叠旧patch；用户之后手动改写的字段不被ROI撤销覆盖。运行一旦开始，它启动时用的值就是producer自己的值：撤销记录清空，之后删除ROI保留的是最近一次运行使用的值，不回到运行之前的草稿。数值控件的被动规范化沿同一draft patch标明normalized，更新唯一草稿但不取消撤销权，普通Form与Scan贡献编辑器相同；不能靠浮点容差或JSON文本顺序猜测用户意图。镜像删除使用公共panel_plot_selectors给出的绘制种类，不把Curve Area的x_range数值语义当成实际图形类型。没有producer参数语义的Histogram选区只限制数据，不联动producer。
@@ -516,6 +517,7 @@ Node new chunk
 - Initial command state是unknown，只有成功write/display/readback/settle后才known。
 - Side effect失败区分known-old、known-new和unknown outcome。
 - Vendor correction是server的Init字段（`correction_path`），启动时按表单加载，进入command receipt；运行中没有correction mutation入口。remote单帧与sequence共享同一physical mapping/command owner。sequence既可预装完整影片，也可声明总帧数后逐帧提交；两者共用映射与本地paced播放。流式提交仅接受连续编号的已验证uint8图，通过容量2的队列施加背压，不覆盖、不丢帧；proxy的唯一上传worker使用同一sequence token和持续连接，不接管hardware。Stop/失败唤醒上传及播放等待，释放缓存并保留最后已确认相位，不能把已入队当作已显示。
+- 同一sequence和mapping内，字节完全相同的相邻相位图只传前帧引用并复用映射；不以近似相等或画面相似代替。已确认且未改变的像素通过HOLD保留完整authored时间，不重复BitBlt/USB换槽/读回。receipt区分全部逻辑step与真正的新presentation/ACK；未知状态不能HOLD。最终profile稳定时间从最后一次真实presentation ACK计算，不能每个HOLD重新起算。缓存只持必要前帧，不增加跨run图像仓库或另一个hardware owner。
 - Profile记录model、serial、wavelength、phase curve来源和settle语义；不新增hash。
 - Editor明确区分authoring draft与device command；external Task后旧Send不得静默覆盖。
 - Editor的device状态问句（100 ms轮询与每次草稿变化）在Editor自己的串行command executor上问、在Qt线程上显示：一次只有一问在途，command进行中不问——command的交付本身带回它留下的device状态；Qt线程从不等在remote proxy的apply锁后面：proxy缓存的状态有自己的短锁，任何状态读（含Editor构造时的第一次）都不等apply的网络往返；远端慢apply只推迟状态行，不冻结event loop。
@@ -556,6 +558,7 @@ Node new chunk
 - 输入站点的数组顺序是身份。motion_frames默认16，为实际发出总图数（包含终点、不含已显示的起点），按plan.fraction给出的waypoint时间在等间隔时刻采样，不静默增图。返回坐标与相位图对应真实分数格点，不把1280列FFT裁成1272列冒充同一坐标。约束是同一时刻的最小间距，检查实际发出图之间的连续线段（包括起点）；空间路径可在不同时间交叉。少帧切角若不满足间距则拒绝，准备缓存按实际帧上界分配。
 - 重排核心输入初始Target、占据源索引及显式终点Target，匹配数为两者可用数量的较小值；代价是实际欧氏距离而非平方距离。多余原子只取最短匹配子集，其余光阱淡出；不足时保留全部可用原子并匹配最小距离的终点子集，未填终点如实记录。使用现有依赖的矩形线性指派，删除旧固定基数/半径CSR及整数平方代价实现，也不保留“多余原子原地留存”选项。连续时间最小间距包含移动原子和淡出期间尚未移除的原子；光学关阱不等于原子已离开，未验证的释放过程明确记录，不把自由指派的最优性冒充一般带障碍多原子路径的全局最优。
 - 直线路径不满足间距时，只在既有owner内作有界的等代价pair交换、先/后移动等待及局部waypoint修复；没有找到合格方案报no valid schedule found，不断言物理上无解。记录欧氏指派下界、实际总路径长度、detour ratio及方法，不保证一般碰撞约束下全局最短。候选仅改变一条路径时缓存其它pair距离，以同一连续距离公式重算该路径对其它路径；最后仍检查完整实际发出轨迹。最小总距离不等于最小最长移动距离、最短播放时间或最高存活率。
+- 连续最小距离计算先用初态距离及扣除公共平移后的残余位移构造保守pair下界；不可能比已知初态最小距离更小的pair不再逐段计算。候选仍使用同一精确线段最小距离公式，并计入浮点误差界；不能用采样距离、物理容差或特定阵列形状替代实际clearance。
 - 全幅相位约束校正、最终图的光阱强度与相位必须用同一个光学模型；紧凑频率支撑只减少严格为零的运算，不缩小物理孔径。Tensor Core数值误差须由独立全幅传播实测；未收敛如实返回失败，不放宽科学阈值凑时间。编译/初始化与在线计算分别报告。
 - 所有发出图共用同一分数Fourier合成、实际编码光场测量与幅度更新；不保留固定64轮全幅FFT的独立移除阶段，也不在阶段边界跳到重新求解的任意终点相位。相位从真实起始场沿原子身份连续延续，未占据光阱的淡出合入同一序列；明确报告保留光阱峰值光强比例与相邻帧相位变化，不把相对均匀度等同于绝对阱深或实验存活率。少量初始更新后只修正未达本次公开质量门的帧，不能默默放宽门限；没有通过的预测模型不作为依赖保留。
 - 丢弃占据源不仅是系数归零：淡出完成后，每个被丢弃占据站点的5×5原生Fourier像素区域最大光强须≤该站点初始中心光强的0.01。同一稀疏Fourier算子作自适应复光场投影（每帧最多64次，bright相位随当前场延续），携带前帧校正；位置/期望谱不变且已通过门限时复用同一已验证相位图。其它未占据位置背景仍为诊断。此数值消光门不是原子已离开或不会再装载的证明；焦面站点相位步长与pupil加权像素相位步长RMS分别命名、分别保存。
@@ -565,6 +568,8 @@ Node new chunk
 - 相位码与设备灰度不是同一事实。方向、vendor correction及波长LUT继续由设备mapping owner负责；生成端不能复制另一份默认映射。软件传播、像素响应模拟及实际光学/原子存活验收分别报告，不以模拟代替实验结果。
 - 粗网格与实际编码光场反馈的对数幅度迭代共用深度2的Anderson残差混合；历史只属于当前帧的当前分辨率，换帧/分辨率或改变修正阻尼时重置，不在占据批次之间继承旧答案。小Gram系统使用float64，原生检查仍用FP32 Fourier计算并由独立complex128传播验证。拒绝候选时保留已接受的系数、相位码和光场，最终强度/暗位门不因加速而改变。
 - Host输出使用working-point自有的CuPy pinned pool，按`maximum_motion_frames`界定size classes；同一运动帧上界限定GPU中间数组。设备分配器的stream arena必须随自己的工作区释放或复用，不让重复Start积累闲置显存。预备内存/时间须明确报告，关闭只清自己的闲置pool，仍被调用者持有的输出保持有效；不得清全局allocator或复用尚被持有的数组。
+- 准备只保留有消费者的结果：不生成未使用的initial_pattern_phase，不预留每种影片长度各两份pinned块；预留本working point最大影片的一块，实际已交付且仍持有的结果继续独占内存。Fourier band容量由源列、最多匹配数及完整halo列的结构上界确定，不为不可能出现的band建graph；不按GPU型号、特定site数或测试用格距选择优化。
+- 已验证不变帧必须在baseline计算与候选修正之前判定复用，并按当前几何、active roster与bright/discard门核对已有光场。保持相同数据真相，不为了产生随后丢弃的候选而继续迭代；从hold恢复运动仍通过同一数值流程与独立光场/相位检查，不要求维持旧冗余迭代造成的warm-start轨迹。
 - 相位码序列的host buffer由每次调用独占，不保存在可复用workspace；传输完成后以只读buffer视图交出，普通写入及重新设为writeable均拒绝，后续计算不能覆盖仍被持有的结果。不为交付整部影片额外复制bytes；这是caller-owned只读传输结果，不是Runtime的bytes-backed DataBlock。`endpoint_data`提供实际source_phase，准确保持输入command；终点仍由同一连续轨迹产生，不额外重新求一个任意光学相位的target。
 - motion_frames为实际发出相位图的总数；其它源系数在前min(2,N)图内淡出，不额外隐藏增加移除帧，也不恢复旧dark_tolerance参数。空占据是零匹配、不播放新相位的正常结果。最大实际单帧位移及同一路径/时间分配下≤1 Fourier bin/frame的参考帧数单独报告；该参考不是实验安全阈值。同一compute路径可在每帧编码质量检查与host复制完成后调用frame_ready(index, readonly_frame)，并继续计算下一帧；不能越过未通过的帧提交后续帧。保留整部结果供归档，回调背压另记而不是冒充数值计算开销。
 

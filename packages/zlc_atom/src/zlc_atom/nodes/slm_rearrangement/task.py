@@ -448,7 +448,8 @@ class SlmRearrangementTask:
                 ids = self._plan["source_indices"]
                 overlay = None if not len(ids) else ImagePointOverlay(
                     revision=self._revision, coordinates=self.points[0][ids, ::-1],
-                    point_ids=tuple(str(i) for i in ids), labels=tuple(f"#{i+1}" for i in ids),
+                    point_ids=tuple(self._overlay_geometry["point_ids"][i] for i in ids),
+                    labels=tuple(self._overlay_geometry["labels"][i] for i in ids),
                     static_statuses=tuple(PointStatus.OCCUPIED for _ in ids), paths_xy=path)
                 plot_input = source_image if overlay is None else ImageFrame(source_image,overlay)
                 axes = source_image.block.schema.cell_domain.axes
@@ -646,12 +647,13 @@ class SlmRearrangementTask:
                             raise
 
                     try:
+                        compute_started = perf_counter()
                         self._result = compute_rearrangement(prepared, plan,
                             motion_frames=self.motion_frames,
                             support_tolerance=self.intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
                             stop_requested=context.cancel_requested)
-                        self._timings["compute_and_feed"] = (perf_counter()-online_started)*1000
+                        self._timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
                         for name, value in self._result["timing_ms"].items():
                             self._timings["compute_"+name] = float(value)
                         if not self._result["converged"]:

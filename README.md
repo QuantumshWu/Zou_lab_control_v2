@@ -192,40 +192,79 @@ movement per map remain diagnostics. Focal-site phase steps and pupil-weighted
 pixel-phase RMS steps are distinct reported measurements. Neither numerical
 gate proves atom release, moving-well shape, liquid-crystal response or survival.
 
-Full-native 1024 × 1272 checks on an RTX 5070 Laptop GPU used the lab pupil,
-25-bin source spacing and 10 total maps:
+Optimization removes work before making the remaining operations faster:
+unchanged accepted frames are reused before unused amplitude trials; continuous
+clearance uses conservative pair-distance bounds, with the same exact segment
+formula for candidates; preparation builds only the bands its geometry can use
+and reserves one maximum movie buffer rather than two of every size class.
+There is no GPU-name, trap-count or chosen-grid shortcut. Held output buffers
+remain independently owned across another computation and workspace close.
 
-| Case | CPU planner | Standalone shared generator, including host transfer | Independent bright ratio / discarded-region ratio after fade |
-| --- | ---: | ---: | ---: |
-| Archived 35 → 9, no selected-trap movement | 0.66–1.28 ms | 63.76 ms | 1.008742 / 0.00001081 |
-| Synthetic 225 → 100, fixed-seed 112 occupied, uniform weights | 42.7 ms after pair-distance caching | 63.54 ms | 1.009875 / 0.003415 |
+Full-native 1024 × 1272, 25-bin-spacing measurements on an RTX 5070 Laptop GPU
+gave these same-process standalone generation medians, including host transfer:
 
-Preparation is outside these online windows: measured 1.74 s and 2.66 s
-respectively, with repeated preparation about 0.43 s and 0.76–0.88 s; new CUDA
-compilation can take longer. Per-frame host transfers summed to about 1.8–2.0 ms and
-is already included in its total. Independent complex128 propagation checked
-every delivered map. Repeated close released the owned GPU arenas; generated
-source preparation retained a constant 10.4 MB CuPy FFT cache, not per-run growth.
-These are local measurements, not an exact T400 timing prediction.
-
-Matched real-GPU computation plus simulated X15213/RPC playback, authored at
-60 Hz, measured the following. The window starts at generator entry, after
-matching; streaming setup was performed before that window.
-
-| Case | First software output, sequential → pipeline | Compute start → playback call complete, sequential → pipeline |
+| Case, 10 maps | Before | After |
 | --- | ---: | ---: |
-| 35 → 9 | 109.69 → 37.74 ms | 331.75 → 262.52 ms |
-| 225 → 100 | 94.21 → 35.55 ms | 316.25 → 254.16 ms |
+| Archived 35 → 9, no selected-trap motion | 68.9 ms | 46.4 ms |
+| 225 → 100, 112 occupied | 72.7 ms | 66.6 ms |
+| 400 sites, rigid motion | 223.2 ms | 45.5 ms |
+| 400 → 100, 200 occupied, nonrigid motion | 144.7 ms | 117.9 ms |
 
-All 10 maps were acknowledged. Actual software intervals were about 17–20 ms
-(roughly 50–59 Hz), not proven 60 Hz optical refresh. The final profile hold
-was applied once, with about 33 ms remaining after the last interval.
-During overlap, generator wall time was 113.82/127.94 ms, including callback
-time 3.23/1.04 ms; concurrent in-process upload/mapping and CPU/GIL scheduling
-also expand the solver wall window. This is not pure CUDA kernel time, and
-overlapping generation/upload/playback windows must not be added. The shared
-frame-major solver preserved every phase byte, measured field and quality
-metric bit-for-bit against both saved pre-pipeline results.
+For the static case, 15/30 maps changed from 79.6/110.2 to 45.1/47.1 ms.
+Rigid-motion speedup mainly removes redundant geometry comparisons; it is not
+a claim that arbitrary 400-site rearrangement takes 45 ms. Independent complex128
+propagation checked every delivered map, also covering genuinely partial35-site
+occupancy, hold/resume and an odd 127×159 nontrivial pupil. The same bright 1.01 and
+discarded-region 0.01 gates remain. A hold/resume continuation can choose a
+different valid map after discarded intermediate work is removed; it is checked
+by the optical gates and phase diagnostics, not assumed bit-identical.
+
+Warmed source-35 preparation was approximately 355–385 ms after reduction,
+versus 417–476 ms in the recorded baseline cohort. A new CUDA compilation took
+2.49 s and is separate from online work. The max-30 pinned reservation fell from
+252 to 64 MiB; a first max-sized allocation actually consumes the reserved block.
+No unbounded working-point cache or global allocator clearing was added.
+
+Whole-online measurements start at occupancy-ready, include matching and
+first-callback stream prepare/bind, and end after the software playback call and
+remaining final hold. They exclude cold preparation, camera readout and saving.
+With the SAME current device transport, old and new solvers both pipelined:
+
+| Case | First software output, before → after | Whole online, before → after |
+| --- | ---: | ---: |
+| Real35, 17 occupied, 9 destinations, 16 maps | 27.5 → 58.6 ms | 428.3 → 439.5 ms |
+| Nonrigid400 → 100, 200 occupied, 10 maps | 100.3 → 34.1 ms | 336.0 → 283.3 ms |
+
+The small-case whole-flow gain was NOT proved in that cohort: stream setup
+varied 3.9→19.2 ms. Earlier sequential-versus-pipeline comparisons are a different
+baseline and must not be presented as this round's gain. Repeated hot/one-second
+idle probes also showed runtime outliers; no hard latency bound or attribution
+to GPU throttling is justified. A four-call follow-up observed 75–92 ms of standalone
+generation with unchanged iteration counts and only one 0.30 ms minor collection;
+that did not reproduce or explain the earlier 191 ms sample. These are simulated software presentation/ACK
+timings, not physical SLM or T400 measurements. Overlapping solve/feed/play
+windows must not be added, and GPU-to-host wait time is not all avoidable CPU work.
+
+Exact adjacent repeats now travel as a previous-frame reference and reuse the
+mapped pixels. Under exclusive ownership, known unchanged output is held without
+another DVI draw, USB switch/readback, or simulation-world propagation. Every
+authored interval remains; receipts distinguish logical steps from actual new
+presentation ACKs. Final settling is measured from the LAST actual presentation,
+not restarted by every hold. The verified two-unique-map replay gives:
+
+| Logical frames | Payload before → after | Local replay before → after | Simulated100 Mb/s replay before → after |
+| --- | ---: | ---: | ---: |
+| 10 | 13.03 → 2.61 MB | 231 → 196 ms | 1197 → 394 ms |
+| 15 | 19.54 → 2.61 MB | 319 → 286 ms | 1742 → 473 ms |
+| 30 | 39.08 → 2.61 MB | 579 → 530 ms | 3432 → 720 ms |
+
+This replay excludes GPU generation/setup and is not an actual LAN measurement.
+All-unique frames still pay a small exact-comparison cost (about1.8 ms in one local
+10-frame cohort); no universal speedup is claimed. Raw full-size 60 Hz traffic is
+about 625 Mb/s before overhead. Lossless compression was measured rather than
+enabled blindly: moving uint8 LZ4 streams grew, and shuffled native float32 saved
+about 16% but cost 29 ms to transform/encode/decode, unfavorable on local/gigabit
+links. No codec dependency, bandwidth guesser or speculative ACK window remains.
 
 ### One-shot SLM Rearrangement Task
 
@@ -281,8 +320,9 @@ Actual Config-filled periods and nested loops determine the conservative
 verification deadline. Camera reception continues independently during GPU/SLM
 work. Late playback or an evidently early verification photo is rejected;
 a host receive timestamp is not a physical exposure timestamp. The physical
-SLM owner plays verified frames locally as they arrive, acknowledges every frame,
-and applies remaining final settle only once. Update both client and server
+SLM owner plays verified frames locally as they arrive, confirms every logical
+step, and applies remaining final settle only once. Repeated holds reuse a prior
+confirmation rather than inventing new display ACKs. Update both client and server
 for sequence protocol v2. DVI acknowledgements prove software rendering,
 not vblank or liquid-crystal settling.
 Queue admission/upload acknowledgement is not display acknowledgement. Missing
@@ -295,9 +335,12 @@ The three automatic previews are before photo + occupancy, after photo +
 occupancy, and source/final phase. The **trajectory** signal stores full ordered
 X,Y positions by step and source identity, including the initial position;
 it is not automatically plotted as Y against frame. Saved
-`figures/trajectory_2d.npz` + `.png` show a white XY plot of each trap's paths,
-direction arrows, frame labels and wait spans: circles mark starts, squares
-mark ends, and stable path colors follow source order. The Figure keeps the true
+`figures/trajectory_2d.npz` + `.png` show a white XY plot using the common SiteMap
+glyphs, status colors and source identifiers. A thinner path terminates in one
+arrow; same-status site/path/head geometry is unioned before applying alpha once,
+so joins and overlaps do not darken. There are no per-path colors or endpoint
+boxes. A shared frame range and compact exceptional-order tags keep text sparse.
+The Figure keeps the true
 source Target intensity Dataset; `show_image=False` hides only its pixel layer.
 The NPZ retains typed ordered XY vertices, including holds
 and backtracking, so FigureViewer can redraw it. These are planned trap paths,
@@ -318,11 +361,18 @@ Stop/failure saves partial evidence
 and the last confirmed phase; unknown device outcomes remain explicit.
 Target filling is not per-atom identity-tracked survival.
 
-Current acceptance: the earlier batch native virtual Task flow and 34 focused
-tests passed. Streaming numerical/RPC checks pass, but its formal native Task
-flow is being checked. The sparse FigureViewer static/dynamic seam is fixed and
-visually accepted; dense trajectory styling is still being refined. Final whole
-flow, experimental SLM optical response and atom-survival acceptance remain pending.
+Numerical/RPC/Task and public Figure tests cover verified prefixes, cancellation,
+early upload EOF, retained output ownership, and exact static/dynamic overlays.
+The final combined native virtual Task flow passed with actual GPU computation,
+16 ordered logical confirmations, two valid photographs, exact final phase and
+matching photo/path identifiers. Fresh FigureViewer reopened that saved result.
+All test windows and render children were closed. Sparse and 100/400-site 4×4 path figures were checked
+on screen and on save/reopen, with all source IDs retained and no measured text
+overlap/clipping. Compact 2×2 views remain pixel-limited for exceptional timing tags;
+use the existing size/zoom controls. Full Agg overlay drawing still costs about
+32/181 ms for 100/400 paths in the measured report-view cohort; it is outside
+the photo-to-playback path, not a new fast scientific renderer. Experimental
+SLM optical response and atom-survival acceptance remain pending.
 
 Task Console, Device Control, Pulse Editor and SLM Editor share one
 `ExperimentSession`, named devices, signal plane and sequencer. Loaded-device
