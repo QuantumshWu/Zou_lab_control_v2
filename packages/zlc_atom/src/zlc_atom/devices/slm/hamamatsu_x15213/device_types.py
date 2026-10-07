@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from queue import Empty, Queue
 import re
+import sys
 from threading import Event, Lock, Thread
 import time
 from typing import Callable, Mapping
@@ -24,7 +25,7 @@ from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse.endpoint import local_ipv4_addresses
 
 from .. import open_slm_control
-from ..device import bind_slm, canonical_phase
+from ..device import bind_slm, canonical_phase, phase_from_codes, phase_sequence_codes
 from .remote import _RemoteSlmAdapter, _open_slm_server
 
 
@@ -236,7 +237,7 @@ def _native_dvi_client_geometry(hwnd: int) -> tuple[int, int, int, int]:
 
 def _open_dvi_presenter(
     display_name: str,
-) -> tuple[Callable[[np.ndarray], None], Callable[[], None]]:
+) -> tuple[Callable[[object], None], Callable[[], None], Callable[[np.ndarray], None]]:
     """Restore the exact physical-raster presenter used before USB-only M6."""
 
     geometry = _display(display_name)
@@ -262,6 +263,7 @@ def _open_dvi_presenter(
                 root, borderwidth=0, highlightthickness=0, background="black"
             )
             label.pack(fill="both", expand=True)
+            prepared_photos = []
 
             def poll() -> None:
                 try:
@@ -272,11 +274,16 @@ def _open_dvi_presenter(
                 if command is None:
                     root.destroy()
                     return
-                frame, done, result = command
+                operation, frame, done, result = command
                 try:
-                    photo = ImageTk.PhotoImage(
-                        Image.fromarray(frame, mode="L"), master=root
-                    )
+                    if operation == "prepare":
+                        prepared_photos[:] = [
+                            ImageTk.PhotoImage(Image.fromarray(raster, mode="L"), master=root)
+                            for raster in frame
+                        ]
+                        return
+                    photo = (prepared_photos[frame] if type(frame) is int else
+                             ImageTk.PhotoImage(Image.fromarray(frame, mode="L"), master=root))
                     label.configure(image=photo)
                     label.image = photo
                     root.update_idletasks()
@@ -304,7 +311,7 @@ def _open_dvi_presenter(
                     result.append(error)
                 finally:
                     done.set()
-                root.after(0, poll)
+                    root.after(0, poll)
 
             root.deiconify()
             root.lift()
@@ -327,14 +334,20 @@ def _open_dvi_presenter(
     if startup:
         raise RuntimeError("X15213 DVI presenter failed to start") from startup[0]
 
-    def present(frame: np.ndarray) -> None:
+    def send(operation: str, frame: object) -> None:
         done = Event()
         result: list[BaseException] = []
-        commands.put((np.array(frame, copy=True), done, result))
+        commands.put((operation, frame, done, result))
         if not done.wait(5.0):
             raise TimeoutError("X15213 DVI transport did not acknowledge the frame")
         if result:
             raise RuntimeError("X15213 DVI transport rejected the frame") from result[0]
+
+    def present(frame: object) -> None:
+        send("present", frame if type(frame) is int else np.array(frame, copy=True))
+
+    def prepare(frames: np.ndarray) -> None:
+        send("prepare", frames)
 
     def close() -> None:
         commands.put(None)
@@ -342,7 +355,7 @@ def _open_dvi_presenter(
         if thread.is_alive():
             raise TimeoutError("X15213 DVI presenter did not close within 5 seconds")
 
-    return present, close
+    return present, close, prepare
 
 
 def _sdk_library() -> Path:
@@ -730,9 +743,12 @@ class X15213Adapter:
         self._command_revision = 0
         self._phase: np.ndarray | None = None
         self._last_gray: np.ndarray | None = None
+        self._sequence: dict[str, object] | None = None
+        self._sequence_cancel = Event()
+        self._display_slot = 0
         self._transport = str(authored["transport"])
         self._presenter: tuple[
-            Callable[[np.ndarray], None], Callable[[], None]
+            Callable[[object], None], Callable[[], None], Callable[[np.ndarray], None]
         ] | None = None
         self._display_name = ""
         self._dvi_controller_mode_proven = False
@@ -824,18 +840,21 @@ class X15213Adapter:
             return dict(self._last_receipt)
 
     def _gray(self, canonical: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
-        mapping = self._mapping_snapshot()
-        oriented = canonical
-        if self._flip_y:
-            oriented = oriented[::-1, :]
-        if self._flip_x:
-            oriented = oriented[:, ::-1]
         phase_code = np.mod(
-            _half_up(oriented.astype(np.float64) * (128.0 / np.pi)), 256.0
-        ).astype(np.uint16)
+            _half_up(canonical.astype(np.float64) * (128.0 / np.pi)), 256.0
+        ).astype(np.uint8)
+        return self._gray_codes(phase_code)
+
+    def _gray_codes(self, codes: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
+        mapping = self._mapping_snapshot()
+        phase_code = codes
+        if self._flip_y:
+            phase_code = phase_code[::-1, :]
+        if self._flip_x:
+            phase_code = phase_code[:, ::-1]
         if bool(mapping["correction_enabled"]):
             phase_code = (
-                phase_code + np.asarray(mapping["correction"], dtype=np.uint16)
+                phase_code.astype(np.uint16) + np.asarray(mapping["correction"], dtype=np.uint16)
             ) % 256
         return (
             np.ascontiguousarray(self._phase_to_gray[phase_code], dtype=np.uint8),
@@ -926,6 +945,8 @@ class X15213Adapter:
     def apply_phase(self, radians: object) -> np.ndarray:
         if self._closed:
             raise RuntimeError("X15213 is closed")
+        if self._sequence is not None:
+            self.release_phase_sequence()
         canonical = canonical_phase(radians, _SHAPE_YX)
         gray, mapping = self._gray(canonical)
         with self._state_lock:
@@ -1002,6 +1023,7 @@ class X15213Adapter:
             raise
         try:
             _check(self._sdk.Change_DispSlot(self._board_id, 0), "Change_DispSlot")
+            self._display_slot = 0
         except BaseException:
             self._record_failure(
                 stage="display",
@@ -1060,9 +1082,157 @@ class X15213Adapter:
             )
         return canonical
 
+    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object) -> dict[str, object]:
+        """Map and preload every frame before the first display command."""
+        if self._closed:
+            raise RuntimeError("X15213 is closed")
+        started = time.perf_counter()
+        if self._sequence is not None:
+            self.release_phase_sequence()
+        frames, intervals = phase_sequence_codes(codes, _SHAPE_YX, frame_interval_seconds)
+        phases = tuple(phase_from_codes(frame, _SHAPE_YX) for frame in frames)
+        mapped = [self._gray_codes(frame) for frame in frames]
+        grays = tuple(value[0] for value in mapped)
+        mapping = mapped[0][1]
+        slots = []
+        if self._transport == "dvi":
+            if self._presenter is None:
+                self._presenter = _open_dvi_presenter(self._display_name)
+            rasters = np.zeros((len(frames), *_RASTER_YX), dtype=np.uint8)
+            rasters[:, :, :_SHAPE_YX[1]] = grays
+            self._presenter[2](rasters)
+        else:
+            # Reuse only the existing vendor frame-memory API. Never overwrite
+            # the currently visible slot while preparing a sequence.
+            slots = [slot for slot in range(len(frames) + 1) if slot != self._display_slot][:len(frames)]
+            for gray, slot in zip(grays, slots):
+                _check(self._sdk.Write_FMemArray(
+                    self._board_id, gray.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                    int(gray.size), _SHAPE_YX[1], _SHAPE_YX[0], slot,
+                ), "Write_FMemArray sequence preload")
+        self._sequence_cancel.clear()
+        prepared = {
+            "frame_count": len(frames),
+            "frame_intervals_seconds": intervals.tolist(),
+            "prepare_ms": (time.perf_counter() - started) * 1000,
+            "mapping_revision": int(mapping["mapping_revision"]),
+        }
+        self._sequence = {
+            "phases": phases, "grays": grays, "slots": slots, "mapping": mapping,
+            "intervals": intervals, "command_revision": self.command_revision,
+            "prepared": prepared,
+        }
+        return dict(prepared)
+
+    def cancel_phase_sequence(self) -> None:
+        """Interrupt local pacing; the last acknowledged frame stays displayed."""
+        self._sequence_cancel.set()
+
+    def release_phase_sequence(self) -> None:
+        self._sequence = None
+        if self._transport == "dvi" and self._presenter is not None:
+            # The label retains the displayed photo; unused preloaded photos
+            # can go without issuing an optical command.
+            self._presenter[2](np.empty((0, *_RASTER_YX), dtype=np.uint8))
+
+    def play_phase_sequence(self) -> dict[str, object]:
+        sequence, self._sequence = self._sequence, None
+        if self._closed:
+            raise RuntimeError("X15213 is closed")
+        if sequence is None:
+            raise RuntimeError("SLM phase sequence has not been prepared")
+        mapping = sequence["mapping"]
+        if sequence["command_revision"] != self.command_revision or mapping["mapping_revision"] != self.mapping_revision:
+            error = RuntimeError("stale prepared SLM sequence; prepare from the current device state")
+            try:
+                self.release_phase_sequence()
+            except BaseException as cleanup_error:
+                error.add_note(f"SLM sequence cleanup failed: {cleanup_error}")
+            raise error
+        started = time.perf_counter()
+        dispatch, acknowledgments = [], []
+        result = {
+            **sequence["prepared"], "played_frames": 0, "cancelled": False,
+            "acknowledgment": ("tkinter-render-and-exact-raster-check" if self._transport == "dvi"
+                               else "sdk-slot-change-and-frame-memory-readback"),
+            "physical_vblank_observed": False, "final_settle_ms": 0.0,
+            "final_settle_completed": False,
+        }
+        with self._state_lock:
+            self._command_revision += 1
+        try:
+            for index, (canonical, gray, interval) in enumerate(zip(
+                sequence["phases"], sequence["grays"], sequence["intervals"]
+            )):
+                if self._sequence_cancel.is_set():
+                    break
+                previous_phase, previous_gray, previous_receipt = self._phase, self._last_gray, self._last_receipt
+                frame_started = time.perf_counter()
+                dispatch.append((frame_started - started) * 1000)
+                with self._state_lock:
+                    self._phase, self._last_gray = None, None
+                    self._last_receipt = self._receipt(mapping, outcome="unknown", stage="sequence-display-pending", readback="not-run")
+                try:
+                    if self._transport == "dvi":
+                        self._presenter[0](index)
+                    else:
+                        slot = sequence["slots"][index]
+                        _check(self._sdk.Change_DispSlot(self._board_id, slot), "Change_DispSlot")
+                        self._display_slot = slot
+                        observed = self._readback()
+                        if not np.array_equal(observed, gray):
+                            raise RuntimeError("X15213 USB frame-memory readback differs from the sequence frame")
+                except BaseException:
+                    if self._transport == "dvi":
+                        self._record_unknown(stage="sequence-display", mapping=mapping, readback="not-available")
+                    else:
+                        self._record_failure(
+                            stage="sequence-display", gray=gray, mapping=mapping,
+                            previous_phase=previous_phase, previous_gray=previous_gray, previous_receipt=previous_receipt,
+                        )
+                    raise
+                acknowledged = time.perf_counter()
+                acknowledgments.append((acknowledged - started) * 1000)
+                with self._state_lock:
+                    self._phase, self._last_gray = canonical, gray
+                    self._last_receipt = self._receipt(mapping, outcome="known-new", stage="sequence-frame", readback=("presenter-ack" if self._transport == "dvi" else "matched-new"))
+                result["played_frames"] = index + 1
+                if self._sequence_cancel.wait(max(0.0, frame_started + float(interval) - time.perf_counter())):
+                    break
+            if result["played_frames"] == result["frame_count"] and not self._sequence_cancel.is_set():
+                settle_started = time.perf_counter()
+                self._sequence_cancel.wait(max(0.0, self._settle - (settle_started - acknowledged)))
+                result["final_settle_ms"] = (time.perf_counter() - settle_started) * 1000
+                result["final_settle_completed"] = not self._sequence_cancel.is_set()
+        finally:
+            active_error = sys.exception()
+            result["cancelled"] = self._sequence_cancel.is_set()
+            result["dispatch_ms"] = dispatch
+            result["acknowledged_ms"] = acknowledgments
+            result["actual_frame_intervals_ms"] = np.diff(dispatch).tolist()
+            result["play_ms"] = (time.perf_counter() - started) * 1000
+            with self._state_lock:
+                stage = self._last_receipt["stage"]
+                if stage in {"sequence-frame", "complete", "uncommanded"} or not dispatch:
+                    stage = "sequence-cancelled" if result["cancelled"] else "sequence-complete"
+                self._last_receipt = {
+                    **self._last_receipt, "stage": stage,
+                    "command_revision": self._command_revision, "sequence": result,
+                }
+            try:
+                self.release_phase_sequence()
+            except BaseException as cleanup_error:
+                result["release_error"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
+                if active_error is None:
+                    raise
+                active_error.add_note(f"SLM sequence cleanup failed: {cleanup_error}")
+        return {**result, "receipt": self.last_command_receipt}
+
     def close(self) -> None:
         if self._closed:
             return
+        self.cancel_phase_sequence()
+        self._sequence = None
         if self._transport == "dvi":
             if self._presenter is not None:
                 self._presenter[1]()

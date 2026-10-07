@@ -148,6 +148,22 @@ def image_point_overlay_geometry(
     }
 
 
+def image_point_overlay_geometry_matches(
+    image: OwnedSnapshot, geometry: Mapping[str, object],
+) -> bool:
+    """Whether shared run geometry belongs to this image's coordinates."""
+    try:
+        y_axis, x_axis = _image_axes(image)
+    except ValueError:
+        return False
+    frame = None if x_axis.coordinate_frame is None else str(x_axis.coordinate_frame)
+    return (
+        geometry.get("coordinate_frame") == frame
+        and geometry.get("x_axis_id") == str(x_axis.axis_id)
+        and geometry.get("y_axis_id") == str(y_axis.axis_id)
+    )
+
+
 def _validated_overlay_geometry(
     geometry: object,
     image: OwnedSnapshot,
@@ -180,15 +196,7 @@ def _validated_overlay_geometry(
     centers = np.asarray(geometry["coordinates_xy"], dtype=np.float64)
     if centers.shape != (len(ids), 2) or not np.all(np.isfinite(centers)):
         raise ValueError("image overlay geometry coordinates are invalid")
-    y_axis, x_axis = _image_axes(image)
-    frame = (
-        None if x_axis.coordinate_frame is None else str(x_axis.coordinate_frame)
-    )
-    if (
-        geometry["coordinate_frame"] != frame
-        or str(geometry["x_axis_id"]) != str(x_axis.axis_id)
-        or str(geometry["y_axis_id"]) != str(y_axis.axis_id)
-    ):
+    if not image_point_overlay_geometry_matches(image, geometry):
         raise ValueError("image overlay geometry differs from image axes")
     image_schema = image.block.schema
     status_schema = status.block.schema
@@ -720,6 +728,7 @@ __all__ = [
     "PointStatus",
     "image_point_overlay_from_signal",
     "image_point_overlay_geometry",
+    "image_point_overlay_geometry_matches",
     "PulseBlock",
     "PulseAnalogTrace",
     "PulseChannel",

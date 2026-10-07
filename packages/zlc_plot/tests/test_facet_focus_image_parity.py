@@ -600,6 +600,7 @@ def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
     from zlc_plot import (
         image_point_overlay_from_signal,
         image_point_overlay_geometry,
+        image_point_overlay_geometry_matches,
     )
 
     image = _frames_scan_snapshot()
@@ -617,6 +618,12 @@ def test_overlay_geometry_refuses_a_reordered_same_count_status_axis() -> None:
         overlay.point_ids,
         status_axis=status_axis,
     )
+    assert image_point_overlay_geometry_matches(image, geometry)
+    for field in ("coordinate_frame", "x_axis_id", "y_axis_id"):
+        unrelated = {**geometry, field: "slm.phase"}
+        assert not image_point_overlay_geometry_matches(image, unrelated)
+        with pytest.raises(ValueError, match="image axes"):
+            image_point_overlay_from_signal(unrelated, status, image, revision=1)
     reversed_axis = axis("site", values=(1, 0), role=SITE)
     bad_schema = DatasetSchema(
         status.block.schema.repeat_domain,

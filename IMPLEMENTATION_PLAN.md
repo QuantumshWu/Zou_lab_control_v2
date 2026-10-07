@@ -454,24 +454,16 @@
 - B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。
 - Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
 
-### 2.7 SLM GPU重排（仍在实施，未达成最终性能目标）
+### 2.7 SLM GPU重排（单次实验Task在实施，未宣告硬件验收）
 
-- 用户允许在无法满足最初10 ms时，以整条轨迹全部相位图host-ready不超过150 ms为可接受上限；仍须尽量优化，不把150 ms当成应消耗的预算。只有固定geometry、光瞳、端点和数值资源的准备可排除在占据后的计时之外。
-- 已按用户要求实际执行公开作者LPI实现，并用其随附九阱移动位图校对。作者示例的强度max/min约1.18，不等于本实现要求的1.01；C++计时的compute列未同步编码完成，不与整条轨迹host-ready混为一谈。作者代码仅为ignored研究参考，不复制为production依赖。
-- 正式solver已接入紧凑源移除、同一分数Fourier算子的运动投影/幅度更新、少量初始迭代及仅对失败帧继续的编码后修正。旧逐帧Newton/CG、未通过的神经初值及其artifact格式已删除；可选endpoint_data只提供固定端点，不伪装为神经推理。旧无作用batch hint不保留。所有科学计算仍在既有SLM solver，无新production文件或类。
-- FP16只用于部分迭代，最终原生全幅检查及修正决策使用同一Fourier数学的FP32计算。当前完整122帧的独立complex128复核全部通过，最大光场相对L2误差1.42e-7、最大强度比1.00978775、最大暗/亮比5.4562e-7；不能再用FP16验收，因为它曾将实际1.010013的帧报为1.009910。
-- 最新纯CuPy/CTK12.9公共入口27次完整调用全部通过数值门，包含13种随机占据、其中十种为50%装载：50帧43.60–48.44 ms，74帧64.96–67.06 ms，98帧86.55–96.34 ms，连续122帧114.27–119.19 ms。空闲20秒后的122帧仍为325.19/287.17 ms，随后立即重算119.19/114.88 ms，故尚不能宣布稳定150 ms上限。没有修改电源策略、锁频或隐藏忙循环。固定500次端点工作点的资源准备约1.80 s、预留2032 MiB host pool，准备后的进程RSS约3.01 GB；首次编译与端点生成不包含在这条准备计时中。
-- 真实发出的sites/fraction包含每整数段的三个子步；强度目标仍是用户声明的相对权重，共同亮度尺度来自实际端点，不把逐site预备误差作为新目标。返回中心采样功率明确只是proxy，不冒充分数位置下的积分衍射效率。Converged仅代表强度/暗位数值门，不能替代光阱形状、像素刷新或原子存活实验。
-- 性能证据、训练权重及研究报告只在ignored research，不进Git。未操作SLM硬件、未合并master；整体Goal仍未完成。
-- 默认保留AA3粗迭代+2原生迭代及实际输出有界修正。减少为1或0次原生迭代使122帧中位数138.41→184.61/230.78 ms，修正提案15→130/248，已排除；跨帧幅度继承与精确Y周期缩减也未留下更慢/不收敛的备用分支。默认150次端点准备的source/target强度比分别约1.007497/1.001960；基准使用固定500次准备工作点，二者不混同。
-- 横向共轭配对已进入同一合成/测量路径：1272物理列用637个绝对坐标（矩阵补齐640）共享cos/sin乘法，保留全部像素、不假定对称光瞳；相对已合并的单次forward乘法，122帧成对中位数133.07→117.62 ms。两种公共尺寸64×80、127×159验证了不对称光瞳、分数坐标、中途取消后重算和输出寿命。矩阵接口已收敛为普通GemmEx；删除实际未消费的measurement/coarse数组与无用预热、共用native根表，资源数组减少39.91 MiB，五例全部七类输出逐字节相同，清理前后118.22/118.12 ms基本不变。
-- 装载/保存共享每帧频率数组，整批传坐标和初始系数，直接复制kernel与计算一起捕获；源移除前缀阻塞回传、全部运动后缀一次回传。50%占据在同一900源/400目标阵列下需要98–122帧；独立minimax匹配证明所测22例的帧数已达本几何/步距下界，不通过截短轨迹凑时间。较早的设备时间戳对照已定位空闲后的主要额外时间在计算图执行窗口内，图间空隙只有约0.5–2.2 ms；窗口包含可能的调度/抢占，不能据此断言为降频或物理极限。
-- 当前实际编码block内的clock64/globaltimer诊断为慢/快调用312.41/115.07 ms，134个同SM有效区间的等效tick-rate中位数约2343/2056 MHz；全部七类输出逐字节相同。该结果不支持直接用滞后的NVML「330 MHz」解释全部编码慢速，也不能证明其他kernel的频率或排除调度/访存停顿。诊断仅在ignored research；没有产品探针、空转预热或电源设置变更。
-- 已将必需的设备工作区重置/初始场复制提前，与独立的CPU匹配重叠，不增加GPU工作。两轮反向顺序对照中空闲调用312.21/194.41→165.28/165.10 ms，立即重算116.34/114.67→112.37/113.20 ms；全部七类输出逐字节相同，公共两种尺寸测试通过。`timing_ms["plan"]`包含这一轻量提交阶段，不冒充纯匹配时间。仍未证明稳定150 ms。
-- WDDM诊断未见预算压力：空闲前后本地使用约662 MiB、预算7123 MiB，非本地使用2148 MiB、预算17575.5 MiB均稳定，慢调用仍293.44 ms。该快照不证明逐buffer residency；尚不能把长尾归因于显存不足。直接提交同一运动计算比捕获模式的立即重算更慢（157.86对116.42 ms），未保留替代执行路线。手写WMMA融合约束计算更慢；仅编码融合对完整122帧中位数只省0.90 ms，因收益不足以承担额外PTX实现而未入产品。
-- 范围核查发现122帧并非所有合法输入的上界：五个无偏exact-400随机mask均为122帧，但靠左上角的400个source在R72下合法且间距5，需要218帧。此前仅第一张移动图在8次普通修正后仍为1.024728，独立CPU复核确认是实际慢收敛而非测量/index错误。修正已复用同一深度2残差混合，逐frame保存小历史并在阻尼改变时重置；没有增加8次上限或角落分支，第一张移动图6次即通过。当前218帧全部经独立complex128复核，最大强度比1.0099716612、暗/亮比4.03153e-7、场相对L2误差1.50754e-7；原失败帧为1.0045630472。六例集成输出与原型全部七类数组逐字节相同，公共两种尺寸测试通过。
-- 该正确性修复的六例耗时总和中位数725.33→723.29 ms基本持平，四个常见案例小幅增加约1–3 ms；不能宣称整体加速。218帧案例提案225→177、成对中位数323.03→315.07 ms，依然明显超过150 ms。最左400个source在既定R80内不可行，未删除或重新采样这条结果；整个性能目标仍未完成。
-- 当前共轭配对版本的122帧相位图完成六个刷新边界抽查：源移除、首个移动、最大实际相位/亮度步及最终目标交接。采样未发现半高双峰，最大峰位偏离约0.30 Fourier bin。未经标定的原始逻辑相位线性插值模型最低光强为较弱相邻端点的0.4433；最短相位弧模型为0.8795。它们不是实际SLM响应的上下界，也不证明原子存活；此前9701源移除的0.3944模型低谷仍成立，不能因数值强度门通过而隐去。
+- 2026-10-07 当前Task输入为一个source Science Context、一个source Calibration和一个operator-authored Pulse。target_rows/target_columns默认3×3，从源roster现有格点生成中央完整矩形并保留对应权重；目标读出复用同一Calibration子集，不要求上传final Target/Context，也不另写final Science Context。
+- 光学核心与原子政策已在既有owner内分开：Task将第一张照片的valid occupied站点转为整数available_source_indices，调用plan_rearrangement(prepared, indices)，再把plan交给compute_rearrangement(prepared, plan)。保留采集前生成的CSR、预热的Numba匹配和原数值路线；本轮不新增scheduler/minimax/备用算法，不宣称任意碰撞约束下的全局最优。
+- motion_frames=N精确包含终点、不包含起始位置，移除ramp_frames独立；间距门检查同一时刻的完整连续线段，允许空间路径在不同时间交叉。少帧切角不安全时明确拒绝，不静默增图。GPU运动数组和host输出缓存按N+移除帧准备；仅source_phase的endpoint_data准确保留输入command，目标沿既有端点求解生成；准备与生成使用同一本次authored强度容差（默认1.01），不因性能自动放宽强度/暗位门。
+- GPU、端点及有界资源在Pulse之前准备，随后建立source phase。Task只Fire一次operator的完整Pulse；before/after使用稳定Period ID选择，实际Config与嵌套loop时序由共同compiler walker检查。相机arm一次、接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。第一张照片之后才选择、匹配、计算全部图、上传并播放，验证段不重新load原子。
+- 整段逻辑码一次上传/物理映射和预装载后，在SLM server owner本地paced playback。默认16运动+2移除、60Hz的名义显示时间为300ms；计算、上传与额外最终光学等待另计。保守after-imaging deadline和接收事实共同判断验证是否可接受；预算不足或实际播放越界明确失败。逐帧dispatch/ack/final settle入报告，DVI软件确认不冒充vblank；USB真实slot容量及实际光学响应仍待硬件验收。
+- 报告只在复拍之后或实际失败时保存：两张照片及counts/occupied/validity/threshold、源与自动目标、匹配/轨迹、默认开启的精确uint8序列、冻结输入事实、Pulse/device receipts、GPU与各阶段时间，以及公共Figure NPZ+PNG和summary JSON/text。匹配由Task单独计时，generator报告prepare_frame_state/solve/copy/total；互相包含或重叠的窗口不相加。目标填充率不等同逐原子存活率。Stop保留最后已确认phase、释放预装载缓存并保存partial与原始错误；unknown outcome明确记录。
+- 共用数值路线的1024×1272实测源4×4→目标3×3、16运动+2移除两次总计算为28.05/26.64ms，host pool为120MiB；独立complex128复核全部18图，最大场相对L2误差1.45e-7、亮强度比1.00756736、暗/亮比1.72e-9。接口分离及source-only端点的定向用例已通过。这些结果不证明大阵列或空闲长尾的稳定150ms上限，也不构成真机光学/原子存活验收；历史大阵列研究数据保留在ignored research，本轮优先完成已有路径的完整实验流程。
+- 自动静态run geometry和动态overlay共用Plot的image axis IDs/coordinate frame判据；相机站点标号不再附加到phase预览，无output-name特判。
 
 
 ## 3. 当前验证状态

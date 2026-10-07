@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import socket
 import threading
+import time
 from threading import Barrier, Thread
 
 import numpy as np
@@ -909,7 +910,7 @@ def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
 
     def huge_shape(_endpoint, _method, _arguments, _timeout):
         return {
-            "version": 1,
+            "version": device_module._REMOTE_VERSION,
             "ok": True,
             "error": None,
             "state": {
@@ -934,7 +935,7 @@ def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
     def invalid_state(_endpoint, _method, _arguments, _timeout):
         phase = np.full((2, 2), 7.0 * np.pi, dtype="<f4").tobytes()
         return {
-            "version": 1,
+            "version": device_module._REMOTE_VERSION,
             "ok": True,
             "error": None,
             "state": {
@@ -995,7 +996,7 @@ def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
     try:
         sender.sendall(
             device_module._REMOTE_HEADER.pack(
-                0, device_module._MAX_REMOTE_PHASE_BYTES + 1
+                0, device_module._MAX_REMOTE_SEQUENCE_BYTES + 1
             )
         )
         with pytest.raises(ValueError, match="maximum size"):
@@ -1177,3 +1178,262 @@ def test_a_local_server_whose_thread_cannot_start_releases_what_it_opened(
         assert handle.close_count == 1
     finally:
         installation.close()
+
+
+def test_remote_sequence_preloads_bulk_codes_and_paces_every_acknowledged_frame(monkeypatch, tmp_path):
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as physical_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as remote_module
+
+    yy, xx = np.ogrid[:1024, :1272]
+    codes = np.asarray([(xx + yy + 11 * index) % 256 for index in range(16)], dtype=np.uint8)
+    codes.flags.writeable = False
+    correction = np.asarray((3 * yy + 5 * xx) % 256, dtype=np.uint8)
+    correction_path = tmp_path / "sequence-correction.bmp"
+    Image.fromarray(correction).save(correction_path)
+    preload, delivered, calls, sleeps = [], [], [], []
+    released = threading.Event()
+    real_sleep = time.sleep
+
+    def prepare(rasters):
+        preload[:] = list(rasters)
+        if not len(rasters):
+            released.set()
+
+    def present(index):
+        assert type(index) is int
+        delivered.append(preload[index].copy())
+        real_sleep(0.026 if index == 0 else 0.002)
+
+    monkeypatch.setattr(physical_module, "_display", lambda _name: {"name": "test-display"})
+    monkeypatch.setattr(physical_module, "_prepare_dvi_controller", lambda _serial: False)
+    monkeypatch.setattr(physical_module, "_open_dvi_presenter", lambda _name: (present, lambda: None, prepare))
+    monkeypatch.setattr(physical_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    original_rpc = remote_module._rpc_call
+
+    def counted(endpoint, method, arguments, timeout):
+        calls.append(method)
+        if method == "prepare_sequence":
+            assert len(arguments[-1]) == codes.nbytes > 16 * 1024 * 1024
+        reply = original_rpc(endpoint, method, arguments, timeout)
+        if method == "play_sequence":
+            assert reply[0]["state"]["phase_bytes"] == 0 and reply[1] == b""
+            assert reply[0]["sequence"]["sequence_token"] == arguments[0]
+        return reply
+
+    monkeypatch.setattr(remote_module, "_rpc_call", counted)
+    physical = X15213Adapter(_config(transport="dvi", flip_x=True, flip_y=True, correction_path=str(correction_path)))
+    server, worker = running_slm_server(physical)
+    remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 3.0)
+    try:
+        prepared = remote.prepare_phase_sequence(codes, 1 / 60)
+        assert delivered == []
+        assert remote.command_revision == physical.command_revision == 0
+        assert prepared["frame_count"] == len(preload) == 16
+        assert np.shares_memory(remote._sequence_codes, codes), "readonly solver movie is retained without another full copy"
+        assert not remote._sequence_codes.flags.writeable
+        result = remote.play_phase_sequence()
+        assert remote._sequence_codes is None
+        assert calls == ["describe", "prepare_sequence", "play_sequence"]
+        assert result["played_frames"] == 16
+        assert result["cancelled"] is False
+        assert result["physical_vblank_observed"] is False
+        assert result["acknowledgment"] == "tkinter-render-and-exact-raster-check"
+        assert len(result["dispatch_ms"]) == len(result["acknowledged_ms"]) == 16
+        assert np.all(np.asarray(result["acknowledged_ms"]) > result["dispatch_ms"])
+        assert np.all(np.asarray(result["actual_frame_intervals_ms"]) >= 1000 / 60 - 0.1)
+        assert result["actual_frame_intervals_ms"][0] >= 26, "late acknowledgment extends cadence without skipping a frame"
+        assert sleeps == [], "sequence must not use the static apply's 50 ms sleep per frame"
+        assert preload == [], "completed playback releases preloaded images"
+        for frame, delivered_raster in zip(codes, delivered):
+            expected = physical._phase_to_gray[(frame[::-1, ::-1].astype(np.uint16) + correction) % 256]
+            np.testing.assert_array_equal(delivered_raster[:, :1272], expected)
+            assert not delivered_raster[:, 1272:].any()
+        np.testing.assert_array_equal(remote.last_commanded_phase, codes[-1].astype(np.float32) * np.float32(2 * np.pi / 256))
+        assert remote.last_command_receipt["outcome"] == "known-new"
+        assert remote.command_revision == physical.command_revision == 1
+        with pytest.raises(RuntimeError, match="not been prepared"):
+            remote.play_phase_sequence()
+        remote.prepare_phase_sequence(codes, 1 / 60)
+        released.clear()
+        remote.close()
+        assert released.wait(2), "a disconnected preparation owner must release unplayed frames"
+        assert physical._sequence is None
+        np.testing.assert_array_equal(physical.last_commanded_phase, codes[-1].astype(np.float32) * np.float32(2 * np.pi / 256))
+    finally:
+        remote.close()
+        server.shutdown()
+        server.server_close()
+        worker.join(2)
+        physical.close()
+
+
+@pytest.mark.parametrize("ending", ["stop", "display-failure", "lost-reply", "cleanup-failure"])
+def test_remote_sequence_stop_and_failures_preserve_truth_while_play_rpc_is_active(monkeypatch, ending):
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as physical_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as remote_module
+
+    frames, delivered = [], []
+    stop_requested = threading.Event()
+
+    def prepare(rasters):
+        frames[:] = list(rasters)
+        if not len(rasters) and ending in {"display-failure", "cleanup-failure"}:
+            raise RuntimeError("photo release failed")
+
+    def present(index):
+        if ending == "display-failure" and index == 1:
+            raise RuntimeError("frame delivery failed")
+        delivered.append(index)
+        if ending == "stop":
+            stop_requested.set()
+
+    monkeypatch.setattr(physical_module, "_display", lambda _name: {"name": "test-display"})
+    monkeypatch.setattr(physical_module, "_prepare_dvi_controller", lambda _serial: False)
+    monkeypatch.setattr(physical_module, "_open_dvi_presenter", lambda _name: (present, lambda: None, prepare))
+    original_rpc = remote_module._rpc_call
+    calls = []
+
+    def rpc(endpoint, method, arguments, timeout):
+        calls.append(method)
+        reply = original_rpc(endpoint, method, arguments, timeout)
+        if method == "play_sequence" and reply[0]["ok"]:
+            assert reply[0]["state"]["phase_bytes"] == 0 and reply[1] == b""
+        if ending == "lost-reply" and method == "play_sequence" and calls.count("play_sequence") == 2:
+            raise socket.timeout("lost final sequence reply")
+        return reply
+
+    monkeypatch.setattr(remote_module, "_rpc_call", rpc)
+    physical = X15213Adapter(_config(transport="dvi"))
+    server, worker = running_slm_server(physical)
+    remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 3.0)
+    codes = np.full((3, *physical.shape_yx), np.arange(3, dtype=np.uint8)[:, None, None] * 32, dtype=np.uint8)
+    try:
+        if ending == "lost-reply":
+            remote.prepare_phase_sequence(codes, 0.001)
+            remote.play_phase_sequence()
+            assert "sequence" in remote.last_command_receipt
+            delivered.clear()
+        remote.prepare_phase_sequence(codes, 0.2 if ending == "stop" else 0.001)
+        if ending == "stop":
+            assert not np.shares_memory(remote._sequence_codes, codes)
+            codes[0] = 255  # Receipt reconstruction retains the actual uploaded bytes.
+            result = remote.play_phase_sequence(stop_requested.is_set)
+            assert result["cancelled"] is True
+            assert result["played_frames"] == 1
+            assert calls.count("cancel_sequence") == 1, "Stop needs an independent RPC beside active playback"
+            assert remote.last_command_receipt["stage"] == "sequence-cancelled"
+            np.testing.assert_array_equal(remote.last_commanded_phase, np.zeros(physical.shape_yx, np.float32))
+        elif ending == "display-failure":
+            with pytest.raises(RuntimeError, match="frame delivery failed"):
+                remote.play_phase_sequence()
+            assert remote.last_commanded_phase is None
+            assert remote.last_command_receipt["outcome"] == "unknown"
+            assert remote.last_command_receipt["sequence"]["played_frames"] == 1
+            assert "photo release failed" in remote.last_command_receipt["sequence"]["release_error"]
+        elif ending == "lost-reply":
+            with pytest.raises(socket.timeout, match="lost final"):
+                remote.play_phase_sequence()
+            assert remote.last_commanded_phase is None
+            assert remote.last_command_receipt["outcome"] == "unknown"
+            assert "sequence" not in remote.last_command_receipt, "a lost reply cannot relabel the previous sequence as this run's timing"
+            assert physical.last_command_receipt["sequence"]["played_frames"] == 3
+        else:
+            with pytest.raises(RuntimeError, match="photo release failed"):
+                remote.play_phase_sequence()
+            assert remote.last_command_receipt["outcome"] == "known-new"
+            np.testing.assert_array_equal(remote.last_commanded_phase, codes[-1].astype(np.float32) * np.float32(2 * np.pi / 256))
+        assert len(delivered) == (3 if ending in {"lost-reply", "cleanup-failure"} else 1)
+        assert frames == []
+        assert remote._sequence_codes is None
+    finally:
+        remote.close()
+        server.shutdown()
+        server.server_close()
+        worker.join(2)
+        physical.close()
+
+
+def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(monkeypatch):
+    class SlotsSdk(_UsbSdk):
+        def __init__(self):
+            super().__init__()
+            self.slots = {}
+            self.changes = []
+
+        def Write_FMemArray(self, _board, source, size, width, height, slot):
+            self.write_count += 1
+            self.slots[slot] = np.ctypeslib.as_array(source, shape=(int(size),)).reshape(int(height), int(width)).copy()
+            return 1
+
+        def Change_DispSlot(self, _board, slot):
+            self.changes.append(slot)
+            self.display = self.slots[slot]
+            return 1
+
+    sdk = SlotsSdk()
+    _patch_usb(monkeypatch, sdk)
+    physical = X15213Adapter(_config())
+    try:
+        codes = np.asarray([np.full(physical.shape_yx, index * 37, np.uint8) for index in range(3)])
+        physical.prepare_phase_sequence(codes, 0.001)
+        assert sdk.write_count == 3
+        assert set(sdk.slots) == {1, 2, 3}
+        assert sdk.changes == []
+        assert not sdk.display.any()
+        result = physical.play_phase_sequence()
+        assert sdk.changes == [1, 2, 3]
+        assert sdk.write_count == 3, "playback must not upload each frame again"
+        assert result["acknowledgment"] == "sdk-slot-change-and-frame-memory-readback"
+        assert result["played_frames"] == 3
+        assert physical._sequence is None
+        np.testing.assert_array_equal(physical.last_commanded_phase, codes[-1].astype(np.float32) * np.float32(2 * np.pi / 256))
+        physical.prepare_phase_sequence(codes, 0.001)
+        assert physical._display_slot not in physical._sequence["slots"]
+        physical.release_phase_sequence()
+        with pytest.raises(RuntimeError, match="not been prepared"):
+            physical.play_phase_sequence()
+    finally:
+        physical.close()
+
+
+@pytest.mark.parametrize("wrong", ["token", "mapping", "revision", "played_frames"])
+def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(monkeypatch, wrong):
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as module
+    from zlc_atom.devices.simulation.slm.device import VirtualSLM
+    from zlc_atom.devices.simulation.world import SimulationWorld
+
+    physical = VirtualSLM(SimulationWorld(), identity="receipt-verification")
+    server, worker = running_slm_server(physical)
+    original = module._rpc_call
+
+    def altered(endpoint, method, arguments, timeout):
+        metadata, payload = original(endpoint, method, arguments, timeout)
+        if method == "play_sequence":
+            assert metadata["ok"] and payload == b""
+            if wrong == "token":
+                metadata["sequence"]["sequence_token"] = "another-sequence"
+            elif wrong == "mapping":
+                metadata["state"]["mapping_revision"] += 1
+            elif wrong == "revision":
+                metadata["state"]["command_revision"] += 1
+            else:
+                metadata["state"]["receipt"]["sequence"]["played_frames"] = 0
+        return metadata, payload
+
+    monkeypatch.setattr(module, "_rpc_call", altered)
+    remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2.0)
+    try:
+        codes = np.full((2, *physical.shape_yx), 37, dtype=np.uint8)
+        remote.prepare_phase_sequence(codes, .001)
+        with pytest.raises(ValueError, match="confirmation receipt"):
+            remote.play_phase_sequence()
+        assert remote.last_commanded_phase is None
+        assert remote.last_command_receipt["outcome"] == "unknown"
+        assert remote._sequence_codes is None
+        assert physical.last_command_receipt["outcome"] == "known-new"
+    finally:
+        remote.close()
+        server.shutdown()
+        server.server_close()
+        worker.join(2)
+        physical.close()

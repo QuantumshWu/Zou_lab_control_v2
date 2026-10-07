@@ -279,7 +279,7 @@ def prepare_rearrangement_geometry(
     source_yx: object, target_yx: object, *, shape_yx: tuple[int, int],
     matching_radii: object, max_step: int = 1, minimum_separation: float,
 ) -> dict[str, object]:
-    """Prepare fixed native Fourier-grid geometry without observing occupancy."""
+    """Prepare fixed native Fourier-grid geometry before selecting active sources."""
     shape = _pair(shape_yx, "shape_yx")
     if not np.array_equal(np.asarray(shape_yx), shape):
         raise ValueError("shape_yx must contain positive integers")
@@ -350,20 +350,23 @@ def prepare_rearrangement_geometry(
     }
 
 
-def plan_rearrangement(prepared: Mapping[str, object], occupied: object) -> dict[str, object]:
-    """Assign observed atoms; the emitted path still requires a clearance gate.
+def plan_rearrangement(prepared: Mapping[str, object], available_source_indices: object) -> dict[str, object]:
+    """Assign available source sites; emitted paths still require a clearance gate.
 
-    Fractions describe spatial progress, not a physical clock. Unselected
-    occupied sources are reported; this planner does not discard their atoms.
+    Source indices refer to the prepared roster; their selection belongs to the
+    caller. Fractions describe spatial progress, not a physical clock.
     """
     source, target = prepared["source_yx"], prepared["target_yx"]
-    # Fix dtype/layout/mutability at this small input boundary: immutable or
-    # strided occupancy input must not trigger a new JIT signature online.
-    mask = np.array(occupied, copy=True, order="C")
-    if mask.dtype.kind != "b" or mask.shape != (len(source),):
-        raise ValueError("occupied must contain one boolean per source site")
+    indices = np.asarray(available_source_indices)
+    if (indices.ndim != 1 or indices.dtype.kind not in "iu"
+            or np.any(indices < 0) or np.any(indices >= len(source))):
+        raise ValueError("available_source_indices must contain integer indices into the prepared source roster")
+    # One ordinary writable mask retains the prewarmed matching signature for
+    # immutable/strided index lists; it carries no camera classification.
+    mask = np.zeros(len(source), bool)
+    mask[indices] = True
     if np.count_nonzero(mask) < len(target):
-        raise ValueError("not enough occupied source sites for the target")
+        raise ValueError("not enough available source sites for the target")
     for radius, adjacency, eligible in zip(
         prepared["matching_radii"], prepared["adjacency"], prepared["eligible"],
     ):
@@ -387,7 +390,7 @@ def plan_rearrangement(prepared: Mapping[str, object], occupied: object) -> dict
               + steps) // (2 * steps)) if steps else start[None].copy()
     return {
         "assignment": _frozen(assignment),
-        "unselected_occupied": _frozen(np.flatnonzero(unselected)),
+        "unselected_source_indices": _frozen(np.flatnonzero(unselected)),
         "motion_yx": _frozen(motion.astype(np.int32)),
         "fraction": _frozen(fraction), "matching_radius": radius,
     }
@@ -2187,14 +2190,14 @@ typedef float real_t;
 __device__ real_t cv(float a){return a;}
 #endif
 extern "C" __global__ void load_motion_frame(int* counter,const int* native_indices,const int* coarse_indices,
- const int* frequencies,const long long* offsets,const float2* coefficients,int* native_index,int* coarse_index,
- int* frequency,float2* current,int N,int K){
+ const double2* frequencies,const long long* offsets,const float2* coefficients,int* native_index,int* coarse_index,
+ double2* frequency,float2* current,int N,int K){
  __shared__ int frame;int t=threadIdx.x;
  if(!t){frame=counter[0];counter[0]=frame+1;}__syncthreads();
  unsigned long long row=(unsigned long long)frame*N;
  for(int j=t;j<N;j+=256){native_index[j]=native_indices[row+j];coarse_index[j]=coarse_indices[row+j];current[j]=coefficients[row+j];}
  long long begin=offsets[frame],end=offsets[frame+1];
- for(int j=t;j<K;j+=256)frequency[j]=j<end-begin?frequencies[begin+j]:0;
+ for(int j=t;j<K;j+=256)frequency[j]=j<end-begin?frequencies[begin+j]:make_double2(0,0);
 }
 extern "C" __global__ void store_motion_frame(const int* counter,const unsigned char* codes,
  const float2* coefficients,const float2* actual,unsigned char* movie,float2* saved_coefficients,float2* saved_actual,int N,int area){
@@ -2206,10 +2209,13 @@ extern "C" __global__ void scatter(const float2* c,const int* index,float2* spec
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N){atomicAdd(&spectrum[index[i]].x,c[i].x);atomicAdd(&spectrum[index[i]].y,c[i].y);}}
 extern "C" __global__ void gather(const float2* spectrum,const int* index,float2* c,int N){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N)c[i]=spectrum[index[i]];}
-extern "C" __global__ void pack_inverse(const float2* spectrum,real_t* packed,int H,int LY,int K){
+extern "C" __global__ void pack_inverse(const float2* spectrum,const double2* frequencies,real_t* packed,int H,int LY,int K){
  __shared__ float2 tile[32][33];
  int y=blockIdx.x*32+threadIdx.x,k=blockIdx.y*32+threadIdx.y;
- for(int j=0;j<32;j+=8)if(y<H&&k+j<K)tile[threadIdx.y+j][threadIdx.x]=spectrum[(k+j)*LY+(y-H/2+LY)%LY];
+ for(int j=0;j<32;j+=8)if(y<H&&k+j<K){
+  float2 v=spectrum[(k+j)*LY+(y-H/2+LY)%LY];double s,c;
+  sincos(6.2831853071795864769*frequencies[k+j].y*(y-H/2)/H,&s,&c);
+  tile[threadIdx.y+j][threadIdx.x]=make_float2(v.x*c-v.y*s,v.x*s+v.y*c);}
  __syncthreads();
  int yy=blockIdx.x*32+threadIdx.y,kk=blockIdx.y*32+threadIdx.x;
  for(int j=0;j<32;j+=8)if(yy+j<H&&kk<K){float2 v=tile[threadIdx.x][threadIdx.y+j];int i=(yy+j)*K+kk;
@@ -2243,11 +2249,13 @@ extern "C" __global__ void pack_field(const float2* field,real_t* packed,int H,i
  float2 minus=d>0&&xm>=0?field[y*W+xm]:make_float2(0,0);
  pack_pair(packed,plus,minus,y,d,H,P);
 }
-extern "C" __global__ void select_roots(const float2* bank,const int* frequencies,real_t* backward,real_t* forward,int NF,int K,int P){
+extern "C" __global__ void select_roots(const double2* frequencies,real_t* backward,real_t* forward,int NF,int K,int P,int W){
  __shared__ float2 tile[32][33];
  int x=blockIdx.x*32+threadIdx.x,k=blockIdx.y*32+threadIdx.y;
  for(int j=0;j<32;j+=8)if(x<P&&k+j<K){
-  float2 v=k+j<NF?bank[frequencies[k+j]*P+x]:make_float2(0,0);tile[threadIdx.y+j][threadIdx.x]=v;
+  double s=0,c=0;
+  if(k+j<NF&&x<=W/2)sincos(6.2831853071795864769*frequencies[k+j].x*x/W,&s,&c);
+  float2 v=make_float2(c,s);tile[threadIdx.y+j][threadIdx.x]=v;
   if(backward){int r=(k+j)*2*P+x;backward[r]=cv(v.x);backward[r+P]=cv(v.y);}
  }
  __syncthreads();
@@ -2256,21 +2264,17 @@ extern "C" __global__ void select_roots(const float2* bank,const int* frequencie
   int out=(xx+j)*K+kk;
   forward[out]=cv(v.x);forward[out+P*K]=cv(v.y);}
 }
-extern "C" __global__ void pack_forward(const float* projected,float2* spectrum,int H,int LY,int K){
- if(blockIdx.y*32>=H){
-  int yy=blockIdx.y*32-H/2+threadIdx.x,k=blockIdx.x*32+threadIdx.y;
-  for(int j=0;j<32;j+=8)if(k+j<K&&yy<LY-H/2)spectrum[(k+j)*LY+yy]=make_float2(0,0);
-  return;
- }
+extern "C" __global__ void pack_forward(const float* projected,const double2* frequencies,float2* spectrum,int H,int LY,int K){
  __shared__ float2 tile[32][33];
  int k=blockIdx.x*32+threadIdx.x,y=blockIdx.y*32+threadIdx.y;
- for(int j=0;j<32;j+=8)if(k<K&&y+j<H){int r=(y+j)*K+k;
-  tile[threadIdx.y+j][threadIdx.x]=make_float2(projected[r],projected[r+H*K]);}
+ for(int j=0;j<32;j+=8)if(k<K&&y+j<H){int r=(y+j)*K+k;double s,c;
+  sincos(6.2831853071795864769*frequencies[k].y*(y+j-H/2)/H,&s,&c);
+  float re=projected[r],im=projected[r+H*K];
+  tile[threadIdx.y+j][threadIdx.x]=make_float2(re*c+im*s,im*c-re*s);}
  __syncthreads();
  int yy=blockIdx.y*32+threadIdx.x,kk=blockIdx.x*32+threadIdx.y;
- // Also clear the partial physical-height tile: odd H has padding here too.
  for(int j=0;j<32;j+=8)if(yy<LY&&kk+j<K)
-  spectrum[(kk+j)*LY+(yy-H/2+LY)%LY]=yy<H?tile[threadIdx.x][threadIdx.y+j]:make_float2(0,0);
+  spectrum[(kk+j)*LY+(yy-H/2+LY)%LY]=tile[threadIdx.x][threadIdx.y+j];
 }
 extern "C" __global__ void encode(const float* input,const float* pupil,const float* incident,float2* optical,
  unsigned char* codes,int H,int W,int P){
@@ -2377,18 +2381,18 @@ extern "C" __global__ void source_encode(const float2* unit,const float2* carrie
  float s,c;sincosf(code*.02454369260617025968f+incident[pixel],&s,&c);
  demod[i]=make_float2(pupil[i]*(c*b.x+s*b.y),pupil[i]*(s*b.x-c*b.y));
 }
-extern "C" __global__ void clearance(const int* p,float* distances,int F,int N){
+extern "C" __global__ void clearance(const double* p,double* distances,int F,int N){
  int i=blockIdx.x*blockDim.x+threadIdx.x,j=blockIdx.y*blockDim.y+threadIdx.y;if(i>=N||j>=i)return;
- float best=1e30f;
- for(int f=0;f<F;++f){int a=(f*N+i)*2,b=(f*N+j)*2;float y=p[a]-p[b],x=p[a+1]-p[b+1],yy=0,xx=0;
+ double best=1e300;
+ for(int f=0;f<F;++f){int a=(f*N+i)*2,b=(f*N+j)*2;double y=p[a]-p[b],x=p[a+1]-p[b+1],yy=0,xx=0;
   if(f+1<F){yy=p[a+N*2]-p[b+N*2]-y;xx=p[a+N*2+1]-p[b+N*2+1]-x;}
-  float v=yy*yy+xx*xx,t=v>0?fminf(1,fmaxf(0,-(y*yy+x*xx)/v)):0;y+=t*yy;x+=t*xx;best=fminf(best,y*y+x*x);}
+  double v=yy*yy+xx*xx,t=v>0?fmin(1,fmax(0,-(y*yy+x*xx)/v)):0;y+=t*yy;x+=t*xx;best=fmin(best,y*y+x*x);}
  distances[i*N+j]=best;
 }
 '''
 
 
-def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase):
+def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_motion_frames, stop_requested):
     """Prepare the one native Fourier model and optional sampling quadrature."""
     try:
         import cupy as cp  # noqa: PLC0415
@@ -2413,16 +2417,14 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase):
                     pointer, pointer, integer, integer, integer, integer]
     gemm.restype = integer
     number = len(geometry["target_yx"])
-    signed = 3 * (np.concatenate((geometry["source_yx"], geometry["target_yx"]))[:, 1] - shape[1] // 2)
-    low, high = int(signed.min()), int(signed.max())
-    capacity = (min(number, high - low + 1) + 15) // 16 * 16
+    capacity = (number + 15) // 16 * 16
     module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
     names = ("load_motion_frame", "store_motion_frame", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
              "pack_forward", "encode", "anderson_begin", "anderson_update", "compact_delta", "compact_project",
              "fold_native", "source_encode", "clearance")
     kernels = {name: module.get_function(name) for name in names}
     gpu = dict(cp=cp, cublas=cublas, cufft=cufft, stream=stream, module=module, kernels=kernels,
-               library=library, gemm=gemm, shape=shape, number=number, low=low, high=high,
+               library=library, gemm=gemm, shape=shape, number=number,
                pupil_cpu=pupil.copy(), incident_cpu=np.asarray(incident, np.float32).copy(),
                pupil_energy=float(np.sum(pupil.astype(np.float64) ** 2)), pupil_scale=float(np.max(pupil)),
                resources={}, output_pool=cp.cuda.PinnedMemoryPool(), weight_exponent=np.float32(.8))
@@ -2432,7 +2434,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase):
     distance = int(np.max(np.maximum(source.max(axis=0) - target.min(axis=0),
                                      target.max(axis=0) - source.min(axis=0))))
     steps = max(1, int(np.ceil(min(max(geometry["matching_radii"]), distance) / geometry["max_step"])))
-    gpu["motion_capacity"] = 3 * steps
+    gpu["motion_capacity"] = 3 * steps if maximum_motion_frames is None else maximum_motion_frames
     handles = []
     def close():
         stream.synchronize()
@@ -2446,23 +2448,20 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase):
     try:
         with stream:
             gpu["coefficients"] = cp.zeros(number, cp.complex64)
-            gpu["frequencies"] = cp.zeros(capacity, cp.int32)
+            gpu["frequencies"] = cp.zeros((capacity, 2), cp.float64)
             for factor, precise in [(factor, False) for factor in factors] + [(1, True)]:
+                if stop_requested is not None and stop_requested():
+                    raise InterruptedError("SLM rearrangement preparation stopped")
                 dtype = cp.float32 if precise else cp.float16
                 work_module = cp.RawModule(code="#define HALF 0\n" + _REARRANGEMENT_CUDA) if precise else module
                 work_kernels = {name: work_module.get_function(name) for name in names} if precise else kernels
                 h, w = (size // factor for size in shape)
-                padded, ly = (w // 2 + 16) // 16 * 16, 3 * h
-                if not precise:
-                    roots = np.exp(2j * np.pi * np.arange(low, high + 1)[:, None]
-                                   * np.arange(padded)[None] / (3 * w)).astype(np.complex64)
-                    roots[:, w // 2 + 1:] = 0
+                padded, ly = (w // 2 + 16) // 16 * 16, h
                 handle = cublas.create()
                 handles.append(handle)
                 cublas.setStream(handle, stream.ptr)
                 work = dict(shape=(h, w), padded=padded, ly=ly, handle=handle,
                             typecode=0 if precise else 2, module=work_module, kernels=work_kernels,
-                            bank=gpu["resources"][1]["bank"] if precise else cp.asarray(roots),
                             forward=cp.empty((2 * padded, capacity), dtype),
                             spectrum=cp.empty((capacity, ly), cp.complex64),
                             transformed=cp.empty((capacity, ly), cp.complex64),
@@ -2511,11 +2510,11 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase):
             gpu["motion_coefficients"] = cp.zeros((motion_count, number), cp.complex64)
             gpu["motion_actual"] = cp.empty((motion_count, number), cp.complex64)
             gpu["motion_indices"] = {factor: cp.zeros((motion_count, number), cp.int32) for factor in factors}
-            gpu["motion_frequencies"] = cp.zeros(motion_count * capacity, cp.int32)
+            gpu["motion_frequencies"] = cp.zeros((motion_count * capacity, 2), cp.float64)
             gpu["motion_offsets"] = cp.zeros(motion_count + 1, cp.int64)
             gpu["frame_index"] = cp.zeros(1, cp.int32)
-            gpu["distances"] = cp.full((number, number), cp.inf, cp.float32)
-            trial = cp.asarray(geometry["target_yx"][None])
+            gpu["distances"] = cp.full((number, number), cp.inf, cp.float64)
+            trial = cp.asarray(geometry["target_yx"][None], cp.float64)
             kernels["clearance"](((number + 15) // 16,) * 2, (16, 16),
                                  (trial, gpu["distances"], np.int32(1), np.int32(number)))
             float(cp.sqrt(cp.min(gpu["distances"])))
@@ -2530,8 +2529,8 @@ def _rearrangement_select_roots(work, band):
     """Pack this frame's fixed frequencies once in this workspace's precision."""
     padded = work["padded"]
     work["kernels"]["select_roots"](((padded + 31) // 32, (band + 31) // 32), (32, 8),
-                                   (work["bank"], work["frequencies"], work.get("backward", np.uint64(0)), work["forward"],
-                                    np.int32(band), np.int32(band), np.int32(padded)))
+                                   (work["frequencies"], work.get("backward", np.uint64(0)), work["forward"],
+                                    *map(np.int32, (band, band, padded, work["shape"][1]))))
 
 
 def _rearrangement_propagate(gpu, work, band, operation):
@@ -2547,7 +2546,7 @@ def _rearrangement_propagate(gpu, work, band, operation):
                            (gpu["coefficients"], work["index"], work["spectrum"], np.int32(number)))
         work["plans"][band].fft(work["spectrum"][:band], work["transformed"][:band], gpu["cufft"].CUFFT_INVERSE)
         kernels["pack_inverse"](((h + 31) // 32, (band + 31) // 32), (32, 8),
-                                (work["transformed"], work["packed"], np.int32(h), np.int32(ly), np.int32(band)))
+                                (work["transformed"], work["frequencies"], work["packed"], np.int32(h), np.int32(ly), np.int32(band)))
         status = gpu["gemm"](work["handle"], 0, 0, 2 * padded, 2 * h, band, alpha,
                              work["backward"].data.ptr, typecode, 2 * padded,
                              work["packed"].data.ptr, typecode, band, beta,
@@ -2574,7 +2573,7 @@ def _rearrangement_propagate(gpu, work, band, operation):
     if status:
         raise RuntimeError(f"SLM cuBLAS analysis failed ({status})")
     kernels["pack_forward"](((band + 31) // 32, (ly + 31) // 32), (32, 8),
-                            (work["projected"], work["spectrum"], np.int32(h), np.int32(ly), np.int32(band)))
+                            (work["projected"], work["frequencies"], work["spectrum"], np.int32(h), np.int32(ly), np.int32(band)))
     work["plans"][band].fft(work["spectrum"][:band], work["transformed"][:band], gpu["cufft"].CUFFT_FORWARD)
     kernels["gather"](((number + 255) // 256,), (256,),
                       (work["transformed"], work["index"], work["actual"], np.int32(number)))
@@ -2617,26 +2616,30 @@ def _rearrangement_store_frame(gpu):
 def _rearrangement_bind(gpu, points):
     """Build bulk trajectory metadata; the caller retains host inputs through transfer."""
     shape = np.asarray(gpu["shape"])
-    scaled = 3 * (np.asarray(points, np.float64) - shape // 2)
-    frequencies = np.rint(scaled).astype(np.int64)
-    if np.max(abs(scaled - frequencies)) > 1e-8:
-        raise ValueError("emitted sites must lie on the native third-bin grid")
-    columns = frequencies[..., 1] - gpu["low"]
-    present = np.zeros((len(points), gpu["high"] - gpu["low"] + 1), bool)
-    present[np.arange(len(points))[:, None], columns] = True
-    lookup = np.cumsum(present, axis=1, dtype=np.int32) - 1
-    counts = present.sum(axis=1, dtype=np.int32)
+    signed = np.asarray(points, np.float64) - shape // 2
+    integer_y = np.floor(signed[..., 0]).astype(np.int64)
+    # Each band has one X frequency and one fractional Y carrier. Its remaining
+    # Y frequencies are native integer FFT bins, for any authored frame count.
+    bands = np.stack((signed[..., 1], signed[..., 0] - integer_y), axis=-1)
+    selected, lookup, counts = [], [], []
+    for frame in bands:
+        frequencies, inverse = np.unique(frame, axis=0, return_inverse=True)
+        selected.append(frequencies)
+        lookup.append(inverse)
+        counts.append(len(frequencies))
+    counts = np.asarray(counts, np.int32)
     offsets = np.r_[0, np.cumsum(counts, dtype=np.int64)]
-    selected = np.nonzero(present)[1].astype(np.int32)
+    selected = np.concatenate(selected)
+    lookup = np.asarray(lookup)
     indices = {}
     for factor, work in gpu["resources"].items():
-        packed = lookup[np.arange(len(points))[:, None], columns] * work["ly"] + frequencies[..., 0] % work["ly"]
+        packed = lookup * work["ly"] + integer_y % work["ly"]
         indices[factor] = packed.astype(np.int32)
     return indices, selected, counts, offsets
 
 
-def _prepare_rearrangement_lattice(gpu, source_points, initial_codes):
-    """Fold the actual encoded source field and the complete physical pupil."""
+def _prepare_rearrangement_lattice(gpu, source_points, initial_phase):
+    """Fold the actual source command field and the complete physical pupil."""
     from cupyx.scipy.fft import get_fft_plan  # noqa: PLC0415
 
     cp, shape = gpu["cp"], gpu["shape"]
@@ -2652,8 +2655,7 @@ def _prepare_rearrangement_lattice(gpu, source_points, initial_codes):
     carrier = np.exp(2j * np.pi * (residue[0] * yy / h + residue[1] * xx / w)).astype(np.complex64)
     pupil = np.fft.ifftshift(gpu["pupil_cpu"])
     effective = pupil.astype(np.float64).reshape(gy, fh, gx, fw).sum(axis=(0, 2)).astype(np.float32)
-    optical = gpu["pupil_cpu"] * np.exp(1j * (initial_codes.astype(np.float64) * (2 * np.pi / 256)
-                                             + gpu["incident_cpu"]))
+    optical = gpu["pupil_cpu"] * np.exp(1j * (initial_phase.astype(np.float64) + gpu["incident_cpu"]))
     initial = np.fft.ifftshift(optical) * carrier.conj()
     initial = initial.reshape(gy, fh, gx, fw).sum(axis=(0, 2)).astype(np.complex64)
     small = cp.asarray(initial)
@@ -2702,7 +2704,7 @@ def _rearrangement_lattice_correct(gpu, iterations):
     cp.take(state["spectrum"], state["positions"], out=state["actual"])
 
 
-def _rearrangement_endpoint(cp, points, shape, pupil, intensity, iterations, seed):
+def _rearrangement_endpoint(cp, points, shape, pupil, intensity, iterations, seed, stop_requested):
     """Prepare a fixed endpoint, retaining the coefficients that reproduce it."""
     height, width = shape
     iy, ix = cp.asarray((points - np.asarray(shape) // 2).T % np.asarray(shape)[:, None])
@@ -2714,6 +2716,8 @@ def _rearrangement_endpoint(cp, points, shape, pupil, intensity, iterations, see
     illumination = cp.fft.ifftshift(cp.asarray(pupil))
     coefficient = weight * cp.exp(cp.complex64(1j) * phase)
     for iteration in range(iterations):
+        if stop_requested is not None and stop_requested():
+            raise InterruptedError("SLM rearrangement preparation stopped")
         spectrum.fill(0)
         spectrum[iy, ix] = coefficient
         back = cp.fft.ifft2(spectrum)
@@ -2739,21 +2743,45 @@ def prepare_rearrangement(
     target_intensities: object | None = None,
     endpoint_iterations: int = 150, seed: int = 0,
     endpoint_data: Mapping[str, object] | None = None,
+    maximum_motion_frames: int | None = None,
+    ramp_frames: int = 2,
+    support_tolerance: float = SPOT_SUPPORT_TOLERANCE,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Prepare the calibrated optical working point before observing occupancy.
+    """Prepare the calibrated optical working point before selecting active sites.
 
-    Apply initial_phase_codes before measuring occupancy in source order. The
+    Apply initial_phase before the transition; indices use the source roster's
+    original order. The
     returned workspace is caller-owned and serial-use only. Changing either
     array, pupil or incident aberration requires preparing it again.
-    endpoint_data may supply source/target_phase_codes and _coefficients for
-    fixed calibrated endpoints. Their actual encoded fields are measured here;
-    requested intensity weights remain authoritative, with one physical RMS
-    brightness scale per endpoint. Supplied codes must meet the 1.01 support
+    endpoint_data may supply source/target_phase or _phase_codes for fixed
+    calibrated endpoints, with optional _coefficients. A supplied source_phase
+    stays exact for source initialization; emitted maps and the final target use
+    the shared uint8 encoder. Missing coefficients use measured endpoint fields.
+    An omitted endpoint is generated by the existing fixed-endpoint solve.
+    Their actual fields are measured here; requested intensity weights remain
+    authoritative, with one physical RMS brightness scale per endpoint.
+    Supplied endpoint fields must meet support_tolerance (default 1.01)
     ratio. Short endpoint optimization is allowed, but an inaccurate generated
     target is not reused as a solved final frame.
     The caller closes prepared["close"]() after its last serial solve.
-    No occupancy-dependent answer is prepared.
+    maximum_motion_frames bounds reusable GPU movie rows. ramp_frames reserves
+    host output buffers for that authored removal prefix before planning.
+    No selection-dependent answer is prepared.
     """
+    if stop_requested is not None and stop_requested():
+        raise InterruptedError("SLM rearrangement preparation stopped")
+    tolerance = float(support_tolerance)
+    if not np.isfinite(tolerance) or tolerance < 1:
+        raise ValueError("support_tolerance must be finite and >= 1")
+    if isinstance(ramp_frames, bool) or int(ramp_frames) != ramp_frames or ramp_frames < 1:
+        raise ValueError("ramp_frames must be a positive integer")
+    ramp_frames = int(ramp_frames)
+    if maximum_motion_frames is not None:
+        if (isinstance(maximum_motion_frames, bool) or int(maximum_motion_frames) != maximum_motion_frames
+                or maximum_motion_frames < 1):
+            raise ValueError("maximum_motion_frames must be a positive integer")
+        maximum_motion_frames = int(maximum_motion_frames)
     geometry = prepare_rearrangement_geometry(
         source_yx, target_yx, shape_yx=shape_yx, matching_radii=matching_radii,
         minimum_separation=minimum_separation,
@@ -2778,28 +2806,34 @@ def prepare_rearrangement(
             if name in endpoint_data and not np.array_equal(actual, endpoint_data[name]):
                 raise ValueError(f"endpoint_data {name} does not match the prepared working point")
         for name, points in (("source", geometry["source_yx"]), ("target", geometry["target_yx"])):
-            for suffix in ("phase_codes", "coefficients"):
-                if f"{name}_{suffix}" not in endpoint_data:
-                    raise ValueError(f"endpoint_data requires {name}_{suffix}")
-            codes = np.asarray(endpoint_data[f"{name}_phase_codes"])
-            coefficient = np.asarray(endpoint_data[f"{name}_coefficients"])
-            if codes.dtype != np.uint8 or codes.shape != shape:
-                raise ValueError(f"endpoint_data {name}_phase_codes must be a native uint8 raster")
-            if (coefficient.shape != (len(points),) or not np.all(np.isfinite(coefficient))
-                    or np.any(abs(coefficient) == 0)):
-                raise ValueError(f"endpoint_data {name}_coefficients must be finite and nonzero, one per site")
-    gpu = _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase)
+            if f"{name}_phase" in endpoint_data:
+                canonical_phase(endpoint_data[f"{name}_phase"], shape)
+            elif f"{name}_phase_codes" in endpoint_data:
+                codes = np.asarray(endpoint_data[f"{name}_phase_codes"])
+                if codes.dtype != np.uint8 or codes.shape != shape:
+                    raise ValueError(f"endpoint_data {name}_phase_codes must be a native uint8 raster")
+            if f"{name}_coefficients" in endpoint_data:
+                coefficient = np.asarray(endpoint_data[f"{name}_coefficients"])
+                if (coefficient.shape != (len(points),) or not np.all(np.isfinite(coefficient))
+                        or np.any(abs(coefficient) == 0)):
+                    raise ValueError(f"endpoint_data {name}_coefficients must be finite and nonzero, one per site")
+    gpu = _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_motion_frames, stop_requested)
     try:
         cp, stream = gpu["cp"], gpu["stream"]
         native = gpu["resources"][1]
-        coefficients, codes_list, fields, brightness, endpoint_ratios = [], [], [], [], []
+        coefficients, codes_list, phases, fields, brightness, endpoint_ratios = [], [], [], [], [], []
         with stream:
             for index, (name, points, authored) in enumerate((
                     ("source", geometry["source_yx"], intensities[0]),
                     ("target", geometry["target_yx"], intensities[1]))):
-                if endpoint_data is None:
+                if stop_requested is not None and stop_requested():
+                    raise InterruptedError("SLM rearrangement preparation stopped")
+                supplied = endpoint_data is not None and (
+                    f"{name}_phase" in endpoint_data or f"{name}_phase_codes" in endpoint_data)
+                if not supplied:
                     coefficient, pattern = _rearrangement_endpoint(
                         cp, points, shape, gpu["pupil_cpu"], authored, int(endpoint_iterations), int(seed) + index,
+                        stop_requested,
                     )
                     latent = cp.exp(cp.complex64(1j) * cp.asarray(pattern, cp.float32))
                     gpu["kernels"]["encode"](((int(np.prod(shape)) + 255) // 256,), (256,),
@@ -2807,10 +2841,21 @@ def prepare_rearrangement(
                                               native["codes"], *map(np.int32, (*shape, 0))))
                     codes = native["codes"].get()
                 else:
-                    coefficient = np.asarray(endpoint_data[f"{name}_coefficients"], np.complex64).copy()
-                    codes = np.asarray(endpoint_data[f"{name}_phase_codes"]).copy()
+                    coefficient = endpoint_data.get(f"{name}_coefficients")
+                    if f"{name}_phase" in endpoint_data:
+                        supplied_phase = canonical_phase(endpoint_data[f"{name}_phase"], shape)
+                        latent = cp.exp(cp.complex64(1j) * cp.asarray(supplied_phase + gpu["incident_cpu"], cp.float32))
+                        gpu["kernels"]["encode"](((int(np.prod(shape)) + 255) // 256,), (256,),
+                            (latent, native["physical_pupil"], native["incident"], native["optical"],
+                             native["codes"], *map(np.int32, (*shape, 0))))
+                        codes = native["codes"].get()
+                    else:
+                        codes = np.asarray(endpoint_data[f"{name}_phase_codes"]).copy()
+                phase = codes.astype(np.float64) * (2 * np.pi / 256)
+                if index == 0 and endpoint_data is not None and "source_phase" in endpoint_data:
+                    phase = canonical_phase(endpoint_data["source_phase"], shape)
                 optical = gpu["pupil_cpu"].astype(np.float64) * np.exp(
-                    1j * (codes.astype(np.float64) * (2 * np.pi / 256) + gpu["incident_cpu"]))
+                    1j * (phase.astype(np.float64) + gpu["incident_cpu"]))
                 spectrum = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(optical)))
                 actual = spectrum[tuple(points.T)]
                 power = abs(actual) ** 2
@@ -2818,15 +2863,18 @@ def prepare_rearrangement(
                     raise ValueError(f"prepared {name} has a zero or invalid bright-site field")
                 relative = power / authored
                 ratio = float(relative.max() / relative.min())
-                if endpoint_data is not None and ratio > SPOT_SUPPORT_TOLERANCE:
-                    raise ValueError(f"endpoint_data {name} codes exceed authored intensity ratio "
-                                     f"{SPOT_SUPPORT_TOLERANCE:g}: {ratio:.6g}")
+                if supplied and ratio > tolerance:
+                    raise ValueError(f"endpoint_data {name} field exceeds authored intensity ratio "
+                                     f"{tolerance:g}: {ratio:.6g}")
+                if coefficient is None:
+                    coefficient = actual / np.linalg.norm(actual)
                 coefficients.append(_frozen(np.asarray(coefficient, np.complex64)))
                 codes_list.append(_frozen(codes))
+                phases.append(_frozen(phase))
                 fields.append(_frozen(actual.astype(np.complex64)))
                 brightness.append(float(np.sqrt(np.sum(power) / np.sum(authored, dtype=np.float64))))
                 endpoint_ratios.append(ratio)
-            _prepare_rearrangement_lattice(gpu, geometry["source_yx"], codes_list[0])
+            _prepare_rearrangement_lattice(gpu, geometry["source_yx"], phases[0])
             target_amplitude = np.sqrt(intensities[1])
             gpu["amplitude"] = cp.asarray(target_amplitude / np.linalg.norm(target_amplitude))
             gpu["target_codes"] = cp.asarray(codes_list[1])
@@ -2841,6 +2889,8 @@ def prepare_rearrangement(
                 _rearrangement_amplitude_updates(gpu, gpu["resources"][2], 16, 1)
             stream.synchronize()
             for band in native["plans"]:
+                if stop_requested is not None and stop_requested():
+                    raise InterruptedError("SLM rearrangement preparation stopped")
                 stream.begin_capture()
                 _rearrangement_load_frame(gpu)
                 if coarse_updates:
@@ -2854,30 +2904,41 @@ def prepare_rearrangement(
                 gpu["frame_index"].fill(0)
                 gpu["graphs"][band].launch(stream)
             stream.synchronize()
-            # Prepare the library's size classes for default two-ramp movies.
+            # Prepare the library's size classes for the authored removal prefix.
             # Two owned blocks allow an earlier result to stay live during the
-            # next serial call; no occupancy-dependent data is precomputed.
+            # next serial call; no selection-dependent data is precomputed.
             area = int(np.prod(shape))
-            size = 1 << (max(512, 5 * area) - 1).bit_length()
-            maximum_size = 1 << (max(512, (2 + gpu["motion_capacity"]) * area) - 1).bit_length()
+            size = 1 << (max(512, (ramp_frames + 1) * area) - 1).bit_length()
+            maximum_size = 1 << (max(512, (ramp_frames + gpu["motion_capacity"]) * area) - 1).bit_length()
             free_blocks = 0
+            reserved_bytes = 0
             while size <= maximum_size:
                 blocks = [gpu["output_pool"].malloc(size), gpu["output_pool"].malloc(size)]
                 del blocks
                 free_blocks += 2
+                reserved_bytes += 2 * size
                 size *= 2
             if gpu["output_pool"].n_free_blocks() != free_blocks:
-                raise MemoryError("SLM output buffers could not all be reserved before occupancy")
+                raise MemoryError("SLM output buffers could not all be reserved before planning")
+        free_memory, total_memory = cp.cuda.runtime.memGetInfo()
         return {
             **geometry, "gpu": gpu, "close": gpu["close"],
+            "maximum_motion_frames": gpu["motion_capacity"],
+            "gpu_info": {
+                "device_name": cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)["name"].decode(),
+                "device_memory_free_bytes": free_memory,
+                "device_memory_total_bytes": total_memory,
+                "host_output_pool_reserved_bytes": reserved_bytes,
+            },
             "source_intensities": intensities[0], "target_intensities": intensities[1],
             "source_coefficients": coefficients[0], "target_coefficients": coefficients[1],
             "source_field": fields[0], "target_field": fields[1],
             "source_brightness": brightness[0], "target_brightness": brightness[1],
             "endpoint_support_intensity_ratios": tuple(endpoint_ratios),
             "initial_phase_codes": codes_list[0], "target_phase_codes": codes_list[1],
-            "initial_pattern_phase": freeze_pattern_phase(codes_list[0].astype(np.float64) * (2 * np.pi / 256), shape),
-            "target_pattern_phase": freeze_pattern_phase(codes_list[1].astype(np.float64) * (2 * np.pi / 256), shape),
+            "initial_phase": phases[0], "target_phase": phases[1],
+            "initial_pattern_phase": freeze_pattern_phase(phases[0] + gpu["incident_cpu"], shape),
+            "target_pattern_phase": freeze_pattern_phase(phases[1] + gpu["incident_cpu"], shape),
         }
     except BaseException:
         gpu["close"]()
@@ -2885,17 +2946,21 @@ def prepare_rearrangement(
 
 
 def compute_rearrangement(
-    prepared: dict[str, object], occupied: object, *, surplus_policy: str,
-    ramp_frames: int = 2, iterations: int | None = None,
+    prepared: dict[str, object], plan: Mapping[str, object], *,
+    ramp_frames: int = 2, motion_frames: int | None = None, iterations: int | None = None,
     support_tolerance: float = SPOT_SUPPORT_TOLERANCE, dark_tolerance: float = .01,
     require_converged: bool = True, stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Observed occupancy through every native phase-code map, ready on host.
+    """Render an explicit site-transition plan into native host-ready phase maps.
 
-    Unselected source light fades before motion. Bright constraints use authored
+    Source selection and matching are completed by the caller. Unselected
+    source light fades before motion. Bright constraints use authored
     weights and one measured physical brightness scale per endpoint; zero means
-    a dark constraint and -1 an absent slot. Integer waypoints are subdivided
-    into native third-bin positions without changing their piecewise path.
+    a dark constraint and -1 an absent slot. motion_frames samples the rounded
+    piecewise plan at uniform normalized waypoint times, including the final
+    endpoint and excluding the initial source position. None chooses three
+    samples per integer segment. Every actual frame-to-frame segment is checked
+    for clearance; an unsafe frame count is rejected without adding maps.
     None selects 64 source projections and 3 coarse + 2 native motion updates
     (10 native when stride-two quadrature is unavailable), then at most eight
     safeguarded encoded-field proposals for each failing motion frame. Explicit
@@ -2915,41 +2980,48 @@ def compute_rearrangement(
     started = time.perf_counter()
     if not prepared["gpu"]:
         raise RuntimeError("SLM rearrangement workspace is closed")
-    if surplus_policy != "discard":
-        raise ValueError("this target consumes selected atoms only; explicitly choose surplus_policy='discard'")
     if (isinstance(ramp_frames, bool) or int(ramp_frames) != ramp_frames or ramp_frames < 1
+            or (motion_frames is not None and
+                (isinstance(motion_frames, bool) or int(motion_frames) != motion_frames or motion_frames < 1))
             or (iterations is not None and
                 (isinstance(iterations, bool) or int(iterations) != iterations or iterations < 0))):
-        raise ValueError("ramp_frames must be positive and iterations nonnegative integers")
+        raise ValueError("ramp_frames and motion_frames must be positive and iterations nonnegative integers")
     tolerance = float(support_tolerance)
     if not np.isfinite(tolerance) or tolerance < 1:
         raise ValueError("support_tolerance must be finite and >= 1")
     dark_limit = _scalar(dark_tolerance, "dark_tolerance", nonnegative=True)
     gpu = prepared["gpu"]
-    # These required resets depend only on the prepared working point, so let
-    # the device perform them while the CPU matches atoms. No warmup is added.
+    # Required resets depend only on the prepared working point.
     with gpu["stream"]:
         gpu["frame_index"].fill(0)
         gpu["source"]["small"][:] = gpu["source"]["initial"]
-    plan = plan_rearrangement(prepared, occupied)
     after_plan = time.perf_counter()
     assignment = plan["assignment"]
-    path, fractions = plan["motion_yx"], plan["fraction"]
+    path = plan["motion_yx"]
+    if (not np.array_equal(path[0], prepared["source_yx"][assignment])
+            or not np.array_equal(path[-1], prepared["target_yx"])):
+        raise ValueError("plan endpoints do not match the prepared source roster and target")
     if len(path) == 1:
         path = np.concatenate((path, path))
-        fractions = np.asarray([0., 1.])
-    substeps = np.asarray([1 / 3, 2 / 3, 1.])
-    moving = ((1 - substeps)[None, :, None, None] * path[:-1, None]
-              + substeps[None, :, None, None] * path[1:, None]).reshape(-1, len(assignment), 2)
-    progress = ((1 - substeps)[None] * fractions[:-1, None]
-                + substeps[None] * fractions[1:, None]).reshape(-1)
+    motion_frames = 3 * (len(path) - 1) if motion_frames is None else int(motion_frames)
+    if motion_frames > prepared["maximum_motion_frames"]:
+        raise ValueError(f"motion_frames exceeds prepared maximum {prepared['maximum_motion_frames']}")
+    progress = np.arange(1, motion_frames + 1, dtype=np.float64) / motion_frames
+    # Integer quotient/remainder keeps exact waypoint hits and endpoint identity;
+    # all counts, including the former three-per-segment default, use this route.
+    quotient, remainder = np.divmod(np.arange(1, motion_frames + 1) * (len(path) - 1), motion_frames)
+    segment = np.minimum(quotient, len(path) - 2)
+    mix = np.where(quotient == len(path) - 1, 1., remainder / motion_frames)
+    moving = path[segment].astype(np.float64) + mix[:, None, None] * (path[segment + 1] - path[segment])
+    actual_path = np.concatenate((path[:1], moving))
     ramp_frames = int(ramp_frames)
-    motion_frames, frames = len(moving), ramp_frames + len(moving)
+    frames = ramp_frames + motion_frames
     shape = prepared["shape_yx"]
     cp, stream, number = gpu["cp"], gpu["stream"], gpu["number"]
     native, source = gpu["resources"][1], gpu["source"]
     source_count = len(prepared["source_yx"])
     pixels = frames * int(np.prod(shape))
+    copy_events = []
     desired = np.full((frames, source_count), -1, np.float32)
     sites = np.full((frames, source_count, 2), -1., np.float64)
     source_amplitude = prepared["source_brightness"] * np.sqrt(prepared["source_intensities"])
@@ -2968,9 +3040,9 @@ def compute_rearrangement(
     iteration_counts = np.full(frames, total_updates, np.int32)
     iteration_counts[:ramp_frames] = source_updates
     with stream:
-        positions = cp.asarray(path, cp.int32)
+        positions = cp.asarray(actual_path, cp.float64)
         gpu["kernels"]["clearance"](((number + 15) // 16,) * 2, (16, 16),
-                                    (positions, gpu["distances"], np.int32(len(path)), np.int32(number)))
+                                    (positions, gpu["distances"], np.int32(len(moving) + 1), np.int32(number)))
         clearance = float(cp.sqrt(cp.min(gpu["distances"])))
         if clearance < prepared["minimum_separation"]:
             raise ValueError(f"emitted trajectory clearance {clearance:g} is below {prepared['minimum_separation']:g}")
@@ -2990,7 +3062,11 @@ def compute_rearrangement(
             else:
                 _rearrangement_lattice_correct(gpu, source_updates)
             source_fields_gpu[index] = source["actual"]
+            copy_begin, copy_end = cp.cuda.Event(), cp.cuda.Event()
+            copy_begin.record(stream)
             source["codes"].get(out=host[index], stream=stream, blocking=True)
+            copy_end.record(stream)
+            copy_events.append((copy_begin, copy_end))
         source_fields = source_fields_gpu.get()
         post = source_fields[-1, assignment]
         if np.any(abs(post) == 0) or not np.all(np.isfinite(post)):
@@ -3105,7 +3181,11 @@ def compute_rearrangement(
                     iteration_counts[ramp_frames + index] += 1
         # Source prefixes are already complete; publish the motion suffix only
         # after every accepted correction has reached the prepared GPU rows.
+        copy_begin, copy_end = cp.cuda.Event(), cp.cuda.Event()
+        copy_begin.record(stream)
         movie.get(out=host[ramp_frames:], stream=stream, blocking=True)
+        copy_end.record(stream)
+        copy_events.append((copy_begin, copy_end))
         stream.synchronize()
     actual = np.zeros((frames, source_count), np.complex64)
     actual[:ramp_frames] = source_fields
@@ -3135,11 +3215,14 @@ def compute_rearrangement(
     reference[ramp_frames:, :number] = np.exp(1j * phase)
     phase_error = np.angle(actual * reference.conj())
     codes = np.frombuffer(memoryview(memory).toreadonly(), np.uint8, count=pixels).reshape((frames, *shape))
+    total_ms = (time.perf_counter() - started) * 1000
+    plan_ms = (after_plan - started) * 1000
+    copy_ms = sum(cp.cuda.get_elapsed_time(begin, end) for begin, end in copy_events)
     return {
-        **plan, "motion_yx": _frozen(np.concatenate((path[:1].astype(float), moving))),
+        **plan, "motion_yx": _frozen(actual_path),
         "fraction": _frozen(np.r_[0., progress]), "phase_codes": codes,
         "sites_yx": sites, "actual_fields": actual, "desired_amplitudes": desired,
-        "ramp_frames": ramp_frames, "iterations": tuple(map(int, iteration_counts)),
+        "ramp_frames": ramp_frames, "motion_frames": motion_frames, "iterations": tuple(map(int, iteration_counts)),
         "clearance": clearance, "support_intensity_ratios": ratio, "converged": converged,
         "dark_intensity_ratios": dark_ratio, "dark_tolerance": dark_limit, "support_tolerance": tolerance,
         "intensity_relative_rms": rms,
@@ -3151,7 +3234,8 @@ def compute_rearrangement(
         "phase_error_rms_rad": np.sqrt(np.sum(np.where(positive, phase_error ** 2, 0), axis=1)
                                       / np.count_nonzero(positive, axis=1)),
         "phase_step_max_rad": np.max(abs(np.angle(kept * np.concatenate((initial[None], kept[:-1])).conj())), axis=1),
-        "surplus_policy": surplus_policy, "phase_encoding": "uint8:2pi/256",
+        "phase_encoding": "uint8:2pi/256",
         "prepared_target_reused": reused_target, "encoded_correction_proposals": proposals_evaluated,
-        "timing_ms": {"plan": (after_plan - started) * 1000, "total": (time.perf_counter() - started) * 1000},
+        "timing_ms": {"prepare_frame_state": plan_ms, "solve": total_ms - plan_ms - copy_ms,
+                      "copy": copy_ms, "total": total_ms},
     }

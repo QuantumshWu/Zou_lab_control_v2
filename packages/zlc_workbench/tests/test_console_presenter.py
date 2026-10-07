@@ -4423,6 +4423,14 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     assert presenter.view.task_takeover is True
     assert presenter._active_task_id == task_id
     assert presenter.view.status[-1] == ("task", "calibration: Capturing 2/5")
+    host.observation = LogicNodeObservation(
+        True, False, "running", progress=NodeProgress("Saving results"),
+    )
+    presenter.beat()
+    assert presenter.view.status[-1] == ("task", "calibration: Saving results")
+    messages = len(presenter.view.status)
+    presenter.beat()
+    assert len(presenter.view.status) == messages
     primary = DatasetOutputDeclaration("frames", "camera.frames")
     overlay = DatasetOutputDeclaration("occupied", "atom.occupied")
     presenter.logic[task_id].preview_specs = (

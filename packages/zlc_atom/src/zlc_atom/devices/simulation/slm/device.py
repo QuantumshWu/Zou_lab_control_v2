@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from threading import Event
+import time
+from typing import Callable
+
 import numpy as np
+
+from ...slm.device import phase_from_codes, phase_sequence_codes
 
 
 class VirtualSLM:
@@ -20,6 +26,9 @@ class VirtualSLM:
         self._command_revision = 0
         self._outcome = "known-new"
         self._stage = "simulation-state"
+        self._sequence = None
+        self._sequence_cancel = Event()
+        self._sequence_receipt = None
 
     @property
     def identity(self) -> str:
@@ -30,6 +39,8 @@ class VirtualSLM:
         return self._world.slm_shape_yx
 
     def apply_phase(self, radians: object) -> np.ndarray:
+        self._sequence = None
+        self._sequence_receipt = None
         self._command_revision += 1
         try:
             commanded = self._world.apply_slm_phase(radians)
@@ -55,7 +66,7 @@ class VirtualSLM:
 
     @property
     def last_command_receipt(self) -> dict[str, object]:
-        return {
+        receipt = {
             "transport": "virtual",
             "identity": self.identity,
             "profile": "simulation",
@@ -74,11 +85,76 @@ class VirtualSLM:
             "stage": self._stage,
             "readback": "simulation-state",
         }
+        if self._sequence_receipt is not None:
+            receipt["sequence"] = self._sequence_receipt
+        return receipt
+
+    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object) -> dict[str, object]:
+        started = time.perf_counter()
+        frames, intervals = phase_sequence_codes(codes, self.shape_yx, frame_interval_seconds)
+        phases = tuple(phase_from_codes(frame, self.shape_yx) for frame in frames)
+        prepared = {"frame_count": len(frames), "frame_intervals_seconds": intervals.tolist(),
+                    "prepare_ms": (time.perf_counter() - started) * 1000,
+                    "upload_roundtrip_ms": 0.0, "mapping_revision": 0}
+        self._sequence = (phases, intervals, self._command_revision, prepared)
+        self._sequence_cancel.clear()
+        return dict(prepared)
+
+    def cancel_phase_sequence(self) -> None:
+        self._sequence_cancel.set()
+
+    def release_phase_sequence(self) -> None:
+        self._sequence = None
+
+    def play_phase_sequence(self, stop_requested: Callable[[], bool] | None = None) -> dict[str, object]:
+        sequence, self._sequence = self._sequence, None
+        if sequence is None:
+            raise RuntimeError("SLM phase sequence has not been prepared")
+        phases, intervals, revision, prepared = sequence
+        if revision != self._command_revision:
+            raise RuntimeError("stale prepared SLM sequence")
+        started = time.perf_counter()
+        dispatch, acknowledgments = [], []
+        result = {**prepared, "played_frames": 0, "cancelled": False,
+                  "acknowledgment": "simulation-state", "physical_vblank_observed": False,
+                  "final_settle_ms": 0.0, "final_settle_completed": False}
+        self._command_revision += 1
+        failed = False
+        try:
+            for canonical, interval in zip(phases, intervals):
+                if self._sequence_cancel.is_set() or (stop_requested is not None and stop_requested()):
+                    self._sequence_cancel.set()
+                    break
+                frame_started = time.perf_counter()
+                dispatch.append((frame_started - started) * 1000)
+                self._world.apply_slm_phase(canonical)
+                acknowledgments.append((time.perf_counter() - started) * 1000)
+                self._outcome = "known-new"
+                result["played_frames"] += 1
+                deadline = frame_started + float(interval)
+                while time.perf_counter() < deadline and not self._sequence_cancel.is_set():
+                    if stop_requested is not None and stop_requested():
+                        self._sequence_cancel.set()
+                        break
+                    self._sequence_cancel.wait(min(0.01, max(0.0, deadline - time.perf_counter())))
+        except BaseException:
+            failed = True
+            self._outcome = "known-old"
+            raise
+        finally:
+            result.update(cancelled=self._sequence_cancel.is_set(), dispatch_ms=dispatch,
+                          acknowledged_ms=acknowledgments, actual_frame_intervals_ms=np.diff(dispatch).tolist(),
+                          play_ms=(time.perf_counter() - started) * 1000)
+            result["final_settle_completed"] = result["played_frames"] == len(phases) and not result["cancelled"]
+            self._stage = "sequence-failed" if failed else "sequence-cancelled" if result["cancelled"] else "sequence-complete"
+            self._sequence_receipt = result
+        return {**result, "receipt": self.last_command_receipt}
 
     def close(self) -> None:
         # Closing an editor or session is not an optical blank command.  The
         # last explicit phase remains the simulated hardware's last command.
-        return None
+        self.cancel_phase_sequence()
+        self.release_phase_sequence()
 
 
 __all__ = ["VirtualSLM"]

@@ -7,6 +7,7 @@ from functools import lru_cache
 import math
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -471,7 +472,7 @@ class SimulationWorld:
             return self._commanded_phase
 
     def apply_slm_phase(self, radians: object) -> np.ndarray:
-        """Atomically accept one explicit command and invalidate propagation."""
+        """Accept a command and advance the existing physical trap roster."""
 
         from zlc_atom.devices.slm import canonical_phase
 
@@ -480,6 +481,10 @@ class SimulationWorld:
             self._commanded_phase = commanded
             self._slm_phase_revision += 1
             self._propagated_revision = -1
+            # A movie's intermediate traps move atoms even when no camera
+            # looks at them. Use the same nearest-peak remap at each command,
+            # rather than lazily jumping straight from source to final frame.
+            self._ensure_slm_propagation()
             return self._commanded_phase
 
     def _camera_centers(self, indices_yx: np.ndarray) -> np.ndarray:
@@ -942,8 +947,14 @@ class SimulationWorld:
         *,
         table: object | None = None,
         camera_channel: str = "emCCD",
+        started_at: float | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
-        """Play one applied board point through the shared physical world."""
+        """Play one point; a sequencer clock anchor paces its physical events.
+
+        Direct numerical callers omit the anchor and evaluate the same
+        compiled timeline immediately. All wall waits happen outside _lock.
+        """
 
         if not isinstance(program, CompiledProgram):
             raise TypeError("program must be CompiledProgram")
@@ -993,10 +1004,36 @@ class SimulationWorld:
         )
         dac_at_events = _dac_values_at_ticks(program, row, event_ticks)
 
+        def wait_until(tick):
+            if stop_event is not None and stop_event.is_set():
+                return True
+            if started_at is None:
+                return False
+            remaining = max(0., started_at + float(tick) / clock - time.monotonic())
+            if stop_event is not None:
+                return stop_event.wait(remaining)
+            if remaining:
+                time.sleep(remaining)
+            return False
+
+        pending_frames = []
+
+        def deliver_before(tick):
+            while pending_frames and pending_frames[0][0] <= tick:
+                finished, device, frame = pending_frames.pop(0)
+                if wait_until(finished):
+                    return False
+                device.trigger(1, frame=frame)
+            return True
+
         with self._lock:
             self._ensure_slm_propagation()
             self._fire_count += 1
-            for tick, dac_values in zip(event_ticks, dac_at_events, strict=True):
+        for tick, dac_values in zip(event_ticks, dac_at_events, strict=True):
+            if not deliver_before(tick) or wait_until(tick):
+                return
+            with self._lock:
+                self._ensure_slm_propagation()
                 self._dac_values.update(dac_values)
                 release_start = release_ends.get(tick)
                 if release_start is not None:
@@ -1033,11 +1070,14 @@ class SimulationWorld:
                             probe_seconds=probe_seconds,
                             occupancy=shot_occupancy,
                         )
-                        device.trigger(
-                            1,
-                            frame=frame,
-                        )
+                        # Freeze the exposure's scene at its rising edge, then
+                        # make it available only after its integration time.
+                        pending_frames.append((integration_end, device, frame))
+                pending_frames.sort(key=lambda item: item[0])
 
+        if not deliver_before(float("inf")) or wait_until(duration_ticks):
+            return
+        with self._lock:
             self._dac_values.update(_final_dac_values(program, row))
 
 

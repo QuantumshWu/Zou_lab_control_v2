@@ -135,26 +135,30 @@ backend implicitly.
 `prepare_rearrangement(...)` prepares fixed source/target geometry, endpoint
 holograms and GPU resources **before** imaging. Coordinates are integer Y,X
 indices in the native centered Fourier image, not camera pixels or micrometres.
-The input `pupil_phase` is a measured incident aberration to compensate; it is
-not an intentional carrier or the device's vendor response correction.
+The input `pupil_phase` belongs to the common optical model; the Task uses the
+source Context's pupil and operator convention. Device vendor correction stays
+with the physical SLM owner.
 Preparation also reserves two output buffers in each needed pinned-memory size
-class, bounded by the declared geometry and matching range. This is empty storage,
-not precomputed occupancy-dependent answers. The 1024×1272 benchmark reserves
-496 MiB for a 32-bin maximum range, or 2032 MiB for 80 bins; preparation time and
-RAM are reported separately from online latency. The pool belongs to this working
-point and unused buffers are released on close, without flushing global caches.
+class, bounded by `maximum_motion_frames` and the authored removal prefix.
+For 16 moving maps, prepare with `maximum_motion_frames=16, ramp_frames=2`.
+The measured 1024×1272 small-array case with 16 motion + 2 removal frames
+reserved 120 MiB. Preparation time and memory are reported separately from
+online latency. The pool belongs to this working point and unused buffers are
+released on close, without flushing global caches.
 
-Apply `prepared["initial_phase_codes"]`, acquire a boolean occupancy vector in
-the exact source-site order, then call:
+Apply `prepared["initial_phase"]`. The caller supplies available source indices
+in the original roster; camera classification and atom policy belong to the Task.
+Planning and phase generation are separate calls:
 
 ```python
+plan = plan_rearrangement(prepared, available_source_indices)
 sequence = compute_rearrangement(
-    prepared, occupied, surplus_policy="discard",  # explicitly extinguish unused sites
+    prepared, plan, motion_frames=16,
 )
 # All sequence["phase_codes"] frames are now independent, read-only host arrays.
-# At a separately characterized, safe device cadence:
-for codes in sequence["phase_codes"]:
-    slm.apply_phase_codes(codes)
+# Preload the sequence once; the physical SLM owner plays it locally.
+slm.prepare_phase_sequence(sequence["phase_codes"], 1 / 60)
+receipt = slm.play_phase_sequence()
 # When this fixed optical working point is no longer needed:
 prepared["close"]()
 ```
@@ -169,10 +173,13 @@ hardware clock.
 Preparation requires explicit `shape_yx`, `pupil_amplitude`, `matching_radii`
 and `minimum_separation`, plus the source and target arrays. The solver chooses
 the first feasible authored maximum-distance bound, minimizes squared distance
-within it, and checks the piecewise-linear paths including between frames.
-Motion emits three substeps per integer planner segment; returned positions
-describe those actual fractional Fourier coordinates without rounding.
-Insufficient atoms, infeasible assignments, collisions and unconverged phase
+within that matching graph, and checks the piecewise-linear paths between frames.
+This is the existing matching method, without a claim of globally optimal
+collision-constrained transport. `motion_frames=N` emits exactly N moving maps,
+including the endpoint and excluding the initial positions, with actual fractional
+Fourier coordinates. The constraint is minimum separation at the same time:
+spatial paths may cross when the traps pass at different times. Insufficient
+available sources, infeasible assignments, unsafe spacing and unconverged phase
 sequences are rejected. The default intended-site intensity max/min gate is 1.01;
 explicit diagnostic `require_converged=False` returns the actual metrics, not
 a successful quality verdict. `iterations=None` uses a prepared fixed initial
@@ -180,15 +187,70 @@ schedule followed by bounded correction of only failed encoded frames. An
 explicit integer requests that many projection/weight updates per frame and
 disables additional adaptive updates; zero still encodes and measures the result.
 
-Optional `endpoint_data` supplies already prepared source/target phase codes
-and synthesis coefficients at the same geometry, pupil and requested intensities.
-These are fixed optical working points, not cached occupancy-dependent answers
-or a neural model. Actual fields are measured from the encoded patterns, while
-intensity gates remain relative to the requested site weights. A prepared target
+Optional `endpoint_data` supplies already prepared source/target command phases
+or phase codes, with optional coefficients, at the same geometry, pupil and
+requested intensities. Supplying only `source_phase` preserves that exact command
+and generates the target with the existing endpoint solver. Supplied fields are
+measured and checked; generated target codes are checked after encoding, while
+intensity gates remain relative to the requested site weights. Preparation and
+generation accept `support_tolerance` (default 1.01); the Task passes its authored
+weighted intensity ratio to both. A prepared target
 can be reused only at its exact endpoint and after satisfying that same gate.
 Closing the prepared GPU workspace does not invalidate already returned host maps.
 
-Online timing covers occupancy-dependent planning, clearance, every generated
+### One-shot SLM Rearrangement Task
+
+Add **Task: Slm Rearrangement** in TaskConsole. Select the camera, sequencer and
+SLM, one source Science Context and its source Calibration. Every authored
+source site must have a calibrated readout. Set **Target rows** and **Target
+columns** (default 3 × 3): the Task generates the central complete rectangle
+available in the source grid and retains those sites' authored weights.
+The generated target uses the same pupil/operator and the corresponding subset
+of the source Calibration. Select one ordinary operator-edited Pulse file and
+its **Before imaging Period** and **After imaging
+Period** by their displayed names. The Task does not rewrite or split that Pulse.
+It runs the entire Pulse once, accepts its first photograph, computes and plays
+the rearrangement while the Pulse continues, then accepts the second photograph.
+The Pulse must provide exactly two camera triggers and enough intervening time;
+its verification segment must not load a new atom sample.
+GPU resources and the generated target hologram are prepared before Fire.
+The first photograph's valid occupied sites become the available source indices;
+the existing planner assigns them to the generated target, then the generator
+renders that explicit plan. Unselected source light fades in the removal ramp.
+
+**Motion frames** is the exact number of moving maps, including the final target
+and excluding the starting positions. **Removal ramp frames** is separate. At
+the default 16 + 2 frames and 60 Hz the nominal display duration is 300 ms;
+GPU computation, upload and any remaining final optical settle add to it. Actual
+Config-filled periods, nested-loop timing and exposure windows are checked at
+execution. If the phase sequence cannot finish before the conservative compiled
+verification deadline, the verification is rejected and the report remains partial.
+Fewer maps may take an unsafe shortcut between waypoints; the actual continuous
+segment clearance is checked and refused rather than silently adding maps.
+
+Previews show the two photographs with their own same-shot occupancy overlays,
+source/final phase, and each target's Y coordinate against motion frame (both
+X and Y trajectories are saved). As with other Tasks,
+automatic run previews retire at termination; the important plots are retained
+as ordinary Figure NPZ + PNG files for FigureViewer. The run saves `summary.json`
+and `summary.txt`, `data/rearrangement.npz`, both photographs and counts/validity,
+matching/trajectory and exact phase codes (Save phase sequence is on by default),
+the generated target, frozen source Calibration/Context facts, and actual Pulse
+and device receipts. The run creates no additional final Science Context file.
+Timing names distinguish preparation, camera availability, readout, nested compute stages,
+upload/preload, actual playback/final settle, report delay and final file/render
+work. Nested timing windows must not be added together. No report rendering or
+phase-movie archival occurs before the verification photograph.
+
+The device sequence protocol is version 2; update both SLM server and client
+from this checkout. Playback is local after one bulk upload. The DVI receipt
+records software rendering acknowledgments, not measured physical vblank or
+liquid-crystal settling. The selected frame interval and optical response still
+need apparatus acceptance. An interrupted sequence retains the last confirmed
+phase and releases its preloaded buffers; a failed transport records unknown
+outcome instead of inventing successful movement.
+
+Online timing covers source selection and matching, clearance, every generated
 full-frame mask, quantization and host transfer. CUDA/JIT/endpoint preparation
 is separate. Network-only inference, one iteration, and first-frame latency
 are not complete-rearrangement measurements. The returned metrics include

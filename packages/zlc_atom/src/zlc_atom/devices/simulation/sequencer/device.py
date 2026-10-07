@@ -194,6 +194,8 @@ class VirtualPulseStreamer(PulseStreamer):
                 applied.program,
                 table=point,
                 camera_channel=self.camera_trigger_channel,
+                started_at=cycle_start,
+                stop_event=self._stop,
             )
         duration = run_duration_seconds(
             applied.program,

@@ -63,6 +63,24 @@ def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
     return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
 
 
+def phase_sequence_codes(
+    codes: object, shape_yx: tuple[int, int], frame_interval_seconds: object
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate logical frames and keep a readonly view of the caller's movie."""
+    shape = _shape(shape_yx)
+    source = np.asarray(codes)
+    if source.dtype != np.uint8 or source.ndim != 3 or source.shape[1:] != shape or not len(source):
+        raise ValueError("SLM phase sequence must be nonempty uint8 frames matching the full device shape")
+    intervals = np.asarray(frame_interval_seconds, dtype=np.float64)
+    if intervals.ndim == 0:
+        intervals = np.full(len(source), intervals.item(), dtype=np.float64)
+    if intervals.shape != (len(source),) or not np.all(np.isfinite(intervals)) or np.any(intervals <= 0):
+        raise ValueError("SLM frame intervals must be finite positive seconds, one per frame")
+    frames = source.view()
+    frames.flags.writeable = False
+    return frames, np.frombuffer(intervals.tobytes(), dtype=np.float64)
+
+
 @runtime_checkable
 class SlmAdapter(Protocol):
     """The complete device-independent surface of one phase-only SLM."""

@@ -35,6 +35,7 @@ from zlc_plot import (
     SelectorKind,
     paints_image_surface,
     image_point_overlay_from_signal,
+    image_point_overlay_geometry_matches,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_ui import STATUS_SEVERITIES
@@ -537,6 +538,7 @@ class ConsolePresenter:
         # phase and progress continue to come exclusively from the row's host.
         self._active_task_id: str | None = None
         self._shown_task_takeover: bool | None = None
+        self._shown_task_status: tuple[str, str] | None = None
         #: A whole board waiting to go up -- loaded or empty -- and the words
         #: for when it has, held until every node it replaces has stopped.
         self._pending_board: tuple[_LayoutCandidate, str] | None = None
@@ -1276,7 +1278,7 @@ class ConsolePresenter:
             geometry = publication.run_record.get(
                 IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
             )
-            if not isinstance(geometry, Mapping):
+            if not isinstance(geometry, Mapping) or not image_point_overlay_geometry_matches(snapshot, geometry):
                 return snapshot, event_records
             point_ids = tuple(str(value) for value in geometry["point_ids"])
             overlay = ImagePointOverlay(
@@ -6970,8 +6972,13 @@ class ConsolePresenter:
             self._shown_task_takeover = takeover
             for panel in tuple(self.panels.values()):
                 self._publish_panel_state(panel)
-            if active is not None:
-                _state, status = self._logic_state(active)
+        if active is None:
+            self._shown_task_status = None
+        else:
+            _state, status = self._logic_state(active)
+            shown = (active.node_id, status)
+            if shown != self._shown_task_status:
+                self._shown_task_status = shown
                 self._report(f"{active.node_id}: {status}", severity="task")
 
     def _begin_task_takeover(self, binding: LogicBinding) -> None:
@@ -7125,6 +7132,8 @@ class ConsolePresenter:
         )
         if not isinstance(geometry, Mapping):
             raise RuntimeError("operator point review image has no point geometry")
+        if not image_point_overlay_geometry_matches(snapshot, geometry):
+            raise ValueError("operator point review geometry differs from image axes")
         point_ids = tuple(str(value) for value in geometry["point_ids"])
         requested_ids = tuple(
             str(value) for value in request.payload.get("point_ids", ())

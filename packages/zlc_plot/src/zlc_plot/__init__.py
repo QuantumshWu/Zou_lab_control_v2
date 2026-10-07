@@ -58,6 +58,10 @@ _EXPORTS = {
         "zlc_plot.primitives",
         "image_point_overlay_geometry",
     ),
+    "image_point_overlay_geometry_matches": (
+        "zlc_plot.primitives",
+        "image_point_overlay_geometry_matches",
+    ),
     "PointStatus": ("zlc_plot.primitives", "PointStatus"),
     "ImagePointReviewSurface": (
         "zlc_plot.point_review",
@@ -170,6 +174,7 @@ __all__ = [
     "IMAGE_POINT_OVERLAY_GEOMETRY_RECORD",
     "image_point_overlay_from_signal",
     "image_point_overlay_geometry",
+    "image_point_overlay_geometry_matches",
     "NumericRange",
     "open_figure_host",
     "PlotKind",

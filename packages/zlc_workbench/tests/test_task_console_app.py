@@ -880,6 +880,7 @@ assert catalog == (
     ('Processor: Occupancy', ('logic', 'occupancy')),
     ('Task: Calibration', ('logic', 'calibration')),
     ('Task: Slm Feedback', ('logic', 'slm_feedback')),
+    ('Task: Slm Rearrangement', ('logic', 'slm_rearrangement')),
 )
 facet_index = next(
     index for index in range(view._view.kind_combo.count())
