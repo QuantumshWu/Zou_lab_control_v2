@@ -130,6 +130,290 @@ def _grid_indices(
     )
     return shape, axes[0], axes[1]
 
+_REARRANGEMENT_MATCH = None
+
+
+def _match_rearrangement(indptr, columns, costs, occupied, row_order):
+    """Exact rectangular primal-dual matching; compiled lazily in preparation."""
+    def radix_bin(key, last):
+        value = np.uint64(key) ^ np.uint64(last)
+        if value == 0:
+            return 0
+        result = 1
+        for shift in (32, 16, 8, 4, 2, 1):
+            if value >> shift:
+                value >>= shift
+                result += shift
+        return result
+
+    rows, width = len(indptr) - 1, len(occupied)
+    # Keep original source IDs and neighbor order; inactive edges never enter
+    # initialization or an augmenting path, so filter them only once.
+    pointers = np.empty_like(indptr)
+    active_columns = np.empty_like(columns)
+    active_costs = np.empty_like(costs)
+    pointers[0] = 0
+    used = 0
+    for row in range(rows):
+        for edge in range(indptr[row], indptr[row + 1]):
+            col = columns[edge]
+            if occupied[col]:
+                active_columns[used] = col
+                active_costs[used] = costs[edge]
+                used += 1
+        pointers[row + 1] = used
+    indptr, columns, costs = pointers, active_columns, active_costs
+    infinity = np.iinfo(np.int64).max
+    assignment = np.full(rows, -1, np.int64)
+    owner = np.full(width, -1, np.int64)
+    u, v = np.zeros(rows, np.int64), np.zeros(width, np.int64)
+    distance, parent = np.empty(width, np.int64), np.empty(width, np.int64)
+    settled, visited = np.empty(width, np.bool_), np.empty(width, np.int64)
+    # Sixty-five radix buckets, each with free/matched heads. Queue storage
+    # depends on source count, never on coordinate magnitude or cost range.
+    heads = np.empty(130, np.int64)
+    bucket = np.empty(width, np.int64)
+    previous, following = np.empty(width, np.int64), np.empty(width, np.int64)
+    for row in row_order:
+        minimum = infinity
+        for edge in range(indptr[row], indptr[row + 1]):
+            if costs[edge] < minimum:
+                minimum = costs[edge]
+        if minimum == infinity:
+            return assignment, False
+        u[row] = minimum
+        for edge in range(indptr[row], indptr[row + 1]):
+            col = columns[edge]
+            if owner[col] < 0 and costs[edge] == minimum:
+                assignment[row], owner[col] = col, row
+                break
+    for root in row_order:
+        if assignment[root] >= 0:
+            continue
+        heads[:] = -1
+        bucket[:] = -1
+        distance[:] = infinity
+        parent[:] = -1
+        settled[:] = False
+        visits, row = 0, root
+        row_distance, last = np.int64(0), np.int64(0)
+        while True:
+            for edge in range(indptr[row], indptr[row + 1]):
+                col = columns[edge]
+                if settled[col]:
+                    continue
+                trial = row_distance + costs[edge] - u[row] - v[col]
+                if trial >= distance[col]:
+                    continue
+                old = bucket[col]
+                if old >= 0:
+                    before, after = previous[col], following[col]
+                    if before < 0:
+                        heads[old] = after
+                    else:
+                        following[before] = after
+                    if after >= 0:
+                        previous[after] = before
+                distance[col], parent[col] = trial, row
+                slot = 2 * radix_bin(trial, last) + int(owner[col] >= 0)
+                head = heads[slot]
+                previous[col], following[col] = -1, head
+                if head >= 0:
+                    previous[head] = col
+                heads[slot], bucket[col] = col, slot
+            if heads[0] < 0 and heads[1] < 0:
+                number = 1
+                while number <= 64 and heads[2 * number] < 0 and heads[2 * number + 1] < 0:
+                    number += 1
+                if number > 64:
+                    return assignment, False
+                minimum = infinity
+                for status in range(2):
+                    col = heads[2 * number + status]
+                    while col >= 0:
+                        minimum = min(minimum, distance[col])
+                        col = following[col]
+                last = minimum
+                for status in range(2):
+                    col = heads[2 * number + status]
+                    heads[2 * number + status] = -1
+                    while col >= 0:
+                        after = following[col]
+                        slot = 2 * radix_bin(distance[col], last) + status
+                        head = heads[slot]
+                        previous[col], following[col] = -1, head
+                        if head >= 0:
+                            previous[head] = col
+                        heads[slot], bucket[col] = col, slot
+                        col = after
+            if heads[0] >= 0:
+                sink, length = heads[0], last
+                break
+            col = heads[1]
+            head = following[col]
+            heads[1] = head
+            if head >= 0:
+                previous[head] = -1
+            bucket[col], settled[col] = -1, True
+            visited[visits] = col
+            visits += 1
+            row, row_distance = owner[col], last
+        # Update old matched rows only; the free sink keeps v=0. This is the
+        # rectangular dual condition lost by naive epsilon-scaling auctions.
+        u[root] += length
+        for index in range(visits):
+            col = visited[index]
+            change = length - distance[col]
+            u[owner[col]] += change
+            v[col] -= change
+        col = sink
+        while col >= 0:
+            row = parent[col]
+            old = assignment[row]
+            assignment[row], owner[col] = col, row
+            col = old
+    return assignment, True
+
+
+def prepare_rearrangement_geometry(
+    source_yx: object, target_yx: object, *, shape_yx: tuple[int, int],
+    matching_radii: object, max_step: int = 1, minimum_separation: float,
+) -> dict[str, object]:
+    """Prepare fixed native Fourier-grid geometry without observing occupancy."""
+    shape = _pair(shape_yx, "shape_yx")
+    if not np.array_equal(np.asarray(shape_yx), shape):
+        raise ValueError("shape_yx must contain positive integers")
+    sites = []
+    for name, values in (("source_yx", source_yx), ("target_yx", target_yx)):
+        array = np.asarray(values)
+        if (array.ndim != 2 or array.shape[1] != 2 or not len(array)
+                or array.dtype.kind not in "iuf" or not np.all(np.isfinite(array))
+                or np.any(array != np.floor(array))):
+            raise ValueError(f"{name} must be a nonempty matrix of integer Y,X sites")
+        if np.any(array < 0) or np.any(array >= shape):
+            raise ValueError(f"{name} lies outside the native SLM shape")
+        if np.any(array > np.iinfo(np.int32).max):
+            raise ValueError(f"{name} exceeds the native int32 coordinate range")
+        if len(np.unique(array, axis=0)) != len(array):
+            raise ValueError(f"{name} must contain unique sites")
+        sites.append(np.frombuffer(
+            np.ascontiguousarray(array, dtype=np.int32).tobytes(), dtype=np.int32,
+        ).reshape(-1, 2))
+    source, target = sites
+    if len(source) < len(target):
+        raise ValueError("source site count is smaller than target site count")
+    radii = np.asarray(matching_radii, dtype=float)
+    if (radii.ndim != 1 or not radii.size or not np.all(np.isfinite(radii))
+            or np.any(radii < 0) or np.any(np.diff(radii) <= 0)):
+        raise ValueError("matching_radii must be finite increasing nonnegative radii")
+    step = _scalar(max_step, "max_step")
+    if step != int(step):
+        raise ValueError("max_step must be a positive integer number of Fourier bins")
+    separation = _scalar(minimum_separation, "minimum_separation")
+    adjacency, eligible = [], []
+    for radius in radii:
+        pointers, column_parts, cost_parts = [0], [], []
+        allowed = np.zeros(len(source), dtype=bool)
+        for point in target:
+            delta = source.astype(np.int64) - point
+            cols = np.flatnonzero(np.max(np.abs(delta), axis=1) <= radius)
+            values = np.sum(delta[cols] ** 2, axis=1)
+            column_parts.append(cols)
+            cost_parts.append(values)
+            pointers.append(pointers[-1] + len(cols))
+            allowed[cols] = True
+        columns = np.concatenate(column_parts).astype(np.int64)
+        costs = np.concatenate(cost_parts).astype(np.int64)
+        divisor = max(1, int(np.gcd.reduce(costs))) if costs.size else 1
+        normalized = costs // divisor
+        # At most n augmentations, each of reduced length <= n*max(cost).
+        # Keep dual updates and tentative distances within exact int64 arithmetic.
+        span = len(target) ** 2 + len(target) + 2
+        if normalized.size and int(normalized.max()) > np.iinfo(np.int64).max // span:
+            raise ValueError("matching costs exceed the exact int64 working range")
+        adjacency.append(tuple(_frozen(array) for array in (
+            np.asarray(pointers, np.int64), columns, normalized,
+        )))
+        eligible.append(_frozen(allowed))
+    order = _frozen(np.argsort(np.sum((target - np.mean(target, axis=0)) ** 2, axis=1), kind="stable"))
+    global _REARRANGEMENT_MATCH
+    if _REARRANGEMENT_MATCH is None:
+        from numba import njit  # noqa: PLC0415
+
+        _REARRANGEMENT_MATCH = njit(cache=True, nogil=True)(_match_rearrangement)
+        _REARRANGEMENT_MATCH(*adjacency[-1], np.ones(len(source), dtype=bool), order)
+    return {
+        "source_yx": source, "target_yx": target, "shape_yx": shape,
+        "matching_radii": tuple(float(radius) for radius in radii),
+        "adjacency": tuple(adjacency), "eligible": tuple(eligible), "row_order": order,
+        "max_step": int(step), "minimum_separation": separation,
+    }
+
+
+def plan_rearrangement(prepared: Mapping[str, object], occupied: object) -> dict[str, object]:
+    """Assign observed atoms; the emitted path still requires a clearance gate.
+
+    Fractions describe spatial progress, not a physical clock. Unselected
+    occupied sources are reported; this planner does not discard their atoms.
+    """
+    source, target = prepared["source_yx"], prepared["target_yx"]
+    # Fix dtype/layout/mutability at this small input boundary: immutable or
+    # strided occupancy input must not trigger a new JIT signature online.
+    mask = np.array(occupied, copy=True, order="C")
+    if mask.dtype.kind != "b" or mask.shape != (len(source),):
+        raise ValueError("occupied must contain one boolean per source site")
+    if np.count_nonzero(mask) < len(target):
+        raise ValueError("not enough occupied source sites for the target")
+    for radius, adjacency, eligible in zip(
+        prepared["matching_radii"], prepared["adjacency"], prepared["eligible"],
+    ):
+        if np.count_nonzero(mask & eligible) < len(target):
+            continue
+        assignment, feasible = _REARRANGEMENT_MATCH(*adjacency, mask, prepared["row_order"])
+        if feasible:
+            break
+    else:
+        raise ValueError("no complete assignment within the authored matching radii")
+    assignment = assignment.astype(np.intp, copy=False)
+    unselected = mask.copy()
+    unselected[assignment] = False
+    start = source[assignment]
+    delta = target.astype(np.int64) - start
+    steps = int(np.ceil(np.max(np.abs(delta)) / prepared["max_step"]))
+    fraction = np.linspace(0.0, 1.0, steps + 1) if steps else np.zeros(1)
+    # Integer arithmetic gives exact half-up rounding even when a rational
+    # progress value lies just below a tie after floating-point division.
+    motion = (start[None] + (2 * np.arange(steps + 1)[:, None, None] * delta
+              + steps) // (2 * steps)) if steps else start[None].copy()
+    return {
+        "assignment": _frozen(assignment),
+        "unselected_occupied": _frozen(np.flatnonzero(unselected)),
+        "motion_yx": _frozen(motion.astype(np.int32)),
+        "fraction": _frozen(fraction), "matching_radius": radius,
+    }
+
+
+def rearrangement_clearance(motion_yx: object) -> float:
+    """Exact minimum distance along every emitted straight frame-to-frame path."""
+    from scipy.spatial.distance import pdist  # noqa: PLC0415
+
+    motion = np.asarray(motion_yx, dtype=float)
+    if (motion.ndim != 3 or motion.shape[2] != 2 or min(motion.shape[:2]) < 1
+            or not np.all(np.isfinite(motion))):
+        raise ValueError("motion_yx must contain finite frame, site, Y/X coordinates")
+    minimum = float(pdist(motion[0], "sqeuclidean").min(initial=np.inf))
+    for start, end in zip(motion[:-1], motion[1:]):
+        start_squared = pdist(start, "sqeuclidean")
+        velocity_squared = pdist(end - start, "sqeuclidean")
+        dot = (pdist(end, "sqeuclidean") - start_squared - velocity_squared) * 0.5
+        progress = np.divide(-dot, velocity_squared, out=np.zeros_like(dot),
+                             where=velocity_squared > 0)
+        np.clip(progress, 0.0, 1.0, out=progress)
+        squared = start_squared + progress * (2 * dot + progress * velocity_squared)
+        minimum = min(minimum, float(squared.min(initial=np.inf)))
+    return float(np.sqrt(max(0.0, minimum)))
+
+
 def preset_grid(
     shape_yx: object,
     grid_shape_yx: object,
@@ -1872,4 +2156,1002 @@ def load_science_context(path: str | Path) -> dict[str, object]:
         "pupil_support": support,
         "target_intensity": target,
         **normalized,
+    }
+
+
+# A Fourier band is a statement about nonzero target coefficients, not a
+# smaller SLM. All phase constraints below still run on every physical pixel.
+_REARRANGEMENT_PHASE_CODE_CUDA = r'''
+__device__ unsigned char phase_code(double command,unsigned int pixel){
+ if(command<0)command+=6.2831853071795864769;
+ if(command<0)command+=6.2831853071795864769;
+ float a=fminf((float)command,6.28318500518798828125f);
+ unsigned int p16=((unsigned int)floorf(a*10430.3783504704527f+0.5f))&65535;
+ unsigned int hash=pixel+0x9e3779b9u;
+ hash^=hash>>16;hash*=0x7feb352du;hash^=hash>>15;hash*=0x846ca68bu;hash^=hash>>16;
+ // Exact p16/256 plus the same spatial threshold. A float-radian roundtrip
+ // can spuriously turn an exact code 255 into zero at particular pixels.
+ unsigned int carry=(((p16&255)<<16)+(hash>>8))>>24;
+ return (unsigned char)(((p16>>8)+carry)&255);
+}
+'''
+
+
+_REARRANGEMENT_CUDA = _REARRANGEMENT_PHASE_CODE_CUDA + r'''
+#include <cuda_fp16.h>
+#if HALF
+typedef half real_t;
+__device__ real_t cv(float a){return __float2half_rn(a);}
+#else
+typedef float real_t;
+__device__ real_t cv(float a){return a;}
+#endif
+extern "C" __global__ void load_motion_frame(int* counter,const int* native_indices,const int* coarse_indices,
+ const int* frequencies,const long long* offsets,const float2* coefficients,int* native_index,int* coarse_index,
+ int* frequency,float2* current,int N,int K){
+ __shared__ int frame;int t=threadIdx.x;
+ if(!t){frame=counter[0];counter[0]=frame+1;}__syncthreads();
+ unsigned long long row=(unsigned long long)frame*N;
+ for(int j=t;j<N;j+=256){native_index[j]=native_indices[row+j];coarse_index[j]=coarse_indices[row+j];current[j]=coefficients[row+j];}
+ long long begin=offsets[frame],end=offsets[frame+1];
+ for(int j=t;j<K;j+=256)frequency[j]=j<end-begin?frequencies[begin+j]:0;
+}
+extern "C" __global__ void store_motion_frame(const int* counter,const unsigned char* codes,
+ const float2* coefficients,const float2* actual,unsigned char* movie,float2* saved_coefficients,float2* saved_actual,int N,int area){
+ int i=blockIdx.x*blockDim.x+threadIdx.x,frame=counter[0]-1;
+ if(i<area)movie[(unsigned long long)frame*area+i]=codes[i];
+ if(i<N){unsigned long long row=(unsigned long long)frame*N+i;saved_coefficients[row]=coefficients[i];saved_actual[row]=actual[i];}
+}
+extern "C" __global__ void scatter(const float2* c,const int* index,float2* spectrum,int N){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N){atomicAdd(&spectrum[index[i]].x,c[i].x);atomicAdd(&spectrum[index[i]].y,c[i].y);}}
+extern "C" __global__ void gather(const float2* spectrum,const int* index,float2* c,int N){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N)c[i]=spectrum[index[i]];}
+extern "C" __global__ void pack_inverse(const float2* spectrum,real_t* packed,int H,int LY,int K){
+ __shared__ float2 tile[32][33];
+ int y=blockIdx.x*32+threadIdx.x,k=blockIdx.y*32+threadIdx.y;
+ for(int j=0;j<32;j+=8)if(y<H&&k+j<K)tile[threadIdx.y+j][threadIdx.x]=spectrum[(k+j)*LY+(y-H/2+LY)%LY];
+ __syncthreads();
+ int yy=blockIdx.x*32+threadIdx.y,kk=blockIdx.y*32+threadIdx.x;
+ for(int j=0;j<32;j+=8)if(yy+j<H&&kk<K){float2 v=tile[threadIdx.x][threadIdx.y+j];int i=(yy+j)*K+kk;
+ packed[i]=cv(v.x);packed[i+H*K]=cv(v.y);}
+}
+// Roots at opposite centered x coordinates are conjugate even for an asymmetric
+// pupil. Reconstruct both physical pixels before applying their own amplitudes.
+__device__ __forceinline__ float2 synthesis_pixel(const float* image,int y,int x,int H,int W,int P){
+ int d=abs(x-W/2),r=y*2*P+d;float sign=x>=W/2?1.f:-1.f;
+ return make_float2(image[r]-sign*image[r+H*2*P+P],image[r+H*2*P]+sign*image[r+P]);
+}
+__device__ __forceinline__ float2 pupil_projection(float2 field,float amplitude){
+ float magnitude=hypotf(field.x,field.y);
+ return magnitude>1e-20f?make_float2(field.x*(amplitude/magnitude),field.y*(amplitude/magnitude)):make_float2(amplitude,0);
+}
+__device__ __forceinline__ void pack_pair(real_t* packed,float2 plus,float2 minus,int y,int d,int H,int P){
+ int r=y*2*P+d;
+ packed[r]=cv(plus.x+minus.x);packed[r+P]=cv(plus.y-minus.y);
+ packed[r+H*2*P]=cv(plus.y+minus.y);packed[r+H*2*P+P]=cv(minus.x-plus.x);
+}
+extern "C" __global__ void project(const float* image,const float* pupil,real_t* packed,int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*P)return;int d=i%P,y=i/P,xp=W/2+d,xm=W/2-d;
+ float2 plus=make_float2(0,0),minus=make_float2(0,0);
+ if(xp<W)plus=pupil_projection(synthesis_pixel(image,y,xp,H,W,P),pupil[y*W+xp]);
+ if(d>0&&xm>=0)minus=pupil_projection(synthesis_pixel(image,y,xm,H,W,P),pupil[y*W+xm]);
+ pack_pair(packed,plus,minus,y,d,H,P);
+}
+extern "C" __global__ void pack_field(const float2* field,real_t* packed,int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*P)return;int d=i%P,y=i/P,xp=W/2+d,xm=W/2-d;
+ float2 plus=xp<W?field[y*W+xp]:make_float2(0,0);
+ float2 minus=d>0&&xm>=0?field[y*W+xm]:make_float2(0,0);
+ pack_pair(packed,plus,minus,y,d,H,P);
+}
+extern "C" __global__ void select_roots(const float2* bank,const int* frequencies,real_t* backward,real_t* forward,int NF,int K,int P){
+ __shared__ float2 tile[32][33];
+ int x=blockIdx.x*32+threadIdx.x,k=blockIdx.y*32+threadIdx.y;
+ for(int j=0;j<32;j+=8)if(x<P&&k+j<K){
+  float2 v=k+j<NF?bank[frequencies[k+j]*P+x]:make_float2(0,0);tile[threadIdx.y+j][threadIdx.x]=v;
+  if(backward){int r=(k+j)*2*P+x;backward[r]=cv(v.x);backward[r+P]=cv(v.y);}
+ }
+ __syncthreads();
+ int xx=blockIdx.x*32+threadIdx.y,kk=blockIdx.y*32+threadIdx.x;
+ for(int j=0;j<32;j+=8)if(xx+j<P&&kk<K){float2 v=tile[threadIdx.x][threadIdx.y+j];
+  int out=(xx+j)*K+kk;
+  forward[out]=cv(v.x);forward[out+P*K]=cv(v.y);}
+}
+extern "C" __global__ void pack_forward(const float* projected,float2* spectrum,int H,int LY,int K){
+ if(blockIdx.y*32>=H){
+  int yy=blockIdx.y*32-H/2+threadIdx.x,k=blockIdx.x*32+threadIdx.y;
+  for(int j=0;j<32;j+=8)if(k+j<K&&yy<LY-H/2)spectrum[(k+j)*LY+yy]=make_float2(0,0);
+  return;
+ }
+ __shared__ float2 tile[32][33];
+ int k=blockIdx.x*32+threadIdx.x,y=blockIdx.y*32+threadIdx.y;
+ for(int j=0;j<32;j+=8)if(k<K&&y+j<H){int r=(y+j)*K+k;
+  tile[threadIdx.y+j][threadIdx.x]=make_float2(projected[r],projected[r+H*K]);}
+ __syncthreads();
+ int yy=blockIdx.y*32+threadIdx.x,kk=blockIdx.x*32+threadIdx.y;
+ // Also clear the partial physical-height tile: odd H has padding here too.
+ for(int j=0;j<32;j+=8)if(yy<LY&&kk+j<K)
+  spectrum[(kk+j)*LY+(yy-H/2+LY)%LY]=yy<H?tile[threadIdx.x][threadIdx.y+j]:make_float2(0,0);
+}
+extern "C" __global__ void encode(const float* input,const float* pupil,const float* incident,float2* optical,
+ unsigned char* codes,int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;
+ float2 field=P?synthesis_pixel(input,i/W,i%W,H,W,P):((const float2*)input)[i];
+ float a=atan2f(field.y,field.x),s,c;
+ unsigned char code=phase_code((double)a-(double)incident[i],(unsigned int)i);codes[i]=code;
+ sincosf(code*.02454369260617025968f+incident[i],&s,&c);optical[i]=make_float2(pupil[i]*c,pupil[i]*s);
+}
+__device__ __forceinline__ float weight_ratio(float magnitude,float target,float brightness){
+ return fminf(5.f,fmaxf(.2f,brightness*target/fmaxf(magnitude,1e-20f)));
+}
+extern "C" __global__ void anderson_begin(const float2* c,float2* phase,int* state,int N){
+  int t=threadIdx.x;for(int j=t;j<N;j+=256){float2 a=c[j];double m=hypot((double)a.x,(double)a.y);
+    phase[j]=m>0?make_float2((float)(a.x/m),(float)(a.y/m)):make_float2(1,0);}
+  if(!t){state[0]=0;state[1]=0;}}
+extern "C" __global__ void anderson_update(const float2* field,const float* target,float2* c,const float2* phase,
+  float* gh,float* rh,double* candidate,int* state,int N,float exponent){
+  __shared__ double sums[5][256],brightness,mx,mg,gamma0,gamma1,largest,normalizer;
+  __shared__ int bad;
+  int t=threadIdx.x,slot=state[1],count=state[0],prev=(slot+2)%3,older=(slot+1)%3;
+  double se=0,sa=0;
+  for(int j=t;j<N;j+=256){float2 e=field[j];se+=(double)e.x*e.x+(double)e.y*e.y;sa+=(double)target[j]*target[j];}
+  sums[0][t]=se;sums[1][t]=sa;__syncthreads();
+  for(int k=128;k;k/=2){if(t<k){sums[0][t]+=sums[0][t+k];sums[1][t]+=sums[1][t+k];}__syncthreads();}
+  if(!t){brightness=sqrt(sums[0][0]/fmax(sums[1][0],1e-30));bad=0;}__syncthreads();
+  double sx=0,sg=0;
+  for(int j=t;j<N;j+=256){float2 a=c[j],e=field[j];
+    float x=logf(fmaxf(hypotf(a.x,a.y),1e-20f));
+    float gain=exponent*logf(weight_ratio(hypotf(e.x,e.y),target[j],(float)brightness));
+    sx+=x;sg+=gain;}
+  sums[0][t]=sx;sums[1][t]=sg;__syncthreads();
+  for(int k=128;k;k/=2){if(t<k){sums[0][t]+=sums[0][t+k];sums[1][t]+=sums[1][t+k];}__syncthreads();}
+  if(!t){mx=sums[0][0]/N;mg=sums[1][0]/N;}__syncthreads();
+  for(int j=t;j<N;j+=256){float2 a=c[j],e=field[j];
+    double x=(double)logf(fmaxf(hypotf(a.x,a.y),1e-20f))-mx;
+    double f=(double)(exponent*logf(weight_ratio(hypotf(e.x,e.y),target[j],(float)brightness)))-mg;
+    gh[slot*N+j]=(float)(x+f);rh[slot*N+j]=(float)f;}
+  __syncthreads();
+  double h00=0,h01=0,h11=0,b0=0,b1=0;
+  if(count)for(int j=t;j<N;j+=256){double f=rh[slot*N+j],d0=f-rh[prev*N+j];
+    double d1=count>1?(double)rh[prev*N+j]-rh[older*N+j]:0;
+    h00+=d0*d0;h01+=d0*d1;h11+=d1*d1;b0+=d0*f;b1+=d1*f;}
+  sums[0][t]=h00;sums[1][t]=h01;sums[2][t]=h11;sums[3][t]=b0;sums[4][t]=b1;__syncthreads();
+  for(int k=128;k;k/=2){if(t<k)for(int q=0;q<5;++q)sums[q][t]+=sums[q][t+k];__syncthreads();}
+  if(!t){
+    gamma0=0;gamma1=0;
+    if(count){double a=sums[0][0]*1.0001,b=sums[1][0],d=sums[2][0]*1.0001;
+      if(!isfinite(a)||!isfinite(b)||!isfinite(d)||!isfinite(sums[3][0])||!isfinite(sums[4][0]))bad=1;
+      else if(a>0&&d>0){double determinant=a*d-b*b;
+        if(determinant>1e-12*a*d&&isfinite(determinant)){
+          gamma0=(d*sums[3][0]-b*sums[4][0])/determinant;
+          gamma1=(a*sums[4][0]-b*sums[3][0])/determinant;
+        }else bad=1;
+      }else if(a>0){gamma0=sums[3][0]/a;}
+      else if(d>0){gamma1=sums[4][0]/d;}
+      else bad=1;
+      if(!isfinite(gamma0)||!isfinite(gamma1))bad=1;
+    }
+    if(bad){gamma0=0;gamma1=0;}
+  }__syncthreads();
+  for(int j=t;j<N;j+=256){double g=gh[slot*N+j],v=g;
+    if(count)v-=gamma0*(g-gh[prev*N+j]);
+    if(count>1)v-=gamma1*((double)gh[prev*N+j]-gh[older*N+j]);
+    candidate[j]=v;if(!isfinite(v))atomicExch(&bad,1);}
+  __syncthreads();
+  double largest_local=-1.0e300;
+  for(int j=t;j<N;j+=256){if(bad)candidate[j]=gh[slot*N+j];largest_local=fmax(largest_local,candidate[j]);}
+  sums[0][t]=largest_local;__syncthreads();
+  for(int k=128;k;k/=2){if(t<k)sums[0][t]=fmax(sums[0][t],sums[0][t+k]);__syncthreads();}
+  if(!t)largest=sums[0][0];__syncthreads();
+  double norm=0;for(int j=t;j<N;j+=256){double v=exp(candidate[j]-largest);candidate[j]=v;norm+=v*v;}
+  sums[0][t]=norm;__syncthreads();
+  for(int k=128;k;k/=2){if(t<k)sums[0][t]+=sums[0][t+k];__syncthreads();}
+  if(!t)normalizer=rsqrt(sums[0][0]);__syncthreads();
+  for(int j=t;j<N;j+=256){double a=candidate[j]*normalizer;float2 p=phase[j];c[j]=make_float2((float)(a*p.x),(float)(a*p.y));}
+  if(!t){state[0]=bad?1:min(count+1,2);state[1]=(slot+1)%3;}
+}
+extern "C" __global__ void compact_delta(const float2* field,const int* positions,const float* target,float2* delta,int N){
+ __shared__ float numerator[256],denominator[256];int t=threadIdx.x;float a=0,b=0;
+ for(int j=t;j<N;j+=256){float2 e=field[positions[j]];float v=target[j];a+=v*hypotf(e.x,e.y);b+=v*v;}
+ numerator[t]=a;denominator[t]=b;__syncthreads();
+ for(int k=128;k;k/=2){if(t<k){numerator[t]+=numerator[t+k];denominator[t]+=denominator[t+k];}__syncthreads();}
+ float scale=numerator[0]/fmaxf(denominator[0],1e-30f);
+ for(int j=t;j<N;j+=256){int p=positions[j];float2 e=field[p];float m=hypotf(e.x,e.y),v=scale*target[j];
+  delta[p]=m>0?make_float2(v*e.x/m-e.x,v*e.y/m-e.y):make_float2(v,0);}
+}
+extern "C" __global__ void compact_project(float2* field,const float2* correction,const float* pupil,float2* unit,int M){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=M)return;
+ float re=field[i].x+correction[i].x/M,im=field[i].y+correction[i].y/M,m=hypotf(re,im);
+ float2 u=m>0?make_float2(re/m,im/m):make_float2(1,0);unit[i]=u;field[i]=make_float2(pupil[i]*u.x,pupil[i]*u.y);
+}
+extern "C" __global__ void fold_native(const float2* native,float2* small,int H,int W,int FH,int FW){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=FH*FW)return;int x=i%FW,y=i/FW;float re=0,im=0;
+ for(int ty=0;ty<H/FH;++ty)for(int tx=0;tx<W/FW;++tx){float2 a=native[(y+ty*FH)*W+x+tx*FW];re+=a.x;im+=a.y;}
+ small[i]=make_float2(re,im);
+}
+extern "C" __global__ void source_encode(const float2* unit,const float2* carrier,const float* pupil,const float* incident,
+ unsigned char* codes,float2* demod,int H,int W,int FH,int FW){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;int x=i%W,y=i/W;
+ float2 a=unit[(y%FH)*FW+x%FW],b=carrier[i];float re=a.x*b.x-a.y*b.y,im=a.x*b.y+a.y*b.x;
+ int pixel=((y+H/2)%H)*W+(x+W/2)%W;
+ unsigned char code=phase_code((double)atan2f(im,re)-(double)incident[pixel],(unsigned int)pixel);codes[pixel]=code;
+ float s,c;sincosf(code*.02454369260617025968f+incident[pixel],&s,&c);
+ demod[i]=make_float2(pupil[i]*(c*b.x+s*b.y),pupil[i]*(s*b.x-c*b.y));
+}
+extern "C" __global__ void clearance(const int* p,float* distances,int F,int N){
+ int i=blockIdx.x*blockDim.x+threadIdx.x,j=blockIdx.y*blockDim.y+threadIdx.y;if(i>=N||j>=i)return;
+ float best=1e30f;
+ for(int f=0;f<F;++f){int a=(f*N+i)*2,b=(f*N+j)*2;float y=p[a]-p[b],x=p[a+1]-p[b+1],yy=0,xx=0;
+  if(f+1<F){yy=p[a+N*2]-p[b+N*2]-y;xx=p[a+N*2+1]-p[b+N*2+1]-x;}
+  float v=yy*yy+xx*xx,t=v>0?fminf(1,fmaxf(0,-(y*yy+x*xx)/v)):0;y+=t*yy;x+=t*xx;best=fminf(best,y*y+x*x);}
+ distances[i*N+j]=best;
+}
+'''
+
+
+def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase):
+    """Prepare the one native Fourier model and optional sampling quadrature."""
+    try:
+        import cupy as cp  # noqa: PLC0415
+        from cupy.cuda import cublas, cufft  # noqa: PLC0415
+        from cuda.pathfinder import load_nvidia_dynamic_lib  # noqa: PLC0415
+    except ImportError as error:
+        raise RuntimeError('SLM GPU calculation requires pip install "zou-lab-control[slm-gpu]"') from error
+    import ctypes  # noqa: PLC0415
+
+    shape = geometry["shape_yx"]
+    pupil = np.asarray(pupil_amplitude, np.float32)
+    if (pupil.shape != shape or not np.all(np.isfinite(pupil))
+            or np.any(pupil < 0) or not np.any(pupil > 0)):
+        raise ValueError("pupil_amplitude must be finite, nonnegative and match the full SLM")
+    incident = np.zeros(shape, np.float32) if pupil_phase is None else canonical_phase(pupil_phase, shape)
+    stream = cp.cuda.Stream(non_blocking=True)
+    library = (ctypes.WinDLL if os.name == "nt" else ctypes.CDLL)(load_nvidia_dynamic_lib("cublas").abs_path)
+    gemm = library.cublasGemmEx
+    pointer, integer = ctypes.c_void_p, ctypes.c_int
+    gemm.argtypes = [pointer, integer, integer, integer, integer, integer, pointer,
+                    pointer, integer, integer, pointer, integer, integer,
+                    pointer, pointer, integer, integer, integer, integer]
+    gemm.restype = integer
+    number = len(geometry["target_yx"])
+    signed = 3 * (np.concatenate((geometry["source_yx"], geometry["target_yx"]))[:, 1] - shape[1] // 2)
+    low, high = int(signed.min()), int(signed.max())
+    capacity = (min(number, high - low + 1) + 15) // 16 * 16
+    module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
+    names = ("load_motion_frame", "store_motion_frame", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
+             "pack_forward", "encode", "anderson_begin", "anderson_update", "compact_delta", "compact_project",
+             "fold_native", "source_encode", "clearance")
+    kernels = {name: module.get_function(name) for name in names}
+    gpu = dict(cp=cp, cublas=cublas, cufft=cufft, stream=stream, module=module, kernels=kernels,
+               library=library, gemm=gemm, shape=shape, number=number, low=low, high=high,
+               pupil_cpu=pupil.copy(), incident_cpu=np.asarray(incident, np.float32).copy(),
+               pupil_energy=float(np.sum(pupil.astype(np.float64) ** 2)), pupil_scale=float(np.max(pupil)),
+               resources={}, output_pool=cp.cuda.PinnedMemoryPool(), weight_exponent=np.float32(.8))
+    # Stride-two samples share the centered native coordinates only at these sizes.
+    factors = (1, 2) if all(size % 4 == 0 for size in shape) else (1,)
+    source, target = geometry["source_yx"], geometry["target_yx"]
+    distance = int(np.max(np.maximum(source.max(axis=0) - target.min(axis=0),
+                                     target.max(axis=0) - source.min(axis=0))))
+    steps = max(1, int(np.ceil(min(max(geometry["matching_radii"]), distance) / geometry["max_step"])))
+    gpu["motion_capacity"] = 3 * steps
+    handles = []
+    def close():
+        stream.synchronize()
+        for handle in handles:
+            cublas.destroy(handle)
+        handles.clear()
+        if gpu:
+            gpu["output_pool"].free_all_blocks()
+        gpu.clear()
+    gpu["close"] = close
+    try:
+        with stream:
+            gpu["coefficients"] = cp.zeros(number, cp.complex64)
+            gpu["frequencies"] = cp.zeros(capacity, cp.int32)
+            for factor, precise in [(factor, False) for factor in factors] + [(1, True)]:
+                dtype = cp.float32 if precise else cp.float16
+                work_module = cp.RawModule(code="#define HALF 0\n" + _REARRANGEMENT_CUDA) if precise else module
+                work_kernels = {name: work_module.get_function(name) for name in names} if precise else kernels
+                h, w = (size // factor for size in shape)
+                padded, ly = (w // 2 + 16) // 16 * 16, 3 * h
+                if not precise:
+                    roots = np.exp(2j * np.pi * np.arange(low, high + 1)[:, None]
+                                   * np.arange(padded)[None] / (3 * w)).astype(np.complex64)
+                    roots[:, w // 2 + 1:] = 0
+                handle = cublas.create()
+                handles.append(handle)
+                cublas.setStream(handle, stream.ptr)
+                work = dict(shape=(h, w), padded=padded, ly=ly, handle=handle,
+                            typecode=0 if precise else 2, module=work_module, kernels=work_kernels,
+                            bank=gpu["resources"][1]["bank"] if precise else cp.asarray(roots),
+                            forward=cp.empty((2 * padded, capacity), dtype),
+                            spectrum=cp.empty((capacity, ly), cp.complex64),
+                            transformed=cp.empty((capacity, ly), cp.complex64),
+                            field_gemm=cp.empty((2, h, 2 * padded), dtype),
+                            projected=cp.empty((2, h, capacity), cp.float32),
+                            actual=cp.empty(number, cp.complex64),
+                            index=(gpu["resources"][1]["index"] if precise
+                                   else cp.arange(number, dtype=cp.int32) % (16 * ly)),
+                            frequencies=gpu["frequencies"],
+                            alpha=np.asarray(1, np.float32), beta=np.asarray(0, np.float32),
+                            plans={band: cufft.Plan1d(ly, cufft.CUFFT_C2C, band)
+                                   for band in range(16, capacity + 1, 16)})
+                if precise:
+                    # The final decision uses FP32 roots/packing on the same finite
+                    # Fourier map. Roots, emitted optical field and query indices
+                    # belong to the same native geometry; only packing is precise.
+                    work["optical"] = gpu["resources"][1]["optical"]
+                    gpu["measurement"] = work
+                else:
+                    work.update(backward=cp.empty((capacity, 2 * padded), dtype),
+                                packed=cp.empty((2, h, capacity), dtype),
+                                image=cp.empty((2, h, 2 * padded), cp.float32),
+                                pupil=cp.asarray(pupil[::factor, ::factor]
+                                                 / np.float32(gpu["pupil_scale"]) * factor ** 2))
+                    if factor == 1:
+                        work.update(capacity=capacity, optical=cp.empty((h, w), cp.complex64),
+                                    codes=cp.empty((h, w), cp.uint8),
+                                    physical_pupil=cp.asarray(pupil),
+                                    incident=cp.asarray(incident, cp.float32))
+                    gpu["resources"][factor] = work
+                for band in work["plans"]:
+                    _rearrangement_select_roots(work, band)
+                    if precise:
+                        _rearrangement_propagate(gpu, work, band, "forward")
+                    else:
+                        _rearrangement_propagate(gpu, work, band, "roundtrip")
+                        if factor == 1:
+                            _rearrangement_propagate(gpu, work, band, "encode")
+            gpu["aa_phase"] = cp.empty(number, cp.complex64)
+            gpu["aa_g"] = cp.empty((3, number), cp.float32)
+            gpu["aa_r"] = cp.empty((3, number), cp.float32)
+            gpu["aa_candidate"] = cp.empty(number, cp.float64)
+            gpu["aa_state"] = cp.zeros(2, cp.int32)
+            motion_count = gpu["motion_capacity"]
+            gpu["motion_codes"] = cp.empty((motion_count, *shape), cp.uint8)
+            gpu["motion_coefficients"] = cp.zeros((motion_count, number), cp.complex64)
+            gpu["motion_actual"] = cp.empty((motion_count, number), cp.complex64)
+            gpu["motion_indices"] = {factor: cp.zeros((motion_count, number), cp.int32) for factor in factors}
+            gpu["motion_frequencies"] = cp.zeros(motion_count * capacity, cp.int32)
+            gpu["motion_offsets"] = cp.zeros(motion_count + 1, cp.int64)
+            gpu["frame_index"] = cp.zeros(1, cp.int32)
+            gpu["distances"] = cp.full((number, number), cp.inf, cp.float32)
+            trial = cp.asarray(geometry["target_yx"][None])
+            kernels["clearance"](((number + 15) // 16,) * 2, (16, 16),
+                                 (trial, gpu["distances"], np.int32(1), np.int32(number)))
+            float(cp.sqrt(cp.min(gpu["distances"])))
+            stream.synchronize()
+    except BaseException:
+        close()
+        raise
+    return gpu
+
+
+def _rearrangement_select_roots(work, band):
+    """Pack this frame's fixed frequencies once in this workspace's precision."""
+    padded = work["padded"]
+    work["kernels"]["select_roots"](((padded + 31) // 32, (band + 31) // 32), (32, 8),
+                                   (work["bank"], work["frequencies"], work.get("backward", np.uint64(0)), work["forward"],
+                                    np.int32(band), np.int32(band), np.int32(padded)))
+
+
+def _rearrangement_propagate(gpu, work, band, operation):
+    """Centered finite Fourier propagation with the frame's already packed roots."""
+    h, w = work["shape"]
+    padded, ly, number = work["padded"], work["ly"], gpu["number"]
+    kernels, cb = work["kernels"], gpu["cublas"]
+    typecode = work["typecode"]
+    alpha, beta = work["alpha"].ctypes.data, work["beta"].ctypes.data
+    if operation != "forward":
+        work["spectrum"][:band].fill(0)
+        kernels["scatter"](((number + 255) // 256,), (256,),
+                           (gpu["coefficients"], work["index"], work["spectrum"], np.int32(number)))
+        work["plans"][band].fft(work["spectrum"][:band], work["transformed"][:band], gpu["cufft"].CUFFT_INVERSE)
+        kernels["pack_inverse"](((h + 31) // 32, (band + 31) // 32), (32, 8),
+                                (work["transformed"], work["packed"], np.int32(h), np.int32(ly), np.int32(band)))
+        status = gpu["gemm"](work["handle"], 0, 0, 2 * padded, 2 * h, band, alpha,
+                             work["backward"].data.ptr, typecode, 2 * padded,
+                             work["packed"].data.ptr, typecode, band, beta,
+                             work["image"].data.ptr, 0, 2 * padded,
+                             cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT)
+        if status:
+            raise RuntimeError(f"SLM cuBLAS synthesis failed ({status})")
+        if operation == "encode":
+            kernels["encode"](((h * w + 255) // 256,), (256,),
+                              (work["image"], work["physical_pupil"], work["incident"], work["optical"],
+                               work["codes"], *map(np.int32, (h, w, padded))))
+            return
+        kernels["project"](((h * padded + 255) // 256,), (256,),
+                           (work["image"], work["pupil"], work["field_gemm"],
+                            np.int32(h), np.int32(w), np.int32(padded)))
+    if operation == "forward":
+        kernels["pack_field"](((h * padded + 255) // 256,), (256,),
+                              (work["optical"], work["field_gemm"], np.int32(h), np.int32(w), np.int32(padded)))
+    status = gpu["gemm"](work["handle"], 0, 0, band, 2 * h, 2 * padded, alpha,
+                         work["forward"].data.ptr, typecode, band,
+                         work["field_gemm"].data.ptr, typecode, 2 * padded, beta,
+                         work["projected"].data.ptr, 0, band,
+                         cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT)
+    if status:
+        raise RuntimeError(f"SLM cuBLAS analysis failed ({status})")
+    kernels["pack_forward"](((band + 31) // 32, (ly + 31) // 32), (32, 8),
+                            (work["projected"], work["spectrum"], np.int32(h), np.int32(ly), np.int32(band)))
+    work["plans"][band].fft(work["spectrum"][:band], work["transformed"][:band], gpu["cufft"].CUFFT_FORWARD)
+    kernels["gather"](((number + 255) // 256,), (256,),
+                      (work["transformed"], work["index"], work["actual"], np.int32(number)))
+
+
+def _rearrangement_amplitude_updates(gpu, work, band, count):
+    """Depth-two amplitude updates, reset for this frame and resolution."""
+    _rearrangement_select_roots(work, band)
+    if not count:
+        return
+    number = np.int32(gpu["number"])
+    gpu["kernels"]["anderson_begin"]((1,), (256,),
+                                     (gpu["coefficients"], gpu["aa_phase"], gpu["aa_state"], number))
+    for _ in range(count):
+        _rearrangement_propagate(gpu, work, band, "roundtrip")
+        gpu["kernels"]["anderson_update"]((1,), (256,),
+            (work["actual"], gpu["amplitude"], gpu["coefficients"], gpu["aa_phase"],
+             gpu["aa_g"], gpu["aa_r"], gpu["aa_candidate"], gpu["aa_state"], number, gpu["weight_exponent"]))
+
+
+def _rearrangement_load_frame(gpu):
+    """Stage one row; its incremented counter stays fixed until the next load."""
+    native = gpu["resources"][1]
+    coarse = gpu["resources"].get(2, native)
+    gpu["kernels"]["load_motion_frame"]((1,), (256,),
+        (gpu["frame_index"], gpu["motion_indices"][1], gpu["motion_indices"].get(2, gpu["motion_indices"][1]),
+         gpu["motion_frequencies"], gpu["motion_offsets"], gpu["motion_coefficients"],
+         native["index"], coarse["index"], gpu["frequencies"], gpu["coefficients"],
+         np.int32(gpu["number"]), np.int32(native["capacity"])))
+
+
+def _rearrangement_store_frame(gpu):
+    """Copy accepted frame outputs; no block changes the row counter here."""
+    area = int(np.prod(gpu["shape"]))
+    gpu["kernels"]["store_motion_frame"](((area + 255) // 256,), (256,),
+        (gpu["frame_index"], gpu["resources"][1]["codes"], gpu["coefficients"], gpu["measurement"]["actual"],
+         gpu["motion_codes"], gpu["motion_coefficients"], gpu["motion_actual"], np.int32(gpu["number"]), np.int32(area)))
+
+
+def _rearrangement_bind(gpu, points):
+    """Build bulk trajectory metadata; the caller retains host inputs through transfer."""
+    shape = np.asarray(gpu["shape"])
+    scaled = 3 * (np.asarray(points, np.float64) - shape // 2)
+    frequencies = np.rint(scaled).astype(np.int64)
+    if np.max(abs(scaled - frequencies)) > 1e-8:
+        raise ValueError("emitted sites must lie on the native third-bin grid")
+    columns = frequencies[..., 1] - gpu["low"]
+    present = np.zeros((len(points), gpu["high"] - gpu["low"] + 1), bool)
+    present[np.arange(len(points))[:, None], columns] = True
+    lookup = np.cumsum(present, axis=1, dtype=np.int32) - 1
+    counts = present.sum(axis=1, dtype=np.int32)
+    offsets = np.r_[0, np.cumsum(counts, dtype=np.int64)]
+    selected = np.nonzero(present)[1].astype(np.int32)
+    indices = {}
+    for factor, work in gpu["resources"].items():
+        packed = lookup[np.arange(len(points))[:, None], columns] * work["ly"] + frequencies[..., 0] % work["ly"]
+        indices[factor] = packed.astype(np.int32)
+    return indices, selected, counts, offsets
+
+
+def _prepare_rearrangement_lattice(gpu, source_points, initial_codes):
+    """Fold the actual encoded source field and the complete physical pupil."""
+    from cupyx.scipy.fft import get_fft_plan  # noqa: PLC0415
+
+    cp, shape = gpu["cp"], gpu["shape"]
+    h, w = shape
+    signed = np.asarray(source_points, np.int64) - np.asarray(shape) // 2
+    tiles = tuple(int(np.gcd.reduce(np.r_[size, signed[:, axis] - signed[0, axis]]))
+                  for axis, size in enumerate(shape))
+    fh, fw = (size // tile for size, tile in zip(shape, tiles))
+    residue = signed[0] % tiles
+    modes = (signed - residue) // np.asarray(tiles)
+    gy, gx = tiles
+    yy, xx = np.ogrid[:h, :w]
+    carrier = np.exp(2j * np.pi * (residue[0] * yy / h + residue[1] * xx / w)).astype(np.complex64)
+    pupil = np.fft.ifftshift(gpu["pupil_cpu"])
+    effective = pupil.astype(np.float64).reshape(gy, fh, gx, fw).sum(axis=(0, 2)).astype(np.float32)
+    optical = gpu["pupil_cpu"] * np.exp(1j * (initial_codes.astype(np.float64) * (2 * np.pi / 256)
+                                             + gpu["incident_cpu"]))
+    initial = np.fft.ifftshift(optical) * carrier.conj()
+    initial = initial.reshape(gy, fh, gx, fw).sum(axis=(0, 2)).astype(np.complex64)
+    small = cp.asarray(initial)
+    state = dict(shape=shape, fundamental=(fh, fw), carrier=cp.asarray(carrier), pupil=cp.asarray(pupil),
+                 effective=cp.asarray(effective), incident=cp.asarray(gpu["incident_cpu"]),
+                 initial=small.copy(), small=small, unit=cp.empty_like(small),
+                 spectrum=cp.empty_like(small), delta=cp.empty_like(small), correction=cp.empty_like(small),
+                 native=cp.empty(shape, cp.complex64), codes=cp.empty(shape, cp.uint8),
+                 positions=cp.asarray(((modes[:, 0] % fh) * fw + modes[:, 1] % fw).astype(np.int32)),
+                 target=cp.ones(len(source_points), cp.float32), actual=cp.empty(len(source_points), cp.complex64),
+                 plan=get_fft_plan(small, axes=(-2, -1)))
+    gpu["source"] = state
+    _rearrangement_lattice_correct(gpu, 64)
+    gpu["stream"].synchronize()
+    gpu["stream"].begin_capture()
+    _rearrangement_lattice_correct(gpu, 64)
+    state["graph"] = gpu["stream"].end_capture()
+    state["small"][:] = state["initial"]
+
+
+def _rearrangement_lattice_correct(gpu, iterations):
+    """Free-phase amplitude/dark projection, then native encoding and analysis."""
+    cp, state, kernels = gpu["cp"], gpu["source"], gpu["kernels"]
+    h, w = state["shape"]
+    fh, fw = state["fundamental"]
+    size, number = fh * fw, len(state["target"])
+    compact_grid = ((size + 255) // 256,)
+    for _ in range(iterations):
+        state["plan"].fft(state["small"], state["spectrum"], gpu["cufft"].CUFFT_FORWARD)
+        state["delta"].fill(0)
+        kernels["compact_delta"]((1,), (256,), (state["spectrum"], state["positions"], state["target"],
+                                               state["delta"], np.int32(number)))
+        state["plan"].fft(state["delta"], state["correction"], gpu["cufft"].CUFFT_INVERSE)
+        kernels["compact_project"](compact_grid, (256,), (state["small"], state["correction"], state["effective"],
+                                                          state["unit"], np.int32(size)))
+    if iterations == 0:
+        state["correction"].fill(0)
+        kernels["compact_project"](compact_grid, (256,), (state["small"], state["correction"], state["effective"],
+                                                          state["unit"], np.int32(size)))
+    kernels["source_encode"](((h * w + 255) // 256,), (256,),
+                              (state["unit"], state["carrier"], state["pupil"], state["incident"],
+                               state["codes"], state["native"], *map(np.int32, (h, w, fh, fw))))
+    kernels["fold_native"](compact_grid, (256,),
+                           (state["native"], state["small"], *map(np.int32, (h, w, fh, fw))))
+    state["plan"].fft(state["small"], state["spectrum"], gpu["cufft"].CUFFT_FORWARD)
+    cp.take(state["spectrum"], state["positions"], out=state["actual"])
+
+
+def _rearrangement_endpoint(cp, points, shape, pupil, intensity, iterations, seed):
+    """Prepare a fixed endpoint, retaining the coefficients that reproduce it."""
+    height, width = shape
+    iy, ix = cp.asarray((points - np.asarray(shape) // 2).T % np.asarray(shape)[:, None])
+    amplitude = cp.sqrt(cp.asarray(intensity, dtype=cp.float32))
+    amplitude /= cp.linalg.norm(amplitude)
+    phase = cp.asarray(np.random.default_rng(seed).uniform(-np.pi, np.pi, len(points)).astype(np.float32))
+    weight = amplitude.copy()
+    spectrum = cp.zeros(shape, cp.complex64)
+    illumination = cp.fft.ifftshift(cp.asarray(pupil))
+    coefficient = weight * cp.exp(cp.complex64(1j) * phase)
+    for iteration in range(iterations):
+        spectrum.fill(0)
+        spectrum[iy, ix] = coefficient
+        back = cp.fft.ifft2(spectrum)
+        field = illumination * cp.exp(cp.complex64(1j) * cp.angle(back))
+        actual = cp.fft.fft2(field)[iy, ix]
+        magnitude = cp.abs(actual)
+        measured = magnitude / cp.maximum(cp.linalg.norm(magnitude), 1e-20)
+        weight *= cp.clip(amplitude / cp.maximum(measured, 1e-20), .2, 5) ** cp.float32(.8)
+        weight /= cp.linalg.norm(weight)
+        if iteration < min(50, iterations // 2):
+            phase = cp.angle(actual)
+        coefficient = weight * cp.exp(cp.complex64(1j) * phase)
+    spectrum.fill(0)
+    spectrum[iy, ix] = coefficient
+    pattern = cp.remainder(cp.angle(cp.fft.fftshift(cp.fft.ifft2(spectrum))), cp.float32(2 * np.pi))
+    return cp.asnumpy(coefficient), cp.asnumpy(pattern)
+
+
+def prepare_rearrangement(
+    source_yx: object, target_yx: object, *, shape_yx: tuple[int, int],
+    pupil_amplitude: object, matching_radii: object, minimum_separation: float,
+    pupil_phase: object | None = None, source_intensities: object | None = None,
+    target_intensities: object | None = None,
+    endpoint_iterations: int = 150, seed: int = 0,
+    endpoint_data: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Prepare the calibrated optical working point before observing occupancy.
+
+    Apply initial_phase_codes before measuring occupancy in source order. The
+    returned workspace is caller-owned and serial-use only. Changing either
+    array, pupil or incident aberration requires preparing it again.
+    endpoint_data may supply source/target_phase_codes and _coefficients for
+    fixed calibrated endpoints. Their actual encoded fields are measured here;
+    requested intensity weights remain authoritative, with one physical RMS
+    brightness scale per endpoint. Supplied codes must meet the 1.01 support
+    ratio. Short endpoint optimization is allowed, but an inaccurate generated
+    target is not reused as a solved final frame.
+    The caller closes prepared["close"]() after its last serial solve.
+    No occupancy-dependent answer is prepared.
+    """
+    geometry = prepare_rearrangement_geometry(
+        source_yx, target_yx, shape_yx=shape_yx, matching_radii=matching_radii,
+        minimum_separation=minimum_separation,
+    )
+    shape = geometry["shape_yx"]
+    if (isinstance(endpoint_iterations, bool) or int(endpoint_iterations) != endpoint_iterations
+            or endpoint_iterations < 1):
+        raise ValueError("endpoint_iterations must be a positive integer")
+    intensities = []
+    for name, values, points in (("source", source_intensities, geometry["source_yx"]),
+                                 ("target", target_intensities, geometry["target_yx"])):
+        value = np.ones(len(points), np.float32) if values is None else np.asarray(values, np.float32)
+        if value.shape != (len(points),) or not np.all(np.isfinite(value)) or np.any(value <= 0):
+            raise ValueError(f"{name}_intensities must be finite and positive, one per site")
+        intensities.append(_readonly(value))
+    if endpoint_data is not None:
+        calibration = dict(source_yx=geometry["source_yx"], target_yx=geometry["target_yx"],
+                           pupil_amplitude=np.asarray(pupil_amplitude),
+                           pupil_phase=np.zeros(shape, np.float32) if pupil_phase is None else np.asarray(pupil_phase),
+                           source_intensities=intensities[0], target_intensities=intensities[1])
+        for name, actual in calibration.items():
+            if name in endpoint_data and not np.array_equal(actual, endpoint_data[name]):
+                raise ValueError(f"endpoint_data {name} does not match the prepared working point")
+        for name, points in (("source", geometry["source_yx"]), ("target", geometry["target_yx"])):
+            for suffix in ("phase_codes", "coefficients"):
+                if f"{name}_{suffix}" not in endpoint_data:
+                    raise ValueError(f"endpoint_data requires {name}_{suffix}")
+            codes = np.asarray(endpoint_data[f"{name}_phase_codes"])
+            coefficient = np.asarray(endpoint_data[f"{name}_coefficients"])
+            if codes.dtype != np.uint8 or codes.shape != shape:
+                raise ValueError(f"endpoint_data {name}_phase_codes must be a native uint8 raster")
+            if (coefficient.shape != (len(points),) or not np.all(np.isfinite(coefficient))
+                    or np.any(abs(coefficient) == 0)):
+                raise ValueError(f"endpoint_data {name}_coefficients must be finite and nonzero, one per site")
+    gpu = _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase)
+    try:
+        cp, stream = gpu["cp"], gpu["stream"]
+        native = gpu["resources"][1]
+        coefficients, codes_list, fields, brightness, endpoint_ratios = [], [], [], [], []
+        with stream:
+            for index, (name, points, authored) in enumerate((
+                    ("source", geometry["source_yx"], intensities[0]),
+                    ("target", geometry["target_yx"], intensities[1]))):
+                if endpoint_data is None:
+                    coefficient, pattern = _rearrangement_endpoint(
+                        cp, points, shape, gpu["pupil_cpu"], authored, int(endpoint_iterations), int(seed) + index,
+                    )
+                    latent = cp.exp(cp.complex64(1j) * cp.asarray(pattern, cp.float32))
+                    gpu["kernels"]["encode"](((int(np.prod(shape)) + 255) // 256,), (256,),
+                                             (latent, native["physical_pupil"], native["incident"], native["optical"],
+                                              native["codes"], *map(np.int32, (*shape, 0))))
+                    codes = native["codes"].get()
+                else:
+                    coefficient = np.asarray(endpoint_data[f"{name}_coefficients"], np.complex64).copy()
+                    codes = np.asarray(endpoint_data[f"{name}_phase_codes"]).copy()
+                optical = gpu["pupil_cpu"].astype(np.float64) * np.exp(
+                    1j * (codes.astype(np.float64) * (2 * np.pi / 256) + gpu["incident_cpu"]))
+                spectrum = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(optical)))
+                actual = spectrum[tuple(points.T)]
+                power = abs(actual) ** 2
+                if not np.all(np.isfinite(power)) or np.any(power <= 0):
+                    raise ValueError(f"prepared {name} has a zero or invalid bright-site field")
+                relative = power / authored
+                ratio = float(relative.max() / relative.min())
+                if endpoint_data is not None and ratio > SPOT_SUPPORT_TOLERANCE:
+                    raise ValueError(f"endpoint_data {name} codes exceed authored intensity ratio "
+                                     f"{SPOT_SUPPORT_TOLERANCE:g}: {ratio:.6g}")
+                coefficients.append(_frozen(np.asarray(coefficient, np.complex64)))
+                codes_list.append(_frozen(codes))
+                fields.append(_frozen(actual.astype(np.complex64)))
+                brightness.append(float(np.sqrt(np.sum(power) / np.sum(authored, dtype=np.float64))))
+                endpoint_ratios.append(ratio)
+            _prepare_rearrangement_lattice(gpu, geometry["source_yx"], codes_list[0])
+            target_amplitude = np.sqrt(intensities[1])
+            gpu["amplitude"] = cp.asarray(target_amplitude / np.linalg.norm(target_amplitude))
+            gpu["target_codes"] = cp.asarray(codes_list[1])
+            gpu["target_coefficients"] = cp.asarray(coefficients[1])
+            gpu["target_fields"] = cp.asarray(fields[1])
+            gpu["graphs"] = {}
+            coarse_updates = 3 if 2 in gpu["resources"] else 0
+            native_updates = 2 if coarse_updates else 10
+            # Warm the exact update operation before capture, including its reduction.
+            _rearrangement_amplitude_updates(gpu, native, 16, 1)
+            if coarse_updates:
+                _rearrangement_amplitude_updates(gpu, gpu["resources"][2], 16, 1)
+            stream.synchronize()
+            for band in native["plans"]:
+                stream.begin_capture()
+                _rearrangement_load_frame(gpu)
+                if coarse_updates:
+                    _rearrangement_amplitude_updates(gpu, gpu["resources"][2], band, coarse_updates)
+                _rearrangement_amplitude_updates(gpu, native, band, native_updates)
+                _rearrangement_propagate(gpu, native, band, "encode")
+                _rearrangement_select_roots(gpu["measurement"], band)
+                _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
+                _rearrangement_store_frame(gpu)
+                gpu["graphs"][band] = stream.end_capture()
+                gpu["frame_index"].fill(0)
+                gpu["graphs"][band].launch(stream)
+            stream.synchronize()
+            # Prepare the library's size classes for default two-ramp movies.
+            # Two owned blocks allow an earlier result to stay live during the
+            # next serial call; no occupancy-dependent data is precomputed.
+            area = int(np.prod(shape))
+            size = 1 << (max(512, 5 * area) - 1).bit_length()
+            maximum_size = 1 << (max(512, (2 + gpu["motion_capacity"]) * area) - 1).bit_length()
+            free_blocks = 0
+            while size <= maximum_size:
+                blocks = [gpu["output_pool"].malloc(size), gpu["output_pool"].malloc(size)]
+                del blocks
+                free_blocks += 2
+                size *= 2
+            if gpu["output_pool"].n_free_blocks() != free_blocks:
+                raise MemoryError("SLM output buffers could not all be reserved before occupancy")
+        return {
+            **geometry, "gpu": gpu, "close": gpu["close"],
+            "source_intensities": intensities[0], "target_intensities": intensities[1],
+            "source_coefficients": coefficients[0], "target_coefficients": coefficients[1],
+            "source_field": fields[0], "target_field": fields[1],
+            "source_brightness": brightness[0], "target_brightness": brightness[1],
+            "endpoint_support_intensity_ratios": tuple(endpoint_ratios),
+            "initial_phase_codes": codes_list[0], "target_phase_codes": codes_list[1],
+            "initial_pattern_phase": freeze_pattern_phase(codes_list[0].astype(np.float64) * (2 * np.pi / 256), shape),
+            "target_pattern_phase": freeze_pattern_phase(codes_list[1].astype(np.float64) * (2 * np.pi / 256), shape),
+        }
+    except BaseException:
+        gpu["close"]()
+        raise
+
+
+def compute_rearrangement(
+    prepared: dict[str, object], occupied: object, *, surplus_policy: str,
+    ramp_frames: int = 2, iterations: int | None = None,
+    support_tolerance: float = SPOT_SUPPORT_TOLERANCE, dark_tolerance: float = .01,
+    require_converged: bool = True, stop_requested: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Observed occupancy through every native phase-code map, ready on host.
+
+    Unselected source light fades before motion. Bright constraints use authored
+    weights and one measured physical brightness scale per endpoint; zero means
+    a dark constraint and -1 an absent slot. Integer waypoints are subdivided
+    into native third-bin positions without changing their piecewise path.
+    None selects 64 source projections and 3 coarse + 2 native motion updates
+    (10 native when stride-two quadrature is unavailable), then at most eight
+    safeguarded encoded-field proposals for each failing motion frame. Explicit
+    iterations requests exactly that many updates per calculated frame, with no
+    additional adaptive proposals. Coarse steps and actual-field corrections
+    share depth-two centered-log amplitude mixing. Histories belong to one
+    frame and resolution, and restart when corrective damping changes.
+    Zero still encodes and checks the result.
+    Prepared target codes are reused only at the exact final endpoint when they
+    satisfy the requested authored-weight gate.
+    Converged covers intensity and dark-site gates, not refresh dynamics,
+    integrated background power, physical removal, or atom survival. No device
+    is contacted. Output ownership survives subsequent calls to this workspace.
+    """
+    import time  # noqa: PLC0415
+
+    started = time.perf_counter()
+    if not prepared["gpu"]:
+        raise RuntimeError("SLM rearrangement workspace is closed")
+    if surplus_policy != "discard":
+        raise ValueError("this target consumes selected atoms only; explicitly choose surplus_policy='discard'")
+    if (isinstance(ramp_frames, bool) or int(ramp_frames) != ramp_frames or ramp_frames < 1
+            or (iterations is not None and
+                (isinstance(iterations, bool) or int(iterations) != iterations or iterations < 0))):
+        raise ValueError("ramp_frames must be positive and iterations nonnegative integers")
+    tolerance = float(support_tolerance)
+    if not np.isfinite(tolerance) or tolerance < 1:
+        raise ValueError("support_tolerance must be finite and >= 1")
+    dark_limit = _scalar(dark_tolerance, "dark_tolerance", nonnegative=True)
+    gpu = prepared["gpu"]
+    # These required resets depend only on the prepared working point, so let
+    # the device perform them while the CPU matches atoms. No warmup is added.
+    with gpu["stream"]:
+        gpu["frame_index"].fill(0)
+        gpu["source"]["small"][:] = gpu["source"]["initial"]
+    plan = plan_rearrangement(prepared, occupied)
+    after_plan = time.perf_counter()
+    assignment = plan["assignment"]
+    path, fractions = plan["motion_yx"], plan["fraction"]
+    if len(path) == 1:
+        path = np.concatenate((path, path))
+        fractions = np.asarray([0., 1.])
+    substeps = np.asarray([1 / 3, 2 / 3, 1.])
+    moving = ((1 - substeps)[None, :, None, None] * path[:-1, None]
+              + substeps[None, :, None, None] * path[1:, None]).reshape(-1, len(assignment), 2)
+    progress = ((1 - substeps)[None] * fractions[:-1, None]
+                + substeps[None] * fractions[1:, None]).reshape(-1)
+    ramp_frames = int(ramp_frames)
+    motion_frames, frames = len(moving), ramp_frames + len(moving)
+    shape = prepared["shape_yx"]
+    cp, stream, number = gpu["cp"], gpu["stream"], gpu["number"]
+    native, source = gpu["resources"][1], gpu["source"]
+    source_count = len(prepared["source_yx"])
+    pixels = frames * int(np.prod(shape))
+    desired = np.full((frames, source_count), -1, np.float32)
+    sites = np.full((frames, source_count, 2), -1., np.float64)
+    source_amplitude = prepared["source_brightness"] * np.sqrt(prepared["source_intensities"])
+    target_amplitude = prepared["target_brightness"] * np.sqrt(prepared["target_intensities"])
+    for index in range(ramp_frames):
+        mix = (index + 1) / ramp_frames
+        desired[index] = (1 - mix) * source_amplitude
+        desired[index, assignment] += mix * target_amplitude
+        sites[index] = prepared["source_yx"]
+    desired[ramp_frames:, :number] = target_amplitude
+    sites[ramp_frames:, :number] = moving
+    source_updates = 64 if iterations is None else int(iterations)
+    total_updates = (5 if 2 in gpu["resources"] else 10) if iterations is None else int(iterations)
+    coarse_updates = min(3, max(0, total_updates - 2)) if 2 in gpu["resources"] else 0
+    native_updates = total_updates - coarse_updates
+    iteration_counts = np.full(frames, total_updates, np.int32)
+    iteration_counts[:ramp_frames] = source_updates
+    with stream:
+        positions = cp.asarray(path, cp.int32)
+        gpu["kernels"]["clearance"](((number + 15) // 16,) * 2, (16, 16),
+                                    (positions, gpu["distances"], np.int32(len(path)), np.int32(number)))
+        clearance = float(cp.sqrt(cp.min(gpu["distances"])))
+        if clearance < prepared["minimum_separation"]:
+            raise ValueError(f"emitted trajectory clearance {clearance:g} is below {prepared['minimum_separation']:g}")
+        memory = gpu["output_pool"].malloc(pixels)
+        host = np.frombuffer(memory, np.uint8, count=pixels).reshape((frames, *shape))
+        movie = gpu["motion_codes"][:motion_frames]
+        coefficients = gpu["motion_coefficients"][:motion_frames]
+        actual_gpu = gpu["motion_actual"][:motion_frames]
+        source_fields_gpu = cp.empty((ramp_frames, source_count), cp.complex64)
+        for index in range(ramp_frames):
+            if stop_requested is not None and stop_requested():
+                stream.synchronize()
+                raise InterruptedError("SLM rearrangement stopped")
+            source["target"].set(desired[index], stream=stream)
+            if iterations is None:
+                source["graph"].launch(stream)
+            else:
+                _rearrangement_lattice_correct(gpu, source_updates)
+            source_fields_gpu[index] = source["actual"]
+            source["codes"].get(out=host[index], stream=stream, blocking=True)
+        source_fields = source_fields_gpu.get()
+        post = source_fields[-1, assignment]
+        if np.any(abs(post) == 0) or not np.all(np.isfinite(post)):
+            raise RuntimeError("source removal produced an invalid bright-site field")
+        phase = np.angle(post)[None] + progress[:, None] * np.angle(
+            prepared["target_coefficients"] * post.conj())[None]
+        coefficient_values = (abs(prepared["target_coefficients"])[None] * np.exp(1j * phase)).astype(np.complex64)
+        indices, frequencies, counts, offsets = _rearrangement_bind(gpu, moving)
+        # Retain these ordinary host arrays until the final blocking transfer.
+        coefficients.set(coefficient_values, stream=stream)
+        for factor, values in indices.items():
+            gpu["motion_indices"][factor][:motion_frames].set(values, stream=stream)
+        gpu["motion_frequencies"][:len(frequencies)].set(frequencies, stream=stream)
+        gpu["motion_offsets"][:motion_frames + 1].set(offsets, stream=stream)
+        reused_target = False
+        for index in range(motion_frames):
+            if stop_requested is not None and stop_requested():
+                # Bulk host metadata stays alive until every queued read ends.
+                stream.synchronize()
+                raise InterruptedError("SLM rearrangement stopped")
+            if (index == motion_frames - 1 and progress[index] == 1.
+                    and np.array_equal(moving[index], prepared["target_yx"])
+                    and prepared["endpoint_support_intensity_ratios"][1] <= tolerance):
+                movie[index] = gpu["target_codes"]
+                coefficients[index] = gpu["target_coefficients"]
+                actual_gpu[index] = gpu["target_fields"]
+                iteration_counts[ramp_frames + index] = 0
+                gpu["frame_index"].fill(motion_frames)
+                reused_target = True
+                continue
+            band = (int(counts[index]) + 15) // 16 * 16
+            if iterations is None:
+                gpu["graphs"][band].launch(stream)
+            else:
+                _rearrangement_load_frame(gpu)
+                if coarse_updates:
+                    _rearrangement_amplitude_updates(gpu, gpu["resources"][2], band, coarse_updates)
+                _rearrangement_amplitude_updates(gpu, native, band, native_updates)
+                _rearrangement_propagate(gpu, native, band, "encode")
+                _rearrangement_select_roots(gpu["measurement"], band)
+                _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
+                _rearrangement_store_frame(gpu)
+        motion_fields = actual_gpu.get()
+        relative = abs(motion_fields / target_amplitude[None]) ** 2
+        ratios = relative.max(axis=1) / relative.min(axis=1)
+        failed = np.flatnonzero(~np.isfinite(ratios) | (ratios > tolerance))
+        proposals_evaluated = 0
+        if iterations is None and len(failed):
+            # A round submits every currently failing frame before the single
+            # host read. Accepted coefficients/codes remain untouched on rejection.
+            # Reuse the coarse update kernel with this frame's actual-field history.
+            proposals = cp.empty((len(failed), number), cp.complex64)
+            proposal_fields = cp.empty_like(proposals)
+            proposal_codes = cp.empty((len(failed), *shape), cp.uint8)
+            phases = cp.empty_like(proposals)
+            history_g = cp.empty((len(failed), 3, number), cp.float32)
+            history_r = cp.empty_like(history_g)
+            candidate = cp.empty((len(failed), number), cp.float64)
+            history_state = cp.empty((len(failed), 2), cp.int32)
+            for slot, index in enumerate(failed):
+                gpu["kernels"]["anderson_begin"]((1,), (256,),
+                    (coefficients[index], phases[slot], history_state[slot], np.int32(number)))
+            gains = np.full(len(failed), float(gpu["weight_exponent"]), np.float64)
+            residual = np.log(np.maximum(abs(motion_fields[failed]), 1e-30) / target_amplitude[None])
+            residual -= residual.mean(axis=1, keepdims=True)
+            merits = np.mean(residual ** 2, axis=1)
+            for _ in range(8):
+                if stop_requested is not None and stop_requested():
+                    stream.synchronize()
+                    raise InterruptedError("SLM rearrangement stopped")
+                active = np.flatnonzero(~np.isfinite(ratios[failed]) | (ratios[failed] > tolerance))
+                if not len(active):
+                    break
+                for slot in active:
+                    index = failed[slot]
+                    band = (int(counts[index]) + 15) // 16 * 16
+                    gpu["frame_index"].fill(int(index))
+                    _rearrangement_load_frame(gpu)
+                    gpu["kernels"]["anderson_update"]((1,), (256,),
+                        (actual_gpu[index], gpu["amplitude"], gpu["coefficients"], phases[slot],
+                         history_g[slot], history_r[slot], candidate[slot], history_state[slot],
+                         np.int32(number), np.float32(gains[slot])))
+                    _rearrangement_select_roots(native, band)
+                    _rearrangement_propagate(gpu, native, band, "encode")
+                    _rearrangement_select_roots(gpu["measurement"], band)
+                    _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
+                    proposals[slot] = gpu["coefficients"]
+                    proposal_fields[slot] = gpu["measurement"]["actual"]
+                    proposal_codes[slot] = native["codes"]
+                proposed = proposal_fields.get()
+                for slot in active:
+                    index = failed[slot]
+                    field = proposed[slot]
+                    values = abs(field / target_amplitude) ** 2
+                    ratio = float(values.max() / values.min())
+                    update = np.log(np.maximum(abs(field), 1e-30) / target_amplitude)
+                    update -= update.mean()
+                    merit = float(np.mean(update ** 2))
+                    accepted = np.isfinite(ratio) and (merit < merits[slot] or ratio <= tolerance)
+                    dot = float(update @ residual[slot])
+                    if accepted:
+                        coefficients[index] = proposals[slot]
+                        movie[index] = proposal_codes[slot]
+                        actual_gpu[index] = proposal_fields[slot]
+                        motion_fields[index] = field
+                        residual[slot], merits[slot], ratios[index] = update, merit, ratio
+                    if not accepted or dot < 0:
+                        gains[slot] *= .5
+                        # Damping changes the map; do not mix its old residuals.
+                        history_state[slot].fill(0)
+                    proposals_evaluated += 1
+                    iteration_counts[ramp_frames + index] += 1
+        # Source prefixes are already complete; publish the motion suffix only
+        # after every accepted correction has reached the prepared GPU rows.
+        movie.get(out=host[ramp_frames:], stream=stream, blocking=True)
+        stream.synchronize()
+    actual = np.zeros((frames, source_count), np.complex64)
+    actual[:ramp_frames] = source_fields
+    actual[ramp_frames:, :number] = motion_fields
+    positive = desired > 0
+    intensity = abs(actual.astype(np.complex128)) ** 2
+    relative = np.divide(intensity, desired.astype(np.float64) ** 2,
+                         out=np.zeros(desired.shape), where=positive)
+    high = np.max(relative, axis=1)
+    low = np.min(np.where(positive, relative, np.inf), axis=1)
+    ratio = np.divide(high, low, out=np.full(frames, np.inf), where=low > 0)
+    minimum = np.min(np.where(positive, intensity, np.inf), axis=1)
+    dark = np.max(np.where(desired == 0, intensity, 0), axis=1)
+    dark_ratio = np.divide(dark, minimum, out=np.full(frames, np.inf), where=minimum > 0)
+    converged = bool(np.all(np.isfinite(ratio) & (ratio <= tolerance) & (dark_ratio <= dark_limit)))
+    if require_converged and not converged:
+        raise RuntimeError(f"SLM sequence did not meet intensity ratio {tolerance:g} and dark/bright ratio "
+                           f"{dark_limit:g}; worst bright {np.max(ratio):.6g}, dark {np.max(dark_ratio):.6g}")
+    mean = np.sum(relative, axis=1) / np.count_nonzero(positive, axis=1)
+    rms = np.sqrt(np.sum(np.where(positive, (relative / mean[:, None] - 1) ** 2, 0), axis=1)
+                  / np.count_nonzero(positive, axis=1))
+    kept = np.concatenate((source_fields[:, assignment], motion_fields))
+    initial = prepared["source_field"][assignment]
+    brightness = abs(kept / initial[None]) ** 2
+    reference = np.zeros(actual.shape, np.complex64)
+    reference[:ramp_frames] = np.exp(1j * np.angle(prepared["source_field"]))[None]
+    reference[ramp_frames:, :number] = np.exp(1j * phase)
+    phase_error = np.angle(actual * reference.conj())
+    codes = np.frombuffer(memoryview(memory).toreadonly(), np.uint8, count=pixels).reshape((frames, *shape))
+    return {
+        **plan, "motion_yx": _frozen(np.concatenate((path[:1].astype(float), moving))),
+        "fraction": _frozen(np.r_[0., progress]), "phase_codes": codes,
+        "sites_yx": sites, "actual_fields": actual, "desired_amplitudes": desired,
+        "ramp_frames": ramp_frames, "iterations": tuple(map(int, iteration_counts)),
+        "clearance": clearance, "support_intensity_ratios": ratio, "converged": converged,
+        "dark_intensity_ratios": dark_ratio, "dark_tolerance": dark_limit, "support_tolerance": tolerance,
+        "intensity_relative_rms": rms,
+        "center_sample_power_proxy": np.sum(np.where(positive, intensity, 0), axis=1) / (np.prod(shape) * gpu["pupil_energy"]),
+        "brightness_minimum_to_initial": brightness.min(axis=1),
+        "brightness_maximum_to_initial": brightness.max(axis=1),
+        "brightness_mean_to_initial": brightness.mean(axis=1),
+        "source_brightness": prepared["source_brightness"], "target_brightness": prepared["target_brightness"],
+        "phase_error_rms_rad": np.sqrt(np.sum(np.where(positive, phase_error ** 2, 0), axis=1)
+                                      / np.count_nonzero(positive, axis=1)),
+        "phase_step_max_rad": np.max(abs(np.angle(kept * np.concatenate((initial[None], kept[:-1])).conj())), axis=1),
+        "surplus_policy": surplus_policy, "phase_encoding": "uint8:2pi/256",
+        "prepared_target_reused": reused_target, "encoded_correction_proposals": proposals_evaluated,
+        "timing_ms": {"plan": (after_plan - started) * 1000, "total": (time.perf_counter() - started) * 1000},
     }

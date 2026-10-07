@@ -537,13 +537,19 @@ def test_usb_close_failure_is_visible_and_retryable(monkeypatch) -> None:
 
 
 def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
-    monkeypatch,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
 
     sdk = _UsbSdk()
     handle = _patch_usb(monkeypatch, sdk)
-    physical = X15213Adapter(_config())
+    yy, xx = np.ogrid[:1024, :1272]
+    correction = (3 * yy + 5 * xx).astype(np.uint8)
+    correction_path = tmp_path / "remote-correction.bmp"
+    Image.fromarray(correction).save(correction_path)
+    physical = X15213Adapter(_config(
+        flip_x=True, flip_y=True, correction_path=str(correction_path),
+    ))
     server, worker = running_slm_server(physical)
     calls: list[str] = []
     original = device_module._rpc_call
@@ -592,10 +598,10 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
             "model": "X15213 (exact type suffix not recorded)",
             "serial": "LSH0804382",
             "wavelength_nm": 852.0,
-            "flip_x": False,
-            "flip_y": False,
-            "correction_path": "",
-            "correction_enabled": False,
+            "flip_x": True,
+            "flip_y": True,
+            "correction_path": str(correction_path.resolve()),
+            "correction_enabled": True,
             "mapping_revision": 0,
             "settle_seconds": 0.05,
             "settle_source": "Repository default; optical settle acceptance pending",
@@ -637,7 +643,7 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         def timeout_once(endpoint, method, arguments, timeout):
             nonlocal timed_out
             calls.append(method)
-            if method == "apply" and not timed_out:
+            if method == "apply_codes" and not timed_out:
                 timed_out = True
                 original(endpoint, method, arguments, timeout)
                 raise socket.timeout("simulated reply timeout")
@@ -645,20 +651,59 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
 
         monkeypatch.setattr(device_module, "_rpc_call", timeout_once)
         with pytest.raises(socket.timeout):
-            remote.apply_phase(
-                np.full(remote.shape_yx, np.pi / 2.0, dtype=np.float32)
+            remote.apply_phase_codes(
+                np.full(remote.shape_yx, 64, dtype=np.uint8)
             )
         assert remote.last_commanded_phase is None
         assert remote.last_command_receipt["outcome"] == "unknown"
         assert sdk.write_count == 3, "a lost reply must not resend the applied phase"
         assert connections[0].fileno() == -1
-        recovered = remote.apply_phase(
-            np.full(remote.shape_yx, np.pi / 2.0, dtype=np.float32)
+        recovered = remote.apply_phase_codes(
+            np.full(remote.shape_yx, 64, dtype=np.uint8)
         )
-        assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
+        assert calls == ["describe", "apply", "apply", "apply_codes", "describe", "apply_codes"]
         assert sdk.write_count == 4
         assert len(connections) == 2
         np.testing.assert_array_equal(remote.last_commanded_phase, recovered)
+
+        codes = (17 * yy + 13 * xx).astype(np.uint8)
+        def checked_codes(endpoint, method, arguments, timeout):
+            if method == "apply_codes":
+                assert arguments[2] == [1024, 1272]
+                assert len(arguments[3]) == codes.size
+                assert arguments[3] == codes.tobytes()
+            return counted(endpoint, method, arguments, timeout)
+        monkeypatch.setattr(device_module, "_rpc_call", checked_codes)
+        decoded = remote.apply_phase_codes(codes)
+        expected_phase = codes.astype(np.float32) * np.float32(2 * np.pi / 256)
+        np.testing.assert_array_equal(decoded, expected_phase)
+        np.testing.assert_array_equal(physical.last_commanded_phase, expected_phase)
+        assert decoded is remote.last_commanded_phase
+        assert not decoded.flags.writeable
+        assert sdk.write_count == remote.command_revision == physical.command_revision == 5
+        assert remote.last_command_receipt["readback"] == "matched-new"
+        profile = _load_profile("LSH0804382")
+        gray = np.floor(np.interp(
+            np.arange(256) * 852.0 / (128 * profile["phase_curve_wavelength_nm"]),
+            profile["phase_pi_by_gray"], np.arange(256),
+        ) + 0.5).astype(np.uint8)
+        mapped_codes = (codes[::-1, ::-1].astype(np.uint16) + correction) % 256
+        np.testing.assert_array_equal(sdk.display, gray[mapped_codes])
+        for invalid in (codes.astype(np.uint16), codes[:, :-1]):
+            with pytest.raises(ValueError, match="uint8 matrix"):
+                remote.apply_phase_codes(invalid)
+        for payload, shape in ((codes.tobytes()[:-1], [1024, 1272]),
+                               (codes.tobytes(), [1024, 1271])):
+            reply, _ = original(remote._connection, "apply_codes", (
+                5, 0, shape, payload,
+            ), 2.0)
+            assert reply["ok"] is False
+            assert reply["error"] == "invalid SLM phase payload"
+        assert sdk.write_count == physical.command_revision == 5
+        assert calls[-1] == "apply_codes"
+        remote.apply_phase(expected)
+        assert sdk.write_count == remote.command_revision == 6
+        assert calls[-1] == "apply"
         server.shutdown()
         server.server_close()
         worker.join(timeout=2.0)
@@ -675,14 +720,18 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
     assert sdk.close_count == 1
     assert handle.close_count == 1
     assert all(connection.fileno() == -1 for connection in connections)
-    assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
+    expected_calls = ["describe", "apply", "apply", "apply_codes", "describe", "apply_codes", "apply_codes", "apply"]
+    assert calls == expected_calls
     with pytest.raises(RuntimeError, match="closed"):
         remote.apply_phase(expected)
-    assert calls == ["describe", "apply", "apply", "apply", "describe", "apply"]
+    with pytest.raises(RuntimeError, match="closed"):
+        remote.apply_phase_codes(codes)
+    assert calls == expected_calls
 
 
+@pytest.mark.parametrize("phase_codes", (False, True))
 def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
-    monkeypatch,
+    monkeypatch, phase_codes: bool,
 ) -> None:
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
@@ -699,9 +748,10 @@ def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
         def send(name: str, adapter, value: float) -> None:
             barrier.wait()
             try:
-                results[name] = adapter.apply_phase(
-                    np.full(adapter.shape_yx, value, dtype=np.float32)
-                )
+                results[name] = (adapter.apply_phase_codes(
+                    np.full(adapter.shape_yx, round(value * 128 / np.pi), dtype=np.uint8)
+                ) if phase_codes else adapter.apply_phase(
+                    np.full(adapter.shape_yx, value, dtype=np.float32)))
             except BaseException as error:
                 errors[name] = error
 
@@ -724,7 +774,9 @@ def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
         np.testing.assert_array_equal(loser.last_commanded_phase, phase1)
         assert sdk.write_count == 1
 
-        phase2 = loser.apply_phase(
+        phase2 = loser.apply_phase_codes(
+            np.full(loser.shape_yx, 96, dtype=np.uint8)
+        ) if phase_codes else loser.apply_phase(
             np.full(loser.shape_yx, 3.0 * np.pi / 4.0, dtype=np.float32)
         )
         assert loser.command_revision == 2
@@ -742,8 +794,9 @@ def test_remote_slm_rejects_a_stale_writer_and_refreshes_physical_truth(
     assert not worker.is_alive()
 
 
+@pytest.mark.parametrize("phase_codes", (False, True))
 def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
-    monkeypatch,
+    monkeypatch, phase_codes: bool,
 ) -> None:
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as device_module
 
@@ -753,6 +806,13 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
     server, worker = running_slm_server(physical)
     remote = None
     original = device_module._rpc_call
+
+    def apply(value: float) -> np.ndarray:
+        return (remote.apply_phase_codes(
+            np.full(remote.shape_yx, round(value * 128 / np.pi), dtype=np.uint8)
+        ) if phase_codes else remote.apply_phase(
+            np.full(remote.shape_yx, value, dtype=np.float32)))
+
     try:
         for request in (
             {"version": True, "method": "describe"},
@@ -777,15 +837,11 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
             )
             assert oversized.recv(1) == b""
         remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2.0)
-        old = remote.apply_phase(
-            np.full(remote.shape_yx, np.pi / 4.0, dtype=np.float32)
-        )
+        old = apply(np.pi / 4.0)
         sdk.write_updates = False
         sdk.write_result = 0
         with pytest.raises(RuntimeError, match="Write_FMemArray"):
-            remote.apply_phase(
-                np.full(remote.shape_yx, np.pi / 2.0, dtype=np.float32)
-            )
+            apply(np.pi / 2.0)
         assert remote.last_command_receipt["outcome"] == "known-old"
         np.testing.assert_array_equal(remote.last_commanded_phase, old)
 
@@ -794,34 +850,35 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
 
         def malformed_after_apply(endpoint, method, arguments, timeout):
             metadata, payload = original(endpoint, method, arguments, timeout)
-            if method == "apply":
+            if method in {"apply", "apply_codes"}:
                 metadata["version"] = True
             return metadata, payload
 
         monkeypatch.setattr(device_module, "_rpc_call", malformed_after_apply)
         with pytest.raises(ValueError, match="protocol version"):
-            remote.apply_phase(
-                np.full(remote.shape_yx, 3.0 * np.pi / 4.0, dtype=np.float32)
-            )
+            apply(3.0 * np.pi / 4.0)
         assert physical.command_revision == 3
         assert remote.last_commanded_phase is None
         assert remote.last_command_receipt["outcome"] == "unknown"
 
         monkeypatch.setattr(device_module, "_rpc_call", original)
-        recovered = remote.apply_phase(
-            np.full(remote.shape_yx, np.pi, dtype=np.float32)
-        )
+        recovered = apply(np.pi)
         assert remote.command_revision == 4
         np.testing.assert_array_equal(remote.last_commanded_phase, recovered)
 
         sdk.change_result = 0
         with pytest.raises(RuntimeError, match="Change_DispSlot"):
-            remote.apply_phase(
-                np.full(remote.shape_yx, 5.0 * np.pi / 4.0, dtype=np.float32)
-            )
+            apply(5.0 * np.pi / 4.0)
         assert remote.command_revision == 5
         assert remote.last_commanded_phase is None
         assert remote.last_command_receipt["outcome"] == "unknown"
+        sdk.change_result = 1
+        sdk.bad_readback = True
+        with pytest.raises(RuntimeError, match="readback differs"):
+            apply(3.0 * np.pi / 2.0)
+        assert sdk.write_count == remote.command_revision == 6
+        assert remote.last_commanded_phase is None
+        assert remote.last_command_receipt["stage"] == "readback"
     finally:
         if remote is not None:
             remote.close()

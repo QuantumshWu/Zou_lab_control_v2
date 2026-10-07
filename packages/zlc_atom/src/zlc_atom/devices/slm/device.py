@@ -58,6 +58,16 @@ def canonical_phase(radians: object, shape_yx: tuple[int, int]) -> np.ndarray:
     ).reshape(shape)
 
 
+def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
+    """Decode digital phase, not vendor gray: orientation and LUT stay downstream."""
+    shape = _shape(shape_yx)
+    source = np.asarray(codes)
+    if source.shape != shape or source.dtype != np.uint8:
+        raise ValueError("SLM phase codes must be a uint8 matrix matching the full device shape")
+    radians = source.astype(np.float32) * np.float32(_TWO_PI / 256)
+    return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
+
+
 @runtime_checkable
 class SlmAdapter(Protocol):
     """The complete device-independent surface of one phase-only SLM."""

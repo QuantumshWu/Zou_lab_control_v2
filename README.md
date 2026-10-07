@@ -102,6 +102,91 @@ SLM Feedback(Calibration + Science Context + pulse + exposure) -> report + final
 Panel -> matching data/fit/overlay -> data-backed Figure + PNG preview
 ```
 
+### GPU SLM rearrangement
+
+This implementation is still under optical and performance validation.
+Its current `converged` flag checks intended-site endpoint intensities and
+authored dark sites, not moving-well shape, background light or finite-refresh
+behavior. Do not use that flag as experimental approval to transport atoms.
+The solver uses phase projection and amplitude updates. A depth-two Anderson
+step mixes the current frame's recent log-amplitude residuals in both coarse
+updates and actual encoded-field corrections. Each frame keeps its own history;
+changing correction damping resets it. Native-grid checks remain authoritative.
+Opposite horizontal Fourier coordinates share cosine/sine products. Each
+physical pixel is still reconstructed and receives its own pupil amplitude;
+the center and unpaired negative edge are counted exactly once. This reduces
+matrix multiplication work without assuming a symmetric beam or cropping the SLM.
+The retired per-frame Newton/Jacobian solver and unvalidated neural predictor
+are not retained as alternate implementations.
+
+The optional numerical API is in `zlc_atom.devices.slm.solver`. Install its
+CUDA dependencies with `python -m pip install -e ".[slm-gpu]"`. Ordinary
+discovery, the static SLM Editor, and Feedback do not import CUDA or change
+backend implicitly.
+
+`prepare_rearrangement(...)` prepares fixed source/target geometry, endpoint
+holograms and GPU resources **before** imaging. Coordinates are integer Y,X
+indices in the native centered Fourier image, not camera pixels or micrometres.
+The input `pupil_phase` is a measured incident aberration to compensate; it is
+not an intentional carrier or the device's vendor response correction.
+Preparation also reserves two output buffers in each needed pinned-memory size
+class, bounded by the declared geometry and matching range. This is empty storage,
+not precomputed occupancy-dependent answers. The 1024×1272 benchmark reserves
+496 MiB for a 32-bin maximum range, or 2032 MiB for 80 bins; preparation time and
+RAM are reported separately from online latency. The pool belongs to this working
+point and unused buffers are released on close, without flushing global caches.
+
+Apply `prepared["initial_phase_codes"]`, acquire a boolean occupancy vector in
+the exact source-site order, then call:
+
+```python
+sequence = compute_rearrangement(
+    prepared, occupied, surplus_policy="discard",  # explicitly extinguish unused sites
+)
+# All sequence["phase_codes"] frames are now independent, read-only host arrays.
+# At a separately characterized, safe device cadence:
+for codes in sequence["phase_codes"]:
+    slm.apply_phase_codes(codes)
+# When this fixed optical working point is no longer needed:
+prepared["close"]()
+```
+
+The physical SLM proxy accepts this encoding through its existing serialized
+command lane; orientation, correction, wavelength mapping, acknowledgements,
+and optical settling stay with the server. Calculation never sends frames on
+its own. There is no claim that a liquid-crystal display or the atoms move in
+the computation time. Frame fractions are spatial progress, not an invented
+hardware clock.
+
+Preparation requires explicit `shape_yx`, `pupil_amplitude`, `matching_radii`
+and `minimum_separation`, plus the source and target arrays. The solver chooses
+the first feasible authored maximum-distance bound, minimizes squared distance
+within it, and checks the piecewise-linear paths including between frames.
+Motion emits three substeps per integer planner segment; returned positions
+describe those actual fractional Fourier coordinates without rounding.
+Insufficient atoms, infeasible assignments, collisions and unconverged phase
+sequences are rejected. The default intended-site intensity max/min gate is 1.01;
+explicit diagnostic `require_converged=False` returns the actual metrics, not
+a successful quality verdict. `iterations=None` uses a prepared fixed initial
+schedule followed by bounded correction of only failed encoded frames. An
+explicit integer requests that many projection/weight updates per frame and
+disables additional adaptive updates; zero still encodes and measures the result.
+
+Optional `endpoint_data` supplies already prepared source/target phase codes
+and synthesis coefficients at the same geometry, pupil and requested intensities.
+These are fixed optical working points, not cached occupancy-dependent answers
+or a neural model. Actual fields are measured from the encoded patterns, while
+intensity gates remain relative to the requested site weights. A prepared target
+can be reused only at its exact endpoint and after satisfying that same gate.
+Closing the prepared GPU workspace does not invalidate already returned host maps.
+
+Online timing covers occupancy-dependent planning, clearance, every generated
+full-frame mask, quantization and host transfer. CUDA/JIT/endpoint preparation
+is separate. Network-only inference, one iteration, and first-frame latency
+are not complete-rearrangement measurements. The returned metrics include
+intensity error, trap-phase changes and sampled site power; numerical
+pixel-transition models are not experimental atom-survival evidence.
+
 Task Console, Device Control, Pulse Editor and SLM Editor share one
 `ExperimentSession`, named devices, signal plane and sequencer. Loaded-device
 cards expose Control and Close. Adding, removing, renaming or reconfiguring a

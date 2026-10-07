@@ -22,7 +22,7 @@ import numpy as np
 from zlc_durable import strict_json_loads
 from zlc_pulse.endpoint import drop_connection, drop_peer_connections, is_loopback_host
 
-from ..device import SlmAdapter, _shape, _validated_state, canonical_phase
+from ..device import SlmAdapter, _shape, _validated_state, canonical_phase, phase_from_codes
 
 
 #: The server's narration channel: the machine that owns the SLM shows these
@@ -130,7 +130,7 @@ def _open_slm_server(
             and not payload
         ):
             reply = response(True, None, include_phase=True)
-        elif request.get("method") != "apply" or fields != {
+        elif request.get("method") not in {"apply", "apply_codes"} or fields != {
             "version", "method", "command_revision", "mapping_revision", "shape_yx"
         }:
             reply = response(False, "invalid SLM remote request", include_phase=True)
@@ -149,14 +149,17 @@ def _open_slm_server(
             not isinstance(request["shape_yx"], list)
             or any(type(value) is not int for value in request["shape_yx"])
             or request["shape_yx"] != list(slm.shape_yx)
-            or len(payload) != _remote_phase_bytes(slm.shape_yx)
+            or len(payload) != _remote_phase_bytes(slm.shape_yx) // (
+                4 if request["method"] == "apply_codes" else 1
+            )
         ):
             reply = response(False, "invalid SLM phase payload", include_phase=True)
         else:
             try:
-                slm.apply_phase(
-                    np.frombuffer(payload, dtype="<f4").reshape(slm.shape_yx)
-                )
+                phase = (phase_from_codes(np.frombuffer(payload, dtype=np.uint8).reshape(slm.shape_yx), slm.shape_yx)
+                         if request["method"] == "apply_codes" else
+                         np.frombuffer(payload, dtype="<f4").reshape(slm.shape_yx))
+                slm.apply_phase(phase)
             except Exception as error:
                 reply = response(
                     False, f"{type(error).__name__}: {error}", include_phase=True
@@ -271,7 +274,7 @@ def _rpc_call(
 ) -> tuple[dict[str, object], bytes]:
     if method == "describe" and not arguments:
         metadata, payload = {"version": _REMOTE_VERSION, "method": method}, b""
-    elif method == "apply" and len(arguments) == 4:
+    elif method in {"apply", "apply_codes"} and len(arguments) == 4:
         command_revision, mapping_revision, shape_yx, payload = arguments
         metadata = {
             "version": _REMOTE_VERSION,
@@ -451,22 +454,34 @@ class _RemoteSlmAdapter:
             return dict(self._receipt)
 
     def apply_phase(self, radians: object) -> np.ndarray:
+        canonical = canonical_phase(radians, self._shape_yx)
+        return self._apply(canonical, "apply", canonical.tobytes())
+
+    def apply_phase_codes(self, codes: object) -> np.ndarray:
+        """Send one already-computed 8-bit phase frame through the same command lane."""
+        source = np.asarray(codes)
+        if source.shape != self._shape_yx or source.dtype != np.uint8:
+            raise ValueError("SLM phase codes must be a uint8 matrix matching the full device shape")
+        payload = source.tobytes()
+        canonical = phase_from_codes(np.frombuffer(payload, np.uint8).reshape(self._shape_yx), self._shape_yx)
+        return self._apply(canonical, "apply_codes", payload)
+
+    def _apply(self, canonical: np.ndarray, method: str, payload: bytes) -> np.ndarray:
         with self._lock:
             if self._closed:
                 raise RuntimeError("remote SLM is closed")
             if self._uncertain:
                 self._describe()
-            canonical = canonical_phase(radians, self._shape_yx)
             expected_command = self._command_revision
             expected_mapping = self._mapping_revision
             try:
                 error = self._request(
-                    "apply",
+                    method,
                     (
                         expected_command,
                         expected_mapping,
                         list(self._shape_yx),
-                        np.asarray(canonical, dtype="<f4").tobytes(),
+                        payload,
                     ),
                     commanded=canonical,
                 )

@@ -65,6 +65,8 @@ def _world(**config_changes: object) -> SimulationWorld:
     return SimulationWorld(replace(SimulationWorldConfig(), **config_changes))
 
 
+
+
 def _world_pulse(
     *,
     duration: float = 0.02,
@@ -1913,6 +1915,267 @@ def _full_fft_returned_quality(
         / np.sum(np.square(pupil_amplitude, dtype=np.float32))
     )
     return ratio, efficiency
+
+
+def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> None:
+    source = np.array([[2, 2], [10, 10], [3, 10]])
+    target = np.array([[10, 8], [4, 3]])
+    prepared = slm_solver.prepare_rearrangement_geometry(
+        source, target, shape_yx=(16, 16), matching_radii=(0, 1, 2),
+        minimum_separation=4.5,
+    )
+    source[0] = [15, 15]
+    np.testing.assert_array_equal(prepared["source_yx"][0], [2, 2])
+    with pytest.raises(ValueError):
+        prepared["source_yx"].setflags(write=True)
+    plan = slm_solver.plan_rearrangement(prepared, [True, True, True])
+    np.testing.assert_array_equal(plan["assignment"], [1, 0])
+    np.testing.assert_array_equal(plan["unselected_occupied"], [2])
+    np.testing.assert_array_equal(plan["fraction"], [0.0, 0.5, 1.0])
+    np.testing.assert_array_equal(plan["motion_yx"], [
+        [[10, 10], [2, 2]], [[10, 9], [3, 3]], [[10, 8], [4, 3]],
+    ])
+    assert np.max(np.abs(np.diff(plan["motion_yx"], axis=0))) <= 1
+    assert slm_solver.rearrangement_clearance(plan["motion_yx"]) >= 4.5
+    repeated = slm_solver.plan_rearrangement(prepared, [True, True, True])
+    np.testing.assert_array_equal(repeated["motion_yx"], plan["motion_yx"])
+    compiled = slm_solver._REARRANGEMENT_MATCH
+    signatures = tuple(compiled.signatures)
+    readonly_occupancy = np.ones(6, dtype=bool)[::2]
+    readonly_occupancy.setflags(write=False)
+    np.testing.assert_array_equal(
+        slm_solver.plan_rearrangement(prepared, readonly_occupancy)["assignment"], plan["assignment"],
+    )
+    assert tuple(compiled.signatures) == signatures
+
+    identity = slm_solver.prepare_rearrangement_geometry(
+        [[2, 2], [10, 10]], [[10, 10], [2, 2]], shape_yx=(16, 16),
+        matching_radii=(0,), minimum_separation=4.5,
+    )
+    same = slm_solver.plan_rearrangement(identity, [True, True])
+    np.testing.assert_array_equal(same["assignment"], [1, 0])
+    np.testing.assert_array_equal(same["motion_yx"][0], [[10, 10], [2, 2]])
+    assert same["motion_yx"].shape == (1, 2, 2)
+    np.testing.assert_array_equal(same["fraction"], [0.0])
+    assert same["matching_radius"] == 0
+    with pytest.raises(ValueError, match="occupied"):
+        slm_solver.plan_rearrangement(prepared, [True, False, False])
+    with pytest.raises(ValueError, match="boolean"):
+        slm_solver.plan_rearrangement(prepared, [1, 1, 1])
+    blocked = slm_solver.prepare_rearrangement_geometry(
+        [[2, 2], [2, 3]], [[2, 2], [10, 10]], shape_yx=(16, 16),
+        matching_radii=(1,), minimum_separation=1,
+    )
+    with pytest.raises(ValueError, match="matching radii"):
+        slm_solver.plan_rearrangement(blocked, [True, True])
+    reachable = slm_solver.prepare_rearrangement_geometry(
+        [[2, 2], [2, 3]], [[2, 2], [10, 10]], shape_yx=(16, 16),
+        matching_radii=(1, 8), minimum_separation=1,
+    )
+    assert slm_solver.plan_rearrangement(reachable, [True, True])["matching_radius"] == 8
+    assert slm_solver._REARRANGEMENT_MATCH is compiled
+    # Every source is eligible, but two target rows compete for one source:
+    # cardinality alone must not mistake this Hall-infeasible graph for a match.
+    hall = slm_solver.prepare_rearrangement_geometry(
+        [[0, 0], [0, 1], [8, 8]], [[0, 0], [8, 7], [8, 8]],
+        shape_yx=(10, 10), matching_radii=(1,), minimum_separation=1,
+    )
+    with pytest.raises(ValueError, match="matching radii"):
+        slm_solver.plan_rearrangement(hall, [True, True, True])
+    irregular = slm_solver.prepare_rearrangement_geometry(
+        [[0, 0], [90001, 15003], [15002, 95001]], [[80000, 20000], [20000, 80000]],
+        shape_yx=(100001, 100001), matching_radii=(95000,), minimum_separation=1,
+    )
+    large = slm_solver.plan_rearrangement(irregular, [True, True, True])
+    difference = irregular["source_yx"][large["assignment"]].astype(np.int64) - irregular["target_yx"]
+    assert np.sum(difference ** 2) == 375000015
+    with pytest.raises(ValueError, match="int64 working range"):
+        slm_solver.prepare_rearrangement_geometry(
+            [[0, 1], [2147483647, 2147483646], [100, 103]],
+            [[0, 0], [2147483647, 2147483647]], shape_yx=(2147483648, 2147483648),
+            matching_radii=(2147483647,), minimum_separation=1,
+        )
+    for bad in ([[2, 2], [2, 2]], [[16, 2], [3, 3]], [[2.5, 2], [3, 3]]):
+        with pytest.raises(ValueError):
+            slm_solver.prepare_rearrangement_geometry(
+                bad, target, shape_yx=(16, 16), matching_radii=(2,),
+                minimum_separation=1,
+            )
+    with pytest.raises(ValueError, match="source"):
+        slm_solver.prepare_rearrangement_geometry(
+            [[2, 2]], target, shape_yx=(16, 16), matching_radii=(2,),
+            minimum_separation=1,
+        )
+    assert slm_solver.rearrangement_clearance(
+        [[[0, 0], [0, 2]], [[0, 2], [0, 0]]]
+    ) == 0.0
+    assert slm_solver.rearrangement_clearance(
+        [[[0, 0], [0, 2]], [[0, 0], [2, 0]]]
+    ) == pytest.approx(np.sqrt(2))
+    assert slm_solver.rearrangement_clearance([[[1, 1]]]) == np.inf
+    # Near-square feasible matchings exposed long sparse-solver tails. Keep
+    # their bottleneck, weighted optimum, identity and emitted clearance.
+    center = np.array([512, 636])
+    source = (np.indices((30, 30)).reshape(2, -1).T - 14.5) * 8 + center
+    target = (np.indices((20, 20)).reshape(2, -1).T - 9.5) * 8 + center
+    prepared = slm_solver.prepare_rearrangement_geometry(
+        source, target, shape_yx=(1024, 1272),
+        matching_radii=(0, 8, 16, 24, 32), minimum_separation=4.5,
+    )
+    for seed, objective in ((9400, 88448), (9414, 80960)):
+        occupied = np.random.default_rng(seed).random(900) < .7
+        plan = slm_solver.plan_rearrangement(prepared, occupied)
+        assert plan["matching_radius"] == 16
+        assert len(plan["motion_yx"]) == 17
+        assert np.all(occupied[plan["assignment"]])
+        difference = prepared["source_yx"][plan["assignment"]].astype(np.int64) - prepared["target_yx"]
+        assert np.sum(difference ** 2) == objective
+        assert slm_solver.rearrangement_clearance(plan["motion_yx"]) == 5
+
+
+@pytest.mark.parametrize("shape", ((64, 80), (127, 159)))
+def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) -> None:
+    cp = pytest.importorskip("cupy")
+    try:
+        available = cp.cuda.runtime.getDeviceCount()
+    except cp.cuda.runtime.CUDARuntimeError as error:
+        if error.status not in (35, 100):
+            raise
+        pytest.skip(f"CUDA is unavailable: {error}")
+    if not available:
+        pytest.skip("no CUDA device")
+    from zlc_atom.devices.slm.device import phase_from_codes
+
+    # Keep the complete shared-encoder boundary proof when replacing the solver.
+    count = 65536 + 1024 * 1272
+    encoded = cp.empty(count, cp.uint8)
+    encoder = cp.RawKernel(slm_solver._REARRANGEMENT_PHASE_CODE_CUDA + r'''
+    extern "C" __global__ void encode_grid(unsigned char* out,int count){
+      int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
+      unsigned int p=i<65536?i:65280, pixel=i<65536?i:i-65536;
+      out[i]=phase_code(p*0.00009587379924285257,pixel);
+    }''', "encode_grid")
+    encoder(((count + 255) // 256,), (256,), (encoded, np.int32(count)))
+    phase16 = np.arange(65536, dtype=np.uint32)
+    hashed = phase16 + np.uint32(0x9e3779b9)
+    hashed ^= hashed >> 16; hashed *= np.uint32(0x7feb352d)
+    hashed ^= hashed >> 15; hashed *= np.uint32(0x846ca68b); hashed ^= hashed >> 16
+    carry = (((phase16 & 255) << 16) + (hashed >> 8)) >> 24
+    np.testing.assert_array_equal(encoded[:65536].get(), ((phase16 >> 8) + carry).astype(np.uint8))
+    np.testing.assert_array_equal(encoded[65536:].get(), 255)
+
+    height, width = shape
+    yy, xx = np.ogrid[:height, :width]
+    zy, zx = (yy - (height - 1) / 2) / height, (xx - (width - 1) / 2) / width
+    pupil = (3.75 * np.exp(-((zy / .35) ** 2 + (zx / .28) ** 2))).astype(np.float32)
+    pupil[zy * zy + zx * zx > .22] = 0
+    aberration = canonical_phase(.37 * (zy * zy + zx * zx) + .2 * zx - .15 * zy, shape)
+    center = np.array(shape) // 2
+    source = center + np.array([[-4, -4], [-4, 4], [4, -4], [4, 4]], np.int32)
+    target = center + np.array([[-3, -2], [3, 2]], np.int32)
+    prepared = slm_solver.prepare_rearrangement(
+        source, target, shape_yx=shape, pupil_amplitude=pupil,
+        pupil_phase=aberration, matching_radii=(0, 4), minimum_separation=2,
+        endpoint_iterations=200,
+    )
+    occupied = np.ones(len(source), bool)
+    sequence = slm_solver.compute_rearrangement(
+        prepared, occupied, surplus_policy="discard", iterations=0,
+        require_converged=False,
+    )
+    amplitudes = sequence["desired_amplitudes"]
+    unused = sequence["unselected_occupied"]
+    assert np.all(amplitudes[0, unused] > 0)
+    np.testing.assert_array_equal(amplitudes[1, unused], 0)
+    motion_amplitudes = amplitudes[sequence["ramp_frames"]:]
+    assert np.all(motion_amplitudes[:, :len(target)] > 0)
+    np.testing.assert_array_equal(motion_amplitudes[:, len(target):], -1)
+    np.testing.assert_array_equal(sequence["dark_intensity_ratios"][sequence["ramp_frames"]:], 0)
+    assert sequence["dark_tolerance"] == .01
+    for positions, values in zip(sequence["sites_yx"], amplitudes):
+        present = positions[values >= 0]
+        assert len(np.unique(present, axis=0)) == len(present)
+        np.testing.assert_array_equal(positions[values < 0], -1)
+
+    saved_codes = sequence["phase_codes"].copy()
+    assert not sequence["phase_codes"].flags.writeable
+    with pytest.raises(ValueError):
+        sequence["phase_codes"].setflags(write=True)
+    next_sequence = slm_solver.compute_rearrangement(prepared, occupied, surplus_policy="discard")
+    assert next_sequence["converged"]
+    assert np.max(next_sequence["support_intensity_ratios"]) <= 1.01
+    assert np.max(next_sequence["dark_intensity_ratios"]) <= .01
+    assert np.any(next_sequence["sites_yx"] % 1 != 0)
+
+    # A direct complex128 Fourier sum on the full actual pupil independently
+    # checks fractional emitted coordinates, rather than rounding to FFT bins.
+    y = (np.arange(height) - height // 2) / height
+    x = (np.arange(width) - width // 2) / width
+    for candidate in (sequence, next_sequence):
+        for code, positions, values, actual in zip(
+            candidate["phase_codes"], candidate["sites_yx"],
+            candidate["desired_amplitudes"], candidate["actual_fields"],
+        ):
+            command = phase_from_codes(code, shape)
+            field = pupil.astype(float) * np.exp(1j * (command.astype(float) + aberration))
+            present, bright, dark = values >= 0, values > 0, values == 0
+            signed = positions[present] - center
+            ey = np.exp(-2j * np.pi * signed[:, 0, None] * y)
+            ex = np.exp(-2j * np.pi * signed[:, 1, None] * x)
+            expected = np.einsum("jh,hw,jw->j", ey, field, ex, optimize=True)
+            np.testing.assert_allclose(actual[present], expected, rtol=1e-3,
+                                       atol=1e-3 * np.min(abs(actual[bright])))
+            assert np.all(actual[~present] == 0)
+            if candidate is next_sequence:
+                power = abs(expected[values[present] > 0]) ** 2 / values[bright] ** 2
+                assert power.max() / power.min() <= 1.01
+                if np.any(dark):
+                    assert np.max(abs(expected[values[present] == 0]) ** 2) / np.min(abs(actual[bright]) ** 2) <= .01
+    assert not np.shares_memory(sequence["phase_codes"], next_sequence["phase_codes"])
+    np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+    with pytest.raises(InterruptedError):
+        slm_solver.compute_rearrangement(prepared, occupied, surplus_policy="discard",
+                                        stop_requested=lambda: True)
+    stop_after_first_motion = iter((False, False, False, True))
+    with pytest.raises(InterruptedError):
+        slm_solver.compute_rearrangement(
+            prepared, occupied, surplus_policy="discard",
+            stop_requested=lambda: next(stop_after_first_motion, True),
+        )
+    restarted = slm_solver.compute_rearrangement(prepared, occupied, surplus_policy="discard")
+    np.testing.assert_array_equal(restarted["phase_codes"], next_sequence["phase_codes"])
+    np.testing.assert_array_equal(restarted["actual_fields"], next_sequence["actual_fields"])
+    prepared["close"]()
+    np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+
+    # A common third-bin Y translation exercises both nonzero carriers, on
+    # even and odd physical apertures. The full-pupil sum checks complex phase
+    # as well as intensity, so a wrong carrier origin/sign cannot cancel out.
+    translated_prepared = slm_solver.prepare_rearrangement(
+        source, source + np.array([1, 0], np.int32), shape_yx=shape,
+        pupil_amplitude=pupil, pupil_phase=aberration,
+        matching_radii=(0, 1), minimum_separation=2, endpoint_iterations=200,
+    )
+    try:
+        translated = slm_solver.compute_rearrangement(
+            translated_prepared, occupied, surplus_policy="discard",
+        )
+        for frame, residue in ((2, 1), (3, 2)):
+            positions = translated["sites_yx"][frame]
+            signed = positions - center
+            np.testing.assert_array_equal(np.rint(3 * signed[:, 0]).astype(np.int64) % 3, residue)
+            command = phase_from_codes(translated["phase_codes"][frame], shape)
+            field = pupil.astype(float) * np.exp(1j * (command.astype(float) + aberration))
+            ey = np.exp(-2j * np.pi * signed[:, 0, None] * y)
+            ex = np.exp(-2j * np.pi * signed[:, 1, None] * x)
+            expected = np.einsum("jh,hw,jw->j", ey, field, ex, optimize=True)
+            actual = translated["actual_fields"][frame]
+            np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5 * np.min(abs(actual)))
+            relative = abs(expected) ** 2 / translated["desired_amplitudes"][frame] ** 2
+            assert relative.max() / relative.min() <= 1.01
+    finally:
+        translated_prepared["close"]()
+
 
 
 def test_slm_solver_validates_authored_pupil_amplitude() -> None:
