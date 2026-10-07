@@ -112,11 +112,12 @@ def test_image_frames_replace_the_complete_layer_and_keep_new_run_overlay(entry)
         paths_xy=np.asarray((((1.0, 0.5), (1.0, 0.5), (0.0, 1.0)),)),
     )
     spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
+    parameters = {"show_image": entry != "process"}
     service = RenderProcess("image-frame-contract") if entry == "process" else None
     host = (
-        service.build_host(ImageFrame(first, overlay), spec)
+        service.build_host(ImageFrame(first, overlay), spec, parameters=parameters)
         if service is not None
-        else RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
+        else RasterPlotHost.from_plot(ImageFrame(first, overlay), spec, parameters=parameters)
     )
     try:
         host.wait_for_front(timeout=30)
@@ -141,7 +142,7 @@ def test_image_frames_replace_the_complete_layer_and_keep_new_run_overlay(entry)
         operation = update(bare)
         assert operation.front.identity.data_revision == 11
         assert operation.front.identity.image_overlay_revision is None
-        reference = RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
+        reference = RasterPlotHost.from_plot(ImageFrame(first, overlay), spec, parameters=parameters)
         try:
             reference.wait_for_front(timeout=30)
             next_frame = reference.update_data(ImageFrame(second, incoming)).result(timeout=30)
@@ -170,9 +171,10 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     paths = np.asarray((
         ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (1.0, 1.0), (0.0, 0.0)),
         ((2.0, 1.0),) * 5,
+        ((1.0, 1.0), (2.0, 0.0), (2.0, 0.0), (2.0, 0.0), (2.0, 0.0)),
     ))
     overlay = ImagePointOverlay(
-        0, paths[:, 0, :], point_ids=("moving", "stationary"), paths_xy=paths,
+        0, paths[:, 0, :], point_ids=("moving", "stationary", "later start"), paths_xy=paths,
     )
     assert not overlay.paths_xy.flags.writeable
     empty = ImagePointOverlay(0, np.empty((0, 2)), paths_xy=np.empty((0, 5, 2)))
@@ -180,14 +182,15 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
     original = ImageFrame(_image_snapshot(), overlay)
     image, archive = save_figure_artifact(
-        tmp_path / "paths", plot_input=original, spec=spec, parameters={}, size="2x2",
+        tmp_path / "paths", plot_input=original, spec=spec,
+        parameters={"show_image": False, "side_distribution": False}, size="2x2",
     )
     info, arrays, datasets = read_archive(archive)
     restored, recipe = read_figure_plot(info, arrays, datasets, "data")
     assert isinstance(restored, ImageFrame)
     np.testing.assert_array_equal(restored.snapshot.block.values, original.snapshot.block.values)
     np.testing.assert_array_equal(restored.overlay.paths_xy, paths)
-    assert restored.overlay.point_ids == ("moving", "stationary")
+    assert restored.overlay.point_ids == ("moving", "stationary", "later start")
     session = PlotSession(
         restored, recipe["spec"], parameters=recipe["parameters"], size=recipe["size"],
     )
@@ -197,10 +200,32 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
         np.testing.assert_array_equal(artists["image:point-path-ends"].get_offsets(), paths[:, -1, :])
         colors = artists["image:point-paths"].get_colors()
         assert not np.array_equal(colors[0], colors[1])
+        assert not artists["image"].get_visible()
+        assert len(artists["image:point-path-ends"].get_facecolors()) == 3
+        assert artists["image:point-path-arrows"]
+        path_labels = [label.get_text() for label in artists["image:point-path-labels"] if label.get_visible()]
+        assert "wait f2–f3" in path_labels and "wait f0–f4" in path_labels
+        assert "f0, f4" in path_labels
+        coincident = [label.get_position() for label in artists["image:point-path-labels"]
+                      if label.get_visible() and label.xy == (1.0, 1.0)]
+        assert len(coincident) == 2 and len(set(coincident)) == 2
         composed = session.rgba().copy()
         session._renderer.draw()
         # Same tolerance as the existing native/Agg image parity cases.
         assert np.max(np.abs(composed.astype(np.int16) - session.rgba().astype(np.int16))) <= 4
+        session.set_parameter("show_image", True)
+        assert artists["image"].get_visible()
+        assert not np.array_equal(composed, session.rgba())
+        session.set_parameter("show_image", False)
+        np.testing.assert_array_equal(composed, session.rgba())
+        session.set_parameter("show_point_labels", False)
+        assert not any(label.get_visible() for label in
+                       (*artists["image:point-labels"], *artists["image:point-path-labels"]))
+        assert artists["image:point-paths"].get_visible()
+        assert artists["image:point-path-ends"].get_visible()
+        assert all(arrow.get_visible() for arrow in artists["image:point-path-arrows"])
+        session.set_parameter("show_point_labels", True)
+        np.testing.assert_array_equal(composed, session.rgba())
         changed = paths.copy()
         changed[0, 1, 0] = 0.5
         with pytest.raises(RevisionError, match="different content"):

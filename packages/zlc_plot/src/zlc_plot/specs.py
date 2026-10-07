@@ -792,6 +792,13 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
     policy = style.render
     entries: list[ParameterSpec[object]] = [
         ParameterSpec(
+            "show_image",
+            bool,
+            RenderEffect.BASE_STYLE,
+            default=True,
+            label="Image raster",
+        ),
+        ParameterSpec(
             "relim_mode",
             str,
             _IMAGE_COLOR_EFFECTS,
