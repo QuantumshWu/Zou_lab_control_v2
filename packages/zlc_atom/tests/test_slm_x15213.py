@@ -1416,17 +1416,20 @@ def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(
     _patch_usb(monkeypatch, sdk)
     physical = X15213Adapter(_config())
     try:
-        codes = np.asarray([np.full(physical.shape_yx, index * 37, np.uint8) for index in range(3)])
+        codes = np.asarray([np.full(physical.shape_yx, value, np.uint8) for value in (0, 0, 37)])
         physical.prepare_phase_sequence(codes, 0.001)
-        assert sdk.write_count == 3
-        assert set(sdk.slots) == {1, 2, 3}
+        assert sdk.write_count == 2
+        assert set(sdk.slots) == {1, 2}
         assert sdk.changes == []
         assert not sdk.display.any()
         result = physical.play_phase_sequence()
-        assert sdk.changes == [1, 2, 3]
-        assert sdk.write_count == 3, "playback must not upload each frame again"
+        assert sdk.changes == [1, 2], "an exact known-frame HOLD issues no redundant SDK command"
+        assert sdk.write_count == 2, "playback must not upload each frame again"
         assert result["acknowledgment"] == "sdk-slot-change-and-frame-memory-readback"
         assert result["played_frames"] == 3
+        assert result["repeated_frames"] == 1 and result["mapped_frame_count"] == 2
+        assert result["frame_actions"] == ["presented", "held", "presented"]
+        assert len(result["acknowledged_ms"]) == 2 and len(result["confirmed_ms"]) == 3
         assert physical._sequence is None
         np.testing.assert_array_equal(physical.last_commanded_phase, codes[-1].astype(np.float32) * np.float32(2 * np.pi / 256))
         physical.prepare_phase_sequence(codes, 0.001)
@@ -1497,7 +1500,7 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
 
     delivered, errors, playback = [], [], []
     first_display, blocked_producer, unblock_display, producer_done = (threading.Event() for _ in range(4))
-    frames = np.frombuffer(bytes(np.arange(12, dtype=np.uint8).repeat(1024 * 1272)), np.uint8).reshape(12, 1024, 1272)
+    frames = np.frombuffer(bytes(np.asarray([0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3], np.uint8).repeat(1024 * 1272)), np.uint8).reshape(12, 1024, 1272)
 
     def present(gray):
         assert isinstance(gray, np.ndarray) and not gray.flags.writeable
@@ -1570,6 +1573,9 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
             assert errors == [] and playback[0]["played_frames"] == len(frames)
             assert max(playback[0]["queue_wait_ms"]) > 1, "underrun waits are measured, not hidden/skipped"
             assert len(playback[0]["upload_ms"]) == len(frames)
+            assert playback[0]["repeat_packet_count"] == playback[0]["repeated_frames"] == 8
+            assert playback[0]["acknowledged_upload_payload_bytes"] == 4 * frames[0].nbytes
+            assert playback[0]["mapped_frame_count"] == 4
             assert playback[0]["final_settle_completed"]
         elif ending == "stop":
             assert playback[0]["cancelled"] and playback[0]["played_frames"] == 1
@@ -1581,7 +1587,8 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
         else:
             assert any("final stream reply lost" in str(error) for error in errors)
             assert remote.last_command_receipt["outcome"] == "unknown" and remote.last_commanded_phase is None
-        for frame, gray in zip(frames, delivered):
+        actions = physical.last_command_receipt["sequence"]["frame_actions"]
+        for frame, gray in zip(frames[[index for index, action in enumerate(actions) if action == "presented"]], delivered):
             np.testing.assert_array_equal(gray, physical._phase_to_gray[frame[::-1, ::-1]])
         if ending != "lost-reply":
             confirmed = physical.last_command_receipt["sequence"]["played_frames"]
@@ -1686,3 +1693,109 @@ def test_remote_stream_upload_eof_stops_only_an_unfinished_current_prefix(monkey
         if newcomer is not None: newcomer.close()
         server.shutdown(); server.server_close(); worker.join(2)
         physical.close()
+
+
+@pytest.mark.parametrize("ending", ["complete", "stop-during-hold", "mapping-change", "unknown"])
+def test_exact_repeated_frames_hold_without_fresh_display_ack_or_extra_settle(monkeypatch, ending):
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
+
+    delivered, prepared = [], []
+
+    def present(index):
+        if ending == "unknown":
+            raise RuntimeError("the first display was not confirmed")
+        delivered.append(prepared[index])
+
+    monkeypatch.setattr(module, "_display", lambda _name: {"name": "test-display"})
+    monkeypatch.setattr(module, "_prepare_dvi_controller", lambda _serial: False)
+    monkeypatch.setattr(module, "_open_dvi_presenter", lambda _name: (present, lambda: None, lambda frames: prepared.__setitem__(slice(None), frames)))
+    physical = X15213Adapter(_config(transport="dvi"))
+    server, worker = running_slm_server(physical)
+    remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2)
+    codes = np.asarray([np.full(physical.shape_yx, code, np.uint8) for code in (11, 11, 37, 37)])
+    try:
+        remote.prepare_phase_sequence(codes, .06)
+        if ending == "mapping-change":
+            with physical._state_lock:
+                physical._mapping_revision += 1
+            with pytest.raises(RuntimeError, match="stale prepared SLM sequence"):
+                remote.play_phase_sequence()
+            assert delivered == [] and remote.last_commanded_phase is None
+        elif ending == "unknown":
+            with pytest.raises(RuntimeError, match="first display was not confirmed"):
+                remote.play_phase_sequence()
+            assert remote.last_commanded_phase is None and remote.last_command_receipt["outcome"] == "unknown"
+            assert remote.last_command_receipt["sequence"]["held_frames"] == 0
+        else:
+            stop = (lambda: physical.last_command_receipt["stage"] == "sequence-hold") if ending == "stop-during-hold" else None
+            result = remote.play_phase_sequence(stop)
+            count = 2 if ending == "stop-during-hold" else 4
+            assert result["played_frames"] == len(result["confirmed_ms"]) == len(result["step_started_ms"]) == count
+            assert result["frame_actions"] == ["presented", "held"] * (count // 2)
+            assert result["held_frames"] == count // 2
+            assert result["newly_presented_frames"] == len(result["acknowledged_ms"]) == len(delivered) == count // 2
+            assert np.all(np.asarray(result["actual_step_intervals_ms"]) >= 59.8)
+            assert result["cancelled"] is (ending == "stop-during-hold")
+            np.testing.assert_array_equal(remote.last_commanded_phase, codes[count - 1].astype(np.float32) * np.float32(2 * np.pi / 256))
+            if ending == "complete":
+                assert result["play_ms"] >= 239.5
+                assert result["final_settle_ms"] < 5, "the already-held final phase has satisfied its optical profile dwell"
+                assert result["final_settle_completed"]
+                np.testing.assert_array_equal(delivered[-1], physical._phase_to_gray[codes[2]])
+    finally:
+        remote.close()
+        server.shutdown(); server.server_close(); worker.join(2)
+        physical.close()
+
+
+def test_repeat_reuse_preserves_odd_word_tail_strided_codes_and_owned_phase():
+    from types import SimpleNamespace
+    from zlc_atom.devices.simulation.slm.device import VirtualSLM
+    from zlc_atom.devices.slm.device import canonical_phase, phase_from_codes
+
+    applied = []
+    world = SimpleNamespace(slm_shape_yx=(3, 5), commanded_phase=canonical_phase(np.zeros((3, 5)), (3, 5)))
+
+    def apply(radians):
+        world.commanded_phase = canonical_phase(radians, world.slm_shape_yx)
+        applied.append(world.commanded_phase)
+        return world.commanded_phase
+
+    world.apply_slm_phase = apply
+    physical = VirtualSLM(world, identity="odd-strided-byte-tail")
+    backing = np.zeros((4, 3, 10), np.uint8)
+    codes = backing[:, :, ::2]
+    codes[:] = np.arange(15, dtype=np.uint8).reshape(3, 5)
+    codes[2:, -1, -1] ^= 1  # Only the last byte of the seven-byte word tail differs.
+    codes.flags.writeable = False
+    assert not codes.flags.c_contiguous and codes[0].nbytes == 15
+    physical.prepare_phase_sequence(codes, .001)
+    direct = physical.play_phase_sequence()
+    assert direct["frame_actions"] == ["presented", "held", "presented", "held"]
+    assert len(applied) == 2, "strided exact repeats retain the world phase without repeating propagation"
+    server, worker = running_slm_server(physical)
+    remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2)
+    replies, errors = [], []
+
+    def play():
+        try:
+            replies.append(remote.play_phase_sequence())
+        except BaseException as error:
+            errors.append(error)
+
+    player = Thread(target=play)
+    try:
+        remote.prepare_phase_sequence(None, .001, frame_count=4)
+        player.start()
+        for index, frame in enumerate(codes): remote.submit_phase_frame(index, frame)
+        player.join(2)
+        assert not player.is_alive() and errors == []
+        assert replies[0]["repeat_packet_count"] == 2
+        assert replies[0]["acknowledged_upload_payload_bytes"] == 30
+        assert replies[0]["frame_actions"] == ["presented", "held", "presented", "held"]
+        np.testing.assert_array_equal(remote.last_commanded_phase, phase_from_codes(codes[-1], (3, 5)))
+        with pytest.raises(ValueError): remote.last_commanded_phase.flags.writeable = True
+    finally:
+        remote.cancel_phase_sequence()
+        if player.is_alive(): player.join(2)
+        remote.close(); server.shutdown(); server.server_close(); worker.join(2); physical.close()

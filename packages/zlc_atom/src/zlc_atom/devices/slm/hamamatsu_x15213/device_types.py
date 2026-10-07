@@ -26,7 +26,7 @@ from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse.endpoint import local_ipv4_addresses
 
 from .. import open_slm_control
-from ..device import bind_slm, canonical_phase, phase_from_codes, phase_sequence_codes
+from ..device import _same_phase_codes, bind_slm, canonical_phase, phase_from_codes, phase_sequence_codes
 from .remote import _RemoteSlmAdapter, _open_slm_server
 
 
@@ -996,10 +996,10 @@ class X15213Adapter:
             except BaseException:
                 observed = None
         if observed is not None:
-            if np.array_equal(observed, gray):
-                readback = "matched-new"
-            elif previous_gray is not None and np.array_equal(observed, previous_gray):
+            if previous_gray is not None and np.array_equal(observed, previous_gray):
                 readback = "matched-old"
+            elif np.array_equal(observed, gray):
+                readback = "matched-new"
             else:
                 readback = "mismatch"
 
@@ -1196,7 +1196,17 @@ class X15213Adapter:
         # every frame. Its public phase snapshot decodes the confirmed frame.
         if frames is not None and (frames.flags.writeable or np.asarray(codes).flags.writeable):
             frames = np.frombuffer(frames.tobytes(), dtype=np.uint8).reshape(frames.shape)
-        mapped = [] if frames is None else [self._gray_codes(frame) for frame in frames]
+        mapped = []
+        repeated_frames = 0
+        previous = None
+        if frames is not None:
+            for frame in frames:
+                if previous is not None and _same_phase_codes(frame, previous):
+                    mapped.append(mapped[-1])
+                    repeated_frames += 1
+                else:
+                    mapped.append(self._gray_codes(frame))
+                previous = frame
         grays = tuple(value[0] for value in mapped)
         mapping = mapped[0][1] if mapped else self._mapping_snapshot()
         slots = []
@@ -1207,8 +1217,13 @@ class X15213Adapter:
         elif frames is not None:
             # Reuse only the existing vendor frame-memory API. Never overwrite
             # the currently visible slot while preparing a sequence.
-            slots = [slot for slot in range(len(frames) + 1) if slot != self._display_slot][:len(frames)]
-            for gray, slot in zip(grays, slots):
+            available = iter(slot for slot in range(len(frames) + 1) if slot != self._display_slot)
+            for index, gray in enumerate(grays):
+                if index and gray is grays[index - 1]:
+                    slots.append(slots[-1])
+                    continue
+                slot = next(available)
+                slots.append(slot)
                 _check(self._sdk.Write_FMemArray(
                     self._board_id, gray.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
                     int(gray.size), _SHAPE_YX[1], _SHAPE_YX[0], slot,
@@ -1220,6 +1235,7 @@ class X15213Adapter:
             "prepare_ms": (time.perf_counter() - started) * 1000,
             "mapping_revision": int(mapping["mapping_revision"]),
             "streaming": frames is None, "queue_capacity": 2 if frames is None else 0,
+            "repeated_frames": repeated_frames, "mapped_frame_count": len(mapped) - repeated_frames,
         }
         self._sequence = {
             "codes": frames, "grays": grays, "slots": slots, "mapping": mapping,
@@ -1227,6 +1243,8 @@ class X15213Adapter:
             "prepared": prepared,
             "queue": Queue(maxsize=2) if frames is None else None,
             "submitted": 0, "playing": False, "mapping_ms": [], "queued_at": [],
+            "last_submitted": None, "repeated_frames": repeated_frames,
+            "mapped_frame_count": len(mapped) - repeated_frames,
         }
         return dict(prepared)
 
@@ -1236,21 +1254,37 @@ class X15213Adapter:
             raise RuntimeError("Streaming SLM phase sequence has not been prepared")
         if type(index) is not int or index != sequence["submitted"] or index >= len(sequence["intervals"]):
             raise ValueError("SLM streaming frame index is not the next declared frame")
-        frame = np.asarray(codes)
-        if frame.dtype != np.uint8 or frame.shape != _SHAPE_YX:
-            raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
-        if frame.flags.writeable:
-            frame = np.frombuffer(frame.tobytes(), dtype=np.uint8).reshape(_SHAPE_YX)
-        mapped_at = time.perf_counter()
-        gray, mapping = self._gray_codes(frame)
-        if mapping["mapping_revision"] != sequence["mapping"]["mapping_revision"]:
+        if self.mapping_revision != sequence["mapping"]["mapping_revision"]:
             raise RuntimeError("stale streaming SLM mapping")
+        mapped_at = time.perf_counter()
+        previous = sequence["last_submitted"]
+        if codes is None:
+            if previous is None:
+                raise ValueError("SLM repeated frame has no preceding admitted frame")
+            frame, gray = previous
+            repeated = True
+        else:
+            frame = np.asarray(codes)
+            if frame.dtype != np.uint8 or frame.shape != _SHAPE_YX:
+                raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
+            if frame.flags.writeable:
+                frame = np.frombuffer(frame.tobytes(), dtype=np.uint8).reshape(_SHAPE_YX)
+            repeated = previous is not None and _same_phase_codes(frame, previous[0])
+            if repeated:
+                frame, gray = previous
+            else:
+                gray, mapping = self._gray_codes(frame)
+                if mapping["mapping_revision"] != sequence["mapping"]["mapping_revision"]:
+                    raise RuntimeError("stale streaming SLM mapping")
         mapping_ms = (time.perf_counter() - mapped_at) * 1000
         while not self._sequence_cancel.is_set() and self._sequence is sequence:
             try:
                 sequence["queue"].put((frame, gray), timeout=0.01)
                 sequence["mapping_ms"].append(mapping_ms)
                 sequence["queued_at"].append(time.perf_counter())
+                sequence["last_submitted"] = (frame, gray)
+                sequence["repeated_frames"] += int(repeated)
+                sequence["mapped_frame_count"] += int(not repeated)
                 sequence["submitted"] += 1
                 return
             except Full:
@@ -1287,6 +1321,8 @@ class X15213Adapter:
             raise error
         started = time.perf_counter()
         dispatch, acknowledgments, queue_wait = [], [], []
+        step_started, confirmations, frame_actions = [], [], []
+        last_display_acknowledged = None
         result = {
             **sequence["prepared"], "played_frames": 0, "cancelled": False,
             "acknowledgment": ("native-gdi-flush-and-exact-raster-check" if self._transport == "dvi"
@@ -1336,6 +1372,8 @@ class X15213Adapter:
             for index, interval in enumerate(sequence["intervals"]):
                 if self._sequence_cancel.is_set():
                     break
+                if self.mapping_revision != mapping["mapping_revision"]:
+                    raise RuntimeError("stale streaming SLM mapping")
                 if sequence["queue"] is not None:
                     queued_started = time.perf_counter()
                     while not self._sequence_cancel.is_set():
@@ -1351,47 +1389,59 @@ class X15213Adapter:
                     canonical, gray = sequence["codes"][index], sequence["grays"][index]
                 previous_phase, previous_gray, previous_receipt = self._phase, self._last_gray, self._last_receipt
                 frame_started = time.perf_counter()
-                dispatch.append((frame_started - started) * 1000)
-                with self._state_lock:
-                    self._phase, self._last_gray = None, None
-                    self._last_receipt = self._receipt(mapping, outcome="unknown", stage="sequence-display-pending", readback="not-run")
-                try:
-                    if self._transport == "dvi":
-                        self._presenter[0](gray if sequence["queue"] is not None else index)
-                    else:
-                        if sequence["queue"] is not None:
-                            slot = 1 if self._display_slot == 0 else 0
-                            _check(self._sdk.Write_FMemArray(
-                                self._board_id, gray.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                                int(gray.size), _SHAPE_YX[1], _SHAPE_YX[0], slot,
-                            ), "Write_FMemArray sequence frame")
+                step_started.append((frame_started - started) * 1000)
+                held = (previous_phase is not None and gray is previous_gray
+                        and previous_receipt["outcome"] == "known-new"
+                        and previous_receipt["mapping_revision"] == mapping["mapping_revision"])
+                if held:
+                    # Exclusive ownership and the same exact mapped pixels
+                    # retain the preceding confirmation; no new hardware ACK.
+                    with self._state_lock:
+                        self._last_receipt = self._receipt(mapping, outcome="known-new", stage="sequence-hold", readback="retained-confirmed-state")
+                else:
+                    dispatch.append((frame_started - started) * 1000)
+                    with self._state_lock:
+                        self._phase, self._last_gray = None, None
+                        self._last_receipt = self._receipt(mapping, outcome="unknown", stage="sequence-display-pending", readback="not-run")
+                    try:
+                        if self._transport == "dvi":
+                            self._presenter[0](gray if sequence["queue"] is not None else index)
                         else:
-                            slot = sequence["slots"][index]
-                        _check(self._sdk.Change_DispSlot(self._board_id, slot), "Change_DispSlot")
-                        self._display_slot = slot
-                        observed = self._readback()
-                        if not np.array_equal(observed, gray):
-                            raise RuntimeError("X15213 USB frame-memory readback differs from the sequence frame")
-                except BaseException:
-                    if self._transport == "dvi":
-                        self._record_unknown(stage="sequence-display", mapping=mapping, readback="not-available")
-                    else:
-                        self._record_failure(
-                            stage="sequence-display", gray=gray, mapping=mapping,
-                            previous_phase=previous_phase, previous_gray=previous_gray, previous_receipt=previous_receipt,
-                        )
-                    raise
-                acknowledged = time.perf_counter()
-                acknowledgments.append((acknowledged - started) * 1000)
-                with self._state_lock:
-                    self._phase, self._last_gray = canonical, gray
-                    self._last_receipt = self._receipt(mapping, outcome="known-new", stage="sequence-frame", readback=("presenter-ack" if self._transport == "dvi" else "matched-new"))
+                            if sequence["queue"] is not None:
+                                slot = 1 if self._display_slot == 0 else 0
+                                _check(self._sdk.Write_FMemArray(
+                                    self._board_id, gray.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                                    int(gray.size), _SHAPE_YX[1], _SHAPE_YX[0], slot,
+                                ), "Write_FMemArray sequence frame")
+                            else:
+                                slot = sequence["slots"][index]
+                            _check(self._sdk.Change_DispSlot(self._board_id, slot), "Change_DispSlot")
+                            self._display_slot = slot
+                            observed = self._readback()
+                            if not np.array_equal(observed, gray):
+                                raise RuntimeError("X15213 USB frame-memory readback differs from the sequence frame")
+                    except BaseException:
+                        if self._transport == "dvi":
+                            self._record_unknown(stage="sequence-display", mapping=mapping, readback="not-available")
+                        else:
+                            self._record_failure(
+                                stage="sequence-display", gray=gray, mapping=mapping,
+                                previous_phase=previous_phase, previous_gray=previous_gray, previous_receipt=previous_receipt,
+                            )
+                        raise
+                    acknowledged = last_display_acknowledged = time.perf_counter()
+                    acknowledgments.append((acknowledged - started) * 1000)
+                    with self._state_lock:
+                        self._phase, self._last_gray = canonical, gray
+                        self._last_receipt = self._receipt(mapping, outcome="known-new", stage="sequence-frame", readback=("presenter-ack" if self._transport == "dvi" else "matched-new"))
+                confirmations.append((time.perf_counter() - started) * 1000)
+                frame_actions.append("held" if held else "presented")
                 result["played_frames"] = index + 1
                 if wait_until(frame_started + float(interval)):
                     break
             if result["played_frames"] == result["frame_count"] and not self._sequence_cancel.is_set():
                 settle_started = time.perf_counter()
-                wait_until(acknowledged + self._settle)
+                wait_until(last_display_acknowledged + self._settle)
                 result["final_settle_ms"] = (time.perf_counter() - settle_started) * 1000
                 result["final_settle_completed"] = not self._sequence_cancel.is_set()
         finally:
@@ -1402,9 +1452,17 @@ class X15213Adapter:
             result["dispatch_ms"] = dispatch
             result["acknowledged_ms"] = acknowledgments
             result["actual_frame_intervals_ms"] = np.diff(dispatch).tolist()
+            result["step_started_ms"] = step_started
+            result["confirmed_ms"] = confirmations
+            result["actual_step_intervals_ms"] = np.diff(step_started).tolist()
+            result["frame_actions"] = frame_actions
+            result["held_frames"] = frame_actions.count("held")
+            result["newly_presented_frames"] = len(acknowledgments)
             result["play_ms"] = (time.perf_counter() - started) * 1000
             result["queue_wait_ms"] = queue_wait
             result["mapping_ms"] = list(sequence["mapping_ms"])
+            result["repeated_frames"] = sequence["repeated_frames"]
+            result["mapped_frame_count"] = sequence["mapped_frame_count"]
             result["first_dispatch_ms"] = dispatch[0] if dispatch else None
             result["first_acknowledged_ms"] = acknowledgments[0] if acknowledgments else None
             with self._state_lock:
@@ -1413,7 +1471,7 @@ class X15213Adapter:
                     # alive after playback. Retain only its confirmed pixels.
                     self._phase = np.frombuffer(self._phase.tobytes(), dtype=np.uint8).reshape(_SHAPE_YX)
                 stage = self._last_receipt["stage"]
-                if stage in {"sequence-frame", "complete", "uncommanded"} or not dispatch:
+                if stage in {"sequence-frame", "sequence-hold", "complete", "uncommanded"} or not dispatch:
                     stage = ("sequence-failed" if active_error is not None else
                              "sequence-cancelled" if result["cancelled"] else "sequence-complete")
                 self._last_receipt = {

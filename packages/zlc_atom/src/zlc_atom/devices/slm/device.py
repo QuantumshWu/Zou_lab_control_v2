@@ -63,6 +63,18 @@ def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
     return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
 
 
+def _same_phase_codes(left: np.ndarray, right: np.ndarray) -> bool:
+    """Compare validated uint8 snapshots exactly without a byte-sized mask."""
+    if left is right and not left.flags.writeable:
+        return True
+    if left.flags.c_contiguous and right.flags.c_contiguous:
+        first, second = left.reshape(-1), right.reshape(-1)
+        words = first.size // 8 * 8
+        return (np.array_equal(first[:words].view(np.uint64), second[:words].view(np.uint64))
+                and np.array_equal(first[words:], second[words:]))
+    return np.array_equal(left, right)
+
+
 def phase_sequence_codes(
     codes: object, shape_yx: tuple[int, int], frame_interval_seconds: object,
     *, frame_count: int | None = None,

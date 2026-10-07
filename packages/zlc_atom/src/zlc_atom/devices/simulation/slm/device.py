@@ -9,7 +9,7 @@ from typing import Callable
 
 import numpy as np
 
-from ...slm.device import phase_from_codes, phase_sequence_codes
+from ...slm.device import _same_phase_codes, phase_from_codes, phase_sequence_codes
 
 
 class VirtualSLM:
@@ -101,7 +101,7 @@ class VirtualSLM:
                     "streaming": frames is None, "queue_capacity": 2 if frames is None else 0}
         self._sequence = {"codes": frames, "intervals": intervals, "command_revision": self._command_revision,
                           "prepared": prepared, "queue": Queue(maxsize=2) if frames is None else None,
-                          "submitted": 0, "playing": False}
+                          "submitted": 0, "playing": False, "last_submitted": None}
         self._sequence_cancel.clear()
         return dict(prepared)
 
@@ -111,14 +111,23 @@ class VirtualSLM:
             raise RuntimeError("Streaming SLM phase sequence has not been prepared")
         if type(index) is not int or index != sequence["submitted"] or index >= len(sequence["intervals"]):
             raise ValueError("SLM streaming frame index is not the next declared frame")
-        frame = np.asarray(codes)
-        if frame.dtype != np.uint8 or frame.shape != self.shape_yx:
-            raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
-        if frame.flags.writeable:
-            frame = np.frombuffer(frame.tobytes(), np.uint8).reshape(self.shape_yx)
+        previous = sequence["last_submitted"]
+        if codes is None:
+            if previous is None:
+                raise ValueError("SLM repeated frame has no preceding admitted frame")
+            frame = previous
+        else:
+            frame = np.asarray(codes)
+            if frame.dtype != np.uint8 or frame.shape != self.shape_yx:
+                raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
+            if frame.flags.writeable:
+                frame = np.frombuffer(frame.tobytes(), np.uint8).reshape(self.shape_yx)
+            if previous is not None and _same_phase_codes(frame, previous):
+                frame = previous
         while not self._sequence_cancel.is_set() and self._sequence is sequence:
             try:
                 sequence["queue"].put(frame, timeout=0.01)
+                sequence["last_submitted"] = frame
                 sequence["submitted"] += 1
                 return
             except Full:
@@ -144,11 +153,15 @@ class VirtualSLM:
             raise RuntimeError("stale prepared SLM sequence")
         started = time.perf_counter()
         dispatch, acknowledgments, queue_wait = [], [], []
+        step_started, confirmations, frame_actions = [], [], []
         result = {**prepared, "played_frames": 0, "cancelled": False,
                   "acknowledgment": "simulation-state", "physical_vblank_observed": False,
                   "final_settle_ms": 0.0, "final_settle_completed": False}
         self._command_revision += 1
         failed = False
+        previous_frame, canonical = None, None
+        confirmed_phase = None
+        repeated_frames = 0
         try:
             for index, interval in enumerate(intervals):
                 if self._sequence_cancel.is_set() or (stop_requested is not None and stop_requested()):
@@ -171,10 +184,21 @@ class VirtualSLM:
                 else:
                     frame = codes[index]
                 frame_started = time.perf_counter()
-                dispatch.append((frame_started - started) * 1000)
-                canonical = phase_from_codes(frame, self.shape_yx)
-                self._world.apply_slm_phase(canonical)
-                acknowledgments.append((time.perf_counter() - started) * 1000)
+                step_started.append((frame_started - started) * 1000)
+                repeated = previous_frame is not None and _same_phase_codes(frame, previous_frame)
+                if repeated:
+                    repeated_frames += 1
+                else:
+                    canonical = phase_from_codes(frame, self.shape_yx)
+                held = (repeated and self._outcome == "known-new"
+                        and self._world.commanded_phase is confirmed_phase)
+                if not held:
+                    dispatch.append((frame_started - started) * 1000)
+                    confirmed_phase = self._world.apply_slm_phase(canonical)
+                    acknowledgments.append((time.perf_counter() - started) * 1000)
+                previous_frame = frame
+                confirmations.append((time.perf_counter() - started) * 1000)
+                frame_actions.append("held" if held else "presented")
                 self._outcome = "known-new"
                 result["played_frames"] += 1
                 deadline = frame_started + float(interval)
@@ -192,7 +216,11 @@ class VirtualSLM:
                           acknowledged_ms=acknowledgments, actual_frame_intervals_ms=np.diff(dispatch).tolist(),
                           play_ms=(time.perf_counter() - started) * 1000)
             result.update(queue_wait_ms=queue_wait, first_dispatch_ms=dispatch[0] if dispatch else None,
-                          first_acknowledged_ms=acknowledgments[0] if acknowledgments else None)
+                          first_acknowledged_ms=acknowledgments[0] if acknowledgments else None,
+                          repeated_frames=repeated_frames, mapped_frame_count=result["played_frames"] - repeated_frames,
+                          step_started_ms=step_started, confirmed_ms=confirmations, frame_actions=frame_actions,
+                          actual_step_intervals_ms=np.diff(step_started).tolist(),
+                          held_frames=frame_actions.count("held"), newly_presented_frames=len(acknowledgments))
             result["final_settle_completed"] = result["played_frames"] == len(intervals) and not result["cancelled"]
             self._stage = "sequence-failed" if failed else "sequence-cancelled" if result["cancelled"] else "sequence-complete"
             self._sequence_receipt = result
