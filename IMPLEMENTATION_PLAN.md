@@ -455,21 +455,22 @@
 - B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。
 - Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
 
-### 2.7 SLM GPU重排（单次实验Task已完成软件验证，硬件待验收）
+### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
-- 真机曝光检查失败后再次Start的`producer generation is already active`已定位为Task在prepare之后、collect之前退出时只关闭相机，未退休内部camera producer。沿既有Feedback的同一清理方式补全generation退休，不放宽Runtime的active-owner检查、不改变FiniteCapture的先停止接收后drain语义；实际曝光回读拒绝后修改曝光、同session重新采集的定向红绿验证通过。
-
-- 2026-10-07 完成一次Pulse全流程：真实Qt操作、RTX5070Laptop GPU与虚拟设备，单个Context/Calibration自动生成2×2目标，首次9个occupied、复拍4/4填充；四个preview真实接受有效数据，phase不混入camera geometry，保存Figure可重开。此为128×128功能验收，不冒充全幅400阱或实验原子存活率。最后一次匹配/全部相位计算/回传13.34ms，GPU准备2.35s单列；18帧名义300ms、虚拟播放581ms，均有实际分阶段报告。窗口/children已关闭，证据仅在ignored research。
-- 对齐master `b1d8a1f2` 后12项Task/发现/overlay/状态定向检查通过。提前失败不归属旧run的播放记录，partial phase保留该图自己的device receipt；结束释放整段pinned movie，不把已保存影片留在completed node。软件实现位于worktree，未合并master；真实SLM服务端与客户端须同时更新sequence protocol v2，光学刷新/settle与原子损失仍需实验机验收。
-
-- 2026-10-07 当前Task输入为一个source Science Context、一个source Calibration和一个operator-authored Pulse。target_rows/target_columns默认3×3，从源roster现有格点生成中央完整矩形并保留对应权重；目标读出复用同一Calibration子集，不要求上传final Target/Context，也不另写final Science Context。
-- 光学核心与原子政策已在既有owner内分开：Task将第一张照片的valid occupied站点转为整数available_source_indices，调用plan_rearrangement(prepared, indices)，再把plan交给compute_rearrangement(prepared, plan)。保留采集前生成的CSR、预热的Numba匹配和原数值路线；本轮不新增scheduler/minimax/备用算法，不宣称任意碰撞约束下的全局最优。
-- motion_frames=N精确包含终点、不包含起始位置，移除ramp_frames独立；间距门检查同一时刻的完整连续线段，允许空间路径在不同时间交叉。少帧切角不安全时明确拒绝，不静默增图。GPU运动数组和host输出缓存按N+移除帧准备；仅source_phase的endpoint_data准确保留输入command，目标沿既有端点求解生成；准备与生成使用同一本次authored强度容差（默认1.01），不因性能自动放宽强度/暗位门。
-- GPU、端点及有界资源在Pulse之前准备，随后建立source phase。Task只Fire一次operator的完整Pulse；before/after使用稳定Period ID选择，实际Config与嵌套loop时序由共同compiler walker检查。相机arm一次、接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。第一张照片之后才选择、匹配、计算全部图、上传并播放，验证段不重新load原子。
-- 整段逻辑码一次上传/物理映射和预装载后，在SLM server owner本地paced playback。默认16运动+2移除、60Hz的名义显示时间为300ms；计算、上传与额外最终光学等待另计。保守after-imaging deadline和接收事实共同判断验证是否可接受；预算不足或实际播放越界明确失败。逐帧dispatch/ack/final settle入报告，DVI软件确认不冒充vblank；USB真实slot容量及实际光学响应仍待硬件验收。
-- 报告只在复拍之后或实际失败时保存：两张照片及counts/occupied/validity/threshold、源与自动目标、匹配/轨迹、默认开启的精确uint8序列、冻结输入事实、Pulse/device receipts、GPU与各阶段时间，以及公共Figure NPZ+PNG和summary JSON/text。匹配由Task单独计时，generator报告prepare_frame_state/solve/copy/total；互相包含或重叠的窗口不相加。目标填充率不等同逐原子存活率。Stop保留最后已确认phase、释放预装载缓存并保存partial与原始错误；unknown outcome明确记录。
-- 共用数值路线的1024×1272实测源4×4→目标3×3、16运动+2移除两次总计算为28.05/26.64ms，host pool为120MiB；独立complex128复核全部18图，最大场相对L2误差1.45e-7、亮强度比1.00756736、暗/亮比1.72e-9。接口分离及source-only端点的定向用例已通过。这些结果不证明大阵列或空闲长尾的稳定150ms上限，也不构成真机光学/原子存活验收；历史大阵列研究数据保留在ignored research，本轮优先完成已有路径的完整实验流程。
-- 自动静态run geometry和动态overlay共用Plot的image axis IDs/coordinate frame判据；相机站点标号不再附加到phase预览，无output-name特判。
+- Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
+- 第一张照片的valid occupied站点按源roster身份成为available_source_indices。共同planner按实际欧氏距离匹配min(可用源,目标数)：多余原子丢弃，其阱在序列内淡出；不足时正常部分填充，保存未填目标。无效分类仍为invalid，不改成empty。具体Task拥有相机分类和目标政策，solver只接收显式计划；不复制分类或新增编排框架。
+- 指派最小化总欧氏距离，不是最大边长或播放时间。直线冲突时采用有界等代价pair交换、先后移动等待及局部waypoint修复；保存指派下界、实际距离、detour ratio和routing方法，没有找到方案如实拒绝，不声称一般碰撞约束下全局最优。对只改变一条路径的候选，缓存其它pair并以同一连续数学重算该路径对其它路径；8个参考case的指派、移除名单、路径及时间分数逐位不变。
+- motion_frames=N是实际显示的总图数，包含终点、不含已经显示的起点；淡出合入这N图，不额外生成R帧。空占据是零匹配且不播放新图。公开输入删除独立ramp/dark/radius参数；有界GPU及pinned host资源按N准备。沿已有phase projection/幅度更新求解，不重发明算法；连续帧间间距检查允许空间路径错时交叉，但不允许同一时刻越界。
+- UI的intensity_error_percent默认1%，转换为weighted max/min ratio门限1.01；准备与生成消费同一门限。丢弃占据站点在淡出后另须通过5×5原生Fourier像素区域最大光强/该站点初始中心光强≤0.01；同一稀疏算子的自适应复场投影最多64次，携带前帧校正，已验证不变图直接复用。其它背景仅诊断；相对初始阱亮度、焦面站点相位步长、pupil加权像素相位步长RMS、最大单帧位移与参考帧数分别保存，不能把数值均匀度或消光门当作原子释放/存活保证。
+- GPU/端点准备与source phase建立在Fire之前。Task只Fire一次原Pulse，稳定Period ID对应显示Name；共同compiler walker读取实际Config及嵌套loop。相机只arm一次并接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。曝光独立于Period时长，不比较、不自动调整；operator负责实际曝光/照明及相应Calibration有效性。保守after deadline仍检查完整计算、上传、播放与最终等待，host receive不冒充曝光时间。
+- 相位逻辑码批量上传、mapping/preload后由物理SLM owner本地paced播放，逐图确认不跳帧；默认16图/60Hz名义266.7ms，不另加隐藏移除帧。计算、上传与额外最终光学settle另计，settle只补一次。DVI回执是软件render/exact-raster确认，不冒充vblank或液晶响应；USB容量与真实光学响应仍待实验机验收。
+- 参数使用四组既有FluentParameterForm（Target grid、Imaging、Movement、Quality and output）。当前先生成完整影片，再批量上传/本地播放，没有实现计算/上传/播放pipeline。
+- 自动preview只有前图+占据、后图+占据、源/最终phase三张；相机geometry按image axes/coordinate frame匹配，不污染phase。trajectory输出是完整X,Y的Repeat×step×source-site×coordinate Dataset，含起点与N个输出位置，未匹配位置invalid，不再自动画Y/frame。trajectory_2d Figure保留真实source Target intensity Dataset，用show_image=False仅隐藏像素层，在白色XY图上绘制每阱有序路径、箭头、frame labels与wait spans；起点圆圈、终点方框，按源顺序分配公共palette。typed NPZ保留重复顶点、hold与backtracking，PNG只是preview，所画是计划光阱路径而非跟踪到的原子轨迹。
+- 报告仅在复拍或实际失败后写：两张已有照片及counts/occupied/validity/threshold、源/终点目标、匹配与路径、默认开启的精确uint8序列、冻结Calibration/Context事实、实际Pulse/device receipts、分阶段时间及公共Figure NPZ+PNG。准备、readout、matching、generator solve/copy、upload、play/final settle与save窗口分别记录，重叠/包含窗口不相加。Stop/failure保留partial、原始错误与最后已确认phase；unknown outcome明确记录，释放预装载与pinned movie。
+- Windows新增用户要求的bin/install_slm_gpu.bat，复用唯一installer及Python resolver，按manifest安装slm-gpu pinned CuPy/CTK，不安装NVIDIA driver。进度与原始错误可见，保存%TEMP%/zlc-slm-gpu-install.log并保留exit code/pause；安装后显示解释器/GPU并执行真实dot+FFT。fake interpreter launcher验证与当前venv GPU小计算已通过，验证过程未执行安装或下载。
+- RTX5070 Laptop、完整1024×1272、实验pupil/25-bin格点、总10图：真实35→9（选中阱无运动）planner0.66–1.28ms，generator含回传53–89ms；225→100、固定seed20261007的112占据/均匀权重，planner缓存修复后42.7ms（另一个112 seed26.3ms），generator69–116ms。准备另计1.74/2.66s，重复约0.43/0.76–0.88s，新CUDA编译可更长；host copy约0.7–1.3ms已包含generator总时间，不重复相加。这不是T400的精确预计。
+- 每张实际相位码的独立complex128检查：35→9 worst bright1.008742、fade后removed5×5最大比1.0801e-5；225→100 worst bright1.009875、fade后最大比0.003415。225最小总距离解的最长指派边190.39 Fourier bins，10图实际最大步19.3447 bins，按同一路径/时间分配的≤1 bin/frame参考194图，不能把10图称为原子安全。35片段只有2张不同图，已验证静止后缀复用；它的pupil相位步RMS为0.570/1.141rad后接近0，不与焦面相位步长混称。
+- 两类working point各重复prepare/compute/close2次，35提供源相位的owned GPU pool关闭后0bytes，225生成源保留固定10,420,224bytes CuPy FFT cache且第二次无增长；仍持有的host影片互不共享/不被覆盖。当前34个相关定向测试通过，虚拟设备的native Qt Task全流程完成；FigureViewer source identity复验仍在进行，不标为完成。旧16+2图与旧四preview数字不作为当前性能证据；软件/虚拟验证不等同SLM光学刷新、再装载排除或实验原子存活验收。
 
 
 ## 3. 当前验证状态

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from zlc_plot import AxisRef
-from zlc_plot.semantics import fate_field_name
 from zlc_pulse import PulseSequence
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
@@ -11,6 +9,7 @@ from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.slm.solver import (
     SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
     load_science_context,
+    load_target,
 )
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactCodec,
@@ -46,6 +45,9 @@ _SCIENCE_CONTEXT_CODEC = ArtifactCodec(
     (".npz",),
     load_science_context,
 )
+_TARGET_CODEC = ArtifactCodec(
+    "zlc.slm.target", "SLM Targets (*.json)", (".json",), load_target,
+)
 _PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
     "zlc.pulse/slm-rearrangement",
@@ -68,22 +70,24 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
         AuthoringField("target_columns", "int", "Target columns", 3, minimum=1),
         AuthoringField("before_period", "text", "Before imaging Period", "", required=True),
         AuthoringField("after_period", "text", "After imaging Period", "", required=True),
-        AuthoringField("exposure_seconds", "float", "Camera exposure seconds", .005, minimum=1e-9),
-        AuthoringField("motion_frames", "int", "Motion frames", 16, minimum=1, maximum=256),
-        AuthoringField("frame_rate_hz", "float", "SLM frame rate Hz", 60., minimum=1e-9),
-        AuthoringField("ramp_frames", "int", "Removal ramp frames", 2, minimum=1, maximum=16),
+        AuthoringField("exposure_seconds", "float", "Camera exposure", .005, minimum=1e-9, unit="s",
+                       description="Authored camera integration; the Task does not compare it with Pulse Period lengths."),
+        AuthoringField("motion_frames", "int", "Movement frames", 16, minimum=1, maximum=256,
+                       description="Total displayed maps. The report gives the largest movement per frame; approximately one Fourier pixel per frame is a starting reference, not an atom-survival guarantee."),
+        AuthoringField("frame_rate_hz", "float", "Display frame rate", 60., minimum=1e-9, unit="Hz",
+                       description="Requested display cadence, not a measured liquid-crystal response."),
         AuthoringField(
-            "nominal_playback_seconds", "float", "Nominal SLM playback seconds", None,
-            derived=True,
+            "nominal_playback_seconds", "float", "Display duration", None,
+            derived=True, unit="s",
             description=(
-                "Removal and motion frame count divided by the SLM frame rate. "
+                "Movement frame count divided by the SLM frame rate. "
                 "GPU computation, upload, preparation and any additional optical settling are excluded."
             ),
         ),
-        AuthoringField("matching_radius", "int", "Matching radius Fourier bins", 80, minimum=0),
-        AuthoringField("minimum_separation", "float", "Minimum separation Fourier bins", 4.5, minimum=0.),
-        AuthoringField("intensity_tolerance", "float", "Maximum weighted intensity ratio", 1.01, minimum=1.),
-        AuthoringField("dark_tolerance", "float", "Maximum dark / bright intensity ratio", .01, minimum=0.),
+        AuthoringField("minimum_separation", "float", "Minimum spacing", 4.5, minimum=0., unit="pixel",
+                       description="Continuous separation of occupied traps, including surplus atoms while their traps fade. Fourier coordinates are not micrometres."),
+        AuthoringField("intensity_error_percent", "float", "Intensity tolerance (%)", 1., minimum=0.,
+                       description="Maximum/minimum intensity after division by requested site weights, minus one. This is not a bound on absolute trap-depth change or atom loss."),
         AuthoringField("save_phase_sequence", "bool", "Save phase sequence", True),
     ),
     validator=_validate_rearrangement,
@@ -93,7 +97,7 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
 def _resolve_defaults(values, resources):
     del resources
     try:
-        frames = int(values.get("motion_frames", 16)) + int(values.get("ramp_frames", 2))
+        frames = int(values.get("motion_frames", 16))
         rate = float(values.get("frame_rate_hz", 60.))
     except (TypeError, ValueError):
         return {}
@@ -114,6 +118,7 @@ def _build(
     calibration: ResolvedArtifact,
     science_context: ResolvedArtifact,
     pulse_resource: ResolvedWorkspaceResource,
+    end_target: ResolvedArtifact | None = None,
     save_figure_artifact: object = None,
     **values: object,
 ) -> SlmRearrangementTask:
@@ -130,6 +135,11 @@ def _build(
             raise ValueError(f"{key} names a Period absent from the selected imaging pulse")
     if period_ids.index(authored["before_period"]) >= period_ids.index(authored["after_period"]):
         raise ValueError("Before imaging Period must precede after imaging Period")
+    destination = None
+    if end_target is not None:
+        destination, kind = end_target.value
+        if kind != "spots":
+            raise ValueError("The end Target must be a spots Target")
     return SlmRearrangementTask(
         camera=camera,
         camera_key=camera_key,
@@ -142,11 +152,14 @@ def _build(
         calibration_path=calibration.path,
         science_context=science_context.value,
         science_context_path=science_context.path,
+        target_intensity=destination,
+        target_path=None if end_target is None else end_target.path,
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,
         save_figure_artifact=save_figure_artifact,
+        intensity_tolerance=1.0 + authored["intensity_error_percent"] / 100.0,
         **{key: value for key, value in authored.items()
-           if key not in {"pulse_template", "nominal_playback_seconds"}},
+           if key not in {"pulse_template", "nominal_playback_seconds", "intensity_error_percent"}},
     )
 
 
@@ -154,10 +167,11 @@ def _rearrangement_editor_factory(parent=None):
     """Project the selected Pulse's Periods into the leaf's Fluent form."""
     from collections.abc import Mapping
     from dataclasses import replace
-    from PyQt5 import QtCore
+    from PyQt5 import QtCore, QtWidgets
     from zlc_ui.form import FluentParameterForm, FormChoice, FormSpec
+    from zlc_ui.fluent import FluentSectionLabel, scaled_px
 
-    class RearrangementForm(FluentParameterForm):
+    class RearrangementForm(QtWidgets.QWidget):
         draft_changed = QtCore.pyqtSignal(object)
         managed_fields = tuple(
             field.name for field in SLM_REARRANGEMENT_SCHEMA.fields
@@ -165,9 +179,42 @@ def _rearrangement_editor_factory(parent=None):
         )
 
         def __init__(self, parent=None):
-            super().__init__(FormSpec(()), parent=parent)
-            self.changed.connect(self._value_changed)
-            self.value_normalized.connect(lambda key: self._value_changed(key, normalized=True))
+            super().__init__(parent)
+            layout = QtWidgets.QVBoxLayout(self)
+            layout.setContentsMargins(0,0,0,0)
+            layout.setSpacing(scaled_px(6,minimum=4))
+            self._groups = (
+                ("Target grid", ("target_rows","target_columns")),
+                ("Imaging", ("before_period","after_period","exposure_seconds")),
+                ("Movement", ("motion_frames","frame_rate_hz","nominal_playback_seconds")),
+                ("Quality and output", ("minimum_separation","intensity_error_percent","save_phase_sequence")),
+            )
+            self._forms = {}
+            for title, keys in self._groups:
+                layout.addWidget(FluentSectionLabel(title))
+                form = FluentParameterForm(FormSpec(()), parent=self)
+                form.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
+                layout.addWidget(form)
+                self._forms[title] = form
+                form.changed.connect(self._value_changed)
+                form.value_normalized.connect(lambda key: self._value_changed(key, normalized=True))
+
+        @property
+        def spec(self):
+            return FormSpec(tuple(field for form in self._forms.values() for field in form.spec.fields))
+
+        def _form_for(self,key):
+            return next(self._forms[title] for title,keys in self._groups if key in keys)
+
+        def read_value(self,key):
+            return self._form_for(key).read_value(key)
+
+        def widget_for(self,key):
+            return self._form_for(key).widget_for(key)
+
+        def set_label_width(self,width):
+            for form in self._forms.values():
+                form.set_label_width(width)
 
         def _value_changed(self, key, *, normalized=False):
             try:
@@ -201,7 +248,13 @@ def _rearrangement_editor_factory(parent=None):
                         offered += (FormChoice(f"Unavailable: {selected}", selected),)
                     field = replace(field, kind="choice", default=selected, choices=offered)
                 fields.append(field)
-            self.reconcile(FormSpec(tuple(fields)), {field.key: values[field.key] for field in fields})
+            for title, keys in self._groups:
+                selected = tuple(field for field in fields if field.key in keys)
+                self._forms[title].reconcile(FormSpec(selected), {field.key:values[field.key] for field in selected})
+            use_grid = not str((projection.get("artifact_values") or {}).get("end_target_path", "")).strip()
+            for key in ("target_rows", "target_columns"):
+                self.widget_for(key).setEnabled(use_grid)
+                self.widget_for(key).setToolTip("Used when End Target is blank; otherwise the selected Target supplies the destinations.")
 
         def set_mutation_enabled(self, enabled):
             self.setEnabled(enabled)
@@ -218,6 +271,8 @@ LOGIC_NODE = LogicNodeDescriptor(
                           argument_name="calibration"),
         ArtifactInputSpec("science_context_path", "SLM Science Context", _SCIENCE_CONTEXT_CODEC,
                           argument_name="science_context"),
+        ArtifactInputSpec("end_target_path", "End Target (blank = grid)", _TARGET_CODEC,
+                          required=False, argument_name="end_target"),
     ),
     outputs=(BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT, AFTER_FRAME_OUTPUT,
              AFTER_OCCUPIED_OUTPUT, PHASE_OUTPUT, TRAJECTORY_OUTPUT, QUALITY_OUTPUT),
@@ -225,13 +280,6 @@ LOGIC_NODE = LogicNodeDescriptor(
         NodePreviewSpec(BEFORE_FRAME_OUTPUT, "image", overlay=BEFORE_OCCUPIED_OUTPUT),
         NodePreviewSpec(AFTER_FRAME_OUTPUT, "image", overlay=AFTER_OCCUPIED_OUTPUT),
         NodePreviewSpec(PHASE_OUTPUT, "image"),
-        NodePreviewSpec(
-            TRAJECTORY_OUTPUT, "curve",
-            semantic={
-                fate_field_name(AxisRef.point("slm_rearrangement.frame")): "x",
-                fate_field_name(AxisRef.cell_data("slm_rearrangement.target_site")): "group",
-            },
-        ),
     ),
     artifact_outputs=(ArtifactOutputSpec("artifact_path", REARRANGEMENT_ARTIFACT_CONTRACT),),
     device_requirements=(

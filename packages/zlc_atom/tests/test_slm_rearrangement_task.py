@@ -166,7 +166,7 @@ def experiment(tmp_path, monkeypatch, request):
     plane = SignalDataPlane()
     context = _RunContext(tmp_path / "run", camera, board, trace)
     state = SimpleNamespace(trace=trace, camera=camera, board=board, slm=slm,
-                            context=context, plane=plane, available_indices=[], closed=[])
+                            context=context, plane=plane, available_indices=[], closed=[], images=images)
 
     def prepare(**kwargs):
         trace.append("prepare_gpu")
@@ -180,24 +180,30 @@ def experiment(tmp_path, monkeypatch, request):
         indices = np.asarray(available)
         assert indices.dtype.kind in "iu" and indices.ndim == 1
         state.available_indices.append(indices.copy())
-        return {"assignment": indices[:len(state.prepare_arguments["target_yx"])]}
+        n = min(len(indices), len(state.prepare_arguments["target_yx"]))
+        return {"assigned_source_indices": indices[:n], "assigned_target_indices": np.arange(n),
+                "removed_source_indices": indices[n:], "source_indices": indices[:n],
+                "target_indices": np.arange(n),
+                "target_filled": np.arange(len(state.prepare_arguments["target_yx"])) < n}
 
     def compute(prepared, planned, **kwargs):
         trace.append("compute")
-        assert planned["assignment"].dtype.kind in "iu"
+        assert planned["assigned_source_indices"].dtype.kind in "iu"
         if board.early_verification:
             deadline = time.monotonic() + 1
             while camera._records.produced_count < 2 and time.monotonic() < deadline:
                 time.sleep(.001)
             assert camera._records.produced_count == 2
-        frames = kwargs["motion_frames"] + kwargs["ramp_frames"]
+        frames = kwargs["motion_frames"] if len(planned["source_indices"]) else 0
         codes = np.full((frames, *slm.shape_yx), 32, np.uint8)
-        points = np.asarray(state.prepare_arguments["target_yx"], dtype=np.float64)
-        return {"phase_codes": codes, "assignment": np.arange(len(points)),
-                "motion_yx": np.repeat(points[None], kwargs["motion_frames"] + 1, axis=0),
+        starts = np.asarray(state.prepare_arguments["source_yx"], dtype=np.float64)[planned["source_indices"]]
+        points = starts.copy()
+        points[:len(planned["assigned_source_indices"])] = state.prepare_arguments["target_yx"][planned["assigned_target_indices"]]
+        return {"phase_codes": codes, "converged": True,
+                "motion_yx": starts[None] + np.linspace(0,1,kwargs["motion_frames"]+1)[:,None,None]*(points-starts)[None],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
                 "support_intensity_ratios": np.full(frames, 1.005),
-                "dark_intensity_ratios": np.zeros(frames), "timing_ms": {"plan": .1, "total": .2}}
+                "background_intensity_ratios": np.zeros(frames), "timing_ms": {"total": .2}}
 
     monkeypatch.setattr(task_module, "prepare_rearrangement", prepare)
     monkeypatch.setattr(task_module, "plan_rearrangement", plan)
@@ -210,7 +216,7 @@ def experiment(tmp_path, monkeypatch, request):
         science_context=source_context, science_context_path=tmp_path / "science_context.npz",
         target_rows=1 if getattr(request, "param", 4) == 2 else 2, target_columns=2,
         pulse_sequence=_sequence(), pulse_path=tmp_path / "operator.json",
-        before_period="before", after_period="after", motion_frames=2, ramp_frames=1,
+        before_period="before", after_period="after", motion_frames=2,
         save_figure_artifact=_stub_figures,
     )
     try:
@@ -224,6 +230,9 @@ def experiment(tmp_path, monkeypatch, request):
 def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment):
     e = experiment
     authored = sequence_to_tree(e.task.sequence)
+    # Integration is independent of the trigger Period's length, including
+    # camera readback longer than the entire authored imaging Period.
+    e.task.exposure_seconds = .02
     # This one case uses the real Figure writer and reader. The other cases
     # focus on interruption and do not pay for rendering the same pictures.
     e.task._save_figure_artifact = None
@@ -234,7 +243,7 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert e.trace.index("fire") < e.trace.index("compute") < e.trace.index("upload") < e.trace.index("play") < e.trace.index("after_trigger")
     np.testing.assert_array_equal(e.available_indices[0], [0, 1, 3, 4, 5])
     np.testing.assert_array_equal(e.task.target_indices, [1, 2, 4, 5])
-    assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path"}
+    assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path", "end_target_path"}
     assert e.slm.plays == 1 and e.closed == [True]
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
@@ -242,18 +251,60 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert summary["filled_target_sites"] == 2
     assert summary["missing_target_indices"] == [0]
     assert summary["invalid_target_indices"] == [1]
-    assert result["target_filling_fraction"] == .5
+    assert result["target_filling_fraction"] is None
+    assert summary["verification_complete"] is False
+    assert summary["judged_target_filling_fraction"] == pytest.approx(2/3)
     assert [item["source_ordinal"] for item in summary["frame_records"]] == [0, 1]
-    for name in ("before_frame", "after_frame", "phase", "trajectory_y", "intensity_ratio"):
+    for name in ("before_frame", "after_frame", "phase", "trajectory_2d", "intensity_ratio"):
         archive = e.context.artifacts[name + "_figure"][0]
         assert archive.is_file()
         info, arrays, datasets = read_archive(archive)
         assert datasets
         loaded, recipe = read_figure_plot(info, arrays, datasets, next(iter(datasets)))
         assert loaded is not None and recipe["spec"] is not None
+        from zlc_workbench.viewer import describe_archive
+        description = describe_archive(info, arrays)
+        assert e.task.instance_id in dict(dict(description.tabs)["Logic"])
     with np.load(result["artifact_path"], allow_pickle=False) as data:
-        assert data["phase_codes"].shape == (3, 8, 10)
-        assert not data["after_valid"][1] and not data["after_occupied"][1]
+        assert data["phase_codes"].shape == (2, 8, 10)
+        assert not data["after_target_valid"][1] and not data["after_target_occupied"][1]
+
+
+@pytest.mark.parametrize("occupied_count", [0, 2])
+def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occupied_count):
+    e = experiment
+    e.images[0][:] = 0
+    for y, x in e.task.points[0][:occupied_count]:
+        e.images[0][y, x] = 10
+    result = e.task.execute(e.context)
+    assert Path(result["artifact_path"]).is_file()
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["status"] == "completed" and summary["assigned_atoms"] == occupied_count
+    assert len(summary["unfilled_target_indices"]) == 4 - occupied_count
+    assert e.slm.plays == int(occupied_count > 0)
+    assert e.board.fires == [(1, 1)]
+
+
+def test_explicit_end_target_does_not_invent_calibration_for_a_new_position(experiment):
+    e = experiment
+    old = e.task
+    target = np.zeros(e.slm.shape_yx, np.float32)
+    target[1,1] = 1
+    e.task = SlmRearrangementTask(
+        camera=e.camera, camera_key=old.camera_key, sequencer=e.board, sequencer_key=old.sequencer_key,
+        slm=e.slm, slm_key=old.slm_key, signal_plane=e.plane,
+        calibration=old.calibration, calibration_path=old.calibration_path,
+        science_context=old.science_context, science_context_path=old.context_path,
+        target_intensity=target, target_path=old.context_path.parent / "end-target.json",
+        pulse_sequence=old.sequence, pulse_path=old.pulse_path,
+        before_period=old.before_period, after_period=old.after_period,
+        motion_frames=2, save_figure_artifact=_stub_figures)
+    result = e.task.execute(e.context)
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["assigned_atoms"] == 1 and summary["removed_atoms"] == 4
+    assert summary["invalid_target_indices"] == [0] and not summary["verification_complete"]
+    assert result["target_filling_fraction"] is None
+    np.testing.assert_array_equal(e.task.points[1], [[1,1]])
 
 
 @pytest.mark.parametrize("experiment", [2], indirect=True)
@@ -315,7 +366,7 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert terminal.event_ref.sequence > first.event_ref.sequence
         np.testing.assert_array_equal(final["before_occupied"].block.values[0, 0], [True, True, False, True, True, True])
         np.testing.assert_array_equal(final["before_occupied"].expanded_validity()[0, 0], [True, True, False, True, True, True])
-        np.testing.assert_array_equal(final["after_occupied"].expanded_validity()[0, 0], [False, True, False, False, False, False])
+        np.testing.assert_array_equal(final["after_occupied"].expanded_validity()[0, 0], [True, True, False, True, True, True])
         assert final["before_frame"].expanded_validity().all() and final["after_frame"].expanded_validity().all()
         assert terminal.event_record["capture_events"]["before_frame"]["source_ordinal"] == 0
         assert terminal.event_record["capture_events"]["after_frame"]["source_ordinal"] == 1
@@ -327,7 +378,7 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert json.loads((directory / "summary.json").read_text())["target_sites"] == 2
         assert Path(host.final_result["artifact_path"]).is_file()
         assert all(artifact.path.is_file() for artifact in host.artifacts)
-        for name in ("before_frame", "after_frame", "phase", "trajectory_y", "intensity_ratio"):
+        for name in ("before_frame", "after_frame", "phase", "trajectory_2d", "intensity_ratio"):
             archive = directory / "figures" / f"{name}.npz"
             info, arrays, datasets = read_archive(archive)
             loaded, recipe = read_figure_plot(info, arrays, datasets, next(iter(datasets)))
@@ -344,17 +395,18 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         host.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "actual-exposure"])
+@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "after-arm"])
 def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experiment, monkeypatch, failure):
     e = experiment
     if failure == "short-gap":
         e.task.sequence = _sequence(.001)
-        error_type, message = ValueError, "playback alone"
-    elif failure == "actual-exposure":
-        working_point = e.camera.working_point
-        monkeypatch.setattr(e.camera, "working_point", lambda:
-            replace(working_point(), exposure_seconds=.01000001))
-        error_type, message = ValueError, "camera's actual exposure"
+        error_type, message = RuntimeError, "nominal playback needs"
+    elif failure == "after-arm":
+        prepare_outputs = e.task._prepare_outputs
+        def refused(*_args):
+            raise RuntimeError("injected post-arm failure")
+        monkeypatch.setattr(e.task, "_prepare_outputs", refused)
+        error_type, message = RuntimeError, "post-arm failure"
     else:
         previous = {"played_frames": 7, "play_ms": 321., "cancelled": False}
         e.slm.receipt_overrides["sequence"] = previous
@@ -367,7 +419,7 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
     authored = sequence_to_tree(e.task.sequence)
     with pytest.raises(error_type, match=message):
         e.task.execute(e.context)
-    assert e.board.fires == [] and e.slm.plays == 0
+    assert e.board.fires == ([(1, 1)] if failure == "short-gap" else []) and e.slm.plays == 0
     assert sequence_to_tree(e.task.sequence) == authored
     assert "partial_data" in e.context.artifacts
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
@@ -375,10 +427,10 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
     if failure == "gpu-prepare":
         assert summary["device_snapshots"]["slm"]["command_receipt"]["sequence"] == previous
         assert e.slm.commands == [], "early failure must retain the preceding device command"
-    if failure == "actual-exposure":
+    if failure == "after-arm":
         # The operator changes exposure and starts again in the same session.
         # Hardware is closed, but the companion producer must be released too.
-        monkeypatch.setattr(e.camera, "working_point", working_point)
+        monkeypatch.setattr(e.task, "_prepare_outputs", prepare_outputs)
         e.task.exposure_seconds = .001
         retry = _RunContext(e.context.run_directory.parent / "retry", e.camera, e.board, e.trace)
         result = e.task.execute(retry)
@@ -498,7 +550,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         fields = {field.key: field for field in form.spec.fields}
         assert [(choice.label, choice.value) for choice in fields["before_period"].choices] == [
             ("Select Period", ""), ("Before image", "before"), ("Transport", "gap"), ("Verify image", "after")]
-        assert form.read_value("nominal_playback_seconds") == pytest.approx(.3)
+        assert form.read_value("nominal_playback_seconds") == pytest.approx(16/60)
         assert not form.widget_for("nominal_playback_seconds").isEnabled()
         patches = []
         form.draft_changed.connect(patches.append)
@@ -507,7 +559,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert patches[-1]["values"]["before_period"] == "before"
         values.update(before_period="before", after_period="after", motion_frames=32)
         project()
-        assert form.read_value("nominal_playback_seconds") == pytest.approx(34/60, abs=1e-6)
+        assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
         resource = replace(resource, value=replace(sequence, periods=tuple(
             replace(period, name="Renamed first image") if period.period_id == "before" else period
             for period in sequence.periods)))
