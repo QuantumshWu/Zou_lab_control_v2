@@ -34,10 +34,6 @@ LIBRARY_NAME = "daqlib2.dll"
 _SUCCESS = 0
 _TIMEOUT = -7
 
-#: How long ``libdaq2_init`` may take: it enumerates USB and then walks every
-#: Ethernet adapter, which is seconds on a machine with several.
-_INITIALISE_SECONDS = 20.0
-
 _TEXT_SIZE = 256
 
 

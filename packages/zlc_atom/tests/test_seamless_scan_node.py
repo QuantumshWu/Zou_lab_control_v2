@@ -33,7 +33,8 @@ from zlc_pulse import (
     load_streamer_config,
     resolve_api_parameters,
 )
-from zlc_pulse.device import AppliedState, BoardDescription, ConfigValueHolder
+from zlc_pulse.device import AppliedState, BoardDescription, ConfigValueHolder, DoneReport
+from zlc_pulse.wire import STATUS_DONE
 from zlc_runtime import MonitorCoverage, NodeHost, SignalDataPlane, SignalValue
 
 from zlc_atom.authoring import AuthoringField, TunableField
@@ -42,7 +43,7 @@ from zlc_atom.nodes import (
     ResolvedWorkspaceResource,
     discover_logic_nodes,
 )
-from tests.pulse_fixture import pulse_sequence
+from pulse_fixture import pulse_sequence
 from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_AXIS_REQUEST,
@@ -60,7 +61,7 @@ from zlc_atom.nodes.scan import (
 )
 from zlc_atom.nodes.seamless_scan import SEAMLESS_SCAN_SCHEMA
 
-from tests.fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench, scan_source_schema
+from fakes import SCRIPTED_SEED_VALUE, ScriptedScanBench, scan_source_schema
 
 
 class _FakeSequencer(ConfigValueHolder):
@@ -104,16 +105,20 @@ class _FakeSequencer(ConfigValueHolder):
         return self._applied
 
     def wait_done(self, _timeout):
-        return SimpleNamespace(fault=None)
+        return DoneReport(STATUS_DONE, None, False, 0.01)
 
 
 class _FakeSource:
-    """A point's value on demand; ``fail_at`` names the take that fails and
-    ``on_take`` sees every take, so a test can press Stop at a moment."""
+    """A point's value on demand; ``fail_at`` names the take that fails,
+    ``withhold_at`` the take whose shot never comes -- a missed trigger --
+    and ``on_take`` sees every take, so a test can press Stop at a moment."""
 
-    def __init__(self, *, fail_at: int | None = None) -> None:
+    def __init__(
+        self, *, fail_at: int | None = None, withhold_at: int | None = None
+    ) -> None:
         self.taken = 0
         self.fail_at = fail_at
+        self.withhold_at = withhold_at
         self.on_take = None
 
     def open(self) -> None:
@@ -132,11 +137,17 @@ class _FakeSource:
         return {"source_signal": "fake"}
 
     def next_value(self, context, *, idle=None):
-        del idle
         self.taken += 1
         check_cancelled(context)
         if self.taken == self.fail_at:
             raise RuntimeError("scripted source failed")
+        if self.taken == self.withhold_at:
+            # Only the scan's watch on the board can end this wait.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                idle()
+                time.sleep(0.001)
+            raise AssertionError("the scan waited on past the board's DONE")
         schema = scan_source_schema(shots=1)
         snapshot = owned_snapshot_from_arrays(
             schema,
@@ -1279,6 +1290,30 @@ def test_a_device_axis_is_put_back_however_the_table_ends() -> None:
     knob, sequencer = _Knob(refuse_restore=True), _FakeSequencer(_template_sequence())
     with pytest.raises(RuntimeError, match="scripted device refused restore"):
         _device_seamless(knob, sequencer, _FakeSource()).execute(_Context())
+
+
+def test_a_shot_the_source_never_delivers_fails_once_the_board_is_done(monkeypatch) -> None:
+    """The board's DONE is the witness that no more triggers are coming.
+
+    Readouts are assigned by arrival, so a missed camera trigger leaves
+    every later frame without its shot.  Once the board has reported DONE,
+    a source that falls silent gets a bounded grace -- not a wait until
+    Stop -- and the segment fails by name, the board goes SAFE and the
+    device axis is put back.
+    """
+
+    from zlc_atom.nodes.scan import seamless
+
+    monkeypatch.setattr(seamless, "_SOURCE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(seamless, "_BOARD_POLL_SECONDS", 0.0)
+    knob, sequencer = _Knob(), _FakeSequencer(_template_sequence())
+    with pytest.raises(
+        RuntimeError, match="the board played 2 shots and the source delivered 1"
+    ):
+        _device_seamless(knob, sequencer, _FakeSource(withhold_at=2)).execute(_Context())
+    assert sequencer.fires == 1
+    assert sequencer.safe_calls == 2, "the initial SAFE, then the failed segment's"
+    assert knob.tunes == [1.0, 0.25] and knob.level == 0.25
 
 
 def test_a_stop_received_while_the_board_goes_safe_fires_no_table() -> None:

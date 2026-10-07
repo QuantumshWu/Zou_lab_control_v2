@@ -53,7 +53,7 @@ module tb_ramp_scan;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
   zlc_period_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW),
                         .SCAN_ADDR_WIDTH(SAW), .BANK_SIZE(2)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(2),.run_repeat_count(32'd1),
+    .clk(clk),.reset(reset),.start(start),.arm(1'b0),.prog_count(2),.run_repeat_count(32'd1),
     .scan_enable(1'b1),.scan_count(32'd3),.scan_repeat_count(32'd1),
     .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
     .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),
@@ -84,7 +84,9 @@ module tb_ramp_scan;
   integer t, started, errs, p, ft;
   reg [BW-1:0] hist [0:2*60+10];
   initial begin
-    reset=1; start=0; bank_ready=2'b01; bank_chunk0=0; bank_chunk1=1;
+    // Both banks armed, as the host leaves them; bank 1's chunk register still names the
+    // chunk two back (-1), as while the host rewrites that bank's words.
+    reset=1; start=0; bank_ready=2'b11; bank_chunk0=0; bank_chunk1=32'hFFFFFFFF;
     repeat (200) @(posedge clk);                                       // arm with reset held
     t=-1; started=0;
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
@@ -107,16 +109,18 @@ module tb_ramp_scan;
     end
     if (errs != 0) $fatal(1, "RAMP-SCAN-BAD mismatches=%0d", errs);
 
-    // Point 2 lives in bank 1, deliberately not ready through the physical seam:
-    // the engine holds point 1's last row and flags UNDERFLOW instead of playing
-    // a stale point.  Once the bank is resident the prefetcher fetches the point
-    // and the seam completes: the next frame restarts from row 0 at VSTART.
+    // Point 2 lives in bank 1, armed but still naming an older chunk through the
+    // physical seam -- the host's refill writes the words first and the chunk
+    // register last: the engine holds point 1's last row and flags UNDERFLOW
+    // instead of playing a stale point.  Once the register names the chunk the
+    // prefetcher fetches the point and the seam completes: the next frame
+    // restarts from row 0 at VSTART.
     repeat (4) @(posedge clk);
     if (dut.scan_point_index != 1) $fatal(1, "late-bank setup lost point 1 (index=%0d)", dut.scan_point_index);
     if (!underflow) $fatal(1, "a missing bank did not raise UNDERFLOW at the seam");
     if (!running) $fatal(1, "the engine gave up on a late bank instead of holding");
     @(negedge clk);
-    bank_ready = 2'b11;
+    bank_chunk1 = 1;
     // the prefetcher reads the point (RD_LAT+2 clocks) and the held seam completes
     for (ft = 0; ft < 12 && dut.scan_point_index != 2; ft = ft + 1) @(posedge clk);
     if (dut.scan_point_index != 2)

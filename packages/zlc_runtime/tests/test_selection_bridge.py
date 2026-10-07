@@ -711,7 +711,7 @@ def test_a_selection_over_the_canonical_prefix_carries_the_prefix_s_event_record
         plane.close()
 
 
-def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest() -> None:
+def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(monkeypatch) -> None:
     """A restored panel answers for its screen before following newer data."""
 
     event_schema = _image_schema()
@@ -747,6 +747,18 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
         events,
         bridge_id="restored-prefix",
     )
+    # The catch-up to the newer shot runs as soon as the first answer
+    # exists; it waits here until that first answer has been read, or the
+    # read below races it for the plane's latest.
+    caught_up_may_run = Event()
+    original_evaluate = bridge._evaluate_processor
+
+    def held_evaluate(processor, signal, publication):
+        if signal.snapshot.ref.revision.value == 2:
+            caught_up_may_run.wait(2.0)
+        return original_evaluate(processor, signal, publication)
+
+    monkeypatch.setattr(bridge, "_evaluate_processor", held_evaluate)
     selection = SelectionState(
         "image",
         "area",
@@ -776,6 +788,7 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
             np.asarray([True, False, False]),
         )
 
+        caught_up_may_run.set()
         caught_up = _wait_for_signal(plane, signal, 2)
         caught_up_publication = caught_up.publication(signal)
         assert caught_up_publication is not None
@@ -809,6 +822,7 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
             np.asarray([1.0, 2.0, 3.0]),
         )
     finally:
+        caught_up_may_run.set()
         _close(bridge, plane, source)
 
 
@@ -1326,7 +1340,7 @@ def test_a_fit_whose_run_expired_takes_its_outputs_down_with_the_condition() -> 
             )
         )
         assert bridge.last_condition == (
-            "this run is no longer held, so its fit derives nothing"
+            "this shot has left the history window, so its fit derives nothing"
         )
         assert plane.latest_publication("@logic/expired/mean") is None, (
             "the previous solve stayed public under the condition"
@@ -1706,9 +1720,35 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
         second = plane.freeze().publication("@logic/trail/center")
         assert second.direct_parent_refs[0].sequence == 2
 
+        # The run stops on a newer shot while this one's fit is in flight:
+        # landing after the Stop, it is superseded like any trailing fit --
+        # the final shot's own fit answers -- not an error the card keeps.
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 3, schema, values + 2.0),
+            MonitorCoverage(1, 5),
+        )
+        plane.commit_live(source, state)
+        plane.freeze()
+        remember_current()
+        plane.seal_committed(source)
+        assert not plane.is_generation_live("camera/frame")
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=2, batch_revision=3)
+        )
+        assert bridge.last_error is None
+        # It says why it derives nothing, as a box on that picture does,
+        # until the final shot's own fit answers.
+        assert "final shot" in bridge.last_condition
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=3, batch_revision=4)
+        )
+        assert bridge.last_error is None
+        assert bridge.last_condition == ""
+
         # A revision no panel ever held reports, not silently vanishes.
         events.emit_fit(
-            _batch_fit_event(plane, source_revision=77, batch_revision=3)
+            _batch_fit_event(plane, source_revision=77, batch_revision=5)
         )
         assert bridge.last_error is not None
     finally:
@@ -2922,6 +2962,52 @@ def test_a_selection_on_a_stopped_run_still_derives(source_error) -> None:
             assert bridge.last_error is None
         else:
             assert str(source_error) in str(bridge.last_error)
+        assert bridge.last_condition == ""
+    finally:
+        bridge.close()
+        plane.close()
+
+
+def test_a_box_on_an_earlier_shot_of_a_stopped_run_waits_for_the_final_one() -> None:
+    """A finished run's one answer describes its final shot.
+
+    A paused or held display can still show an earlier shot when the run
+    stops.  A box drawn there has no terminal answer -- that is the final
+    shot's -- and must not raise out of the interaction: it is a condition,
+    and presenting the final shot re-commits the same box, which derives.
+    """
+
+    schema = _image_schema()
+    values = np.arange(12, dtype=float).reshape(1, 1, 4, 3)
+    plane, source, state, initial = _source_setup(schema, values)
+    plane.set_front_signals({"camera/frame", "@logic/held/roi_frame"})
+    events = _Events()
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="held")
+    bridge.start()
+    try:
+        shown = initial.publication("camera/frame")
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("frame", 2, schema, values + 1.0),
+            state["frame"].coverage,
+        )
+        plane.commit_live(source, state)
+        plane.seal_committed(source)
+        final = plane.latest_publication("camera/frame")
+        assert shown is not None and final is not None and final is not shown
+        selection = SelectionState(
+            "image", "area",
+            (SelectionRange("x", 0.0, 1.0, domain="cell_data"),
+             SelectionRange("y", 20.0, 30.0, domain="cell_data")),
+            revision=0,
+        )
+        bridge.commit_selection(selection, source_publication=shown)
+        assert bridge.last_error is None
+        assert "final shot" in bridge.last_condition
+        assert plane.freeze().value("@logic/held/roi_frame") is None
+
+        bridge.commit_selection(selection, source_publication=final)
+        assert plane.freeze().value("@logic/held/roi_frame") is not None
         assert bridge.last_condition == ""
     finally:
         bridge.close()

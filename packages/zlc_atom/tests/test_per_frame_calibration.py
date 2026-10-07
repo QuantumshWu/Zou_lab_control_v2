@@ -23,10 +23,12 @@ from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_NODE
 from zlc_atom.nodes.camera_measurement.measurement import frames_snapshot
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_NODE
 from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
+from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+from zlc_data import owned_snapshot_from_arrays
 from zlc_pulse import api_bindings_in_period_order
 from zlc_runtime import SignalValue
 
-from tests.pulse_fixture import calibration_request, pulse_sequence
+from pulse_fixture import calibration_request, pulse_sequence
 
 
 def _calibration(threshold: float, *, sites: tuple[str, ...] = ("site-1",)) -> TrapCalibration:
@@ -76,6 +78,16 @@ def test_each_frame_reads_with_the_calibration_it_names() -> None:
     assert mixed.artifacts["occupied"].expanded_validity().all(), "a stricter verdict is still a verdict"
     assert np.array_equal(mixed.counts, plain.counts)
     assert mixed.artifacts["counts"].block.schema == plain.artifacts["counts"].block.schema
+    # A scan lays its frame axis innermost beneath the plan's rows and names a
+    # repeated value once: the frames of every row are still 1, 2, 3.
+    scanned_schema = scan_dataset_schema(
+        frames.block.schema, ((1.0,), (3.0,), (1.0,)), (("power", "mW"),)
+    )
+    scanned = owned_snapshot_from_arrays(
+        scanned_schema, np.tile(frames.block.values, (1, 3, 1, 1)), 1
+    )
+    judged = OccupancyProcessor(shared, calibration_by_frame={2: strict}).process(scanned)
+    assert judged.occupied.tolist() == [[[True], [False], [True]] * 3]
 
 
 def test_a_frames_calibration_must_read_the_same_sites_and_name_a_real_frame() -> None:
@@ -92,10 +104,7 @@ def test_a_frames_calibration_must_read_the_same_sites_and_name_a_real_frame() -
     # A frame's own calibration answers for its unit as the shared one does:
     # thresholds trained in photoelectrons do not judge frames read in counts.
     trained = replace(_calibration(1e6), report={"run_record": {"request": {"photoelectrons": True}}})
-    counted = SignalValue(
-        "camera/frames", _cycle(10.0, 10.0), None,
-        run_record={"parameters": {"photoelectrons": False}, "device_snapshots": {"camera": {}}},
-    )
+    counted = SignalValue("camera/frames", _cycle(10.0, 10.0), None)
     with pytest.raises(ValueError, match="frame 2's calibration was trained in photoelectrons"):
         OccupancyProcessor(_calibration(1.0), calibration_by_frame={2: trained}).evaluate(counted)
 

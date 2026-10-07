@@ -8,6 +8,7 @@ from .endpoint import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_REQUEST_TIMEOUT,
+    bind_exclusive,
     drop_connection,
     drop_peer_connections,
     is_loopback_host,
@@ -96,6 +97,9 @@ REMOTE_METHODS = (
 #: Stop and completion waits use separate, non-claiming owner-token
 #: connections, leaving the command connection available for control.
 CANCEL_METHOD = "cancel"
+#: The longest one completion wait may hold the server: the client asks in
+#: slices of at most this, and the server refuses a longer one.
+_WAIT_SLICE_SECONDS = 1.0
 
 _TREE_TYPES = {
     cls.__name__: cls
@@ -811,7 +815,6 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
 class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """One board owner; a newcomer takes over only after stable physical SAFE."""
 
-    allow_reuse_address = True
     daemon_threads = False
     block_on_close = True
     request_queue_size = 8
@@ -846,10 +849,27 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._owner_started = 0.0
         self._fault: str | None = None
         self._connections: set[socket.socket] = set()
+        #: Whether this server ever served.  socketserver closes a server
+        #: refused at its bind or listen too, and a service closes the one
+        #: it listened with when its board then fails to open.  Neither
+        #: served anybody, so its close must not SAFE a board -- an unopened
+        #: one would log an AUTO-SAFE that never happened beside the
+        #: failure, and an open one handed in would be stopped mid-shot by a
+        #: server that never started.
+        self._served = False
         super().__init__(address, _RemoteHandler)
 
+    def server_bind(self) -> None:
+        bind_exclusive(self.socket, self.server_address)
+        self.server_address = self.socket.getsockname()
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self._served = True
+        super().serve_forever(poll_interval)
+
     def server_close(self) -> None:
-        self.client_disconnected(client="server", reason="server shutdown")
+        if self._served:
+            self.client_disconnected(client="server", reason="server shutdown")
         with self._client_lock:
             connections = tuple(self._connections)
         for connection in connections:
@@ -1260,8 +1280,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 or not isinstance(params["token"], str)
                 or type(params["command_id"]) is not int or params["command_id"] <= 0
                 or type(params["timeout"]) not in (int, float)
-                or not 0 <= params["timeout"] <= 1.0):
-            raise ValueError("wait_done requires token, positive command_id and timeout in [0, 1]")
+                or not 0 <= params["timeout"] <= _WAIT_SLICE_SECONDS):
+            raise ValueError(
+                "wait_done requires token, positive command_id and timeout in "
+                f"[0, {_WAIT_SLICE_SECONDS:g}]"
+            )
         with self._client_lock:
             owner = self._owner_client
             if owner is None or self._fault is not None or params["token"] != self._owner_token:
@@ -1457,7 +1480,9 @@ class RemotePulseStreamer(ConfigValueHolder):
                     or not answer["cancel_token"]
                 ):
                     raise ConnectionError(
-                        "Pulse server command protocol differs; update and restart run_server before connecting"
+                        "Pulse server command protocol differs; update the machine that serves the board "
+                        "and restart its pulse server (initialize its devices again, or restart "
+                        "zlc pulse_server) before connecting"
                     )
                 self._cancel_token = answer["cancel_token"]
             except Exception:
@@ -1484,6 +1509,15 @@ class RemotePulseStreamer(ConfigValueHolder):
                 return
             try:
                 self._call_locked("close", {})
+            except ConnectionResetError:
+                # The server had already ended this connection -- the
+                # ordinary way a client learns another took the board --
+                # and a server SAFEs the board of every connection it drops.
+                # There is nothing left for this close to do or to report.
+                # A close the server did not answer in time, or answered
+                # unreadably, is not that: it may still be closing the
+                # board, and the caller hears so.
+                pass
             finally:
                 self._disconnect_locked()
 
@@ -1527,7 +1561,10 @@ class RemotePulseStreamer(ConfigValueHolder):
             },
         )
         if not isinstance(receipt, dict):
-            raise RuntimeError("Pulse server did not return the load receipt; update run_server")
+            raise RuntimeError(
+                "Pulse server did not return the load receipt; update the machine that "
+                "serves the board and restart its pulse server"
+            )
         # The server accepted these exact inputs. Only server-owned execution
         # state comes back; do not serialize the whole program/source twice.
         self._loaded_application = AppliedState(
@@ -1554,10 +1591,17 @@ class RemotePulseStreamer(ConfigValueHolder):
             self._fire_command_id = None
             if self._stopping:
                 raise RuntimeError("a Stop arrived while this FIRE was being prepared; it was not sent")
-            receipt = self._call_locked(
-                "fire",
-                {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
-            )
+            try:
+                receipt = self._call_locked(
+                    "fire",
+                    {"run_repeats": run_repeats, "scan_repeats": scan_repeats},
+                )
+            except RemoteError:
+                # A refused FIRE may have taken the server's application with
+                # it (a board that would not start forgets what it held), so
+                # this side asks again instead of reusing its copy.
+                self._loaded_application = None
+                raise
             if (not isinstance(receipt, dict) or set(receipt) != {"command_id"}
                     or type(receipt["command_id"]) is not int or receipt["command_id"] <= 0):
                 raise ConnectionError("Pulse server did not return the FIRE command identity")
@@ -1581,7 +1625,7 @@ class RemotePulseStreamer(ConfigValueHolder):
         if command_id is None:
             return None
         while True:
-            duration = min(1.0, self.request_timeout / 2)
+            duration = min(_WAIT_SLICE_SECONDS, self.request_timeout / 2)
             if deadline is not None:
                 duration = min(duration, max(0.0, deadline - time.monotonic()))
             try:
@@ -1592,10 +1636,19 @@ class RemotePulseStreamer(ConfigValueHolder):
                         "token": token, "command_id": command_id, "timeout": duration,
                     }})
                     answer = _recv_frame(lane)
+            except TimeoutError as error:
+                # Late, not ended -- a server inside a long JTAG call answers
+                # nothing in time, and nobody has taken the board -- so it is
+                # not told as the end the command lane reports by its type.
+                raise ConnectionError(
+                    "the pulse server did not answer the completion wait in time"
+                ) from error
             except OSError as error:
-                raise ConnectionError(f"{_CONNECTION_ENDED} ({type(error).__name__})") from error
+                raise ConnectionResetError(f"{_CONNECTION_ENDED} ({type(error).__name__})") from error
             except ValueError as error:
                 raise ConnectionError(f"the pulse server's completion reply could not be read: {error}") from error
+            if answer is None:
+                raise ConnectionResetError(_CONNECTION_ENDED)
             if (not isinstance(answer, Mapping) or answer.get("id") != 1
                     or type(answer.get("ok")) is not bool
                     or set(answer) != ({"id", "ok", "result"} if answer["ok"] else {"id", "ok", "error"})):
@@ -1774,8 +1827,11 @@ class RemotePulseStreamer(ConfigValueHolder):
                 f"the pulse server did not answer within {self.request_timeout:g}s"
             ) from exc
         except OSError as exc:
+            # The one "ended" type (with end of stream below), so a caller
+            # tells a dropped connection from a late or garbled answer by
+            # its type rather than by its text.
             self._disconnect_locked()
-            raise ConnectionError(f"{_CONNECTION_ENDED} ({type(exc).__name__})") from exc
+            raise ConnectionResetError(f"{_CONNECTION_ENDED} ({type(exc).__name__})") from exc
         except ValueError as exc:
             if not sent:
                 # A request this side could not encode never left: the
@@ -1791,7 +1847,7 @@ class RemotePulseStreamer(ConfigValueHolder):
             # object", which describes the shape of nothing instead of saying
             # what happened.
             self._disconnect_locked()
-            raise ConnectionError(_CONNECTION_ENDED)
+            raise ConnectionResetError(_CONNECTION_ENDED)
         try:
             if not isinstance(response, Mapping):
                 raise ConnectionError("remote response is not an object")
@@ -1857,28 +1913,40 @@ def _deployment_config() -> dict:
     return require_streamer_config(found["source"])
 
 
-def open_local_streamer(
+def _deployed_streamer(
     *,
-    backend: str = "auto",
-    uart_port: str | None = None,
-    uart_baud: int = DEFAULT_UART_BAUD,
-    state_dir: str | Path = AXI_STATE_DIR,
+    backend: str,
+    uart_port: str | None,
+    uart_baud: int | None,
+    state_dir: str | Path,
 ) -> PulseStreamer:
-    """Build, open and SAFE-check the one local board this process owns.
+    """The one local board this process owns, built and NOT yet opened.
 
-    This is the deployment half of what the server CLI does, shared verbatim
-    with :class:`LocalPulseService`: the canonical ``streamer_config.json``,
-    the XDC target, the backend probe, the transport, and the first stable
-    SAFE readback.  Every step narrates through :func:`_server_log`, so the
-    story reads the same from a console or from a bench window.
+    The deployment half of what the server CLI does, shared with
+    :class:`LocalPulseService`: the canonical ``streamer_config.json``, the
+    XDC target, the backend probe and the transport; :func:`_connect_deployed`
+    is the other half.  The caller binds its listening port between the two,
+    so the open and the first SAFE -- what would stop another server's shot
+    -- wait for that bind.  The probe cannot wait: it picks the transport the
+    served streamer is built on.  With ``auto``, or ``uart`` and no port, it
+    reads the layout word from each candidate COM port in turn, resending
+    the read frame until 0.5 s have passed, and stops at the first port
+    that matches -- a board's own port included while another process
+    drives that board over JTAG, where a frame can take one of that
+    process's register accesses.  Every step
+    narrates through :func:`_server_log`, so the story reads the same from a
+    console or from a bench window.  ``uart_baud`` defaults to the rate that
+    config states.
     """
 
     config = _deployment_config()
     target = pulse_target_from_xdc(config_path=config["source"])
+    # The rate of the config just validated, not the one read at import.
+    baud = int(config["uart_baud"] if uart_baud is None else uart_baud)
     resolution = resolve_backend(
         backend,
         uart_port=uart_port,
-        uart_baud=uart_baud,
+        uart_baud=baud,
         target=target,
         params=config["params"],
         clock_hz=config["clock_hz"],
@@ -1915,7 +1983,7 @@ def open_local_streamer(
             raise RuntimeError("UART resolution did not return a port")
         transport = UartRegisterTransport(
             port=resolution.uart_port,
-            baud=int(uart_baud),
+            baud=baud,
         )
     else:
         transport = VivadoAxiRegisterTransport(state_dir=state_dir)
@@ -1939,9 +2007,15 @@ def open_local_streamer(
             dac_buses=config["params"].bus_count,
             target_ports=len(target.ports),
             clock_hz=f"{config['clock_hz']:.0f}",
-            uart_baud=int(uart_baud) if resolution.backend == "uart" else None,
+            uart_baud=baud if resolution.backend == "uart" else None,
         ),
     )
+    return streamer
+
+
+def _connect_deployed(streamer: PulseStreamer) -> None:
+    """Open the deployed board and prove its first SAFE, or leave it closed."""
+
     _server_log("HARDWARE CONNECTING", detail=_log_fields(action="open_deployed_streamer"))
     try:
         streamer.open()
@@ -1963,7 +2037,6 @@ def open_local_streamer(
             command_id=initial_safe.command_id,
         ),
     )
-    return streamer
 
 
 class LocalPulseService:
@@ -1982,7 +2055,7 @@ class LocalPulseService:
         *,
         backend: str = "auto",
         uart_port: str | None = None,
-        uart_baud: int = DEFAULT_UART_BAUD,
+        uart_baud: int | None = None,
         state_dir: str | Path = AXI_STATE_DIR,
         host: str = DEFAULT_BIND_HOST,
         port: int = DEFAULT_PORT,
@@ -1998,7 +2071,7 @@ class LocalPulseService:
         )
         self._owns_streamer = streamer is None
         if streamer is None:
-            streamer = open_local_streamer(
+            streamer = _deployed_streamer(
                 backend=backend,
                 uart_port=uart_port,
                 uart_baud=uart_baud,
@@ -2007,12 +2080,18 @@ class LocalPulseService:
         elif not isinstance(streamer, PulseStreamer):
             raise TypeError("streamer must be a PulseStreamer")
         self.streamer = streamer
-        try:
-            self._server = PulseRemoteServer((host, int(port)), streamer, peers=peers)
-        except BaseException:
-            if self._owns_streamer:
-                streamer.close()
-            raise
+        # Listen BEFORE the board is opened.  A second service for this
+        # port -- another bench, a lingering process -- is refused at its
+        # bind, not after its first SAFE has stopped the running shot of the
+        # service that holds the board.  (Its backend probe has already run:
+        # see _deployed_streamer.)
+        self._server = PulseRemoteServer((host, int(port)), streamer, peers=peers)
+        if self._owns_streamer:
+            try:
+                _connect_deployed(streamer)
+            except BaseException:
+                self._server.server_close()
+                raise
         self.host = str(host)
         self.port = int(self._server.server_address[1])
         self._thread = threading.Thread(
@@ -2073,9 +2152,16 @@ def serve(
     host: str = DEFAULT_BIND_HOST,
     port: int = DEFAULT_PORT,
 ) -> None:
-    """Serve one supplied device until interrupted."""
+    """Serve one supplied device until interrupted.
+
+    A device that is not open yet is opened, and its first SAFE proven, only
+    once the port is held: a second server for this port is refused at its
+    bind before it opens the board.
+    """
 
     with PulseRemoteServer((host, int(port)), streamer, peers=True) as server:
+        if not streamer.snapshot()["opened"]:
+            _connect_deployed(streamer)
         listen_host = host or "0.0.0.0"
         actual_port = int(server.server_address[1])
         if listen_host == "0.0.0.0":
@@ -2086,10 +2172,9 @@ def serve(
         try:
             server.serve_forever(poll_interval=0.1)
         except KeyboardInterrupt:
+            # The shutdown SAFE is the server's own close, on leaving the
+            # ``with``: one SAFE, whichever way serving ended.
             _server_log("SERVER STOPPING", detail=_log_fields(reason="keyboard interrupt"))
-            pass
-        finally:
-            server.client_disconnected(client="server", reason="server shutdown")
 
 
 def connect(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, **kwargs: Any) -> RemotePulseStreamer:
@@ -2113,8 +2198,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", default=str(AXI_STATE_DIR))
     parser.add_argument("--uart-port", default=None, help="the one configured Pulse UART port")
     parser.add_argument(
-        "--uart-baud", type=int, default=DEFAULT_UART_BAUD,
-        help="UART rate matching the programmed FPGA (default: board deployment manifest).",
+        "--uart-baud", type=int, default=None,
+        help="UART rate matching the programmed FPGA (default: the deployment config's uart_baud).",
     )
     parser.add_argument("--check-config", action="store_true")
     return parser
@@ -2132,7 +2217,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"python={sys.executable}")
         print(f"backend={args.backend}")
         print(f"uart_port={args.uart_port or 'auto-discover'}")
-        print(f"uart_baud={args.uart_baud}")
+        print(f"uart_baud={config['uart_baud'] if args.uart_baud is None else args.uart_baud}")
         print(f"listen_bind={args.host}:{args.port}")
         normalized_host = str(args.host).strip().lower()
         same_host = (
@@ -2160,7 +2245,7 @@ def _main(argv: list[str] | None = None) -> int:
     streamer: PulseStreamer | None = None
     try:
         try:
-            streamer = open_local_streamer(
+            streamer = _deployed_streamer(
                 backend=args.backend,
                 uart_port=args.uart_port,
                 uart_baud=args.uart_baud,
@@ -2215,7 +2300,6 @@ __all__ = [
     "connect",
     "decode_tree",
     "encode_tree",
-    "open_local_streamer",
     "resolve_backend",
     "serve",
 ]

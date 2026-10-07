@@ -141,7 +141,7 @@ def test_a_bounded_bracket_walk_keeps_the_true_timeline() -> None:
     table = _table(2)
     full = trigger_edge_ticks(program, _LANES, table, run_repeats=2)
     bounded = trigger_edge_ticks(
-        program, _LANES, table, run_repeats=2, bracket_bodies=1
+        program, _LANES, table, run_repeats=2, bracket_bodies=lambda _body: 1
     )
     for lane in _LANES:
         assert set(bounded[lane]) < set(full[lane])
@@ -153,7 +153,7 @@ def test_a_bounded_bracket_walk_keeps_the_true_timeline() -> None:
             tick for tick in second if tick in bounded[lane]
         ]
     assert trigger_edge_ticks(
-        program, _LANES, table, run_repeats=2, bracket_bodies=2
+        program, _LANES, table, run_repeats=2, bracket_bodies=lambda _body: 2
     ) == full
     assert list(bracket_iterations(10, 3)) == [0, 1, 2, 7, 8, 9]
     assert list(bracket_iterations(6, 3)) == list(range(6))

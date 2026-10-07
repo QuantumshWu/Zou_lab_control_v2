@@ -1,4 +1,9 @@
-"""Nothing outside zlc_ui may hold a widget, or reach past a window's handle.
+"""Nothing here may name a Qt class, or reach past a window's handle.
+
+A plot's surface is the one widget that crosses this layer, and only as
+zlc_plot hands it out -- ``host.qt_widget`` for a panel card,
+``ImagePointReviewSurface`` for a site review -- to be passed to the handle
+whole: nothing here builds a widget of its own or lays one out.
 
 This is the rule the delay-column defect came from.  A presenter that could
 reach ``view.schedule_view.channel_panel`` pushed a value into one panel and
@@ -52,12 +57,15 @@ def test_no_module_here_reaches_into_the_gui_package() -> None:
     )
 
 
-def test_no_module_here_builds_or_holds_a_qt_widget() -> None:
+def test_no_module_here_imports_qt_outside_board() -> None:
     """A composition root that can construct a widget will assemble a UI.
 
     Importing PyQt5 at all is the check, because there is no widget-free half
     of it worth carving out: the one module that legitimately needs Qt needs
-    it for threads and timers, and it is named above.
+    it for threads and timers, and it is named above.  It does not see the
+    widgets zlc_plot builds and this layer holds on their way to a handle --
+    ``host.qt_widget``, ``ImagePointReviewSurface`` -- which are the permitted
+    ones: zlc_plot builds them whole and this layer only passes them on.
     """
 
     offenders: list[str] = []

@@ -135,7 +135,7 @@ def _factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _discover() -> tuple[DeviceInstanceConfig, ...]:
+def _discover() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     # No card is an empty answer, as every other family gives; a missing
     # libdaq2 still raises, from library(), with where to put it.
     serials = discover_daq4211()
@@ -151,7 +151,7 @@ def _discover() -> tuple[DeviceInstanceConfig, ...]:
             parameters=ZISHU_DAQ4211_SCHEMA.project_values({"serial": serial}),
         )
         for serial in serials
-    )
+    ), ()
 
 
 DEVICE_TYPES = (

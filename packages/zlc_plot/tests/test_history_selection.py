@@ -72,14 +72,12 @@ def _history(shots: int) -> DataView:
     return DataView(owned_snapshot_from_arrays(schema, values, 1, stream_generation="g"))
 
 
-def test_the_window_mask_selects_the_shots_the_rolling_trace_draws() -> None:
+def test_the_window_rows_are_the_shots_the_rolling_trace_draws() -> None:
     view = _history(5)
     history = view.rolling_history(group=AxisRef.cell_data("site"))
     assert history.source_indices.tolist() == [-4, -3, -2, -1, 0]
     for window in (1, 2, 5, 9):
-        mask = view._history_layout.row_mask(window)
-        assert mask.shape == (5 * FRAMES,)
-        rows = np.flatnonzero(mask)
+        rows = np.arange(5 * FRAMES)[view._history_layout.window_rows(window)]
         shots_kept = history.source_indices[-window:]
         # Every row of a kept shot, and only those, is inside the window.
         assert rows.tolist() == [

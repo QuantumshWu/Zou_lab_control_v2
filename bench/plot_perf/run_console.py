@@ -26,19 +26,12 @@ import shutil
 import tempfile
 import time
 
-# The operator's console runs on the real display.  Measured offscreen it is
-# 826x609 at device pixel ratio 1 -- one ninth of the pixels -- so this layer
-# clears any inherited offscreen choice before Qt is touched.
-os.environ.pop("QT_QPA_PLATFORM", None)
-
 from .common import (
     SIZE_PRESET,
     Pointer,
-    Presented,
     ROOT,
     axis_by_role,
     pump,
-    pump_until,
     stats,
     write_result,
 )
@@ -61,60 +54,6 @@ def _console_paths() -> None:
         sys.path.insert(0, tests)
 
 
-#: Seams worth timing on a panel's renderer.  Absent ones are skipped, so
-#: one list covers every kind and a new kind only has to add its own.
-# The seams a frame is made of, DERIVED from the renderer rather than typed
-# out here.  A hand-kept list goes blind exactly when it matters: it had no
-# _update_rolling, so a rolling panel's 31.6 ms per frame sat in
-# _compose_frame's self-time with no child to blame, and a plot kind added
-# tomorrow would be invisible the same way.  Every ``_update_*`` the product
-# defines is a seam by construction; these are the ones whose names do not
-# follow that shape.
-_COMPOSE_SEAMS = (
-    "present",
-    "_compose_frame",
-    "_native_draw",
-    "_image_rgba_front",
-    "_view_filling_rgba_front",
-    "_mutate_image_artists",
-    "_cached_image_range",
-    "_blit_exact_rgba_image",
-    "_dynamic_artists",
-    "_raster_prepared_curve_command",
-    "_raster_prepared_error_bars",
-    "_raster_prepared_images",
-    "_thin_overlapping_chrome",
-    "_height_bars_occluded_polyline",
-    "_settle_owned_boxes",
-    "_resolve_image_limits",
-)
-
-
-def renderer_seams(renderer_type=None) -> tuple[str, ...]:
-    """Every timeable seam on the renderer, product-derived."""
-
-    if renderer_type is None:
-        from zlc_plot.rendering import MatplotlibRenderer as renderer_type
-    updates = tuple(
-        sorted(
-            name
-            for name in vars(renderer_type)
-            if name.startswith("_update_")
-            and callable(vars(renderer_type)[name])
-        )
-    )
-    missing = tuple(
-        name for name in _COMPOSE_SEAMS if not hasattr(renderer_type, name)
-    )
-    if missing:
-        raise HarnessSeamError(
-            "the bench names seams the renderer no longer has: %s. A probe "
-            "that binds nothing reports zero and reads like free work."
-            % ", ".join(missing)
-        )
-    return _COMPOSE_SEAMS + updates
-
-
 def every_gap_ms(stamps, origin: float) -> dict:
     """EVERY interval between presented frames, in order, since the panel opened.
 
@@ -135,10 +74,6 @@ def every_gap_ms(stamps, origin: float) -> dict:
             round(1e3 * (b - a), 1) for a, b in zip(stamps, stamps[1:])
         ],
     }
-
-
-class HarnessSeamError(RuntimeError):
-    """The bench's idea of the renderer no longer matches the renderer."""
 
 
 class _PanelFronts:
@@ -187,6 +122,13 @@ class ConsoleBench:
         _console_paths()
         from zlc_ui.qt import ensure_qt_app
 
+        # The operator's console runs on the real display.  Measured
+        # offscreen it is 826x609 at device pixel ratio 1 -- one ninth of
+        # the pixels -- so the bench clears any inherited offscreen choice
+        # where it builds the application, not at import: the bench guards
+        # import this module inside the test process, whose later Qt tests
+        # must stay offscreen.
+        os.environ.pop("QT_QPA_PLATFORM", None)
         self.app = ensure_qt_app(["zlc-console-bench"])
         self.allow_low_density = allow_low_density
         self.report: dict = {}
@@ -557,72 +499,7 @@ class ConsoleBench:
         card = self.view._cards.get(panel.panel_id)
         return None if card is None else card.surface
 
-    def renderer(self, panel):
-        return panel.host._session._renderer
-
     # ---------------------------------------------------------- measurement
-    def instrument(
-        self,
-        panel,
-        *,
-        seams=None,
-        module_seams: bool = True,
-    ) -> list[str]:
-        """Bind self-time probes to THIS panel's renderer, and to the
-        module-level work a frame does outside it.
-
-        A renderer-only tap hides the front store: the source reduction, the
-        front store and the block mean all live in ``_image_raster`` as plain
-        functions, and they were a third of some frames while every visible
-        row said the renderer was cheap.  Module functions have exactly one
-        instance, so watching them is safe where watching a class is not.
-        """
-
-        # A process-isolated Host deliberately exposes no PlotSession or
-        # renderer to B.  Child internals cannot be monkeypatched from this
-        # process; the pipeline probe below still measures the exact B-side
-        # route and Qt accept while causal prepare-to-accept measures the
-        # complete A round trip.
-        if not hasattr(panel.host, "_session"):
-            return []
-
-        # Four panels reporting under one class name is the class-level tap
-        # again, one level up: _native_draw fired 85 times across a layout
-        # and there was no way to say whose frames those were.
-        label = "%s[%s]" % (type(self.renderer(panel)).__name__, self.label(panel))
-        renderer = self.renderer(panel)
-        if seams is None:
-            seams = renderer_seams(type(renderer))
-        bound = probe.watch(renderer, *seams, prefix=label)
-        # The three things compose does that are NOT renderer methods: the
-        # full-figure capture, the restore, and the per-artist draws.  A
-        # rolling panel spent 32 ms per frame in compose's own body with
-        # every named child under one millisecond, and there was no way to
-        # say which of the three it was.  Capture and restore are canvas
-        # methods, so the instance tap reaches them; what is left after
-        # subtracting them is the artist loop.
-        bound += probe.watch(
-            renderer.figure.canvas,
-            "copy_from_bbox",
-            "restore_region",
-            prefix="%s.canvas" % label,
-        )
-        import zlc_plot._image_raster as raster
-        import zlc_plot._height3d_raster as h3d
-
-        if module_seams and not getattr(ConsoleBench, "_module_seams_bound", False):
-            for module, names in (
-                (raster, ("prepare_image_front", "_area_mean", "_reduce_blocks")),
-                (h3d, ("render_height_bars", "_stroke_rims")),
-            ):
-                for name in names:
-                    try:
-                        probe.watch_module(module, name)
-                    except Exception:
-                        continue
-            ConsoleBench._module_seams_bound = True
-        return bound
-
     def instrument_pipeline(self, panel) -> dict[str, list[str]]:
         """Bind low-overhead stage probes to one complete panel pipeline.
 
@@ -635,7 +512,6 @@ class ConsoleBench:
 
         label = self.label(panel)
         port = panel.port
-        host = panel.host
         widget = self.surface(panel)
         if port is None or widget is None:
             raise guards.HarnessError(f"{label} has no live port/widget to instrument")
@@ -660,57 +536,17 @@ class ConsoleBench:
                 prefix=f"QtWidget[{label}]",
             ),
         }
-        # The process proxy intentionally has no child PlotSession.  Keep the
-        # valid B-side port/Qt measurements above; the causal timeline is the
-        # authority for the complete IPC round trip.  Only a local comparison
-        # host admits the internal stage taps below.
-        if not hasattr(host, "_session"):
-            return bound
-
-        session = host._session
-        bound.update({
-            "host": probe.watch(
-                host,
-                "update_data",
-                "_enqueue_data_frame",
-                "_begin_data_frame",
-                "_on_frame_prepared",
-                "_on_frame_solved",
-                "_dispatch_frame_commit",
-                "_on_frame_committed",
-                prefix=f"RasterHost[{label}]",
-            ),
-            "session": probe.watch(
-                session,
-                "prepare_live_frame",
-                "_prepare_live_frame_worker",
-                "solve_live_frame",
-                "_solve_live_pair",
-                "_solve_started_fit_parts",
-                "_fit_facet_batch",
-                "_solve_fit_selection",
-                "commit_live_frame",
-                "_accept_pair_fit",
-                "_present_projection_transaction",
-                "_update_renderer",
-                "describe_display",
-                prefix=f"PlotSession[{label}]",
-            ),
-            "fit_engine": probe.watch(
-                session._fit_engine,
-                "fit",
-                "fit_batch",
-                prefix=f"FitEngine[{label}]",
-            ),
-        })
+        # A panel's host is a proxy for its render child: the session, the
+        # renderer and the fit engine live over there and cannot be tapped
+        # from here.  These B-side seams are what this process does; the
+        # causal timeline is the authority for the round trip through the
+        # child.
         return bound
 
     def density(self, panel) -> dict:
-        if hasattr(panel.host, "_session"):
-            renderer = self.renderer(panel)
-            if self.allow_low_density:
-                return guards.display_density(renderer)
-            return guards.require_real_density(renderer)
+        """The pixels this panel's presented front actually carries; a
+        low-density surface is refused unless the run said it meant it."""
+
         surface = self.surface(panel)
         front = None if surface is None else surface.presented_front
         if front is None:
@@ -724,13 +560,9 @@ class ConsoleBench:
             "dpi": float(front.logical_dpi * front.device_pixel_ratio),
             "megapixels": round(float(width * height) / 1e6, 2),
         }
-        if not self.allow_low_density and facts["device_pixel_ratio"] < 2.0:
-            raise guards.HarnessError(
-                "device pixel ratio %s: this is an offscreen or low-density "
-                "surface (%s px)"
-                % (facts["device_pixel_ratio"], facts["figure_px"])
-            )
-        return facts
+        return guards.require_real_density(
+            facts, minimum_ratio=1.0 if self.allow_low_density else 2.0
+        )
 
     def live(self, panel, seconds: float = 8.0) -> dict:
         """Time live frames with the producer and the beat as the product runs them."""
@@ -1681,57 +1513,6 @@ class ConsoleBench:
         return tuple(sorted(thread.name for thread in left))
 
 
-def render_cost(seams, frames_by_panel: dict) -> list[dict]:
-    """Per-frame render cost per panel, rolled up from the self-times.
-
-    Self-times sum to the frame by construction, so grouping them by the
-    panel prefix gives what one panel costs to draw once -- which is the
-    number the session and host layers report, and the only way to put a
-    console panel beside a standalone plot.  The frame gap cannot do it:
-    the console is beat-paced, so every panel reports the beat.
-    """
-
-    totals: dict[str, list] = {}
-    renders: dict[str, int] = {}
-    for row in seams:
-        seam = row["seam"]
-        # Pipeline probes use the same ``[panel]`` identity, but they are not
-        # renderer children.  Accept only the renderer/canvas prefix; otherwise
-        # FitEngine time is counted once as fit and again as "render cost".
-        if not seam.startswith("MatplotlibRenderer[") or "]" not in seam:
-            continue
-        panel = seam[seam.index("[") + 1:seam.index("]")]
-        if seam == f"MatplotlibRenderer[{panel}].present":
-            renders[panel] = int(row["calls"])
-        entry = totals.setdefault(panel, [0.0, 0.0])
-        entry[0] += row["self_ms_total"]
-        entry[1] += row["self_ms_per_call"] * row["calls"] * row["cpu_share"]
-    out = []
-    for panel, (wall, cpu) in sorted(totals.items(), key=lambda i: -i[1][0]):
-        frames = max(1, renders.get(panel, frames_by_panel.get(panel, 0)))
-        out.append({
-            "panel": panel,
-            "frames": frames,
-            "presented_frames": int(frames_by_panel.get(panel, 0)),
-            "wall_ms_per_frame": round(wall / frames, 2),
-            "cpu_ms_per_frame": round(cpu / frames, 2),
-        })
-    return out
-
-
-def _print_render_cost(payload: dict, seconds: float, frames_by_panel: dict) -> None:
-    rows = render_cost(probe.rows(seconds), frames_by_panel)
-    if not rows:
-        return
-    payload["render_cost"] = rows
-    print()
-    print("render cost per frame (self-times rolled up per panel)")
-    for row in rows:
-        print("   %-12s %7.2f ms wall   %7.2f ms cpu   over %d frames"
-              % (row["panel"], row["wall_ms_per_frame"],
-                 row["cpu_ms_per_frame"], row["frames"]))
-
-
 def _print_problems(payload: dict) -> None:
     problems = payload.get("problems") or []
     print()
@@ -1793,7 +1574,7 @@ def main() -> None:
                 "density": bench.density(panels[0]),
             }
             for panel in panels:
-                bench.instrument(panel)
+                bench.instrument_pipeline(panel)
             payload["together"] = bench.live_all(panels, args.seconds)
             if args.gesture:
                 # WITH THE SIBLINGS LIVE.  The arbiter exists because a
@@ -1816,8 +1597,8 @@ def main() -> None:
                 "size": args.size,
                 "density": bench.density(source),
             }
-            bench.instrument(source)
-            bench.instrument(downstream)
+            bench.instrument_pipeline(source)
+            bench.instrument_pipeline(downstream)
             payload["together"] = bench.live_all([source, downstream], args.seconds)
         else:
             panel = bench.add_panel(args.kind, size=args.size)
@@ -1831,7 +1612,7 @@ def main() -> None:
                 "panels_in_console": len(bench.presenter.panels),
                 "density": bench.density(panel),
             }
-            bench.instrument(panel)
+            bench.instrument_pipeline(panel)
             if args.stalls:
                 # One window, measured and attributed.
                 payload["stalls"] = bench.attribute_stalls(panel, args.seconds)
@@ -1891,11 +1672,6 @@ def main() -> None:
             together["rss_mb_before"], together["rss_mb_after"]))
         print()
         print(probe.report(together["window_s"], top=args.top))
-        _print_render_cost(
-            payload,
-            together["window_s"],
-            {row["panel"]: row["frames"] for row in together["panels"]},
-        )
         _print_problems(payload)
         left = payload["threads_left_running"]
         print()
@@ -1938,7 +1714,6 @@ def main() -> None:
         print("gesture: %s" % (payload["gesture"],))
     print()
     print(probe.report(live["window_s"], top=args.top))
-    _print_render_cost(payload, live["window_s"], {args.kind: live["frames"]})
     _print_problems(payload)
     left = payload["threads_left_running"]
     print()

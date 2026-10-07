@@ -502,6 +502,38 @@ def test_a_rolled_window_s_record_names_only_the_rows_it_kept() -> None:
         assert record["device_settings"]["camera"]["epoch_ranges"] == ((3, 4),)
     assert records[True] == records[False]
 
+    # A named window read again after a lease shrank at the same shot: the
+    # rows it trimmed are holes, and the record claims only the rows held,
+    # not the record kept for that window's start before the trim.
+    plane, source, source_declaration, derived, derived_declaration, history = (
+        _indexed_lane(4, prefix="trim")
+    )
+    try:
+        for index in (2, 3, 4):
+            plane.commit_live(
+                source, {"frame": monitor_output(source_declaration, float(index))}
+            )
+            plane.commit_processor(
+                derived,
+                {
+                    "value": monitor_output(
+                        derived_declaration,
+                        float(index),
+                        event_record=_camera_epoch_record(index),
+                    )
+                },
+                source_publication=plane.latest_publication("trim-source/frame"),
+            )
+        _snapshot, record = plane.current_dataset_view("trim-derived/value", history_window=4)
+        assert record["device_settings"]["camera"]["epoch_ranges"] == ((1, 4),)
+        history.resize(2)
+        snapshot, record = plane.current_dataset_view("trim-derived/value", history_window=4)
+        assert snapshot.expanded_validity().reshape(-1).tolist() == [False, False, True, True]
+        assert record["device_settings"]["camera"]["epoch_ranges"] == ((3, 4),)
+    finally:
+        history.close()
+        plane.close()
+
 
 def _finite_grid_point(
     declaration: DatasetOutputDeclaration,
@@ -878,7 +910,7 @@ def test_repeat_counts_follow_written_cells_not_survival_eligibility(point_codes
                         DatasetComponentValidity((site.axis_id, channel.axis_id), np.broadcast_to(eligible[..., None], (1, 1, 2, 3))))
             block = DataBlock(BlockId("survival"), DatasetRevision(0),
                               np.zeros((1, 1, 2, 3), dtype=bool), validity, event_schema,
-                              window=IndexedWindow(written - 1, written, written - 1))
+                              window=IndexedWindow(written - 1, written))
             snapshot = OwnedSnapshot(block.ref(StreamGenerationId("source")), block)
             value = plane.commit_live(node, {"survival": LiveDatasetOutput(
                 declaration, snapshot, DatasetCoverage(written, 6 * len(point_codes)),
@@ -1743,12 +1775,11 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         plane.close()
 
 
-def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
-    """The stamp a consumer keeps work across revisions by.
+def test_indexed_history_stamps_its_window_and_shows_a_replacement() -> None:
+    """The window a block was read as, and a replaced shot's new value.
 
-    ``start``..``latest`` name the retained shots; ``stable_since`` is -1
-    until a retained index is overwritten, and then the sequence that
-    overwrote it -- the fence past which no carried work is valid.
+    ``start``..``latest`` name the retained shots; a retained index
+    published again replaces that shot inside the same window.
     """
 
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
@@ -1788,11 +1819,9 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         window = before.block.window
         assert window is not None
         assert window.latest - window.start == 3
-        assert window.stable_since == -1
 
         # The latest index published again with another value -- a re-run
-        # for the same parent -- is a REPLACEMENT of a retained shot, which
-        # every table carried across revisions must notice.
+        # for the same parent -- is a REPLACEMENT of a retained shot.
         plane.commit_processor(
             derived,
             {"value": monitor_output(derived_declaration, 60.0)},
@@ -1802,8 +1831,24 @@ def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
         after = plane.current_dataset("stamped-derived/value")
         assert after.block.window.start == window.start
         assert after.block.window.latest == window.latest
-        assert DatasetRevision(after.block.window.stable_since) == after.block.revision
         assert float(after.materialize().block.values.reshape(-1)[-1]) == 60.0
+
+        # Replaced again while no lease kept a history, then read through
+        # the history a new lease begins: the replaced publication shows
+        # its own value, and the current shot does not roll from that read.
+        replaced = plane.latest_publication("stamped-derived/value")
+        history.close()
+        plane.commit_processor(
+            derived,
+            {"value": monitor_output(derived_declaration, 600.0)},
+            source_publication=publication,
+            trigger=("rerun", 2),
+        )
+        history = plane.acquire_indexed_history("stamped-derived/value", 4)
+        older = plane.current_dataset("stamped-derived/value", replaced)
+        assert older.materialize().block.values.reshape(-1).tolist() == [60.0]
+        current = plane.current_dataset("stamped-derived/value")
+        assert current.materialize().block.values.reshape(-1).tolist() == [600.0]
     finally:
         if history is not None:
             history.close()
@@ -1873,6 +1918,101 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
             )
     finally:
         if lease is not None:
+            lease.close()
+        plane.close()
+
+
+def test_a_holding_window_keeps_its_shape_and_a_lagging_readers_rows() -> None:
+    """A named window is its N source positions, whenever it is read.
+
+    An exact follower's window has N rows from its first event on -- a row
+    the history never held is invalid -- and its holding lease keeps the
+    rows it has yet to read however far the newest commit moved on; the
+    history's own window, which a panel reads, stays the largest lease's.
+    A window rolled from another reader's -- wider, narrower, of an older
+    shot or of the same one -- shows only the rows the history holds now.
+    """
+
+    from zlc_runtime import RetainedPublicationExpired
+
+    declaration = DatasetOutputDeclaration("field", "test.field", index_by_source=True)
+    source = producer("held-source", declaration)
+    name = "held-source/field"
+    plane = SignalDataPlane()
+    lease = None
+
+    def window(publication, size=None):
+        snapshot = plane.current_dataset_view(name, publication, history_window=size)[0]
+        return (
+            np.asarray(snapshot.materialize().block.values).reshape(-1).tolist(),
+            snapshot.expanded_validity().reshape(-1).tolist(),
+        )
+
+    try:
+        plane.begin_generation(source)
+        (lease,) = plane.acquire_indexed_histories((name,), 2, hold=True)
+        publications = []
+        for value in (1.0, 2.0, 3.0, 4.0, 5.0):
+            plane.commit_live(source, {"field": monitor_output(declaration, value)})
+            publications.append(plane.latest_publication(name))
+        assert window(publications[0], 2) == ([0.0, 1.0], [False, True])
+        # Four commits behind, the follower still reads its whole window.
+        assert window(publications[1], 2) == ([1.0, 2.0], [True, True])
+        assert window(publications[-1]) == ([4.0, 5.0], [True, True])
+        assert window(publications[-1], 4) == ([2.0, 3.0, 4.0, 5.0], [True] * 4)
+        lease.hold_from(4)
+        plane.commit_live(source, {"field": monitor_output(declaration, 6.0)})
+        assert not plane.retains(name, publications[1])
+        with pytest.raises(RetainedPublicationExpired, match="precedes retained"):
+            window(publications[1], 2)
+        assert window(publications[3], 2) == ([0.0, 4.0], [False, True])
+        # Rolled from the four rows read before row 3 was let go: a hole.
+        assert window(plane.latest_publication(name), 4) == (
+            [0.0, 4.0, 5.0, 6.0], [False, True, True, True]
+        )
+        # The panel's window of the same shot, rolled from that one.
+        assert window(plane.latest_publication(name)) == ([5.0, 6.0], [True, True])
+    finally:
+        if lease is not None:
+            lease.close()
+        plane.close()
+
+
+def test_an_event_that_is_already_a_window_keeps_no_history() -> None:
+    """A signal whose events carry the history axes is read event by event.
+
+    A region cut from a window publishes windows; a history of them would
+    nest one window in another, which no reader lays out.  Its lease is
+    refused by name, and one taken before its first event builds nothing:
+    a reader gets the event, which already spans its window.
+    """
+
+    declaration = DatasetOutputDeclaration("field", "test.field", index_by_source=True)
+    cut = DatasetOutputDeclaration("cut", "test.cut", index_by_source=True)
+    source = producer("window-source", declaration)
+    region = producer("window-region", cut)
+    plane = SignalDataPlane()
+    leases = []
+    try:
+        plane.begin_generation(source)
+        plane.begin_generation(region)
+        leases.append(plane.acquire_indexed_history("window-source/field", 2))
+        leases.append(plane.acquire_indexed_history("window-region/cut", 3))
+        for value in (1.0, 2.0):
+            plane.commit_live(source, {"field": monitor_output(declaration, value)})
+            window = plane.current_dataset_view("window-source/field", history_window=2)[0]
+            plane.commit_live(region, {"cut": LiveDatasetOutput(cut, window, MonitorCoverage(2, 2))})
+        assert not plane.supports_indexed_history("window-region/cut")
+        with pytest.raises(ValueError, match="history windows"):
+            plane.acquire_indexed_history("window-region/cut", 3)
+        event = plane.current_dataset("window-region/cut")
+        assert np.asarray(event.materialize().block.values).reshape(-1).tolist() == [1.0, 2.0]
+        # A reader that names a window -- a region drawn on this signal's
+        # panel -- reads the same event, not a refusal.
+        named = plane.current_dataset_view("window-region/cut", history_window=3)[0]
+        assert np.asarray(named.materialize().block.values).reshape(-1).tolist() == [1.0, 2.0]
+    finally:
+        for lease in leases:
             lease.close()
         plane.close()
 

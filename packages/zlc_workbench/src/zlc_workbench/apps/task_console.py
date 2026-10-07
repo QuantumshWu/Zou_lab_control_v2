@@ -390,6 +390,8 @@ class ExperimentGuiFlow:
         #: Devices whose control is being read for its first frame.
         self._device_control_opening: set[str] = set()
         self._device_shutdown_pending = False
+        #: Queues ``_continue_device_shutdown`` onto the next owner turn.
+        self._resume_shutdown = None
 
     def open(self) -> "ExperimentGuiFlow":
         from zlc_atom.install import (
@@ -413,6 +415,7 @@ class ExperimentGuiFlow:
         # and generic tune share its existing busy policy and one close truth.
         submit, close = attach_qt_worker("zlc-devices")
         continue_close = attach_qt_owner_turn(self.close)
+        self._resume_shutdown = attach_qt_owner_turn(self._continue_device_shutdown)
 
         def run(work, deliver, failed):
             def finished(result):
@@ -444,6 +447,9 @@ class ExperimentGuiFlow:
                 shutdown_session=self._shutdown_session,
                 on_shutdown=self._session_shutdown_complete,
                 on_device_open=self.open_device_control,
+                on_device_published=lambda key: self._retire_device_controls(
+                    frozenset({key})
+                ),
                 run_off_thread=run,
                 close_worker=close,
             )
@@ -571,6 +577,10 @@ class ExperimentGuiFlow:
         def released() -> None:
             if self.device_controls.get(key) is control:
                 self._forget_device_control(key)
+            if self._device_shutdown_pending and self._resume_shutdown is not None:
+                # A shutdown waited for this control to close; it goes on
+                # from the next owner turn, not from inside this close.
+                self._resume_shutdown()
 
         control.closed.connect(released)
 
@@ -629,11 +639,13 @@ class ExperimentGuiFlow:
                 }
                 self._adopt_device_reading(key, model, result)
                 self._device_control_models[key] = model
+                projection = self._device_control_projection(key)
                 control = open_device_control(
                     title=f"{self.session.device_labels.get(key, key)} control",
                     spec=model["spec"],
-                    projection=self._device_control_projection(key),
+                    projection=projection,
                 )
+                model["shown_owner_revision"] = projection["owner_revision"]
             except BaseException as error:
                 self._device_control_models.pop(key, None)
                 self._report_device(f"{key}: {error}", "error")
@@ -782,6 +794,7 @@ class ExperimentGuiFlow:
         if previous_session != session_id:
             model["desired"] = commandable
             model["unit_drafts"] = set()
+            model["unapplied"] = {}
             model["live"] = {name: False for name in names}
             model["risk"] = None
         else:
@@ -905,6 +918,8 @@ class ExperimentGuiFlow:
         desired = dict(model.get("desired", {}))
         live_values = dict(model.get("live", {}))
         statuses = dict(model.get("status", {}))
+        unapplied = dict(model.get("unapplied", {}))
+        kept: dict[str, tuple[str, str]] = {}
         active = str(self._device_tune_active or "")
         fields: dict[str, object] = {}
         for tunable in tunables:
@@ -926,7 +941,21 @@ class ExperimentGuiFlow:
                 reason = ""
             applying = active == f"{key}:{name}"
             queued = (key, name) in self._device_tune_pending
-            status, severity = statuses.get(
+            to_apply = (
+                name in model.get("unit_drafts", ())
+                or (desired_value, desired_unit) != (current.get(name), tunable.metadata.unit or "")
+            )
+            # A queued value dropped unseen (refused as the drain reached it,
+            # or cancelled by a claim change) is the newest fact about its
+            # field while that value is still to apply: a status written for
+            # another field does not take it down, nor does a reading unless
+            # it reached the value.  Every Apply of the field takes it down
+            # first, and so does Desired typed back to Current, which leaves
+            # nothing to apply; a field no longer declared keeps none.
+            note = unapplied.get(name) if unit_pending or to_apply else None
+            if note is not None:
+                kept[name] = note
+            status, severity = note if note is not None else statuses.get(
                 name,
                 (
                     ("Applying; latest queued", "task") if applying and queued else
@@ -954,17 +983,12 @@ class ExperimentGuiFlow:
                 # never be applied live still drew a switch to not press.
                 "live_capable": bool(tunable.live_write),
                 "live_enabled": editable and tunable.live_write and not unit_pending,
-                "apply_enabled": (
-                    editable
-                    and not applying
-                    and not unit_pending
-                    and (name in model.get("unit_drafts", ())
-                         or (desired_value, desired_unit) != (current.get(name), tunable.metadata.unit or ""))
-                ),
+                "apply_enabled": editable and not applying and not unit_pending and to_apply,
                 "status": status,
                 "severity": severity,
                 "reason": reason,
             }
+        model["unapplied"] = kept
         return {
             "owners": owners,
             "reason": (
@@ -1005,9 +1029,10 @@ class ExperimentGuiFlow:
                 field = projection["fields"].get(pending[1])
                 if not isinstance(field, dict) or not field.get("editable"):
                     self._device_tune_pending.pop(pending, None)
-                    model["status"] = {
-                        pending[1]: ("Cancelled because field ownership changed", "warning")
-                    }
+                    note = ("Cancelled because field ownership changed", "warning")
+                    model.setdefault("unapplied", {})[pending[1]] = note
+                    # The strip last said this value was queued.
+                    model["control"].show_status(f"{pending[1]}: {note[0]}", note[1])
                     cancelled = True
             if cancelled:
                 projection = self._device_control_projection(key)
@@ -1020,10 +1045,11 @@ class ExperimentGuiFlow:
         if model is None or session is None:
             return
         if accepted:
-            projection = self._device_control_projection(str(key))
+            # Bound to what the operator was SHOWN: a claim that changed
+            # since the last projection is not one they accepted.
             model["risk"] = (
                 str(model.get("device_session_id", "")),
-                int(projection["owner_revision"]),
+                int(model["shown_owner_revision"]),
             )
         else:
             model["risk"] = None
@@ -1061,20 +1087,32 @@ class ExperimentGuiFlow:
         model["live"] = live
         self._project_device_control(str(key))
 
-    def _queue_device_tune(self, key: str, field: str, requested: object, unit: str) -> None:
+    def _queue_device_tune(
+        self, key: str, field: str, requested: object, unit: str
+    ) -> tuple[str, str] | None:
+        """Apply one value now, or queue it behind the tune on the worker.
+
+        Returns the (text, severity) note a refused value was shown with;
+        None when the value started, was queued, or has no control.
+        """
+
         key, field = str(key), str(field)
         model = self._device_control_models.get(key)
         if model is None:
-            return
+            return None
         if field in model.get("unit_requests", {}):
-            model["control"].show_status("display unit is still being prepared", "task")
-            return
+            note = ("Not applied while the display unit changed; Apply again", "warning")
+            model["status"] = {field: note}
+            self._project_device_control(key)
+            return note
+        model.setdefault("unapplied", {}).pop(field, None)
         projection = self._device_control_projection(key)
         selected = projection["fields"].get(field)
         if not isinstance(selected, dict) or not selected.get("editable"):
-            model["status"] = {field: (str(selected.get("reason", "Field is locked")) if isinstance(selected, dict) else "Unknown field", "warning")}
+            note = (str(selected.get("reason", "Field is locked")) if isinstance(selected, dict) else "Unknown field", "warning")
+            model["status"] = {field: note}
             self._project_device_control(key)
-            return
+            return note
         if self._device_tune_active is not None:
             self._device_tune_pending[(key, field)] = (requested, unit)
             model["desired"][field] = (requested, unit)
@@ -1082,10 +1120,18 @@ class ExperimentGuiFlow:
                 f"queued latest {field}", "task"
             )
             self._project_device_control(key)
-            return
-        self._start_device_tune(key, field, requested, unit)
+            return None
+        return self._start_device_tune(key, field, requested, unit)
 
-    def _start_device_tune(self, key: str, field: str, requested: object, unit: str) -> None:
+    def _start_device_tune(
+        self, key: str, field: str, requested: object, unit: str
+    ) -> tuple[str, str] | None:
+        """Take the field's command and start the tune on the worker.
+
+        Returns the (text, severity) note a refused value was shown with;
+        None once the tune started, whatever it later finishes with.
+        """
+
         from zlc_atom.authoring import AuthoringSchema, TunableField, read_tunable_in_unit, tune_in_unit
         from ..authoring_form import project_schema
         from ..device_use import DeviceClaim
@@ -1094,8 +1140,9 @@ class ExperimentGuiFlow:
         session = self.session
         run = self._device_worker_run
         if session is None or run is None:
-            model["control"].show_status("device tune worker is closed", "error")
-            return
+            note = ("device tune worker is closed", "error")
+            model["control"].show_status(*note)
+            return note
         tunables = {item.metadata.name: item for item in model["tunables"]}
         try:
             tunable = tunables[field]
@@ -1120,16 +1167,18 @@ class ExperimentGuiFlow:
                 allow_while_logic=bool(owners and tunable.live_write),
             )
         except Exception as error:
-            model["status"] = {field: (str(error), "warning")}
-            model["control"].show_status(str(error), "warning")
+            note = (str(error), "warning")
+            model["status"] = {field: note}
+            model["control"].show_status(*note)
             self._project_device_control(key)
-            return
+            return note
         self._device_tune_active = f"{key}:{field}"
         model["status"] = {field: ("Applying", "task")}
         model["control"].show_status(f"applying {field}", "task")
         self._project_device_control(key)
         device = model["device"]
         with_logic = bool(owners)
+        read_session = str(model.get("device_session_id", ""))
         display_units = {name: pair[1] for name, pair in model["desired"].items()}
         display_units[field] = unit
 
@@ -1150,6 +1199,11 @@ class ExperimentGuiFlow:
                 item.metadata.name: item.current for item in declared_before
             }
             before_provenance = dict(device.settings_provenance())
+            if str(before_provenance.get("device_session_id", "")).strip() != read_session:
+                # A peer re-created the device: the reading this was applied
+                # from -- its Current, its bounds, a risk accepted over it --
+                # is another session's.
+                raise RuntimeError("the device session changed; Refresh this control")
             effective = tune_in_unit(device, field, requested, unit)
             declared_after = tuple(device.tunable_fields())
             if any(not isinstance(item, TunableField) for item in declared_after):
@@ -1206,7 +1260,6 @@ class ExperimentGuiFlow:
                         requested_unit=unit,
                         previous_effective=result["previous"],
                         new_effective=result["new_effective"],
-                        verified=True,
                         before_provenance=result["before_provenance"],
                         after_provenance=result["provenance"],
                         previous_values=result["before"],
@@ -1256,14 +1309,41 @@ class ExperimentGuiFlow:
             )
         except BaseException as error:
             finish(None, error)
+        return None
 
     def _drain_device_tune_pending(self) -> None:
-        if self._device_tune_active is not None or not self._device_tune_pending:
-            return
-        (key, field), (requested, unit) = next(iter(self._device_tune_pending.items()))
-        self._device_tune_pending.pop((key, field), None)
-        if key in self._device_control_models:
-            self._queue_device_tune(key, field, requested, unit)
+        # Until one starts: an entry refused here (its field locked, its
+        # command refused, the worker closed or its display unit changed
+        # meanwhile) is reported on its control, and must not park the rest
+        # until some unrelated tune happens to finish.  The operator last saw
+        # that value queued, so a note stays on its field while the value is
+        # still to apply: the next entry -- often another field of the same
+        # device -- writes its own status in this same turn, before anything
+        # is painted.  The note says what happened to the value, with the
+        # refusal's words as its reason, so it stays true once the lock or
+        # lease that refused it is gone; the unit note is worded so already.
+        # The control's strip, which last said the value was queued (or, for
+        # a lease, said the refusal in the present tense), says the same note:
+        # when the tune that ran belonged to another device's control, no
+        # later line on this one would.
+        while self._device_tune_active is None and self._device_tune_pending:
+            (key, field), (requested, unit) = next(iter(self._device_tune_pending.items()))
+            self._device_tune_pending.pop((key, field), None)
+            model = self._device_control_models.get(key)
+            if model is None:
+                continue
+            converting = field in model.get("unit_requests", {})
+            refused = self._queue_device_tune(key, field, requested, unit)
+            if refused is not None:
+                text, severity = refused
+                model.get("status", {}).pop(field, None)
+                note = (
+                    refused if converting else
+                    (f"Queued value not applied ({text}); Apply again", severity)
+                )
+                model.setdefault("unapplied", {})[field] = note
+                model["control"].show_status(f"{field}: {note[0]}", note[1])
+                self._project_device_control(key)
 
     def _guard_control_gesture(self, control, what, action):
         """One generic-control gesture, unable to kill the bench.
@@ -1349,15 +1429,61 @@ class ExperimentGuiFlow:
     def _retire_device_controls(
         self,
         device_keys: frozenset[str] | None = None,
-    ) -> None:
-        for key, control in tuple(self.device_controls.items()):
-            if device_keys is not None and key not in device_keys:
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Ask each control to close: the keys still closing, and those kept.
+
+        A generic control closes at once.  A device editor (Pulse, SLM)
+        refuses its first close and closes on its own time -- its work and
+        plots must stop first -- and its ``closed`` release forgets it then.
+        A control whose close says it is not under way was KEPT open (Cancel
+        on an editor's discard question): nothing may wait for its ``closed``,
+        and nothing after it is asked.  So the editors go first -- the
+        discard question is theirs -- and a Cancel leaves every generic
+        Control with its unapplied drafts, rather than closing them for a
+        retire that then does not happen.
+        """
+
+        closing: list[str] = []
+        kept: list[str] = []
+        selected = tuple(
+            (key, control)
+            for key, control in tuple(self.device_controls.items())
+            if device_keys is None or key in device_keys
+        )
+        for key, control in sorted(
+            selected, key=lambda item: item[0] in self._device_control_models
+        ):
+            if kept:
+                break
+            under_way = control.close()
+            if self.device_controls.get(key) is not control:
                 continue
-            control.close()
-            if self.device_controls.get(key) is control:
-                if control.is_visible():
-                    raise RuntimeError(f"{key} control refused to close")
+            if not control.is_visible():
                 self._forget_device_control(key)
+            else:
+                (closing if under_way else kept).append(key)
+        return tuple(closing), tuple(kept)
+
+    def _device_controls_closed(self) -> bool:
+        """Close every control before anything stops; whether all have.
+
+        One still closing is waited for: its ``released`` resumes a pending
+        shutdown, and a closing composition retries on the beat.  One kept
+        open cancels the shutdown and the close outright.  Left pending,
+        they fired on their own whenever that editor closed, hours later,
+        and a closing composition asked its question again on every beat.
+        """
+
+        closing, kept = self._retire_device_controls()
+        if kept:
+            self._device_shutdown_pending = False
+            self._closing_all = False
+            self._report_device(
+                f"shutdown cancelled: the {', '.join(kept)} control stayed open",
+                "warning",
+            )
+            return False
+        return not closing
 
     def _prepare_session_reconcile(
         self,
@@ -1367,13 +1493,40 @@ class ExperimentGuiFlow:
     ):
         """Stop only users of affected leaves, then return the worker half."""
 
-        if self.session is not session:
-            raise RuntimeError("DeviceManager tried to change another experiment session")
         plan = session.plan_device_reconcile(
             config,
             close_keys=frozenset(close_keys),
         )
+        from ..device_use import DeviceUseBusy
+
         affected = frozenset(plan.affected_keys)
+        # Before anything closes: a command the barrier below refuses (a
+        # remote publication, a tune, a PulseGUI run) refuses the change
+        # here, not after its Controls were closed for it.
+        holders = session.device_use.command_holders(tuple(sorted(affected)))
+        if holders:
+            raise DeviceUseBusy(holders)
+        # So does a Control still reading its device, which holds no command:
+        # its close refuses, and found only after the editors were asked, an
+        # editor was closed for a change that then did not happen.
+        reading = sorted(affected & (self._device_refresh_active | self._device_control_opening))
+        if reading:
+            raise RuntimeError(
+                f"the {', '.join(reading)} control is still reading its device; "
+                "press again when it is done"
+            )
+        # Before anything stops: a running Logic stopped for a change that
+        # then waits on an editor's close was stopped for nothing.
+        closing, kept = self._retire_device_controls(affected)
+        if kept:
+            raise RuntimeError(
+                f"the {', '.join(kept)} control stayed open; nothing changed"
+            )
+        if closing:
+            raise RuntimeError(
+                f"closing the {', '.join(closing)} control first; "
+                "press again once it has closed"
+            )
         barrier = None
         if affected:
             barrier = session.device_use.begin_maintenance(
@@ -1381,11 +1534,6 @@ class ExperimentGuiFlow:
                 "Device Manager change",
                 tuple(sorted(affected)),
             )
-            try:
-                self._retire_device_controls(affected)
-            except BaseException:
-                barrier.release()
-                raise
 
         def work() -> object:
             try:
@@ -1405,8 +1553,6 @@ class ExperimentGuiFlow:
     def _session_reconciled(self, session: object) -> None:
         """Refresh device-dependent drafts without replacing TaskConsole."""
 
-        if self.session is not session:
-            raise RuntimeError("another experiment session replaced the changed one")
         installed = session.installation.devices
         stale_controls = frozenset(
             key
@@ -1428,16 +1574,21 @@ class ExperimentGuiFlow:
         if self.console is not None:
             self.console.close_later()
 
+    def _continue_device_shutdown(self) -> None:
+        if self._device_shutdown_pending and self.devices is not None:
+            self.devices.presenter.shutdown_active()
+
     def _prepare_session_shutdown(self, session: object) -> bool:
-        if self.session is not None and session is not self.session:
-            raise RuntimeError("DeviceManager tried to retire another experiment session")
         if not self._device_tune_idle():
             return False
         self._device_shutdown_pending = True
+        # Controls first, while the console they draw in is still open; one
+        # still closing resumes this shutdown when it has (``released``).
+        if not self._device_controls_closed():
+            return False
         presenter = self.console_presenter
         if presenter is not None and not presenter.close():
             return False
-        self._retire_device_controls()
         if self.timer is not None:
             self.timer.stop()
         return True
@@ -1446,8 +1597,6 @@ class ExperimentGuiFlow:
         session.close()
 
     def _session_shutdown_complete(self, session: object) -> None:
-        if self.session is not session:
-            raise RuntimeError("another experiment session replaced the retired one")
         self.session = None
         self.console_presenter = None
         self.timer = None
@@ -1481,6 +1630,11 @@ class ExperimentGuiFlow:
                     )
                 return False
             if not self._device_tune_idle():
+                return False
+            # The controls first here too, while the console is still whole:
+            # an editor kept open cancels this close before the console has
+            # stopped anything.
+            if not self._device_controls_closed():
                 return False
             if self.console_presenter is not None and not self.console_presenter.close():
                 return False
@@ -1700,22 +1854,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         finally:
-            if presenter is not None:
-                # The GUI normally advances this non-blocking close through
-                # its owner turns.  --check has no event loop after return,
-                # so it must finish the same lifecycle here or the two
-                # non-daemon render processes keep the command alive.
-                import time
+            try:
+                if presenter is not None:
+                    # The GUI normally advances this non-blocking close
+                    # through its owner turns.  --check has no event loop
+                    # after return, so it finishes the same orderly close
+                    # here instead of leaving the (daemonic) render children
+                    # to be terminated at interpreter exit.
+                    import time
 
-                deadline = time.monotonic() + 30.0
-                while not presenter.close() and time.monotonic() < deadline:
-                    presenter.beat()
-                    time.sleep(0.005)
-                if not presenter.close():
-                    raise RuntimeError(
-                        "TaskConsole render processes did not close"
-                    )
-            session.close()
+                    deadline = time.monotonic() + 30.0
+                    while not presenter.close() and time.monotonic() < deadline:
+                        presenter.beat()
+                        time.sleep(0.005)
+                    if not presenter.close():
+                        raise RuntimeError(
+                            "TaskConsole render processes did not close"
+                        )
+            finally:
+                # Tried even when the console did not close: only a node
+                # still holding a device keeps the devices open.
+                session.close()
 
     try:
         flow = create_experiment_flow(

@@ -56,7 +56,7 @@ from zlc_runtime import DatasetCoverage, LiveDatasetOutput, MonitorCoverage
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
+from pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
 @pytest.fixture

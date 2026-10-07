@@ -266,7 +266,10 @@ def test_durable_mkdir_rejects_a_missing_parent(tmp_path):
     assert not target.parent.exists()
 
 
-def test_directory_flush_is_real_on_the_current_platform(tmp_path):
+def test_the_platform_directory_flush_runs_on_a_real_directory(tmp_path):
+    """The real backend, not a stand-in: a flush cannot be observed, so what
+    is checked is that this platform's handle-and-flush succeeds."""
+
     repository = durable_mkdir(tmp_path / "repository")
     target = durable_mkdir(repository / "nested")
     flush_directory(target)

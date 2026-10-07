@@ -28,7 +28,7 @@ from zlc_runtime import SelectionRange, SelectionState
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
+from pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
 def _camera_host(
@@ -179,6 +179,24 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         **draft,
         **patch,
     }
+    # An Area on an image whose axes are not the sensor plane names no crop.
+    assert descriptor.selection_patch(
+        SelectionState(
+            plot_kind="image",
+            selector_kind="area",
+            ranges=(
+                SelectionRange("camera_measurement.frames.frame", 0.0, 1.0, domain="cell_data"),
+                SelectionRange("spatial-y", -3.2, 6.0, domain="cell_data"),
+            ),
+        ),
+        draft=draft,
+        context={
+            "frame_shape_yx": (10, 30),
+            "sensor_shape_yx": (40, 100),
+            "binning_yx": (2, 3),
+            "roi_origin_yx": (7, 11),
+        },
+    ) is None
     assert [
         (mapping.plot_kind, mapping.selector_kind)
         for mapping in descriptor.selection_mappings

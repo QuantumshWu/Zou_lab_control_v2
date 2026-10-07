@@ -22,7 +22,12 @@ class InMemoryLmsLibrary:
     again, because the instrument on the bench is still emitting whatever
     it was emitting when the software let go of it -- and a simulation
     that forgets on open cannot express the one state that matters here:
-    an instrument already set up, which connecting must not disturb.
+    an instrument already set up, which connecting must not disturb.  They
+    survive for as long as this LIBRARY does: the virtual bench builds one
+    per Init (``virtual_rf_source``), so a device initialized again finds
+    its brick at power-up, as if it had been unplugged in between; a test
+    that means an instrument left set up opens a second source on the same
+    library.
 
     It powers up standing INSIDE its own range -- at the bottom of it, RF
     off -- as a real brick does: a synthesizer cannot stand at 0 Hz, and a

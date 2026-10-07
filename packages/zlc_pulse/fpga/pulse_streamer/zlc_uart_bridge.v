@@ -4,7 +4,7 @@
 // zlc_uart_bridge -- UART fast-control side-channel decoder.
 //
 // A dedicated serial control link that writes the SAME flat, word-addressed
-// register/BRAM map as the JTAG-to-AXI path (host.image.region_bases), so a
+// register/BRAM map as the JTAG-to-AXI path (zlc_pulse.wire.region_bases), so a
 // program is BYTE-IDENTICAL on either transport -- a pure transport swap that
 // removes the Vivado-Tcl/JTAG per-transaction overhead. The baud is the board
 // manifest's USB-UART rate, shared by host and generated RTL.

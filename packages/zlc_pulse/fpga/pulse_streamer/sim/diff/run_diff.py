@@ -24,7 +24,14 @@ import sys
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
-VIVADO = pathlib.Path(os.environ.get("ZLC_PS_VIVADO_BIN", r"C:/Xilinx/Vivado/2019.1/bin"))
+# The simulator tools sit beside the vivado the build and the JTAG session
+# run, found by their one rule (ZLC_PS_VIVADO_BIN, else the newest installed
+# release, else PATH) as this checkout states it.
+sys.path.insert(0, str(HERE.parents[5]))
+import zou_lab_control  # noqa: E402,F401  product bootstrap
+from zlc_pulse.transport.axi import _default_vivado  # noqa: E402
+
+VIVADO = pathlib.Path(_default_vivado()).resolve().parent
 
 ENGINES = {
     # engine source and the generated IP simulation models its top instantiates

@@ -505,9 +505,5 @@ class VirtualCamera:
                     self._clip_buffer = None
                     self._condition.notify_all()
 
-    @property
-    def produced_count(self) -> int:
-        return self._records.produced_count
-
 
 __all__ = ["VirtualCamera", "VirtualCameraConfig"]

@@ -169,28 +169,30 @@ exit /b 0
 
 :zlc_find_vivado
 if defined ZLC_PS_VIVADO_BIN goto zlc_vivado_found
-for %%V in (2019.1 2019.2 2020.1 2020.2 2021.1 2021.2 2022.1 2022.2 2023.1 2023.2 2024.1 2024.2 2025.1 2025.2 2026.1 2026.2) do (
-  if exist "C:\Xilinx\Vivado\%%V\bin\vivado.bat" set "ZLC_PS_VIVADO_BIN=C:\Xilinx\Vivado\%%V\bin\vivado.bat"
-  if exist "D:\Xilinx\Vivado\%%V\bin\vivado.bat" set "ZLC_PS_VIVADO_BIN=D:\Xilinx\Vivado\%%V\bin\vivado.bat"
-  if exist "C:\AMD\Vivado\%%V\bin\vivado.bat" set "ZLC_PS_VIVADO_BIN=C:\AMD\Vivado\%%V\bin\vivado.bat"
-  if exist "D:\AMD\Vivado\%%V\bin\vivado.bat" set "ZLC_PS_VIVADO_BIN=D:\AMD\Vivado\%%V\bin\vivado.bat"
+rem The newest release under the default install roots -- the rule
+rem zlc_pulse.transport.axi._default_vivado keeps too, so a build and the pulse
+rem server's JTAG session run the same Vivado.  Release folders are named
+rem YYYY.N, so their names order as their versions; a tie keeps the earlier root.
+set "ZLC_VIVADO_RELEASE="
+for %%R in ("C:\Xilinx\Vivado" "C:\AMD\Vivado" "D:\Xilinx\Vivado" "D:\AMD\Vivado") do (
+  for /d %%V in ("%%~R\*") do if exist "%%~V\bin\vivado.bat" call :zlc_vivado_newer "%%~V"
 )
-rem Preserve default-root discovery for releases newer than the explicit list.
-for /d %%V in ("C:\Xilinx\Vivado\*" "D:\Xilinx\Vivado\*" "C:\AMD\Vivado\*" "D:\AMD\Vivado\*") do (
-  if exist "%%~V\bin\vivado.bat" set "ZLC_PS_VIVADO_BIN=%%~V\bin\vivado.bat"
-)
+set "ZLC_VIVADO_RELEASE="
 if defined ZLC_PS_VIVADO_BIN goto zlc_vivado_found
 for /f "delims=" %%I in ('where vivado.bat 2^>nul') do if not defined ZLC_PS_VIVADO_BIN set "ZLC_PS_VIVADO_BIN=%%I"
 if defined ZLC_PS_VIVADO_BIN goto zlc_vivado_found
 where vivado >nul 2>nul
 if not errorlevel 1 set "ZLC_PS_VIVADO_BIN=vivado"
 if defined ZLC_PS_VIVADO_BIN goto zlc_vivado_found
-if /I "%~3"=="/optional" (
-  echo NOTE: Python will report a JTAG startup failure if no Vivado installation is available.
-  exit /b 0
-)
 echo ERROR: Vivado was not found. Set ZLC_PS_VIVADO_BIN.
 exit /b 1
+
+:zlc_vivado_newer
+rem One installed release: keep it only if it is newer than the one kept.
+if defined ZLC_VIVADO_RELEASE if not "%~nx1" GTR "%ZLC_VIVADO_RELEASE%" exit /b 0
+set "ZLC_VIVADO_RELEASE=%~nx1"
+set "ZLC_PS_VIVADO_BIN=%~1\bin\vivado.bat"
+exit /b 0
 
 :zlc_vivado_found
 echo ZLC Vivado: %ZLC_PS_VIVADO_BIN%

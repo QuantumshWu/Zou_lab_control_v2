@@ -14,8 +14,8 @@ from zlc_atom.nodes import discover_logic_nodes
 from zlc_atom.nodes.calibration import CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
-from tests.fakes import FakePlane, camera_cycle_snapshot
-from tests.pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
+from fakes import FakePlane, camera_cycle_snapshot
+from pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
 
 
 def test_device_discovery_is_the_leaf_manifest() -> None:
@@ -112,6 +112,7 @@ assert calls == [{
         check=False,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 

@@ -21,10 +21,17 @@ import time
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
-from numba import njit, prange
 
-from . import _fit_compiled as _compiled_fit
-from .fit import (
+from . import _kernel_cache
+
+# BEFORE numba is imported: it reads NUMBA_CACHE_DIR when the dispatcher is
+# built, so a later assignment is ignored in silence.
+_kernel_cache.install()
+
+from numba import njit, prange  # noqa: E402
+
+from . import _fit_compiled as _compiled_fit  # noqa: E402
+from .fit import (  # noqa: E402
     ArrayTuple,
     FitCancelled,
     FitDeadlineExceeded,
@@ -37,6 +44,7 @@ from .fit import (
     _DeferredFitData,
     _fixed_parameter_partition,
     _initial_values,
+    _regular_image_storage,
     _solver_bounds,
     _too_few_points,
 )
@@ -346,9 +354,10 @@ def _compiled_regular_linear_objective(
             # (width, 3) basis and transposing the (height, 3) result gave
             # the same numbers as strided views, and np.dot on a strided
             # operand falls off BLAS.  The constant-offset sum already has a
-            # scalar owner.
+            # scalar owner.  A trial step reads only the value's projection,
+            # so it streams the frame once, not three times.
             image = observations.reshape(height, width)
-            for vector in range(3):
+            for vector in range(3 if derivatives else 1):
                 projected[vector] = image @ x_vectors[vector]
         if context.size:
             x_sum = np.sum(x_vectors[0])
@@ -801,9 +810,7 @@ def _compiled_regular_descriptor(
         ),
         objective=objective,
         value_jacobian=base.value_jacobian,
-        context_builder=base.context_builder,
         max_candidates=base.max_candidates,
-        cache_key=f"{base.cache_key}-regular-grid-v1",
         coordinate_layout="rectangular-grid",
     )
 
@@ -1505,8 +1512,15 @@ def fit_regular_separable_images(
                 finalize=False,
                 # Regular images retain their original masked/NaN samples,
                 # so they need this boundary's finite-input selection --
-                # except an unmasked integer frame, which has none to select.
-                all_finite=valid is None and source.dtype.kind in "biu",
+                # except an unmasked frame with none to select: an integer
+                # one, or one whose centring counted every value finite.
+                all_finite=valid is None and (
+                    source.dtype.kind in "biu"
+                    or (
+                        refinement
+                        and bool(np.all(native_context[:, 0, 3] == values.shape[-1]))
+                    )
+                ),
             )
             direct_rss = None
             if refinement and options.loss == "linear":
@@ -1673,8 +1687,20 @@ def production_dispatchers() -> tuple[object, ...]:
     )
 
 
-def warm_production_cache() -> dict[str, tuple[bool, ...]]:
-    """Warm radial/anisotropic single-owner batch work with real inputs."""
+def warm_production_cache(
+    storages: Sequence[object],
+) -> dict[str, tuple[bool, ...]]:
+    """Warm radial/anisotropic single-owner batch work with real inputs.
+
+    Once in each storage a regular-image fit reads one of ``storages`` in
+    -- the plane dtypes the render warm draws.  The refinement centres a
+    frame in its own storage, so
+    :func:`_compiled_regular_centered_context` is one compile per storage,
+    and one skipped here compiles beside the operator's first fitted frame
+    of it.  The model is not part of that
+    kernel's type, so the two models alternate over the storages, each
+    family's own callbacks asked on the way.
+    """
 
     from .fit import FitEngine  # noqa: PLC0415
 
@@ -1682,34 +1708,35 @@ def warm_production_cache() -> dict[str, tuple[bool, ...]]:
     x = np.linspace(-2.0, 2.0, 19, dtype=np.float64)
     y = np.linspace(-1.5, 1.5, 17, dtype=np.float64)
     grid_x, grid_y = np.meshgrid(x, y)
+    models = (
+        (
+            "radial_gaussian_center",
+            np.asarray((3.0, 0.2, 0.7, 0.15, -0.1), dtype=np.float64),
+        ),
+        (
+            "anisotropic_gaussian_center",
+            np.asarray((3.0, 0.2, 0.65, 0.9, 0.15, -0.1), dtype=np.float64),
+        ),
+    )
+    # Each storage as the input reads it: a bool plane is fitted as its
+    # uint8 counts, so it asks for the uint8 compile and adds none.
+    fitted = [
+        storage
+        for storage in dict.fromkeys(_regular_image_storage(item) for item in storages)
+        if storage is not None
+    ]
     statuses: dict[str, tuple[bool, ...]] = {}
-    for model_id, parameters, storage_dtype in (
-        (
-            "radial_gaussian_center",
-            np.asarray((3.0, 0.2, 0.7, 0.15, -0.1), dtype=np.float64),
-            np.dtype(np.uint8),
-        ),
-        (
-            "anisotropic_gaussian_center",
-            np.asarray((3.0, 0.2, 0.65, 0.9, 0.15, -0.1), dtype=np.float64),
-            np.dtype(np.uint16),
-        ),
-        (
-            "radial_gaussian_center",
-            np.asarray((3.0, 0.2, 0.7, 0.15, -0.1), dtype=np.float64),
-            np.dtype(np.float32),
-        ),
-        (
-            "anisotropic_gaussian_center",
-            np.asarray((3.0, 0.2, 0.65, 0.9, 0.15, -0.1), dtype=np.float64),
-            np.dtype(np.float64),
-        ),
-    ):
+    for index, storage_dtype in enumerate(fitted):
+        model_id, parameters = models[index % len(models)]
+        label = f"{model_id} in {storage_dtype}"
         model = engine.registry.get(model_id)
         image = model.evaluate(
             (grid_x.reshape(-1), grid_y.reshape(-1)), parameters
         ).reshape(y.size, x.size)
-        if storage_dtype.kind == "u":
+        if storage_dtype.kind in "iu":
+            # Counts, as a camera or a derived count holds them: the bare
+            # Gaussian (0.2 to 3.2) cast to an integer is a staircase of
+            # four levels, not a spot to fit.
             stored = np.clip(
                 np.rint(image * 40.0), 0.0, np.iinfo(storage_dtype).max
             ).astype(storage_dtype)
@@ -1721,7 +1748,7 @@ def warm_production_cache() -> dict[str, tuple[bool, ...]]:
         single = engine.fit(model_id, inputs[0])
         if not single.success:
             raise RuntimeError(
-                f"cache warm failed for regular single {model_id}: "
+                f"cache warm failed for regular single {label}: "
                 f"{single.message}"
             )
         results, failures = engine.fit_batch(
@@ -1731,13 +1758,13 @@ def warm_production_cache() -> dict[str, tuple[bool, ...]]:
         )
         if any(failure is not None for failure in failures):
             raise RuntimeError(
-                f"cache warm failed for regular {model_id}: {failures!r}"
+                f"cache warm failed for regular {label}: {failures!r}"
             )
-        statuses[model_id] = tuple(
+        statuses[label] = tuple(
             bool(result is not None and result.success) for result in results
         )
-        if not all(statuses[model_id]):
+        if not all(statuses[label]):
             raise RuntimeError(
-                f"cache warm failed for regular {model_id}: {statuses[model_id]!r}"
+                f"cache warm failed for regular {label}: {statuses[label]!r}"
             )
     return statuses

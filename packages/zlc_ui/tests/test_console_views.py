@@ -58,6 +58,20 @@ signal_picker = card._settings_form.widget_for('signal')
 assert isinstance(signal_picker, FluentTreeComboBox)
 assert signal_picker.current_choice_key() == ''
 assert signal_picker.model().item(0).text() == 'source'
+# A Setting value the card cannot read is said on the card while it stands.
+# The next projection writes the record's value over that row -- with its
+# signals blocked, so no edit clears it -- and the error goes with the value
+# it was about: the presenter's word shows again.
+def unreadable(_key):
+    raise ValueError('not a panel size')
+card._settings_form.read_value = unreadable
+card._setting_changed('size')
+del card._settings_form.read_value
+assert card.status_dot.toolTip() == 'not a panel size'
+assert card._settings_popup.isVisible()
+card.set_panel_projection(dict(state, title='Renamed'), surface_projection)
+assert card.status_dot.toolTip() == 'ready', card.status_dot.toolTip()
+card.set_panel_projection(state, surface_projection)
 picked = []
 card.state_changed.connect(picked.append)
 card.show()
@@ -1308,6 +1322,10 @@ cell_combo.setCurrentIndex(cell_combo.findData('image'))
 cell_combo.activated.emit(cell_combo.currentIndex())
 card.state_changed.disconnect(capture_cell_patch)
 assert {'cell_kind': 'image'} in cell_patches
+# Nothing took that pick.  A refusal comes back as the record the presenter
+# kept -- the same projection -- and the open form shows the record again.
+handle.set_panel_projection('panel-1', facet_state, surface)
+assert card._settings_form.read_all()['cell_kind'] == 'curve'
 handle.set_panel_projection('panel-1', state, surface)
 assert 'cell_kind' not in card._settings_form.spec.keys, (
     'only a facet grid offers a cell kind')
@@ -1423,6 +1441,14 @@ assert editor.kind_label.text() == 'facet grid · curve cells'
 assert handle.update_panel_editor('panel-1', projection)
 assert editor.producer_summary.text() == 'Logic node: cm'
 assert editor.open_producer_button.isEnabled()
+# The same in Edit: a refused pick is answered by the same projection, and
+# the picker goes back to the overlay the panel draws.
+editor.panel_form.widget_for('overlay_signal').select_choice_key('')
+assert editor.panel_form.read_value('overlay_signal') == ''
+assert handle.update_panel_editor('panel-1', projection)
+assert editor.panel_form.widget_for('overlay_signal').current_choice_key() == (
+    '@logic/occ/site_overlay'
+)
 from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE as camera_descriptor
 from zlc_atom.nodes.seamless_scan.logic_node import LOGIC_NODE as scan_descriptor
 from zlc_workbench.authoring_form import project_logic_schema
@@ -2576,6 +2602,38 @@ app.processEvents()
 assert form.keys == ('calibration_path',), form.keys
 assert changed == [], 'projecting is not editing'
 editor.deleteLater(); app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+"""
+    )
+
+
+def test_a_number_the_calibration_form_cannot_read_stays_out_of_its_draft(run_qt) -> None:
+    """The Calibration row's own form read every change inside the Qt slot,
+    and a box holding a number it cannot show refuses to be read: that
+    refusal escaped the slot, which aborts the console.  It is no value yet
+    -- the draft keeps its last one -- and a box's own normalization reaches
+    the draft as one, not as an operator edit."""
+
+    run_qt(
+        """
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE
+app = ensure_qt_app(['test'])
+(factory,) = LOGIC_NODE.ui_contributions
+form = factory()
+spec = FormSpec((FormFieldProps(key='repeats', kind='int', label='Samples', default=200, minimum=1),))
+form.update_projection({'form_spec': spec, 'form_values': {'repeats': 200}})
+patches = []
+form.draft_changed.connect(patches.append)
+box = form.widget_for('repeats')
+box.setProperty('numericError', 'the number does not fit the box')
+form.changed.emit('repeats')
+form.value_normalized.emit('repeats')
+assert patches == [], patches
+box.setProperty('numericError', '')
+form.value_normalized.emit('repeats')
+assert patches == [{'values': {'repeats': 200}, 'normalized': True}], patches
+form.deleteLater()
 """
     )
 

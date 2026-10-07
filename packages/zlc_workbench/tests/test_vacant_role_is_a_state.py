@@ -19,8 +19,6 @@ import re
 import time
 from pathlib import Path
 
-import pytest
-
 from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
 from test_console_presenter import (  # noqa: F401 -- fixtures
     presenter,
@@ -38,7 +36,6 @@ def _fate_rows(binding) -> dict[str, object]:
     }
 
 
-@pytest.mark.gui
 def test_vacating_a_required_role_keeps_the_fate_and_the_console(workspace) -> None:
     """The real console, the real gesture: vacate x on a mounted image."""
 

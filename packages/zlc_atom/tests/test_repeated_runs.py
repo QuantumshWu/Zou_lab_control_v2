@@ -16,7 +16,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_runtime.plane import SignalDataPlane
 
-from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
+from pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_pulse
 
 
 def test_the_same_measurement_node_takes_three_shots_in_a_row() -> None:

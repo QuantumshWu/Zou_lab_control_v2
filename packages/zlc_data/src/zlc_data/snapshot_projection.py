@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+import operator
 
 import numpy as np
 
@@ -26,7 +27,6 @@ from .selection import (
     take_indices,
 )
 from .validity import (
-    INVALID,
     CellValidity,
     DatasetComponentValidity,
     Invalid,
@@ -52,6 +52,7 @@ __all__ = [
     "restrict_snapshot",
     "restricted_schema",
     "restricted_values",
+    "schemas_continue",
     "selection_indices",
     "value_selection",
 ]
@@ -137,12 +138,6 @@ class IndexedHistoryLayout:
         base, inner, _outer = self.point_domain.code_mapping(PRIMARY_INDEX_AXIS_ID)
         start = first if isinstance(base, range) else int(np.searchsorted(base, first))
         return slice(start * inner, self.row_count)
-
-    def row_mask(self, window: int) -> np.ndarray:
-        """Which point rows the last ``window`` shots occupy."""
-        mask = np.zeros(self.row_count, dtype=np.bool_)
-        mask[self.window_rows(window)] = True
-        return mask
 
 
 def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None:
@@ -300,6 +295,17 @@ def indexed_schemas_compatible(
     )
 
 
+def schemas_continue(previous: DatasetSchema, following: DatasetSchema) -> bool:
+    """Whether a picture of ``previous`` takes ``following`` as new data.
+
+    The same schema, or an indexed history whose retained window moved: the
+    plot host's rule for new data, asked by the host itself and by every
+    owner that decides to keep a host or replace it before handing it data.
+    """
+
+    return previous == following or indexed_schemas_compatible(previous, following)
+
+
 def _derived_reference(
     source_ref: DatasetRevisionRef,
     schema: DatasetSchema,
@@ -440,6 +446,24 @@ def selection_indices(
         selected_axes = tuple(axis for axis in domain.axes if axis.axis_id in terms)
         if not selected_axes:
             return range(domain.size)
+        if len(selected_axes) == 1 and domain.axis_codes is not None:
+            # A contiguous run of one axis whose rows repeat each code of an
+            # ascending base in turn -- the shots of a history window, each
+            # its event's rows -- is a contiguous run of rows, answered by
+            # arithmetic.  Expanding the code of every row to compare it
+            # cost a history window per shot what its rows number.
+            (axis,) = selected_axes
+            logical = logical_indices(axis.axis_id)
+            base, inner, outer = domain.code_mapping(domain.coordinate_axis(axis.axis_id).axis_id)
+            if (isinstance(logical, range) and logical.step == 1 and isinstance(base, range)
+                    and base.step == 1 and outer == 1):
+                first = max(logical.start - base.start, 0)
+                stop = min(logical.stop - base.start, len(base))
+                if stop <= first:
+                    raise EmptySelection(
+                        "selection names coordinates no source domain row holds together"
+                    )
+                return range(first * inner, stop * inner)
         keep = np.ones(domain.size, dtype=np.bool_)
         for axis in selected_axes:
             logical = logical_indices(axis.axis_id)
@@ -539,15 +563,22 @@ def _subset_mapped_domain(
             kept, tile = base, len(indices) // period
         else:
             kept, inner, tile = domain.codes(axis.axis_id, selected_rows), 1, 1
-        used, inverse = np.unique(np.asarray(kept), return_inverse=True)
-        if used.size == axis.size:
+        if isinstance(kept, range) and kept.step > 0:
+            # Distinct and ascending already: row i keeps the i-th code, and
+            # sorting a history window's every sample to learn so was the
+            # cost of the cut.
+            used, inverse = kept, range(len(kept))
+        else:
+            used, inverse = np.unique(np.asarray(kept), return_inverse=True)
+        if len(used) == axis.size:
             axes.append(axis)
         else:
             axis_indices = (range(int(used[0]), int(used[-1]) + 1)
-                            if used.size and int(used[-1]) - int(used[0]) + 1 == used.size
-                            else tuple(used.tolist()))
+                            if len(used) and int(used[-1]) - int(used[0]) + 1 == len(used)
+                            else tuple(int(code) for code in used))
             axes.append(_subset_axis(axis, axis_indices))
-        axis_codes.append(range(inverse.size) if np.array_equal(inverse, np.arange(inverse.size))
+        axis_codes.append(inverse if isinstance(inverse, range)
+                          else range(inverse.size) if np.array_equal(inverse, np.arange(inverse.size))
                           else inverse)
         axis_repeats.append((inner, tile))
     return DomainSpec((len(indices),), tuple(axes), tuple(axis_codes), tuple(axis_repeats))
@@ -670,6 +701,11 @@ def value_selection(
     return Selection(tuple(resolved))
 
 
+#: The ``slice_memo`` entry holding the last segmented cut as a whole: the
+#: source segments it covered, its choice, and what it made of them.
+_PREFIX_MEMO = "prefix"
+
+
 def restrict_snapshot(
     snapshot: OwnedSnapshot,
     selection: Selection | None = None,
@@ -689,8 +725,10 @@ def restrict_snapshot(
 
     ``repeat_rows`` restricts the physical Repeat carrier, not one logical
     axis in it. Its existing coordinates and axis_codes remain authoritative.
-    An optional caller-owned candidate memo reuses immutable slices. Only
-    this call's consumed entries replace it, after construction succeeds.
+    An optional caller-owned candidate memo reuses immutable slices, and the
+    last segmented cut whole: a block that begins with the segments that cut
+    covered (a growing finite prefix) walks only its new tail. Only this
+    call's consumed entries replace it, after construction succeeds.
     """
 
     if not isinstance(snapshot, OwnedSnapshot):
@@ -728,10 +766,44 @@ def restrict_snapshot(
         point_search = point_indices if isinstance(point_indices, range) else np.asarray(point_indices)
         cell_choice = (schema.value_schema.validity_contract.component_axis_ids,
                        tuple((axis.axis_id, data_indices[axis.axis_id]) for axis in schema.cell_domain.axes))
-        consumed = {}
+        block = snapshot.block
+        source_segments = block.segments
+        choice = (repeat_indices, point_indices, cell_choice)
+        # A finite run's prefix only grows: when this block begins with the
+        # very segments the memo's last cut covered, under the same choice,
+        # that cut is this one's head and only the appended tail is walked.
+        # Walking every committed segment again made a region on a live
+        # finite run O(run) Python per shot.
+        head = None if slice_memo is None else slice_memo.get(_PREFIX_MEMO)
+        start = 0
         segments, origins, sizes = [], [], []
-        for origin, extent, planes in zip(snapshot.block.segment_origins, snapshot.block.segment_shapes,
-                                          snapshot.block.segments, strict=True):
+        head_origins = head_sizes = np.empty((0, 2), dtype=np.int64)
+        if head is not None:
+            covered, covered_origins, head_choice, head_segments, cut_origins, cut_sizes = head
+            count = len(covered)
+            if (head_choice == choice and count <= len(source_segments)
+                    and all(map(operator.is_, source_segments[:count], covered))
+                    and np.array_equal(block.segment_origins[:count], covered_origins)):
+                start = count
+                segments = list(head_segments)
+                head_origins, head_sizes = cut_origins, cut_sizes
+
+        def touching(selected, first, extent):
+            if isinstance(selected, range):
+                return (first < selected.stop) & (first + extent > selected.start)
+            return np.searchsorted(selected, first + extent) > np.searchsorted(selected, first)
+
+        # Which segments the choice reaches at all, decided for every one at
+        # once: a window narrower than the history walks only its own shots.
+        tail_origins = block.segment_origins[start:]
+        tail_shapes = block.segment_shapes[start:]
+        reached = start + np.flatnonzero(
+            touching(repeat_search, tail_origins[:, 0], tail_shapes[:, 0])
+            & touching(point_search, tail_origins[:, 1], tail_shapes[:, 1])
+        )
+        consumed = {}
+        for index in reached.tolist():
+            origin, extent, planes = block.segment_origins[index], block.segment_shapes[index], source_segments[index]
             repeats, repeat_origin = overlap(repeat_search, origin[0], extent[0])
             points, point_origin = overlap(point_search, origin[1], extent[1])
             if not repeats or not points:
@@ -773,12 +845,24 @@ def restrict_snapshot(
         reference = reference_for(derived)
         result = OwnedSnapshot(reference, DataBlock._from_owned_segments(
             reference.block_id, reference.revision, derived,
-            window=snapshot.block.window, segments=tuple(segments),
-            origins=np.asarray(origins, dtype=np.int64).reshape(-1, 2),
-            shapes=np.asarray(sizes, dtype=np.int64).reshape(-1, 2)))
+            window=block.window, segments=tuple(segments),
+            origins=np.concatenate((head_origins, np.asarray(origins, dtype=np.int64).reshape(-1, 2))),
+            shapes=np.concatenate((head_sizes, np.asarray(sizes, dtype=np.int64).reshape(-1, 2)))))
         if slice_memo is not None:
-            slice_memo.clear()
+            if not start:
+                # Only this call's entries: a slice nothing reads any more
+                # must not keep its planes alive.  A reused head keeps its
+                # own, which this call consumed by reusing them.
+                slice_memo.clear()
             slice_memo.update(consumed)
+            # The whole cut is remembered when it cut something and covered
+            # more than the head it reused; a cut that kept everything
+            # leaves the memo as empty as its slices.
+            if start < len(source_segments) and (consumed or start):
+                slice_memo[_PREFIX_MEMO] = (
+                    source_segments, block.segment_origins, choice, result.block.segments,
+                    result.block.segment_origins, result.block.segment_shapes,
+                )
         return result
     values = restricted_values(
         snapshot.block.values, schema, repeat_indices, point_indices, data_indices

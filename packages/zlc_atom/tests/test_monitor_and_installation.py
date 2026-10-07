@@ -6,7 +6,7 @@ import time
 import numpy as np
 import pytest
 
-from tests.fakes import FakePlane
+from fakes import FakePlane
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.install import (
     DeviceCatalogSnapshot,
@@ -48,7 +48,7 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         # ordered; Stop below must publish the three remaining full cycles.
         camera.trigger(13, frame=np.zeros((96, 128), dtype=np.uint16))
         deadline = time.monotonic() + 5.0
-        while camera.produced_count < 13 and time.monotonic() < deadline:
+        while camera._records.produced_count < 13 and time.monotonic() < deadline:
             time.sleep(0.001)
         for _ in range(3):
             monitor.poll()
@@ -399,9 +399,9 @@ def test_a_direct_stop_half_way_through_a_cycle_keeps_the_complete_cycles_it_too
         assert plane.latest_publication(signal_key) is not None
         assert publishing.wait(1.0)
         camera.trigger(5, frame=frame)
-        while camera.produced_count < 7 and time.monotonic() < deadline:
+        while camera._records.produced_count < 7 and time.monotonic() < deadline:
             time.sleep(0.001)
-        assert camera.produced_count == 7
+        assert camera._records.produced_count == 7
         stop.set()
         release.set()
         worker.join(timeout=5.0)

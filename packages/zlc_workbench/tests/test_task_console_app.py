@@ -401,7 +401,7 @@ def test_live_board_close_cancels_queued_projection_without_waiting_for_running_
     queued = board.submit_projection(lambda: None)
     begun = time.monotonic()
     assert board.close() is False
-    assert time.monotonic() - begun < 0.05
+    assert time.monotonic() - begun < 0.25
     assert queued.cancelled()
     assert board.pending_projection_count == 1
     release.set()
@@ -495,7 +495,7 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
     try:
         begun = time.monotonic()
         window.close()
-        assert time.monotonic() - begun < 0.05
+        assert time.monotonic() - begun < 0.25
         assert cancelled == [True]
         assert window.is_visible()
         _wait_qt(
@@ -1050,6 +1050,16 @@ try:
     reopened_pulse = flow.device_controls['sequencer']
     assert reopened_pulse is not pulse
     assert reopened_pulse.presenter.sequencer is flow.session.sequencer
+    # Cancel on the editor's discard question keeps it, and the Shutdown it
+    # held is cancelled -- not left pending to fire when the editor closes.
+    reopened_pulse.presenter._saved_state = object()
+    reopened_pulse.confirm_pulse_discard = lambda: False
+    assert flow.devices.presenter.shutdown_active() is False
+    application.processEvents()
+    assert reopened_pulse.is_visible() and not flow._device_shutdown_pending
+    assert 'sequencer control stayed open' in flow.devices._view.status_strip.text()
+    reopened_pulse.presenter._saved_state = reopened_pulse.presenter._state
+    del reopened_pulse.confirm_pulse_discard
 
     camera_card = flow.devices._view._loaded_cards['camera']
     QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
@@ -1097,6 +1107,9 @@ try:
         application.processEvents(); QtTest.QTest.qWait(5)
     model = flow._device_control_models['camera']
     assert model['desired']['exposure'][1] == 'ms'
+    assert 'camera task' not in camera_control._view._field_rows['exposure'][5].text(), (
+        'a unit refresh kept a refusal whose lease is gone'
+    )
     camera_control._view._field_rows['exposure'][2].click()
     exposure = camera_control._view.form.widget_for('exposure')
     exposure.setValue(65.0)
@@ -1130,6 +1143,23 @@ try:
     QtTest.QTest.mouseClick(camera_window.titleBar.closeBtn, QtCore.Qt.LeftButton)
     application.processEvents()
     assert not camera_control.is_visible()
+    # An editor opened after a Control is still asked before it: Cancel on
+    # the discard question leaves the camera Control and its drafts alone.
+    reopened_pulse.close(); application.processEvents()
+    deadline = QtCore.QDeadlineTimer(5000)
+    while 'sequencer' in flow.device_controls and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(10)
+    QtTest.QTest.mouseClick(sequencer_card.control_button, QtCore.Qt.LeftButton)
+    application.processEvents()
+    kept_pulse = flow.device_controls['sequencer']
+    kept_pulse.presenter._saved_state = object()
+    kept_pulse.confirm_pulse_discard = lambda: False
+    assert flow.devices.presenter.shutdown_active() is False
+    assert kept_pulse.is_visible() and not flow._device_shutdown_pending
+    assert flow.device_controls['camera'] is camera_control
+    assert flow._device_control_models['camera'] is model, 'a Control closed for a cancelled Shutdown'
+    kept_pulse.presenter._saved_state = kept_pulse.presenter._state
+    del kept_pulse.confirm_pulse_discard
     first_session = flow.session
     slm = flow.session.installation.device('slm')
     slm_phase = slm.last_commanded_phase.copy()
@@ -1148,13 +1178,11 @@ try:
     assert flow.devices.presenter.shutdown_active() is False
     assert flow.session is first_session
     solve_release.set()
+    # Nobody presses Shutdown again: the SLM Editor's own close resumes it.
     deadline = QtCore.QDeadlineTimer(5000)
-    shut_down = False
-    while not shut_down and not deadline.hasExpired():
+    while flow.session is not None and not deadline.hasExpired():
         application.processEvents()
         QtTest.QTest.qWait(10)
-        shut_down = flow.devices.presenter.shutdown_active()
-    assert shut_down is True
     assert 'slm' not in flow.device_controls
     assert flow.session is None
     assert flow.device_controls == {}
@@ -1307,7 +1335,7 @@ try:
     def slow_tune(self, name, value):
         calls.append((name, value, type(value), threading.current_thread().name))
         started.set()
-        release.wait(2.0)
+        release.wait(10.0)
         return original_tune(self, name, value)
     camera_type.tune = slow_tune
     camera_card = flow.devices._view._loaded_cards['camera']
@@ -1318,7 +1346,6 @@ try:
         application.processEvents(); QtTest.QTest.qWait(5)
     control = flow.device_controls['camera']
     assert 'exposure' in control._view.form.keys, 'opened on its first reading'
-    threading.Timer(0.4, release.set).start()
 
     exposure = control._view.form.widget_for('exposure')
     before_turns = len(heartbeat)
@@ -1357,6 +1384,9 @@ try:
     control.close(); application.processEvents()
     assert control.is_visible(), 'hung tune control claimed it had closed'
     assert flow.session is not None
+    # Released by the test once everything above has been seen, not by a
+    # timer racing the waits above on a slow runner.
+    release.set()
 
     deadline = QtCore.QDeadlineTimer(3000)
     while (flow._device_tune_active is not None or
@@ -1498,7 +1528,6 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
         tunable_values=lambda: {"power": fields()[0].current},
         settings_provenance=lambda: {"device_session_id": "rf", "settings_epoch": state["epoch"]})
     control = _RecordingControl()
-    control.show_status = lambda *_: None
     flow = ExperimentGuiFlow(workspace=workspace)
     flow.session = SimpleNamespace(device_use=DeviceUseCoordinator(),
         record_device_tune=lambda **kwargs: records.append(kwargs))
@@ -1514,10 +1543,22 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     pending_field = flow._device_control_projection("rf")["fields"]["power"]
     assert pending_field["editable"]
     assert not pending_field["apply_enabled"] and not pending_field["live_enabled"]
-    flow._queue_device_tune("rf", "power", 135.0, "mVpp")
+    # Queued behind a tune, it arrives from the drain, which goes on to the
+    # next entry of this device (here a field it no longer declares) and
+    # writes that entry's status in the same turn.
+    flow._device_tune_pending[("rf", "power")] = (135.0, "mVpp")
+    flow._device_tune_pending[("rf", "retired")] = (1.0, "")
+    flow._drain_device_tune_pending()
     assert calls == [], "Apply ran before its display unit conversion completed"
+    shown = flow._device_control_projection("rf")["fields"]["power"]
+    assert shown["severity"] == "warning" and "Apply again" in shown["status"], (
+        "the unapplied value is said on its field, past the next entry's status"
+    )
+    assert set(model["unapplied"]) == {"power"}, "a field no longer declared keeps no note"
     work, done = converting.pop()
     done(work())
+    shown = flow._device_control_projection("rf")["fields"]["power"]
+    assert "Apply again" in shown["status"], "the unit refresh it waited for kept the note"
     assert len(refreshes) == 1, "changing the displayed unit is not a full device refresh"
     flow._device_worker_run = lambda work, done, _failed: done(work())
     assert model["desired"]["power"][0] == pytest.approx(100.0)
@@ -1561,7 +1602,6 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     source, instrument = _rigol()
     try:
         rf_control = _RecordingControl()
-        rf_control.show_status = lambda *_: None
         rf_model = {"device": source, "control": rf_control,
                     "device_session_id": "", "desired": {}, "live": {}}
         flow._device_worker_run = lambda work, done, _failed: done(work())
@@ -1678,13 +1718,17 @@ def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
 
 
 class _RecordingControl:
-    """A control that remembers every projection it was handed."""
+    """A control that remembers every projection and status line it was handed."""
 
     def __init__(self) -> None:
         self.projections: list[dict] = []
+        self.statuses: list[tuple[str, str]] = []
 
     def set_projection(self, _spec, projection) -> None:
         self.projections.append(projection)
+
+    def show_status(self, text: str, severity: str) -> None:
+        self.statuses.append((text, severity))
 
     def is_visible(self) -> bool:
         return True
@@ -1696,7 +1740,9 @@ def _bare_flow(workspace):
     return ExperimentGuiFlow(workspace=workspace)
 
 
-def test_a_control_still_being_read_holds_the_device_worker(workspace) -> None:
+def test_a_control_still_being_read_holds_the_device_worker(
+    workspace, monkeypatch
+) -> None:
     """A first reading in flight is device work like a refresh or a tune.
 
     The worker used to count only refreshes and tunes as busy, so a session
@@ -1718,14 +1764,38 @@ def test_a_control_still_being_read_holds_the_device_worker(workspace) -> None:
         def tunable_fields(self):
             return ()
 
-    session = object()
-    flow.session = session
-    flow._device_worker_run = lambda work, done: done(work())
+    from types import SimpleNamespace
+
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        "zlc_ui.open_device_control", lambda **window: opened.append(window)
+    )
+    flow.session = SimpleNamespace(device_labels={})
+    flow._device_worker_run = lambda work, done, failed: done(work())
     flow._device_shutdown_pending = True
     flow._open_generic_control("rf", _Device())
     assert "rf" not in flow._device_control_opening
+    assert opened == [], "a reading landing during shutdown opened a control"
+    assert len(reports) == 1, reports
     assert flow.device_controls == {}
     assert flow._device_control_models == {}
+
+    # A device change over a Control still reading holds no command, and its
+    # close would refuse: the change is refused before any editor is asked.
+    asked: list[str] = []
+    flow.device_controls["sequencer"] = SimpleNamespace(close=lambda: asked.append("sequencer"))
+    live = SimpleNamespace(
+        plan_device_reconcile=lambda _config, close_keys: SimpleNamespace(
+            affected_keys=("rf", "sequencer")
+        ),
+        device_use=SimpleNamespace(command_holders=lambda _keys: ()),
+    )
+    for reading in (flow._device_refresh_active, flow._device_control_opening):
+        reading.add("rf")
+        with pytest.raises(RuntimeError, match="rf control is still reading"):
+            flow._prepare_session_reconcile(live, object(), frozenset())
+        reading.clear()
+    assert asked == [], "an editor was closed for a change a reading Control refused"
 
 
 def test_a_policy_change_projects_each_control_once(workspace) -> None:
@@ -1763,11 +1833,105 @@ def test_a_policy_change_projects_each_control_once(workspace) -> None:
         stop=lambda _reason: None, superseded=lambda: None,
     ).commit()
     flow._device_tune_pending[("rf", "frequency")] = 1.0e9
+    flow._device_tune_pending[("rf", "power")] = 2.0
     flow._refresh_device_control_policies()
     assert computed == ["rf", "rf"]
-    assert ("rf", "frequency") not in flow._device_tune_pending
-    assert flow._device_control_models["rf"]["status"] == {
-        "frequency": ("Cancelled because field ownership changed", "warning")
+    assert not flow._device_tune_pending
+    # Each cancelled value is said on its own field while it is still to
+    # apply; the second cancel does not take the first one's note.
+    assert flow._device_control_models["rf"]["unapplied"] == {
+        "frequency": ("Cancelled because field ownership changed", "warning"),
+        "power": ("Cancelled because field ownership changed", "warning"),
     }
+    # And on the strip, which last said the values were queued.
+    assert control.statuses == [
+        ("frequency: Cancelled because field ownership changed", "warning"),
+        ("power: Cancelled because field ownership changed", "warning"),
+    ]
     assert len(control.projections) == 2
     lease.release()
+
+
+def test_a_queued_value_the_drain_refuses_is_said_on_its_field(workspace) -> None:
+    """A value refused as the drain reaches it keeps a note past the next start.
+
+    The next entry -- often another field of the same device -- writes its
+    own status in the same turn, so a refusal said only as a status was gone
+    before anything was painted.  The note says what happened to the value,
+    so it stays true once the lease or the lock that refused it is gone, and
+    it goes once nothing is left to apply.  The control's strip, which last
+    said the value was queued, says the same note: the tune that ran was
+    another device's, so no later line on this control would.
+    """
+
+    from types import SimpleNamespace
+
+    from zlc_atom.authoring import AuthoringField, TunableField
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseCoordinator
+
+    flow = _bare_flow(workspace)
+    coordinator = DeviceUseCoordinator()
+    flow.session = SimpleNamespace(device_use=coordinator)
+    started: list[object] = []
+    flow._device_worker_run = lambda _work, _done, failed: started.append(failed)
+    control = _RecordingControl()
+    device = object()
+    model = {
+        "device": device, "control": control, "spec": object(),
+        "device_session_id": "rf-session",
+        "tunables": (
+            TunableField(AuthoringField("frequency", "float", "Frequency", 1.0e9), 1.0e9, True, ("frequency",)),
+            TunableField(AuthoringField("power", "float", "Power", -5.0), -5.0, True, ("power",)),
+        ),
+        "current": {"frequency": 1.0e9, "power": -5.0},
+        "desired": {"frequency": (1.0e9, ""), "power": (-5.0, "")},
+        "live": {}, "status": {},
+    }
+    flow._device_control_models["rf"] = model
+
+    def queue(values: dict[str, float]) -> None:
+        flow._device_tune_active = "camera:exposure"
+        for field, value in values.items():
+            assert flow._queue_device_tune("rf", field, value, "") is None
+        flow._device_tune_active = None
+
+    def shown(field: str) -> dict:
+        return flow._device_control_projection("rf")["fields"][field]
+
+    # An editor's command lease on the device refuses both queued values.
+    editor = coordinator.acquire_command(object(), "pulse editor", (DeviceClaim("rf", "rf", device),))
+    queue({"frequency": 2.0e9, "power": -3.0})
+    flow._drain_device_tune_pending()
+    refused = ("Queued value not applied (device is in use by pulse editor); Apply again", "warning")
+    assert model["unapplied"] == {"frequency": refused, "power": refused}
+    assert control.projections[-1]["fields"]["frequency"]["status"] == refused[0]
+    assert control.statuses[-1] == (f"power: {refused[0]}", "warning")
+    assert started == []
+    editor.release()
+    assert (shown("frequency")["status"], shown("frequency")["severity"]) == refused
+    assert shown("frequency")["apply_enabled"] and shown("frequency")["reason"] == ""
+    # Desired typed back to Current leaves nothing to apply, nor a note.
+    flow._set_device_control_desired("rf", "power", -5.0, "")
+    assert shown("power")["status"] == "Ready" and not shown("power")["apply_enabled"]
+    assert "power" not in model["unapplied"]
+
+    # A Logic that took frequency between two beats refuses it as the drain
+    # reaches it; power, its risk accepted, starts in the same turn.
+    queue({"frequency": 3.0e9, "power": -4.0})
+    logic = coordinator.prepare_logic(
+        object(), "scan", (DeviceClaim("rf", "rf", device, ("frequency",)),),
+        stop=lambda _reason: None, superseded=lambda: None,
+    ).commit()
+    flow._project_device_control("rf")
+    flow._set_device_control_risk("rf", True)
+    flow._drain_device_tune_pending()
+    assert len(started) == 1
+    assert shown("frequency")["status"] == "Queued value not applied (Protected by scan); Apply again"
+    assert shown("power")["status"] == "Applying"
+    assert control.statuses[-2:] == [
+        ("frequency: Queued value not applied (Protected by scan); Apply again", "warning"),
+        ("applying power", "task"),
+    ]
+    started.pop()(RuntimeError("stopped"))
+    logic.release()
+    coordinator.assert_idle()

@@ -26,7 +26,10 @@ SRC = ROOT / "src" / "zlc_pulse"
 #: package with its own writer is a package whose files differ from the rest
 #: in line endings, temp-file discipline and crash behaviour.
 #:
-#: The allowance costs no isolation, which the test below is what keeps true.
+#: The allowance costs no isolation: each of the two keeps its own rule in its
+#: own suite -- zlc_data numpy and the standard library, zlc_durable the
+#: standard library alone -- so what comes in behind them is checked where a
+#: change to them is tested.
 ALLOWED_TOP_LEVEL = {
     "numpy",
     "serial",
@@ -34,9 +37,6 @@ ALLOWED_TOP_LEVEL = {
     "zlc_durable",
     "zlc_pulse",
 }
-
-#: The allowed layers, each of which must stay as light as this package is.
-LIGHT_LAYERS = ("zlc_data", "zlc_durable")
 
 
 def _imported_top_levels(path: Path) -> list[str]:
@@ -58,25 +58,6 @@ def test_source_imports_only_the_package_and_allowed_dependencies() -> None:
         for path in SRC.rglob("*.py")
         for name in _imported_top_levels(path)
         if name not in ALLOWED_TOP_LEVEL
-        and name not in sys.stdlib_module_names
-    ]
-    assert offenders == []
-
-
-def test_the_allowed_layers_carry_nothing_in_behind_them() -> None:
-    """An allowed layer may be imported only while it is as light as this one.
-
-    An allowance to import one layer is an allowance to import whatever that
-    layer imports.  Written down, they stay a unit vocabulary and a file
-    writer; unwritten, it is the day zlc_pulse quietly needs matplotlib.
-    """
-
-    offenders = [
-        (layer, path.name, name)
-        for layer in LIGHT_LAYERS
-        for path in (ROOT.parents[0] / layer / "src" / layer).rglob("*.py")
-        for name in _imported_top_levels(path)
-        if name not in {"numpy", layer}
         and name not in sys.stdlib_module_names
     ]
     assert offenders == []

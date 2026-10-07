@@ -116,7 +116,7 @@ def _project(view: DataView, spec) -> None:
     elif isinstance(spec, RollingPlot):
         view.rolling_history(group=spec.group, aggregation=spec.reduction)
     elif isinstance(spec, HistogramPlot):
-        view.histogram(bins=_BINS)
+        view._histogram_from_plan(_BINS, view._histogram_plan((), (), Reduction.MEAN, 1))
     else:  # pragma: no cover
         raise AssertionError(f"unhandled spec: {spec!r}")
 

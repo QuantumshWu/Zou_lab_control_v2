@@ -587,7 +587,9 @@ class _DataEditorView(QtWidgets.QWidget):
             "domain": self.domain_combo.currentData(),
         }
         if self._adding_axis:
-            self._adding_axis = False
+            # Still adding until the projection shows the axis made
+            # (update_projection): a refused Create keeps the draft and the
+            # button that creates it.
             self._emit("add_axis", **values)
         elif self._selected_axis:
             self._emit("edit_axis", axis_id=self._selected_axis, **values)
@@ -711,7 +713,15 @@ class _DataEditorView(QtWidgets.QWidget):
                 )
                 for axis in axes
             )
+            listed = {self.axis_combo.itemData(index) for index in range(self.axis_combo.count())}
             _fill_choice_combo(self.axis_combo, axis_rows, selected_axis)
+            if self._adding_axis and selected_axis and selected_axis not in listed:
+                # Create landed: the presenter selects the axis it made,
+                # which the list did not hold.  Cleared when Create was
+                # pressed, a refusal re-projected the selected axis over the
+                # draft and turned the button into its Apply -- or, with no
+                # projection at all, left a Create button that did nothing.
+                self._adding_axis = False
             if self._adding_axis:
                 self.axis_combo.setCurrentIndex(-1)
             self._selected_axis = selected_axis

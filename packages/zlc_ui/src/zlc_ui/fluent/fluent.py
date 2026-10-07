@@ -1268,6 +1268,9 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._allow_any = True
         self._numeric_bounds: tuple[float | None, float | None, str] = (None, None, "float")
         self._numeric_validator = False
+        #: ``(kind, bottom, top, decimals)`` of the validator
+        #: set_numeric_validator installed; None once anything else replaced it.
+        self._validator_spec: tuple | None = None
         self._quantity_unit = ""
         self._shown_quantity_unit = ""
         self._normalization_timer: QtCore.QTimer | None = None
@@ -1350,8 +1353,8 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         bottom, top, kind = self._numeric_bounds
         requested_number = number
         if kind == "quantity":
-            bottom = None if bottom is None else DEFAULT_UNITS.convert_decimal(bottom, self._quantity_unit, self._shown_quantity_unit)
-            top = None if top is None else DEFAULT_UNITS.convert_decimal(top, self._quantity_unit, self._shown_quantity_unit)
+            bottom = _bound_in_unit(bottom, self._quantity_unit, self._shown_quantity_unit)
+            top = _bound_in_unit(top, self._quantity_unit, self._shown_quantity_unit)
         low = None if bottom is None else _finite_decimal(bottom)
         high = None if top is None else _finite_decimal(top)
         available = _numeric_text_width(self)
@@ -1451,7 +1454,14 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._allow_any = bool(allow_any)
 
     def setValidator(self, validator) -> None:  # noqa: N802
+        replaced = self.validator()
         super().setValidator(validator)
+        if replaced is not None and replaced is not validator and replaced.parent() is self:
+            # QLineEdit only points at its validator: one it replaced stays a
+            # child of the edit until the edit dies, and every projection
+            # re-declares the bounds of the boxes it keeps.
+            replaced.deleteLater()
+        self._validator_spec = None
         self._numeric_validator = isinstance(validator, (QtGui.QIntValidator, QtGui.QDoubleValidator))
         if self._numeric_validator:
             self._numeric_bounds = (
@@ -1487,9 +1497,16 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         then neither accepted nor refused nor reported: the operator types 700,
         presses the button, and nothing happens at all.  Clamping before Qt
         decides whether to emit means the field always leaves in a state it can
-        commit."""
+        commit.
+
+        The same bounds declared again are the validator already installed:
+        a projection re-declares every field it keeps."""
 
         self._numeric_bounds = (bottom, top, kind)
+        spec = (kind, bottom, top, int(decimals))
+        if spec == self._validator_spec:
+            self._numeric_validator = True
+            return
         if kind == "int":
             low, high = QT_INT_RANGE
             if all(
@@ -1518,6 +1535,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         # Force a dot decimal separator regardless of the system locale.
         validator.setLocale(QtCore.QLocale.c())
         self.setValidator(validator)
+        self._validator_spec = spec
         self._numeric_bounds = (bottom, top, kind)
         self._numeric_validator = True
 
@@ -3993,11 +4011,15 @@ class FluentUnitPicker(FluentTreeComboBox):
 
         In place.  The tree is reconciled, not the picker rebuilt, so a row
         that keeps its picker keeps its place in the layout and in the
-        focus chain -- and a unit that did not change costs nothing.
+        focus chain -- and a unit that did not change is only selected
+        again.  That is how a refused pick is put back: the tree names the
+        leaf before it asks, and left there the next number typed would be
+        read in a unit the picker does not say.
         """
 
         wanted = str(unit).strip() or "1"
         if wanted == self._unit:
+            self.select_choice_key(wanted)
             return
         tree = unit_choice_tree(wanted)
         self._unit = wanted
@@ -4985,18 +5007,6 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         if self.value() != previous:
             self._queue_normalization()
 
-    def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
-        """Accepted and ignored: a count has no scale to choose between.
-
-        These are counts of things -- pixels, shots, windows -- so there is
-        no ladder to offer and nothing for a picker to do.  What the number
-        counts is said by the row's label, which every field's is, and
-        printing it inside the box as a suffix said it a second time in the
-        one place the operator is trying to type.
-        """
-
-        del unit
-
     def setMinimum(self, minimum: int) -> None:  # noqa: N802
         self.setRange(int(minimum), self.maximum())
 
@@ -5302,6 +5312,12 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         previous_value = self._value
         self._low = None if low <= -sys.float_info.max else _finite_decimal(minimum)
         self._high = None if high >= sys.float_info.max else _finite_decimal(maximum)
+        # ``unit`` is what the NUMBER is in -- the owner's unit, and its
+        # range's; the digits' own spelling is the picker's beside the box.
+        # Re-declared, it is not changed: every projection re-configures the
+        # box it keeps, and the spelling the operator chose to read it in is
+        # theirs -- reset on every draft, "ms" snapped back to "s" the
+        # moment the wheel stopped.
         if wanted_unit != self._unit:
             self._unit = self._shown_unit = wanted_unit
         self._display_text = ""
@@ -5454,30 +5470,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     # ------------------------------------------------------------- the unit
 
-    def setValueUnit(self, unit: str) -> None:  # noqa: N802 - Qt API name
-        """What this box's NUMBER is in -- its owner's unit, and its range's.
-
-        The box shows and takes DIGITS.  Which unit those digits are in is
-        said beside it, by the picker the row mounts, and choosing there is
-        the only way the scale changes: a prefix typed into the number is a
-        second way to say the same thing, in the one place where getting it
-        wrong is silent and expensive.
-        """
-
-        wanted = str(unit).strip() or "1"
-        if wanted == self._unit:
-            # Re-declared, not changed.  Every projection re-configures the
-            # box it keeps, and the spelling the operator chose to read it
-            # in is theirs: resetting it to the owner's unit on every draft
-            # is how "ms" snapped back to "s" the moment the wheel stopped.
-            return
-        previous = self._unit, self._shown_unit, self._display_text
-        self._unit = wanted
-        self._shown_unit = wanted
-        self._display_text = ""
-        if not self._commit(self._value, notify_normalized=True):
-            self._unit, self._shown_unit, self._display_text = previous
-
     def valueUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._unit
 
@@ -5509,16 +5501,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         return DEFAULT_UNITS.convert_decimal(number, self._shown_unit, self._unit)
 
     def _shown_bound(self, edge: Decimal | None) -> Decimal | None:
-        """One declared bound in the unit on screen, or None where there is
-        none there: 0 W has no dBm to be, so a floor of 0 W is no floor in
-        dBm, and an undeclared side has no bound in any unit."""
-
-        if edge is None:
-            return None
-        try:
-            return self._shown_from_value(edge)
-        except (UnitError, ValueError, ArithmeticError):
-            return None
+        return _bound_in_unit(edge, self._unit, self._shown_unit)
 
     # ------------------------------------------------------------- stepping
 
@@ -5780,6 +5763,23 @@ def _finite_decimal(value: object) -> Decimal:
     if number is None or not number.is_finite():
         raise ValueError(f"not a finite number: {value!r}")
     return number
+
+
+def _bound_in_unit(edge: object, unit: str, shown: str) -> Decimal | None:
+    """One declared bound in the unit on screen, or None where there is
+    none there: 0 W has no dBm to be, so a floor of 0 W is no floor in
+    dBm, and an undeclared side has no bound in any unit.
+
+    Both numeric boxes ask this.  Converted without the question, the
+    quantity line edit raised out of a resize for a W field read in dBm.
+    """
+
+    if edge is None:
+        return None
+    try:
+        return DEFAULT_UNITS.convert_decimal(edge, unit, shown)
+    except (UnitError, ValueError, ArithmeticError):
+        return None
 
 
 def _grid_step(value: Decimal, step: Decimal, steps: int) -> Decimal:

@@ -16,9 +16,9 @@
 // Control path (all behind ONE proven axi_bram_ctrl, so AXI handshakes are the
 // vendor IP -- only a SIMPLE combinational write decoder is custom):
 //   jtag_axi_0 -> axi_bram_ctrl_0 -> {bram_addr_a, bram_we_a, ...} -> decoder,
-//   by word-address region (bases == host.wire.region_bases, single source):
-//     R_CTRL  regfile: scalars + COMMAND/STATUS mailbox + LOOP_TABLE_COUNT + BANK_SIZE
-//             + SLOT_COUNT + CURSOR(read-back) + BANK_READY(host-written)
+//   by word-address region (bases == zlc_pulse.wire.region_bases, single source):
+//     R_CTRL  regfile: scalars + COMMAND/STATUS mailbox + LOOP_TABLE_COUNT
+//             + CURSOR(read-back) + BANK_READY(host-written)
 //     R_ROWS  period-row BRAM: ROW_WORDS 32-bit words per row on port A, one
 //             whole row (ROW_PORTB_BITS) per engine read on port B
 //     R_SCAN  scan BRAM (one slot vector per point), 2*BANK_SIZE deep (ping-pong)
@@ -35,9 +35,9 @@
 // RD_LAT=2 prefetch pipeline is deterministic and back-to-back 20 ns rows play
 // one per clock (see zlc_period_streamer.v and the xsim benches).
 //
-// Geometry localparams are computed by the SAME formulas as host.wire.region_bases
+// Geometry localparams are computed by the SAME formulas as zlc_pulse.wire.region_bases
 // (locked by the wire tests); the create-project tcl derives the BRAM IP geometry
-// from host.wire too.
+// from zlc_pulse.wire too.
 // =============================================================================
 
 module zlc_pulse_streamer_top #(
@@ -101,7 +101,7 @@ module zlc_pulse_streamer_top #(
     localparam integer BUS_ACTION_BITS = 2 + SLOT_SEL_WIDTH + BUS_WIDTH;
     localparam integer ROW_BITS = TICK_WIDTH + SLOT_SEL_WIDTH + TTL_CHANNEL_COUNT + BUS_COUNT * BUS_ACTION_BITS;
 
-    // --- word-address region bases (== host.wire.region_bases) ---------------
+    // --- word-address region bases (== zlc_pulse.wire.region_bases) ---------------
     localparam integer R_CTRL_BASE = 0;
     localparam integer R_CTRL_WORDS = 64;
     localparam integer R_ROWS_BASE  = R_CTRL_BASE + R_CTRL_WORDS;
@@ -114,7 +114,7 @@ module zlc_pulse_streamer_top #(
     localparam integer R_DELAY_WORDS = `ZLC_DELAY_REG_WORDS;   // >= TTL_CHANNEL_COUNT + BUS_COUNT
     localparam integer R_TOTAL_WORDS = R_DELAY_BASE + R_DELAY_WORDS;
 
-    // CTRL regfile word offsets (== host.wire.CtrlWords).
+    // CTRL regfile word offsets (== zlc_pulse.wire.CtrlWords).
     localparam integer C_COMMAND = 1;   // bit0 LOAD bit1 FIRE bit2 RESET bit3 SAFE
     localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ENGINE_ERROR bit4 UNDERFLOW bit5 LINK_ERROR
     localparam integer C_PROG_COUNT = 3;
@@ -122,8 +122,6 @@ module zlc_pulse_streamer_top #(
     localparam integer C_SCAN_ENABLE = 5;
     localparam integer C_RUN_REPEAT_COUNT = 6;
     localparam integer C_LOOP_TABLE_COUNT = 7;
-    localparam integer C_BANK_SIZE = 13;
-    localparam integer C_SLOT_COUNT = 14;
     localparam integer C_CURSOR = 15;       // engine -> host (cumulative row-visit ordinal)
     localparam integer C_BANK_READY = 16;   // host -> engine (bit b: bank b loaded)
     localparam integer C_BANK0_CHUNK = 17;  // host -> engine: sweep chunk resident in bank 0
@@ -139,7 +137,7 @@ module zlc_pulse_streamer_top #(
     wire [BUS_COUNT*BUS_WIDTH-1:0] zlc_bus_out;
     wire zlc_running, zlc_done, zlc_underflow, zlc_overflow, zlc_physical_active;
     wire [SCAN_COUNT_WIDTH-1:0] zlc_cursor;
-    reg eng_reset = 1'b1, eng_start = 1'b0;
+    reg eng_reset = 1'b1, eng_start = 1'b0, eng_arm = 1'b0;
 
     // --- delays: BOTH TTL channels AND DAC buses use the 32b/word R_DELAY register region,
     // driving the per-signal event scheduler (long delays; see zlc_period_streamer).
@@ -361,14 +359,22 @@ module zlc_pulse_streamer_top #(
     // (different) fingerprint or ctrl_reg[63]=0 here, so a mismatched host refuses it.
     localparam integer C_LAYOUT_ID = 63;
     localparam [31:0] ZLC_LAYOUT_ID = LAYOUT_FINGERPRINT[31:0];   // geometry fingerprint (wire.build_fingerprint)
-    always @(*) begin
-        if (sel_ctrl) bram_douta = (word_addr[5:0] == C_LAYOUT_ID[5:0])
-                                   ? ZLC_LAYOUT_ID : command_readback(word_addr[5:0], ctrl_reg[word_addr[5:0]], ack_id, ack_status, ack_cursor);
-        else bram_douta = 32'b0;
+    // REGISTERED on the port enable, exactly the one-clock BRAM port axi_bram_ctrl is
+    // configured for (READ_LATENCY 1 in create_project.tcl): the controller samples a beat
+    // the clock AFTER it presented that beat's address, and within a burst it may already
+    // present the next address in that clock.  A combinational mux is right only while the
+    // address stays put -- single-word reads -- and could hand a multi-word read (the command
+    // completion's ACK_ID..ACK_CURSOR, the observer's STATUS..CURSOR poll) every word shifted
+    // by one.
+    always @(posedge clk) begin
+        if (bram_ena)
+            bram_douta <= !sel_ctrl ? 32'b0
+                        : (word_addr[5:0] == C_LAYOUT_ID[5:0]) ? ZLC_LAYOUT_ID
+                        : command_readback(word_addr[5:0], ctrl_reg[word_addr[5:0]], ack_id, ack_status, ack_cursor);
     end
 
-    // UART read tap: COMBINATIONAL, byte-identical to the AXI read mux above (same hardwired LAYOUT_ID
-    // readback).  MUST NOT be registered: the bridge sets u_rd_word with a NON-BLOCKING assign in D_READ
+    // UART read tap: COMBINATIONAL, the same readback as the AXI read mux above (same hardwired LAYOUT_ID
+    // readback) one clock sooner.  MUST NOT be registered: the bridge sets u_rd_word with a NON-BLOCKING assign in D_READ
     // (so u_rd_word is valid only in the NEXT state, D_RLAT) and latches u_rd_data into wbuf THAT SAME
     // D_RLAT cycle.  A registered tap adds a second cycle of latency, so the bridge would capture the
     // PREVIOUS word's value -> every UART read returns stale data (observed on hardware).
@@ -416,7 +422,7 @@ module zlc_pulse_streamer_top #(
     // the resident image, and starts it.  SAFE can interrupt any state and preserves a
     // fully loaded program.  Rising-edge-detected commands.
     localparam CMD_LOAD = 4'b0001, CMD_FIRE = 4'b0010, CMD_RESET = 4'b0100, CMD_SAFE = 4'b1000;
-    // STATUS bit map MUST match host.wire: LOADED=1 RUNNING=2 DONE=4
+    // STATUS bit map MUST match zlc_pulse.wire: LOADED=1 RUNNING=2 DONE=4
     // ENGINE_ERROR=8 UNDERFLOW=16 LINK_ERROR=32.  Underflow is bit4 (NOT bit3) so a transient
     // streaming STALL is never confused with the host's fatal ERROR bit.
     localparam [4:0] ST_LOADED = 5'd1, ST_RUNNING = 5'd2, ST_DONE = 5'd4,
@@ -434,6 +440,10 @@ module zlc_pulse_streamer_top #(
     // A Fire holds the engine in reset long enough for its arm to flush and refill
     // its prefetch FIFOs from the resident image at least once (the engine flushes
     // every 2^ARM_PERIOD_BITS clocks and refills within FIFO_DEPTH + RD_LAT + 2).
+    // The period is counted from the eng_arm strobe the Fire raises, so the last
+    // flush lands at a fixed distance before the release -- after LOAD/SAFE the
+    // reset has been held for an arbitrary time, and without the strobe a release
+    // landing within a refill started with empty FIFOs (ERROR|UNDERFLOW).
     // These are fabric clocks, not a host polling gap.
     localparam integer ENGINE_ARM_PERIOD = 64;
     localparam integer ENGINE_ARM_CYCLES = 2 * ENGINE_ARM_PERIOD + 16;
@@ -468,6 +478,7 @@ module zlc_pulse_streamer_top #(
     always @(posedge clk) begin
         ldr_status_we <= 1'b0;
         eng_start <= 1'b0;
+        eng_arm <= 1'b0;
         cmd_seen <= cmd_now;
         if (u_cmd_reply_valid && u_cmd_reply_ready) u_cmd_reply_valid <= 1'b0;
         if (u_protocol_error) protocol_error <= 1'b1;
@@ -491,7 +502,10 @@ module zlc_pulse_streamer_top #(
                 resident_valid <= 1'b0;
                 command_wait <= 8'd4; lstate <= L_LOAD;
             end else if (command_code == CMD_FIRE && resident_valid && !status_running && ctrl_reg[C_PROG_COUNT] != 0) begin
-                eng_reset <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
+                // eng_arm restarts the engine's arm period at this clock, so its last
+                // flush lands well before the release below whatever the phase the
+                // reset held since LOAD/SAFE had reached.
+                eng_reset <= 1'b1; eng_arm <= 1'b1; status_running <= 1'b0; protocol_error <= 1'b0;
                 command_wait <= ENGINE_ARM_CYCLES; lstate <= L_ARM;
             end else begin
                 ack_id <= command_id; ack_status <= {27'b0, ST_ERROR}; ack_cursor <= zlc_cursor;
@@ -577,7 +591,7 @@ module zlc_pulse_streamer_top #(
         // generated memory/core output stages make issue->data RD_LAT+2 cycles.
         .RD_LAT(2), .ARM_PERIOD_BITS(6)
     ) zlc_engine_i (
-        .clk(axi_clk), .reset(eng_reset), .start(eng_start),
+        .clk(axi_clk), .reset(eng_reset), .start(eng_start), .arm(eng_arm),
         .prog_count(ctrl_reg[C_PROG_COUNT][ROW_ADDR_WIDTH:0]),
         .run_repeat_count(ctrl_reg[C_RUN_REPEAT_COUNT]),
         .scan_enable(ctrl_reg[C_SCAN_ENABLE][0]),

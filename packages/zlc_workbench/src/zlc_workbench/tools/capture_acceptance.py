@@ -1,7 +1,7 @@
 """Capture one workbench window for visual acceptance, on a real screen.
 
     zlc capture --view console --template virtual
-    zlc capture --view pulse --pulse imaging_template.json
+    zlc capture --view pulse --workspace D:/experiment --pulse imaging.json
     zlc capture --view figure --path run.npz
     zlc capture --view device --workspace D:/experiment
 

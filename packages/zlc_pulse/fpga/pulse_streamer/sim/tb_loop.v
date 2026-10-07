@@ -47,7 +47,7 @@ module tb_loop;
   wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
   zlc_period_streamer dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(prog_count_r),.run_repeat_count(32'd1),
+    .clk(clk),.reset(reset),.start(start),.arm(1'b0),.prog_count(prog_count_r),.run_repeat_count(32'd1),
     .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
     .loop_table_count(ltc_r),.loop_first_flat(loop_first),.loop_last_flat(loop_last),.loop_count_flat(loop_count),
     .row_raddr(row_raddr),.row_rdata(row_rdata),

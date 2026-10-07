@@ -84,6 +84,10 @@ _FRAME_SOURCES = frozenset({FRAMES_FROM_CAMERA, FRAMES_FROM_FOLDER})
 #: picture, in the shared format the figure viewer opens.
 SAVED_SAMPLE_STEM = "sample"
 
+#: The one operator-input kind this task raises: which of the detected
+#: sites the calibration keeps.
+SITE_REVIEW_REQUEST = "point-selection"
+
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
 
 
@@ -1400,6 +1404,10 @@ class CalibrationTask:
             )
         except BaseException as error:
             if armed:
+                # Walked away from, as a Stop is: the board fired the whole
+                # run up front, so the camera has usually taken frames past
+                # the last cycle read, and that surplus is not a second fault.
+                capture.stopped = True
                 try:
                     capture.close()
                 except BaseException as cleanup_error:
@@ -1622,7 +1630,7 @@ class CalibrationTask:
                     f"Waiting for review of {candidate.n_sites} detected sites"
                 )
                 response = context.request_operator_input(
-                    "point-selection",
+                    SITE_REVIEW_REQUEST,
                     title="Review detected calibration sites",
                     message=(
                         "Exclude high-order diffraction or other unwanted sites, "
@@ -1967,4 +1975,5 @@ __all__ = [
     "CalibrationRequest",
     "CalibrationRunResult",
     "CalibrationTask",
+    "SITE_REVIEW_REQUEST",
 ]

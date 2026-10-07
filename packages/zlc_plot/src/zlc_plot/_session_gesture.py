@@ -9,7 +9,7 @@ import math
 import numpy as np
 
 from ._axis_transform import AxisTransform
-from ._axis_scale import axis_space, axis_value
+from ._axis_scale import axis_space, axis_value, placed
 from ._gesture_engine import (
     _ColorGesture,
     _ColorLimitDrag,
@@ -34,10 +34,22 @@ from .selectors import (
     SelectorState,
 )
 from .specs import FacetGridPlot, ImagePlot
-from .kinds import AxisRef
 
 if TYPE_CHECKING:
     from .session import PlotSession
+
+
+def _drawn_bounds(limits: tuple[float, float]) -> NumericRange | None:
+    """The canonical extent a selector is held to, or None where there is none.
+
+    An axis drawn in a display unit can end on a value its canonical unit
+    cannot express: a dBm value shown in mW is drawn from 0 mW, which is
+    -inf dBm, and panned below it reaches mW that have no dBm at all.
+    Building a range from that raised on the press and on every move of
+    every drag on the axis; a drag on it is simply not held.
+    """
+
+    return NumericRange(*limits) if all(map(math.isfinite, limits)) else None
 
 
 class GestureSessionMixin:
@@ -65,20 +77,41 @@ class GestureSessionMixin:
         *,
         captured_transform: AxisTransform | None = None,
     ) -> CrosshairPoint | None:
+        """The canonical point under ``event``, or None where it reads nothing.
+
+        A drag follows the hand on every coordinate it can read.  Over what
+        nothing can be read from (below 0 mW on a dBm value) it keeps the
+        coordinate its last reading gave -- axis by axis, as a box stopped
+        by a wall on one axis still slides along the other.  Required of
+        both, an X range, an Area's side or its body stopped following a
+        hand that drifted below a 0 mW floor, where the coordinate it moves
+        was perfectly readable.  A press and a new box need both: held on
+        one axis, a new box dragged straight past the floor would come out
+        flat, and a flat box takes the committed one away.
+        """
+
         assert self._renderer is not None
         if captured_transform is None:
             return None
-        point = captured_transform.canonical_point(
+        reading = captured_transform.canonical_reading(
             event,
             self._renderer.figure.canvas,
         )
-        if point is None:
+        if reading is None:
             return None
-        return (
-            CrosshairPoint(point.x, point.x)
-            if self._threshold_gesture_on_histogram()
-            else point
-        )
+        x, y = reading
+        gesture = self._gesture
+        if isinstance(gesture, _SelectorGesture) and gesture.handle is not DragHandle.NEW:
+            x = x if math.isfinite(x) else gesture.reading.x
+            y = y if math.isfinite(y) else gesture.reading.y
+        if self._threshold_gesture_on_histogram():
+            y = x
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        point = CrosshairPoint(x, y)
+        if isinstance(gesture, _SelectorGesture):
+            gesture.reading = point
+        return point
 
     def _is_double_click(self, event: Any, button: int) -> bool:
         """Normalize native, browser-detail, and timed middle/right clicks."""
@@ -267,6 +300,7 @@ class GestureSessionMixin:
             handle,
             point,
             (float(event.x), float(event.y)),
+            reading=point,
         )
 
 
@@ -385,11 +419,14 @@ class GestureSessionMixin:
             # scale-blind.  The fallback was also unreachable: the only
             # caller returns before this when the press carried no
             # transform.  A dead branch that is right, beside a live one
-            # that is wrong, is how the defect stayed invisible.
+            # that is wrong, is how the defect stayed invisible.  An end
+            # the scale cannot place is where the scene draws it, at the
+            # wall (:func:`placed`); at -inf pixels its handles could not
+            # be grabbed.
             return np.asarray(
                 transform.display_to_pixel(
-                    coordinate[0],
-                    coordinate[1],
+                    placed(coordinate[0], transform.x_limits, transform.x_scale),
+                    placed(coordinate[1], transform.y_limits, transform.y_scale),
                     canvas,
                 ),
                 dtype=float,
@@ -517,13 +554,18 @@ class GestureSessionMixin:
         event_axes: Any,
         *,
         event: Any | None = None,
-        transform: AxisTransform | None = None,
+        transform: AxisTransform,
     ) -> tuple[SelectorState, DragHandle] | None:
-        x_bounds = self._selector_x_bounds(transform)
-        y_bounds = self._selector_y_bounds(transform)
         hit_fraction = self._defaults.interaction.selector_hit_radius_fraction
-        tx = max(x_bounds.span * hit_fraction, 1e-12)
-        ty = max(y_bounds.span * hit_fraction, 1e-12)
+        # Ends and thresholds are scored where each axis is straight, as a
+        # fraction of what is DRAWN there.  A fraction of the canonical
+        # span was no reach at all on an axis ending where its unit has no
+        # value (0 mW on a dBm value), and on a log or display-unit axis
+        # it reached far at one end of the box and nowhere at the other.
+        x_scale = transform.interaction_scale("x")
+        y_scale = transform.interaction_scale("y")
+        tx = max(hit_fraction * transform.drawn_span("x"), 1e-12)
+        ty = max(hit_fraction * transform.drawn_span("y"), 1e-12)
         candidates: list[
             tuple[int, float, int, SelectorState, DragHandle]
         ] = []
@@ -536,7 +578,7 @@ class GestureSessionMixin:
             score = float("inf")
             handle = DragHandle.BODY
             if state.kind is SelectorKind.X_RANGE and isinstance(value, NumericRange):
-                endpoint = range_endpoint_hit(value, point.x, tx)
+                endpoint = range_endpoint_hit(value, point.x, tx, x_scale)
                 if endpoint is not None:
                     score, handle = endpoint
                 elif value.low <= point.x <= value.high:
@@ -551,11 +593,14 @@ class GestureSessionMixin:
                 if area_hit is not None:
                     score, handle = area_hit
             elif state.kind is SelectorKind.THRESHOLD:
-                score = (
-                    abs(point.x - float(value)) / tx
+                coordinate, scale, reach = (
+                    (point.x, x_scale, tx)
                     if self._projected._is_histogram_plot()
-                    else abs(point.y - float(value)) / ty
+                    else (point.y, y_scale, ty)
                 )
+                score = abs(
+                    axis_space(coordinate, scale) - axis_space(float(value), scale)
+                ) / reach
             if score <= 1.0:
                 kind_priority = (
                     0 if state.kind is SelectorKind.THRESHOLD else 1
@@ -577,61 +622,10 @@ class GestureSessionMixin:
         )
         return state, handle
 
-    def _coordinate_bounds(self, ref: AxisRef) -> NumericRange:
-        # The 1-D canonical domain carries the same extremes as the broadcast
-        # coordinate tensor without materializing megapixels per call.
-        view = self._projected._view
-        if view is not None:
-            domain = np.asarray(view._resolve(ref).domain_canonical, dtype=float)
-            finite = domain[np.isfinite(domain)]
-            if finite.size:
-                return NumericRange(float(np.min(finite)), float(np.max(finite)))
-        values = np.asarray(self._projected._coordinate(ref).canonical, dtype=float)
-        finite = values[np.isfinite(values)]
-        return NumericRange(float(np.min(finite)), float(np.max(finite)))
-
-    def _value_bounds(self) -> NumericRange:
-        # IN THE SAMPLES' OWN DTYPE.  Casting the value plane to float64 to
-        # ask for its extremes copied a whole camera frame, and gathering
-        # ``values[isfinite(values)]`` copied most of it a second time --
-        # the sibling above already refuses to materialize megapixels per
-        # call, and this is the same refusal.  Integers have no non-finite
-        # values to skip; floats get the one-pass masked kernel the
-        # histogram bins already use, and numpy's ``where=`` when it is
-        # not compiled.
-        values = np.asarray(self._projected._value_quantity().canonical)
-        if values.dtype.kind != "f":
-            return NumericRange(float(np.min(values)), float(np.max(values)))
-        from ._raster_kernels import masked_finite_extrema
-
-        extrema = masked_finite_extrema(values, None)
-        if extrema is not None:
-            count, low, high, _integral = extrema
-            if count:
-                return NumericRange(low, high)
-        finite = np.isfinite(values)
-        return NumericRange(
-            float(np.min(values, where=finite, initial=np.inf)),
-            float(np.max(values, where=finite, initial=-np.inf)),
-        )
-
-    def _selector_x_bounds(
-        self,
-        transform: AxisTransform | None = None,
-    ) -> NumericRange:
-        if transform is not None:
-            return NumericRange(*transform.canonical_x_limits)
-        if self._view is None:
-            assert self._renderer is not None
-            return NumericRange(
-                *sorted(map(float, self._renderer.primary_axes.get_xlim()))
-            )
-        source = self._projected._x_selector_source()
-        return (
-            self._coordinate_bounds(source)
-            if isinstance(source, AxisRef)
-            else self._value_bounds()
-        )
+    def _selector_x_bounds(self, transform: AxisTransform) -> NumericRange | None:
+        # Every selector gesture carries the transform it began on: the
+        # extent it is held to is the one DRAWN there.
+        return _drawn_bounds(transform.canonical_x_limits)
 
     def _color_selector_domain(self) -> NumericRange:
         assert self._renderer is not None
@@ -666,51 +660,19 @@ class GestureSessionMixin:
             )
         return ColorLimitCandidate(value)
 
-    def _selector_y_bounds(
-        self,
-        transform: AxisTransform | None = None,
-    ) -> NumericRange:
-        if transform is not None:
-            if self._threshold_gesture_on_histogram():
-                return NumericRange(*transform.canonical_x_limits)
-            return NumericRange(*transform.canonical_y_limits)
+    def _selector_y_bounds(self, transform: AxisTransform) -> NumericRange | None:
         if self._threshold_gesture_on_histogram():
-            return self._selector_x_bounds()
-        if self._view is None:
-            assert self._renderer is not None
-            return NumericRange(
-                *sorted(map(float, self._renderer.primary_axes.get_ylim()))
-            )
-        assert self._renderer is not None
-        visible = NumericRange(
-            *sorted(map(float, self._renderer.primary_axes.get_ylim()))
-        )
-        if self._projected._is_histogram_plot():
-            return visible
-        source = self._projected._y_ref_or_value()
-        return self._projected._display_range_to_canonical(visible, source)
+            return self._selector_x_bounds(transform)
+        return _drawn_bounds(transform.canonical_y_limits)
 
     def _on_motion(self, event: Any) -> None:
         gesture = self._gesture
         if gesture is None:
             return
         if isinstance(gesture, _PanGesture):
-            if gesture.lane_due(
-                "pan",
-                self._defaults.interaction.pointer_update_interval_ms,
-            ):
-                try:
-                    self._update_pan(event, gesture)
-                finally:
-                    gesture.lane_finished("pan")
+            self._update_pan(event, gesture)
             return
         if isinstance(gesture, _OrbitGesture):
-            if not gesture.lane_due(
-                "orbit",
-                self._defaults.interaction.pointer_update_interval_ms,
-            ):
-                return
-            orbit_lane = True
             from ._height3d_raster import HeightBarCamera
 
             dx = float(event.x) - gesture.origin_px[0]
@@ -725,38 +687,46 @@ class GestureSessionMixin:
             )
             gesture.current = camera
             assert self._renderer is not None
-            try:
-                # The moving hand COMMITS the view it is showing.  Held
-                # privately, the turn existed only inside this gesture and
-                # inside the renderer: a live generation arriving mid-drag
-                # mounts a replacement surface from the panel's record, so
-                # a hand that had not let go yet watched the scene snap
-                # home to the view it started from.  The camera has one
-                # owner -- the display parameters -- and the drag writes
-                # it like the scroll wheel already writes the zoom.  What
-                # IS transient is the compose partition: for the length of
-                # the gesture the scene is the dynamic artist and the
-                # chrome beside it is background.  Nothing about the drag
-                # lowers the resolution -- the scene is rendered at the box
-                # size on every frame.
-                self.set_parameters({
-                    "camera_azimuth": camera.azimuth_deg,
-                    "camera_elevation": camera.elevation_deg,
-                })
-            finally:
-                if orbit_lane:
-                    gesture.lane_finished("orbit")
+            # The moving hand COMMITS the view it is showing.  Held
+            # privately, the turn existed only inside this gesture and
+            # inside the renderer: a live generation arriving mid-drag
+            # mounts a replacement surface from the panel's record, so
+            # a hand that had not let go yet watched the scene snap
+            # home to the view it started from.  The camera has one
+            # owner -- the display parameters -- and the drag writes
+            # it like the scroll wheel already writes the zoom.  What
+            # IS transient is the compose partition: for the length of
+            # the gesture the scene is the dynamic artist and the
+            # chrome beside it is background.  Nothing about the drag
+            # lowers the resolution -- the scene is rendered at the box
+            # size on every frame.
+            self.set_parameters({
+                "camera_azimuth": camera.azimuth_deg,
+                "camera_elevation": camera.elevation_deg,
+            })
             return
         if isinstance(gesture, _PickGesture):
             # A scene press is a pick in waiting: release decides click
             # vs inert drag, movement means nothing until then.
             return
+        if isinstance(gesture, _SelectorGesture) and not gesture.moved:
+            # Exact pixel inequality is the sole activation edge; there is
+            # deliberately no arbitrary drag threshold.  Taken before
+            # anything is read: a hand that moved is no click, even over
+            # what nothing can be read from -- let go below a 0 mW floor,
+            # it took the committed selector away as one.
+            gesture.moved = (
+                float(event.x),
+                float(event.y),
+            ) != gesture.origin_px
         point = self._event_canonical(
             event,
             captured_transform=gesture.transform,
         )
         if point is None:
-            self._cancel_gesture()
+            # A new box's hand over what nothing can be read from (below 0
+            # mW on a dBm value) moves nothing: the candidate stays where
+            # the last reading put it.
             return
         if isinstance(gesture, _ColorGesture):
             gesture.drag = gesture.drag.moved(point.x)
@@ -769,13 +739,8 @@ class GestureSessionMixin:
             # Press only arms the selector.  Native double-click delivery
             # necessarily contains an ordinary press/release first, so any
             # controller candidate or compose here would flash an Area even
-            # when the hand never moved.  Exact pixel inequality is the sole
-            # activation edge; there is deliberately no arbitrary drag
-            # threshold.
-            if (
-                float(event.x),
-                float(event.y),
-            ) == gesture.origin_px:
+            # when the hand never moved.
+            if not gesture.moved:
                 return
             self._selector_controller.pointer_down(
                 gesture.kind,
@@ -809,8 +774,8 @@ class GestureSessionMixin:
             # The gesture began on THIS transform, so it is that
             # transform's scales the drag has to slide under -- not
             # whatever the axes happen to carry when it lands.
-            x_scale=gesture.transform.canonical_x_scale or gesture.transform.x_scale,
-            y_scale=gesture.transform.canonical_y_scale or gesture.transform.y_scale,
+            x_scale=gesture.transform.interaction_scale("x"),
+            y_scale=gesture.transform.interaction_scale("y"),
         )
         if updated is not None and updated != current:
             assert self._renderer is not None
@@ -936,8 +901,14 @@ class GestureSessionMixin:
             # Preserve the established single-click grammar: clicking blank
             # plot space removes the committed selector of the same kind.
             # This is a click action, not a zero-size Area gesture, so it
-            # creates no candidate and never ran the preview renderer.
-            if gesture.handle is DragHandle.NEW:
+            # creates no candidate and never ran the preview renderer.  A
+            # hand that moved -- on the way, or to let go elsewhere -- is
+            # no click, though it never started because nothing could be
+            # read where it went.
+            if gesture.handle is DragHandle.NEW and not gesture.moved and (
+                float(event.x),
+                float(event.y),
+            ) == gesture.origin_px:
                 committed = self._projected._selector_state_or_none(
                     gesture.kind
                 )
@@ -953,16 +924,21 @@ class GestureSessionMixin:
                 captured_transform=gesture.transform,
             )
             if point is None:
-                self._cancel_gesture()
-                return
-            candidate = self._selector_controller.finish_gesture(
-                point.x,
-                point.y,
-                x_bounds=self._selector_x_bounds(gesture.transform),
-                y_bounds=self._selector_y_bounds(gesture.transform),
-                x_scale=gesture.transform.canonical_x_scale or gesture.transform.x_scale,
-                y_scale=gesture.transform.canonical_y_scale or gesture.transform.y_scale,
-            )
+                # A new box let go over what nothing can be read from
+                # (below 0 mW on a dBm value) is where the last reading put
+                # it, as the moves there left it.  Cancelled, a box dragged
+                # to the bottom of the axis vanished on release.
+                candidate = self._selector_controller.candidate_state()
+                self._selector_controller.cancel()
+            else:
+                candidate = self._selector_controller.finish_gesture(
+                    point.x,
+                    point.y,
+                    x_bounds=self._selector_x_bounds(gesture.transform),
+                    y_bounds=self._selector_y_bounds(gesture.transform),
+                    x_scale=gesture.transform.interaction_scale("x"),
+                    y_scale=gesture.transform.interaction_scale("y"),
+                )
         except Exception:
             self._cancel_gesture()
             raise

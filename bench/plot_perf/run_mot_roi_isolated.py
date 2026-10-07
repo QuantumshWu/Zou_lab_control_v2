@@ -8,7 +8,62 @@ import numpy as np
 
 from . import probe
 from .common import stats, write_result
-from .run_console import renderer_seams
+
+
+# The seams a frame is made of, DERIVED from the renderer rather than typed
+# out here.  A hand-kept list goes blind exactly when it matters: it had no
+# _update_rolling, so a rolling panel's 31.6 ms per frame sat in
+# _compose_frame's self-time with no child to blame, and a plot kind added
+# tomorrow would be invisible the same way.  Every ``_update_*`` the product
+# defines is a seam by construction; these are the ones whose names do not
+# follow that shape, and one the renderer no longer has is refused.
+_COMPOSE_SEAMS = (
+    "present",
+    "_compose_frame",
+    "_native_draw",
+    "_image_rgba_front",
+    "_view_filling_rgba_front",
+    "_mutate_image_artists",
+    "_cached_image_range",
+    "_blit_exact_rgba_image",
+    "_dynamic_artists",
+    "_raster_prepared_curve_command",
+    "_raster_prepared_error_bars",
+    "_raster_prepared_images",
+    "_thin_overlapping_chrome",
+    "_height_bars_occluded_polyline",
+    "_settle_owned_boxes",
+    "_resolve_image_limits",
+)
+
+
+class HarnessSeamError(RuntimeError):
+    """The bench's idea of the renderer no longer matches the renderer."""
+
+
+def renderer_seams(renderer_type=None) -> tuple[str, ...]:
+    """Every timeable seam on the renderer, product-derived."""
+
+    if renderer_type is None:
+        from zlc_plot.rendering import MatplotlibRenderer as renderer_type
+    updates = tuple(
+        sorted(
+            name
+            for name in vars(renderer_type)
+            if name.startswith("_update_")
+            and callable(vars(renderer_type)[name])
+        )
+    )
+    missing = tuple(
+        name for name in _COMPOSE_SEAMS if not hasattr(renderer_type, name)
+    )
+    if missing:
+        raise HarnessSeamError(
+            "the bench names seams the renderer no longer has: %s. A probe "
+            "that binds nothing reports zero and reads like free work."
+            % ", ".join(missing)
+        )
+    return _COMPOSE_SEAMS + updates
 
 
 def _simulation_feeds(*, updates: int) -> dict:
@@ -84,7 +139,8 @@ def _simulation_feeds(*, updates: int) -> dict:
         )
 
     relative = tuple(range(-39, 1))
-    indexed_schema = _indexed_schema(roi_events[0].block.schema, relative)
+    # A frame-count history without a shot clock: no shot-time axis.
+    indexed_schema = _indexed_schema(roi_events[0].block.schema, relative, None)
     roi_history = []
     camera = []
     for revision in range(1, updates + 4):
@@ -287,12 +343,15 @@ def run(*, updates: int) -> dict:
         # The console's facet grid draws its curve cells with the product
         # default -- uncertainty bars ON -- and this side asks for the same
         # picture, so its numbers can be read beside the chain's report of
-        # the same source.
+        # the same source.  Each Curve/Histogram panel reads its OWN window
+        # (default one shot), so every "-40" here asks for forty, as the
+        # chain's panels do.
         _case(
             "panel3 facet-curve-fit-40",
             roi,
             specs["panel3 facet-curve-fit-40"],
             updates=updates,
+            parameters={"window": 40},
             fit={"model": "gaussian_offset", "fit_all_facets": True},
         ),
         _case(
@@ -300,19 +359,21 @@ def run(*, updates: int) -> dict:
             roi,
             specs["panel3b facet-curve-40"],
             updates=updates,
+            parameters={"window": 40},
         ),
         _case(
             "panel3c facet-histogram-40",
             roi,
             specs["panel3c facet-histogram-40"],
             updates=updates,
+            parameters={"window": 40},
         ),
         _case(
             "panel4 curve-40",
             roi,
             specs["panel4 curve-40"],
             updates=updates,
-            parameters={"uncertainty": True},
+            parameters={"uncertainty": True, "window": 40},
         ),
     ]
     return {

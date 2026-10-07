@@ -15,7 +15,13 @@ their latest event. `index_by_source` declares only that a display-derived
 output is capable of history. Runtime exposes a window-bounded ordinary Dataset
 over a neutral `primary-index` only while a consumer holds a window lease;
 retention begins at the current event, uses the largest active window, and is
-dropped with the last lease. A window whose shots, times the newest event's
+dropped with the last lease. A reader that names a window (a Processor's input
+window, a region's, an overlay's) reads exactly that many source positions
+ending at its publication, from its first event on: a row the history does not
+hold is invalid, so the window's shape never depends on when it was read. An
+exact follower's lease holds the rows it has yet to read while it lags, so
+each publication is evaluated over its full window; readers without a window
+still see only the largest lease's. A window whose shots, times the newest event's
 bytes, less what is already held for it, exceed the machine's free physical
 memory is refused outright rather than truncated: the lease when it is taken or
 grown (less its live history), the commit when a generation's first shot meets

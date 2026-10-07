@@ -25,7 +25,6 @@ def test_validation_accepts_canonical_values_and_normalizes_numeric_scalars():
     assert nonnegative_integer(np.int64(3), "count") == 3
     assert positive_integer(2, "count") == 2
     assert digest_text(digest, "digest") == digest
-    assert digest_text(None, "digest", optional=True) is None
 
 
 def test_canonical_text_rejects_padding_and_wrong_types():

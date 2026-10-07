@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._axis_scale import LINEAR, LOG, axis_space, axis_value
+from ._axis_scale import LINEAR, Scale, axis_space, axis_value, placed
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -373,8 +373,8 @@ def _drag_numeric_range(
     position: float,
     minimum_span: float | None = None,
     bounds: NumericRange | None = None,
-    scale: str = LINEAR,
-) -> NumericRange:
+    scale: Scale = LINEAR,
+) -> NumericRange | None:
     """Resolve every bounded numeric-range drag.
 
     ``minimum_span`` is optional for data selectors and explicit for color
@@ -384,9 +384,14 @@ def _drag_numeric_range(
     ``scale`` is how the axis divides the space between its ends.  Only the
     BODY handle needs it: dragging a body means SLIDE, and sliding is a
     screen operation.  Adding a data delta to both ends slides on a linear
-    axis and stretches on a logarithmic one, where equal screen distances
-    are equal ratios.  Every other handle sets an end to the value under the
+    axis and stretches on any other: a logarithmic one, where equal screen
+    distances are equal ratios, or a nonuniform image lattice, where they
+    are equal cells.  Every other handle sets an end to the value under the
     pointer, which is already the right value whatever the scale.
+
+    None when that slide carries an end where the unit has no value: on an
+    axis without ``bounds`` (drawn from 0 mW, over a dBm value) nothing
+    stops a box slid down past 0 mW, and there is no box there to draw.
     """
 
     if not isinstance(original, NumericRange):
@@ -414,7 +419,9 @@ def _drag_numeric_range(
         raise ValueError("minimum_span must be positive")
     if bounds is not None and (bounds.span <= 0.0 or minimum > bounds.span):
         raise ValueError("bounds must contain the minimum span")
-    original = _clamp_range(original, bounds)
+    slide = handle is DragHandle.BODY and scale != LINEAR
+    if not slide:
+        original = _clamp_range(original, bounds)
     if handle is not DragHandle.NEW and original.span < minimum:
         raise ValueError("original is narrower than minimum_span")
     if handle is DragHandle.NEW:
@@ -433,14 +440,40 @@ def _drag_numeric_range(
         if bounds is not None:
             high = min(high, bounds.high)
         return NumericRange(original.low, high)
-    if scale == LOG:
-        # The same slide, expressed where the axis is straight.
-        moved = axis_space(position, scale) - axis_space(origin, scale)
-        shifted = NumericRange(
-            axis_value(axis_space(original.low, scale) + moved, scale),
-            axis_value(axis_space(original.high, scale) + moved, scale),
+    if slide:
+        # The same slide, expressed where the axis is straight: a log axis'
+        # exponent, a nonuniform image lattice's cell positions, a
+        # nonlinear display unit's own values.  The wall stops it THERE
+        # too, and from the box as it is: pushed back by a data delta, a
+        # box slid against the top of a log axis came back a decade and a
+        # quarter tall, and one sticking out of a zoomed view shrank or
+        # became the whole axis at the first move.  An end the scale cannot
+        # place -- 0 or below on a log axis -- slides from the low wall it
+        # is drawn at (:func:`placed`); taken at -inf, it made the box the
+        # whole view.
+        walls = None if bounds is None else (bounds.low, bounds.high)
+        start, stop = (
+            axis_space(end if walls is None else placed(end, walls, scale), scale)
+            for end in (original.low, original.high)
         )
-        return _clamp_range(shifted, bounds)
+        moved = axis_space(position, scale) - axis_space(origin, scale)
+        if bounds is not None:
+            wall_low, wall_high = sorted(
+                (axis_space(bounds.low, scale), axis_space(bounds.high, scale))
+            )
+            if abs(stop - start) >= wall_high - wall_low:
+                return bounds
+            # The same clamp pulls a box that sticks out back inside.
+            moved = min(
+                max(moved, wall_low - min(start, stop)),
+                wall_high - max(start, stop),
+            )
+        low = axis_value(start + moved, scale)
+        high = axis_value(stop + moved, scale)
+        if not (math.isfinite(low) and math.isfinite(high)):
+            return None
+        # Per-end clamps only absorb the round trip through the scale.
+        return NumericRange(_clamp(low, bounds), _clamp(high, bounds))
     return _clamp_range(original.shifted(position - origin), bounds)
 
 
@@ -551,15 +584,26 @@ class _SelectorController:
             self._states[state.kind] = stored
         return previous, stored
 
-    def retarget_facet(self, facet_index: int, kinds: tuple[SelectorKind, ...]) -> None:
-        """Move shared geometry to another cell without a numeric revision."""
+    def retarget_facet(
+        self, facet_index: int, kinds: tuple[SelectorKind, ...]
+    ) -> "_SelectorController":
+        """Shared geometry on another cell, without a numeric revision.
+
+        A new controller, this one untouched: the facet clamp moves the
+        selectors inside a presentation that can still be refused, and the
+        rollback restores the controller it held -- moved in place, that
+        controller came back with its selectors on the clamped cell.
+        """
         with self._lock:
             if self._gesture is not None:
                 raise RuntimeError("cannot retarget a selector during a pointer gesture")
-            for kind in kinds:
-                state = self._states.get(kind)
-                if state is not None:
-                    self._states[kind] = replace(state, facet_index=facet_index)
+            moved = _SelectorController()
+            moved._states = {
+                kind: replace(state, facet_index=facet_index) if kind in kinds else state
+                for kind, state in self._states.items()
+            }
+            moved._revisions = dict(self._revisions)
+            return moved
 
     def _commit_finished(
         self,
@@ -677,8 +721,8 @@ class _SelectorController:
         *,
         x_bounds: NumericRange | None = None,
         y_bounds: NumericRange | None = None,
-        x_scale: str = LINEAR,
-        y_scale: str = LINEAR,
+        x_scale: Scale = LINEAR,
+        y_scale: Scale = LINEAR,
     ) -> SelectorState | None:
         point = CrosshairPoint(x, y)
         with self._lock:
@@ -726,8 +770,8 @@ class _SelectorController:
         *,
         x_bounds: NumericRange | None = None,
         y_bounds: NumericRange | None = None,
-        x_scale: str = LINEAR,
-        y_scale: str = LINEAR,
+        x_scale: Scale = LINEAR,
+        y_scale: Scale = LINEAR,
     ) -> SelectorState | None:
         """Return the final transient value without committing controller state."""
 
@@ -792,15 +836,19 @@ def _dragged_value(
     *,
     x_bounds: NumericRange | None,
     y_bounds: NumericRange | None,
-    x_scale: str = LINEAR,
-    y_scale: str = LINEAR,
+    x_scale: Scale = LINEAR,
+    y_scale: Scale = LINEAR,
 ) -> SelectorValue:
     handle = gesture.handle
     origin = gesture.origin
     original = gesture.original_value
+    # A slide that would carry an end where the unit has no value leaves
+    # that range where the last move drew it: a hand moves nothing it
+    # cannot draw.
+    last = gesture.candidate_value
     if kind is SelectorKind.X_RANGE:
         assert isinstance(original, NumericRange)
-        return _drag_numeric_range(
+        slid = _drag_numeric_range(
             original,
             handle=handle,
             origin=origin.x,
@@ -808,6 +856,7 @@ def _dragged_value(
             bounds=x_bounds,
             scale=x_scale,
         )
+        return last if slid is None else slid
     if kind is SelectorKind.AREA:
         assert isinstance(original, RectangleRange)
         if handle is DragHandle.NEW:
@@ -818,7 +867,7 @@ def _dragged_value(
                     origin=origin.x,
                     position=point.x,
                     bounds=x_bounds,
-            scale=x_scale,
+                    scale=x_scale,
                 ),
                 _drag_numeric_range(
                     original.y,
@@ -826,28 +875,33 @@ def _dragged_value(
                     origin=origin.y,
                     position=point.y,
                     bounds=y_bounds,
-            scale=y_scale,
+                    scale=y_scale,
                 ),
             )
         x = original.x
         y = original.y
         if handle is DragHandle.BODY:
-            x = _drag_numeric_range(
+            assert isinstance(last, RectangleRange)
+            slid_x = _drag_numeric_range(
                 x,
                 handle=DragHandle.BODY,
                 origin=origin.x,
                 position=point.x,
                 bounds=x_bounds,
-            scale=x_scale,
+                scale=x_scale,
             )
-            y = _drag_numeric_range(
+            slid_y = _drag_numeric_range(
                 y,
                 handle=DragHandle.BODY,
                 origin=origin.y,
                 position=point.y,
                 bounds=y_bounds,
-            scale=y_scale,
+                scale=y_scale,
             )
+            # Against the end of what the unit can express the box stops
+            # on that axis and still slides along the other, as at a wall.
+            x = last.x if slid_x is None else slid_x
+            y = last.y if slid_y is None else slid_y
         else:
             if handle in {DragHandle.LEFT, DragHandle.BOTTOM_LEFT, DragHandle.TOP_LEFT}:
                 x = _drag_numeric_range(
@@ -856,7 +910,7 @@ def _dragged_value(
                     origin=origin.x,
                     position=point.x,
                     bounds=x_bounds,
-            scale=x_scale,
+                    scale=x_scale,
                 )
             if handle in {DragHandle.RIGHT, DragHandle.BOTTOM_RIGHT, DragHandle.TOP_RIGHT}:
                 x = _drag_numeric_range(
@@ -865,7 +919,7 @@ def _dragged_value(
                     origin=origin.x,
                     position=point.x,
                     bounds=x_bounds,
-            scale=x_scale,
+                    scale=x_scale,
                 )
             if handle in {DragHandle.BOTTOM, DragHandle.BOTTOM_LEFT, DragHandle.BOTTOM_RIGHT}:
                 y = _drag_numeric_range(
@@ -874,7 +928,7 @@ def _dragged_value(
                     origin=origin.y,
                     position=point.y,
                     bounds=y_bounds,
-            scale=y_scale,
+                    scale=y_scale,
                 )
             if handle in {DragHandle.TOP, DragHandle.TOP_LEFT, DragHandle.TOP_RIGHT}:
                 y = _drag_numeric_range(
@@ -883,7 +937,7 @@ def _dragged_value(
                     origin=origin.y,
                     position=point.y,
                     bounds=y_bounds,
-            scale=y_scale,
+                    scale=y_scale,
                 )
         return RectangleRange(x, y)
     if kind is SelectorKind.CROSSHAIR:

@@ -2,10 +2,10 @@
 
 ``run_session`` says a revision costs N ms; this says WHICH work that is.
 Every live update is profiled and the samples are folded into named buckets
--- the projection, the artist updates, Matplotlib's own draw (split into
-image, text/ticks, colorbar, the distribution rail, and the rest), and the
-compose/blit that turns a canvas into a front -- so an optimisation can be
-aimed instead of guessed.
+-- the projection, the fit, the artist updates, Matplotlib's own draw (split
+into image, text/ticks, paths/lines, and the rest), and the compose/blit
+that turns a canvas into a front -- so an optimisation can be aimed instead
+of guessed.
 
 Run:  python -m bench.plot_perf.attribute [--only substring] [--updates N]
 """
@@ -23,24 +23,34 @@ matplotlib.use("Agg", force=True)
 from .cases import catalog, open_session  # noqa: E402
 
 
-#: (bucket, predicate over "module:function") in priority order.  The first
-#: match wins, so the specific buckets precede the general ones.
+#: (bucket, predicate over "path:function") in priority order.  The first
+#: match wins, so the specific buckets precede the general ones.  A bucket
+#: reads the file's whole normalised path, so a package directory claims
+#: every module under it however deep: ``zlc_plot/`` all of the plot
+#: package, ``/numpy/`` numpy's ``_core``/``lib`` subpackages, and the
+#: trailing ``matplotlib/`` whatever of Matplotlib's draw (Normalize and
+#: Colormap calls, ``axes/_axes.py``, ``backend_bases.py``) the specific
+#: Matplotlib buckets left.  Matplotlib's specific needles carry their
+#: package directory because a zlc module shares some of its file names
+#: (``_kinds/image.py``, ``zlc_data/axis.py``).
 _BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("compose/blit", ("rendering.py:compose", "rendering.py:present",
                       "raster.py:_compose", "_image_raster.py:",)),
-    ("mpl:text/ticks", ("text.py:", "axis.py:", "ticker.py:", "textpath.py:",
-                        "font_manager.py:", "_mathtext", "backend_agg.py:draw_text",
+    ("mpl:text/ticks", ("matplotlib/text.py:", "matplotlib/axis.py:", "matplotlib/ticker.py:",
+                        "matplotlib/textpath.py:", "matplotlib/font_manager.py:",
+                        "matplotlib/_mathtext", "backend_agg.py:draw_text",
                         "backend_agg.py:_prepare_font", "backend_agg.py:get_text_width_height_descent")),
-    ("mpl:image", ("image.py:", "backend_agg.py:draw_image")),
-    ("mpl:path/line", ("lines.py:", "path.py:", "patches.py:", "collections.py:",
-                       "backend_agg.py:draw_path", "transforms.py:")),
-    ("mpl:draw other", ("backend_agg.py:", "figure.py:", "axes/_base.py:",
-                        "artist.py:", "spines.py:", "colorbar.py:")),
+    ("mpl:image", ("matplotlib/image.py:", "backend_agg.py:draw_image")),
+    ("mpl:path/line", ("matplotlib/lines.py:", "matplotlib/path.py:", "matplotlib/patches.py:",
+                       "matplotlib/collections.py:", "backend_agg.py:draw_path",
+                       "matplotlib/transforms.py:")),
+    ("mpl:draw other", ("matplotlib/",)),
     ("zlc:projection", ("data_view.py:", "_fit_projection.py:", "specs.py:",
-                        "snapshot", "aggregate")),
-    ("zlc:rendering", ("rendering.py:", "session.py:", "selectors.py:",
-                       "ticks.py:", "layout.py:")),
-    ("numpy", ("{built-in method numpy", "numpy/", "numpy\\\\")),
+                        "snapshot", "aggregate", "zlc_data/")),
+    ("zlc:fit", ("zlc_plot/fit.py:", "_session_fit.py:", "_fit_compiled.py:",
+                 "_fit_radial.py:", "_fit_scene.py:")),
+    ("zlc:rendering", ("zlc_plot/",)),
+    ("numpy", ("/numpy/",)),
 )
 
 
@@ -51,13 +61,14 @@ def _bucket(name: str) -> str:
     return "other"
 
 
-def _entry_name(entry) -> str:
-    path, line, function = entry
+def _entry_names(entry) -> tuple[str, str]:
+    """(bucketed, shown): the whole normalised path, and its last two parts."""
+    path, _line, function = entry
     if path in ("~", ""):
-        return f"builtin:{function}"
-    parts = path.replace("\\", "/").split("/")
-    tail = "/".join(parts[-2:]) if len(parts) > 1 else parts[-1]
-    return f"{tail}:{function}"
+        name = f"builtin:{function}"
+        return name, name
+    path = path.replace("\\", "/")
+    return f"{path}:{function}", f"{'/'.join(path.split('/')[-2:])}:{function}"
 
 
 def attribute(case, updates: int) -> dict:
@@ -80,7 +91,7 @@ def attribute(case, updates: int) -> dict:
     buckets: dict[str, float] = {}
     leaders: list[tuple[float, str]] = []
     for entry, (_cc, _nc, tt, _ct, callers) in stats.stats.items():
-        name = _entry_name(entry)
+        path, name = _entry_names(entry)
         if name.startswith("builtin:") and callers:
             # A builtin's self time belongs to whoever ASKED for it: a
             # ufunc reduce is the caller's reduction, not a bucket of its
@@ -93,12 +104,12 @@ def attribute(case, updates: int) -> dict:
             for caller, item in callers.items():
                 count = item[0] if isinstance(item, tuple) else item
                 share = tt * count / total_calls
-                caller_name = _entry_name(caller)
-                bucket = _bucket(caller_name)
+                caller_path, caller_name = _entry_names(caller)
+                bucket = _bucket(caller_path)
                 buckets[bucket] = buckets.get(bucket, 0.0) + share
                 leaders.append((share, f"{name} <- {caller_name}"))
             continue
-        buckets[_bucket(name)] = buckets.get(_bucket(name), 0.0) + tt
+        buckets[_bucket(path)] = buckets.get(_bucket(path), 0.0) + tt
         leaders.append((tt, name))
     leaders.sort(reverse=True)
     return {

@@ -1056,14 +1056,7 @@ def _reconfigure_widget(
             widget.setPlaceholderText(field.description[:48])
         else:
             widget.setPlaceholderText(_blank_placeholder(field))
-            # The validator HOLDS the bounds, so it is replaced when they
-            # move and not otherwise: rebuilt on every reconcile it was a
-            # fresh QValidator per numeric field per projection, and the
-            # one it replaced was never destroyed.
-            if (old_field.kind, old_field.minimum, old_field.maximum, old_field.unit) != (
-                field.kind, field.minimum, field.maximum, field.unit
-            ):
-                _install_validator(field, widget)
+            _install_validator(field, widget)
     elif isinstance(widget, FluentDoubleSpinBox):
         handler = _IntHandler if field.kind == "int" else _FloatHandler
         handler._configure_spin(field, widget, widget.decimalValue() if being_edited(widget) else value)
@@ -1181,6 +1174,9 @@ class FluentParameterForm(QtWidgets.QWidget):
         #: leaves the picker orphaned in the row, painted wherever it was.
         self._cells: dict[str, QtWidgets.QWidget] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
+        #: Rows the host has locked (set_editable): a device another owner
+        #: holds may not be edited, whatever its field declares.
+        self._locked: set[str] = set()
         self._dependents = self._dependency_map(spec)
 
         self._layout = QtWidgets.QVBoxLayout(self)
@@ -1244,14 +1240,14 @@ class FluentParameterForm(QtWidgets.QWidget):
 
     # ------------------------------------------------------- enabled state
     #
-    # ONE formula.  Whether a control may be edited is decided by the field
-    # (unavailable), its Auto switch (Auto holds no value to edit) and the
-    # field that governs it (enabled_when), together -- and every path that
-    # can change any of those projects the result through here.  Written as
-    # three partial formulas in construction, populate and reconcile, the
-    # same values enabled a dependent through one entry and disabled it
-    # through another, and a governed field's Auto state was overwritten by
-    # its controller.
+    # ONE formula.  Whether a control may be edited is decided by the host
+    # (set_editable), the field (unavailable), its Auto switch (Auto holds no
+    # value to edit) and the field that governs it (enabled_when), together
+    # -- and every path that can change any of those projects the result
+    # through here.  Written as three partial formulas in construction,
+    # populate and reconcile, the same values enabled a dependent through one
+    # entry and disabled it through another, and a governed field's Auto
+    # state was overwritten by its controller.
 
     def _controller_value(self, key: str) -> object:
         """What the governing field holds; None while it holds nothing
@@ -1268,6 +1264,10 @@ class FluentParameterForm(QtWidgets.QWidget):
             return None
 
     def _enabled(self, key: str, *, editing: bool = False) -> bool:
+        if key in self._locked:
+            # Not a projection of the draft: the device refuses, and it
+            # refuses under the cursor too.
+            return False
         if editing:
             # The operator is inside it; a projection never takes a control
             # away under their cursor.
@@ -1293,11 +1293,29 @@ class FluentParameterForm(QtWidgets.QWidget):
         self._widgets[key].setEnabled(self._enabled(key, editing=editing))
         automatic = self._auto_switches.get(key)
         if automatic is not None:
-            automatic.setEnabled(not self._fields[key].unavailable)
+            automatic.setEnabled(
+                not self._fields[key].unavailable and key not in self._locked
+            )
 
     def _project_enabled_all(self, *, editing_key: str | None = None) -> None:
         for key in self._spec.keys:
             self._project_enabled(key, editing=key == editing_key)
+
+    def set_editable(self, key: str, editable: bool) -> None:
+        """The host's say over one row, as one more input to the formula.
+
+        A device control whose owner does not hold the device may not edit
+        it.  Written straight onto the editor, that lock was a second writer
+        of the enabled state: the next Auto toggle or governing edit
+        re-enabled a control the device was refusing.
+        """
+
+        self._field_for(key)
+        if editable:
+            self._locked.discard(key)
+        else:
+            self._locked.add(key)
+        self._project_enabled(key)
 
     def _unit_picker(self, field, widget):
         """The shared picker, for a row whose unit has more than one spelling.
@@ -1317,7 +1335,11 @@ class FluentParameterForm(QtWidgets.QWidget):
         return picker
 
     def _shown_unit_picked(self, key: str, symbol: str) -> None:
-        """Select this row's unit through the numeric control's one value path."""
+        """Select this row's unit through the numeric control's one value path.
+
+        A pick the number has no value in (-3 Vpp read in dBm) is refused,
+        and the picker is put back on the unit the box is still read in.
+        """
 
         widget = self._widgets.get(key)
         if widget is None:
@@ -1325,7 +1347,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         try:
             widget.setShownUnit(symbol)
         except UnitError:
-            return
+            pass
         accepted = widget.shownUnit()
         picker = self._unit_pickers.get(key)
         if picker is not None:
@@ -1933,6 +1955,8 @@ class FluentParameterForm(QtWidgets.QWidget):
             self._fields = {field.key: field for field in spec.fields}
             self._handlers = new_handlers
             self._dependents = new_dependents
+            # A row that left takes its lock with it.
+            self._locked.intersection_update(spec.keys)
         finally:
             if structural:
                 self.setUpdatesEnabled(True)

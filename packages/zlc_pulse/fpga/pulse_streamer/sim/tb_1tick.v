@@ -3,14 +3,15 @@
 // 1-tick back-to-back stress on the period table: rows one tick long with ALTERNATING masks,
 // so every 20 ns row must be visible on its own cycle.  Verifies FIFO_DEPTH/PIPE sustains the
 // design's headline 1-tick capability across a long row (a prefetch bubble) and at the very
-// first and last rows of one-row and two-row finite Pulses.
+// first and last rows of one-row and two-row finite Pulses -- and that a FIRE after LOAD/SAFE
+// starts on row 0 at every phase of the arm period (the top's `arm` strobe).
 module tb_1tick;
   localparam integer CH=`ZLC_NUM_DELAY_CH, RAW=`ZLC_ROW_ADDR_WIDTH, TW=32, NS=`ZLC_NUM_SLOTS;
   localparam integer SSW=`ZLC_SLOT_SEL_WIDTH, BUSC=`ZLC_BUS_COUNT, BW=`ZLC_BUS_WIDTH;
   localparam integer ML=`ZLC_MAX_LOOPS, LIW=`ZLC_LOOP_INDEX_WIDTH, DTW=32;
   localparam integer ABITS=2+SSW+BW, RBITS=TW+SSW+CH+BUSC*ABITS;
   localparam integer NE=20;
-  reg clk=0, reset=0, start=0; reg [RAW:0] prog_count=NE; always #10 clk=~clk;
+  reg clk=0, reset=0, start=0, arm=0; reg [RAW:0] prog_count=NE; always #10 clk=~clk;
 
   function [RBITS-1:0] row_of;
     input [TW-1:0] dur; input [CH-1:0] mask;
@@ -27,7 +28,7 @@ module tb_1tick;
   wire [`ZLC_SCAN_ADDR_WIDTH-1:0] scan_raddr; wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
   zlc_period_streamer dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(prog_count),.run_repeat_count(32'd1),
+    .clk(clk),.reset(reset),.start(start),.arm(arm),.prog_count(prog_count),.run_repeat_count(32'd1),
     .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
     .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),
     .loop_last_flat({ML*RAW{1'b0}}),.loop_count_flat({ML*32{1'b0}}),
@@ -66,12 +67,39 @@ module tb_1tick;
     repeat (4) @(posedge clk);
   end endtask
 
+  // FIRE after LOAD/SAFE: reset has been held for an arbitrary time, so the free-running
+  // arm period is at an arbitrary phase.  The top strobes `arm` as it accepts the FIRE and
+  // releases reset ENGINE_ARM_CYCLES later; at every phase row 0 must be resident then.
+  task fire_phase_case; input integer offset; begin
+    reset=1; start=0; prog_count=2;
+    rowmem[0] = row_of(32'd1, 32'h1);
+    rowmem[1] = row_of(32'd1, 32'h2);
+    repeat (offset) @(posedge clk);
+    @(negedge clk); arm=1;
+    @(negedge clk); arm=0;
+    repeat (145) @(posedge clk);                 // the top's L_ARM wait + its L_FIRE clock
+    @(negedge clk); reset=0; start=1;
+    repeat (3) @(posedge clk); #1;
+    if (!running || underflow || out !== 32'h1)
+      $fatal(1, "FIRE %0d clocks into the arm period did not start on row 0: run=%b uf=%b out=%h",
+             offset, running, underflow, out);
+    @(negedge clk); start=0;
+    repeat (10) @(posedge clk); #1;
+    if (!done || running || underflow)
+      $fatal(1, "FIRE %0d clocks into the arm period did not finish clean: run=%b done=%b uf=%b",
+             offset, running, done, underflow);
+    @(negedge clk); reset=1;
+    repeat (4) @(posedge clk);
+  end endtask
+
   reg dense_phase=0;
   integer tcount=0; reg [CH-1:0] op=32'hx; integer seen=0; integer bad=0; integer exp_t;
   initial begin
     for (i=0;i<(1<<RAW);i=i+1) rowmem[i]=0;
     short_case(1);
     short_case(2);
+    for (i=0;i<64;i=i+1) fire_phase_case(i);
+    $display("FIRE-ARM-PHASE-OK");
     // rows 0..8 one tick each, row 9 lasts to tick 100, rows 10..19 one tick each
     for (i=0;i<NE;i=i+1) begin
       starts[i] = (i<10) ? i : 90+i;

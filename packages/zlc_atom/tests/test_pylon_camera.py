@@ -29,7 +29,7 @@ import time
 import numpy as np
 import pytest
 
-from tests.fakes import FakePlane
+from fakes import FakePlane
 from zlc_atom.devices.camera import CameraAcquisitionMode, CameraAdapter
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
 from zlc_atom.nodes.camera_measurement import (
@@ -294,7 +294,9 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     adapter.set_roi((101, 51, 641, 481))
     point = adapter.set_exposure_seconds(0.0123457)
     assert point.exposure_seconds == pytest.approx(0.012345)
-    assert point.required_external_trigger_interval_seconds == pytest.approx(0.012345)
+    # The camera's minimum trigger period includes its readout, which the
+    # readback does not ask: not known, rather than the exposure.
+    assert point.required_external_trigger_interval_seconds is None
     # COVERED, not clipped.  Width increments by 4 and Height by 2 on this
     # sensor, so x 101..742 becomes 100..744 and y 51..532 becomes 50..532:
     # the applied region contains the requested one.  Rounding the size down
@@ -437,12 +439,7 @@ def test_camera_measurement_monitor_arms_the_pylon_mode_for_a_whole_cycle(
         assert actual is not None
         assert actual.acquisition_mode == mode.value
         assert actual.readout_mode == readout_mode
-        if frames_per_cycle == 1:
-            assert actual.required_external_trigger_interval_seconds is None
-        else:
-            assert actual.required_external_trigger_interval_seconds == pytest.approx(
-                0.01
-            )
+        assert actual.required_external_trigger_interval_seconds is None
 
         for _ in range(frames_per_cycle):
             assert monitor.poll() is not None
@@ -490,9 +487,7 @@ def test_triggered_finite_and_repeat_zero_sessions_both_preserve_frame_order(
     assert camera.MaxNumBuffer.writes[-1] == 3
     continuous_point = adapter.working_point()
     assert continuous_point.acquisition_mode == CameraAcquisitionMode.EXTERNAL_TRIGGERED.value
-    assert continuous_point.required_external_trigger_interval_seconds == pytest.approx(
-        adapter.config.exposure_seconds
-    )
+    assert continuous_point.required_external_trigger_interval_seconds is None
     assert continuous_point.readout_mode == "pylon:Mono8;external=Line1;grab=OneByOne"
     captured = adapter.read_frame_records(3, timeout=0.5, exact=False)
     assert [int(record.image[0, 0]) for record in captured] == [3, 4, 5]

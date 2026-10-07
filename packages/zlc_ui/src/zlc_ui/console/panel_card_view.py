@@ -38,7 +38,7 @@ from zlc_ui.fluent import (
     FONT,
     fluent_font_size,)
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
-from zlc_ui.form.qt_form import FluentParameterForm
+from zlc_ui.form.qt_form import FluentParameterForm, being_edited
 
 from ._panel_projection import (
     interval_form_field,
@@ -118,6 +118,35 @@ def _set_interaction(surface: object | None, enabled: bool) -> None:
     gate = getattr(surface, "set_interaction_enabled", None)
     if callable(gate):
         gate(bool(enabled))
+
+
+def _shows_unrecorded_pick(
+    form: FluentParameterForm | None, state: Mapping[str, object]
+) -> bool:
+    """Whether a row naming WHAT the panel draws shows a pick its record lacks.
+
+    A refused signal, overlay or cell-kind pick comes back as the record the
+    presenter kept, so the projection equals the one the form was built from,
+    and a form reconciled only on a changed projection went on showing the
+    refused pick over a card drawing something else.  Asked by the rule
+    reconcile writes by: a choice row always, a keyed row once the operator
+    is no longer inside it.
+    """
+
+    if form is None:
+        return False
+    for field in form.spec.fields:
+        if field.key not in ("signal", "overlay_signal", "cell_kind"):
+            continue
+        if field.kind != "choice" and being_edited(form.widget_for(field.key)):
+            continue
+        try:
+            shown = form.read_value(field.key)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if str(shown or "") != str(state.get(field.key) or ""):
+            return True
+    return False
 
 
 def data_structure_fragments(
@@ -290,6 +319,9 @@ class PanelCardView(FluentGroupBox):
         #: it too, whenever it is opened.
         self._status_text = ""
         self._status_error = False
+        #: The presenter's standing condition for this panel, which a local
+        #: Setting read error covers while it stands and never erases.
+        self._presented_status: tuple[str, bool] = ("", False)
         self._settings_status: QtWidgets.QLabel | None = None
         #: The form's required content width in device pixels.  Carried to the
         #: popup sizer explicitly: the scroll body stays a width CONSUMER (its
@@ -414,7 +446,9 @@ class PanelCardView(FluentGroupBox):
         # card before a mounted panel can be used.
         self._selectors_on = True
         self._surface_error_connected = False
-        self._local_setting_error = ""
+        #: (row, text) of a Setting value this card could not read; the
+        #: row is kept so a re-projection knows whether it replaced it.
+        self._local_setting_error = ("", "")
         self.set_status("", error=False)
         self.set_selectors_enabled(True)
         # An empty card still has a size: the frame it is.  Settle it now, so
@@ -591,7 +625,11 @@ class PanelCardView(FluentGroupBox):
         self._parameter_surface = projected
         self._apply_panel_state(
             incoming,
-            rebuild_form=state_changed or form_changed,
+            rebuild_form=(
+                state_changed
+                or form_changed
+                or _shows_unrecorded_pick(self._settings_form, incoming)
+            ),
         )
 
     def _caption(self) -> str:
@@ -876,11 +914,20 @@ class PanelCardView(FluentGroupBox):
         board.  The dot rides the title strip beside the Setting button, so
         the card body still reserves no status row; hovering it reads the
         full message.  An empty text clears the mark.
+
+        A Setting value this card cannot read is its own condition: it is
+        shown over this one while it stands, and fixing it shows this one
+        again -- the presenter sends a condition once, when it changes.
         """
 
-        value = str(text)
+        self._presented_status = (str(text), bool(error))
+        self._show_status()
+
+    def _show_status(self) -> None:
+        local = self._local_setting_error[1]
+        value, error = (local, True) if local else self._presented_status
         self._status_text = value
-        self._status_error = bool(error)
+        self._status_error = error
         self.status_dot.set_color(RED if error else GREY)
         self.status_dot.setToolTip(value)
         self.status_dot.setVisible(bool(value))
@@ -1062,6 +1109,18 @@ class PanelCardView(FluentGroupBox):
                 or not self._settings_form.adopt_projection(spec, values)
             ):
                 self._settings_form.reconcile(spec, values)
+            # The projection now stands in every row the operator is not
+            # typing in -- written with signals blocked, so no ``changed``
+            # clears a read error its value replaced.  Left standing, the
+            # red text outlived the value and hid every later presenter
+            # condition.  A row still being typed in keeps both.
+            row = self._local_setting_error[0]
+            if row and not (
+                row in spec.keys
+                and being_edited(self._settings_form.widget_for(row))
+            ):
+                self._local_setting_error = ("", "")
+                self._show_status()
             self._apply_settings_enabled_state()
             self._sync_settings_body_size(opening=opening)
             self._settings_pending_rebuild = None
@@ -1378,12 +1437,12 @@ class PanelCardView(FluentGroupBox):
             else:
                 return
         except (KeyError, TypeError, ValueError) as error:
-            self._local_setting_error = str(error) or type(error).__name__
-            self.set_status(self._local_setting_error, error=True)
+            self._local_setting_error = (name, str(error) or type(error).__name__)
+            self._show_status()
             return
-        if self._local_setting_error:
-            self._local_setting_error = ""
-            self.set_status("", error=False)
+        if self._local_setting_error[0]:
+            self._local_setting_error = ("", "")
+            self._show_status()
         self.state_changed.emit(patch)
 
     def _choice_groups(self, field: str):

@@ -377,8 +377,14 @@ class ExperimentSession:
         self._installation_config = installation_config
         self._device_catalog = device_catalog
         self._installation_revision = 0
+        #: Serialises device TRANSITIONS (plan, reconcile, close); reconcile
+        #: and close hold it across device close/open -- seconds for a
+        #: camera.  Plain readers (the live declaration, the setting records)
+        #: never take it: the Qt thread asks them while an Apply runs, and
+        #: froze behind it.  What they read is replaced whole.
         self._reconcile_lock = threading.RLock()
         self._recovery_installations: list[object] = []
+        self._setting_records_lock = threading.Lock()
         self._device_setting_records: dict[
             tuple[str, int], dict[str, object]
         ] = {}
@@ -403,8 +409,7 @@ class ExperimentSession:
     def installation_config(self) -> object | None:
         """The effective live declaration, including operational Close changes."""
 
-        with self._reconcile_lock:
-            return self._installation_config
+        return self._installation_config
 
     @property
     def device_labels(self) -> dict[str, str]:
@@ -423,7 +428,6 @@ class ExperimentSession:
         requested: object,
         previous_effective: object,
         new_effective: object,
-        verified: bool,
         before_provenance: Mapping[str, object],
         after_provenance: Mapping[str, object],
         previous_values: Mapping[str, object],
@@ -480,11 +484,10 @@ class ExperimentSession:
             "requested_unit": str(requested_unit),
             "previous_effective": previous_effective,
             "new_effective": new_effective,
-            "verified": bool(verified),
             "actor": "device_control_risk_override",
         }
         if after_epoch != before_epoch:
-            with self._reconcile_lock:
+            with self._setting_records_lock:
                 self._device_setting_records.setdefault(
                     (before_session, before_epoch), before_record
                 )
@@ -516,7 +519,7 @@ class ExperimentSession:
                     if start < 0 or stop < start:
                         continue
                     referenced.setdefault(session_id, []).append((start, stop))
-        with self._reconcile_lock:
+        with self._setting_records_lock:
             return [
                 dict(record)
                 for (session_id, epoch), record in sorted(
@@ -562,7 +565,8 @@ class ExperimentSession:
         a type/parameter edit replaces that leaf.  Devices do not compose, so
         a leaf is rebuilt only for its own edit.  A simulation-world edit
         rebuilds world-bound leaves while independent physical leaves retain
-        identity.
+        identity.  A Close (``close_keys``) acts on the live declaration, not
+        on ``config``.
         """
 
         from zlc_atom.install import preflight_installation
@@ -584,6 +588,11 @@ class ExperimentSession:
             raise RuntimeError(
                 "this session was not opened from an installation configuration"
             )
+        if closed:
+            # Close is an operational request, not an edit to apparatus.json:
+            # it is judged against the live declaration, so a draft's
+            # unapplied edits are neither applied nor dropped by it.
+            config = current
         loaded_keys = frozenset(source.devices)
         unknown_close = closed - loaded_keys
         if unknown_close:
@@ -631,12 +640,10 @@ class ExperimentSession:
             if after is None or not _same_device_setup(descriptors, before, after):
                 affected.add(key)
 
-        # Close is an operational request, not an edit to apparatus.json.  The
-        # closed leaves are omitted from the live target; the untouched draft
-        # remains available for an explicit Apply that opens them again.
-        omitted = affected if closed else set()
+        # The closed leaves are omitted from the live target; the untouched
+        # draft remains available for an explicit Apply that opens them again.
         target = InstallationConfig(
-            tuple(item for item in config.devices if item.instance_id not in omitted),
+            tuple(item for item in config.devices if item.instance_id not in closed),
             simulation=config.simulation,
         )
         target_by_key = {item.instance_id: item for item in target.devices}

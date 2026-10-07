@@ -46,7 +46,7 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
+def _discover_vaunix() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     """Every attached Lab Brick, by serial -- a count read, no opens.
 
     A missing vendor DLL raises the INSTRUCTION (which file, into which
@@ -69,7 +69,7 @@ def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
             parameters=VAUNIX_LMS_SCHEMA.project_values({"serial": int(serial)}),
         )
         for serial in library.device_serials()
-    )
+    ), ()
 
 
 DEVICE_TYPES = (

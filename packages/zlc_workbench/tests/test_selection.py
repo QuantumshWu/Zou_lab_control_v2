@@ -18,7 +18,6 @@ What is asserted:
 
 from __future__ import annotations
 
-import os
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
@@ -27,9 +26,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,

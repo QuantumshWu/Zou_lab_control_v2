@@ -476,6 +476,12 @@
 
 ## 3. 当前验证状态
 
+本文件不维护包级全量计数（每轮修订都会增删测试，写下的数一轮就过期），也不记哪次全量跑出了什么。
+全量跑应有的结果：每个包与 tools 的测试全绿；唯一预期的红是 `test_environment::test_every_package_resolves_to_its_own_product`，
+且只在装着旧 `zlc_*` editable 副本、遮住 checkout 的机器上（本机即是，见第7节「`Github\zlc_*` 是拆包残留的旧副本」）。
+本节与第1节各条是各自切面的聚焦证据；条中出现的包级计数
+（如Workbench 425/435/436、Plot 534、atom 1106/20）是写下该条时的tree，不是当前完成证明。
+
 - 2026-09-05 新增release–recapture四参数Series fit（A、B、eta、f）；f为普通频率，A=1/B=0可用现有表达式精确固定。解析Jacobian和Numba single/batch已接入，warmer新增3个模型callback。独立182个高精度锚最大函数误差2.22e-16、Jacobian绝对误差4.19e-15；完整FitEngine 32/128/512点中位0.85/2.00/7.24ms，64×128批量33.57ms，已有cache新进程首次fit343ms。详细口径与复现命令见Plot performance文档；这是SEM加权最小二乘，并非binomial MLE。
 - 2026-09-04 same-shot/Occupancy显示修复：Runtime与Workbench组等待/重启/延迟提交`34 passed`，Camera＋Occupancy与camera restart`2 passed`，Plot完整输入四入口（含真实RenderProcess）、动态invalid、active-fit配置及真实camera呈现`16 passed`，跨进程front/Save与typed overlay保存重开`2 passed`。清圈和全invalid的完整RGBA与同源无overlay对照0像素差；生产代码净减39行，无新production文件/类。实验机原始偶发现象未在本机复现；已复现并修复的是违背same-shot的缺成员放行与旧overlay继承路径。
 
@@ -513,14 +519,14 @@
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
 - 紧凑Science Context当前证据：SLM Editor完整文件`22 passed`；strict Context与Feedback candidate/Stop/failure边界`10 passed`；最终三条直接边界`3 passed`。X15213全尺寸体积、Pattern/composite逐元素roundtrip和8-bit phase-code roundtrip均来自当前worktree；未运行100-shot。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
-- Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature（该Task此后已删除）sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
+- Device Control回归（该cut的tree）：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature（该Task此后已删除）sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；Panel Edit现与TaskConsole完整共用Frozen snapshot/Refresh、Interaction、Direct producer和Save figure。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
 - FigureViewer Info页是树：InfoPane每页一棵两列`InfoTree`（名字 | 值），record逐层展开、分支行内联标量摘要、长数值列表按个数与范围显示、值由wrap-anywhere delegate在列内换行不cutoff；页顶filter同时匹配名字与值并展开到命中处；Ctrl+C与右键菜单复制整个值或名字路径；Raw页是文档四个section的嵌套树；Flow node携带`row=(tab, label)`，点击card切页并选中该行。`FluentReadoutMultiline`不再用于InfoPane。
 - FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration normal与partial report、SLM candidate/report、Seamless live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
 - 公共Panel Setting现复用master的page-local `FluentOverlayFrame` owner，并以固定identity（`Setting · panel-N`）作为可拖header，不读取可编辑title/signal/structure；右上角紧凑`×`只隐藏Setting。TaskConsole与FigureViewer因复用PanelCard同时获得该行为，Panel删除仍是card header的受保护命令。
 - Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
 - Exact Scan terminal/Frozen根修当前证据：真实`20×(10×10×10)×(3×35)`canonical Dataset从partial Live publication开始，原子提交`field.x→Facet, field.y→Y, field.z→X, pair/site→Reduced`后，Live、运行中Frozen及terminal seal后重新创建的Frozen host均保持同一schema fingerprint、物理shape `(20,1000,3,35)`、resolved roles和`[-0.5,9.5]×[-0.5,9.5]` limits。根因三处均删除：multi-fate逐行修复导致回退默认35×3、host accept后以1×1×3×35 event schema覆盖canonical surface、以及histogram threshold/shape-only viewport无条件重放到image。当前实现使用atomic fate assignment、canonical accept metadata、resolved capability interaction和schema/spec view identity；Plot semantic/feasibility/facet/threshold聚焦`52 passed`，Workbench canonical/Frozen/retarget/save交叉聚焦`10 passed`。
-- Plot/Runtime/Workbench当前candidate直接回归：Plot `534 passed`、Runtime `107 passed`、Workbench `435 passed`；Atom对Figure/hosted-node新contract的direct用例`1 passed`。这些结果来自当前tree，不复用旧Exact Scan cut的计数。
+- Plot/Runtime/Workbench该cut的candidate直接回归：Plot `534 passed`、Runtime `107 passed`、Workbench `435 passed`；Atom对Figure/hosted-node新contract的direct用例`1 passed`。这些结果来自该cut的tree，不复用旧Exact Scan cut的计数。
 - Pulse repeat三层根修：`PulseSequence.brackets`（命名、可嵌套，最外层在前）只负责timeline内部连续区间；主界面新增持久化`run_repeats`（默认0=∞），Pulse Scan保留`scan_repeats`。无scan时Run repeats控制完整Pulse；有scan时每个row执行Run repeats次后才前进，整张table由Scan repeats重走。`shots_per_point`与Seamless `repeats`分别只做本次run_repeats/scan_repeats override，不改写Bracket或复制rows。Wire/RTL使用独立loop table与`RUN_REPEAT_COUNT/SCAN_COUNT/SCAN_REPEAT_COUNT`并在同一FIRE内完成全部seam，三层不再压平到一套execution count或保留旧兼容路径。每个Bracket的左右post复用Schedule drag owner，可拖到任意合法gap；Add Bracket按选择包住period/再包一层/放空Bracket/包住整个Pulse，Delete某个post只删那个Bracket。
 - 硬件改回周期表（2026-09-21）：一个period一行（32-bit绝对tick时长或duration slot、TTL mask、每路DAC一条hold/edge/ramp action，值为字面码或DAC slot），loop table最多8个Bracket嵌套4层，scan slot值就是绝对播放值（duration `1..2^32-1` tick、DAC `0..1023`），没有nominal base、delta、tick scale或系数乘法器。Bracket体只占一次行数，delay预算按真实展开的翻转数验证。实际量化rows统一进入compiler、wire、readback、Pulse Editor Run/Sync/Hold/Step、Seamless Dataset coordinates/run record；distinct authored points若量化坍缩会在device前拒绝。ABI `LAYOUT_STRUCT_VERSION=8`、默认几何fingerprint `0x5AD5A6A0`；zlc_pulse套件160 passed（3条config-values用例在master即红）、12个xsim bench（1-tick行、嵌套loop、seamless回绕、ramp+slot、晚到bank的underflow hold/resume、TTL/DAC delay与对齐）全过；Vivado纯build结果见第4节，不复用旧bitstream证据。
 - 通用Fit表达式减量候选：Panel Setting/Edit只提供单行`name=value`精确fixed与`name=guess(value)`初始猜测；fixed复用既有bounds请求通道的相等端点作为内部exact marker，但普通及regular-image solver都会把该维度真正移出optimizer，free-only计算DOF/Jacobian/covariance，all-fixed不启动optimizer。表达式按painted单位输入，PanelState/Figure只保存canonical fixed/initial；语法、unknown或domain错误只在DisplayDescription保留transient draft/warning并继续同model自动fit。Curve/Histogram/Image/Facet/Rolling共用FitSession请求，Console与Viewer共用同一Panel投影；fixed参数的误差publication为invalid。相对`17629d1`无新增production文件或类、production净增376行、test净增163行；此前临时`fit_target.py`与第二套canonical validator已删除。减量后直接聚焦`38 passed`，Plot全包`534 passed`、Console View全文件`31 passed`，另直接验证普通/regular all-fixed均返回`all parameters fixed`。Workbench全包在先运行36项后仍稳定暴露既有camera-restart selector顺序失败，目标test单独运行`1 passed`；该问题属于下一独立cut，不混入Fit提交。
@@ -641,14 +647,9 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
   history 的行，所以 `selection_output_catalog` 对 rolling 返回空。要切到那些 shot，需要 rolling
   适配层在范围里写明坐标轴（primary-index 或 shot time），再按普通 point 轴切——那是能力，不是修补。
 - **`_reduce_blocks` 4.2 ms 出现在半数 image 帧上**（08-27 的数，未复测；裁决见上，记录在此备查）。
-- **全量测试只剩一条红**（2026-09-25 修订后逐包各跑一次）：data 188、durable 28、runtime 176、
-  pulse 157（5 skip）、ui 161、plot 1183、atom 497、workbench 531 通过；唯一的红是下一条的
-  `test_environment`。d00ce8c9 时的 plot 9、runtime 25、pulse 3、ui 4、atom 20、workbench 32 + 2 errors
-  多数是 segmented DataBlock 之后测试仍直读 `.block.values`、测试替身缺新字段、断言已删的 API，已随测试
-  审查逐条修掉或删去。
 - **`Github\zlc_*` 是拆包残留的旧副本**（`zlc_runtime/selection_bridge.py` 56KB vs 树内 96KB，
   8 月 3 日），pip editable 全部指向它们。走 `zou_lab_control` bootstrap 时不受影响
-  （它把 checkout 置顶），但**裸 `import zlc_runtime` 会拿到旧副本**。`zlc-check-environment` 在
+  （它把 checkout 置顶），但**裸 `import zlc_runtime` 会拿到旧副本**。`zlc check` 在
   checkout 模式也核对每层的 distribution 归属，`zou-lab-control` 以外的 owner 都报成问题并写出
   `pip uninstall` 命令，所以本机的 `test_environment::test_every_package_resolves_to_its_own_product`
   会红到这 8 个旧 editable 安装被卸载为止——那是检查在起作用。删不删是用户的事。

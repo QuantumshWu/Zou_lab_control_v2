@@ -157,7 +157,6 @@ echo   set ZLC_PS_XDC=C:\path\to\board.xdc
 echo.
 echo Optional:
 echo   set ZLC_PS_VIVADO_BIN=C:\Xilinx\Vivado\2019.2\bin\vivado.bat
-echo   set ZLC_PS_PROJECT_DIR=%%CD%%\fpga\build\ps
 exit /b 0
 
 :zlc_verify_sources
@@ -415,8 +414,8 @@ rem exceeds the target_pct the config declares, and a build that starts anyway
 rem spends an hour of Vivado on a geometry the config already refused.  The
 rem answer is passed up, and the caller stops on it.
 rem THE SAME FILE the geometry is emitted from: without --config the
-rem estimator looks for a config of its own -- ZLC_PS_CONFIG, the current
-rem directory, then the installed copy -- and forgives a missing one with
+rem estimator looks for a config of its own -- ZLC_PS_CONFIG, then the
+rem installed copy -- and forgives a missing one with
 rem built-in defaults, so the gate can pass a geometry that is not the one
 rem being synthesized.  The part stays an argument because ZLC_PS_FPGA_PART
 rem may override the configured board; :zlc_resolve_part already refuses an

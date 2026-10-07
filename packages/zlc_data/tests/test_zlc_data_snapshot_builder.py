@@ -223,7 +223,7 @@ def test_the_builder_stamps_where_a_window_sits_and_a_restriction_keeps_it() -> 
         SCALAR_DOMAIN,
         ValueSchema.scalar(np.dtype("uint16"), "count"),
     )
-    window = IndexedWindow(5, 7, 3)
+    window = IndexedWindow(5, 7)
     snapshot = owned_snapshot_from_arrays(
         schema,
         np.asarray([[[1], [2], [3]]], dtype=np.uint16),
@@ -254,9 +254,9 @@ def test_the_builder_stamps_where_a_window_sits_and_a_restriction_keeps_it() -> 
     assert derived.block.window == window
 
     with pytest.raises(ValueError, match="latest"):
-        IndexedWindow(7, 5, -1)
+        IndexedWindow(7, 5)
     with pytest.raises(TypeError):
-        IndexedWindow(5.0, 7, -1)
+        IndexedWindow(5.0, 7)
     with pytest.raises(TypeError, match="window"):
         DataBlock(
             snapshot.block.block_id,

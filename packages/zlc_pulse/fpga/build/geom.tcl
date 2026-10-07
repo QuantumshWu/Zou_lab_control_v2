@@ -1,4 +1,4 @@
-# AUTO-GENERATED from streamer_config.json by image.emit_geom_tcl -- do not edit.
+# AUTO-GENERATED from streamer_config.json by zlc_pulse.wire.emit_geom_tcl -- do not edit.
 # BRAM-IP sizing vars for create_project.tcl (all derived from the config geometry).
 set zlc_row_addr_width 9
 set zlc_row_portb_bits 128

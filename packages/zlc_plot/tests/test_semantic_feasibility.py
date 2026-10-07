@@ -84,6 +84,7 @@ def test_every_offered_option_succeeds(
     finally:
         session.close()
 
+    applied = 0
     for field in description.fields:
         for value, field_value in _field_candidates(field, description):
             probe = PlotSession(make_snapshot(), spec)
@@ -100,8 +101,12 @@ def test_every_offered_option_succeeds(
                     # way.
                     continue
                 probe.replace_spec(candidate)
+                applied += 1
             finally:
                 probe.close()
+    # Every candidate turning vacant -- or none offered -- would pass the
+    # loop above without replacing a single spec.
+    assert applied, "no offered option was ever applied"
 
 def test_only_declared_point_axes_are_offered_each_once() -> None:
     """Each axis in the producer's Point domain appears exactly once."""

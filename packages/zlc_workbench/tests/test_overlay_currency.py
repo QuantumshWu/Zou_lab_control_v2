@@ -12,14 +12,10 @@ camera.
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLBACKEND", "Agg")
 
 from test_signal_front import _publication  # type: ignore[import-not-found]
 
@@ -373,6 +369,27 @@ def test_a_render_projected_under_a_revoked_setting_never_lands(
     assert port.accept(again, again.future.result(timeout=0))
     assert not hasattr(host.inputs[-1], "overlay"), (
         "the frame after the decision still carried the overlay"
+    )
+
+    # The same decision made AFTER a render finished but before the owner
+    # accepted it: the finished render still lands (the host holds it),
+    # but accepting it must not put its setting back under what follows.
+    port.retarget(with_overlay)
+    third_value, third_publication, third_front = _shot(3, 301)
+    finished = port.prepare(third_value, third_publication, third_front)
+    assert finished is not None
+    deferred.run()
+    assert finished.future.done()
+    port.retarget(without_overlay)
+    assert port.accept(finished, finished.future.result(timeout=0))
+    assert port.projection_target is without_overlay
+    fourth_value, fourth_publication, fourth_front = _shot(4, 401)
+    after = port.prepare(fourth_value, fourth_publication, fourth_front)
+    assert after is not None
+    deferred.run()
+    assert port.accept(after, after.future.result(timeout=0))
+    assert not hasattr(host.inputs[-1], "overlay"), (
+        "accepting a render finished before the decision re-installed it"
     )
 
 

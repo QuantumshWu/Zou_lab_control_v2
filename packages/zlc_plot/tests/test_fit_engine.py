@@ -12,10 +12,12 @@ import pytest
 from zlc_plot import FitCancelled, _fit_compiled
 from zlc_plot.fit import (
     FitEngine,
+    FitModelRegistry,
     FitOptions,
     FitResult,
     RegularImageFitInput,
     _DeferredFitData,
+    _DOMAIN_ANCHORED,
     _FIT_RESULT_RAW,
 )
 
@@ -712,8 +714,10 @@ def test_compiled_batch_reports_the_origin_it_subtracted() -> None:
 
     engine = FitEngine()
     model = engine.registry.get("exponential_decay")
-    descriptor = model.compiled_descriptor
-    assert descriptor is not None
+    # The descriptor the engine solves this model with: anchored, as the
+    # model declares.
+    descriptor = engine._compiled_descriptor(model)
+    assert descriptor is not None and descriptor.coordinate_origin == 0
     relative = np.linspace(0.0, 10.0, 112)
     observations = model.evaluate((relative,), _BASE_PARAMETERS[model.model_id])
     lower = np.asarray([parameter.bounds[0] for parameter in model.parameters])
@@ -741,20 +745,46 @@ def test_compiled_batch_reports_the_origin_it_subtracted() -> None:
     )
 
 
-def test_damped_sine_context_stays_linear_in_the_sample_count() -> None:
-    """The damped sine shares the series coordinate plan; no N-by-N table.
+def test_both_lanes_read_the_anchor_from_the_model_and_refuse_alike() -> None:
+    """A model declares its anchor once, and both lanes read it there.
 
-    The model seeds itself from the observations with a Goertzel scan inside
-    its prepare callback, so a plan carrying an N-by-N trigonometric table
-    is dead weight: 128 MiB at the 4096-point budget, copied once per cell
-    of a batch and held in the engine's context cache.
+    A descriptor factory that set an origin of its own anchored the
+    compiled lane and not the SciPy one.  And the SciPy lane read an
+    anchored window's start before it asked whether the window held a
+    point, so an empty window failed as NumPy's empty reduction instead of
+    the refusal every other short fit gets.  Moving that refusal forward
+    put it ahead of the request's own bounds on the SciPy lane alone, so an
+    empty bound over a short window was refused for the bound on one lane
+    and for the window on the other.
     """
 
-    descriptor = _fit_compiled.damped_sine_descriptor()
-    small = descriptor.context_builder((np.linspace(0.0, 1.0, 64),))
-    large = descriptor.context_builder((np.linspace(0.0, 1.0, 4096),))
-    assert small.shape[0] == large.shape[0]
-    assert large.nbytes == small.nbytes * 4096 // 64
+    engine = FitEngine()
+    model = engine.registry.get("exponential_decay")
+    unanchored = replace(
+        model,
+        capabilities=model.capabilities - {_DOMAIN_ANCHORED},
+        compiled_descriptor=lambda: replace(
+            model.compiled_descriptor(), coordinate_origin=0
+        ),
+    )
+    descriptor = FitEngine(FitModelRegistry((unanchored,)))._compiled_descriptor(
+        unanchored
+    )
+    assert descriptor is not None and descriptor.coordinate_origin is None
+
+    x = np.linspace(0.0, 10.0, 12)
+    empty = np.full(x.shape, np.nan)
+    refusal = (
+        f"{model.model_id} needs more points than its {len(model.parameters)} "
+        "free parameters: 0 finite here"
+    )
+    for lane in (model, replace(model, compiled_descriptor=None)):
+        with pytest.raises(ValueError) as refused:
+            engine.fit(lane, (x,), empty)
+        assert str(refused.value) == refusal
+        with pytest.raises(ValueError) as refused:
+            engine.fit(lane, (x,), empty, bounds={"decay_time": (2.0, 1.0)})
+        assert str(refused.value) == "empty bounds for parameter 'decay_time'"
 
 
 def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices(monkeypatch) -> None:
@@ -1245,8 +1275,7 @@ def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
 
     engine = FitEngine()
     model = engine.registry.get("gaussian_offset")
-    descriptor = model.compiled_descriptor
-    assert descriptor is not None
+    descriptor = model.compiled_descriptor()
     x = np.linspace(-5.0, 5.0, 112)
     rng = np.random.default_rng(23)
     clean = model.evaluate((x,), _BASE_PARAMETERS[model.model_id])
@@ -1260,9 +1289,6 @@ def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
         base_lower=np.asarray([parameter.bounds[0] for parameter in model.parameters]),
         base_upper=np.asarray([parameter.bounds[1] for parameter in model.parameters]),
         free_indices=np.asarray([3, 1, 2, 0]),
-        # One plan for both cells, as the engine hands a bucket: a plan built
-        # per cell from its finite points would differ in shape here.
-        context=descriptor.context_builder((x,)),
     )
     assert output.success.tolist() == [True, True]
     assert output.covariance_valid.tolist() == [True, True]
@@ -1368,7 +1394,7 @@ def test_frozen_anchors_cover_all_builtin_evaluators() -> None:
         assert np.allclose(actual, expected, rtol=tolerance, atol=tolerance), model
         flat = tuple(np.asarray(axis, dtype=np.float64).reshape(-1) for axis in coordinates)
         packed, values = _compiled_model_input(flat, parameters)
-        predicted, no_jacobian = spec.compiled_descriptor.value_jacobian(packed, values, False)
+        predicted, no_jacobian = spec.compiled_descriptor().value_jacobian(packed, values, False)
         assert no_jacobian.shape == (0, len(parameters))
         np.testing.assert_array_equal(predicted, actual.reshape(-1))
         if len(flat) == 1:
@@ -1797,6 +1823,27 @@ def test_regular_image_rejects_models_without_the_capability() -> None:
     x, y, image = _separable_image(radial=True, size=24)
     with pytest.raises(ValueError, match="regular-image capability"):
         FitEngine().fit("lorentzian", RegularImageFitInput(x, y, image))
+
+
+def test_a_bool_plane_is_fitted_as_its_counts() -> None:
+    """An occupancy or survival plane is offered the image fits like any
+    other image, so it takes them: read as its 0/1 counts in uint8, a view
+    of the same bytes, and fitted exactly as those counts are.  The input
+    used to refuse it, and every fit offered on such a panel raised."""
+
+    x, y, image = _separable_image(radial=True, size=48)
+    plane = image > 3.0
+    occupied = RegularImageFitInput(x, y, plane)
+    assert occupied.observations.dtype == np.uint8
+    assert np.shares_memory(occupied.observations, plane)
+    counts = RegularImageFitInput(x, y, plane.astype(np.uint8))
+    for model in ("radial_gaussian_center", "anisotropic_gaussian_center"):
+        np.testing.assert_array_equal(
+            FitEngine().fit(model, occupied).parameter_values,
+            FitEngine().fit(model, counts).parameter_values,
+        )
+    with pytest.raises(TypeError, match="real numeric or bool"):
+        RegularImageFitInput(x, y, plane.astype(np.complex128))
 
 
 @pytest.mark.parametrize(

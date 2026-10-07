@@ -1,20 +1,20 @@
 """What separates two populations from one, readable without a fit engine.
 
-Two fitters decide by this one number: the plot's bimodal fit
-(:mod:`zlc_plot.fit`) and the readout's two-state classification
-(:mod:`zlc_atom.nodes.calibration.bimodal`).  It therefore has exactly one
-owner, and the owner cannot be either of them -- it is this module, whose
-whole content is the constant.
+Two fitters decide by this one number and this one comparison: the plot's
+bimodal fit (:mod:`zlc_plot.fit`) and the readout's two-state classification
+(:mod:`zlc_atom.nodes.calibration.bimodal`).  The rule therefore has exactly
+one owner, and the owner cannot be either of them -- it is this module, whose
+whole content is the constant and :func:`decisive`.  Spelled once in each
+fitter, it was ``>=`` in one and ``>`` in the other.
 
-WHY A MODULE OF ITS OWN.  :mod:`zlc_plot.fit` is the solver: importing it
-brings numba and llvmlite and the compiled engine's forty dispatchers,
-half a second and a couple of hundred megabytes, into whatever process
-asks.  The readout's classification is deliberately
-dependency-light -- it is the normal CDF and a threshold -- and it reached
-this number through the solver.  Nothing noticed until the task console,
-which discovers its logic nodes at startup and never renders a raster in
-its own process, was found carrying the entire fit engine: that single
-edge, for a float, was the largest block of a console's open.
+WHY A MODULE OF ITS OWN.  The readout's classification is deliberately
+dependency-light -- it is the normal CDF and a threshold -- and it once
+reached this number through the fit module, which then imported the compiled
+engine with it: numba and llvmlite, half a second and a couple of hundred
+megabytes.  Nothing noticed until the task console, which discovers its
+logic nodes at startup and never renders a raster in its own process, was
+found carrying the entire fit engine: that single edge, for a float, was the
+largest block of a console's open.
 """
 
 from __future__ import annotations
@@ -28,4 +28,14 @@ from __future__ import annotations
 DECISIVE_BIC_GAIN = 10.0
 
 
-__all__ = ["DECISIVE_BIC_GAIN"]
+def decisive(gain: float, threshold: float = DECISIVE_BIC_GAIN) -> bool:
+    """Whether a BIC gain is decisive evidence for two populations over one.
+
+    It must EXCEED the threshold, as Kass and Raftery's "very strong" is a
+    gain over ten.  A NaN gain decides nothing and is never decisive.
+    """
+
+    return gain > threshold
+
+
+__all__ = ["DECISIVE_BIC_GAIN", "decisive"]

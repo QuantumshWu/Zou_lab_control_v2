@@ -40,10 +40,20 @@ from zlc_runtime import split_signal_key
 from .board import _guarded_slot
 
 
-__all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
+__all__ = [
+    "ArchiveDescription",
+    "FigureViewerPresenter",
+    "describe_archive",
+    "read_figure_archive",
+]
 
 
 Rows = tuple[tuple[str, object], ...]
+
+#: Why an archive does not open over a working copy with unsaved edits.
+_OPEN_OVER_UNSAVED_DATA = (
+    "Save or discard the open data working copy before opening another Figure"
+)
 
 
 _MANUAL_DTYPES = tuple(
@@ -358,6 +368,7 @@ def _draft_from_snapshot(
         "producer": None,
         "publication": None,
         "applied_snapshot": None,
+        "applied_values": None,
         "applied_name": None,
         "applied_note": None,
         "panel_id": "",
@@ -1402,6 +1413,24 @@ def _add_recipe_panel(
     )
 
 
+def _recipe_admits(recipe: Mapping[str, object], snapshot: object) -> bool:
+    """Whether a saved recipe's plot still describes this Dataset.
+
+    Asked of zlc_plot's semantic description, the same question
+    ``_add_recipe_panel`` asks when it builds the Panel: it refuses a schema
+    its kind does not admit, and one that lost or moved an axis the recipe
+    names (a lookup failure, not a kind refusal).
+    """
+
+    from zlc_plot.semantics import describe_semantics
+
+    try:
+        describe_semantics(snapshot.block.schema, recipe["spec"])
+    except (ValueError, LookupError):
+        return False
+    return True
+
+
 def _manual_plot_input(draft: Mapping[str, object], snapshot: object) -> object:
     """Keep an archived image overlay only while its coordinate contract matches."""
 
@@ -1419,6 +1448,34 @@ def _manual_plot_input(draft: Mapping[str, object], snapshot: object) -> object:
         and old.cell_domain == new.cell_domain
     )
     return ImageFrame(snapshot, overlay) if compatible else snapshot
+
+
+def read_figure_archive(
+    path: str | Path,
+) -> tuple[Path, ArchiveDescription, tuple[tuple[str, object, object], ...], dict, dict]:
+    """Everything opening one archive reads: its description, each Dataset
+    with its plot recipe, and the lineage and source it was saved with.
+
+    The one body behind the viewer's open and ``figure_viewer --check``.  The
+    check used to read the description alone, so an archive whose overlay
+    would not restore printed "figure ready" and then failed to open.
+    """
+
+    resolved = Path(path).resolve()
+    info, arrays, datasets = read_archive(resolved)
+    description = describe_archive(info, arrays)
+    loaded = tuple(
+        (key, *read_figure_plot(info, arrays, datasets, key))
+        for key in description.dataset_keys
+    )
+    sections = info["sections"]
+    return (
+        resolved,
+        description,
+        loaded,
+        deepcopy(dict(sections["lineage"])),
+        deepcopy(dict(sections["source"])),
+    )
 
 
 def describe_archive(
@@ -2151,14 +2208,22 @@ def played_pulses(
 
     _root, nodes = _lineage_nodes(lineage)
     found: list[PlayedPulse] = []
+    # A sequence number counts one run's events, so two runs of one Logic
+    # -- two generations -- can share one; the key tells them apart the way
+    # the Logic labels do, or both rows opened the first run's pulse.
     records = [
-        (_logic_name(node), int(node["event"]["sequence"]), node["record"])
+        (
+            _logic_name(node),
+            int(node["event"]["sequence"]),
+            str(node["event"]["generation"]),
+            node["record"],
+        )
         for node in nodes.values()
     ]
     saved = _source_run_record(source, nodes)
     if saved is not None:
-        records.append((saved[0], None, saved[2]))
-    for logic, sequence, record in records:
+        records.append((saved[0], None, "", saved[2]))
+    for logic, sequence, generation, record in records:
         named = _named_devices(record)
         for role, device_key, snapshot in _record_devices(record, named_devices=named):
             document = snapshot.get("pulse")
@@ -2173,7 +2238,7 @@ def played_pulses(
             found.append(
                 PlayedPulse(
                     key=(f"saved-source:{logic}:{device_key}" if sequence is None
-                         else f"{logic}:{sequence}:{device_key}"),
+                         else f"{logic}:{sequence}:{generation}:{device_key}"),
                     device_key=str(device_key),
                     logic=logic,
                     sequence=sequence,
@@ -2272,6 +2337,10 @@ class FigureViewerPresenter:
         self._resize_pulse_preview = resize_pulse_preview
         #: Every open pulse tab: its sequence, host and drawing choices.
         self._pulse_tabs: dict[str, dict[str, object]] = {}
+        #: Each tab's newest drawing request made while the worker was busy.
+        self._pulse_pending: dict[str, Callable[[], None]] = {}
+        #: Pulse hosts told to close that have not finished closing yet.
+        self._retired_hosts: list[object] = []
         self._close_requested = False
         self._closed = False
         self._connect()
@@ -2359,61 +2428,87 @@ class FigureViewerPresenter:
         self.view.set_pulse_size_names(key, tuple(PANEL_SIZE_NAMES))
 
         def draw() -> object:
+            asked = (tab["include_off"], tab["size"])
             data, size = self._pulse_timeline(tab)
-            return self._make_pulse_preview(data, size=size), size
+            return self._make_pulse_preview(data, size=size), size, asked
 
         def drawn(result: object) -> None:
-            host, size = result
-            if key not in self._pulse_tabs:
-                # Closed while it was drawing: nothing to show it on.
+            host, size, asked = result
+            if self._pulse_tabs.get(key) is not tab:
+                # Closed while it was drawing -- and perhaps opened again,
+                # with a drawing of its own coming: nothing to show this on.
                 self._close_host(host)
                 return
             tab["host"] = host
             host.set_interaction_enabled(bool(tab["selectors"]))
             self._show_pulse(key, size)
             self.view.set_status(f"showing pulse {played.name}")
+            if asked != (tab["include_off"], tab["size"]):
+                # Size or Show-off-rows changed while this first drawing was
+                # made, when there was no host yet to redraw.
+                self._redraw_pulse(key)
 
         def failed(error: BaseException) -> None:
+            if self._pulse_tabs.get(key) is not tab:
+                return
             self.view.show_pulse_placeholder(key, f"cannot draw this pulse: {error}")
             self.view.set_status(f"cannot draw pulse {played.name}: {error}", error=True)
 
-        self._submit(
-            f"drawing pulse {played.name}…",
-            draw,
-            drawn,
-            "cannot draw pulse",
-            on_failure=failed,
+        self._submit_pulse(
+            key,
+            lambda: self._submit(
+                f"drawing pulse {played.name}…",
+                draw,
+                drawn,
+                "cannot draw pulse",
+                on_failure=failed,
+            ),
         )
+
+    def _submit_pulse(self, key: str, start: Callable[[], None]) -> None:
+        """Draw on one pulse tab now, or as soon as the viewer's worker is free.
+
+        A tab asks for its drawing from a click, and the worker may be busy
+        with an open, a Save or another tab.  Refused then, the tab sat on
+        "drawing the pulse…" for good, and a Size or Show-off-rows change was
+        stored but never drawn.  So each tab's newest request waits and is
+        started when the running operation finishes -- the editor's preview
+        keeps its one pending request the same way.
+        """
+
+        if self._busy:
+            self._pulse_pending[key] = start
+            return
+        start()
 
     @staticmethod
     def _pulse_timeline(tab: Mapping[str, object]) -> tuple[object, str]:
         """The timeline the tab draws and the size it is drawn at.
 
-        The operator's size sticks; otherwise the content decides through
-        the one rule zlc_plot owns for pulses, as the editor's preview does.
+        By the editor's own rule: the operator's size sticks, otherwise the
+        content decides.
         """
 
-        from zlc_plot import recommended_pulse_preset
+        from .pulse_editor import preview_candidate
 
-        from .pulse_editor import timeline_of
-
-        sequence = tab["sequence"]
-        data = timeline_of(sequence, include_off=bool(tab["include_off"]))
-        size = str(tab["size"])
-        if not size:
-            rows = len(getattr(data, "channels", ())) + len(
-                getattr(data, "analog_traces", ())
-            )
-            size = recommended_pulse_preset(rows, len(sequence.periods))
+        data, size, _rows, _periods, _played = preview_candidate(
+            tab["sequence"], bool(tab["include_off"]), str(tab["size"]) or None
+        )
         return data, size
 
     def _show_pulse(self, key: str, size: str) -> None:
+        from .pulse_editor import _readable
+
         tab = self._pulse_tabs[key]
         sequence = tab["sequence"]
         self.view.show_pulse(key, tab["host"])
         self.view.set_pulse_size(key, size)
+        # How long the board played it, every bracket expanded -- the figure
+        # the editor's header gives for the same pulse.
         self.view.set_pulse_status(
-            key, f"{size} · {len(sequence.periods)} periods · played as recorded"
+            key,
+            f"{size} · {len(sequence.periods)} periods · "
+            f"{_readable(sequence.played_nanoseconds())} · played as recorded",
         )
 
     def _redraw_pulse(self, key: str) -> None:
@@ -2433,8 +2528,11 @@ class FigureViewerPresenter:
             if self._pulse_tabs.get(key) is tab:
                 self._show_pulse(key, str(size))
 
-        self._submit(
-            f"redrawing pulse {tab['name']}…", redraw, redrawn, "cannot redraw pulse"
+        self._submit_pulse(
+            key,
+            lambda: self._submit(
+                f"redrawing pulse {tab['name']}…", redraw, redrawn, "cannot redraw pulse"
+            ),
         )
 
     def set_pulse_include_off(self, key: str, enabled: bool) -> None:
@@ -2491,6 +2589,7 @@ class FigureViewerPresenter:
         """Retire one pulse tab and the host that drew it."""
 
         tab = self._pulse_tabs.pop(str(key), None)
+        self._pulse_pending.pop(str(key), None)
         if tab is not None and tab["host"] is not None:
             self._close_host(tab["host"])
         return self.view.close_pulse_tab(key)
@@ -2509,35 +2608,24 @@ class FigureViewerPresenter:
 
         self._open_runtime(path)
 
-    def _open_runtime(self, path: str) -> None:
-        if any(
-            bool(draft["modified"] or draft["unsaved"])
+    def _unsaved_data(self) -> tuple[str, ...]:
+        """The working copies holding edits nobody has saved, by name."""
+
+        return tuple(
+            str(draft["name"])
             for draft in self._data_drafts.values()
-        ):
-            self.view.set_status(
-                "Save or discard the open data working copy before opening another Figure",
-                error=True,
-            )
+            if bool(draft["modified"] or draft["unsaved"])
+        )
+
+    def _open_runtime(self, path: str) -> None:
+        if self._unsaved_data():
+            self.view.set_status(_OPEN_OVER_UNSAVED_DATA, error=True)
             return
         requested = Path(path)
         serial = self._archive_serial + 1
         def prepare() -> object:
-            resolved = requested.resolve()
-            info, arrays, datasets = read_archive(resolved)
-            description = describe_archive(info, arrays)
-            loaded = []
-            for key in description.dataset_keys:
-                plot_input, recipe = read_figure_plot(info, arrays, datasets, key)
-                loaded.append((key, plot_input, recipe))
-            sections = info["sections"]
-            return (
-                resolved,
-                description,
-                tuple(loaded),
-                serial,
-                deepcopy(dict(sections["lineage"])),
-                deepcopy(dict(sections["source"])),
-            )
+            resolved, description, loaded, lineage, source = read_figure_archive(requested)
+            return resolved, description, loaded, serial, lineage, source
 
         self._submit(
             f"opening {requested.name}…",
@@ -2622,14 +2710,21 @@ class FigureViewerPresenter:
         binding = panel_presenter.panels.get(new_panel_id) if new_panel_id else None
         cancelled = self._close_requested or bool(new_panel_id and binding is None)
         error = None if binding is None or binding.port is None else binding.port.last_error
-        if cancelled or error is not None:
+        # The open replaces every working copy, and was refused up front while
+        # one held unsaved edits.  One edited (or Applied) while this archive
+        # was being read is refused the same way here, instead of being
+        # dropped with the rest -- an Apply's preview Panel along with it.
+        unsaved = bool(self._unsaved_data())
+        if cancelled or unsaved or error is not None:
             self._opening_archive = None
             if binding is not None:
                 panel_presenter.remove_panel(new_panel_id)
             for producer, *_rest in published:
                 plane.retire(producer)
             self.view.set_status(
-                "opening cancelled" if cancelled else f"cannot open {resolved.name}: {error}",
+                "opening cancelled" if cancelled
+                else _OPEN_OVER_UNSAVED_DATA if unsaved
+                else f"cannot open {resolved.name}: {error}",
                 error=not cancelled,
             )
             self._finish_operation()
@@ -2693,6 +2788,7 @@ class FigureViewerPresenter:
         self._panel_presenter.beat()
         self._settle_runtime_archive()
         self._refresh_data_save_states()
+        self._poll_retired_hosts()
 
     def commit_surfaces(self) -> None:
         self._panel_presenter.commit_surfaces()
@@ -2830,14 +2926,26 @@ class FigureViewerPresenter:
             return False
         closer = getattr(self.view, "close_data_editor", None)
         closed = bool(callable(closer) and closer(str(editor_id)))
-        if closed and draft["publication"] is None:
+        if not closed:
+            return False
+        # Reaching here dirty means the operator agreed to lose the edits,
+        # and the answer is honoured: an applied copy nobody saved goes with
+        # its preview Panel, typed edits go back to what was applied.  Kept
+        # dirty, the copy blocked every later archive open and was asked
+        # about again at close -- over a tab already gone.
+        if bool(draft["unsaved"]):
+            self._discard_applied_data(draft)
+            self._project_data_choices()
+        elif bool(draft["modified"]):
+            self._restore_data_draft(draft)
+        if draft["publication"] is None:
             self._data_drafts.pop(str(editor_id), None)
             self._data_source_editors = {
                 key: value
                 for key, value in self._data_source_editors.items()
                 if value != str(editor_id)
             }
-        return closed
+        return True
 
     def _restore_data_draft(self, draft: dict[str, object]) -> None:
         snapshot = draft["applied_snapshot"] or draft["source_snapshot"]
@@ -2858,6 +2966,7 @@ class FigureViewerPresenter:
                 "producer",
                 "publication",
                 "applied_snapshot",
+                "applied_values",
                 "applied_name",
                 "applied_note",
                 "panel_id",
@@ -2879,6 +2988,10 @@ class FigureViewerPresenter:
             overlay=draft["source_overlay"],
         )
         restored.update(persistent)
+        if draft["applied_values"] is not None:
+            # The applied snapshot holds the zeros that were published for
+            # invalid samples; the copy gets back the values it had.
+            restored["values"] = np.array(draft["applied_values"], copy=True)
         restored["modified"] = False
         restored["message"] = "Edits discarded"
         draft.clear()
@@ -2895,6 +3008,7 @@ class FigureViewerPresenter:
             ("producer", None),
             ("publication", None),
             ("applied_snapshot", None),
+            ("applied_values", None),
             ("applied_name", None),
             ("applied_note", None),
             ("panel_id", ""),
@@ -3031,12 +3145,44 @@ class FigureViewerPresenter:
     def _apply_data_draft(self, draft: dict[str, object]) -> None:
         validity = np.asarray(draft["validity"], dtype=np.bool_)
         values = np.asarray(draft["values"])
-        if bool(np.any(~validity)):
+        zeroed = bool(np.any(~validity))
+        if zeroed:
+            # Zeroed in what is published, not in the working copy: a sample
+            # marked valid again after an Apply gets its measured value back,
+            # where writing the zeros into the copy made it a 0 that Apply
+            # and Save then wrote.
             values = np.array(values, copy=True)
             values[~validity] = 0
-            draft["values"] = values
-        snapshot = _manual_snapshot(draft)
+        snapshot = _manual_snapshot({**draft, "values": values})
         plot_input = _manual_plot_input(draft, snapshot)
+
+        # Which Panel shows this Apply is decided before anything is published
+        # or removed, so a shape no plot kind can show -- every axis deleted --
+        # is refused while the plane and the preview still hold the last Apply.
+        from .panel_catalog import task_console_fitting_spec
+
+        panel_id = str(draft["panel_id"])
+        binding = self.panels.get(panel_id) if panel_id else None
+        replaced = ""
+        if binding is not None and task_console_fitting_spec(
+            snapshot.block.schema, binding.state.kind, binding.state.cell_kind
+        ) is None:
+            # A Panel's kind is fixed, and the preview's can no longer hold the
+            # edited shape -- an image whose pixel axes were deleted after the
+            # first Apply.  A Panel chosen as on a first Apply replaces it.
+            replaced, binding = panel_id, None
+        recipe = None
+        if binding is None:
+            recipe = draft["recipe"]
+            # The archive's recipe describes the archived Dataset.  Edited
+            # into a shape that recipe no longer admits -- an image with one
+            # of its cell axes deleted -- the copy is new data, and the data
+            # chooses its plot, as it does for a new manual Dataset.
+            if recipe is not None and not _recipe_admits(recipe, snapshot):
+                recipe = None
+            if recipe is None and task_console_fitting_spec(snapshot.block.schema) is None:
+                raise ValueError("no plot kind can show data of this shape")
+
         serial = int(draft["producer_serial"])
         owner_id = f"manual-data-{serial}"
         signal = f"@figure/manual/{serial}/data"
@@ -3078,48 +3224,73 @@ class FigureViewerPresenter:
             data_signal=signal,
             run_record=record,
         )
+        first = draft["producer"] is None
         publication = producer.publish(self._signal_plane, source_publication=parent)
+        # The plane holds this producer's generation from here, whatever the
+        # Panel does, and a close retires the producer the draft names.
         draft["producer"] = producer
+
+        # The Panel first, the working copy's record of the Apply after it: a
+        # Panel that could not be made left a copy that called itself applied
+        # with no preview, so Save always answered "not accepted yet" and
+        # every Apply after it failed the same way.
+        try:
+            if binding is not None:
+                # False here is also "nothing to change": a later Apply of the
+                # same name reaches the Panel through the signal it follows.
+                # A refusal is reported by the Panel presenter itself.
+                self._panel_presenter.update_panel_state(
+                    panel_id,
+                    {
+                        "signal": signal,
+                        "title": str(draft["name"]),
+                        "overlay_signal": producer.overlay_signal,
+                    },
+                )
+                self._panel_presenter.board.owe_presentation((panel_id,))
+            else:
+                if recipe is None:
+                    binding = self._panel_presenter.add_panel(
+                        signal,
+                        snapshot,
+                        title=str(draft["name"]),
+                        kind="",
+                        initial_publication=publication,
+                    )
+                else:
+                    binding = _add_recipe_panel(
+                        self._panel_presenter,
+                        producer,
+                        snapshot,
+                        recipe,
+                        publication,
+                        title=str(draft["name"]),
+                    )
+                panel_id = binding.panel_id
+                if replaced:
+                    # Only once its replacement exists: both follow this
+                    # signal, and a failed add leaves the old preview standing.
+                    self._panel_presenter.remove_panel(replaced)
+        except BaseException:
+            if first:
+                # Nothing else is on this signal before a first Apply.
+                self._signal_plane.retire(producer)
+                draft["producer"] = None
+            raise
         draft["publication"] = publication
         draft["applied_snapshot"] = snapshot
+        # What the zeros replaced: a restore rebuilds the copy from the
+        # applied snapshot, and a sample marked valid again came back as 0.
+        draft["applied_values"] = (
+            np.array(draft["values"], copy=True) if zeroed else None
+        )
         draft["applied_name"] = str(draft["name"])
         draft["applied_note"] = str(draft["note"])
         draft["modified"] = False
         draft["unsaved"] = True
         draft["save_ready"] = False
         draft["message"] = "Applied; preparing the preview Panel"
-
-        panel_id = str(draft["panel_id"])
-        if panel_id and panel_id in self.panels:
-            self._panel_presenter.update_panel_state(
-                panel_id,
-                {
-                    "signal": signal,
-                    "title": str(draft["name"]),
-                    "overlay_signal": producer.overlay_signal,
-                },
-            )
-            self._panel_presenter.board.owe_presentation((panel_id,))
-        else:
-            recipe = draft["recipe"]
-            if recipe is None:
-                binding = self._panel_presenter.add_panel(
-                    signal,
-                    snapshot,
-                    title=str(draft["name"]),
-                    kind="",
-                    initial_publication=publication,
-                )
-            else:
-                binding = _add_recipe_panel(
-                    self._panel_presenter,
-                    producer,
-                    snapshot,
-                    recipe,
-                    publication,
-                    title=str(draft["name"]),
-                )
-            draft["panel_id"] = binding.panel_id
+        draft["panel_id"] = panel_id
         self._panel_presenter.beat()
 
     def _save_data_draft(self, draft: dict[str, object], path: str) -> None:
@@ -3257,36 +3428,45 @@ class FigureViewerPresenter:
     def _finish_operation(self) -> None:
         self._busy = False
         if self._close_requested:
+            self._pulse_pending.clear()
             self._request_close()
+            return
+        if self._pulse_pending:
+            key = next(iter(self._pulse_pending))
+            self._pulse_pending.pop(key)()
 
     @staticmethod
     def _await(operation: object) -> object:
         return operation.result() if hasattr(operation, "result") else operation
 
 
-    @classmethod
-    def _close_host(cls, host: object) -> None:
-        if isinstance(host, tuple):
-            for item in host:
-                cls._close_host(item)
-            return
-        close = getattr(host, "close", None)
-        if not callable(close):
-            return
-        stopped = cls._await(close())
-        if stopped is False:
-            raise RuntimeError("plot host did not stop")
+    def _close_host(self, host: object) -> None:
+        """Tell one pulse host to close, without waiting for it on the owner.
+
+        Its render child is the Edit/Save one, which may be busy with a Save
+        or another window's drawing; waiting here froze the viewer for as
+        long as the host's own limit, 30 s.  So it is told once and polled
+        from the beat, as the console retires its hosts, and the viewer's
+        close waits for it.
+        """
+
+        if host.close(timeout=0.0) is False:
+            self._retired_hosts.append(host)
+
+    def _poll_retired_hosts(self) -> bool:
+        """Forget retired hosts that have finished closing; whether none is left."""
+
+        for host in tuple(self._retired_hosts):
+            if host.close(timeout=0.0) is not False:
+                self._retired_hosts.remove(host)
+        return not self._retired_hosts
 
     def close(self) -> bool:
         """Close the shared Panel engine, archive signals, then IO worker."""
 
         if self._closed:
             return True
-        unsaved = tuple(
-            str(draft["name"])
-            for draft in self._data_drafts.values()
-            if bool(draft["modified"] or draft["unsaved"])
-        )
+        unsaved = self._unsaved_data()
         if unsaved and not self._discard_agreed:
             # Closing takes several passes -- panels, then the IO worker --
             # and each returns False and asks to be called again.  Asked
@@ -3311,6 +3491,10 @@ class FigureViewerPresenter:
             self.view.set_status("closing after the current operation…")
             return False
         self._close_pulse_tabs()
+        if not self._poll_retired_hosts():
+            self.view.set_status("closing pulse drawings…")
+            self._request_close()
+            return False
         timer = self.timer
         if not self._panel_presenter.close():
             self._panel_presenter.beat()

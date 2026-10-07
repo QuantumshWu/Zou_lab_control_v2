@@ -1491,6 +1491,80 @@ def test_a_single_panel_built_from_revived_axes_paints_the_same_picture() -> Non
     )
 
 
+def test_axes_bytes_are_built_over_the_started_params_and_keyed_by_them() -> None:
+    """The bytes are revived by every process on the machine, so they are
+    built over the params Matplotlib started with -- not a notebook's live
+    edit, which would otherwise be baked into every panel after, under a key
+    that never saw it -- and those params are part of the key."""
+
+    from zlc_plot import rendering
+    from zlc_plot.config import DEFAULTS
+
+    prototype = rendering._axes_prototype_path(DEFAULTS.style, 0, 1)
+    prototype.unlink(missing_ok=True)
+    # The style sets no margin, so the live edit is what would reach it.
+    with matplotlib.rc_context({"axes.xmargin": 0.31}):
+        assert rendering._axes_prototype_path(DEFAULTS.style, 0, 1) == prototype
+        _figure, _cells, (built,) = rendering.revive_axes(DEFAULTS.style, 0, 1)
+    assert prototype.is_file()
+    assert built._xmargin == matplotlib.rcParamsOrig["axes.xmargin"] != 0.31
+
+    started = matplotlib.rcParamsOrig["axes.xmargin"]
+    rendering._started_rc_params.cache_clear()
+    matplotlib.rcParamsOrig["axes.xmargin"] = 0.31
+    try:
+        moved = rendering._axes_prototype_path(DEFAULTS.style, 0, 1)
+    finally:
+        matplotlib.rcParamsOrig["axes.xmargin"] = started
+        rendering._started_rc_params.cache_clear()
+    assert moved != prototype
+
+
+def test_axes_bytes_are_keyed_by_the_code_loaded_and_aged_by_their_use() -> None:
+    """The key reads the code this process loaded, and a hit is a use.
+
+    Read from the file at the loaded line, a notebook that imported the
+    module before a merge keyed the old code's bytes by the new text, or
+    raised on every mount where that line opened a string: a moved line
+    or a reworded comment is no change, a changed constant is one.  And
+    the prune ages a file by its mtime: aged by its write, a generation
+    revived every day was deleted by another generation's write a day
+    after it was written.
+    """
+
+    import os
+    import time
+
+    from zlc_plot import rendering
+    from zlc_plot.config import DEFAULTS
+
+    source = (
+        "def build(axis, style):\n"
+        "    # the cell length\n"
+        "    if axis.name in {'x', 'y'}:\n"
+        "        axis.tick_params(length=style.length * 0.5)\n"
+        "    return sorted(axis.ticks, key=lambda tick: tick[0])\n"
+    )
+
+    def code(text: str, filename: str):
+        namespace: dict[str, object] = {}
+        exec(compile(text, filename, "exec"), namespace)
+        return namespace["build"].__code__
+
+    loaded = rendering._code_text(code(source, "a.py"))
+    moved = "\n\n" + source.replace("the cell length", "the length of a cell's marks")
+    assert rendering._code_text(code(moved, "b.py")) == loaded
+    assert rendering._code_text(code(source.replace("0.5", "0.6"), "a.py")) != loaded
+
+    rendering.revive_axes(DEFAULTS.style, 0, 1)
+    prototype = rendering._axes_prototype_path(DEFAULTS.style, 0, 1)
+    assert prototype.is_file()
+    written = time.time() - 2 * 86400.0
+    os.utime(prototype, (written, written))
+    rendering.revive_axes(DEFAULTS.style, 0, 1)
+    assert prototype.stat().st_mtime > time.time() - 3600.0
+
+
 @pytest.mark.parametrize("fitted", [False, True], ids=["plain", "fitted"])
 def test_a_focused_cell_ticks_like_a_panel_of_its_size_whichever_cell_it_is(
     fitted: bool,

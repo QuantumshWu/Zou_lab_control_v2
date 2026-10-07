@@ -736,12 +736,6 @@ class PulseSequence:
 
         return self._bracket_bounds
 
-    def bracket_by_id(self, bracket_id: str) -> PulseBracket:
-        for bracket in self.brackets:
-            if bracket.bracket_id == bracket_id:
-                return bracket
-        raise ValueError(f"no bracket exists with id {bracket_id!r}")
-
     @property
     def loops(self) -> tuple[tuple[int, int, int], ...]:
         """The row loop table: ``(first_row, last_row, count)`` per bracket, outermost first.

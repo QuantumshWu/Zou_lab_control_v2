@@ -207,8 +207,14 @@ class VoltageIntoLoad:
         object.__setattr__(self, "mean_square_divisor", divisor)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
+        # An amplitude below zero has no power: NaN, as a level has none for
+        # a power below zero.  Squared, -0.04 Vpp was the power of +0.04 Vpp,
+        # and a plot's view, limit or drawn wall below 0 Vpp landed mirrored
+        # on the other side of zero where no "no value" check could see it.
         volts = np.asarray(values, dtype=float)
-        return volts * volts / (self.mean_square_divisor * self.load_ohms)
+        return np.where(volts < 0.0, np.nan, volts * volts) / (
+            self.mean_square_divisor * self.load_ohms
+        )
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
         watts = np.asarray(values, dtype=float)

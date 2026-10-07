@@ -85,6 +85,23 @@ def test_unique_path_never_returns_an_occupied_name(tmp_path, monkeypatch) -> No
         "scan-2.npz", "scan-3.npz", "scan-4.npz", "scan.npz",
     ] and fourth.read_bytes() == b"fourth"
 
+    # A move onto the claim that fails takes the empty claim with it: nothing
+    # is published under the final name, and the temporary goes too.
+    def refused(*_args, **_kwargs):
+        raise OSError(13, "Access is denied")
+
+    monkeypatch.setattr("zlc_durable.durability.os.replace", refused)
+    with pytest.raises(OSError, match="denied"):
+        unique_path(
+            tmp_path,
+            "scan",
+            ".npz",
+            writer=lambda temporary: temporary.write_bytes(b"fifth"),
+        )
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "scan-2.npz", "scan-3.npz", "scan-4.npz", "scan.npz",
+    ]
+
 
 def test_unique_file_allocation_does_not_collapse_under_concurrency(tmp_path) -> None:
     callers = 32

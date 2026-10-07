@@ -181,6 +181,15 @@ def test_one_population_stands_with_its_components_coinciding() -> None:
     assert not result.parameter_error_validity["ratio"]
     assert "one population" in result.message
     assert _bimodal_classifier_metrics(result)[0] is None
+    # A threshold the operator placed still splits the one population's
+    # shots; there is no second state, so no fidelity (it read "nan%").
+    placed, left, right, fidelity = _bimodal_classifier_metrics(result, 110.0)
+    below = 0.5 * (1.0 + math.erf(
+        (110.0 - values["center"]) / (values["sigma"] * math.sqrt(2.0))
+    ))
+    assert placed == 110.0 and left == pytest.approx(below, rel=1e-12)
+    assert right == pytest.approx(1.0 - below, rel=1e-12)
+    assert math.isnan(fidelity)
     # An operator who fixed a pinned parameter already asserted two
     # populations: the one-population answer never overwrites that value.
     asserted = engine.fit(

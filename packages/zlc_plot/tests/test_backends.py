@@ -2,126 +2,10 @@ from __future__ import annotations
 
 import sys
 import threading
-from types import ModuleType, SimpleNamespace
 
 import numpy as np
-import pytest
-
-import zlc_plot.backends as backends
 
 
-class _Signal:
-    def __init__(self) -> None:
-        self.callback = None
-
-    def connect(self, callback) -> None:
-        self.callback = callback
-
-
-class _Timer:
-    created = []
-
-    def __init__(self, parent) -> None:
-        self.parent = parent
-        self.interval = None
-        self.timeout = _Signal()
-        self.started = False
-        self.__class__.created.append(self)
-
-    def setInterval(self, interval) -> None:
-        self.interval = interval
-
-    def start(self) -> None:
-        self.started = True
-
-
-def test_ipykernel_wake_timer_uses_dedicated_qt_loop(monkeypatch) -> None:
-    """The notebook liveness timer only quits ipykernel's private loop."""
-
-    _Timer.created.clear()
-    loop = SimpleNamespace(quit=lambda: setattr(loop, "quit_count", loop.quit_count + 1), quit_count=0)
-    shell = SimpleNamespace(
-        kernel=SimpleNamespace(app=SimpleNamespace(qt_event_loop=loop))
-    )
-    modules = SimpleNamespace(
-        QtCore=SimpleNamespace(QTimer=_Timer),
-        QtWidgets=SimpleNamespace(QApplication=SimpleNamespace(instance=lambda: object())),
-    )
-    monkeypatch.setattr(backends, "_IPYKERNEL_WAKE_TIMER", None)
-    monkeypatch.setattr(backends, "_load_qt5_modules", lambda: modules)
-
-    backends._install_ipykernel_wake_timer(shell)
-
-    assert len(_Timer.created) == 1
-    timer = _Timer.created[0]
-    assert timer.interval == 50
-    assert timer.started is True
-    assert timer.timeout.callback is not None
-    timer.timeout.callback()
-    assert loop.quit_count == 1
-
-    backends._install_ipykernel_wake_timer(shell)
-    assert len(_Timer.created) == 1
-
-
-def test_ipykernel_wake_timer_ignores_shell_without_private_loop(monkeypatch) -> None:
-    monkeypatch.setattr(backends, "_IPYKERNEL_WAKE_TIMER", None)
-    shell = SimpleNamespace(kernel=SimpleNamespace(app=SimpleNamespace()))
-    monkeypatch.setattr(
-        backends,
-        "_load_qt5_modules",
-        lambda: (_ for _ in ()).throw(AssertionError("Qt must not load")),
-    )
-    backends._install_ipykernel_wake_timer(shell)
-    assert backends._IPYKERNEL_WAKE_TIMER is None
-
-
-def test_the_notebook_hook_is_skipped_without_importing_ipython(monkeypatch) -> None:
-    """0.64 s, paid by every widget in a plain process, to be told "no".
-
-    The hook this installs is for a Jupyter kernel, and a kernel that could
-    own a shell has already imported IPython -- that is how the code asking
-    is running.  So its absence from ``sys.modules`` IS the answer, and
-    importing it to ask was two thirds of a second of nothing.
-    """
-
-    monkeypatch.setattr(backends, "_IPYTHON_QT_LOOP_ENABLED", False)
-    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    monkeypatch.delitem(sys.modules, "IPython", raising=False)
-    monkeypatch.setattr(
-        backends.importlib,
-        "import_module",
-        lambda name, *rest: (_ for _ in ()).throw(
-            AssertionError(f"nothing may be imported to ask: {name}")
-        ),
-    )
-
-    backends._enable_ipython_qt_loop()
-
-    assert backends._IPYTHON_QT_LOOP_ENABLED is False
-
-
-def test_a_shell_that_is_already_there_still_gets_the_hook(monkeypatch) -> None:
-    """And the kernel it is FOR must still be served."""
-
-    asked: list[tuple[str, str]] = []
-    shell = SimpleNamespace(
-        run_line_magic=lambda *args: asked.append(args), kernel=None
-    )
-    module = ModuleType("IPython")
-    module.get_ipython = lambda: shell
-    monkeypatch.setattr(backends, "_IPYTHON_QT_LOOP_ENABLED", False)
-    monkeypatch.setattr(backends, "_IPYKERNEL_WAKE_TIMER", None)
-    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    monkeypatch.setitem(sys.modules, "IPython", module)
-
-    backends._enable_ipython_qt_loop()
-
-    assert asked == [("gui", "qt5")]
-    assert backends._IPYTHON_QT_LOOP_ENABLED is True
-
-
-@pytest.mark.gui
 def test_a_widget_outliving_its_host_refuses_input_instead_of_raising(qt_app) -> None:
     """An exception out of a Qt handler kills the application, silently.
 
@@ -220,7 +104,6 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising(qt_app) ->
     assert not escaped, "an exception escaped a Qt handler: %r" % (escaped[0],)
 
 
-@pytest.mark.gui
 def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes(qt_app) -> None:
     """Turning a scene must not stop it turning.
 

@@ -26,6 +26,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Lock, Thread
 import logging
+import socket
 import time
 
 from zlc_atom.authoring import is_tunable
@@ -121,6 +122,24 @@ def _one_line(error: BaseException) -> str:
     return " ".join(message.split())
 
 
+def _this_machine_spellings() -> tuple[str, ...]:
+    """Every spelling Remote knows this machine by, beyond loopback.
+
+    Its LAN addresses (the one a standalone pulse server offers other
+    computers among them) and its name: this machine as the board identity
+    knows it without a resolver.  Its full DNS name, a hosts-file alias or
+    a CNAME is not among them -- only a resolver says one leads here, and
+    asking one at every Init and Apply costs what a resolver that does not
+    answer costs.  Listing the addresses resolves this machine's name, so
+    they are listed on the device worker with the devices they judge -- at
+    Init, and again at every Apply.
+    """
+
+    from zlc_pulse.endpoint import local_ipv4_addresses
+
+    return (*local_ipv4_addresses(), socket.gethostname().strip().lower())
+
+
 def _run_inline(work, deliver, failed) -> None:
     """Run the work right here: the headless behaviour every test drives."""
 
@@ -153,6 +172,7 @@ class DeviceManagerPresenter:
         shutdown_session: Callable[[object], None] | None = None,
         on_shutdown: Callable[[object], None] | None = None,
         on_device_open: Callable[[str], None] | None = None,
+        on_device_published: Callable[[str], None] | None = None,
         run_off_thread: Callable[..., None] | None = None,
         close_worker: Callable[[], bool] | None = None,
     ) -> None:
@@ -167,6 +187,7 @@ class DeviceManagerPresenter:
             (shutdown_session, "shutdown_session"),
             (on_shutdown, "on_shutdown"),
             (on_device_open, "on_device_open"),
+            (on_device_published, "on_device_published"),
             (run_off_thread, "run_off_thread"),
             (close_worker, "close_worker"),
         ):
@@ -202,6 +223,12 @@ class DeviceManagerPresenter:
         self._baseline_devices: tuple[DeviceInstanceConfig, ...] = ()
         self._baseline_simulation = {}
         self.saved = True
+        #: The draft was not read from ``path``: a ``--template`` start over
+        #: an apparatus file that exists, or an apparatus file there that
+        #: could not be read.  The screen never agrees with that
+        #: file, and Save goes through Save As rather than replace a file
+        #: this window never read.
+        self._path_unread = False
         self.busy = False
         self._closed = False
         self._scan_lock = Lock()
@@ -216,6 +243,7 @@ class DeviceManagerPresenter:
         self._shutdown_session = shutdown_session
         self._on_shutdown = on_shutdown
         self._on_device_open = on_device_open
+        self._on_device_published = on_device_published
         self._active_session: object | None = None
         #: The bench fabric, started on the first publish and owned here
         #: for the process's life.  What is out is named by key, each
@@ -223,6 +251,11 @@ class DeviceManagerPresenter:
         #: off the device for as long as a peer may be on it.
         self._announcer = None
         self._remoted: dict[str, object] = {}
+        #: This machine's own addresses and name
+        #: (``_this_machine_spellings``), listed on the device worker at
+        #: Init and again at every Apply: Remote tells this machine's
+        #: endpoints from a peer's by them.
+        self._this_machine: tuple[str, ...] = ()
         self._server_log = _server_log_buffer()
         self._active_config: InstallationConfig | None = None
         self._refresh_pending = False
@@ -255,7 +288,6 @@ class DeviceManagerPresenter:
         self.view.load_requested.connect(self._guarded(self.load_from_dialog))
         self.view.save_requested.connect(self._guarded(self.save))
         self.view.save_as_requested.connect(self._guarded(self.save_as))
-        self.view.cancel_requested.connect(self._guarded(self.cancel))
         self.view.lifecycle_requested.connect(self._guarded(self.toggle_lifecycle))
         self.view.device_open_requested.connect(self._guarded(self.open_device))
         self.view.device_remote_toggled.connect(self._guarded(self.toggle_remote))
@@ -300,17 +332,21 @@ class DeviceManagerPresenter:
         """Read the apparatus, or start an empty one and say so.
 
         A missing file is the ordinary case -- it is how a new bench begins --
-        so it is answered rather than raised.
+        so it is answered rather than raised.  A template the window was
+        started from (``--template``) is the draft INSTEAD of the file, as
+        ``--check`` reads it: a virtual start on the rig PC must not open the
+        rig's devices.  Nor does it pass for that file: it shows unsaved, and
+        its Save goes through Save As.  A file that cannot be read leaves
+        ``path`` where it was, so a later Save never overwrites the file that
+        failed: when that file IS ``path`` (the start, or a re-open of the
+        same file), the draft is marked unread like a template's.
         """
 
-        if path is not None:
-            self.path = Path(path)
-        if not self.path.exists():
-            initial = (
-                self._initial_config
-                if _use_initial and self._initial_config is not None
-                else None
-            )
+        target = self.path if path is None else Path(path)
+        initial = self._initial_config if _use_initial else None
+        if initial is not None or not target.exists():
+            self.path = target
+            self._path_unread = initial is not None and target.exists()
             # The same editable truth a file load makes: every known type's
             # defaults materialized, so each form row has a value to show.
             self.devices = [
@@ -320,21 +356,30 @@ class DeviceManagerPresenter:
             self.simulation = {} if initial is None else initial.simulation
             self._baseline_devices = tuple(self.devices)
             self._baseline_simulation = self.simulation
-            self.saved = True
+            self.saved = not self._path_unread
             self._show()
             if self.devices:
                 self._report(
                     f"new {self._template_name(self.devices) or 'custom'} apparatus draft"
+                    + (f"; {target.name} not loaded" if target.exists() else "")
                 )
             else:
-                self._report(f"no apparatus at {self.path.name} yet; add devices and save")
+                self._report(f"no apparatus at {target.name} yet; add devices and save")
             return False
         try:
-            config = load_installation_config(self.path)
+            config = load_installation_config(target)
             devices = [self._canonical_device(item) for item in config.devices]
         except Exception as error:
-            self._report(f"cannot read {self.path.name}: {error}", severity="error")
+            if target == self.path:
+                # The rig's file with every device's address in it: this
+                # draft never came from it, so Save asks where.
+                self._path_unread = True
+                self.saved = False
+                self._show()
+            self._report(f"cannot read {target.name}: {error}", severity="error")
             return False
+        self.path = target
+        self._path_unread = False
         self.devices = devices
         self.simulation = config.simulation
         self._baseline_devices = tuple(self.devices)
@@ -374,21 +419,6 @@ class DeviceManagerPresenter:
             "Apparatus (*.json);;All files (*)",
         )
         return bool(chosen) and self.load(chosen)
-
-    def cancel(self) -> bool:
-        """Discard local edits and restore the last loaded/saved baseline."""
-
-        if (
-            tuple(self.devices) == self._baseline_devices
-            and self.simulation == self._baseline_simulation
-        ):
-            return False
-        self.devices = list(self._baseline_devices)
-        self.simulation = self._baseline_simulation
-        self.saved = True
-        self._show()
-        self._report("discarded unsaved apparatus edits")
-        return True
 
     def add_device(self, type_id: str) -> str:
         """Add one device of a type, set up the way its own schema says.
@@ -495,7 +525,7 @@ class DeviceManagerPresenter:
             self._scan_pending = {descriptor.type_id for descriptor in descriptors}
 
         def ask(descriptor) -> None:
-            answer: object = ()
+            answer: object = ((), ())
             try:
                 answer = descriptor.discover()
             except Exception as error:  # noqa: BLE001 -- reported per family
@@ -524,17 +554,19 @@ class DeviceManagerPresenter:
         # One line per REASON, naming every family that gave it: the Rigol
         # and Tek scans walk the same VISA bus, and a bus that lists nothing
         # made both say the same paragraph -- twice, over the failure that
-        # was actually news.
+        # was actually news.  What a family that answered could not ask is
+        # a reason too, beside what it found.
         reasons: dict[str, list[str]] = {}
         for descriptor in descriptors:
             if descriptor.type_id not in answered:
-                reason = f"no answer within {_FAMILY_SCAN_DEADLINE_SECONDS:g}s"
+                missed = (f"no answer within {_FAMILY_SCAN_DEADLINE_SECONDS:g}s",)
             elif isinstance(answered[descriptor.type_id], Exception):
-                reason = str(answered[descriptor.type_id])
+                missed = (str(answered[descriptor.type_id]),)
             else:
-                found.extend(answered[descriptor.type_id])
-                continue
-            reasons.setdefault(reason, []).append(descriptor.type_id)
+                entries, missed = answered[descriptor.type_id]
+                found.extend(entries)
+            for reason in missed:
+                reasons.setdefault(reason, []).append(descriptor.type_id)
         failures.extend(
             f"{', '.join(families)}: {reason}"
             for reason, families in reasons.items()
@@ -860,18 +892,31 @@ class DeviceManagerPresenter:
                     severity="warning",
                 )
                 return False
+            from zlc_pulse.endpoint import is_this_machine
+
             authored_host = str(parameters["host"]).strip()
-            if authored_host.lower() not in ("", "127.0.0.1", "localhost"):
+            # This machine as written -- loopback, one of its addresses (the
+            # one a standalone pulse server offers other computers too) or
+            # its name -- against the spellings listed when devices were
+            # last loaded (Init or Apply).  No other name is resolved here,
+            # on the GUI thread, where a resolver that does not answer is a
+            # frozen window: a full name or an alias the board identity
+            # would resolve to this machine is refused, naming the
+            # spellings that are accepted.
+            if not is_this_machine(authored_host, self._this_machine):
                 # A client whose server lives elsewhere has nothing of THIS
-                # machine's to publish.
+                # machine's to publish.  The spellings it was judged by are
+                # said, so one this machine has but did not list is seen.
+                listed = ", ".join(self._this_machine) or "none listed"
                 self._report(
-                    f"{key}: its server lives on {authored_host} -- publish "
-                    "it from that machine",
+                    f"{key}: {authored_host} is none of this machine's "
+                    f"addresses or names ({listed}) -- publish it from the "
+                    "machine its server lives on, or write one of these",
                     severity="warning",
                 )
                 return False
-            # The authored host is where THIS machine dials its own server
-            # (loopback).  A peer replaces it with the address it reached
+            # The authored host is where THIS machine dials its own server.
+            # A peer replaces it with the address it reached
             # this machine's announcer at, the one address known to work.
         record = PublishedDevice(
             instance_id=key,
@@ -906,6 +951,10 @@ class DeviceManagerPresenter:
         self._announcer.publish(record)
         self._remoted[key] = lease
         self.view.set_remoted(tuple(sorted(self._remoted)))
+        if self._on_device_published is not None:
+            # The peer's now: a Control left open here would go on looking
+            # editable over a Current nobody re-reads.
+            self._on_device_published(key)
         self._report(
             f"{key}: published on the bench fabric (port "
             f"{self._announcer.port})",
@@ -924,8 +973,13 @@ class DeviceManagerPresenter:
         more would refuse every local user until devices were initialised
         again.  Closing that door can wait on the device, so with a ``leaf``
         this runs on the device worker.  ``leaf`` is None when the device
-        has already left the session, and its server with it: nothing is
-        left to wait on.
+        has already left the session, and its server with it; the
+        announcer still waits out a peer's request that reached the device
+        before the withdrawal.  That is the view's sweep, on the GUI thread,
+        and it is reached only by a published device that left the session
+        without being withdrawn -- its publication claim refuses a rebuild
+        or close of it, and Shutdown withdraws first -- so it is a safety
+        net, not a path a wait sits on.
         """
 
         lease = self._remoted.pop(key)
@@ -1052,16 +1106,16 @@ class DeviceManagerPresenter:
             failed(error)
             return False
 
-        def reconcile() -> object:
-            reconciled = work()
-            if reconciled is not session:
-                raise RuntimeError("device reconcile replaced the active session")
-            return reconciled
+        def reconcile() -> tuple[object, tuple[str, ...]]:
+            # This machine's spellings are listed again with the devices
+            # they judge, on the device worker as at Init: a client Applied
+            # after a cable, a DHCP lease or a VPN brought this machine a
+            # new address is a device of this machine's to Remote.
+            return work(), _this_machine_spellings()
 
-        def finished(reconciled: object) -> None:
-            if self._active_session is not reconciled:
-                failed(RuntimeError("device reconcile completed for another session"))
-                return
+        def finished(result: tuple[object, tuple[str, ...]]) -> None:
+            reconciled, this_machine = result
+            self._this_machine = tuple(this_machine)
             effective = getattr(reconciled, "installation_config", None)
             if not isinstance(effective, InstallationConfig):
                 effective = candidate
@@ -1139,15 +1193,17 @@ class DeviceManagerPresenter:
         self._show()
         self._report("initializing devices")
 
-        def build() -> object:
+        def build() -> tuple[object, tuple[str, ...]]:
             # Opening devices is where the seconds are -- a dial that answers
             # nothing, a vendor runtime coming up -- and none of it touches a
             # window.  Run it off the GUI thread and the "initializing
-            # devices" line above is actually painted while it happens.
+            # devices" line above is actually painted while it happens.  So
+            # is resolving this machine's name, to list its spellings.
+            this_machine = _this_machine_spellings()
             session = self._initialize_session(candidate)
             if session is None:
                 raise RuntimeError("session initializer returned None")
-            return session
+            return session, this_machine
 
         def failed(error: BaseException) -> None:
             self.busy = False
@@ -1156,16 +1212,22 @@ class DeviceManagerPresenter:
 
         self._run_off_thread(
             build,
-            lambda session: self._session_ready(session, candidate),
+            lambda built: self._session_ready(*built, candidate),
             failed,
         )
         return True
 
-    def _session_ready(self, session: object, candidate: InstallationConfig) -> bool:
+    def _session_ready(
+        self,
+        session: object,
+        this_machine: tuple[str, ...],
+        candidate: InstallationConfig,
+    ) -> bool:
         """The half that must happen where the windows are."""
 
         self._active_session = session
         self._active_config = candidate
+        self._this_machine = tuple(this_machine)
         self._refresh_pending = False
         try:
             if self._on_initialized is not None:
@@ -1265,8 +1327,6 @@ class DeviceManagerPresenter:
 
         def finished(retired: object) -> None:
             nonlocal completed
-            if self._active_session is not retired:
-                raise RuntimeError("another session replaced the one being shut down")
             self._active_session = None
             self._active_config = None
             self._refresh_pending = False
@@ -1302,6 +1362,11 @@ class DeviceManagerPresenter:
         factories run; Workbench does not carry a second copy of that grammar.
         """
 
+        if self._path_unread and self.path.exists():
+            # A draft over a rig file it was not read from (a --template, or
+            # a file that failed to read): the operator names where it goes,
+            # and the dialog asks before replacing anything.
+            return self.save_as()
         try:
             config = InstallationConfig(
                 tuple(self.devices), simulation=self.simulation
@@ -1321,6 +1386,7 @@ class DeviceManagerPresenter:
         except Exception as error:
             self._report(f"cannot write {self.path.name}: {error}", severity="error")
             return ""
+        self._path_unread = False
         self._baseline_devices = tuple(self.devices)
         self._baseline_simulation = self.simulation
         self.saved = True
@@ -1348,11 +1414,14 @@ class DeviceManagerPresenter:
         target = Path(chosen)
         if target.suffix == "":
             target = target.with_suffix(".json")
-        previous = self.path
+        previous = self.path, self._path_unread
         self.path = target
+        # The operator named this file, and the dialog asked before
+        # replacing it.
+        self._path_unread = False
         written = self.save()
         if not written:
-            self.path = previous
+            self.path, self._path_unread = previous
             self._show()
         return written
 
@@ -1414,7 +1483,8 @@ class DeviceManagerPresenter:
 
     def _touch(self, message: str) -> None:
         self.saved = (
-            tuple(self.devices) == self._baseline_devices
+            not self._path_unread
+            and tuple(self.devices) == self._baseline_devices
             and self.simulation == self._baseline_simulation
         )
         self._show()

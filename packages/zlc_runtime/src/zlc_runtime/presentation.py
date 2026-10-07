@@ -832,6 +832,11 @@ class BoardScheduler:
         self._last_front = front
         elapsed = self._clock.elapsed_ms()
         if not stage:
+            # A join window counts display ticks, not staging: a follower
+            # cohort formed before Pause whose follower never comes (its fit
+            # failed or was superseded) still seals, and the render already
+            # travelling finishes, as Pause promises.
+            self._arbiter.tick_boundary()
             return front
         # A presentation-paced follower's batch (a rolling trace of a
         # panel's fit signal) is published during its source pair's commit

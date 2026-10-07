@@ -10,11 +10,10 @@ Why bound to one object: ``patch(SomeClass, "method")`` times EVERY instance
 in the process, and a console always holds more than one renderer.  A curve
 panel's profile came back carrying another panel's image work that way, and
 the wrong seam looked like the bottleneck for an afternoon.  :func:`watch`
-binds to the instance you hand it; :func:`watch_module` is for module-level
-functions, where there is only one.
+binds to the instance you hand it.
 
-Numba dispatchers carry ``__wrapped__`` and cannot be wrapped this way --
-:func:`watch_module` says so out loud instead of silently timing nothing.
+A name that is not there is refused, not skipped: a seam that binds nothing
+reports zero, and zero reads like free work.
 
 Wall AND cpu, always both.  A console runs a producer, several panels and a
 parallel pool on one machine, so a seam's thread is descheduled inside it
@@ -99,7 +98,7 @@ def watch(instance, *names: str, prefix: str = "") -> list[str]:
     for name in names:
         original = getattr(type(instance), name, None)
         if original is None or not callable(original):
-            continue
+            raise AttributeError(f"{label} has no method {name!r} to time")
         # A STATICMETHOD reached through the class is a plain function, and
         # binding a wrapper as an instance attribute means the call site no
         # longer supplies the instance -- so passing one injects an argument
@@ -123,26 +122,6 @@ def watch(instance, *names: str, prefix: str = "") -> list[str]:
     return bound
 
 
-def watch_module(module, *names: str, prefix: str = "") -> list[str]:
-    """Time module-level functions.  Refuses numba dispatchers loudly."""
-
-    label = prefix or module.__name__.rsplit(".", 1)[-1]
-    bound: list[str] = []
-    for name in names:
-        original = getattr(module, name, None)
-        if original is None or not callable(original):
-            continue
-        if hasattr(original, "__wrapped__") or hasattr(original, "py_func"):
-            raise TypeError(
-                f"{label}.{name} is a compiled dispatcher; wrapping it here "
-                "measures nothing. Time its CALLER, or use "
-                "ZLC_PLOT_KERNELS=numpy to compare against the reference."
-            )
-        setattr(module, name, _timed(f"{label}.{name}", original))
-        bound.append(name)
-    return bound
-
-
 def watch_attribute(instance, *names: str, prefix: str = "") -> list[str]:
     """Time callable attributes already bound on one object.
 
@@ -157,7 +136,7 @@ def watch_attribute(instance, *names: str, prefix: str = "") -> list[str]:
     for name in names:
         original = getattr(instance, name, None)
         if original is None or not callable(original):
-            continue
+            raise AttributeError(f"{label} has no callable {name!r} to time")
         setattr(instance, name, _timed(f"{label}.{name}", original))
         bound.append(name)
     return bound

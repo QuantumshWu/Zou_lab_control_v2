@@ -135,8 +135,17 @@ class DcamCameraAdapter:
         self._terminal: CameraCaptureTerminalRecord | None = None
         try:
             self._lane.call(self._open_on_owner)
-        except BaseException:
-            self._lane.close()
+        except BaseException as primary:
+            # An open that outlived the lane's bounded wait is still running
+            # there, and if it succeeds it leaves a handle on an adapter
+            # nobody holds -- the next Init would find the camera busy.  The
+            # lane's last command releases it whenever that open returns,
+            # even after the join has stopped waiting; after an open that
+            # failed on its own it finds nothing to release.
+            try:
+                self._lane.close(last=self._close_on_owner)
+            except BaseException as secondary:  # noqa: BLE001 - the open's failure is the report
+                primary.add_note(f"releasing the DCAM handle behind the failed open: {secondary}")
             raise
 
     @property

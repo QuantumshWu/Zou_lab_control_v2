@@ -14,6 +14,15 @@ REPO_ROOT = ROOT.parents[1]
 if os.environ.get("ZLC_TEST_INSTALLED") != "1" and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# Once, before any test module is imported: the in-process Qt tests run
+# offscreen on Agg (every child gets both again in ``_run_qt``).  Said by one
+# test module at import, a file run on its own -- the normal targeted run --
+# built its QApplication on the real desktop: windows on the operator's
+# screen, placement asserted against the real monitor.  ``setdefault`` leaves
+# an explicitly chosen platform alone.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 
 #: Every child starts here.  Without it the subprocess resolves the layers
 #: through whatever the editable install points at -- on this machine,
@@ -33,7 +42,6 @@ def _run_qt(
     *,
     timeout: float = 60,
     extra_path: tuple[Path, ...] = (),
-    mpl_agg: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run one offscreen Qt snippet in its own process and require it to pass."""
 
@@ -45,12 +53,10 @@ def _run_qt(
         )
     )
     environment["QT_QPA_PLATFORM"] = "offscreen"
-    if mpl_agg:
-        # Fixed for the child, not inherited: a matplotlib backend chosen by
-        # whatever imported it in the parent is how this harness produced
-        # access violations at teardown that had nothing to do with the code
-        # under test.
-        environment["MPLBACKEND"] = "Agg"
+    # Fixed for the child, not inherited: a matplotlib backend chosen by
+    # whatever the operator exported is how this harness produced access
+    # violations at teardown that had nothing to do with the code under test.
+    environment["MPLBACKEND"] = "Agg"
     completed = subprocess.run(
         [sys.executable, "-c", _BOOTSTRAP + code],
         cwd=ROOT,

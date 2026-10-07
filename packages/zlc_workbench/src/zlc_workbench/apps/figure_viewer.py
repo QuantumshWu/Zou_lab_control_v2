@@ -211,10 +211,12 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.path is None:
                 print("figure viewer ready: no archive given")
                 return 0
-            from zlc_data.figure_archive import read_archive
-            from ..viewer import describe_archive
+            # What the window reads when it opens, every Dataset and its
+            # recipe included -- a check of less passed archives that then
+            # did not open.
+            from ..viewer import read_figure_archive
 
-            description = describe_archive(*read_archive(arguments.path)[:2])
+            _resolved, description, *_rest = read_figure_archive(arguments.path)
             print(
                 f"figure ready: {description.name!r}, "
                 f"{len(description.datasets)} dataset(s), "

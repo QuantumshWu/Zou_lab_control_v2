@@ -166,9 +166,5 @@ class VirtualWaveformSource:
             if not self._records.armed:
                 self._records.close()
 
-    @property
-    def produced_count(self) -> int:
-        return self._records.produced_count
-
 
 __all__ = ["VirtualWaveformConfig", "VirtualWaveformSource"]

@@ -548,6 +548,42 @@ def test_an_input_token_is_published_only_with_its_upload_enqueued() -> None:
         assert service.close(timeout=30)
 
 
+def test_a_mount_sized_input_segment_is_given_back_once_shots_are_small() -> None:
+    """The segment a whole retained history was uploaded in is not kept.
+
+    The first upload after a mount carries every plane the panel reads.
+    First fit handed that segment to each single-shot upload after it, so
+    the console held it, committed, for as long as the child lived.
+    """
+
+    from zlc_plot import RenderProcess
+    from zlc_plot.render_process import _INPUT_FREE_BLOCKS
+
+    service = RenderProcess("raster-input-free-list-test")
+    history = service._take_input_block(16 << 20)
+    shots = set()
+    try:
+        with service._lock:
+            assert service._keep_input_block(history) is None
+        for _ in range(_INPUT_FREE_BLOCKS):
+            shot = service._take_input_block(1 << 20)
+            assert shot is not history
+            shots.add(shot.name)
+            with service._lock:
+                assert service._keep_input_block(shot) is None
+        # One shot-sized segment in rotation; the history's is gone.
+        assert len(shots) == 1
+        assert [entry[0] for entry in service._input_free] == [shot]
+        assert history.buf is None
+    finally:
+        with service._lock:
+            free = [entry[0] for entry in service._input_free]
+            service._input_free.clear()
+        service._discard_input_blocks(free)
+        service._discard_input_blocks([history])
+        assert service.close(timeout=30)
+
+
 def test_an_owned_input_keeps_the_producer_s_indexed_window() -> None:
     """The child's rebuilt DataBlock carries the block's IndexedWindow.
 
@@ -578,7 +614,7 @@ def test_an_owned_input_keeps_the_producer_s_indexed_window() -> None:
         revision=3,
         block_id="roi.indexed",
         stream_generation="roi",
-        window=IndexedWindow(0, 2, 0),
+        window=IndexedWindow(0, 2),
     )
     installed = _owned_input(("schema", (_INPUT_REF, 2), (_INPUT_REF, 3), (_INPUT_REF, 4),
                               schema.value_schema, schema.fingerprint),
@@ -2823,6 +2859,7 @@ def test_a_promoted_front_does_not_pin_the_first_one() -> None:
         host.close(timeout=10)
 
 
+@pytest.mark.usefixtures("warm_kernel_cache")
 def test_a_render_childs_first_fit_finds_its_family_loaded() -> None:
     """A spare child stops its warming short of the fit; the child that is
     given a panel goes on to that panel's own family once the panel's
@@ -2831,6 +2868,8 @@ def test_a_render_childs_first_fit_finds_its_family_loaded() -> None:
     engine's machine code read off the disk cache: tens of milliseconds
     against six hundred cold.  Timed, because the child's kernels are its
     own to see; the bound is well under cold with the overlay inside it.
+    The cache itself must be current -- a child that has to compile the
+    family misses the bound by seconds -- which the fixture checks first.
     """
 
     from zlc_plot import RenderProcess

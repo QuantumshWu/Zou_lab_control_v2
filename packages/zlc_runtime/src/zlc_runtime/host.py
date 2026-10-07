@@ -20,7 +20,6 @@ from .plane import (
     SignalDataPlane,
     SignalPublication,
     SignalValue,
-    RetainedPublicationExpired,
 )
 from .streams import (
     DEFAULT_FOLLOW_MAX_PENDING,
@@ -612,8 +611,10 @@ class NodeHost:
                             "window input requires source-index history on every sibling; "
                             "use run input for a finite Dataset"
                         )
+                    # An exact follower may read its window behind the newest
+                    # commit: its leases hold the rows it has yet to read.
                     self._input_history_leases = self._data_plane.acquire_indexed_histories(
-                        names, self._input_window,
+                        names, self._input_window, hold=self._input_delivery == "exact",
                     )
                 self._start_processor()
             except BaseException as error:
@@ -621,17 +622,23 @@ class NodeHost:
                 self._refuse_start(error)
                 raise
         else:
-            if self._kind == "task":
-                if run_root is None or input_summary is None:
-                    raise ValueError("a hosted Task start requires run_root and input_summary")
-                self._task_run = TaskRun.create(
-                    run_root,
-                    task_name=self._task_name,
-                    instance_id=self.instance_id,
-                    input_summary=input_summary,
-                )
-            elif run_root is not None or input_summary is not None:
-                raise ValueError("only a Task start accepts run metadata")
+            try:
+                if self._kind == "task":
+                    if run_root is None or input_summary is None:
+                        raise ValueError("a hosted Task start requires run_root and input_summary")
+                    self._task_run = TaskRun.create(
+                        run_root,
+                        task_name=self._task_name,
+                        instance_id=self.instance_id,
+                        input_summary=input_summary,
+                    )
+                elif run_root is not None or input_summary is not None:
+                    raise ValueError("only a Task start accepts run metadata")
+            except BaseException as error:
+                # Refused before anything ran: terminal, like every other
+                # refused Start, never a host left "starting".
+                self._refuse_start(error)
+                raise
             self._start_worker()
 
     def _ensure_owner(self) -> RunOwnerMailbox:
@@ -818,12 +825,16 @@ class NodeHost:
 
     def _start_worker(self) -> None:
         assert self._owner is not None
-        if self._dataset_outputs:
-            self._generation = self._data_plane.begin_generation(self)
-            self._plane_state = True
         self._active = True
         generation = self._owner.begin_generation()
         try:
+            # Inside the failure path: a plane that refuses the generation
+            # (a predecessor not yet sealed, a name another node owns) ends
+            # this Start FAILED, with its Task run recorded as such, not a
+            # host left "starting" beside an empty run directory.
+            if self._dataset_outputs:
+                self._generation = self._data_plane.begin_generation(self)
+                self._plane_state = True
             if self._task_run is not None:
                 self._task_run.mark_running()
             self._owner.submit(
@@ -833,6 +844,9 @@ class NodeHost:
             )
             self._phase = "running"
         except BaseException as error:
+            # Nothing was handed to the owner: its generation is reaped,
+            # or the next Start would wait on work that never existed.
+            self._owner.mark_owner_reaped()
             self._active = False
             self._mark_terminal()
             self._phase = "failed"
@@ -1257,11 +1271,9 @@ class NodeHost:
                 primary_index=value.primary_index,
                 event_record=event_record,
             )
-        if view == "window" and len({
-            (value.snapshot.block.window.start, value.snapshot.block.window.latest)
-            for value in inputs.values()
-        }) != 1:
-            raise RetainedPublicationExpired("sibling window expired while materializing its inputs")
+        # A window input is the same N source positions of one publication
+        # for every sibling, with the bundle's common first row: its
+        # siblings cannot start apart.
         return MappingProxyType(inputs)
 
     def _refuse_start(self, error: BaseException) -> None:
@@ -1565,6 +1577,10 @@ class NodeHost:
                     return
                 source = self._validate_follow_source(publication.value(source_name))
                 outputs = self._evaluate_processor_outputs(source, publication)
+                # Its window is read; a later publication needs no row
+                # older than the second of it.
+                for lease in self._input_history_leases:
+                    lease.hold_from(source.primary_index - self._input_window + 2)
                 if self._stop_event.is_set():
                     raise _StartSuppressed()
                 self._commit_processor(

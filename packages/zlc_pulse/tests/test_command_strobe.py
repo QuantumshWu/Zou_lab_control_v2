@@ -13,6 +13,7 @@ import pytest
 from zlc_pulse import compile_sequence, pulse_target_from_xdc
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
+from zlc_pulse.transport.axi import _default_vivado
 from zlc_pulse.wire import CMD_FIRE, CMD_LOAD, CMD_SAFE, CtrlWords, STATUS_RUNNING, StreamerParams
 
 from test_wire_device import _open_streamer, _sequence
@@ -87,6 +88,7 @@ def test_rtl_contracts_execute_with_nonzero_failure(
         cwd=RTL_DIR,
         capture_output=True,
         text=True,
+        timeout=120,
         check=False,
     )
     assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
@@ -96,6 +98,7 @@ def test_rtl_contracts_execute_with_nonzero_failure(
         cwd=RTL_DIR,
         capture_output=True,
         text=True,
+        timeout=120,
         check=False,
     )
     transcript = run_result.stdout + run_result.stderr
@@ -106,13 +109,12 @@ def test_rtl_contracts_execute_with_nonzero_failure(
 def test_vivado_rtl_matrix_requires_each_numeric_oracle(tmp_path: Path) -> None:
     """Run the maintained xsim matrix when Vivado and generated BRAM IP exist."""
 
+    # The simulator tools sit beside the vivado the build and the JTAG
+    # session run, found by their one rule -- the release that generated the
+    # IP models below, not one written down here or first on PATH.
     suffix = ".bat" if os.name == "nt" else ""
-    configured = os.environ.get("ZLC_PS_VIVADO_BIN", "")
-    tool_dir = Path(configured).resolve().parent if configured else Path("C:/Xilinx/Vivado/2019.1/bin")
-    tools = {
-        name: Path(shutil.which(name) or tool_dir / f"{name}{suffix}")
-        for name in ("xvlog", "xelab", "xsim")
-    }
+    tool_dir = Path(_default_vivado()).resolve().parent
+    tools = {name: tool_dir / f"{name}{suffix}" for name in ("xvlog", "xelab", "xsim")}
     if any(not path.is_file() for path in tools.values()):
         pytest.skip("Vivado xsim matrix not executed: xvlog/xelab/xsim are unavailable")
 
@@ -186,6 +188,7 @@ def test_vivado_rtl_matrix_requires_each_numeric_oracle(tmp_path: Path) -> None:
         if top == "tb_1tick":
             assert "SHORT-ONE-SHOT-OK ticks=1" in transcript
             assert "SHORT-ONE-SHOT-OK ticks=2" in transcript
+            assert "FIRE-ARM-PHASE-OK" in transcript
 
 
 class _Recorder(MemoryRegisterTransport):

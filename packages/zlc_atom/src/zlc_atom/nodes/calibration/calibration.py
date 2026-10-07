@@ -302,16 +302,14 @@ class AtomDetection:
         return np.asarray(self.occupied, dtype=dtype)
 
 
-def classify_threshold(counts: object, thresholds: object, *, bright_above: bool = True) -> np.ndarray:
+def classify_threshold(counts: object, thresholds: object) -> np.ndarray:
     values = np.asarray(counts, dtype=float)
     boundary = np.asarray(thresholds, dtype=float)
     if boundary.ndim == 1 and values.ndim >= 1 and values.shape[-1] == boundary.size:
         boundary = np.broadcast_to(boundary, values.shape)
     elif values.shape != boundary.shape:
         raise ValueError("counts and thresholds must have the same shape or site-axis broadcasting")
-    if bright_above:
-        return np.isfinite(values) & np.isfinite(boundary) & (values > boundary)
-    return np.isfinite(values) & np.isfinite(boundary) & (values < boundary)
+    return np.isfinite(values) & np.isfinite(boundary) & (values > boundary)
 
 
 def _immutable_array(value: object, dtype: str, shape: tuple[int, ...] | None = None) -> np.ndarray:
@@ -2070,12 +2068,7 @@ def _coerce_short_stack(short_frames: object, frame_contract: FrameContract) -> 
     return np.asarray([frame_contract.assert_image(frame) for frame in frames])
 
 
-def _empirical_threshold(
-    dark: object,
-    bright: object,
-    *,
-    bright_above: bool,
-) -> float:
+def _empirical_threshold(dark: object, bright: object) -> float:
     """The cut that classifies THIS run's labelled shots best.
 
     The labels come from the long frames, where an atom is unmistakable; the
@@ -2111,10 +2104,7 @@ def _empirical_threshold(
     dark_below = np.searchsorted(np.sort(dark_values), cuts, side="left")
     bright_below = np.searchsorted(np.sort(bright_values), cuts, side="left")
     total = dark_values.size + bright_values.size
-    if bright_above:
-        fidelity = (dark_below + bright_values.size - bright_below) / total
-    else:
-        fidelity = (dark_values.size - dark_below + bright_below) / total
+    fidelity = (dark_below + bright_values.size - bright_below) / total
     best_value = float(np.max(fidelity))
     best = np.flatnonzero(np.isclose(fidelity, best_value, rtol=0.0, atol=1e-12))
     margin = np.zeros(cuts.shape, dtype=float)
@@ -2177,7 +2167,7 @@ def _fit_readout_model(
         # The fit's own threshold and fidelity are already the weighted
         # crossing and its weighted fidelity; ``ok`` includes that the
         # crossing exists between the two means.
-        if mixture.ok and mixture.bright_above:
+        if mixture.ok:
             gaussian_threshold = mixture.threshold
             gaussian_thresholds[site] = mixture.threshold
             gaussian_dark_means[site] = mixture.dark_mean
@@ -2190,7 +2180,7 @@ def _fit_readout_model(
         threshold = gaussian_threshold
         if threshold_method == "empirical" or not np.isfinite(gaussian_threshold):
             threshold = (
-                _empirical_threshold(dark, bright_values, bright_above=True)
+                _empirical_threshold(dark, bright_values)
                 if dark.size and bright_values.size else float("nan")
             )
         if np.isfinite(threshold):
@@ -2205,7 +2195,6 @@ def _fit_readout_model(
             predictions[:, site] = classify_threshold(
                 short_values,
                 np.full(short_values.shape, threshold, dtype=float),
-                bright_above=True,
             )
     # Labels enter only here (and the empirical path above): they evaluate the
     # final operating point but never determine a Gaussian fit or its threshold.
@@ -2345,12 +2334,11 @@ def calibrate(
         # A label rests on two populations that are decisively there: a site
         # that never loaded has its one Gaussian split in two like any other
         # sample, and must not label its shots by the crossing.
-        if fit.decisive and fit.bright_above and np.isfinite(fit.threshold):
+        if fit.decisive and np.isfinite(fit.threshold):
             reference_values = reference_label_signals[:, :, site]
             bright[:, :, site] = classify_threshold(
                 reference_values,
                 np.full(reference_values.shape, fit.threshold, dtype=float),
-                bright_above=True,
             )
             fit_ok[site] = True
     every_reference_valid = np.all(reference_valid, axis=1)
@@ -2511,7 +2499,6 @@ def calibrate(
         "reference_fit_dark_sigma": np.asarray([fit.dark_sigma for fit in fits]),
         "reference_fit_bright_mean": np.asarray([fit.bright_mean for fit in fits]),
         "reference_fit_bright_sigma": np.asarray([fit.bright_sigma for fit in fits]),
-        "reference_fit_bright_above": np.asarray([fit.bright_above for fit in fits]),
         "reference_fit_ok": np.asarray([fit.ok for fit in fits]),
         "models": model_reports,
     }

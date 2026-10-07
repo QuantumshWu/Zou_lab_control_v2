@@ -22,7 +22,7 @@ module tb_real_engine;
     .clkb(clk),.enb(1'b1),.web({(PBITS/8){1'b0}}),.addrb(row_raddr),.dinb({PBITS{1'b0}}),.doutb(row_rdata_w));
 
   zlc_period_streamer dut (
-    .clk(clk),.reset(reset),.start(start),
+    .clk(clk),.reset(reset),.start(start),.arm(1'b0),
     .prog_count(NE[RAW:0]),.run_repeat_count(32'd0),
     .scan_enable(1'b0),.scan_count(32'd0),.scan_repeat_count(32'd1),
     .loop_table_count({(LIW+1){1'b0}}),.loop_first_flat({ML*RAW{1'b0}}),

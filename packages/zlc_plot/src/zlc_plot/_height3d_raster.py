@@ -20,10 +20,9 @@ grid, so the whole scene is a per-column front-to-back walk:
 * face outlines fall out of edge detection on a face-id plane -- which
   doubles as the pixel->bar PICK map interactions read.
 
-Cost is O(width * (nx + ny)) + O(width * height).  A grid denser than
-the pixels it lands on (a 1000x2000 scan on a 600-px box) pools to the
-display resolution first, exactly as the heatmap's front store does,
-so the walk never exceeds a few cells per pixel column.
+Cost is O(width * (nx + ny)) + O(width * height).  Every cell of the grid
+stands as its own bar, however dense the grid is against the pixels it
+lands on: there is no level of detail (``render_height_bars`` says why).
 """
 
 from __future__ import annotations
@@ -112,7 +111,7 @@ class HeightBarScene:
 
     ``project`` speaks FOLDED ground coordinates (the render's own
     frame); ``pick`` speaks the caller's original
-    grid indices and undo the azimuth fold and the LOD pooling.
+    grid indices and undoes the azimuth fold.
     """
 
     quadrant: int

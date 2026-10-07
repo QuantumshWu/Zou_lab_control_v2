@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-from tests.fakes import imported_modules
+from fakes import imported_modules
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +95,7 @@ assert "zlc_workbench" not in sys.modules
         check=False,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -152,6 +153,7 @@ if reached:
         check=False,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 

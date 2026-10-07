@@ -49,7 +49,7 @@ if TYPE_CHECKING:
         FitResult,
     )
     from .layout import SurfacePlan
-    from .primitives import ImageFrame, ImagePointOverlay, PlotInput
+    from .primitives import ImagePointOverlay, PlotInput
     from .session import (
         DisplayDescription,
         FitEvent,
@@ -732,11 +732,14 @@ class RasterPlotHost:
                     != presentation_epoch
                 )
             )
-            front = self._capture_front() if publishes else self.front
+            captured = self._capture_front() if publishes else None
+            front = self.front if captured is None else captured[0]
             if front is None:
-                front = self._capture_front()
+                captured = self._capture_front()
+                front = captured[0]
             delivery_failure = None
             if publishes:
+                assert captured is not None
                 delivery_failure = self._promote(front)
                 promoted = True
                 # The surface callback is intentionally lossless while a
@@ -744,7 +747,7 @@ class RasterPlotHost:
                 # committed surface, remove the now-redundant coalesced edge;
                 # otherwise every ordinary PUBLISH setter would create a
                 # second indistinguishable front.
-                self._discard_surface_sync_tasks()
+                self._discard_surface_sync_tasks(captured[1])
             if mode is _DispatchMode.PRESENTATION:
                 assert after_publish is not None
                 after_publish()
@@ -760,21 +763,33 @@ class RasterPlotHost:
                     self._require_session().redraw_surface()
             raise
 
-    def _discard_surface_sync_tasks(self) -> None:
+    def _discard_surface_sync_tasks(self, captured_epoch: int) -> None:
+        """Drop the queued republish edges the promoted front made redundant.
+
+        Only while no commit has landed since that front was captured: a
+        session mutated on another thread (a notebook calling it directly)
+        queues its edge under the render lock, and dropping an edge queued
+        after the capture left that commit on no front at all.
+        """
+
+        session = self._require_session()
         cancelled: list[Future[RasterOperation[Any]]] = []
-        with self._condition:
-            if not self._pending:
+        with session._render_lock:
+            if session._raster_presentation_epoch() != captured_epoch:
                 return
-            retained: deque[_WorkerTask] = deque()
-            for task in self._pending:
-                if task.coalesce_key == "surface-sync":
-                    cancelled.append(task.completion)
-                else:
-                    retained.append(task)
-            if len(retained) == len(self._pending):
-                return
-            self._pending = retained
-            self._condition.notify_all()
+            with self._condition:
+                if not self._pending:
+                    return
+                retained: deque[_WorkerTask] = deque()
+                for task in self._pending:
+                    if task.coalesce_key == "surface-sync":
+                        cancelled.append(task.completion)
+                    else:
+                        retained.append(task)
+                if len(retained) == len(self._pending):
+                    return
+                self._pending = retained
+                self._condition.notify_all()
         for completion in cancelled:
             completion.cancel()
 
@@ -874,14 +889,6 @@ class RasterPlotHost:
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="image-overlay",
         )
-
-    def update_image_frame(
-        self,
-        frame: "ImageFrame",
-    ) -> Future[RasterOperation["DisplayDescription"]]:
-        """Present one complete image frame through the pair pipeline."""
-
-        return self._enqueue_data_frame(frame, None)
 
     # ---------------------------------------------------------- pair pipeline
 
@@ -1953,8 +1960,9 @@ class RasterPlotHost:
         FOCUSED front publishes geometry for no cell except the one already
         shown, so "show cell j" became inexpressible exactly when a cell was
         already open, and the caller had nothing to do but drop the request.
-        An index cannot go stale the way a box can: the session clamps it to
-        the cells it has.
+        An index names the same cell for as long as the grid keeps its cell
+        count, and the session announces every focus a count change moves,
+        so a recorded index stays current; one outside the grid is refused.
         """
 
         if isinstance(index, bool) or not isinstance(index, int):
@@ -2280,34 +2288,48 @@ class RasterPlotHost:
                     self._closed = True
                     self._condition.notify_all()
 
-    def _capture_front(self) -> RasterFront:
+    def _capture_front(self) -> tuple[RasterFront, int]:
+        """The committed surface as one front, and the epoch it shows.
+
+        Under ONE hold of the session's render lock: every commit, whichever
+        thread makes it, happens under that lock, and read piece by piece a
+        front could carry one commit's pixels with the next one's axes and
+        identity -- or refuse its own RGBA for a size set in between.
+        """
+
         session = self._require_session()
-        plan = session.surface_plan
-        width, height = tuple(plan.raster_size)
-        raw, actual_height, actual_width = session._raster_capture_rgba_bytes()
-        if (actual_height, actual_width) != (height, width):
-            raise RuntimeError(
-                "session RGBA shape does not match its surface raster size"
+        with session._render_lock:
+            epoch = session._raster_presentation_epoch()
+            plan = session.surface_plan
+            width, height = tuple(plan.raster_size)
+            raw, actual_height, actual_width = (
+                session._raster_capture_rgba_bytes()
             )
-        buffer = RasterBuffer(width, height, raw)
-        axes_maps = session._raster_axes_snapshot()
-        selectors = tuple(session._raster_interaction_snapshot())
-        color_limits = session._raster_color_limits_snapshot()
-        facet_focus_index = session.facet_focus_index
-        revisions = session.revisions
+            if (actual_height, actual_width) != (height, width):
+                raise RuntimeError(
+                    "session RGBA shape does not match its surface raster size"
+                )
+            buffer = RasterBuffer(width, height, raw)
+            axes_maps = session._raster_axes_snapshot()
+            selectors = tuple(session._raster_interaction_snapshot())
+            color_limits = session._raster_color_limits_snapshot()
+            facet_focus_index = session.facet_focus_index
+            revisions = session.revisions
+            data_generation = session.data_generation
+            image_overlay_revision = session.image_overlay_revision
         self._sequence += 1
         identity = RasterIdentity(
             host_id=self._host_id,
             sequence=self._sequence,
-            data_generation=session.data_generation,
+            data_generation=data_generation,
             data_revision=int(revisions.data),
-            image_overlay_revision=session.image_overlay_revision,
+            image_overlay_revision=image_overlay_revision,
             display_revision=int(revisions.display),
             layout_revision=int(revisions.layout),
             kind=str(plan.kind),
             preset=str(plan.preset),
         )
-        return RasterFront(
+        front = RasterFront(
             identity=identity,
             buffer=buffer,
             logical_size=tuple(plan.logical_size),
@@ -2320,6 +2342,7 @@ class RasterPlotHost:
                 facet_focus_index=facet_focus_index,
             ),
         )
+        return front, epoch
 
     def _promote(self, front: RasterFront) -> Exception | None:
         """Make ``front`` current and hand it to every subscriber.

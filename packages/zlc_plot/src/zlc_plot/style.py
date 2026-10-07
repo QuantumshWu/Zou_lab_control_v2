@@ -721,7 +721,8 @@ class RenderPolicyConfig:
 #: policy, and therefore refuses to let an author set twice.  Declared
 #: here rather than read off ``_derived_rc_params`` because the check is
 #: about the vocabulary, not about any instance's values -- and valuing
-#: them resolves fonts.  ``test_style_rc_params`` keeps the two agreeing.
+#: them resolves fonts.  ``test_style_lane.py``'s
+#: ``test_the_names_a_style_owns_are_declared_once`` keeps the two agreeing.
 DERIVED_RC_PARAM_NAMES = frozenset({
     "font.size",
     "font.weight",
@@ -1076,23 +1077,45 @@ def bracket_color(index: int) -> str:
     return cycle[int(index) % len(cycle)]
 
 
-@contextmanager
-def style_context(
+def style_rc_values(
     style: PlotStyleConfig,
     overrides: Mapping[str, Any] | None = None,
-) -> Iterator[None]:
-    """Apply one immutable style on the serial Matplotlib compose lane."""
+    *,
+    beneath: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The whole rc mapping :func:`style_context` enters.
+
+    The style's params and the line cycle its palette draws, then
+    ``overrides``, all laid over ``beneath`` when one is given: the params
+    a caller must not take from whatever this process's live rcParams hold.
+    One builder, so a key on what the lane sets is a key on this and not on
+    a copy that left a line of it out.
+    """
 
     if not isinstance(style, PlotStyleConfig):
         raise TypeError("style must be PlotStyleConfig")
     from cycler import cycler
 
-    values = style.matplotlib_rc_params()
+    values = dict(beneath or {})
+    values.update(style.matplotlib_rc_params())
     values["axes.prop_cycle"] = cycler(color=style.palette.line_cycle)
     if overrides is not None:
         if not isinstance(overrides, Mapping):
             raise TypeError("overrides must be a mapping or None")
         values.update(overrides)
+    return values
+
+
+@contextmanager
+def style_context(
+    style: PlotStyleConfig,
+    overrides: Mapping[str, Any] | None = None,
+    *,
+    beneath: Mapping[str, Any] | None = None,
+) -> Iterator[None]:
+    """Apply one immutable style on the serial Matplotlib compose lane."""
+
+    values = style_rc_values(style, overrides, beneath=beneath)
     # Font registration belongs to the same serialized step as the rc
     # mutation.  Any renderer that enters this context therefore gets the
     # package-owned face even when it did not pre-register the asset.
@@ -1114,4 +1137,5 @@ __all__ = [
     "RenderPolicyConfig",
     "build_plot_style",
     "style_context",
+    "style_rc_values",
 ]

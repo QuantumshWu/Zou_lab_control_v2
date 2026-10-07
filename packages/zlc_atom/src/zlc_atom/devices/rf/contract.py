@@ -611,14 +611,8 @@ class RfSourceBase:
             # Compare the actual result with this session's latest reading;
             # no extra before-query merely to count an epoch.
             #
-            # The reading is dropped for the duration of the write, because a
-            # write that reaches the instrument and then loses its readback
-            # leaves the knob somewhere this session cannot name -- and a
-            # stale number is worse than none.  A refusal that never wrote
-            # puts it back: see TuneRefused.
-            before = self._current_values.get(selected)
-            held = selected in self._current_values
-            self._current_values.pop(selected, None)
+            # Checked before anything is dropped: a value refused here never
+            # reached the instrument, so the reading stays true.
             if kind == FREQUENCY_FIELD:
                 requested = float(value)
                 low, high = self._frequency_range(channel)
@@ -626,12 +620,6 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] Hz"
                     )
-                try:
-                    effective: Any = float(self._write_frequency(channel, requested))
-                except TuneRefused:
-                    if held:
-                        self._current_values[selected] = before
-                    raise
             elif kind == POWER_FIELD:
                 requested = float(value)
                 reader = getattr(self, "read_tunable_in_unit", None)
@@ -644,24 +632,30 @@ class RfSourceBase:
                     raise ValueError(
                         f"{selected} must lie in [{low!r}, {high!r}] {unit or 'dBm'}"
                     )
-                try:
+            elif type(value) is not bool:
+                raise TypeError(f"{selected} takes a bool")
+            # The reading is dropped for the duration of the write, because a
+            # write that reaches the instrument and then loses its readback
+            # leaves the knob somewhere this session cannot name -- and a
+            # stale number is worse than none.  A refusal that never wrote
+            # puts it back: see TuneRefused.
+            before = self._current_values.get(selected)
+            held = selected in self._current_values
+            self._current_values.pop(selected, None)
+            try:
+                if kind == FREQUENCY_FIELD:
+                    effective: Any = float(self._write_frequency(channel, requested))
+                elif kind == POWER_FIELD:
                     effective = float(
                         self._write_power_in_unit(channel, requested, unit)
                         if unit else self._write_power(channel, requested)
                     )
-                except TuneRefused:
-                    if held:
-                        self._current_values[selected] = before
-                    raise
-            else:
-                if type(value) is not bool:
-                    raise TypeError(f"{selected} takes a bool")
-                try:
+                else:
                     effective = bool(self._write_output(channel, value))
-                except TuneRefused:
-                    if held:
-                        self._current_values[selected] = before
-                    raise
+            except TuneRefused:
+                if held:
+                    self._current_values[selected] = before
+                raise
             canonical = (
                 self.convert_tunable_value(selected, effective, unit, "dBm")
                 if kind == POWER_FIELD and unit else effective

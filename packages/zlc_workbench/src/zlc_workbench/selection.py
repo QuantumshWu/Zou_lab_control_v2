@@ -144,23 +144,6 @@ def plot_generation_matches_plot_input(
     return generation is not None and generation == str(data_generation)
 
 
-def same_plot_generation(observation: object, plot_input: object) -> bool:
-    """Whether an observation was drawn on the same RUN as this Dataset.
-
-    The weaker half of :func:`plot_identity_matches_plot_input`: the same
-    stream generation, whatever revision it has reached.  It is the right
-    question for a region that derives nothing -- what such a region names
-    is a place on a picture, and a later shot does not move it -- while a
-    region something IS cut from still has to name the exact revision it
-    was cut from.
-    """
-
-    return plot_generation_matches_plot_input(
-        plot_input,
-        getattr(observation, "data_generation", None),
-    )
-
-
 #: Selector kinds that describe a region.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
 
@@ -949,7 +932,7 @@ def attach_selection_bridge(
     initial_selection: SelectionState | None = None,
     initial_publication: SignalPublication | None = None,
     on_observation: Callable[
-        [SelectionBridge, PlotSelectionObservation, SignalPublication],
+        [SelectionBridge, PlotSelectionObservation, SignalPublication | None],
         object,
     ],
     on_threshold: Callable[[Any], object] | None = None,
@@ -960,7 +943,9 @@ def attach_selection_bridge(
     ``source_publication_for`` resolves an event's exact parent publication by
     data generation and revision.  Without a presentation-side holder, only the plane's
     current publication may answer, and only when both its generation and
-    sequence match the observation exactly.
+    sequence match the observation exactly.  ``on_observation`` is handed
+    None only for a region that binds no revision whose exact publication
+    is gone (``panel_selection_binds_a_revision``).
 
     Returns both so the caller can close them: the bridge outlives any single
     selection, and the subscription outlives the bridge only if it leaks.
@@ -1010,7 +995,15 @@ def attach_selection_bridge(
 
     def route_observation(observation: PlotSelectionObservation) -> None:
         publication = exact_publication(observation)
-        if publication is None:
+        if publication is None and panel_selection_binds_a_revision(
+            observation.state
+        ):
+            # A region something is CUT from must name the exact
+            # publication it was cut from; if that is gone, the picture
+            # is gone and the region with it.  A region that binds no
+            # revision (a value band, a shot window) goes on without one:
+            # on a live rolling panel the publication under it changes
+            # with every shot, and its meaning does not.
             return
         on_observation(bridge, observation, publication)
 

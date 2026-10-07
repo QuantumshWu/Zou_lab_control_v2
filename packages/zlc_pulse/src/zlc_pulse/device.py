@@ -623,6 +623,14 @@ class PulseStreamer(ConfigValueHolder):
                                             scan_repeats=scan_repeats, stop=self._stop)
             self._fire_acknowledged = time.monotonic()
             if not status & STATUS_RUNNING or status & STATUS_ERROR:
+                # What this host believes the board holds is no longer
+                # evidence: a board reconfigured or browned out behind a live
+                # link refuses every FIRE of it.  Forget it, so the next load
+                # writes the image again instead of skipping as "same program".
+                self._loaded = False
+                self._program = None
+                self._applied = None
+                self._applied_digest = ""
                 raise RuntimeError(f"FIRE was not accepted (STATUS=0x{status:08X})")
             self._applied = self._applied.with_repeats(run_repeats, scan_repeats)
             self._fire_command_id = self._command_id
@@ -906,18 +914,27 @@ class PulseStreamer(ConfigValueHolder):
             return
 
         table = rows or ((),)
-        # After ``depth`` identical whole-Pulse executions the FIFO has either
-        # overflowed or reached its periodic state.  Preserve the real nesting
-        # order while bounding each row's Run repeats.  The final complete
-        # sweep plus at most ``depth`` preceding executions validates every row,
-        # the sweep seam, and finite terminal SAFE without materializing a
-        # 32-bit repeat count.
+        # A delay window overlaps at most ``delay // T + 2`` consecutive
+        # whole-Pulse executions when none lasts less than T ticks, so every
+        # window the board can hold already appears once each row's identical
+        # executions are cut to that many: more of them only repeat windows
+        # the shorter run has.  And after ``depth`` identical executions the
+        # FIFO has either overflowed or reached its periodic state.  ``span``
+        # is the tighter of the two.  Preserve the real nesting order while
+        # bounding each row's Run repeats by it: the final complete sweep plus
+        # at most ``span - 1`` preceding executions validates every row, the
+        # sweep seam, and finite terminal SAFE without materializing a 32-bit
+        # repeat count -- or walking ``depth + 1`` copies of a Pulse that no
+        # delay window reaches across.
         depth = max(self.geom.evt_fifo_depth, self.geom.bus_evt_fifo_depth)
+        longest_delay = max([delay for _bit, delay in ttl] + list(bus_delays.values()))
+        shortest_pulse = min(program.frame_ticks(point) for point in set(table))
+        span = min(depth + 1, longest_delay // shortest_pulse + 2)
         if run_repeats == 0:
-            execution_rows = (table[0],) * (depth + 1)
+            execution_rows = (table[0],) * span
             finite_completion = False
         else:
-            bounded_run_repeats = min(run_repeats, depth + 1)
+            bounded_run_repeats = min(run_repeats, span)
             one_sweep = tuple(
                 row
                 for row in table
@@ -925,9 +942,9 @@ class PulseStreamer(ConfigValueHolder):
             )
             finite_completion = scan_repeats != 0
             preceding_executions = (
-                depth
+                span - 1
                 if scan_repeats == 0
-                else min(depth, (scan_repeats - 1) * len(one_sweep))
+                else min(span - 1, (scan_repeats - 1) * len(one_sweep))
             )
             if preceding_executions:
                 copies = (
@@ -939,14 +956,20 @@ class PulseStreamer(ConfigValueHolder):
             # Model the last complete sweep after the exact periodic suffix
             # which can still own FIFO entries.  This includes an intermediate
             # sweep seam, ends on the real terminal row, and remains bounded by
-            # one sweep plus ``depth`` whole-Pulse executions.
+            # one sweep plus ``span - 1`` whole-Pulse executions.
             execution_rows = warmup + one_sweep
-        # The Bracket inside a Pulse is bounded the same way, but at its TRUE
-        # ticks: the first bodies -- the possibly different first replay and
-        # depth + 1 identical ones -- and the last, with the loop's real
-        # length between them, so every later Pulse still lands where the
-        # board plays it.  See bracket_iterations.
-        kept_bodies = depth + 2
+        # The Brackets inside a Pulse are cut by the same two arguments, at
+        # their TRUE ticks: the first bodies -- the possibly different first
+        # replay, then the ``delay // body + 2`` identical ones a delay window
+        # can meet or depth + 1, whichever is fewer -- and as many last ones,
+        # with the loop's real length between them, so every later Pulse
+        # still lands where the board plays it.  Each Bracket at each point
+        # is cut by its own ``body``: the walk costs the product of the counts
+        # of Brackets nested in each other, and one count set by the shortest
+        # body walked every longer loop around it as often as the short one.
+        # See bracket_iterations.
+        def kept_bodies(body: int) -> int:
+            return min(depth + 2, longest_delay // body + 3)
 
         physical_to_logical = {
             physical: logical
@@ -955,19 +978,20 @@ class PulseStreamer(ConfigValueHolder):
         for bit, _delay in ttl:
             if bit >= len(program.channels):
                 raise ValueError(f"channel delay index {bit} is outside the program")
-        # ONE WALK of the run, not one per delayed channel.  A single
-        # negative delay makes every driven lane a delayed channel, and this
-        # runs inside fire() before the board is strobed -- so the walk that
-        # is identical for all of them ran nine times while the operator
-        # waited on Run.
+        # ONE CALL for every delayed channel: it derives the run's row visits
+        # once and shares them between the lanes.  A single negative delay
+        # makes every driven lane a delayed channel, and this runs inside
+        # fire() before the board is strobed -- so the derivation that is
+        # identical for all of them ran nine times while the operator waited
+        # on Run.
         asked = tuple(
             physical_to_logical.get(program.channels[bit], program.channels[bit])
             for bit, _delay in ttl
         )
-        # Compiled digital masks always end low, so the finite terminal SAFE
-        # creates no additional TTL transition: the final falling edge is
-        # already part of this schedule.  DAC state may end away from its safe
-        # code, which is why its explicit terminal descriptor is added below.
+        # The finite terminal SAFE lowers every lane, and the edge walk ends a
+        # lane still high with exactly that falling edge, so it is already part
+        # of this schedule.  DAC state may end away from its safe code, which
+        # is why its explicit terminal descriptor is added below.
         edges = trigger_edge_ticks(
             program,
             asked,

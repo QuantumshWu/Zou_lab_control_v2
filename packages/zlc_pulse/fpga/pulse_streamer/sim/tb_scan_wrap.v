@@ -3,7 +3,9 @@
 // BANK_SIZE so K = ceil(N/BANK_SIZE) > 2 (here BANK_SIZE=4, N=10 -> K=3, ODD: the case that used to gap).
 // A behavioral CYCLIC host-refill model feeds chunks 0,1,..,K-1,0,1,.. one-ahead into the
 // alternating ping-pong bank (bank = monotonic_chunk % 2), exactly matching the engine's
-// bank parity.  A 3x whole-timeline PulseBracket sits inside 2 Run repeats per row,
+// bank parity, by the host's own protocol: both banks stay armed, a bank's words are
+// rewritten while its chunk register still names the chunk it held, and the register is
+// written last.  A 3x whole-timeline PulseBracket sits inside 2 Run repeats per row,
 // and the ten-row table runs for 3 Scan repeats.  Asserts the exact N*M*S nesting,
 // row-only CURSOR motion, finite DONE, and no underflow at either seam.
 module tb_scan_wrap;
@@ -45,7 +47,7 @@ module tb_scan_wrap;
 
   zlc_period_streamer #(.CHANNEL_COUNT(CH),.SCAN_ADDR_WIDTH(SAW),.BANK_SIZE(BANK_SIZE),
                         .NUM_SLOTS(NS)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(2),.run_repeat_count(RUN_REPEATS[31:0]),
+    .clk(clk),.reset(reset),.start(start),.arm(1'b0),.prog_count(2),.run_repeat_count(RUN_REPEATS[31:0]),
     .scan_enable(1'b1),.scan_count(NPTS[31:0]),.scan_repeat_count(SCAN_REPEATS[31:0]),
     .loop_table_count(1),.loop_first_flat(loop_first),.loop_last_flat(loop_last),.loop_count_flat(loop_count),
     .row_raddr(row_raddr),.row_rdata(row_rdata),
@@ -58,17 +60,19 @@ module tb_scan_wrap;
   // --- behavioral CYCLIC host refill model ---------------------------------------------------
   // scanmem entry for (bank,offset) holds the slot vector (= the point index it represents).
   // chunk c (data) = points [c*BANK_SIZE .. ); host loads chunk (mono mod K) into bank (mono%2)
-  // one-ahead, with REFILL_LAT cycles of write latency.
+  // one-ahead: one word per clock into the still-armed bank, then, REFILL_LAT clocks after the
+  // last word, the chunk register -- the host's _refill (words, then BANK*_CHUNK).
   localparam integer REFILL_LAT=6;
-  integer load_at;         // cycle when the in-flight load completes
-  integer load_bank, load_chunk;
+  integer load_at;         // cycle when the chunk register is written
+  integer load_bank, load_chunk, load_word;
   reg     load_busy;
   integer cyc;
-  task load_chunk_into; input integer datachunk; input integer bank; integer j; integer gpt; begin
-    for (j=0;j<BANK_SIZE;j=j+1) begin
-      gpt = datachunk*BANK_SIZE + j;                 // global point index (may be >= NPTS in last chunk)
-      scanmem[bank*BANK_SIZE + j] = (gpt<NPTS) ? gpt[NS*TW-1:0] : {NS*TW{1'b0}};
-    end
+  function [NS*TW-1:0] point_word; input integer datachunk; input integer j; integer gpt; begin
+    gpt = datachunk*BANK_SIZE + j;                   // global point index (may be >= NPTS in last chunk)
+    point_word = (gpt<NPTS) ? gpt[NS*TW-1:0] : {NS*TW{1'b0}};
+  end endfunction
+  task load_chunk_into; input integer datachunk; input integer bank; integer j; begin
+    for (j=0;j<BANK_SIZE;j=j+1) scanmem[bank*BANK_SIZE + j] = point_word(datachunk, j);
   end endtask
 
   // engine monotonic chunk comes directly from the hardware's cumulative row
@@ -85,7 +89,7 @@ module tb_scan_wrap;
     load_chunk_into(1%KCH,1); bank_chunk1=(1%KCH);
     bank_ready=2'b11;
     load_busy=0; eng_mono=0; nseen=0; nbodies=0; stalls_after_warmup=0;
-    cyc=0; load_at=0; load_bank=0; load_chunk=0;
+    cyc=0; load_at=0; load_bank=0; load_chunk=0; load_word=0;
     repeat (300) @(posedge clk);
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
@@ -97,10 +101,17 @@ module tb_scan_wrap;
     if (running) begin
       eng_mono = (scan_cursor_w/NPTS)*KCH
                  + ((scan_cursor_w%NPTS)/BANK_SIZE);
-      // complete an in-flight load
-      if (load_busy && cyc>=load_at) begin
-        if (load_bank==0) bank_chunk0<=load_chunk[TW-1:0]; else bank_chunk1<=load_chunk[TW-1:0];
-        bank_ready[load_bank]<=1'b1; load_busy<=0;
+      // an in-flight load: the next word into the armed bank, or, once every word is in,
+      // the chunk register that makes the bank resident for its new chunk
+      if (load_busy) begin
+        if (load_word < BANK_SIZE) begin
+          scanmem[load_bank*BANK_SIZE + load_word] = point_word(load_chunk, load_word);
+          load_word <= load_word + 1;
+          load_at <= cyc + REFILL_LAT;
+        end else if (cyc >= load_at) begin
+          if (load_bank==0) bank_chunk0<=load_chunk[TW-1:0]; else bank_chunk1<=load_chunk[TW-1:0];
+          load_busy <= 0;
+        end
       end
       // start a one-ahead load if the next bank doesn't already hold the next chunk
       if (!load_busy) begin : refill
@@ -108,9 +119,7 @@ module tb_scan_wrap;
         nb = (eng_mono+1) % 2;
         nc = (eng_mono+1) % KCH;
         if (((nb==0)?bank_chunk0:bank_chunk1) != nc[TW-1:0]) begin
-          bank_ready[nb]<=1'b0;          // de-arm during rewrite
-          load_chunk_into(nc, nb);       // (write data immediately; arm after latency)
-          load_bank<=nb; load_chunk<=nc; load_at<=cyc+REFILL_LAT; load_busy<=1;
+          load_bank<=nb; load_chunk<=nc; load_word<=0; load_busy<=1;
         end
       end
     end

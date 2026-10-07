@@ -60,7 +60,7 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
+def _discover_rigol() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     """Every DG4000 that answers on this machine, named by what it answered.
 
     The serial is the instrument's own, off ``*IDN?``, so unplugging one and
@@ -89,7 +89,7 @@ def _discover_rigol() -> tuple[DeviceInstanceConfig, ...]:
             ),
         )
         for sighting in discover_dg4000()
-    )
+    ), ()
 
 
 DEVICE_TYPES = (

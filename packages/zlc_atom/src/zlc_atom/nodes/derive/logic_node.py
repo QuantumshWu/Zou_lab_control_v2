@@ -10,7 +10,7 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
 )
-from zlc_runtime import DatasetOutputDeclaration
+from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
 from .expression import ExpressionError, compiled_rows, input_members
 from .processor import DeriveProcessor, declared_outputs
@@ -103,8 +103,15 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
     source = described.get(selected_source)
     if source is None:
         raise ValueError("select an available input bundle")
-    names = tuple(item.name.rsplit("/", 1)[-1] for item in described.values() if item.owner_id == source.owner_id)
-    primary = selected_source.rsplit("/", 1)[-1]
+    # Output names are read by the signal-key grammar's one reader.
+    selected = split_signal_key(selected_source)
+    if selected is None:
+        raise ValueError("select an available input bundle")
+    primary = selected[1]
+    names = tuple(
+        parts[1] for item in described.values()
+        if item.owner_id == source.owner_id and (parts := split_signal_key(item.name)) is not None
+    )
     names = tuple(dict.fromkeys((primary, *input_members(expressions, names))))
     signal_plane.resolve_sibling_signals(selected_source, names)
     return DeriveProcessor(expressions=expressions,

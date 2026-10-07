@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
+import threading
 from threading import Barrier, Thread
 
 import numpy as np
@@ -24,7 +25,7 @@ from zlc_atom.devices.slm.hamamatsu_x15213.device_types import (
 )
 from zlc_atom.install import create_installation
 
-from tests.fakes import running_slm_server
+from fakes import running_slm_server
 
 
 class _UsbSdk:
@@ -156,7 +157,6 @@ def test_profile_is_strict_and_records_physical_provenance_boundaries(
     profile = _load_profile("LSH0804382")
     assert profile["model"] == "X15213 (exact type suffix not recorded)"
     assert profile["serial"] == "LSH0804382"
-    assert profile["default_wavelength_nm"] == 852.0
     assert profile["phase_curve_wavelength_nm"] == 785.0
     assert "not recorded" in str(profile["phase_curve_source"])
     assert profile["settle_seconds"] == 0.05
@@ -282,12 +282,22 @@ def test_usb_failure_outcomes_preserve_old_or_become_unknown(
 
         sdk.check_result = 1
 
-        def fail_settle(_seconds: float) -> None:
+        # The settle is the adapter's own ``time.sleep``, and ``time`` is the
+        # one module every thread in this process sleeps through: interrupt
+        # only this thread's sleeps, and only for this one apply.
+        settling = threading.get_ident()
+        real_sleep = module.time.sleep
+
+        def fail_settle(seconds: float) -> None:
+            if threading.get_ident() != settling:
+                real_sleep(seconds)
+                return
             raise RuntimeError("settle interrupted")
 
-        monkeypatch.setattr(module.time, "sleep", fail_settle)
-        with pytest.raises(RuntimeError, match="settle interrupted"):
-            adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
+        with monkeypatch.context() as scoped:
+            scoped.setattr(module.time, "sleep", fail_settle)
+            with pytest.raises(RuntimeError, match="settle interrupted"):
+                adapter.apply_phase(np.zeros(adapter.shape_yx, dtype=np.float32))
         assert adapter.last_commanded_phase is None
         assert adapter.last_command_receipt["outcome"] == "unknown"
         assert adapter.last_command_receipt["stage"] == "settle"

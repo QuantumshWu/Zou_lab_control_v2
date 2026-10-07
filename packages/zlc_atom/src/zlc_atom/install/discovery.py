@@ -88,9 +88,19 @@ def _walk() -> tuple[tuple[DeviceTypeDescriptor, ...], tuple[UnavailableDeviceTy
                 UnavailableDeviceTypes(module_name, f"{type(error).__name__}: {error}")
             )
             continue
-        candidates = tuple(getattr(module, "DEVICE_TYPES", ()))
-        if any(not isinstance(value, DeviceTypeDescriptor) for value in candidates):
-            raise TypeError(f"{module_name} must export DeviceTypeDescriptor values")
+        # A device folder's manifest names its devices, or it is a mistake:
+        # read as naming none, a device written as ``DEVICE_TYPE`` simply
+        # never appeared in the catalog, and nothing said why.
+        candidates = getattr(module, "DEVICE_TYPES", None)
+        if (
+            not isinstance(candidates, tuple)
+            or not candidates
+            or any(not isinstance(value, DeviceTypeDescriptor) for value in candidates)
+        ):
+            raise TypeError(
+                f"{module_name} must export DEVICE_TYPES, a tuple of "
+                "DeviceTypeDescriptor values"
+            )
         values.extend(candidates)
     by_id = tuple(value.type_id for value in values)
     if len(set(by_id)) != len(by_id):

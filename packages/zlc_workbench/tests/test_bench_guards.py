@@ -11,6 +11,7 @@ rather than silently in a bench nobody runs.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,26 +26,23 @@ if str(REPO_ROOT) not in sys.path:
 from bench.plot_perf import guards  # noqa: E402
 
 
-def _renderer(*, ratio: float, width: float = 1470.0, height: float = 1071.0):
-    return SimpleNamespace(
-        figure=SimpleNamespace(bbox=SimpleNamespace(width=width, height=height)),
-        plan=SimpleNamespace(device_pixel_ratio=ratio, dpi=210.0 * ratio),
-    )
+def _front_facts(*, ratio: float, width: int = 1470, height: int = 1071) -> dict:
+    return {"figure_px": (width, height), "device_pixel_ratio": ratio}
 
 
 def test_a_low_density_surface_is_refused_by_name() -> None:
     """Offscreen Qt gives DPR 1 and one ninth of the pixels."""
 
-    facts = guards.require_real_density(_renderer(ratio=3.0))
+    facts = guards.require_real_density(_front_facts(ratio=3.0))
     assert facts["device_pixel_ratio"] == 3.0
     assert facts["figure_px"] == (1470, 1071)
 
     with pytest.raises(guards.HarnessError) as refused:
-        guards.require_real_density(_renderer(ratio=1.0, width=826, height=609))
+        guards.require_real_density(_front_facts(ratio=1.0, width=826, height=609))
     assert "offscreen" in str(refused.value)
     # ...and a caller who means it can say so.
     guards.require_real_density(
-        _renderer(ratio=1.0, width=826, height=609), minimum_ratio=1.0
+        _front_facts(ratio=1.0, width=826, height=609), minimum_ratio=1.0
     )
 
 
@@ -122,6 +120,26 @@ def test_a_console_bench_cannot_be_left_open() -> None:
     )
 
 
+def test_importing_the_console_bench_leaves_the_test_process_offscreen(
+    monkeypatch,
+) -> None:
+    """Only a ConsoleBench asks for the real display, not an import of its module.
+
+    These guards import run_console inside the test process.  Cleared at
+    import, the offscreen platform was gone for every later test of the run:
+    the next in-process QApplication, and every child inheriting the
+    environment, opened on the operator's screen.
+    """
+
+    import importlib
+
+    from bench.plot_perf import run_console
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    importlib.reload(run_console)
+    assert os.environ.get("QT_QPA_PLATFORM") == "offscreen"
+
+
 def test_a_probe_must_not_break_what_it_measures() -> None:
     """Binding a wrapper as an instance attribute drops the implicit self.
 
@@ -178,7 +196,7 @@ def test_the_seam_list_is_derived_from_the_renderer_not_typed_out() -> None:
     after the list was written.
     """
 
-    from bench.plot_perf.run_console import (
+    from bench.plot_perf.run_mot_roi_isolated import (
         HarnessSeamError,
         renderer_seams,
         _COMPOSE_SEAMS,
@@ -327,10 +345,6 @@ def test_an_action_s_wall_clock_runs_from_the_call_to_the_visible_answer(
         ),
     )
     monkeypatch.setattr(
-        edits, "_HostTimeline",
-        lambda _bench: nullcontext(SimpleNamespace(new_hosts=lambda _since: [])),
-    )
-    monkeypatch.setattr(
         edits, "_OwnerSteps",
         lambda _bench: nullcontext(SimpleNamespace(summary=lambda: [])),
     )
@@ -431,3 +445,97 @@ def test_the_host_fps_window_ends_where_its_clock_stops() -> None:
         assert not counts, owner
         names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
         assert {"window", "end"} <= names, owner
+
+
+def test_the_title_oracle_counts_written_rows_not_valid_ones() -> None:
+    """The card counts WRITTEN Repeat rows; validity never stands in for them.
+
+    An indexed window or a finite run is segmented, and its block-level
+    Invalid is a placeholder: the fuzz's title oracle read it as "0 landed".
+    Counting the segments' validity marks instead still disagreed with the
+    card wherever the newest written row was invalid (a failed fit, a Survival
+    shot with no eligible site), and so did an INVALID Monitor event.  The
+    oracle counts from the segments' placements -- without materializing the
+    block -- and every carrier row of a contiguous block, refuses a segment
+    the schema does not place, and describes an alternative Repeat coordinate
+    as the card does: with its primary, not as a factor of its own.
+    """
+
+    from dataclasses import replace
+
+    import numpy as np
+    from data_factory import axis, make_dataset_schema, make_snapshot, repeat_domain
+    from zlc_data import (
+        INVALID, REPEAT, DataBlock, DomainSpec, OwnedSnapshot, ValidityContract, ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+
+    from bench.plot_perf.gui_checks import _plain, _snapshot_shape
+    from zlc_workbench.panel_state import panel_data_shape
+
+    schema = make_dataset_schema(repeat_domain(size=4), DomainSpec((1,), (), ()))
+    snapshot = make_snapshot(schema, np.zeros((4, 1)), revision=1)
+    # Shots 0 and 1 in one segment, shot 1 invalid; shot 3 alone and
+    # invalid; shot 2 unwritten.
+    segments = ((np.zeros((2, 1, 1)), np.asarray([[True], [False]]), None),
+                (np.ones((1, 1, 1)), False, None))
+    segmented = OwnedSnapshot(snapshot.ref, replace(
+        snapshot.block, values=None, validity=INVALID, sigma=None, segments=segments,
+        segment_origins=np.asarray([[0, 0], [3, 0]], dtype=np.int64),
+        segment_shapes=np.asarray([[2, 1], [1, 1]], dtype=np.int64),
+    ))
+
+    shape = _snapshot_shape(segmented)
+    assert shape["landed"] == [3]
+    assert shape["segments"] == {"count": 2, "misplaced": [], "misplaced_count": 0}
+    assert segmented.block._materialized is None
+    # A complete Monitor event that is INVALID was still written on every row.
+    invalid_event = OwnedSnapshot(snapshot.ref, replace(snapshot.block, validity=INVALID))
+    assert _snapshot_shape(invalid_event)["landed"] == [4]
+
+    # Runtime's own constructor attaches its layout past DataBlock's checks:
+    # segment 1 runs past the storage; segments 2, 3 and 4 are in bounds but
+    # their values, mark and sigma in turn are not the shape the extent claims.
+    plane = np.ones((1, 1, 1))
+    misplaced = OwnedSnapshot(snapshot.ref, DataBlock._from_owned_segments(
+        snapshot.block.block_id, snapshot.block.revision, schema,
+        (segments[0], (np.ones((2, 1, 1)), True, None), (np.ones((2, 1, 1)), True, None),
+         (plane, np.ones((1, 1, 2), bool), None), (plane, True, np.ones((2, 1, 1)))),
+        origins=np.asarray([[0, 0], [3, 0], [2, 0], [2, 0], [3, 0]], dtype=np.int64),
+        shapes=np.asarray([[2, 1], [2, 1], [1, 1], [1, 1], [1, 1]], dtype=np.int64),
+    ))
+    shape = _snapshot_shape(misplaced)
+    assert shape["segments"]["misplaced"] == [1, 2, 3, 4]
+    assert shape["landed"] is None and shape["repeat_counts_status"] == "unchecked"
+
+    # Under a COMPONENTS contract a mark carries the declared component axes
+    # alone -- "site" here, never the rest of the Cell.
+    site, quad = axis("site", size=2), axis("quad", size=3)
+    components = owned_snapshot_from_arrays(
+        value_schema=ValueSchema(ValidityContract.components(site.axis_id), np.dtype(np.float64)),
+        repeat_domain=repeat_domain(size=4), cell_domain=DomainSpec((2, 3), (site, quad)),
+        values=np.zeros((4, 1, 2, 3)), revision=1,
+    )
+    plane = np.zeros((1, 1, 2, 3))
+    shape = _snapshot_shape(OwnedSnapshot(components.ref, DataBlock._from_owned_segments(
+        components.block.block_id, components.block.revision, components.block.schema,
+        ((plane, np.ones((1, 1, 2), bool), plane), (plane, np.ones((1, 1, 2, 3), bool), None)),
+        origins=np.asarray([[0, 0], [1, 0]], dtype=np.int64),
+        shapes=np.asarray([[1, 1], [1, 1]], dtype=np.int64),
+    )))
+    assert shape["segments"]["misplaced"] == [1]
+
+    # An alternative coordinate moves with its primary: it does not hold the
+    # primary fixed, so the primary counts every written shot, and the card
+    # names and counts the primary alone -- structure and count paired.
+    shot = axis("shot", role=REPEAT, size=4)
+    stamp = replace(axis("stamp", role=REPEAT, values=(0.0, 0.1, 0.2, 0.3), unit="s"),
+                    coordinate_of=shot.axis_id)
+    stamped = make_dataset_schema(
+        DomainSpec((4,), (shot, stamp), (range(4), range(4))), DomainSpec((1,), (), ()))
+    shape = _snapshot_shape(make_snapshot(stamped, np.zeros((4, 1)), revision=1))
+    assert stamped.repeat_domain.coordinate_counts() == (4, 4)
+    card = panel_data_shape(stamped, None, source=SimpleNamespace(
+        repeat_counts=stamped.repeat_domain.coordinate_counts()))
+    assert shape["structure"] == _plain(card["data_structure"]) == [[["shot", 4]], [], []]
+    assert shape["landed"] == _plain(card["data_valid"]) == [4]

@@ -44,8 +44,11 @@ class PySerialLink:
             return
         serial_port = None
         try:
+            # Built closed: pyserial raises DTR and RTS as it opens a port, so
+            # lowering them after the open still pulsed both on every port the
+            # auto probe tried.
             serial_port = serial.Serial(
-                self.port,
+                None,
                 self.baud,
                 timeout=0.05,
                 write_timeout=1.0,
@@ -53,9 +56,11 @@ class PySerialLink:
                 rtscts=False,
                 xonxoff=False,
             )
+            serial_port.port = self.port
             # Never let opening the pulse-streamer reset or drive another instrument on the bus.
             serial_port.dtr = False
             serial_port.rts = False
+            serial_port.open()
         except BaseException:
             if serial_port is not None:
                 serial_port.close()

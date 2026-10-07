@@ -283,12 +283,24 @@ def _calibration_editor_factory(parent=None):
 
         def __init__(self, parent=None):
             super().__init__(FormSpec(()), parent=parent)
-            self.changed.connect(
-                lambda key: self.draft_changed.emit({"values": {key: self.read_value(key)}})
-            )
+            self.changed.connect(self._value_changed)
             self.value_normalized.connect(
-                lambda key: self.draft_changed.emit({"values": {key: self.read_value(key)}})
+                lambda key: self._value_changed(key, normalized=True)
             )
+
+        def _value_changed(self, key, *, normalized=False):
+            # A Qt slot: a box holding a number it cannot show, or a required
+            # box left empty, is no value yet -- and an exception raised here
+            # aborts the whole console.  The draft keeps its last value.
+            try:
+                value = self.read_value(key)
+            except (TypeError, ValueError):
+                return
+            patch = {"values": {key: value}}
+            if normalized:
+                # The box's own display normalization, not an operator edit.
+                patch["normalized"] = True
+            self.draft_changed.emit(patch)
 
         def update_projection(self, projection):
             resources = projection.get("workspace_resources") or {}

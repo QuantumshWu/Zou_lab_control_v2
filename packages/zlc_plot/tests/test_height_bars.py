@@ -175,11 +175,18 @@ def test_stress_grid_renders_inside_the_guard() -> None:
     rng = np.random.default_rng(1)
     heights = rng.random((96, 128))
     colors = _flat_table(0.5, 0.5, 0.5)
+
+    def render():
+        return render_height_bars(
+            heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+            width=600, height=440,
+        )
+
+    # The guard is on the render, not on the process's first call into the
+    # scan-line kernels: run alone, that call loads (or compiles) them.
+    render()
     start = perf_counter()
-    render_height_bars(
-        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
-        width=600, height=440,
-    )
+    render()
     assert perf_counter() - start < MAX_STRESS_RENDER_SECONDS
 
 def test_the_accepted_camera_parameters_are_the_cameras_own() -> None:
@@ -492,7 +499,9 @@ def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
         assert turned != start, "the hand's turn is not the panel's view"
         shown = session._renderer.height_bars_camera
         assert shown is not None and shown.azimuth_deg == turned
-        assert session._renderer.height_bars_dragging, (
+        renderer = session._renderer
+        scene_axes = renderer._height_bars_axes()
+        assert scene_axes is not None and renderer._confined_gesture_axes is scene_axes, (
             "a drag in flight still holds the frame around the scene"
         )
         # Whatever takes the pointer away -- a replacement surface, a
@@ -500,7 +509,7 @@ def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
         # does not get to move the view back.
         session.cancel_interaction()
         assert float(session.display_state["camera_azimuth"]) == turned
-        assert not session._renderer.height_bars_dragging
+        assert session._renderer._confined_gesture_axes is None
     finally:
         session.close()
 
@@ -724,7 +733,7 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
         axis = _image_axis(session)
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.56, 0.52, button=2)
-        assert renderer.height_bars_dragging
+        assert renderer._confined_gesture_axes is renderer._height_bars_axes() is not None
         preview = session.rgba().copy()
         _pointer(session, "release", axis, 0.56, 0.52, button=2)
         settled = session.rgba().copy()
@@ -1250,14 +1259,14 @@ def test_a_display_commit_mid_drag_does_not_undo_the_drag() -> None:
         session.close()
 
 def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
-    """A gesture lane paces itself by what its own frames cost.
+    """A move the session receives is a move it renders.
 
-    The lane was a fixed 30 ms, and a lane that is not due DROPS the
-    motion rather than deferring it -- so a hand moving at mouse rate
-    lost two thirds of its updates, and whenever the last move before
-    release fell in a closed window the picture only caught up when the
-    button came up.  A scene preview costs a few milliseconds, so at a
-    realistic 125 Hz hand every move must reach the screen.
+    A gesture lane of a fixed 30 ms DROPPED every motion inside its window
+    rather than deferring it -- so a hand moving at mouse rate lost two
+    thirds of its updates, and whenever the last move before release fell
+    in a closed window the picture only caught up when the button came up.
+    Pacing is the host's pointer coalescing; at a realistic 125 Hz hand
+    every move must reach the screen.
     """
 
     session = _session()

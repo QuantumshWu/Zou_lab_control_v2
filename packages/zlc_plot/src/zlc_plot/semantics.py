@@ -1122,10 +1122,6 @@ def describe_semantics(
     if schema is None:
         if spec.kind is not PlotKind.PULSE_TIMELINE:
             raise TypeError("schema must be DatasetSchema for dataset plot kinds")
-        if current_handler.admits(schema):
-            raise ValueError(
-                "pulse semantic handler unexpectedly admits a schema-less input"
-            )
         return SemanticDescription(
             kind=spec.kind,
             kind_choices=(PlotKind.PULSE_TIMELINE,),

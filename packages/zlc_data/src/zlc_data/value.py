@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 from copy import copy
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -81,23 +80,19 @@ class DatasetRevisionRef:
 class IndexedWindow:
     """Where one indexed materialization sits in its history, in shot numbers.
 
-    ``start``..``latest`` are the absolute primary indices the block's shots
-    were taken from (holes allowed); ``stable_since`` is the last sequence
-    at which a retained shot was OVERWRITTEN rather than appended.  A
-    consumer that carried something derived from an earlier revision of the
-    same block may keep it exactly when that revision is not older than
-    ``stable_since``: every shot the two revisions share is then byte-equal,
-    and the difference between them is the shots that entered and left.
-    That is the whole fact an incremental consumer needs, and it is a fact
-    only the producer knows, which is why it travels on the block.
+    ``start``..``latest`` are the absolute primary indices of the window the
+    block was read as (holes allowed).  A restriction keeps them: they name
+    the source window it was cut from, which may hold more shots than the
+    cut does -- so they gate "is this a history window", and never count
+    the block's own shots.  Work carried across revisions is matched by the
+    immutable segments the revisions share, not by these numbers.
     """
 
     start: int
     latest: int
-    stable_since: int
 
     def __post_init__(self) -> None:
-        for name in ("start", "latest", "stable_since"):
+        for name in ("start", "latest"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
                 raise TypeError(f"{name} must be an integer")
@@ -123,10 +118,9 @@ class DataBlock:
     #: It cannot be recovered downstream, so it travels here, beside the
     #: values, sliced by the same code that slices them.
     sigma: np.ndarray | None = None
-    #: For a block that IS a window of a Runtime indexed history: which
-    #: shots, and since when they have been stable.  None for every other
-    #: block.  Read by a consumer that would otherwise recount the whole
-    #: window every shot to learn what one shot changed.
+    #: For a block that IS a window of a Runtime indexed history, or a
+    #: restriction of one: which shots of the source.  None for every other
+    #: block.
     window: IndexedWindow | None = None
     segments: tuple[tuple[np.ndarray, bool | np.ndarray, np.ndarray | None], ...] = ()
     segment_origins: np.ndarray | None = None
@@ -636,23 +630,9 @@ def repeat_coordinate_counts(
     ``present`` names written Repeat carrier rows at one Point coordinate,
     not scientific validity. None means every physical row is present. There
     is no Cell-data input: site/pixel eligibility cannot change these counts.
+    The domain owns the counting rule; this names the Repeat question.
     """
-    if not domain.axes:
-        return ()
-    if present is None:
-        return domain.coordinate_counts(current_row)
-    if present.dtype != np.dtype(bool) or present.shape != (domain.size,):
-        raise ValueError("present rows must be a bool vector matching the Repeat carrier")
-    codes = tuple(domain.codes(axis.axis_id) for axis in domain.axes)
-    result: list[int] = []
-    for target in range(len(codes)):
-        rows = present.copy()
-        for index, other_codes in enumerate(codes):
-            if index == target:
-                continue
-            rows &= other_codes == other_codes[current_row]
-        result.append(int(np.unique(codes[target][rows]).size))
-    return tuple(result)
+    return domain.coordinate_counts(current_row, present)
 
 
 def compact_dataset_validity(

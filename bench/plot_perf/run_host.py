@@ -18,7 +18,7 @@ import os
 
 # This layer times the plot alone, where a small offscreen surface
 # IS the point.  The console layer refuses it -- see
-# common.bootstrap and guards.require_real_density.
+# ConsoleBench.density in run_console.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import argparse

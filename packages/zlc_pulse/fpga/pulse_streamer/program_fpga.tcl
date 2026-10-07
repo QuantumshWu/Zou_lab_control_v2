@@ -1,5 +1,6 @@
 # Program the FINAL pulse-streamer bitstream and leave the JTAG-to-AXI master
-# discoverable as a hw_axi core (the host then drives it with axi_session.py).
+# discoverable as a hw_axi core (the host then drives it through
+# zlc_pulse.transport.axi, or over the UART bridge).
 proc path_env_or {name default} {
     if {[info exists ::env($name)] && $::env($name) ne ""} { return [file normalize $::env($name)] }
     return $default
@@ -33,7 +34,9 @@ if {[llength $expected_parts] != 1} {
 set expected_device [get_property DEVICE $expected_parts]
 if {$expected_device eq ""} { error "Configured part '$expected_part' has no DEVICE property" }
 
-puts "ZLC program_fpga contract: CHANNEL_COUNT=62 NUM_SLOTS=4 control=JTAG-to-AXI (final BRAM tables + streaming)"
+# The bitstream's geometry is not restated here: the host proves it against its
+# own config by the word-63 layout fingerprint before it writes anything.
+puts "ZLC program_fpga contract: control=JTAG-to-AXI + UART (period-table rows + streamed scan); geometry = the word-63 fingerprint"
 puts "ZLC program_fpga project_dir: $project_dir"
 puts "ZLC program_fpga bitstream: $bit_path"
 

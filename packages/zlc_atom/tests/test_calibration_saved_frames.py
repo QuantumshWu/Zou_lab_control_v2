@@ -19,6 +19,7 @@ from zlc_atom.nodes.calibration.outputs import (
 from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
+    SITE_REVIEW_REQUEST,
     CalibrationRunResult,
     SampleWriter,
     CalibrationTask,
@@ -31,8 +32,8 @@ from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
 from zlc_plot import ImageFrame, PointStatus, read_figure_plot
 
-from tests.fakes import FakePlane
-from tests.pulse_fixture import (
+from fakes import FakePlane
+from pulse_fixture import (
     IMAGING_PULSE_RESOURCE,
     calibration_request,
     calibration_task,
@@ -284,7 +285,7 @@ def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path
                 wake.wait(0.01)
                 wake.clear()
             review = host.operator_request
-            assert review is not None and review.kind == "point-selection", host.observation
+            assert review is not None and review.kind == SITE_REVIEW_REQUEST, host.observation
             point_ids = tuple(review.payload["point_ids"])
             assert len(point_ids) > 1
             publication = plane.latest_publication(

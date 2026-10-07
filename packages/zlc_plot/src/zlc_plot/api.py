@@ -136,7 +136,7 @@ def image(
 def rolling(
     data: OwnedSnapshot,
     *,
-    x: AxisRef | str | None = None,
+    x: AxisRef | None = None,
     group: AxisRef | None = None,
     reduction: Reduction = Reduction.MEAN,
     trailing: int | None = None,

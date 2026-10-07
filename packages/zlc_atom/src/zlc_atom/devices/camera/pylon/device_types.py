@@ -45,7 +45,7 @@ PYLON_CAMERA_SCHEMA = AuthoringSchema(
 )
 
 
-def _discover_pylon() -> tuple[DeviceInstanceConfig, ...]:
+def _discover_pylon() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     from pypylon import pylon
 
     factory = pylon.TlFactory.GetInstance()
@@ -58,7 +58,7 @@ def _discover_pylon() -> tuple[DeviceInstanceConfig, ...]:
         )
         for info in factory.EnumerateDevices()
         for serial in (str(info.GetSerialNumber()),)
-    )
+    ), ()
 
 
 def _pylon_factory(context, key: str, values: dict) -> InstalledLeaf:

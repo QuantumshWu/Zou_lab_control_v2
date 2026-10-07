@@ -13,11 +13,12 @@ devices and editors do not maintain alternative readers or writers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 import math
 import os
 from pathlib import Path
 from numbers import Real
+from types import MappingProxyType
 from typing import Any
 
 from zlc_durable import atomic_write_bytes, readable_json_bytes, strict_json_loads
@@ -45,13 +46,23 @@ PULSE_TREE_FORMAT = "zlc.pulse"
 CONFIG_VALUES_FORMAT = "zlc.pulse.config_values"
 CONFIG_VALUES_DIRECTORY = "config_values"
 CURRENT_CONFIG_VALUES = "current.json"
-PULSE_EDITOR_FIELDS = (
-    "visible_ports",
-    "scan_source",
-    "scan_rows",
-    "scan_source_dirty",
-    "scan_repeats",
-)
+#: What an editor section means by a field it leaves out -- the one place
+#: these defaults are decided; the Workbench's authoring state takes them
+#: from here.  A scan runs until Stop when nobody has said otherwise: On
+#: Pulse is a cycle an experiment holds running and a scan is no different;
+#: the alternative is a finite run, which the client waits out by asking the
+#: server every 10 ms whether it is done yet.  It was once spelled 1 in the
+#: editor and 0 in the control that shows it, so every scan silently became
+#: that finite run and one five-second shot printed four hundred lines of
+#: "state=PENDING".
+PULSE_EDITOR_DEFAULTS: Mapping[str, Any] = MappingProxyType({
+    "visible_ports": None,
+    "scan_source": "",
+    "scan_rows": (),
+    "scan_source_dirty": False,
+    "scan_repeats": 0,
+})
+PULSE_EDITOR_FIELDS = tuple(PULSE_EDITOR_DEFAULTS)
 
 
 def parse_pulse_tree_json(text: str | bytes) -> Mapping[str, Any]:
@@ -83,37 +94,54 @@ def split_pulse_document_tree(
         raise ValueError(
             f"unknown pulse editor field(s): {', '.join(map(str, unknown))}"
         )
-    visible = editor.get("visible_ports")
-    if visible is not None and (
-        isinstance(visible, (str, bytes))
-        or not isinstance(visible, Sequence)
-        or any(not isinstance(key, str) for key in visible)
+    check_pulse_editor_fields(
+        **{name: editor.get(name, default) for name, default in PULSE_EDITOR_DEFAULTS.items()}
+    )
+    return sequence_tree, editor
+
+
+def check_pulse_editor_fields(
+    *,
+    visible_ports: object,
+    scan_source: object,
+    scan_rows: object,
+    scan_source_dirty: object,
+    scan_repeats: object,
+) -> None:
+    """The types and bounds of one editor section's fields, or the refusal.
+
+    One rule for the section wherever it is held: read from a file here, and
+    held in memory by the Workbench's authoring state, which asks the same
+    question instead of keeping a second copy of the answer.  What depends on
+    the pulse itself -- which ports exist, which columns a table has -- is
+    decided beside the pulse, not here.
+    """
+
+    if visible_ports is not None and (
+        isinstance(visible_ports, (str, bytes, Mapping))
+        or not isinstance(visible_ports, Collection)
+        or any(not isinstance(key, str) for key in visible_ports)
     ):
-        raise TypeError("editor.visible_ports must be null or a list of strings")
-    source = editor.get("scan_source", "")
-    if not isinstance(source, str):
-        raise TypeError("editor.scan_source must be a string")
-    rows = editor.get("scan_rows", ())
-    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Sequence):
-        raise TypeError("editor.scan_rows must be a table")
-    for row in rows:
+        raise TypeError("visible_ports must be null or a collection of port names")
+    if not isinstance(scan_source, str):
+        raise TypeError("scan_source must be a string")
+    if isinstance(scan_rows, (str, bytes, Mapping)) or not isinstance(scan_rows, Sequence):
+        raise TypeError("scan_rows must be a table")
+    for row in scan_rows:
         if (
             isinstance(row, (str, bytes, Mapping))
             or not isinstance(row, Sequence)
             or any(isinstance(value, bool) or not isinstance(value, Real) for value in row)
         ):
-            raise TypeError("each editor.scan_rows row must be a list of numbers")
-    dirty = editor.get("scan_source_dirty", False)
-    if not isinstance(dirty, bool):
-        raise TypeError("editor.scan_source_dirty must be a boolean")
-    repeats = editor.get("scan_repeats", 0)
-    if isinstance(repeats, bool) or not isinstance(repeats, int):
-        raise TypeError("editor.scan_repeats must be an integer")
-    if repeats < 0:
-        raise ValueError("editor.scan_repeats must be non-negative")
-    if repeats > MAXIMUM_REPEAT_COUNT:
-        raise ValueError("editor.scan_repeats does not fit the hardware 32-bit count")
-    return sequence_tree, editor
+            raise TypeError("each scan_rows row must be a sequence of numbers")
+    if not isinstance(scan_source_dirty, bool):
+        raise TypeError("scan_source_dirty must be a boolean")
+    if isinstance(scan_repeats, bool) or not isinstance(scan_repeats, int):
+        raise TypeError("scan_repeats must be an integer")
+    if scan_repeats < 0:
+        raise ValueError("scan_repeats must be non-negative")
+    if scan_repeats > MAXIMUM_REPEAT_COUNT:
+        raise ValueError("scan_repeats does not fit the hardware 32-bit count")
 
 
 def read_pulse_document(
@@ -458,7 +486,9 @@ __all__ = [
     "CURRENT_CONFIG_VALUES",
     "CONFIG_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
+    "PULSE_EDITOR_DEFAULTS",
     "PULSE_EDITOR_FIELDS",
+    "check_pulse_editor_fields",
     "config_values_from_tree",
     "config_values_to_tree",
     "read_config_values",

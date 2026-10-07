@@ -9,6 +9,7 @@ from types import MappingProxyType
 
 import numpy as np
 from zlc_data import (
+    CoordinateFrameId,
     DatasetSchema,
     DomainSpec,
     OwnedSnapshot,
@@ -29,9 +30,12 @@ from zlc_plot import (
     image_point_overlay_geometry,
 )
 
-from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration import ReadoutModel, ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons
+
+
+#: The frame a camera's pixel axes are counted in: the whole sensor's own.
+_SENSOR_PIXELS = CoordinateFrameId("sensor_pixel_xy")
 
 
 def _require_calibration(candidate: object, what: str) -> None:
@@ -173,42 +177,28 @@ class OccupancyProcessor:
 
         return self._placed[0]
 
-    def _validate_source_run_record(self, source: SignalValue) -> None:
-        """Check only structural camera facts present on the parent."""
+    def _place_against_the_frames(self, source: SignalValue) -> None:
+        """Place every calibration on the crop these frames cover, in their unit.
+
+        The FRAMES say both.  Their two spatial axes are the sensor pixels
+        they cover -- the origin, the binning as the step, the size -- and
+        their value unit says counts or photoelectrons.  Both travel with the
+        frames through whatever carries them on: a scan of them, a derive of
+        them.  The camera's run record does not: read from that record alone,
+        a scan's frames were neither placed nor checked, and a scan whose ROI
+        had moved read every site off by the move, or classified counts by
+        thresholds trained in photoelectrons.  The record still says the one
+        thing the frames cannot, the shape of the whole sensor.
+        """
 
         self._placed = {0: self.calibration, **self.calibration_by_frame}
-        record = source.run_record
-        contract = self.calibration.frame_contract
-        snapshots = record.get("device_snapshots")
-        if snapshots is None:
-            return
-        if not isinstance(snapshots, Mapping):
-            raise ValueError("camera run record device_snapshots must be a mapping")
-        actual = snapshots.get("camera")
-        if actual is None:
-            return
-        if not isinstance(actual, Mapping):
-            raise ValueError("camera device snapshot must be a mapping")
-        self._refuse_a_different_unit(record)
-
-        def pair(name: str) -> tuple[int, int] | None:
-            value = actual.get(name)
-            if value is None:
-                return None
-            try:
-                result = tuple(int(item) for item in value)  # type: ignore[arg-type]
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"camera device snapshot {name} must contain two integers"
-                ) from exc
-            if len(result) != 2:
-                raise ValueError(
-                    f"camera device snapshot {name} must contain two integers"
-                )
-            return result
-
-        sensor = pair("sensor_shape_yx")
+        schema = source.snapshot.block.schema
+        self._refuse_a_different_unit(schema.value_schema.value_unit)
+        snapshots = source.run_record.get("device_snapshots")
+        camera = snapshots.get("camera") if isinstance(snapshots, Mapping) else None
+        sensor = camera.get("sensor_shape_yx") if isinstance(camera, Mapping) else None
         if sensor is not None:
+            sensor = tuple(int(item) for item in sensor)
             for frame, placed in self._placed.items():
                 expected = placed.frame_contract.sensor_shape
                 if expected is not None and sensor != expected:
@@ -223,37 +213,44 @@ class OccupancyProcessor:
         # Only a crop that does not COVER the sites is refused, and only by
         # the calibration itself -- it owns both crops, so it owns the
         # translation.  Binning is refused there too: it changes what a pixel
-        # means, and with it every threshold measured in pixels.
-        origin = pair("roi_origin_yx")
-        shape = pair("roi_shape_yx")
-        binning = pair("binning_yx") or tuple(contract.binning_yx)
-        if origin is not None and shape is not None:
-            roi = (int(origin[1]), int(origin[0]), int(shape[1]), int(shape[0]))
-            image_shape = (
-                int(shape[0]) // int(binning[0]),
-                int(shape[1]) // int(binning[1]),
-            )
-            # Every calibration is read against the same crop.
-            self._placed = {
-                frame: placed.rebased(roi, binning, image_shape)
-                for frame, placed in self._placed.items()
-            }
-        elif tuple(binning) != tuple(contract.binning_yx):
-            raise ValueError(
-                f"camera binning {tuple(binning)} differs from calibration "
-                f"{tuple(contract.binning_yx)}"
-            )
+        # means, and with it every threshold measured in pixels.  Frames whose
+        # axes name no sensor pixels are read on the crop each calibration
+        # was measured on, which only a frame of that very shape passes.
+        axes = schema.cell_domain.axes
+        if len(axes) != 2 or any(axis.coordinate_frame != _SENSOR_PIXELS for axis in axes):
+            return
+        origin = tuple(int(axis.coordinate_at(0)) for axis in axes)
+        binning = tuple(
+            int(axis.coordinate_at(1)) - int(axis.coordinate_at(0))
+            if axis.size > 1
+            # One pixel has no step to say otherwise.
+            else int(self.calibration.frame_contract.binning_yx[index])
+            for index, axis in enumerate(axes)
+        )
+        image_shape = tuple(int(axis.size) for axis in axes)
+        roi = (
+            origin[1], origin[0],
+            image_shape[1] * binning[1], image_shape[0] * binning[0],
+        )
+        # Every calibration is read against the same crop.
+        self._placed = {
+            frame: placed.rebased(roi, binning, image_shape)
+            for frame, placed in self._placed.items()
+        }
 
-    def _refuse_a_different_unit(self, record: Mapping[str, object]) -> None:
+    def _refuse_a_different_unit(self, value_unit: str | None) -> None:
         """A threshold is a number of somethings; the somethings must match.
 
         Counts and photoelectrons differ by an affine map, so a run read in
         one and classified by thresholds fitted in the other is not a little
-        wrong -- every site reads the same way.  Both sides record which they
-        are, so the mismatch is refused rather than discovered in the data.
+        wrong -- every site reads the same way.  Both sides say which they
+        are -- a frame in its unit, the camera's count unit or a plain number
+        (a photoelectron is one: no unit, or "1" once a derive has done
+        arithmetic on it) -- so the mismatch is refused rather than
+        discovered in the data.
         """
 
-        got = bool((record.get("parameters") or {}).get(PHOTOELECTRONS, False))
+        got = value_unit in (None, "1")
         names = {True: "photoelectrons", False: "counts"}
         # Every calibration a frame is read with, not only the shared one: a
         # frame given its own is classified by ITS thresholds.
@@ -409,15 +406,20 @@ class OccupancyProcessor:
                     "these frames have no frame axis to read per-frame calibrations against"
                 )
             return np.zeros(repeats * points, dtype=int)
-        sizes = tuple(int(axis.size) for axis in axes)
-        beyond = sorted(frame for frame in self.calibration_by_frame if frame > sizes[position])
+        frames = int(axes[position].size)
+        beyond = sorted(frame for frame in self.calibration_by_frame if frame > frames)
         if beyond:
             raise ValueError(
                 f"frame {beyond[0]} has its own calibration but a cycle has only "
-                f"{sizes[position]} frame(s)"
+                f"{frames} frame(s)"
             )
-        point_index = np.arange(repeats * points) % points
-        return np.asarray(np.unravel_index(point_index, sizes)[position]) + 1
+        # Read off the domain's own codes: a Point domain is a MAPPED one, not
+        # a dense grid in declaration order.  A scan declares the frame axis
+        # first and lays it innermost, and names a repeated value once, so
+        # unravelling the axis sizes numbered a scan's frames 1,1,2,2,3,3 --
+        # or ran out of bounds.
+        codes = np.asarray(schema.point_domain.codes(axes[position].axis_id))
+        return np.tile(codes, repeats) + 1
 
     def _verdict_tables(self, frame_of_cell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Per cell: the usable sites and the thresholds of the calibration its frame reads with."""
@@ -516,12 +518,12 @@ class OccupancyProcessor:
         snapshot = signal_value.snapshot
         # WHERE the calibration sits comes first.  Every check below is made
         # against the crop this run is taking, and that crop is a fact carried
-        # by the run record -- so reading it is not a validation step, it is
-        # what the validation is done against.  Checked in the other order,
+        # by the frames' own axes -- so reading it is not a validation step, it
+        # is what the validation is done against.  Checked in the other order,
         # the frame shape was compared with the crop the calibration was
         # MEASURED on and a run that had moved its ROI was refused before the
         # translation it needed had been computed.
-        self._validate_source_run_record(signal_value)
+        self._place_against_the_frames(signal_value)
         result = self.process(snapshot)
         return self._live_outputs(
             result,

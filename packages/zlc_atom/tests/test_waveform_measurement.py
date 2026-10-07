@@ -205,7 +205,7 @@ def test_every_packet_is_a_shot_and_a_rolling_window_keeps_the_last_ones() -> No
         publication = plane.latest_publication(key)
         assert publication is not None
         assert plane.retains(key, publication)
-        assert publication.event_ref.sequence == source.produced_count
+        assert publication.event_ref.sequence == source._records.produced_count
     finally:
         if history is not None:
             history.close()
@@ -262,18 +262,18 @@ def test_a_finite_measurement_keeps_every_record_independent_of_buffer_capacity(
         capture = node.prepare(should_stop=lambda: True) if repeat else node.monitor()
         try:
             with source._records._condition:
-                assert source._records._condition.wait_for(lambda: source.produced_count >= 3, timeout=1)
+                assert source._records._condition.wait_for(lambda: source._records.produced_count >= 3, timeout=1)
             if repeat:
                 completed = capture.collect()
-                assert completed == source.produced_count >= 3
+                assert completed == source._records.produced_count >= 3
             else:
                 capture.close()
-                assert capture.revision == source.produced_count >= 3
+                assert capture.revision == source._records.produced_count >= 3
             key = node.signal_key("magnetic_field")
             publication = plane.latest_publication(key)
-            assert publication.event_ref.sequence == source.produced_count
+            assert publication.event_ref.sequence == source._records.produced_count
             record = publication.value(key).event_record["record_timing"]["imu-stop"]
-            assert str(source.produced_count - 1) in record
+            assert str(source._records.produced_count - 1) in record
             assert source.read_records(1, timeout=0, exact=False) == []
             assert not source.capture_state()
         finally:

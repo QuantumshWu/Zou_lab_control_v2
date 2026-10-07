@@ -52,9 +52,8 @@ class LiveDefaults:
 
 @dataclass(frozen=True, slots=True)
 class InteractionDefaults:
-    """Backend-independent pointer cadence and hit/zoom policy."""
+    """Backend-independent double-click, hit and zoom policy."""
 
-    pointer_update_interval_ms: int
     double_click_interval_ms: int
     double_click_radius_px: float
     selector_hit_radius_fraction: float
@@ -62,15 +61,6 @@ class InteractionDefaults:
     wheel_zoom_factor: float
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "pointer_update_interval_ms",
-            integer(
-                self.pointer_update_interval_ms,
-                "pointer_update_interval_ms",
-                minimum=1,
-            ),
-        )
         object.__setattr__(
             self,
             "double_click_interval_ms",
@@ -154,7 +144,6 @@ DEFAULTS = PlotLibraryDefaults(
     layout=_DEFAULT_LAYOUT,
     live=LiveDefaults((100, 200, 400, 800), 100),
     interaction=InteractionDefaults(
-        pointer_update_interval_ms=30,
         double_click_interval_ms=500,
         double_click_radius_px=6.0,
         selector_hit_radius_fraction=0.035,

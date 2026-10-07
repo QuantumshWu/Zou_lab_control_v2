@@ -2,7 +2,6 @@
   "format": "zlc.slm.hamamatsu_x15213.device_profile",
   "model": "X15213 (exact type suffix not recorded)",
   "serial": "LSH0804382",
-  "default_wavelength_nm": 852,
   "phase_curve_wavelength_nm": 785,
   "phase_curve_source": "Repository calibration values; measurement provenance not recorded",
   "settle_seconds": 0.05,

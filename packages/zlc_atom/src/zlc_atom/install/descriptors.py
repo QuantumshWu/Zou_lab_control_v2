@@ -107,7 +107,11 @@ class DeviceTypeDescriptor:
     capabilities: tuple[str, ...]
     factory: Callable[[InstallationFactoryContext, str, Mapping[str, Any]], InstalledLeaf] | None = None
     world_config: Callable[[Mapping[str, Any]], object] | None = None
-    discover: Callable[[], tuple[DeviceInstanceConfig, ...]] | None = None
+    #: What a hardware scan of this family found, and a line for each part
+    #: of it the family could not ask (a peer machine that answered but
+    #: could not be listed): a family that found some is not a failed one,
+    #: but what it missed is still news for the scan to report.
+    discover: Callable[[], tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]] | None = None
     control_factory: Callable[..., object] | None = None
     #: How a peer bench should author THIS device when it is published on the
     #: fabric: authored parameters -> (peer type_id, peer parameters).  A type

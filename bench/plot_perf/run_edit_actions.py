@@ -193,101 +193,6 @@ class _OwnerSampler:
         }
 
 
-class _HostTimeline:
-    """Every raster operation submitted while active, per host, with when it
-    was submitted, started on the worker, and ended.
-
-    Hosts that existed before the window opened are the live panels'; the
-    ones that appear inside it are the action's own -- the Edit surface, an
-    export host -- and their chain of operations, with the gaps between
-    them, is where a wall time goes that no thread is busy for.
-    """
-
-    def __init__(self, bench: ConsoleBench) -> None:
-        self._bench = bench
-        self.records: list[dict] = []
-        self._original = None
-        self._raster = None
-
-    def __enter__(self) -> "_HostTimeline":
-        # A process host deliberately exposes no worker internals in B.  Do
-        # not import RasterPlotHost here merely to install a probe that cannot
-        # see A/C; doing so would load the very renderer this benchmark is
-        # verifying has left B.  The action wall and causal panel timeline are
-        # the cross-process authorities.
-        if all(
-            panel.host is None or not hasattr(panel.host, "_session")
-            for panel in self._bench.presenter.panels.values()
-        ):
-            return self
-        from zlc_plot import raster
-
-        self._raster = raster
-        self._original = raster.RasterPlotHost._submit
-        timeline = self
-        original = self._original
-
-        def submit(host, callback, **kwargs):
-            record = {
-                "host": id(host),
-                "name": str(kwargs.get("coalesce_key") or getattr(callback, "__qualname__", repr(callback)))[:60],
-                "mode": getattr(kwargs.get("mode"), "name", "?"),
-                "submitted": time.perf_counter(),
-                "started": None,
-                "ended": None,
-                "done": None,
-            }
-            timeline.records.append(record)
-
-            def timed():
-                record["started"] = time.perf_counter()
-                try:
-                    return callback()
-                finally:
-                    record["ended"] = time.perf_counter()
-
-            future = original(host, timed, **kwargs)
-            add = getattr(future, "add_done_callback", None)
-            if callable(add):
-                add(lambda _f: record.__setitem__("done", time.perf_counter()))
-            return future
-
-        raster.RasterPlotHost._submit = submit
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        if self._raster is not None:
-            self._raster.RasterPlotHost._submit = self._original
-
-    def new_hosts(self, since: float) -> list[int]:
-        seen: list[int] = []
-        for record in self.records:
-            if record["submitted"] >= since and record["host"] not in seen:
-                seen.append(record["host"])
-        return seen
-
-    def rows(self, host: int, origin: float) -> list[str]:
-        """This host's operations in order, as ``+ms  mode  name  start run gap``."""
-
-        out = []
-        last_end = None
-        for record in self.records:
-            if record["host"] != host:
-                continue
-            sub = (record["submitted"] - origin) * 1000.0
-            start = None if record["started"] is None else (record["started"] - origin) * 1000.0
-            end = None if record["ended"] is None else (record["ended"] - origin) * 1000.0
-            gap = "" if last_end is None or start is None else f" gap {start - last_end:6.1f}"
-            if end is not None:
-                last_end = end
-            run = "" if start is None or end is None else f" run {end - start:6.1f}"
-            out.append(
-                f"      +{sub:7.1f} ms  {record['mode']:<12} {record['name']:<40}"
-                f"{' start +%.1f' % start if start is not None else ' (never ran)'}{run}{gap}"
-            )
-        return out
-
-
 class _RelayTimer:
     """Every owner-turn relay's slot, timed: which turn a queued call is.
 
@@ -501,21 +406,6 @@ def _editor_view(bench: ConsoleBench, panel):
     return bench.view._panel_editors[str(panel.panel_id)]
 
 
-def _host_label(bench: ConsoleBench, host_id: int, index: int) -> str:
-    """Which panel a raster host belongs to, and whether it is the card or Edit."""
-
-    for panel in bench.presenter.panels.values():
-        label = bench._labels.get(panel.panel_id, panel.panel_id)
-        if id(panel.host) == host_id:
-            return f"{label} (live card)"
-        if id(panel.editor_host) == host_id:
-            return f"{label} (Edit surface)"
-        entry = panel.editor_configuration
-        if entry is not None and id(entry[0]) == host_id:
-            return f"{label} (Edit surface, staging)"
-    return f"host {index} (retired or export)"
-
-
 def _profile_session_build(bench: ConsoleBench, panel, label: str) -> dict:
     """Build the Edit surface's PlotSession on this thread, profiled.
 
@@ -568,52 +458,21 @@ def _profile_session_build(bench: ConsoleBench, panel, label: str) -> dict:
 
 
 def _steady_state(bench: ConsoleBench, seconds: float) -> dict:
-    """The live cards' per-shot pipeline at depth, with no action in flight.
+    """The owner thread over ``seconds`` of live cards, with no action in flight.
 
-    Every raster operation of every host over ``seconds`` of pumping,
-    reduced per host to the number of data frames, the median and worst
-    prepare and commit run times, and the median gap a committed frame
-    waits before the next begins -- the cadence each card actually
-    sustains, which is what an operator sees as a laggy panel.
+    What each card's raster worker does happens in its render child, where
+    this process cannot tap it; the owner turns, the relays and the loop
+    clock are what this side of the pipe spends while the board runs.
     """
-
-    import statistics
 
     clock = _LoopClock(bench.app)
     # The console beats on its own timer in the product; the bench stands
     # that timer up for the window, or nothing is staged at all.
-    with guards.ProductBeat(bench.app, bench.presenter), _OwnerSampler() as sampler, _HostTimeline(bench) as timeline, _OwnerSteps(bench) as steps:
+    with guards.ProductBeat(bench.app, bench.presenter), _OwnerSampler() as sampler, _OwnerSteps(bench) as steps:
         began = time.perf_counter()
         while time.perf_counter() - began < seconds:
             clock.pump()
         finished = time.perf_counter()
-    hosts: dict = {}
-    for index, host in enumerate(timeline.new_hosts(began)):
-        label = _host_label(bench, host, index)
-        prepares = []
-        commits = []
-        starts = []
-        for record in timeline.records:
-            if record["host"] != host or record["started"] is None or record["ended"] is None:
-                continue
-            run = (record["ended"] - record["started"]) * 1000.0
-            if "stage_prepare" in record["name"]:
-                prepares.append(run)
-                starts.append(record["started"])
-            elif "stage_commit" in record["name"]:
-                commits.append(run)
-        if not commits:
-            continue
-        cadence = (
-            [(b - a) * 1000.0 for a, b in zip(starts, starts[1:])] if len(starts) > 1 else []
-        )
-        hosts[label] = {
-            "frames": len(commits),
-            "prepare_ms_median": round(statistics.median(prepares), 1) if prepares else None,
-            "commit_ms_median": round(statistics.median(commits), 1),
-            "commit_ms_max": round(max(commits), 1),
-            "frame_interval_ms_median": round(statistics.median(cadence), 1) if cadence else None,
-        }
     return {
         "what": f"steady state ({seconds:.0f} s, no action)",
         "trigger_ms": 0.0,
@@ -621,7 +480,6 @@ def _steady_state(bench: ConsoleBench, seconds: float) -> dict:
         **clock.summary(),
         "owner": sampler.summary(),
         "longest_turn_frames": sampler.during(clock.longest),
-        "hosts": hosts,
         "owner_steps": steps.summary(),
         "relay_turns": _RelayTimer.summary((began, finished)),
     }
@@ -769,7 +627,7 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         profile = cProfile.Profile()
         if mode != "trigger":
             profile.enable()
-    with _OwnerSampler() as sampler, _HostTimeline(bench) as timeline, _OwnerSteps(bench) as steps:
+    with _OwnerSampler() as sampler, _OwnerSteps(bench) as steps:
         began = time.perf_counter()
         # "trigger" profiles the synchronous call alone: it runs on the
         # owner with the workers mostly waiting, so its self times are the
@@ -798,10 +656,6 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         "longest_turn_frames": sampler.during(clock.longest),
         "trigger_frames": sampler.during((began, triggered)),
         "action_frames": sampler.during((began, finished), top_others=12),
-        "host_timelines": {
-            _host_label(bench, host, index): timeline.rows(host, began)
-            for index, host in enumerate(timeline.new_hosts(began))
-        },
         "owner_steps": steps.summary(),
         "relay_turns": _RelayTimer.summary((began, finished)),
     }
@@ -932,6 +786,9 @@ def run(
             bench, grid,
             {"spatial-y": "facet", "spatial-x": "x", "source index": "reduced"},
         )
+        # Each panel reduces its OWN authored window (a curve's is one shot),
+        # not whatever the histogram's lease keeps retained.
+        bench.edit_setting(grid, "display", window=window)
         bench.edit_setting(grid, "fit", model="gaussian_offset")
 
         curve = bench.add_panel_on(roi_signal, "curve", size="2x2")
@@ -940,6 +797,7 @@ def run(
             bench, curve,
             {"source index": "x", "spatial-x": "reduced", "spatial-y": "reduced"},
         )
+        bench.edit_setting(curve, "display", window=window)
 
         began = time.perf_counter()
         bench._until(
@@ -1027,16 +885,6 @@ def _print(payload: dict) -> None:
     if payload.get("problems"):
         print("problems:", payload["problems"])
     for row in payload["actions"]:
-        if row.get("hosts"):
-            print("")
-            print(f"==== {row['what']}: per-host pipeline")
-            print("   %-38s %7s %9s %9s %9s %11s" % ("host", "frames", "prep med", "commit md", "commit mx", "interval md"))
-            for label, stats in row["hosts"].items():
-                print("   %-38s %7d %9s %9s %9s %11s" % (
-                    label[:38], stats["frames"], stats["prepare_ms_median"],
-                    stats["commit_ms_median"], stats["commit_ms_max"],
-                    stats["frame_interval_ms_median"],
-                ))
         if row.get("trigger_profile"):
             print(f"   ---- {row['what']}: trigger profile ({row.get('trigger_ms')} ms, tottime)")
             print("\n".join(row["trigger_profile"].splitlines()[:60]))
@@ -1070,10 +918,6 @@ def _print(payload: dict) -> None:
                 print("   owner-turn relays during the action:")
                 for line in row["relay_turns"]:
                     print("     ", line)
-            for index, rows in (row.get("host_timelines") or {}).items():
-                print(f"   new host {index}: {len(rows)} operations (ms after the trigger)")
-                for line in rows[:40]:
-                    print(line)
     for row in payload["actions"]:
         if "owner_profile" in row:
             print("")

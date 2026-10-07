@@ -19,6 +19,7 @@ from .data_contract import (
     DEFAULT_UNITS,
     Unit,
     UnitRegistry,
+    acquired_repeat_count,
     resolve_unit,
     resolve_axis,
     snapshot_generation,
@@ -66,6 +67,7 @@ from .selectors import (
     SelectorSnapshot,
     SelectorState,
     Viewport,
+    normalize_viewport,
 )
 from .specs import (
     CurvePlot,
@@ -219,6 +221,13 @@ def _window_moment_summaries(
     )
 
 
+def _shots_from_latest(rows: int, begun: int) -> np.ndarray:
+    """Where the Repeat rows of a repeat-carried history sit on the rolling
+    x axis: the latest row begun at zero, every older one before it."""
+
+    return np.arange(rows, dtype=float) - (begun - 1)
+
+
 def _trailing_trace(
     history: RollingHistory,
     column: int,
@@ -305,6 +314,12 @@ _DEFAULT_FIT_SELECTOR_PRIORITY = (
     SelectorKind.AREA,
     SelectorKind.X_RANGE,
 )
+
+#: The most fitted coordinates a one-dimensional overlay is also evaluated
+#: at.  A window denser than this has more points than a panel has pixel
+#: columns, and is drawn from this many uniform samples instead -- or from
+#: the style's sample count, if that asks for more.
+_FIT_OVERLAY_POINT_LIMIT = 4096
 
 
 class _Crossing(Enum):
@@ -812,7 +827,11 @@ class FitProjection:
             if isinstance(self._semantic_spec(), (CurvePlot, HistogramPlot, RollingPlot)) else None
         )
         window = int(self.display_state.values["window"]) if layout is not None or rolling else None
-        count = layout.shot_count if layout is not None else self._data.block.schema.repeat_domain.size
+        # A repeat-carried record keeps its shots on the Repeat rows, and
+        # "the last N" are the last N it has BEGUN: a live finite run
+        # declares every row up front, so counted from the declared end a
+        # window held no data until the run was nearly over.
+        count = layout.shot_count if layout is not None else acquired_repeat_count(self._data)
         narrowed = window is not None and window < count
         if not scope and not narrowed:
             self._scoped_cache = None
@@ -871,10 +890,17 @@ class FitProjection:
 
     def _install_view(self, view: "DataView | None") -> None:
         """The view every quantity is read from -- and the end of whatever
-        was resolved against the one before it."""
+        was resolved against the one before it.
+
+        A NEW memo, not the old one emptied: a ``_with_context`` copy taken
+        before shares the memo with this projection and keeps the view it
+        was taken with, so clearing in place let the new view's answers
+        fill the dict the copy reads -- and a rolled-back unit change put
+        the old view back beside the new view's conversions.
+        """
 
         self._view = view
-        self._fit_conversion_memo.clear()
+        self._fit_conversion_memo = {}
 
     def _build_view(self) -> None:
         """Construct the unit-aware DataView without projecting a payload."""
@@ -952,7 +978,7 @@ class FitProjection:
                     history.source_indices, dtype=float
                 )
             else:
-                source_coordinates = np.arange(total, dtype=float) - (total - 1)
+                source_coordinates = _shots_from_latest(total, total)
             x_unit = resolve_unit("1", DEFAULT_UNITS)
             x_label = "Shots from latest"
         elif along == AxisRef.point(SHOT_TIME_AXIS_ID.value) and history.source_times is not None:
@@ -1073,14 +1099,9 @@ class FitProjection:
             if has_values:
                 data_low = float(offset + int(occupied[0]))
                 data_high = float(offset + int(occupied[-1]))
-        elif binned_values is None:
-            samples = view.samples
-            canonical = np.asarray(samples.value.canonical)
-            valid = np.asarray(samples.valid_mask, dtype=bool)
-            integral = canonical.dtype.kind in "biu"
         else:
-            if binned_valid is None:
-                raise ValueError("binned validity is required with binned values")
+            if binned_values is None or binned_valid is None:
+                raise ValueError("histogram edges take the binned values and their validity")
             canonical = np.asarray(binned_values)
             valid = np.asarray(binned_valid, dtype=bool)
             integral = canonical.dtype.kind in "biu"
@@ -1249,7 +1270,10 @@ class FitProjection:
         """The rolling x that each sample of THIS revision sits at.
 
         Indexed samples use the same Dataset coordinate as the drawn series.
-        An unindexed current event has only its present-shot offset, zero.
+        An unindexed record carries its shots on the Repeat rows, each drawn
+        where ``_rolling_payload`` puts its row (a single event is the one
+        present shot, zero).  Every sample at zero put a range over older
+        shots on nothing and one over the latest on every shot.
         """
 
         if self._view is None:
@@ -1257,7 +1281,11 @@ class FitProjection:
         if self._view.has_primary_index:
             ref = self._spec.x or AxisRef.point(str(PRIMARY_INDEX_AXIS_ID))
             return np.asarray(self._view.coordinate(ref).canonical, dtype=float)
-        return np.zeros(self._view.samples.shape, dtype=float)
+        shape = self._view.samples.shape
+        rows = _shots_from_latest(
+            shape[0], acquired_repeat_count(self._view._snapshot)
+        )
+        return np.broadcast_to(rows.reshape((-1,) + (1,) * (len(shape) - 1)), shape)
 
     def _x_sample_canonical(self) -> np.ndarray:
         """Where each sample sits on the x axis, in that axis's own space.
@@ -1278,11 +1306,8 @@ class FitProjection:
         )
 
     def _rolling_visible_mask(self) -> np.ndarray:
-        """Which samples of this revision the rolling curve actually draws.
-
-        All of them or none: they share one offset, and the window either
-        covers it or does not.
-        """
+        """Which samples of this revision the rolling curve actually draws:
+        those whose shot offset is one of the drawn shots."""
 
         if self._view is None:
             raise TypeError("rolling masking requires zlc_data.OwnedSnapshot")
@@ -1560,7 +1585,7 @@ class FitProjection:
         viewport = None
         if selector is None and self._viewport is not None:
             viewport = (
-                self._viewport_in_canonical()
+                self._viewport_in_canonical(fit=True)
                 if self._view is not None
                 else self._viewport
             )
@@ -1961,7 +1986,7 @@ class FitProjection:
         source = np.asarray(payload.valid, dtype=bool)
         if not _stride_zero_all_true(source):
             valid = source
-        if observations.dtype.kind in "fc":
+        if observations.dtype.kind == "f":
             finite = np.isfinite(observations)
             valid = finite if valid is None else valid & finite
         finite_x = np.isfinite(x)
@@ -2002,7 +2027,30 @@ class FitProjection:
             scope = FitScope.ALL
         return valid, observations, scope, active
 
-    def _viewport_in_canonical(self) -> Viewport:
+    def _viewport_in_canonical(self, *, fit: bool = False) -> Viewport | None:
+        """The drawn viewport in canonical units, axis by axis.
+
+        An axis whose view reaches where its canonical unit has no value --
+        below 0 mW, for a dBm value shown in mW -- is not navigated in
+        canonical terms: it is None here, so the viewport notice leaves it
+        out and a unit switch lets it go, the rule a selector's drawn bounds
+        and :meth:`PlotSession._viewport_from_canonical` keep.  Converted
+        whole, one wheel notch out raised "range low must be finite" after
+        the view had been committed and drawn: no notice went out, every
+        unit switch was refused and every fit over the view failed.
+
+        ``fit`` asks for the domain a fit over the view takes instead.  Every
+        point on screen is still above a wall below 0 mW, so that low end
+        opens and the fit keeps to the screen; None fitted the whole sweep
+        beyond the other wall too.  A high end opens only where it overflowed:
+        a view ending at or below 0 mW holds no canonical point, and opened it
+        would fit every point while the screen shows none.  Only an image's
+        fit keeps to the rows on screen: a curve's y is the observation and a
+        histogram's the count, their fit reads x alone, and y is None there.
+        Kept, a unit switch that let a curve's y go cancelled the fit in
+        flight and solved the same domain again.
+        """
+
         assert self._viewport is not None
         x_range, y_range = self._viewport
         if isinstance(self._spec, PulseTimelinePlot):
@@ -2014,14 +2062,45 @@ class FitProjection:
                 None if x_range is None else self._pulse_display_range_to_source(x_range),
                 y_range,
             )
-        return (
-            None if x_range is None else self._display_range_to_canonical(
-                x_range, self._x_selector_source()
-            ),
-            None if y_range is None else (
+
+        def canonical(value: NumericRange, source: AxisRef | Any) -> NumericRange | None:
+            low, high = (
+                self._display_scalar_to_canonical(end, source)
+                for end in (value.low, value.high)
+            )
+            if fit:
+                widest = float(np.finfo(np.float64).max)
+                low = -widest if math.isnan(low) or low == -math.inf else low
+                high = widest if high == math.inf else high
+            return NumericRange(low, high) if math.isfinite(low) and math.isfinite(high) else None
+
+        return normalize_viewport((
+            None if x_range is None else canonical(x_range, self._x_selector_source()),
+            None if y_range is None or (
+                fit and not isinstance(self._semantic_spec(), ImagePlot)
+            ) else (
                 y_range if self._is_histogram_plot()
-                else self._display_range_to_canonical(y_range, self._y_ref_or_value())
+                else canonical(y_range, self._y_ref_or_value())
             ),
+        ))
+
+    def _viewport_quantities(self, viewport: Viewport | None) -> tuple[Any, Any]:
+        """The quantity each navigated axis of ``viewport`` is drawn in.
+
+        None for an axis the view leaves alone and for a histogram's count
+        axis, which no unit converts.  Their canonical and display units are
+        what a unit edit can change, and what
+        :meth:`PlotSession._viewport_from_canonical` compares.
+        """
+
+        def quantity(source: AxisRef | Any) -> Any:
+            return self._coordinate(source) if isinstance(source, AxisRef) else source
+
+        x_range, y_range = viewport or (None, None)
+        return (
+            None if x_range is None else quantity(self._x_selector_source()),
+            None if y_range is None or self._is_histogram_plot()
+            else quantity(self._y_ref_or_value()),
         )
 
     def _fit_relation_quantity(self, relation: UnitRelation) -> Any:
@@ -2087,15 +2166,22 @@ class FitProjection:
         # The curve is drawn where it was solved, and drawn as the function
         # it is: sampled densely across the fitted window, never only at the
         # scan points or bin centres, where a narrow peak between samples
-        # was cut off and a fast oscillation aliased.  Outside the window it
-        # claims nothing, and a decay anchored at the window start runs away
-        # from the data within a few samples.
+        # was cut off and a fast oscillation aliased.  And at every fitted
+        # coordinate as well: a fixed number of samples alone drew a peak
+        # three scan steps wide at half its height and a sine with more
+        # periods than half the samples as a slow beat.  Outside the window
+        # it claims nothing, and a decay anchored at the window start runs
+        # away from the data within a few samples.
         source = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
         finite = source[np.isfinite(source)]
         if finite.size < 2:
             return ()
+        low, high = float(np.min(finite)), float(np.max(finite))
         sample_count = self._defaults.style.artists.fit_component_sample_count
-        dense = np.linspace(float(np.min(finite)), float(np.max(finite)), sample_count)
+        if finite.size > _FIT_OVERLAY_POINT_LIMIT:
+            dense = np.linspace(low, high, max(sample_count, _FIT_OVERLAY_POINT_LIMIT))
+        else:
+            dense = np.union1d(np.linspace(low, high, sample_count), finite)
         display_x = self._fit_solver_coordinate_to_display(
             dense,
             result.model.coordinate_relations[0],
@@ -2674,11 +2760,6 @@ class FitProjection:
         factor = self._pulse_x_factor()
         return NumericRange(value.low / factor, value.high / factor)
 
-    def _canonical_x_scalar_to_display(self, value: float) -> float:
-        source = self._x_selector_source()
-        quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
-        return self._canonical_scalar_to_display(value, quantity)
-
     def _coordinate_values_to_display(
         self, values: np.ndarray, ref: AxisRef
     ) -> np.ndarray:
@@ -2686,51 +2767,57 @@ class FitProjection:
             values, self._coordinate(ref)
         )
 
-    def _area_canonical_to_display(
-        self,
-        value: RectangleRange,
-    ) -> RectangleRange:
-        if self._view is not None:
-            x = self._canonical_range_to_display(
-                value.x,
-                self._x_selector_source(),
-            )
-            y = (
-                value.y
-                if self._is_histogram_plot()
-                else self._canonical_range_to_display(
-                    value.y,
-                    self._y_ref_or_value(),
-                )
-            )
-            return RectangleRange(x, y)
-        if isinstance(self._spec, PulseTimelinePlot):
-            return RectangleRange(
-                self._pulse_source_range_to_display(value.x),
-                value.y,
-            )
-        return value
-
     def _display_selector_state(self, state: SelectorState) -> SelectorState:
+        """One selector in the units its axes are drawn in.
+
+        An end the display unit has no value for -- 0 mW or less, shown in
+        dBm -- is refused, naming the selector and the end.  A unit chosen
+        over a committed selector meets one: a box dragged to the bottom of
+        a zero-based mW axis refused the switch to dBm as "range low must
+        be finite", with nothing to say which selector to move.  While dBm
+        is shown no drag reaches 0 mW, and a setter handed it is refused
+        here the same way.
+        """
+
+        def shown(value: float, source: AxisRef | Any, end: str) -> float:
+            quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
+            result = self._canonical_scalar_to_display(value, quantity)
+            if not math.isfinite(result):
+                raise ValueError(
+                    f"{state.kind.value.replace('_', ' ')} selector {end} "
+                    f"{value:g} {quantity.canonical_unit.symbol} has no value in "
+                    f"{quantity.display_unit.symbol}: move or clear it"
+                )
+            return result
+
+        def shown_range(value: NumericRange, source: AxisRef | Any, axis: str) -> NumericRange:
+            return NumericRange(
+                shown(value.low, source, f"{axis} low"),
+                shown(value.high, source, f"{axis} high"),
+            )
+
         value = state.value
         if state.kind is SelectorKind.X_RANGE:
             assert isinstance(value, NumericRange)
-            value = self._canonical_range_to_display(
-                value, self._x_selector_source()
-            )
+            value = shown_range(value, self._x_selector_source(), "x")
         elif state.kind is SelectorKind.AREA:
             assert isinstance(value, RectangleRange)
-            value = self._area_canonical_to_display(value)
+            value = RectangleRange(
+                shown_range(value.x, self._x_selector_source(), "x"),
+                value.y
+                if self._is_histogram_plot()
+                else shown_range(value.y, self._y_ref_or_value(), "y"),
+            )
         elif state.kind is SelectorKind.CROSSHAIR:
             assert isinstance(value, CrosshairPoint)
             value = CrosshairPoint(
-                self._canonical_x_scalar_to_display(value.x),
+                shown(value.x, self._x_selector_source(), "x"),
                 value.y
                 if self._is_histogram_plot()
-                else self._canonical_scalar_to_display(value.y, self._y_ref_or_value()),
+                else shown(value.y, self._y_ref_or_value(), "y"),
             )
         elif state.kind is SelectorKind.THRESHOLD:
-            value = self._canonical_scalar_to_display(float(value), self._value_quantity())
+            value = shown(float(value), self._value_quantity(), "value")
         return replace(state, value=value)
 
     def _selector_state_or_none(

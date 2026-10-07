@@ -16,6 +16,7 @@ import numpy as np
 from zlc_data import OwnedSnapshot
 from zlc_data.snapshot_projection import (
     indexed_schemas_compatible,
+    schemas_continue,
 )
 from zlc_durable import atomic_write_file
 
@@ -24,7 +25,6 @@ from .data_contract import (
     DEFAULT_UNITS,
     UnitRegistry,
     resolve_unit,
-    schema_equal,
     schema_value_unit,
     snapshot_generation,
     snapshot_revision,
@@ -446,6 +446,9 @@ class SelectionEvent:
 class ViewportEvent:
     """One viewport change tied to the exact projection it was measured on."""
 
+    #: None on an axis whose view reaches where its canonical unit has no
+    #: value (below 0 mW on a dBm axis shown in mW), and None whole when
+    #: both do; ``display`` still has them.
     canonical: Viewport | None
     display: Viewport | None
     subject: SelectionSubject
@@ -625,6 +628,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             histogram_projection=None,
         )
         self._rebuild_projection()
+        if isinstance(spec, FacetGridPlot):
+            # The first cell is selected, unless there is none to select.
+            self._clamp_facet_state(self._facet_cell_count(self._payload))
         initial_thresholds = normalize_classifier_threshold_targets(initial.get("classifier_thresholds", ()))
         if initial_thresholds:
             self._set_classifier_thresholds_state(initial_thresholds, refresh=True)
@@ -851,10 +857,23 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         x_scale = self._renderer.axis_scale(axis, "x")
         y_scale = self._renderer.axis_scale(axis, "y")
         canonical_scales = [None, None]
-        semantic = projected._semantic_spec()
-        if isinstance(semantic, ImagePlot) and role in {"image", "facet_cell"}:
-            for index, (ref, scale) in enumerate(((semantic.x, x_scale), (semantic.y, y_scale))):
-                quantity = projected._coordinate(ref)
+        # Every data surface is drawn straight in its DISPLAY unit, so a
+        # pointer is interpolated there and only the value under it is
+        # converted: interpolated between the converted limits instead, a
+        # press at the middle of a curve shown in mW over a dBm axis read
+        # -15 dBm where the picture says -3.  The same quantities the
+        # limits above were converted through; a histogram's counts have
+        # no unit.
+        if self._view is not None and role in {"main", "image", "history", "facet_cell"}:
+            x_source = projected._x_selector_source()
+            sources = (
+                (x_source, x_scale),
+                (None if projected._is_histogram_plot() else projected._y_ref_or_value(), y_scale),
+            )
+            for index, (source, scale) in enumerate(sources):
+                if source is None:
+                    continue
+                quantity = projected._coordinate(source) if isinstance(source, AxisRef) else source
                 canonical, display = quantity.canonical_unit, quantity.display_unit
                 if canonical != display and (
                     isinstance(scale, tuple) or not (canonical.is_linear and display.is_linear)
@@ -1322,9 +1341,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         topology = None
         if isinstance(spec, FacetGridPlot):
-            cell_count = len(tuple(getattr(payload, "cells", ())))
             topology = FacetTopology(
-                cell_count=max(cell_count, 1),
+                # A layout refuses zero cells, so an empty grid lays out one
+                # it leaves unpainted.  Only the plan counts that cell; every
+                # other question asks the payload (_facet_cell_count).
+                cell_count=max(len(tuple(getattr(payload, "cells", ()))), 1),
                 cell_height_over_width=(
                     1.0
                     if isinstance(semantic_spec(spec), ImagePlot)
@@ -1501,16 +1522,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if not isinstance(projection, FitProjection):
             raise TypeError("projection must be FitProjection")
         old_plan = self.surface_plan
-        old_count = (
-            old_plan.facet_topology.cell_count
-            if isinstance(self._spec, FacetGridPlot)
-            else None
-        )
-        new_count = (
-            len(tuple(getattr(projection.payload, "cells", ())))
-            if isinstance(self._spec, FacetGridPlot)
-            else None
-        )
+        # Payload against payload, never against the plan: the plan lays
+        # out one cell for an empty grid, so an empty grid compared 0 with
+        # 1 and laid itself out again on every update.
+        old_count = self._facet_cell_count(self._projection.payload)
+        new_count = self._facet_cell_count(projection.payload)
         generation_changed = self._data_generation_changed(
             self._projection.data,
             projection.data,
@@ -1991,6 +2007,15 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._notify_viewport()
         for event in fit_events:
             self._notify_fit(event)
+        if (
+            facet_focus is _UNSET
+            and self._facet_focus_index != previous_state["_facet_focus_index"]
+        ):
+            # Not asked for, so the caller does not know it: a window edit
+            # or a restated publication changed the cell count and moved the
+            # open cell.  Unannounced, the console kept the old cell and its
+            # next restore asked for one the grid no longer has.
+            self._emit_facet_focus()
 
     def _configuration_state_snapshot(self) -> dict[str, object]:
         assert self._renderer is not None
@@ -2180,8 +2205,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             current = prepared.get(name, previous.values.get(name))
             if current is None:
                 continue
-            converted = source_unit.convert_value_to((float(current),), target_unit)
-            prepared[name] = float(np.asarray(converted).reshape(-1)[0])
+            converted = float(np.asarray(
+                source_unit.convert_value_to((float(current),), target_unit)
+            ).reshape(-1)[0])
+            # An axis limit the new unit has no value for -- a fixed y_min of
+            # 0 mW, now in dBm -- is refused by name before anything commits.
+            # Converted, the store held -inf and the drawing refused it with
+            # nothing to say which limit ("Axis limits cannot be NaN or Inf").
+            if value_low != "color_min" and not math.isfinite(converted):
+                raise ValueError(
+                    f"{name} {float(current):g} {source_unit.symbol} has no value "
+                    f"in {target_unit.symbol}: set the value limits or leave Fixed"
+                )
+            prepared[name] = converted
 
     def _current_limits_for(self, low_name: str) -> tuple[float, float]:
         """What a missing fixed limit takes: the picture as it stands.
@@ -2395,6 +2431,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         """Commit display, layout and Image overlay with one renderer update."""
 
         with self._render_lock:
+            # Inside configure every notice waits for the whole target; the
+            # envelope announces what this commit moved.
+            configuring = self._configuration_effects is not None
             with self._lock:
                 self._assert_open()
                 prepared = self._parameter_schema.prepare_updates(values)
@@ -2538,13 +2577,30 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 unit_affecting = bool(
                     parameter_effects & RenderEffect.VIEW_PROJECTION
                 )
+                rebase_viewport = (
+                    unit_affecting
+                    and self._viewport is not None
+                    and self._view is not None
+                )
                 canonical_viewport = (
                     self._viewport_after_limit_edit(
                         self._projected._viewport_in_canonical(), authored
                     )
-                    if unit_affecting
-                    and self._viewport is not None
-                    and self._view is not None
+                    if rebase_viewport
+                    else None
+                )
+                # What each drawn axis is in, and what a fit over the view
+                # takes, before the edit: an axis whose units the edit leaves
+                # alone keeps its view as drawn, and one the rebase lets go
+                # of takes the fit's domain with it.
+                drawn_quantities = (
+                    self._projected._viewport_quantities(selected_viewport)
+                    if rebase_viewport
+                    else None
+                )
+                fitted_viewport = (
+                    self._projected._viewport_in_canonical(fit=True)
+                    if rebase_viewport
                     else None
                 )
                 if effects & RenderEffect.LAYOUT:
@@ -2580,6 +2636,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._layout_revision,
                     self._size,
                     self._image_overlay,
+                    self._focused_facet_index,
+                    self._facet_focus_index,
+                    self._selector_controller,
                 )
                 state = (
                     self._display_store._commit_prepared(previous, candidate)
@@ -2587,6 +2646,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     else previous
                 )
                 fit_cancel: Event | None = None
+                refit = None
+                fit_withdrawn = False
                 layout_attempted = False
                 try:
                     changed = accepted_changes
@@ -2631,12 +2692,58 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         fit_cancel = self._fit_cancel
                     if unit_projection_changed:
                         self._rebuild_projection()
-                        if canonical_viewport is not None:
+                        if rebase_viewport:
                             self._viewport = self._viewport_from_canonical(
-                                canonical_viewport
+                                canonical_viewport,
+                                selected_viewport,
+                                drawn_quantities,
                             )
+                            # An axis the new unit let go of takes the fit's
+                            # domain with it, as a hand moving the view does.
+                            # Left current, a repeated fit was answered by the
+                            # one painted over the old view.
+                            if not fit_selection_changed and any(
+                                kept is not None and shown is None
+                                for kept, shown in zip(
+                                    fitted_viewport or (None, None),
+                                    self._viewport or (None, None),
+                                )
+                            ):
+                                self._fit_context_generation += 1
+                                fit_cancel = self._fit_cancel
                     elif payload_projection_changed:
                         self._rebuild_projection(payload_only=True)
+                    # A parameter can change how many cells a grid lays out --
+                    # a history window over the source index is one cell per
+                    # shot -- and the axes drawn are the old plan's.  Painted
+                    # without a relayout, forty cells met one axes and the edit
+                    # was refused ("visible facet count is outside the rendered
+                    # grid"); the data path already lays out again on a count
+                    # change, and this is the same rule -- payload against
+                    # payload, as there.
+                    new_count = self._facet_cell_count(self._projection.payload)
+                    facet_topology_changed = new_count != self._facet_cell_count(
+                        previous_projection.payload
+                    )
+                    if facet_topology_changed:
+                        self._cancel_gesture()
+                        self._clamp_facet_state(new_count)
+                        # A facet fit answers cell by cell, by POSITION, and
+                        # the positions now name other cells: a source-index
+                        # window keeps the latest shots, so after an edit
+                        # cell i is another shot.  Kept, the narrowed grid
+                        # refused the edit (an answer for a cell it no
+                        # longer has) and the widened one drew every fit on
+                        # the wrong shot.  An armed live request answers the
+                        # new cells now: on a stopped source no data frame
+                        # would, and the console restates the identical
+                        # request, which is no reason to solve again.
+                        refit = (
+                            self._live_fit_request
+                            if self._accepted_fit is not None
+                            else None
+                        )
+                        fit_withdrawn = self._clear_fit_presentation()
                     if unit_affecting and self._accepted_fit is not None:
                         self._accepted_fit = self._refresh_accepted_fit_overlays(
                             self._accepted_fit
@@ -2665,7 +2772,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._refresh_threshold_classifier()
                     plan = (
                         self._resolve_plan()
-                        if effects & RenderEffect.LAYOUT
+                        if effects & RenderEffect.LAYOUT or facet_topology_changed
                         else None
                     )
                     if plan is not None:
@@ -2685,6 +2792,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._layout_revision,
                         self._size,
                         self._image_overlay,
+                        self._focused_facet_index,
+                        self._facet_focus_index,
+                        self._selector_controller,
                     ) = previous_values
                     raise
             try:
@@ -2713,6 +2823,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._layout_revision,
                         self._size,
                         self._image_overlay,
+                        self._focused_facet_index,
+                        self._facet_focus_index,
+                        self._selector_controller,
                     ) = previous_values
                 try:
                     if layout_attempted or self.surface_plan != old_plan:
@@ -2728,10 +2841,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 raise
             if fit_cancel is not None:
                 self._commit_fit_actions(fit_cancel.set)
+        if refit is not None:
+            self._solve_fit_request(refit, live=True)
+        elif fit_withdrawn:
+            self._notify_fit(None)
         if accepted_changes and self.display_state is state:
             self._notify_display(replace(self.display_state, changed_names=accepted_changes))
         if self._viewport != previous_values[0]:
             self._notify_viewport()
+        if not configuring and self._facet_focus_index != previous_values[11]:
+            # A cell count this edit changed moved the open cell; whoever
+            # records the focus hears it, as it does from a data frame.
+            self._emit_facet_focus()
         return self.display_state
 
     def _prepare_replacement(
@@ -2898,6 +3019,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._viewport = viewport
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
+                if focused is not None:
+                    # The first cell, unless the new grid has none.
+                    self._clamp_facet_state(self._facet_cell_count(self._payload))
                 self._accepted_fit = None
                 # Threshold choices address distributions by canonical
                 # coordinates.  Positional state cannot cross a semantic
@@ -3073,17 +3197,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("facet selection is available only for FacetGridPlot")
         if isinstance(index, bool) or not isinstance(index, int):
             raise TypeError("facet index must be an integer")
-        cells = tuple(getattr(self._payload, "cells", ()))
-        if index < 0 or index >= len(cells):
+        if index < 0 or index >= self._facet_cell_count(self._payload):
             raise IndexError("facet index is outside the current grid")
         changed = index != self._focused_facet_index
         if changed:
             self._cancel_gesture()
             self._focused_facet_index = index
-            self._selector_controller.retarget_facet(index, tuple(
-                kind for kind in SelectorKind
-                if kind is not SelectorKind.THRESHOLD or not self._threshold_classifier_enabled()
-            ))
+            self._retarget_selectors(index)
             self._viewport = None
             # Opening another cell is looking at the same measurement more
             # closely.  The accepted result of a facet fit is a per-cell batch
@@ -3096,12 +3216,43 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._invalidate_fit_context()
         return changed
 
+    def _retarget_selectors(self, index: int) -> None:
+        """Put the selectors the cells share on cell ``index``.
+
+        The renderer paints every committed selector on the cell it names,
+        and refuses a cell the grid does not have.  A classifier's threshold
+        is not shared: the classifier places it on the cell it answers.
+        """
+
+        self._selector_controller = self._selector_controller.retarget_facet(
+            index,
+            tuple(
+                kind for kind in SelectorKind
+                if kind is not SelectorKind.THRESHOLD
+                or not self._threshold_classifier_enabled()
+            ),
+        )
+
+    def _facet_cell_count(self, payload: object) -> int | None:
+        """How many cells a FacetGrid payload has; None for any other kind.
+
+        The payload's own count, which is what the renderer paints and
+        validates a cell index against -- not the plan's, which lays out
+        one cell for an empty grid.
+        """
+
+        if not isinstance(self._spec, FacetGridPlot):
+            return None
+        return len(tuple(getattr(payload, "cells", ())))
+
     def _clamp_facet_state(self, cell_count: int) -> None:
-        """Keep selected and open cells valid after a payload topology change."""
+        """Keep selected and open cells valid after a payload topology change.
+
+        An empty grid has no cell to select; the renderer takes none for it.
+        """
 
         if cell_count <= 0:
-            selected = None
-            opened = None
+            selected = opened = None
         else:
             selected = (
                 cell_count - 1
@@ -3116,6 +3267,14 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._focused_facet_index = selected
             self._facet_focus_index = opened
             self._viewport = None
+            # The selectors are drawn on the selected cell and go with it.
+            # Left behind, a window narrowed below the open cell was refused
+            # while any selector existed ("selector facet index is outside
+            # the current grid"), and in the overview the refusal waited for
+            # the operator to open the cell the clamp had selected.  Across
+            # an empty grid they wait for the next cell to be selected.
+            if selected is not None:
+                self._retarget_selectors(selected)
 
     def set_device_pixel_ratio(self, ratio: float) -> SurfacePlan:
         selected = _validated_device_pixel_ratio(ratio)
@@ -3331,10 +3490,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         )
                     previous_schema = snapshot_schema(self._projection.data)
                     next_schema = snapshot_schema(data)
-                    if not (
-                        schema_equal(previous_schema, next_schema)
-                        or indexed_schemas_compatible(previous_schema, next_schema)
-                    ):
+                    if not schemas_continue(previous_schema, next_schema):
                         raise ValueError("data schema must remain exactly constant")
                     if self.holds_live_revision(data, selected_revision):
                         raise ValueError(
@@ -3377,16 +3533,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._emit_projection_focus_change(presentation)
         if resolution is not None:
             self._resolve_fit_completion(resolution)
-
-    def update_image_frame(self, frame: ImageFrame) -> ImageFrame:
-        """Present image data and its point layer in one render transaction."""
-
-        if not isinstance(frame, ImageFrame):
-            raise TypeError("frame must be ImageFrame")
-        if not isinstance(self._semantic_spec, ImagePlot):
-            raise TypeError("ImageFrame requires ImagePlot")
-        self.update_data(frame)
-        return frame
 
     @property
     def image_overlay(self) -> ImagePointOverlay | None:
@@ -4289,17 +4435,55 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return tuple(result)
 
 
-    def _viewport_from_canonical(self, viewport: Viewport) -> Viewport:
-        return (
-            None if viewport[0] is None else self._projected._canonical_range_to_display(
-                viewport[0], self._projected._x_selector_source()
-            ),
-            viewport[1]
-            if viewport[1] is None or self._projected._is_histogram_plot()
-            else self._projected._canonical_range_to_display(
-                viewport[1], self._projected._y_ref_or_value()
-            ),
-        )
+    def _viewport_from_canonical(
+        self,
+        viewport: Viewport | None,
+        drawn: Viewport | None,
+        quantities: tuple[Any, Any],
+    ) -> Viewport | None:
+        """The view ``drawn`` before a unit edit, in the display units just chosen.
+
+        An axis the edit left in the same canonical and display unit -- the
+        other axis's unit, the facet unit or a window changed -- keeps its
+        drawn range.  Rebuilt through canonical it drifted, and one zoomed
+        where its canonical unit has no value (below 0 mW over a dBm value)
+        was let go although nothing about that axis had changed.
+
+        Every other axis is ``viewport``'s, canonical, converted.  One the
+        new unit has no value for -- a view reaching 0 mW, now shown in dBm --
+        lets go of its navigation and autoscales, as an authored limit makes
+        it (:meth:`_viewport_after_limit_edit`): where the hand left the view
+        is no choice to keep, and converted it refused the unit switch
+        ("range low must be finite").  So does an axis the OLD unit's view
+        had no canonical value for, which
+        :meth:`FitProjection._viewport_in_canonical` hands over as None.
+        """
+
+        projected = self._projected
+        canonical = viewport or (None, None)
+        drawn = drawn or (None, None)
+
+        def units(quantity: Any) -> tuple[Any, Any] | None:
+            return None if quantity is None else (quantity.canonical_unit, quantity.display_unit)
+
+        def shown(index: int, before: Any, after: Any) -> NumericRange | None:
+            if units(before) == units(after):
+                return drawn[index]
+            value = canonical[index]
+            if value is None:
+                return None
+            ends = tuple(
+                projected._canonical_scalar_to_display(end, after)
+                for end in (value.low, value.high)
+            )
+            return NumericRange(*ends) if all(map(math.isfinite, ends)) else None
+
+        return normalize_viewport(tuple(
+            shown(index, before, after)
+            for index, (before, after) in enumerate(
+                zip(quantities, projected._viewport_quantities(drawn), strict=True)
+            )
+        ))
 
     @property
     def viewport(self) -> Viewport | None:
@@ -4563,7 +4747,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             value = self._projected._pulse_source_range_to_display(value)
         elif state.kind is SelectorKind.AREA:
             assert isinstance(value, RectangleRange)
-            value = self._projected._area_canonical_to_display(value)
+            value = RectangleRange(
+                self._projected._pulse_source_range_to_display(value.x), value.y
+            )
         elif state.kind is SelectorKind.CROSSHAIR:
             assert isinstance(value, CrosshairPoint)
             value = CrosshairPoint(

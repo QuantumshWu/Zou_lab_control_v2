@@ -354,7 +354,11 @@ def _admit_factory_leaf(
         # The physical identity is claimed here, one leaf at a time in the
         # operator's order, not in the factories that bound it all at once:
         # of two specs naming one instrument the later one is refused, and
-        # which one does not depend on which thread got there first.
+        # which one does not depend on which thread got there first.  A
+        # pulse board is the exception: bind_sequencer claims it in its
+        # factory, before opening it takes the board, so which of two such
+        # specs is refused is thread order, and this claim is its owner's
+        # no-op.
         broker.claim(leaf.binding)
     return leaf
 

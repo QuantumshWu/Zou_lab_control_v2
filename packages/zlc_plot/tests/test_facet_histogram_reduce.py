@@ -117,7 +117,9 @@ def test_each_cell_bins_its_own_means_over_the_reduced_axis() -> None:
         _SITES,
     ]
     grouped = view.facet(_grid(group=AxisRef.cell_data("v.site")), bins=np.arange(-1, 25))
-    standalone = view.histogram(group_by=(AxisRef.cell_data("v.site"),), bins=np.arange(-1, 25))
+    standalone = view._histogram_from_plan(np.arange(-1, 25), view._histogram_plan(
+        (AxisRef.cell_data("v.site"),), (), Reduction.MEAN, 1,
+    ))
     assert standalone.counts.shape == (3, 25)
     for site in range(_SITES):
         np.testing.assert_array_equal(standalone.counts[site], np.histogram(values[..., site], bins=np.arange(-1, 25))[0])

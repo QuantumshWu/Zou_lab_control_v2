@@ -54,20 +54,25 @@ class DeviceControlHandle(QtCore.QObject):
     def set_device_label(self, label: str) -> None:
         self._window.setWindowTitle(f"{label} control")
 
-    def close(self) -> None:
-        """Retire the session's control; the window's own X only hides it."""
+    def close(self) -> bool:
+        """Retire the session's control; the window's own X only hides it.
+
+        False when its guard kept it (a tune or refresh still running).
+        """
 
         target = self._window if self._window is not None else self._view
         if target is None:
-            return
+            return True
         if self._window is not None:
             self._window._hide_on_close = False
         if target.close():
             release_window(target)
             target.deleteLater()
             self._window = self._view = None
-        elif self._window is not None:
+            return True
+        if self._window is not None:
             self._window._hide_on_close = True
+        return False
 
     def set_close_guard(self, guard) -> None:
         if self._window is not None:
@@ -107,7 +112,6 @@ class DeviceManagerHandle(QtCore.QObject):
     load_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     save_as_requested = QtCore.pyqtSignal()
-    cancel_requested = QtCore.pyqtSignal()
     lifecycle_requested = QtCore.pyqtSignal()
 
     _FORWARDED = (
@@ -126,7 +130,6 @@ class DeviceManagerHandle(QtCore.QObject):
         "load_requested",
         "save_requested",
         "save_as_requested",
-        "cancel_requested",
         "lifecycle_requested",
     )
 

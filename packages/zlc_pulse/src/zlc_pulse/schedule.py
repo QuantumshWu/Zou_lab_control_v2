@@ -7,7 +7,7 @@ Every query walks one table in hardware order: each row holds for
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from numbers import Integral
 
 import numpy as np
@@ -49,7 +49,7 @@ def trigger_edge_ticks(
     *,
     run_repeats: int = 1,
     scan_repeats: int = 1,
-    bracket_bodies: int | None = None,
+    bracket_bodies: Callable[[int], int] | None = None,
 ) -> dict[str, tuple[int, ...]]:
     """Return the tick of every edge each named lane plays.
 
@@ -61,10 +61,11 @@ def trigger_edge_ticks(
     question also meant refusing a program for an exposure-shaped reason (a
     lane still high at the end) from inside a FIFO-capacity check.
 
-    ``bracket_bodies`` walks only the first and last that many replays of
-    every Bracket in every Pulse, at their true ticks -- see
-    :func:`.loops.bracket_iterations` -- which is what bounds a capacity
-    check over a loop that replays a body a billion times.
+    ``bracket_bodies`` walks only the first and last few replays of every
+    Bracket in every Pulse -- as many as it answers for that Bracket's
+    one-replay length in ticks -- at their true ticks, see
+    :func:`.loops.bracket_iterations`, which is what bounds a capacity check
+    over a loop that replays a body a billion times.
     """
 
     names = tuple(channels)
@@ -89,7 +90,7 @@ def bus_action_ticks(
     *,
     run_repeats: int = 1,
     scan_repeats: int = 1,
-    bracket_bodies: int | None = None,
+    bracket_bodies: Callable[[int], int] | None = None,
 ) -> dict[int, tuple[int, ...]]:
     """The tick every DAC bus is handed an action, per bus, in playback order.
 
@@ -117,8 +118,8 @@ def bus_action_ticks(
 
 
 def _windows_of(edges: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
-    if len(edges) % 2:
-        raise ValueError("program leaves a trigger channel high after a finite run")
+    # Pairs always close: the edge walk ends a lane still high at the end of
+    # the finite run, as the board's terminal SAFE does.
     windows = tuple(zip(edges[0::2], edges[1::2]))
     if any(end <= start for start, end in windows):
         raise ValueError("program contains a non-positive trigger window")
@@ -146,7 +147,7 @@ def _channel_edges(
     table: np.ndarray | None,
     run_repeats: int,
     scan_repeats: int,
-    bracket_bodies: int | None = None,
+    bracket_bodies: Callable[[int], int] | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Project the tick of every edge each named lane plays, in playback order.
 
@@ -213,7 +214,7 @@ def _channel_edges(
 def _point_shapes(
     prog: CompiledProgram,
     points: Sequence[tuple[int, ...]],
-    bracket_bodies: int | None,
+    bracket_bodies: Callable[[int], int] | None,
 ) -> dict[tuple[int, ...], tuple[tuple[tuple[int, int], ...], int]]:
     """Each distinct point's row visits and Pulse length, derived once.
 

@@ -175,7 +175,8 @@ def _missing_high_dpi_attributes(app: QtWidgets.QApplication) -> tuple[str, ...]
 def ensure_qt_app(argv: Sequence[str] | None = None) -> QtWidgets.QApplication:
     """Return the owner-thread QApplication and configure Fluent once.
 
-    This is the only QApplication constructor in the package.  It also
+    This is the only QApplication constructor in the product
+    (``zlc_plot.ensure_qt5_application`` goes through it).  It also
     applies the shared HiDPI flags and Windows offscreen font registration,
     initializes the shared Fluent scale (and with it the reference Segoe UI
     font) before callers construct widgets, performs owner-thread checks,

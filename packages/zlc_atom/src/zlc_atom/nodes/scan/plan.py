@@ -29,7 +29,8 @@ from pathlib import Path
 
 import numpy as np
 
-from zlc_data.units import DEFAULT_UNITS, format_quantity
+from zlc_data.units import DEFAULT_UNITS, VoltageIntoLoad, format_quantity
+from zlc_durable import strict_json_loads
 from zlc_pulse import (
     apply_api_values,
     PulseSequence,
@@ -588,7 +589,7 @@ def plan_input_rows(payload: object) -> tuple[dict, ...]:
     elif isinstance(payload, str):
         if not payload.strip():
             raise ValueError("the scan plan is empty; add an axis")
-        payload = json.loads(payload)
+        payload = strict_json_loads(payload, "the scan plan")
     if not isinstance(payload, Mapping) or set(payload) != {"axes"}:
         raise ValueError("a scan plan document carries only its axes")
     entries = payload["axes"]
@@ -670,7 +671,36 @@ def _selected_plan(
         unit = row["unit"] or source_unit
         bounds = (float(chosen.lower), float(chosen.upper))
         if source_unit != unit:
-            bounds = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
+            # A device's knob converts through the device: an amplitude in Vpp
+            # is a power only into the channel's own load and waveform.  Read
+            # here at the registry's 50-ohm sine, a region drawn in mVpp over
+            # a row since switched to dBm filled another load's power.  A
+            # prefix move, or a power read in mW or dBm, is the same number
+            # into any load; a move through an amplitude is refused by name.
+            families = (DEFAULT_UNITS.family_of(source_unit or "1"),
+                        DEFAULT_UNITS.family_of(unit or "1"))
+            if (
+                row["port"].startswith(DEVICE_PARAM_FAMILY)
+                and families[0] != families[1]
+                and any(isinstance(family.conversion, VoltageIntoLoad) for family in families)
+            ):
+                raise ValueError(
+                    f"selected scan axis {axis_id!r} row is in {unit}, region drawn in "
+                    f"{source_unit}: that conversion is the device's; set the row to "
+                    f"{source_unit} to draw it"
+                )
+            converted = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
+            # A wall the row's unit has no value for -- below 0 mW or 0 Vpp,
+            # for a row now in dBm -- is refused by name.  Written as NaN it
+            # made the draft no plan at all, and the editor reading it back
+            # retired every row the operator had authored.
+            for name, bound, value in zip(("low", "high"), bounds, converted):
+                if not math.isfinite(float(value)):
+                    raise ValueError(
+                        f"selected scan axis {axis_id!r} {name} {bound:g} {source_unit} "
+                        f"has no value in {unit}: draw the region where it has one"
+                    )
+            bounds = converted
         row["values"] = [float(value) for value in np.linspace(
             float(bounds[0]), float(bounds[1]), len(row["values"]))]
         # Only the row's RANGE half.  A row authored as an explicit list is

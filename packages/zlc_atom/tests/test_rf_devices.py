@@ -1287,9 +1287,9 @@ def test_a_found_instrument_is_offered_as_an_installable_card(monkeypatch) -> No
     )
     monkeypatch.setattr(driver, "visa_resources", lambda: bus)
 
-    offered = module._discover_rigol()
+    offered, missed = module._discover_rigol()
 
-    assert len(offered) == 1
+    assert len(offered) == 1 and missed == ()
     card = offered[0]
     assert card.type_id == "rf.rigol_dg4000"
     assert card.instance_id == "dg4000_DG4E0000000002" == card.role
@@ -1334,4 +1334,4 @@ def test_nothing_to_ask_is_said_out_loud(monkeypatch) -> None:
         {"TCPIP0::198.51.100.9::INSTR": "KEYSIGHT,DSOX1204G,CN0,01.20"}
     )
     monkeypatch.setattr(driver, "visa_resources", lambda: a_scope)
-    assert module._discover_rigol() == ()
+    assert module._discover_rigol() == ((), ())

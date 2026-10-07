@@ -157,6 +157,14 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         row._show_values(ScanAxis(BIAS.port, (-2.0, 0.2, 3.0), "V"))
         assert _axis(row).values == (-1.0, 0.2, 1.0)
         assert row.custom_label.text() == "custom values"
+        # A Values-mode axis whose Range bank a notebook left empty is still
+        # an axis the plan plays: shown, not raised out of the projection.
+        editor._reconcile_rows(json.dumps({"axes": [{
+            "port": BIAS.port, "values": [], "unit": "V",
+            "mode": "values", "value_text": "0.1, 0.2",
+        }]}))
+        assert editor._rows[0].values_edit.text() == "0.1, 0.2"
+        assert _axis(editor._rows[0]).values == (0.1, 0.2)
 
         # A projected ROI is normalized after the synchronous reconcile has
         # finished. It must not claim that the operator manually edited it.
@@ -598,9 +606,14 @@ def test_device_port_unit_conversion_runs_off_the_qt_thread_and_never_overwrites
         row.values_edit.setText("-35, -13, 15")
         row.values_edit.editingFinished.emit()
         old_values = _axis(row).values
+        # The tree names the leaf before it asks; the picker says the row's
+        # unit until the owner's conversion lands, and the new one after.
+        row.unit_picker.select_choice_key("mVpp")
         row.unit_picker.unit_picked.emit("mVpp")
         assert _axis(row).unit == "dBm", "unit changed before worker accepted it"
+        assert row.unit_picker.current_choice_key() == "dBm", "the picker named a unit the row is not in"
         settled(lambda: row._unit_request is None)
+        assert row.unit_picker.current_choice_key() == "mVpp"
         assert tuple(units.convert(_axis(row).values, "mVpp", "dBm")) == pytest.approx(old_values)
         assert _axis(row).values[-1] == pytest.approx(894.4271909999159), "used the global 50-ohm conversion"
         assert row.start_spin.valueUnit() == "mVpp"

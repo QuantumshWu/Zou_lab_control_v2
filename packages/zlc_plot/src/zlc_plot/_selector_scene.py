@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._axis_scale import LINEAR, LOG, midpoint
+from ._axis_scale import LINEAR, LOG, midpoint, placed
 
 from dataclasses import dataclass
 from enum import Enum
@@ -276,12 +276,20 @@ def _selector_primitives(
         low_x, high_x, low_y, high_y = (
             value.x.low, value.x.high, value.y.low, value.y.high
         )
-        middle_x = midpoint(low_x, high_x, context.x_scale)
-        middle_y = midpoint(low_y, high_y, context.y_scale)
+        # Drawn, and grabbed, with an end the scale cannot place at the
+        # wall it is clipped to; the label still reads the box's values.
+        left, right = (
+            placed(end, context.x_limits, context.x_scale) for end in (low_x, high_x)
+        )
+        bottom, top = (
+            placed(end, context.y_limits, context.y_scale) for end in (low_y, high_y)
+        )
+        middle_x = midpoint(left, right, context.x_scale)
+        middle_y = midpoint(bottom, top, context.y_scale)
         handles = (
-            (low_x, low_y), (middle_x, low_y), (high_x, low_y),
-            (high_x, middle_y), (high_x, high_y), (middle_x, high_y),
-            (low_x, high_y), (low_x, middle_y),
+            (left, bottom), (middle_x, bottom), (right, bottom),
+            (right, middle_y), (right, top), (middle_x, top),
+            (left, top), (left, middle_y),
         )
         return (
             line("outline", handles + (handles[0],)),

@@ -206,7 +206,8 @@ def domain_to_tree(domain: DomainSpec, *, structure: bool = False, digest: bool 
         else "sliding" if sliding else [
             {"range": [codes.start, codes.stop, codes.step]} if isinstance(codes, range)
             else _vector_digest(codes) if digest else codes.tolist()
-            for codes in domain.axis_codes
+            # A fingerprint names the mapping, not how it was written.
+            for codes in (domain._mapping if digest or structure else domain.axis_codes)
         ],
         **({"axis_code_repeats": [list(pair) for pair in domain.axis_code_repeats]}
            if domain.axis_code_repeats is not None and not sliding else {}),

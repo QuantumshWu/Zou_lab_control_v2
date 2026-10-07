@@ -202,7 +202,9 @@ class _AxisRow(QtWidgets.QWidget):
 
     def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False,
                      ports=None, reject_unrepresentable: bool = False) -> bool:
-        if not preserve_edit or not being_edited(self.range_inputs):
+        # A Values-mode axis a notebook wrote may leave its Range bank empty;
+        # the plan plays its Values, and the Range boxes keep what they show.
+        if entry["values"] and (not preserve_edit or not being_edited(self.range_inputs)):
             if not self._show_values(ScanAxis(entry["port"], tuple(entry["values"]), entry["unit"]),
                                      ports=ports, reject_unrepresentable=reject_unrepresentable):
                 return False

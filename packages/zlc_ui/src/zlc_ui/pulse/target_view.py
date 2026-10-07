@@ -41,6 +41,7 @@ class PulseTargetView(QtWidgets.QWidget):
         super().__init__(parent)
         self._editable = False
         self._rows: list[_TargetRowWidgets] = []
+        self._reserved: frozenset[str] = frozenset()
         self._width_rules = {
             "digital": TargetWidthRule(1, 1, 1),
             "dac": TargetWidthRule(1, 2, None),
@@ -118,7 +119,21 @@ class PulseTargetView(QtWidgets.QWidget):
             rule = self._width_rules[row.record.kind]
             row.width.setRange(rule.minimum, _QT_SPINBOX_MAXIMUM if rule.maximum is None else rule.maximum)
 
-    def set_ports(self, records: tuple[TargetPortRecord, ...], editable: bool, status_text: str) -> None:
+    def set_ports(
+        self,
+        records: tuple[TargetPortRecord, ...],
+        editable: bool,
+        status_text: str,
+        *,
+        reserved: tuple[str, ...] = (),
+    ) -> None:
+        """Show the records; ``reserved`` names the target holds with no row.
+
+        Add never mints one of those: the presenter refuses a port under a
+        taken name, and a key minted here is not one the page lets anybody
+        edit, so Remove and Add again would only mint it again.
+        """
+
         incoming = tuple(records)
         if any(not isinstance(record, TargetPortRecord) for record in incoming):
             raise TypeError("records must contain TargetPortRecord values")
@@ -136,6 +151,7 @@ class PulseTargetView(QtWidgets.QWidget):
         for row in existing.values():
             self._destroy_row(row)
         self._rows = reconciled
+        self._reserved = frozenset(str(key) for key in reserved)
         self._place_rows()
         self._editable = bool(editable)
         self.status_label.setText(str(status_text))
@@ -246,7 +262,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.apply_button.setEnabled(True)
 
     def _used_keys(self) -> set[str]:
-        return {key for row in self._rows for key in (row.record.key, row.record.clock_key) if key}
+        return {key for row in self._rows for key in (row.record.key, row.record.clock_key) if key} | self._reserved
 
     def _allocate_key(self, stem: str) -> str:
         used = self._used_keys()
@@ -298,7 +314,7 @@ class PulseTargetView(QtWidgets.QWidget):
         key = self._allocate_key("digital")
         record = TargetPortRecord(key, "digital", key, (f"endpoint:{key}",))
         split = next((index for index, row in enumerate(current) if row.kind == "dac"), len(current))
-        self.set_ports(current[:split] + (record,) + current[split:], self._editable, self.status_label.text())
+        self.set_ports(current[:split] + (record,) + current[split:], self._editable, self.status_label.text(), reserved=tuple(self._reserved))
         self._queue_reveal_row(key)
 
     def _add_dac(self) -> None:
@@ -310,8 +326,8 @@ class PulseTargetView(QtWidgets.QWidget):
         key = self._allocate_key("dac")
         clock_key = self._allocate_key(f"{key}_clock")
         width = self._width_rules["dac"].default
-        record = TargetPortRecord(key, "dac", key, tuple(self._endpoint_template.format(key=key, bit=bit) for bit in range(width)), clock_key, f"endpoint:{clock_key}", tuple(range(width)))
-        self.set_ports(current + (record,), self._editable, self.status_label.text())
+        record = TargetPortRecord(key, "dac", key, tuple(self._endpoint_template.format(key=key, bit=bit) for bit in range(width)), clock_key, f"endpoint:{clock_key}")
+        self.set_ports(current + (record,), self._editable, self.status_label.text(), reserved=tuple(self._reserved))
         self._queue_reveal_row(key)
 
     def _remove_key(self, key: str) -> None:
@@ -320,7 +336,7 @@ class PulseTargetView(QtWidgets.QWidget):
         except ValueError as error:
             self.set_feedback(str(error))
             return
-        self.set_ports(tuple(row for row in current if row.key != key), self._editable, self.status_label.text())
+        self.set_ports(tuple(row for row in current if row.key != key), self._editable, self.status_label.text(), reserved=tuple(self._reserved))
 
     def _emit_apply(self) -> None:
         try:

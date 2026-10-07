@@ -49,7 +49,7 @@ def _factory(context, key: str, values: dict) -> InstalledLeaf:
     )
 
 
-def _discover() -> tuple[DeviceInstanceConfig, ...]:
+def _discover() -> tuple[tuple[DeviceInstanceConfig, ...], tuple[str, ...]]:
     # No module on the air is an empty answer, as every other family gives:
     # a bench without an N100 has nothing to offer, not a fault to report.
     ports = discover_n100()
@@ -65,7 +65,7 @@ def _discover() -> tuple[DeviceInstanceConfig, ...]:
             parameters=WHEELTEC_N100_SCHEMA.project_values({"port": port}),
         )
         for port in ports
-    )
+    ), ()
 
 
 DEVICE_TYPES = (

@@ -318,6 +318,11 @@ def _open_dvi_presenter(
     thread = Thread(target=run, name="x15213-dvi-presenter", daemon=True)
     thread.start()
     if not ready.wait(5.0):
+        # The thread goes on starting, and nobody will hold its handles: the
+        # close it is owed is queued now, so a presenter that comes up late
+        # takes its topmost window straight down instead of leaving it up
+        # beside the next one.
+        commands.put(None)
         raise TimeoutError("X15213 DVI presenter did not start within 5 seconds")
     if startup:
         raise RuntimeError("X15213 DVI presenter failed to start") from startup[0]
@@ -542,7 +547,6 @@ _PROFILE_FIELDS = frozenset(
         "format",
         "model",
         "serial",
-        "default_wavelength_nm",
         "phase_curve_wavelength_nm",
         "phase_curve_source",
         "settle_seconds",
@@ -575,7 +579,6 @@ def _load_profile(profile_name: str) -> dict[str, object]:
     if not str(payload["model"]).startswith("X15213"):
         raise ValueError(f"X15213 device profile {requested!r} names the wrong model")
     for field in (
-        "default_wavelength_nm",
         "phase_curve_wavelength_nm",
         "settle_seconds",
     ):

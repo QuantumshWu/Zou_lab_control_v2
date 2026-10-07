@@ -54,15 +54,15 @@ Views emit close intent; a composition-installed close guard decides when the
 top-level window may actually disappear. Handles provide queued close retry so
 completion callbacks never re-enter the current close event. The Qt owner does
 not wait for device, node, archive or plot workers, and a refused close leaves
-the window visible. There is no raw `atexit` widget-deletion path standing in
-for application shutdown: Workbench must retire its real owners before the
-guard accepts the close. At interpreter exit Qt objects are left to the
-operating system (`sip.setdestroyonexit(False)`): no state lives in a Qt
-destructor, and C++ destructors run in Python's teardown order destroyed
-widgets after their QApplication. Before Python finalizes, one exit hook
-releases every top-level window's native window and delivers queued
-`deleteLater` deletions, without close events, so no close guard is asked;
-left to Qt's static teardown they crashed the process after its last line.
+the window visible. Application shutdown is that close: Workbench must retire
+its real owners before the guard accepts it. At interpreter exit Qt objects
+are left to the operating system (`sip.setdestroyonexit(False)`): no state
+lives in a Qt destructor, and C++ destructors run in Python's teardown order
+would destroy widgets after their QApplication. Before Python finalizes, one
+`atexit` hook releases every top-level window's native window and delivers
+queued `deleteLater` deletions, without close events, so no close guard is
+asked; left to Qt's static teardown they crashed the process after its last
+line.
 
 ## Development
 
@@ -108,9 +108,11 @@ For a size-faithful desktop capture, run these commands without
 ```powershell
 zlc capture --view console --template virtual
 zlc capture --view figure --path D:\data\run.npz
-zlc capture --view pulse --pulse imaging_template.json
+zlc capture --view pulse --workspace D:\experiment --pulse imaging.json
 zlc capture --view device --workspace D:\experiment
 ```
+
+`--pulse` names a pulse the operator keeps in that workspace's `pulses/` folder.
 
 The Workbench command is an adapter around the reusable `zlc_ui.acceptance.capture_window`
 API.  That API calls `ensure_qt_app()` before the same public `create_window()`

@@ -11,7 +11,8 @@ beside its own derived revision N-1.
 A Monitor retains only its current event.  A capable derived output gains
 source-index history only while at least one consumer holds a bounded lease;
 retention begins at that lease's current event, follows the largest active
-window, and disappears with the last lease. Runtime can then materialize an
+window (and keeps the rows a lagging exact follower has yet to read), and
+disappears with the last lease. Runtime can then materialize an
 ordinary Dataset in which every retained source index is present and an
 uncomputed index is invalid. Signals from different runs still advance
 independently; there is no cross-run global counter.
@@ -463,6 +464,18 @@ class IndexedHistoryLease:
         self._window = selected
         return transition
 
+    def hold_from(self, index: int) -> None:
+        """Keep every retained row from source ``index`` on (a holding lease).
+
+        A follower that reads its window behind the newest commit needs
+        rows the window alone, counted back from that commit, would already
+        have trimmed.  Its lease holds them until it says how far it got.
+        """
+
+        if self._closed:
+            raise RuntimeError("indexed history lease is closed")
+        self._plane._hold_indexed_history_from(self._signal_name, self._token, index)
+
     def close(self) -> tuple[bool, bool, bool] | None:
         if self._closed:
             return None
@@ -811,16 +824,28 @@ def _restamp_snapshot(
     return OwnedSnapshot(block.ref(generation), block)
 
 
+def _is_history_window(schema: DatasetSchema) -> bool:
+    """Whether an event already IS a Runtime history window.
+
+    A region cut from a window, or a Processor fed one, publishes events
+    that carry the reserved indexed-history axes themselves.  A history of
+    them would nest one window in another, which no reader lays out; their
+    consumers read the event, which already spans its window.
+    """
+
+    return any(
+        axis.axis_id in (PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID)
+        for axis in schema.point_domain.axes
+    )
+
+
 def _indexed_schema(
     event_schema: DatasetSchema,
     indices: np.ndarray,
     times: np.ndarray | None,
 ) -> DatasetSchema:
     point_count = event_schema.point_domain.size
-    if any(
-        axis.axis_id in (PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID)
-        for axis in event_schema.point_domain.axes
-    ):
+    if _is_history_window(event_schema):
         raise ValueError("processor event schema uses a reserved indexed-history axis")
     primary = AxisSpec(
         PRIMARY_INDEX_AXIS_ID,
@@ -932,7 +957,12 @@ def _materialize_indexed_dataset(
         shift = (start - basis.start) * point_count
         # Segments are grouped by event; a window boundary falls between
         # groups even when placements inside one event are unordered.
-        first = int(np.searchsorted(previous.segment_origins[:, 1], shift))
+        # Only the basis rows from ``first_held`` on are copied: below it
+        # this window holds none, whatever the basis showed there.
+        first = int(np.searchsorted(
+            previous.segment_origins[:, 1],
+            (materialization.first_held - basis.start) * point_count,
+        ))
         retained = previous.segments[first:]
     # The input already orders appends after the retained basis, without overlap.
     appended, origins, sizes = [], [], []
@@ -955,7 +985,7 @@ def _materialize_indexed_dataset(
     block = DataBlock._from_owned_segments(
         BlockId(f"{materialization.signal_name}.indexed/{start}:{latest_index}"),
         DatasetRevision(materialization.sequence), schema,
-        window=IndexedWindow(start, latest_index, materialization.stable_since),
+        window=IndexedWindow(start, latest_index),
         segments=(*retained, *appended), origins=origins, shapes=sizes,
     )
     return OwnedSnapshot(block.ref(materialization.generation), block)
@@ -983,6 +1013,9 @@ class _MaterializedIndexed:
     record: Mapping[str, object] | Callable[[], Mapping[str, object]] | None
     start: int
     latest: int
+    #: The first row it holds: its record names the rows from here to
+    #: ``latest``, whatever row ``start`` names below it.
+    first_held: int
 
 
 @dataclass(slots=True)
@@ -991,14 +1024,16 @@ class _IndexedHistory:
 
     Rolling a window changes references, not pixel arrays. A replacement
     advances ``replaced_at`` so neither a later view nor a statistical
-    consumer reuses a value that was replaced. Frozen readers continue to
-    own the events and provenance they actually captured.
+    consumer reuses a value that was replaced; a new history starts it at
+    its first row's sequence, since a replacement before it went unseen.
+    Frozen readers continue to own the events and provenance they actually
+    captured.
     """
 
     events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object], float | None]]
     first_index: int
+    replaced_at: int
     materialized: _MaterializedIndexed | None = None
-    replaced_at: int = -1
 
 
 @dataclass(slots=True)
@@ -1017,17 +1052,15 @@ class _IndexedMaterialization:
     appended: tuple[tuple[int, OwnedSnapshot], ...]
     start: int
     latest: int
+    #: The first row this window can hold: an exact window that names
+    #: more rows than the history holds starts below it, with holes.
+    first_held: int
     basis: _MaterializedIndexed | None
     records: tuple[Mapping[str, object], ...]
     #: When each retained shot was taken, for a history whose shots are
     #: stamped; None for one that counts its shots only.  A window with
     #: times is built afresh each time -- its schema is its coordinates.
     times: tuple[float | None, ...] | None
-    #: The history's ``replaced_at`` at this materialization: the last
-    #: sequence at which a retained shot was overwritten.  Stamped on the
-    #: block so a consumer carrying work from an earlier revision knows
-    #: whether the shots the two share are still the same shots.
-    stable_since: int = -1
     snapshot: OwnedSnapshot | None = None
 
 
@@ -1140,8 +1173,13 @@ def _update_indexed_history(
     value: SignalValue,
     sequence: int,
     demand: int,
+    hold: int | None,
 ) -> tuple[_IndexedHistory, bool]:
-    """Apply an event already validated by the caller's atomic preflight."""
+    """Apply an event already validated by the caller's atomic preflight.
+
+    The history keeps the largest lease's window back from this event, and
+    no row from ``hold`` on: the oldest index a lagging follower still reads.
+    """
     primary_index = value.primary_index
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
@@ -1152,10 +1190,14 @@ def _update_indexed_history(
     # that read like a first-event special case there is no such thing as.
     selected_record = value.event_record
     if history is None:
+        # A history begins fenced at its first row: an earlier publication
+        # of that same index -- replaced before any lease kept a history --
+        # read now shows its own value there, and no window may roll from it.
         return (
             _IndexedHistory(
                 {primary_index: (sequence, event, selected_record, value.shot_time)},
                 primary_index,
+                replaced_at=sequence,
             ),
             True,
         )
@@ -1176,8 +1218,9 @@ def _update_indexed_history(
             value.shot_time,
         )
     previous_first = history.first_index
+    trim = primary_index - demand + 1
     history.first_index = max(
-        previous_first, primary_index - demand + 1
+        previous_first, trim if hold is None else min(trim, hold)
     )
     while events and next(iter(events)) < history.first_index:
         events.pop(next(iter(events)))
@@ -1217,10 +1260,20 @@ def _indexed_materialization_input(
     generation: StreamGenerationId,
     sequence: int,
     value: SignalValue,
-    window: int | None = None,
+    window: int,
+    exact: bool = False,
     first_index: int | None = None,
     include_record: bool = True,
 ) -> tuple[OwnedSnapshot, Mapping[str, object] | None] | _IndexedMaterialization:
+    """The last ``window`` source positions ending at this publication.
+
+    An ``exact`` window is exactly that many rows, whenever it is read: a
+    row the history does not hold -- before the lease began, trimmed, or
+    below ``first_index`` (the bundle's common first row) -- is a hole,
+    like a shot the source skipped.  A reader that named its window thus
+    sees one shape from its first event on.  Otherwise the window starts
+    no earlier than the rows the history holds.
+    """
     primary_index = value.primary_index
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
@@ -1229,19 +1282,23 @@ def _indexed_materialization_input(
             "publication precedes retained indexed history"
         )
     events = history.events
-    start = history.first_index
-    if window is not None:
-        start = max(start, primary_index - window + 1)
-    if first_index is not None:
-        start = max(start, first_index)
-    if start > primary_index:
+    held_from = history.first_index if first_index is None else max(history.first_index, first_index)
+    if held_from > primary_index:
         raise RetainedPublicationExpired("publication precedes the sibling history window")
+    start = primary_index - window + 1
+    if not exact:
+        start = max(start, held_from)
+    # Below this row the window holds none, whatever an earlier
+    # materialization showed there.
+    first_held = max(start, held_from)
     cached = history.materialized
     snapshot = None
     if (
         cached is not None
         and cached.sequence == sequence
         and cached.start == start
+        # Handed out whole only where no row it shows lies below ``held_from``.
+        and start >= held_from
         and cached.latest == primary_index
         and history.replaced_at <= cached.sequence
     ):
@@ -1256,14 +1313,19 @@ def _indexed_materialization_input(
         cached is not None
         and cached.sequence <= sequence
         and history.replaced_at <= cached.sequence
-        and primary_index > cached.latest
-        and cached.start <= start <= cached.latest
+        and primary_index >= cached.latest
+        and cached.start <= first_held <= cached.latest
     ):
         # A basis is reusable only where the new window OVERLAPS it: its
-        # rows from ``start`` to its latest are copied forward and the
-        # rest appended.  A source that jumped past the whole window has
-        # nothing to copy, and rolling from it sliced an empty overlap
-        # into cells the appends could not fill.
+        # rows from ``first_held`` to its latest are copied forward and
+        # the rest appended.  A source that jumped past the whole window
+        # has nothing to copy, and rolling from it sliced an empty overlap
+        # into cells the appends could not fill.  Copying from
+        # ``first_held``, not ``start``, lets an exact window that names
+        # more rows than the history holds (while it fills) roll from the
+        # panel's basis, and the panel from the exact reader's at the same
+        # shot, with nothing to append -- or each read of such a window
+        # rebuilds every row, and so does the panel's read after it.
         basis = cached
     selected_events = []
     appended_records = []
@@ -1277,14 +1339,16 @@ def _indexed_materialization_input(
     append_from = start if basis is None else basis.latest + 1
     # Without times or provenance, the basis already owns every earlier row.
     for index in range(start if stamped or include_record else append_from, primary_index + 1):
-        held = events.get(index)
+        held = events.get(index) if index >= held_from else None
         if index == primary_index:
             current = held is not None and held[0] == sequence
             record = held[2] if current else value.event_record
             shot_time = held[3] if current else value.shot_time
-            selected_events.append((index, value.snapshot))
+            if index >= append_from:
+                selected_events.append((index, value.snapshot))
+                if include_record:
+                    appended_records.append(record)
             if include_record:
-                appended_records.append(record)
                 window_records.append(record)
         elif held is None or held[0] > sequence:
             row_times.append(None)
@@ -1299,7 +1363,7 @@ def _indexed_materialization_input(
                 if include_record:
                     appended_records.append(record)
         row_times.append(shot_time)
-    if include_record and basis is not None and isinstance(basis.record, Mapping) and start == basis.start:
+    if include_record and basis is not None and isinstance(basis.record, Mapping) and first_held == basis.first_held:
         # Pure growth: every row the basis described is still here, so
         # its record plus the appended ones is the window's record.
         records = (basis.record, *appended_records)
@@ -1331,10 +1395,10 @@ def _indexed_materialization_input(
         tuple(selected_events),
         start,
         primary_index,
+        first_held,
         basis,
         records,
         tuple(row_times) if stamped else None,
-        stable_since=history.replaced_at,
         snapshot=snapshot,
     )
 
@@ -1388,9 +1452,13 @@ class _GenerationState:
     materialized: dict[str, _MaterializedFinite] = field(default_factory=dict)
     indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
     #: The records this generation's last reads handed out whole (not
-    #: deferred), newest last.  A derivation commits the very record it
-    #: read, one timing entry per shot its rows hold; recognising it here by
-    #: identity is what spares freezing it again on every commit.  The
+    #: deferred), newest last, each with the finite prefix sequence it
+    #: describes (None for an indexed window).  A derivation commits the
+    #: very record it read, one timing entry per shot its rows hold;
+    #: recognising it here by identity is what spares freezing it again on
+    #: every commit.  A finite one is also where a later read of that run
+    #: starts merging -- an older one too, and a deferred one -- since a
+    #: prefix's record is the generation's, whichever signal was read.  The
     #: caches above cannot say it: a panel's deferred read replaces theirs
     #: while the derivation is still evaluating.  A few more reads than the
     #: readers that derive from one source at once.
@@ -1407,11 +1475,11 @@ class _GenerationState:
             }
         )
 
-    def hand_out(self, record: object) -> None:
+    def hand_out(self, record: object, sequence: int | None = None) -> None:
         """Remember the record one read handed out whole; under the plane lock."""
 
         if isinstance(record, Mapping):
-            self.handed_records.append(record)
+            self.handed_records.append((sequence, record))
 
 
 @dataclass(slots=True)
@@ -1743,23 +1811,14 @@ class ObsoleteParentResult(RuntimeError):
     """
 
 
-class GenerationRetired(RuntimeError):
-    """The generation being published to is no longer the live one.
-
-    Ordinary flow control for the same reason: a publication in flight when
-    a generation retires has nowhere to land.
-    """
-
-
 class GenerationSchemaAdvanced(ValueError):
     """An output changed shape, so it needs a new generation -- not a fault.
 
     A schema is frozen per generation on purpose: a consumer that reads one
     publication must be able to read the next without re-learning the
-    shape.  But shape can change for reasons that are nobody's mistake.  A
-    panel pooling a window of shots hands its own derivation a source that
-    GROWS one shot per publication while the window fills, so the derived
-    Point carrier gains a row every time.
+    shape.  But shape can change for reasons that are nobody's mistake: an
+    operator's Derive program may take its result's shape from the data it
+    reads, and a region's cut follows whatever its source publishes.
 
     The answer is the same one a re-drawn region gets: a different
     derivation publishes into a different generation.  Only the owner of
@@ -1788,6 +1847,10 @@ class SignalDataPlane:
         self._signal_descriptions: tuple[SignalDescription, ...] | None = None
         self._starting: set[str] = set()
         self._indexed_history_demands: dict[str, dict[object, int]] = {}
+        #: The oldest source index a holding lease still needs, by signal and
+        #: lease: an exact window follower's rows stay retained while it
+        #: lags, however far the newest commit has moved on.
+        self._indexed_history_holds: dict[str, dict[object, int]] = {}
         #: What a dropped generation's indexed history held, by signal, while
         #: a lease still names it.  The panel that drew that window keeps it
         #: until the signal's next publication replaces its view, so the next
@@ -1843,9 +1906,10 @@ class SignalDataPlane:
             if state is None or state.retired:
                 return False
             declaration = state.declarations.get(name)
-            return bool(
-                declaration is not None and declaration.index_by_source
-            )
+            if declaration is None or not declaration.index_by_source:
+                return False
+            value = None if state.publication is None else state.publication.value(name)
+            return value is None or not _is_history_window(value.snapshot.block.schema)
 
     def acquire_indexed_history(
         self,
@@ -1875,9 +1939,15 @@ class SignalDataPlane:
         return selected, transition
 
     def acquire_indexed_histories(
-        self, signal_names: Iterable[str], window: int,
+        self, signal_names: Iterable[str], window: int, *, hold: bool = False,
     ) -> tuple[IndexedHistoryLease, ...]:
-        """Acquire one sibling bundle's ordinary leases at the same event boundary."""
+        """Acquire one sibling bundle's ordinary leases at the same event boundary.
+
+        A ``hold`` lease keeps every row retained from here on until its
+        holder names, through :meth:`IndexedHistoryLease.hold_from`, the
+        oldest row it still needs: an exact follower evaluates each
+        publication, however late, over its full window.
+        """
 
         names = tuple(dict.fromkeys(canonical_text(name, "signal name") for name in signal_names))
         selected = self._indexed_history_window(window)
@@ -1892,11 +1962,19 @@ class SignalDataPlane:
                 declaration = state.declarations.get(name)
                 if declaration is None or not declaration.index_by_source:
                     raise ValueError(f"signal {name!r} does not declare source-index history")
+                value = None if state.publication is None else state.publication.value(name)
+                if value is not None and _is_history_window(value.snapshot.block.schema):
+                    raise ValueError(
+                        f"signal {name!r} publishes history windows; read each event as it is"
+                    )
             try:
                 for name in names:
                     token = object()
                     transition = self._set_indexed_history_demand_locked(name, token, selected)
                     leases.append(IndexedHistoryLease(self, name, token, selected, transition))
+                    if hold:
+                        # Source indices are non-negative: from 0 is every row.
+                        self._indexed_history_holds.setdefault(name, {})[token] = 0
             except BaseException:
                 for lease in leases:
                     self._set_indexed_history_demand_locked(lease.signal_name, lease._token, None)
@@ -1916,9 +1994,23 @@ class SignalDataPlane:
                 signal_name, token, None
             )
 
+    def _hold_indexed_history_from(self, signal_name: str, token: object, index: int) -> None:
+        if type(index) is not int:
+            raise TypeError("an indexed history hold is a source index")
+        with self._lock:
+            holds = self._indexed_history_holds.get(signal_name)
+            if holds is None or token not in holds:
+                raise RuntimeError("indexed history lease does not hold rows")
+            # The next commit trims what this releases.
+            holds[token] = max(holds[token], index)
+
     def _indexed_history_demand_locked(self, signal_name: str) -> int | None:
         demands = self._indexed_history_demands.get(signal_name)
         return None if not demands else max(demands.values())
+
+    def _indexed_history_hold_locked(self, signal_name: str) -> int | None:
+        holds = self._indexed_history_holds.get(signal_name)
+        return None if not holds else min(holds.values())
 
     def _set_indexed_history_demand_locked(
         self,
@@ -1948,6 +2040,7 @@ class SignalDataPlane:
                 and (old_demand is None or new_demand > old_demand)
                 and value is not None
                 and isinstance(value.coverage, MonitorCoverage)
+                and not _is_history_window(value.snapshot.block.schema)
             ):
                 _refuse_unaffordable_window(
                     signal_name, new_demand, value.snapshot.block.schema,
@@ -1968,6 +2061,13 @@ class SignalDataPlane:
                 state, signal_name, new_demand, old_demand
             )
             raise
+        if selected is None:
+            # What it held goes at the next commit's trim.
+            holds = self._indexed_history_holds.get(signal_name)
+            if holds is not None:
+                holds.pop(token, None)
+                if not holds:
+                    self._indexed_history_holds.pop(signal_name)
         if new_demand is None:
             # The last lease is gone, and with it the panel that still drew
             # a dropped generation's window of this signal.
@@ -1998,7 +2098,11 @@ class SignalDataPlane:
             data_changed = state.indexed_history.pop(signal_name, None) is not None
         else:
             value = state.publication.value(signal_name)
-            if value is None or not isinstance(value.coverage, MonitorCoverage):
+            if (
+                value is None
+                or not isinstance(value.coverage, MonitorCoverage)
+                or _is_history_window(value.snapshot.block.schema)
+            ):
                 data_changed = (
                     state.indexed_history.pop(signal_name, None) is not None
                 )
@@ -2011,6 +2115,7 @@ class SignalDataPlane:
                     value,
                     state.publication.event_ref.sequence,
                     new_demand,
+                    self._indexed_history_hold_locked(signal_name),
                 )
                 state.indexed_history[signal_name] = history
         new_active = signal_name in state.indexed_history
@@ -2350,16 +2455,15 @@ class SignalDataPlane:
         if not isinstance(schema, DatasetSchema):
             raise RuntimeError("signal has no canonical Dataset schema")
         # A basis answers for every cell it holds, so what is left to place
-        # is what was committed after it.  An older sequence than the basis
-        # is a view of the run BEFORE those cells existed: it cannot borrow
-        # a basis that already contains them, and assembles from scratch.
+        # is what was committed after it.  Every successful atomic commit
+        # appends exactly one entry per finite output, and a basis holds one
+        # segment per commit in commit order, so an older sequence -- a view
+        # of the run before the basis's later cells existed -- is the
+        # basis's first ``sequence`` segments, with nothing to decode.
         basis = state.materialized.get(signal_name)
-        if basis is not None and basis.sequence >= sequence:
-            basis = None
-        floor = 0 if basis is None else basis.sequence
-        # Every successful atomic commit appends exactly one entry per finite
-        # output; sequence 1 occupies slot 0.  The owned list is already the
-        # index, so finding the new suffix needs no scan of earlier shots.
+        floor = 0 if basis is None else min(basis.sequence, sequence)
+        # Sequence 1 occupies slot 0.  The owned list is already the index,
+        # so finding the new suffix needs no scan of earlier shots.
         planes, facts, offsets = state.commit_chunks[signal_name]
         stride = 1 + int(state.published_schemas[signal_name].value_schema.dtype != np.bool_)
         chunks = tuple(planes[floor * stride:sequence * stride])
@@ -2389,10 +2493,11 @@ class SignalDataPlane:
                 yield (repeat_origin, point_origin), _retained_planes(chunk, event_schema, facts)
 
         added = tuple(placements())
-        segments = () if basis is None else basis.snapshot.block.segments
+        kept = packed_facts[2]
+        segments = () if basis is None else basis.snapshot.block.segments[:kept]
         origins = np.asarray([origin for origin, _child in added], dtype=np.int64).reshape(-1, 2)
         if basis is not None:
-            origins = np.concatenate((basis.snapshot.block.segment_origins, origins), axis=0)
+            origins = np.concatenate((basis.snapshot.block.segment_origins[:kept], origins), axis=0)
         segments = (*segments, *(child for _origin, child in added))
         sizes = np.frombuffer(np.asarray(event_schema.physical_shape[:2], dtype=np.int64).tobytes(), dtype=np.int64)
         block = DataBlock._from_owned_segments(
@@ -2533,7 +2638,7 @@ class SignalDataPlane:
                 parent_state = self._states.get(source_publication.event_ref.stream_id.value)
                 if parent_state is not None:
                     handed = tuple(parent_state.handed_records)
-        if not any(event_record is record for record in handed):
+        if not any(event_record is record for _sequence, record in handed):
             event_record = _freeze_run_record(event_record)
         with self._lock:
             if self._closed:
@@ -2664,6 +2769,9 @@ class SignalDataPlane:
                     output.declaration.index_by_source
                     and isinstance(output.coverage, MonitorCoverage)
                     and history_demand is not None
+                    # A lease taken before the first event cannot know it
+                    # will be a window already; such events keep no history.
+                    and not _is_history_window(event.block.schema)
                 ):
                     history = state.indexed_history.get(qualified)
                     if history is None:
@@ -2798,6 +2906,7 @@ class SignalDataPlane:
                     publication.signals[qualified],
                     sequence,
                     history_demand,
+                    self._indexed_history_hold_locked(qualified),
                 )[0]
             if self._released_history_bytes:
                 # This publication replaces the view a panel kept of the
@@ -2818,7 +2927,7 @@ class SignalDataPlane:
                 facts = marshal.dumps((
                     origins[qualified], None if value.primary_index == sequence else value.primary_index,
                     value.repeat_counts, value.shot_time,
-                    None if window is None else (window.start, window.latest, window.stable_since),
+                    None if window is None else (window.start, window.latest),
                     None if not isinstance(validity, DatasetComponentValidity) else
                     tuple(index for index, axis in enumerate(block.schema.cell_domain.axes) if axis.axis_id in validity.axis_ids),
                     value_bytes if block.values.dtype == np.bool_ else None, validity_bytes,
@@ -2913,7 +3022,13 @@ class SignalDataPlane:
                 raise ValueError("publication does not contain the selected signal")
             sequence = selected.event_ref.sequence
             history = state.indexed_history.get(name) if indexed_history else None
-            if history_window is not None and history is None:
+            if (
+                history_window is not None and history is None
+                # An event that already IS a window keeps no history: every
+                # reader, whatever window it names (a region drawn on its
+                # panel), reads the event, which spans its own window.
+                and not _is_history_window(value.snapshot.block.schema)
+            ):
                 raise ValueError(
                     f"signal {name!r} has no publication history for window input; "
                     "use run input for a finite Dataset"
@@ -2924,13 +3039,18 @@ class SignalDataPlane:
                     if any(name not in state.indexed_history for name in history_signals):
                         raise ValueError("window input requires retained history for every sibling")
                     sibling_floor = max(state.indexed_history[name].first_index for name in history_signals)
+                demand = self._indexed_history_demand_locked(name)
+                assert demand is not None, "an indexed history outlived its last lease"
                 indexed_result = _indexed_materialization_input(
                     history,
                     signal_name=name,
                     generation=state.generation,
                     sequence=sequence,
                     value=value,
-                    window=history_window,
+                    # A reader without a window reads the largest lease's:
+                    # rows a lagging follower holds beyond it are its own.
+                    window=demand if history_window is None else history_window,
+                    exact=history_window is not None,
                     first_index=sibling_floor,
                     include_record=include_record,
                 )
@@ -2950,13 +3070,15 @@ class SignalDataPlane:
                     indexed_input = indexed_result
                 if include_record and indexed_input is not None:
                     # Atomic siblings share event records, but their retained
-                    # windows may differ. Reuse only the exact same range.
+                    # windows may differ. Reuse only the exact same rows held:
+                    # windows of one start hold fewer where a history begins
+                    # later or was trimmed, and their records name fewer.
                     materialized_record = next((
                         item.materialized.record
                         for item in state.indexed_history.values()
                         if item.materialized is not None
                         and item.materialized.sequence == sequence
-                        and item.materialized.start == indexed_input.start
+                        and item.materialized.first_held == indexed_input.first_held
                         and item.materialized.latest == indexed_input.latest
                         and item.materialized.record is not None
                         and item.replaced_at <= sequence
@@ -2980,17 +3102,27 @@ class SignalDataPlane:
                 # too, which a reader that needs the record expands (below)
                 # and keeps -- a panel's deferred read must not leave the next
                 # region or run-input read nothing to start from but event 0.
+                # The whole records the last reads handed out count too: two
+                # deferred reads in a row replace the cache's Mapping, and a
+                # read of an OLDER prefix (a fit trailing the lane, a lagging
+                # run-input Processor) cannot start from a newer record.
                 # A deferred read builds on a Mapping only, never on another
                 # deferred record, so none of them nests.
-                seed = max((
-                    item for item in state.materialized.values()
+                seeds = [
+                    (item.record_sequence, item.record)
+                    for item in state.materialized.values()
                     if item.record is not None and item.record_sequence <= sequence
                     and (not defer_record or isinstance(item.record, Mapping)
                          or item.record_sequence == sequence)
-                ), key=lambda item: (item.record_sequence, isinstance(item.record, Mapping)),
-                    default=None)
+                ]
+                seeds.extend(
+                    (handed_sequence, record)
+                    for handed_sequence, record in state.handed_records
+                    if handed_sequence is not None and handed_sequence <= sequence
+                )
+                seed = max(seeds, key=lambda item: (item[0], isinstance(item[1], Mapping)), default=None)
                 if seed is not None:
-                    materialized_record, record_sequence = seed.record, seed.record_sequence
+                    record_sequence, materialized_record = seed
                 if include_record and record_sequence != sequence:
                     # Only references to the append-only buffers, under the lock.
                     record_chunks = (state.event_records, state.commit_record_indices)
@@ -3024,11 +3156,17 @@ class SignalDataPlane:
                     if history is not None and history.materialized is exact:
                         history.materialized = _MaterializedIndexed(
                             exact.sequence, exact.snapshot, materialized_record,
-                            exact.start, exact.latest,
+                            exact.start, exact.latest, exact.first_held,
                         )
                 elif indexed_input is not None:
                     history = state.indexed_history.get(name)
-                    if history is not None:
+                    demand = self._indexed_history_demand_locked(name)
+                    if (
+                        history is not None and demand is not None
+                        # A bundle's common first row hides rows this signal
+                        # holds: no other reader may roll from those holes.
+                        and (sibling_floor is None or sibling_floor <= history.first_index)
+                    ):
                         current = history.materialized
                         # Keep one basis per signal, never a list of them.
                         # A later materialization must not be displaced by
@@ -3036,7 +3174,8 @@ class SignalDataPlane:
                         # afterwards.  A replacement committed since this
                         # build does not invalidate the STORE -- the
                         # basis honestly describes sequence; replaced_at
-                        # fences its reuse.  The WHOLE retained window
+                        # fences its reuse.  The WHOLE window -- the
+                        # largest lease's, which every panel reads --
                         # becomes the basis: a narrower reader (a region's
                         # window, a Processor's input window) rolls from it,
                         # while the panels reading the whole window would
@@ -3052,7 +3191,9 @@ class SignalDataPlane:
                         if (
                             (current is None or current.sequence <= sequence)
                             and (
-                                indexed_input.start == history.first_index
+                                indexed_input.start <= max(
+                                    indexed_input.latest - demand + 1, history.first_index
+                                )
                                 or current is None
                                 or history.replaced_at > current.sequence
                                 or current.latest < history.first_index
@@ -3062,7 +3203,7 @@ class SignalDataPlane:
                         ):
                             if (
                                 current is not None and current.sequence == sequence
-                                and current.start == indexed_input.start
+                                and current.first_held == indexed_input.first_held
                                 and current.latest == indexed_input.latest
                                 and current.record is not None
                                 and (isinstance(current.record, Mapping)
@@ -3075,6 +3216,7 @@ class SignalDataPlane:
                                 materialized_record,
                                 indexed_input.start,
                                 indexed_input.latest,
+                                indexed_input.first_held,
                             )
                 else:
                     cached = state.materialized.get(name)
@@ -3091,7 +3233,10 @@ class SignalDataPlane:
                             record_sequence,
                         )
                 if include_record and not defer_record:
-                    state.hand_out(materialized_record)
+                    state.hand_out(
+                        materialized_record,
+                        None if indexed_input is not None or exact is not None else sequence,
+                    )
         return snapshot, materialized_record
 
     def current_dataset(
@@ -3373,8 +3518,7 @@ class SignalDataPlane:
                    if replay and not stop and state.publication is not None else None)
         start = (1 if stop else
                  current.event_ref.sequence if current is not None else state.next_sequence)
-        payloads = {(item.event_ref, item.signal_names): weakref_ref(item)
-                    for item in self._publication_parents if item._payload_ref is None} if stop else {}
+        payloads = self._parent_payloads_locked() if stop else {}
         replay_input = self._replay_input_locked(state, selected) if stop else None
 
         def retained(index):
@@ -3899,7 +4043,17 @@ class SignalDataPlane:
             {name: state.publication.value(name).snapshot.block for name in names},
         )
 
-    def _retained_publication_locked(self, replay_input: tuple, sequence: int, payloads=None) -> SignalPublication:
+    def _parent_payloads_locked(self) -> dict:
+        """The live publications a replayed ancestry resolves to, weakly.
+
+        Built once per replay, not per event: it walks every publication
+        the plane still holds.
+        """
+
+        return {(item.event_ref, item.signal_names): weakref_ref(item)
+                for item in self._publication_parents if item._payload_ref is None}
+
+    def _retained_publication_locked(self, replay_input: tuple, sequence: int, payloads: dict) -> SignalPublication:
         owner_id, generation, run_record, schemas, canonicals, records, runs, chunks_by_name, templates = replay_input
         packed_records, record_offsets, record_indices, event_records = records
         ancestry = marshal.loads(packed_records[record_offsets[sequence - 1]:record_offsets[sequence]])
@@ -3910,9 +4064,6 @@ class SignalDataPlane:
         event_record = decoded[record_index]
         # The existing weak owner contains only publications actually held by
         # live work, a queue or a Frozen consumer. Metadata cannot pin pixels.
-        if payloads is None:
-            payloads = {(item.event_ref, item.signal_names): weakref_ref(item)
-                        for item in self._publication_parents if item._payload_ref is None} if ancestry else {}
         restored = {}
         parents = tuple(self._unpack_lineage_locked(runs, entry, payloads, restored, records, decoded) for entry in ancestry)
         signals = {}
@@ -3993,7 +4144,12 @@ class SignalDataPlane:
                     names = tuple(name for name in parent.signal_names if name in state.commit_chunks
                                   and 0 < sequence < len(state.commit_chunks[name][2]))
                     if names:
-                        payload = self._retained_publication_locked(self._replay_input_locked(state, names), sequence)
+                        # Its parents are the metadata's, set on the next
+                        # line: the replay's own ancestry is discarded, so
+                        # no payload map is built for it.
+                        payload = self._retained_publication_locked(
+                            self._replay_input_locked(state, names), sequence, {},
+                        )
                         self._publication_parents[payload] = self._publication_parents[parent]
                         object.__setattr__(parent, "_payload_ref", weakref_ref(payload))
             resolved.append(parent if payload is None else payload)
@@ -4072,8 +4228,8 @@ class SignalDataPlane:
         event_record: Mapping[str, object],
         parents: tuple[SignalPublication, ...] = (),
     ) -> SignalPublication:
-        if state.retired or self._states.get(state.owner_id) is not state:
-            raise GenerationRetired("signal generation is no longer active")
+        # Every caller fetched ``state`` live under this same lock hold.
+        assert not state.retired and self._states.get(state.owner_id) is state
         if state.terminal:
             raise RuntimeError("signal generation has already published terminal")
         if len({parent.event_ref for parent in parents}) != len(parents):
@@ -4290,6 +4446,7 @@ class SignalDataPlane:
             self._states.clear()
             self._signal_descriptions = None
             self._indexed_history_demands.clear()
+            self._indexed_history_holds.clear()
             self._released_history_bytes.clear()
             self._front_signals = frozenset()
             self._front = SignalFront({})

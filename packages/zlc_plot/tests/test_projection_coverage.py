@@ -147,3 +147,129 @@ def test_image_facets_do_not_apply_histogram_window_to_history_axis() -> None:
         "source index=0",
     ]
     assert all(np.all(cell.payload.valid) for cell in cells)
+
+
+def test_a_window_edit_lays_a_source_index_grid_out_again() -> None:
+    """A Curve grid faceted by the source index has one cell per shot of its window.
+
+    Widening the window changes how many cells the grid lays out, and a
+    parameter edit is not a data frame: painted on the old plan, five cells
+    met one axes and the edit was refused ("visible facet count is outside
+    the rendered grid").
+    """
+
+    point_domain = mapped_domain_from_columns(
+        {"source index": [-4, -3, -2, -1, 0]},
+        ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+        roles={"source index": PRIMARY_INDEX},
+    )
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        point_domain,
+        cell_axes=(axis("x", values=[0.0, 1.0, 2.0]),),
+        dtype=np.float64,
+    )
+    snapshot = make_snapshot(schema, np.ones(schema.physical_shape), revision=0)
+    spec = FacetGridPlot(
+        AxisRef.point(str(PRIMARY_INDEX_AXIS_ID)),
+        CurvePlot(AxisRef.cell_data("x")),
+    )
+    session = PlotSession(snapshot, spec, parameters={"window": 1})
+    try:
+        assert session.surface_plan.facet_topology.cell_count == 1
+        session.set_parameters({"window": 5})
+        assert session.surface_plan.facet_topology.cell_count == 5
+        session.set_parameters({"window": 2})
+        assert session.surface_plan.facet_topology.cell_count == 2
+        # The selectors are drawn on the selected cell and go with it when a
+        # narrower window moves it.  Left on cell 4 of a two-cell grid, the
+        # open cell's next paint was refused ("selector facet index is
+        # outside the current grid"); narrowed in the overview, the refusal
+        # waited for the operator to open the cell the edit had selected.
+        session.set_parameters({"window": 5})
+        session.focus_facet(4)
+        session.set_x_selector(0.5, 1.5)
+        session.set_parameters({"window": 2})
+        assert session.facet_focus_index == 1
+        assert [state.facet_index for state in session.selectors] == [1]
+        session.set_parameters({"window": 5})
+        session.focus_facet(4)
+        session.show_facet_overview()
+        session.set_parameters({"window": 2})
+        session.focus_facet(1)
+        assert [state.facet_index for state in session.selectors] == [1]
+        assert np.asarray(session.rgba()).size
+    finally:
+        session.close()
+
+
+def test_a_window_edit_answers_fit_and_focus_for_the_cells_it_lays_out() -> None:
+    """The fit batch and the open cell name the grid's NEW cells.
+
+    A facet fit answers by cell position, and a source-index window keeps
+    the latest shots, so after the edit cell i is another shot.  The old
+    batch was kept: narrowed in the overview the edit was refused for an
+    answer on a cell the grid no longer had, widened every fit was drawn on
+    the wrong shot.  The open cell the edit moved was never announced, so
+    the console's next restore asked for a cell the grid no longer had.
+    """
+
+    x = np.linspace(-3.0, 3.0, 13)
+    centres = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
+    point_domain = mapped_domain_from_columns(
+        {"source index": [-4, -3, -2, -1, 0]},
+        ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+        roles={"source index": PRIMARY_INDEX},
+    )
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        point_domain,
+        cell_axes=(axis("x", values=x),),
+        dtype=np.float64,
+    )
+    values = 0.2 + 2.0 * np.exp(-0.5 * (x[None, :] - centres[:, None]) ** 2)
+    snapshot = make_snapshot(
+        schema, values.reshape(schema.physical_shape), revision=0
+    )
+    spec = FacetGridPlot(
+        AxisRef.point(str(PRIMARY_INDEX_AXIS_ID)),
+        CurvePlot(AxisRef.cell_data("x")),
+    )
+    session = PlotSession(snapshot, spec, parameters={"window": 5})
+    fits: list[object] = []
+    focus: list[int | None] = []
+    session.subscribe_fit(fits.append)
+    session.subscribe_facet_focus(lambda index, *_: focus.append(index))
+
+    def answered(shots: slice) -> None:
+        batch = fits[-1].result
+        assert len(fits[-1].overlays) == len(session._payload.cells)
+        np.testing.assert_array_equal(
+            batch.sample_axes[0][1].coordinate_values(),
+            [-4.0, -3.0, -2.0, -1.0, 0.0][shots],
+        )
+        np.testing.assert_allclose(
+            batch.parameter_values["center"], centres[shots], atol=1.0e-3
+        )
+
+    try:
+        session.fit("gaussian_offset", live=True)
+        session.focus_facet(4)
+        assert focus == [4]
+        # Through configure, as the console edits: the open cell moves 4 -> 1.
+        session.configure(
+            parameters={"window": 2}, fit={"model": "gaussian_offset"}
+        )
+        assert session.surface_plan.facet_topology.cell_count == 2
+        assert focus == [4, 1]
+        answered(slice(3, 5))
+        # And directly: widening keeps the open cell and answers all five.
+        session.set_parameters({"window": 5})
+        assert focus == [4, 1]
+        answered(slice(0, 5))
+        session.focus_facet(4)
+        session.set_parameters({"window": 3})
+        assert focus == [4, 1, 4, 2]
+        answered(slice(2, 5))
+    finally:
+        session.close()

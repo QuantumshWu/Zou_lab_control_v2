@@ -26,7 +26,10 @@ from zlc_plot.semantics import schema_structure
 from zlc_runtime import split_signal_key
 
 
-__all__ = ["SignalRow", "format_signal_shape", "project_signals", "signal_label"]
+__all__ = [
+    "SignalRow", "format_signal_shape", "project_signals", "signal_label",
+    "signal_output_name",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +80,7 @@ def project_signals(
 def signal_label(name: str, schema: object) -> str:
     """What to call one signal for a person: its readable name and its shape."""
 
-    return f"{_label(name)}  [{format_signal_shape(schema)}]"
+    return f"{signal_output_name(name)}  [{format_signal_shape(schema)}]"
 
 
 def format_signal_shape(schema: object) -> str:
@@ -99,10 +102,16 @@ def _state(description: object) -> str:
     return "live" if description.live else "finished"
 
 
-def _label(name: str) -> str:
-    """The readable tail of a qualified signal name."""
+def signal_output_name(name: str) -> str:
+    """The output a signal key names, read by the grammar's one reader.
 
-    return name.rsplit("/", 1)[-1] or name
+    A qualified name the grammar does not spell -- a Figure Viewer's
+    ``@figure/<serial>/<name>`` -- is called by its readable tail, as the
+    person reading the list knows it.
+    """
+
+    parts = split_signal_key(name)
+    return (name.rsplit("/", 1)[-1] or name) if parts is None else parts[1]
 
 
 def _producer(name: str, owner_id: str) -> str:

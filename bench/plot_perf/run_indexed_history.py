@@ -20,11 +20,12 @@ Run: python -m bench.plot_perf.run_indexed_history --sites 35 --window 5000
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 import numpy as np
 
-from .common import stats, write_result
+from .common import ROOT, stats, write_result
 
 
 def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
@@ -61,45 +62,14 @@ def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
         index_by_source=True,
     )
 
-    class Source:
-        instance_id = "bench-source"
-        dataset_output_declarations = (source_declaration,)
-
-        @staticmethod
-        def signal_key(name: str) -> str:
-            return f"bench-source/{name}"
-
-    class Derived:
-        instance_id = "bench-occupancy"
-        dataset_output_declarations = (counts_declaration,)
-
-        @staticmethod
-        def signal_key(name: str) -> str:
-            return f"bench-occupancy/{name}"
-
-        @staticmethod
-        def validate_processor_source(_source) -> None:
-            return None
-
-        @staticmethod
-        def evaluate_processor(_source, _publication):
-            raise AssertionError("paused processor must not evaluate")
-
-        @staticmethod
-        def accept_processor_result(_source, _publication, _result) -> None:
-            return None
-
-        @staticmethod
-        def accept_processor_failure(error: Exception) -> None:
-            raise error
-
-        @staticmethod
-        def accept_processor_cancelled() -> None:
-            return None
-
-        @staticmethod
-        def request_processor_owner_wake() -> None:
-            return None
+    # The runtime tests' own producer and paused latest-lane node: they track
+    # the plane's processor contract, where a copy kept here fell behind it
+    # (LatestProcessorControl grew accept_processor_ended) and the bench
+    # stopped at attach.
+    runtime_tests = str(ROOT / "packages" / "zlc_runtime" / "tests")
+    if runtime_tests not in sys.path:
+        sys.path.insert(0, runtime_tests)
+    from _snapshots import paused_lane, producer
 
     repeat = AxisSpec(AxisId("bench.repeat"), "repeat", REPEAT, 1, (0,))
     repeat_domain = DomainSpec((1,), (repeat,), ((0,),))
@@ -209,8 +179,8 @@ def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
         )
 
     plane = SignalDataPlane()
-    source = Source()
-    derived = Derived()
+    source = producer("bench-source", source_declaration)
+    derived = paused_lane("bench-occupancy", counts_declaration)
     plane.begin_generation(source)
 
     def commit_source(revision: int):
@@ -366,7 +336,7 @@ def run_session_layer(
             # The console's live fit: solved once now, then again on every
             # data revision.  The batch seam is timed in place so the fit's
             # share of a shot is read off the same call the product makes.
-            batch = session._fit_facet_batch
+            batch = session._fit_batch
 
             def timed_batch(*args, **kwargs):
                 begin = time.perf_counter()
@@ -375,7 +345,7 @@ def run_session_layer(
                 finally:
                     fit_ms.append(time.perf_counter() - begin)
 
-            session._fit_facet_batch = timed_batch
+            session._fit_batch = timed_batch
             begin = time.perf_counter()
             result = session.fit(fit)
             first_fit_ms = round((time.perf_counter() - begin) * 1000.0, 2)

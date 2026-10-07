@@ -22,7 +22,7 @@ from threading import Lock
 from time import monotonic
 from typing import Any, Callable
 
-from zlc_data.snapshot_projection import indexed_schemas_compatible
+from zlc_data.snapshot_projection import schemas_continue
 from zlc_runtime import SurfaceUpdate
 
 
@@ -98,16 +98,17 @@ def _schema_of(carrier: object) -> object | None:
 def _same_geometry(left: object, right: object) -> bool:
     """Whether a host holding ``right`` takes ``left`` as new data.
 
-    The host's own rule, not a stricter one: the same schema, or an indexed
-    history whose retained window moved.  A full fingerprint also names the
-    coordinates, and a bounded history slides those every shot, so it called
-    every standing Rolling window a new geometry and rebuilt its host on each
-    run restart.  UNKNOWN geometry is not the same geometry.
+    The host's own rule (``schemas_continue``), not a stricter one: the same
+    schema, or an indexed history whose retained window moved.  A full
+    fingerprint also names the coordinates, and a bounded history slides
+    those every shot, so it called every standing Rolling window a new
+    geometry and rebuilt its host on each run restart.  UNKNOWN geometry is
+    not the same geometry.
     """
 
     if left is None or right is None:
         return False
-    return left == right or indexed_schemas_compatible(left, right)
+    return schemas_continue(left, right)
 
 
 def _generation_of(snapshot: object) -> object | None:
@@ -231,6 +232,14 @@ class PlotPanelPort:
     @property
     def display_interval_ms(self) -> int:
         return self._interval_ms
+
+    @property
+    def projection_target(self) -> object:
+        """How the next frame is projected: the panel's current decision,
+        which the picture on screen may not have caught up with yet."""
+
+        with self._state_lock:
+            return self._projection_target
 
     @property
     def presentation_priority(self) -> int:
@@ -1047,13 +1056,20 @@ class PlotPanelPort:
         revision: int | None = None,
     ) -> None:
         """Drop handed records nothing can present any more: another
-        host's, and this host's at or below the revision the screen shows."""
+        host's, and this host's at or below the revision the screen shows.
+
+        A record of another run goes too.  A host kept across a run
+        boundary holds the old run's unpresented tail (coalesced away by
+        the new run's first frame, or finished in an abandoned cohort),
+        and nothing presents an older run once the screen shows a newer
+        one; kept, every restart added one record and its Dataset copy
+        for the life of the host.
+        """
 
         for key, record in tuple(self._handed.items()):
             if record.host is not host or (
                 revision is not None
-                and key[0] == generation
-                and key[1] <= revision
+                and (key[0] != generation or key[1] <= revision)
             ):
                 del self._handed[key]
 
@@ -1147,8 +1163,12 @@ class PlotPanelPort:
             completion=None,
         )
         with self._state_lock:
+            # The projection target is NOT moved here: it is the panel's
+            # current decision (retarget/accept_configuration own it), and
+            # a render staged before a retarget can still finish and be
+            # accepted -- adopting its target put the revoked setting back
+            # under every later frame.
             self._surface = accepted
-            self._projection_target = prepared.target
             self._advance_staged(
                 _generation_of(prepared.plot_input),
                 _revision_of(prepared.plot_input),

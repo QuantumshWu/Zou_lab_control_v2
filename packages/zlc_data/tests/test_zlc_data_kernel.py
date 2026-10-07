@@ -268,6 +268,28 @@ def test_domain_rejects_ambiguous_axis_coordinates_and_out_of_range_codes():
         )
 
 
+def test_a_mapping_is_one_mapping_however_it_was_written():
+    """``range(n)`` and the codes ``0..n-1`` name the same rows.
+
+    A schema built through one and a schema built through the other --
+    a producer's regular repeat carrier and the same carrier written out
+    row by row -- are one schema by equality, hash and fingerprint, or a
+    retarget reads an unchanged geometry as a new one.
+    """
+
+    shot = axis("capture.repeat", REPEAT, 4)
+    written = DomainSpec((4,), (shot,), ((0, 1, 2, 3),))
+    regular = DomainSpec((4,), (shot,), (range(4),))
+    assert written == regular and hash(written) == hash(regular)
+    cells, value = image_schema()
+    schemas = [DatasetSchema(repeat, domain(axis("scan.point", SCAN_POINT, 2)), cells, value)
+               for repeat in (written, regular)]
+    assert schemas[0] == schemas[1]
+    assert schemas[0].fingerprint == schemas[1].fingerprint
+    assert schemas[0].structure_fingerprint == schemas[1].structure_fingerprint
+    assert DomainSpec((4,), (shot,), ((0, 2, 1, 3),)) != regular
+
+
 def test_dataset_schema_tree_matches_the_independent_current_grammar():
     schema = dataset_schema()
     literal = {
@@ -489,6 +511,39 @@ def test_repeat_role_has_exactly_one_structural_owner():
         )
 
 
+def test_source_imports_only_numpy_and_the_standard_library() -> None:
+    """Every layer above imports this one, so its dependencies are theirs.
+
+    Walked over the source, lazy imports included, and here in the package's
+    own suite: the run a zlc_data change gets is the run that must see a new
+    dependency, not another layer's.
+    """
+
+    import ast
+
+    import zlc_data
+
+    files = tuple(Path(zlc_data.__file__).resolve().parent.rglob("*.py"))
+    assert files, "scan found no source files"
+    offenders: list[tuple[str, str]] = []
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots = [alias.name.split(".", 1)[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots = [node.module.split(".", 1)[0]]
+            else:
+                continue
+            offenders.extend(
+                (path.name, root)
+                for root in roots
+                if root not in {"numpy", "zlc_data"}
+                and root not in sys.stdlib_module_names
+            )
+    assert offenders == [], f"unexpected imports: {offenders}"
+
+
 def test_import_is_headless():
     import tempfile
     import zou_lab_control
@@ -533,6 +588,7 @@ for forbidden in ('matplotlib', 'PyQt5'):
             check=True,
             cwd=folder,
             env=environment,
+            timeout=120,
         )
 
 

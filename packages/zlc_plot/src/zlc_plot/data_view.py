@@ -15,7 +15,6 @@ from operator import is_
 from numbers import Integral
 import threading
 from typing import Any, TypeAlias
-import warnings
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -38,6 +37,7 @@ from .data_contract import (
     Unit,
     UnitRegistry,
     ResolvedAxis,
+    acquired_repeat_count,
     resolve_axis,
     resolve_unit,
     schema_repeat_count,
@@ -968,8 +968,6 @@ class DataView:
                     "uncertainty is defined for Reduction.MEAN only, "
                     f"not {aggregation.value!r}"
                 )
-            if self._schema.value_schema.dtype.kind == "c":
-                raise ValueError("uncertainty is undefined for complex values")
         dense = self._dense_data_curve(x, groups, aggregation, uncertainty)
         if dense is not None:
             return dense
@@ -1307,8 +1305,8 @@ class DataView:
 
         Coverage: x determined by one mapped Repeat/Point carrier; groups over
         other one-to-one carrier/data axes.  Everything else -- FIRST (whose
-        result depends on exact sample order), complex values, or irregular
-        group mappings -- keeps the shared axis-code path.
+        result depends on exact sample order) or irregular group mappings --
+        keeps the shared axis-code path.
         """
 
         x_dimension = int(self._resolve(x).dimension)
@@ -1844,8 +1842,6 @@ class DataView:
         values, usable, source_sigma, rows = self._segment_arrays(sigma=uncertainty)
         if rows is not None:
             return None
-        if values.dtype.kind == "c":
-            return None
         if not row_refs:
             return None
         x = row_refs[-1]
@@ -1954,8 +1950,10 @@ class DataView:
         else:
             minimum = aggregation is Reduction.MIN
             ufunc = np.min if minimum else np.max
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)
+            # NumPy's own, per-thread error state: projections run on the
+            # analysis executor and the owner thread at once, and
+            # warnings.catch_warnings swaps the one process-wide filter list.
+            with np.errstate(invalid="ignore"):
                 if all_valid:
                     moments_pg = ufunc(values, axis=reduce_axes)
                 else:
@@ -2130,7 +2128,6 @@ class DataView:
                 source_sigma,
                 centred_moments,
             )
-            assert sem_flat is not None
 
         x_canonical = np.asarray(x_domain.canonical)
         return _FactoredPlanes(
@@ -2660,7 +2657,6 @@ class DataView:
                 return first.reshape(sizes), second.reshape(sizes)
 
             sem = _sem_of_mean(values, counts, source, sigma, centred_moments)
-            assert sem is not None
         return values, counts, presence.reshape(sizes), sem
 
     def _aggregate_axes(
@@ -2698,27 +2694,6 @@ class DataView:
             x, y, x_domain, y_domain, z, counts
         )
 
-
-    def histogram(
-        self,
-        *,
-        bins: int | Sequence[float],
-        reduce_axes: Sequence[AxisRef] = (),
-        aggregation: Reduction = Reduction.MEAN,
-        group_by: tuple[AxisRef, ...] = (),
-        window: int = 1,
-    ) -> HistogramData:
-        """Distribution of the acquired values over canonical ``bins``.
-
-        Every axis pools into the one distribution unless it is named in
-        ``reduce_axes``, which collapses it under ``aggregation`` first --
-        the difference between the distribution of every shot and the
-        distribution of each site's mean over shots.  The histogram kind
-        runs the same two steps with its own edges in between.
-        """
-
-        plan = self._histogram_plan(tuple(group_by), tuple(reduce_axes), aggregation, window)
-        return self._histogram_from_plan(bins, plan)
 
     def _reduction_plan(
         self, refs: Sequence[AxisRef]
@@ -3160,7 +3135,6 @@ class DataView:
                     self._pooled_sigma(),
                     centred_moments,
                 )
-                assert sem is not None
             return RollingHistory(
                 revision=snapshot_revision(self._snapshot),
                 generation=snapshot_generation(self._snapshot),
@@ -3211,22 +3185,36 @@ class DataView:
             return self._single_revision_history(
                 group=group, aggregation=aggregation, uncertainty=uncertainty
             )
-        if self._snapshot.block.values is None:
-            segmented = self._segment_history(group, aggregation, uncertainty)
-            if segmented is not None:
-                return segmented
-        axis_codes = (np.arange(repeats, dtype=np.int64),)
-        dimensions, sizes = (0,), (repeats,)
-        keys = ((),)
-        if group is not None:
-            domains, codes, group_dimensions = self._axis_projection((group,))
-            axis_codes += codes
-            dimensions += group_dimensions
-            sizes += (domains[0].size,)
-            keys = tuple((value,) for value in domains[0].values)
-        return self._history_from_axes(
-            axis_codes, dimensions, sizes, keys,
-            aggregation=aggregation, uncertainty=uncertainty,
+        history = (
+            self._segment_history(group, aggregation, uncertainty)
+            if self._snapshot.block.values is None else None
+        )
+        if history is None:
+            axis_codes = (np.arange(repeats, dtype=np.int64),)
+            dimensions, sizes = (0,), (repeats,)
+            keys = ((),)
+            if group is not None:
+                domains, codes, group_dimensions = self._axis_projection((group,))
+                axis_codes += codes
+                dimensions += group_dimensions
+                sizes += (domains[0].size,)
+                keys = tuple((value,) for value in domains[0].values)
+            history = self._history_from_axes(
+                axis_codes, dimensions, sizes, keys,
+                aggregation=aggregation, uncertainty=uncertainty,
+            )
+        # A live finite run's rows past the ones it has begun are not shots
+        # yet: kept, the latest shot sat that many shots before "latest".
+        # The segment carry keeps the whole run's rows.
+        begun = acquired_repeat_count(self._snapshot)
+        if begun == repeats:
+            return history
+        return replace(
+            history,
+            values=history.values[:begun],
+            valid=history.valid[:begun],
+            counts=history.counts[:begun],
+            sem=None if history.sem is None else history.sem[:begun],
         )
 
     def _history_by_primary_index(
@@ -3391,7 +3379,6 @@ class DataView:
                     return first, second
 
                 errors = _sem_of_mean(reduced, counted, source, sigma, centred_moments)
-                assert errors is not None
                 sem[pending_rows] = errors.reshape(new_shape)
         for plane in (values, counts, valid, sem):
             if plane is not None:
@@ -3467,7 +3454,9 @@ class DataView:
             kept_rows = self._history_layout.window_rows(window)
             dimension, start, stop = 1, kept_rows.start, kept_rows.stop
         elif window > 1:
-            dimension, start, stop = 0, max(0, shape[0] - window), shape[0]
+            # The last N Repeat rows BEGUN; see acquired_repeat_count.
+            stop = acquired_repeat_count(self._snapshot)
+            dimension, start = 0, max(0, stop - window)
         else:
             dimension, start, stop = 0, 0, shape[0]
         if start or stop != shape[dimension]:
@@ -3696,6 +3685,14 @@ class DataView:
             raise ValueError("bins are accepted only for Histogram facet cells")
         if uncertainty and not isinstance(cell, CurvePlot):
             raise ValueError("uncertainty is accepted only for Curve facet cells")
+        statistic = _validate_aggregation(cell.reduction)
+        if uncertainty and statistic is not Reduction.MEAN:
+            # As curve() refuses: the band is the MEAN's standard error, and
+            # drawn around a SUM or an extreme it is a number with no meaning.
+            raise ValueError(
+                "uncertainty is defined for Reduction.MEAN only, "
+                f"not {statistic.value!r}"
+            )
         if spec.facet is None:
             payload = (
                 self.curve(cell.x, group_by=(() if cell.group is None else (cell.group,)),
@@ -4205,7 +4202,7 @@ def _axis_kernel_aggregate(
     }
     operation = 5 if offsets is not None else operations.get(aggregation)
     source = np.asarray(values)
-    if (operation is None or not kernels.engaged() or source.dtype.kind == "c"
+    if (operation is None or not kernels.engaged()
             or source.dtype == np.dtype(np.float16)):
         return None
     maximum = max((code.size for code in codes), default=0)
@@ -4455,12 +4452,15 @@ def _masked_leading_reduce(
     if fused is not None:
         return fused
     counts = np.sum(usable, axis=0, dtype=np.int64)
-    with warnings.catch_warnings():
-        # Empty positions are intentionally NaN and marked invalid by the
-        # caller through ``counts``.
-        warnings.simplefilter("ignore", category=RuntimeWarning)
+    # Empty positions are intentionally NaN and marked invalid by the caller
+    # through ``counts``.  NumPy's per-thread error state, not
+    # warnings.catch_warnings, which swaps the one process-wide filter list
+    # under the other threads that project; and the MEAN as the sum over
+    # the count np.mean forms, whose empty-slice warning no error state
+    # silences.
+    with np.errstate(invalid="ignore", divide="ignore"):
         if aggregation is Reduction.MEAN:
-            result = np.mean(values, axis=0, where=usable, dtype=wide)
+            result = np.sum(values, axis=0, where=usable, dtype=np.float64) / counts
         elif aggregation is Reduction.SUM:
             result = np.sum(values, axis=0, where=usable, initial=0, dtype=wide)
             result = np.where(counts > 0, result, np.nan)
@@ -4646,10 +4646,8 @@ def _sem_of_mean(
     counts: NDArray[np.int64],
     samples: NDArray[Any],
     sigma: NDArray[Any] | None,
-    centred_moments: Callable[
-        [Any, NDArray[np.float64]], tuple[Any, Any] | None
-    ],
-) -> NDArray[np.float64] | None:
+    centred_moments: Callable[[Any, NDArray[np.float64]], tuple[Any, Any]],
+) -> NDArray[np.float64]:
     """The standard error of a mean, formed the ONE way this repo forms it.
 
     Every plot kind that draws a band arrives here.  What differs between
@@ -4687,10 +4685,7 @@ def _sem_of_mean(
         sem = np.full(np.shape(means), np.nan, dtype=np.float64)
         return sem
     centres = np.asarray(means, dtype=np.float64)
-    moments = centred_moments(samples, centres)
-    if moments is None:
-        return None
-    first, second = moments
+    first, second = centred_moments(samples, centres)
     mean_delta = np.asarray(first, dtype=np.float64)
     mean_delta_square = np.asarray(second, dtype=np.float64)
     mean_sigma_square = None
@@ -4698,8 +4693,6 @@ def _sem_of_mean(
         sigma_moments = centred_moments(
             sigma, np.zeros(np.shape(centres), dtype=np.float64)
         )
-        if sigma_moments is None:
-            return None
         mean_sigma_square = np.asarray(sigma_moments[1], dtype=np.float64)
     return _sem_from_moments(
         mean_delta, mean_delta_square, counts, mean_sigma_square
@@ -4802,19 +4795,14 @@ def _bucket_sums(
     group: NDArray[Any],
     codes: NDArray[np.int64],
     bucket_count: int,
-    output_dtype: np.dtype,
 ) -> NDArray[Any]:
     """Per-bucket sums in one O(N) counting pass -- never a sort.
 
     ``bincount`` accumulates in float64 whatever the input dtype, so a
     uint8 camera frame cannot wrap at 256 the way its own arithmetic
-    would; a complex plane is two real passes.
+    would.
     """
 
-    if output_dtype == np.complex128:
-        real = np.bincount(codes, weights=group.real, minlength=bucket_count)
-        imag = np.bincount(codes, weights=group.imag, minlength=bucket_count)
-        return real + 1j * imag
     return np.bincount(
         codes,
         weights=group.astype(np.float64, copy=False),
@@ -4858,7 +4846,6 @@ def _aggregate_by_codes(
     are bit-identical.
     """
 
-    output_dtype = np.complex128 if values.dtype.kind == "c" else np.float64
     if bucket_count == codes.size and np.array_equal(
         codes, np.arange(bucket_count, dtype=codes.dtype)
     ):
@@ -4868,13 +4855,13 @@ def _aggregate_by_codes(
         # way on every drawn frame; the scatter below only re-derived a
         # masked copy of the input.
         output = np.where(
-            usable, values.astype(output_dtype, copy=False), np.nan
+            usable, values.astype(np.float64, copy=False), np.nan
         )
         counts = usable.astype(np.int64)
         output.setflags(write=False)
         counts.setflags(write=False)
         return output, counts
-    output = np.full(bucket_count, np.nan, dtype=output_dtype)
+    output = np.full(bucket_count, np.nan, dtype=np.float64)
     counts = np.zeros(bucket_count, dtype=np.int64)
     positions = np.flatnonzero(usable & (codes >= 0))
     if positions.size:
@@ -4883,9 +4870,7 @@ def _aggregate_by_codes(
         counts = np.bincount(selected_codes, minlength=bucket_count)
         filled = counts > 0
         if aggregation in (Reduction.SUM, Reduction.MEAN):
-            sums = _bucket_sums(
-                group, selected_codes, bucket_count, output_dtype
-            )
+            sums = _bucket_sums(group, selected_codes, bucket_count)
             if aggregation is Reduction.MEAN:
                 output[filled] = sums[filled] / counts[filled]
             else:

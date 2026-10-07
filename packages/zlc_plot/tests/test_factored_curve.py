@@ -466,10 +466,10 @@ def test_exact_axis_aggregation_covers_remaining_curve_roles(
         for groups, reduced in (((), ()), ((AxisRef.cell_data("site"),), ()),
                                 ((), (AxisRef.repeat("repeat"),)),
                                 ((AxisRef.point("ax"),), (AxisRef.point("ay"),))):
-            actual = structured.histogram(bins=(-5, -1, 0, 1, 5), group_by=groups,
-                                          reduce_axes=reduced, aggregation=aggregation)
-            expected = reference.histogram(bins=(-5, -1, 0, 1, 5), group_by=groups,
-                                            reduce_axes=reduced, aggregation=aggregation)
+            actual = structured._histogram_from_plan(
+                (-5, -1, 0, 1, 5), structured._histogram_plan(groups, reduced, aggregation, 1))
+            expected = reference._histogram_from_plan(
+                (-5, -1, 0, 1, 5), reference._histogram_plan(groups, reduced, aggregation, 1))
             np.testing.assert_array_equal(actual.counts, expected.counts)
         assert current.block._materialized is None
     from zlc_plot import CurvePlot, FacetGridPlot

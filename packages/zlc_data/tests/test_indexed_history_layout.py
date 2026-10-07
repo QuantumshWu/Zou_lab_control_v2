@@ -100,9 +100,9 @@ def test_the_layout_reads_shots_rows_and_the_repeating_event(factored) -> None:
     assert layout.shot_count == 3 and layout.row_count == 6
     assert layout.codes(np.asarray((5, 0, 2))).tolist() == [2, 0, 1]
     assert layout.codes().tolist() == [0, 0, 1, 1, 2, 2]
-    assert layout.row_mask(1).tolist() == [False] * 4 + [True] * 2
-    assert layout.row_mask(2).tolist() == [False] * 2 + [True] * 4
-    assert layout.row_mask(50).tolist() == [True] * 6
+    assert layout.window_rows(1) == slice(4, 6)
+    assert layout.window_rows(2) == slice(2, 6)
+    assert layout.window_rows(50) == slice(0, 6)
     assert not layout.cells.flags.writeable
     with pytest.raises(ValueError):
         layout.cells.setflags(write=True)
@@ -212,7 +212,7 @@ def test_cropped_records_keep_their_actual_row_membership() -> None:
     assert layout.inner_count is None
     assert layout.row_count == 3
     assert layout.codes().tolist() == [0, 0, 1]
-    assert layout.row_mask(1).tolist() == [False, False, True]
+    assert layout.window_rows(1) == slice(2, 3)
     schema = _schema((-1, 0), (0, 0, 1))
     repeated = replace(schema, point_domain=replace(
         schema.point_domain, shape=(6,), axis_code_repeats=((2, 1),),
@@ -220,13 +220,13 @@ def test_cropped_records_keep_their_actual_row_membership() -> None:
     layout = indexed_history_layout(repeated)
     assert layout.inner_count is None
     assert layout.codes().tolist() == [0, 0, 0, 0, 1, 1]
-    assert layout.row_mask(1).tolist() == [False] * 4 + [True] * 2
+    assert layout.window_rows(1) == slice(4, 6)
     single = _schema((0,), (0,))
     single = replace(single, point_domain=replace(
         single.point_domain, shape=(12,), axis_codes=(range(1),), axis_code_repeats=((3, 4),),
     ))
     layout = indexed_history_layout(single)
-    assert layout.inner_count == 12 and layout.row_mask(1).all()
+    assert layout.inner_count == 12 and layout.window_rows(1) == slice(0, 12)
     assert layout.codes().tolist() == [0] * 12
 
     mislabelled = _schema((0,), (0,), primary_role=READOUT_EVENT)

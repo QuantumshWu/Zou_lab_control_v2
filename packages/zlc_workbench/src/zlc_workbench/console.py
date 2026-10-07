@@ -104,19 +104,16 @@ from .selection import (
     PlotSelectionSource,
     panel_selection_document,
     panel_selection_from_plot,
-    panel_selection_binds_a_revision,
     same_plot_run,
-    same_plot_generation,
     plot_generation_matches_plot_input,
     panel_selection_from_document,
     panel_selection_matches_subject,
     panel_selection_output_catalog,
     panel_plot_selectors,
-    observation_matches_plot_input,
     plot_identity_matches_plot_input,
     attach_selection_bridge,
 )
-from .topology import format_signal_shape, project_signals, signal_label
+from .topology import format_signal_shape, project_signals, signal_label, signal_output_name
 
 __all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
 
@@ -543,9 +540,9 @@ class ConsolePresenter:
         #: A whole board waiting to go up -- loaded or empty -- and the words
         #: for when it has, held until every node it replaces has stopped.
         self._pending_board: tuple[_LayoutCandidate, str] | None = None
-        # Auto-created Task previews are reconciled against Runtime terminal
-        # truth: an absent signal retires, a sealed signal remains ordinary.
-        self._auto_task_previews: dict[str, dict[str, str]] = {}
+        # The preview panels each Task run opened by itself, by node: they
+        # are removed when that run reaches its terminal state.
+        self._auto_task_previews: dict[str, set[str]] = {}
         self._preview_errors: dict[str, set[str]] = {}
         self._artifact_completion_order = 0
         self.panels: dict[str, PanelBinding] = {}
@@ -560,7 +557,7 @@ class ConsolePresenter:
         self._panel_serial = 0
         # What every card's picker was last told, so it is only rebuilt when
         # the offer really changed.
-        self._offered_groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+        self._offered_groups: tuple = ()
         self._offered_overlays: tuple = ()
         self._catalog_projection: tuple | None = None
         self._signal_choice_context: tuple | None = None
@@ -1518,9 +1515,24 @@ class ConsolePresenter:
                     source_publication=publication,
                 )
         if binding.frozen_data is not None and not binding.refresh_requested:
-            if state_changed or ui_changed or shape_changed or interaction_changed:
+            if state_changed or ui_changed or interaction_changed:
                 self._publish_panel_state(binding, data_shape=accepted_shape)
             else:
+                if shape_changed:
+                    # Only the card's data strip reads the shape, and a
+                    # finite run's Repeat counts change with every shot:
+                    # a whole publish re-projected an open Edit page (four
+                    # form reconciles) per frame for a strip it never shows.
+                    binding.parameter_surface = {
+                        **binding.parameter_surface, **accepted_shape,
+                    }
+                    set_projection = getattr(self.view, "set_panel_projection", None)
+                    if callable(set_projection):
+                        set_projection(
+                            binding.panel_id,
+                            binding.state,
+                            binding.parameter_surface,
+                        )
                 self._refresh_panel_snapshot_status(binding)
         else:
             binding.refresh_requested = False
@@ -1612,12 +1624,14 @@ class ConsolePresenter:
             # down whatever was publishing the panel: a board load that had
             # kept such a panel for repair died on it half mounted.
             projection = None
-        if state is None or state is binding.state:
-            # Asked about the panel's OWN state, so the answer IS the
-            # panel's condition: recorded here rather than only where an
-            # edit happens, because a table can also stop drawing without
-            # anybody editing it -- the same signal can arrive under a
-            # representation that has no such axis to hold the role.
+        if (state is None or state is binding.state) and subject is None and schema is None:
+            # Asked about the panel's OWN state on the data its card shows,
+            # so the answer IS the panel's condition: recorded here rather
+            # than only where an edit happens, because a table can also stop
+            # drawing without anybody editing it -- the same signal can
+            # arrive under a representation that has no such axis to hold
+            # the role.  Asked on another subject -- the frozen data Edit
+            # holds -- it answers for that subject, not for the card.
             binding.vacancy = "" if projection is None else projection.vacancy
         # None three times over, and they mean different things: no
         # projection at all (this Dataset offers no such plot), a table this
@@ -2203,7 +2217,8 @@ class ConsolePresenter:
 
         def completed(future: object) -> None:
             def accept() -> None:
-                if host is not binding.host:
+                if host is not binding.host or future.cancelled():
+                    # A coalesced configure is carried by its successor.
                     return
                 current = binding.accepted_surface
                 if current is None:
@@ -2218,16 +2233,19 @@ class ConsolePresenter:
                         # but only the board may advance a same-shot group.
                         self.board.owe_presentation((binding.panel_id,))
                         return
+                    if binding.port is None:
+                        raise RuntimeError("the panel has no live surface to update")
+                    # On the port's decision, not the accepted picture's:
+                    # a gesture landing before a retarget's configure would
+                    # otherwise install the setting that retarget revoked.
                     target = replace(
-                        current.target,
+                        binding.port.projection_target,
                         display=binding.state.display,
                         interaction=binding.state.interaction,
                         selector=binding.state.selector,
                         classifier_thresholds=binding.state.classifier_thresholds,
                         focused_cell=binding.state.focused_cell,
                     )
-                    if binding.port is None:
-                        raise RuntimeError("the panel has no live surface to update")
                     if binding.port.accept_configuration(operation, target) is None:
                         # A newer front already paints from this same
                         # session. Its acceptance will advance the record.
@@ -2383,20 +2401,34 @@ class ConsolePresenter:
         """Tell one card which currently published signals it may show."""
 
         binding = self.panels[panel_id]
-        publication = binding.display_publication
-        if publication is None and binding.state.signal:
-            publication = self.session.signal_plane.freeze().publication(
-                binding.state.signal
-            )
         self.view.set_panel_signal_choices(
             panel_id,
-            self.signal_groups(),
+            self.signal_groups(panel_id),
             current=binding.state.signal,
             overlay_groups=self.overlay_signal_groups(
                 binding.state.signal,
-                publication,
+                self._overlay_basis(binding, binding.state.signal),
             ),
             overlay_current=binding.state.overlay_signal,
+        )
+
+    def _overlay_basis(self, binding: PanelBinding, signal: str) -> object | None:
+        """The publication a panel's overlay eligibility is judged on.
+
+        ONE rule for the card's offer, Edit's, the refreshed menus and
+        admission: the signal's latest publication, the one the directory's
+        overlay families are read from (_signal_projection).  Judged on the
+        screen (or Edit's freeze), a card still showing the previous run
+        offered an overlay admission then refused, and hid one it would
+        admit.  The screen answers only for a signal with no latest
+        publication left.
+        """
+
+        if not signal:
+            return None
+        return (
+            self.session.signal_plane.latest_publication(signal)
+            or binding.display_publication
         )
 
     def _signal_projection(self) -> tuple:
@@ -2424,19 +2456,43 @@ class ConsolePresenter:
             self._catalog_projection = cached
         return cached
 
-    def signal_groups(self) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    def signal_groups(
+        self, panel_id: str = ""
+    ) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
         """Every signal a card may be pointed at, gathered under its producer.
 
         A flat list of forty keys is a list nobody reads; grouped by who
         publishes them, the same forty are four short lists.  The grouping is
         the producer the plane already records, not a naming convention parsed
         out of the key.
+
+        ``panel_id`` asks for that panel's own offer, which leaves out what
+        the panel itself publishes: its ROI and fit outputs come from the
+        derivation bridge its own host carries, and a new signal clears the
+        selector and the fit and closes that bridge -- the pick would
+        withdraw the very source it picked.  So does anything cut from those
+        outputs, however many hops away -- another panel's ROI on this
+        panel's ROI frame, a Logic node following its ROI sum -- because it
+        starves the moment they are withdrawn.
         """
 
+        rows = self.offered_signals(include_shown=True)
+        producers = {name: producer for name, _label, _state, producer, _derived in rows}
+        sources = {name: derived for name, _label, _state, _producer, derived in rows}
+
+        def own(name: str) -> bool:
+            seen: set[str] = set()
+            while name and name not in seen:
+                if producers.get(name) == panel_id:
+                    return True
+                seen.add(name)
+                name = sources.get(name, "")
+            return False
+
         groups: dict[str, list[tuple[str, str]]] = {}
-        for name, label, _state, producer, _derived in self.offered_signals(
-            include_shown=True
-        ):
+        for name, label, _state, producer, _derived in rows:
+            if panel_id and own(name):
+                continue
             groups.setdefault(producer or "signals", []).append((label, name))
         return tuple(
             (producer, tuple(leaves)) for producer, leaves in groups.items()
@@ -2500,7 +2556,7 @@ class ConsolePresenter:
                 panel_id,
                 tuple(
                     (
-                        row.name.rsplit("/", 1)[-1] or row.name,
+                        signal_output_name(row.name),
                         format_signal_shape(descriptions[row.name].schema),
                         f"{row.state} · {row.name}",
                     )
@@ -2514,35 +2570,32 @@ class ConsolePresenter:
             self._shown_panel_publishers = panel_publishers
             self.view.set_panel_publishers(panel_publishers)
 
-        groups = self.signal_groups()
+        # Each card's OWN offer is the key: what a panel may not pick hangs
+        # on what every row was cut from, which the flat groups do not show.
+        offers = tuple(
+            (panel_id, self.signal_groups(panel_id))
+            for panel_id in self.view.panel_ids()
+        )
         # THE KEY MUST WATCH WHAT ELIGIBILITY WATCHES.  Overlay choices
         # depend on publications and generation families, and none of that
         # is visible in the name/label/producer groups -- so after a stop
         # and restart the groups settled back to equal while occupancy's
         # eligibility flipped, and the one refresh that would have offered
         # it never ran: the overlay combobox stayed empty for good.
-        publications = {
-            binding.state.signal: self.session.signal_plane.latest_publication(binding.state.signal)
-            for binding in self.panels.values() if binding.state.signal
-        }
         overlay_offers = tuple(
             (
                 panel_id,
                 self.overlay_signal_groups(
                     binding.state.signal,
-                    (
-                        publications.get(binding.state.signal)
-                        if binding.state.signal
-                        else None
-                    ),
+                    self._overlay_basis(binding, binding.state.signal),
                 ),
             )
             for panel_id, binding in self.panels.items()
         )
-        offers_changed = groups != self._offered_groups or overlay_offers != self._offered_overlays
+        offers_changed = offers != self._offered_groups or overlay_offers != self._offered_overlays
         if offers_changed:
             overlays_by_panel = dict(overlay_offers)
-            for panel_id in self.view.panel_ids():
+            for panel_id, groups in offers:
                 binding = self.panels.get(panel_id)
                 self.view.set_panel_signal_choices(
                     panel_id,
@@ -2553,7 +2606,7 @@ class ConsolePresenter:
                         binding.state.overlay_signal if binding is not None else ""
                     ),
                 )
-            self._offered_groups = groups
+            self._offered_groups = offers
             self._offered_overlays = overlay_offers
         for node_id in tuple(self.logic):
             self.refresh_logic_editor(node_id)
@@ -2689,8 +2742,13 @@ class ConsolePresenter:
         if signal:
             candidate_front = self.session.signal_plane.freeze()
             candidate_value = candidate_front.value(signal)
-            if signal == current.signal and binding.accepted_surface is not None:
-                accepted_input = binding.accepted_surface.plot_input
+            accepted_surface = binding.accepted_surface
+            # The record moves before a retarget lands, so the accepted
+            # surface may still be the OLD signal's: its schema answers only
+            # for the signal it drew (the rule _panel_schema applies).
+            if (signal == current.signal and accepted_surface is not None
+                    and accepted_surface.target.signal == signal):
+                accepted_input = accepted_surface.plot_input
                 accepted_snapshot = getattr(
                     accepted_input,
                     "snapshot",
@@ -2886,7 +2944,6 @@ class ConsolePresenter:
             # the displaced axis's new fate. Rebuilding current + edited here
             # would discard that swap and assign the same role twice.
             merged["semantic"] = projection.semantic
-            binding.vacancy = vacancy_reason
             if vacancy_reason:
                 self._report(f"{panel_id}: {vacancy_reason}", severity="warning")
         try:
@@ -2904,6 +2961,11 @@ class ConsolePresenter:
                     schema=candidate_schema,
                 )
             )
+            # The candidate's condition on the schema it is judged on.  Every
+            # commit below records it as the panel's vacancy, and nothing
+            # else does: a pick that changes the cells or the signal repairs
+            # a vacancy as surely as a fate edit, and a refused edit stored
+            # no table whose vacancy the card could be saying.
             vacancy_reason = "" if projection is None else projection.vacancy
             resolved_projection = (
                 None if projection is None or not projection.drawable else projection.spec
@@ -2989,22 +3051,12 @@ class ConsolePresenter:
             candidate.overlay_signal
             and candidate.overlay_signal != current.overlay_signal
         ):
-            front = candidate_front or self.session.signal_plane.freeze()
-            # THE SAME PUBLICATION THE OFFER JUDGED.  The offer computes
-            # eligibility from the plane's front; judging admission from
-            # what is on screen instead meant a panel showing an older
-            # generation refused the very entry its own combobox had just
-            # offered.  The screen falls back only when the front has
-            # nothing to say.
-            publication = (
-                front.publication(candidate.signal)
-                or binding.display_publication
-            )
+            # THE SAME PUBLICATION THE OFFER JUDGED (_overlay_basis).
             offered = {
                 name
                 for _producer, leaves in self.overlay_signal_groups(
                     candidate.signal,
-                    publication,
+                    self._overlay_basis(binding, candidate.signal),
                 )
                 for _label, name in leaves
             }
@@ -3015,6 +3067,9 @@ class ConsolePresenter:
                     f"{candidate.signal!r}",
                     severity="error",
                 )
+                # The unchanged record goes back to every view, as the other
+                # refused picks' do: the picker that sent it still shows it.
+                self._publish_panel_state(binding)
                 return False
         needs_mount = (
             bool(candidate.signal)
@@ -3051,6 +3106,7 @@ class ConsolePresenter:
                 self._release_panel(binding)
                 self.view.show_panel(panel_id, None)
             binding.state = candidate
+            binding.vacancy = vacancy_reason
             binding.interaction_viewport = None
             self._restore_producer_draft(binding.panel_id)
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
@@ -3062,8 +3118,24 @@ class ConsolePresenter:
         if needs_mount and vacancy_reason:
             # A known vacancy is a repairable target, not a failed host.
             # Do not start a candidate only to cancel it during projection.
+            accepted = binding.accepted_surface
+            draws_another = binding.port is not None and (
+                accepted is None
+                or not _same_panel_plot_identity(accepted.target, candidate)
+            )
             self._cancel_panel_configuration(binding)
             binding.state = candidate
+            if draws_another:
+                # Nor keep a port drawing another identity -- the one an
+                # in-flight retarget was replacing, say.  Nothing would ever
+                # remount it, and the edit that fills the role would send
+                # this record's table to that port's host.  Released as a
+                # failed retarget is (after the record moved, so a released
+                # history lease normalizes the record the panel keeps): the
+                # panel waits portless, and the repair mounts through the
+                # ordinary portless path.
+                self._release_panel(binding)
+                self.view.show_panel(panel_id, None)
             if candidate.signal != current.signal:
                 binding.interaction_viewport = None
                 self._restore_producer_draft(binding.panel_id)
@@ -3080,13 +3152,23 @@ class ConsolePresenter:
             front = candidate_front
             value = candidate_value
             if value is None:
-                if candidate.signal != current.signal and binding.port is not None:
+                # A live port draws what it drew until a candidate replaces
+                # it, so changing WHAT it draws -- the signal or the cell --
+                # is refused while nothing can prepare the change.  Accepted,
+                # the record claimed cells the card never drew, and the next
+                # plot edit found no such plot to match its host to.  The
+                # unchanged record goes back to every view: the form that
+                # sent the pick is still showing it.
+                if (not _same_panel_plot_identity(candidate, current)
+                        and binding.port is not None):
                     self._report(
-                        f"{candidate.signal} has not published yet",
+                        f"{panel_id}: {candidate.signal} has not published yet",
                         severity="warning",
                     )
+                    self._publish_panel_state(binding)
                     return False
                 binding.state = candidate
+                binding.vacancy = vacancy_reason
                 if candidate.signal != current.signal:
                     binding.interaction_viewport = None
                 binding.parameter_surface = self._unbound_panel_parameters(candidate)
@@ -3116,22 +3198,28 @@ class ConsolePresenter:
                     severity="task",
                 )
             if candidate.kind and fitting is None:
-                if candidate.signal != current.signal and binding.port is not None:
+                drawn_as = candidate.kind.replace("_", " ")
+                if candidate.cell_kind:
+                    drawn_as += f" of {candidate.cell_kind} cells"
+                if (not _same_panel_plot_identity(candidate, current)
+                        and binding.port is not None):
                     self._report(
-                        f"{candidate.signal} cannot be drawn as a "
-                        f"{candidate.kind.replace('_', ' ')}",
+                        f"{panel_id}: {candidate.signal} cannot be drawn as a "
+                        f"{drawn_as}",
                         severity="warning",
                     )
+                    self._publish_panel_state(binding)
                     return False
                 binding.state = candidate
+                binding.vacancy = vacancy_reason
                 if candidate.signal != current.signal:
                     binding.interaction_viewport = None
                 binding.parameter_surface = self._unbound_panel_parameters(candidate)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 self._report(
-                    f"{candidate.signal} cannot be drawn as a "
-                    f"{candidate.kind.replace('_', ' ')}; the panel remains ready",
+                    f"{candidate.signal} cannot be drawn as a {drawn_as}; "
+                    "the panel remains ready",
                     severity="warning",
                 )
                 return True
@@ -3140,20 +3228,18 @@ class ConsolePresenter:
                 getattr(value, "canonical_schema", None)
                 or value.snapshot.block.schema
             )
+            # A front's publications cover its values, so the value above
+            # has its exact publication.
             publication = front.publication(candidate.signal)
-            if publication is None:
-                self._report(
-                    f"{candidate.signal} has no exact publication",
-                    severity="error",
-                )
-                return False
             previous_surface = binding.parameter_surface
             previous_viewport = binding.interaction_viewport
+            previous_vacancy = binding.vacancy
             # The record moves first: the candidate's host is staged on the
             # projection lane, which reads the panel's authored values as the
             # record holds them -- and the remembered viewport, which a new
             # signal must not inherit.
             binding.state = candidate
+            binding.vacancy = vacancy_reason
             if candidate.signal != current.signal:
                 binding.interaction_viewport = None
             binding.parameter_surface = (
@@ -3180,6 +3266,7 @@ class ConsolePresenter:
                 # drew.  Keeping the new name over the old picture made the
                 # next pick of the same signal a no-op.
                 binding.state = current
+                binding.vacancy = previous_vacancy
                 binding.parameter_surface = previous_surface
                 binding.interaction_viewport = previous_viewport
                 self._report(
@@ -3205,25 +3292,13 @@ class ConsolePresenter:
                 f"{panel_id} is preparing {candidate.signal}", severity="task"
             )
         else:
-            if candidate.interval_ms != current.interval_ms and binding.port is not None:
+            # No mount means a port and a host: needs_mount holds whenever
+            # either is missing, and nothing below detaches them.
+            if candidate.interval_ms != current.interval_ms:
                 binding.port.set_display_interval(candidate.interval_ms)
+            previous_vacancy = binding.vacancy
             binding.state = candidate
-            if binding.host is None or binding.port is None:
-                schema = self._panel_schema(binding)
-                binding.parameter_surface = (
-                    (
-                        None
-                        if schema is None
-                        else self._schema_projected_parameters(
-                            binding, schema, self._RESOLVING_REASON
-                        )
-                    )
-                    or self._unbound_panel_parameters(candidate)
-                )
-                self._remount_panel_editor(binding)
-                self._publish_panel_state(binding)
-                self._refresh_console_projection()
-                return True
+            binding.vacancy = vacancy_reason
             if plot_changed:
                 predecessor = binding.configuration
                 self._cancel_panel_configuration(binding)
@@ -3237,6 +3312,7 @@ class ConsolePresenter:
                     )
                 except Exception as error:
                     binding.state = current
+                    binding.vacancy = previous_vacancy
                     self._report(
                         f"{panel_id}: {_error_text(error)}",
                         severity="error",
@@ -3260,17 +3336,16 @@ class ConsolePresenter:
                     and candidate.overlay_signal != current.overlay_signal
                 ):
                     live_overlay = None
-                if binding.port is not None:
-                    # The operator's decision takes effect NOW, not when
-                    # the host finishes redrawing to it: until the port
-                    # is told, the next frame is projected to the setting
-                    # that was just replaced -- which is how an overlay
-                    # switched off came back on the following shot.
-                    binding.port.retarget(
-                        candidate
-                        if fit_override is _UNCHANGED
-                        else replace(candidate, fit=fit_override)
-                    )
+                # The operator's decision takes effect NOW, not when the host
+                # finishes redrawing to it: until the port is told, the next
+                # frame is projected to the setting that was just replaced --
+                # which is how an overlay switched off came back on the
+                # following shot.
+                binding.port.retarget(
+                    candidate
+                    if fit_override is _UNCHANGED
+                    else replace(candidate, fit=fit_override)
+                )
                 if vacancy_reason:
                     # Nothing to draw, so nothing to configure: the panel
                     # keeps the operator's table and its last picture, and
@@ -3673,6 +3748,9 @@ class ConsolePresenter:
         if not isinstance(fallback, PanelState) or binding.state == fallback:
             return
         binding.state = fallback
+        # Its condition goes back with it, judged on the picture the host
+        # kept: a refused repair leaves the table it repaired vacant again.
+        self._panel_resolved_spec(binding)
         # A lease that cannot go back keeps Runtime retaining the refused
         # window while the record says otherwise: that is said, not skipped.
         self._resync_panel_history(binding, fallback)
@@ -3730,6 +3808,16 @@ class ConsolePresenter:
                 configuration_entry is None
                 and host is not None
                 and bool(getattr(host, "service_failure", False))
+                # A vacant table waits for the edit that repairs it, on a
+                # dead host as without one (the portless mount above waits
+                # the same way): resubmitted, the same table is judged on
+                # the same accepted schema and finds the same vacancy.  So
+                # it is judged HERE, on that schema -- the dead host's shown
+                # snapshot -- which records it: a mark an earlier table left
+                # is no reason to keep a dead host under a table that draws.
+                # A table with no projection at all is resubmitted.
+                and (self._panel_resolved_spec(binding) is not None
+                     or not binding.vacancy)
             ):
                 # A render-service crash leaves the last complete Front on
                 # screen.  Re-submit the unchanged authored target through
@@ -3737,12 +3825,35 @@ class ConsolePresenter:
                 # A, and the old surface stays visible until the replacement
                 # is fully accepted.
                 self.update_panel_state(binding.panel_id, {})
+                if (binding.configuration is None and binding.host is host
+                        and not binding.vacancy):
+                    # Nothing replaces it -- the signal has no value or no
+                    # fitting cell, or the candidate was refused.  Kept, the
+                    # same resubmit ran on every beat, saying the same line
+                    # each time.  The panel lets go of it and waits portless
+                    # for the once-per-run mount.  A vacancy the resubmit
+                    # found keeps it instead: the last Front stays on the
+                    # card, the selection bridge goes on deriving the ROI
+                    # outputs from every new publication without a host, the
+                    # history lease holds, and the repair edit remounts.
+                    self._release_panel(binding)
+                    self.view.show_panel(binding.panel_id, None)
+                    self._publish_panel_state(binding)
                 continue
             if (
                 binding.editor_open
                 and binding.editor_configuration is None
                 and binding.editor_host is not None
                 and bool(getattr(binding.editor_host, "service_failure", False))
+                # Nor Edit's: a record with nothing to draw on the data Edit
+                # holds mounts on no host, and each beat said so again.
+                # Judged on that data -- the freeze the remount draws, which
+                # with no entry travelling is ``frozen_data`` -- not on the
+                # card's vacancy, which answers for the card's.
+                and binding.frozen_data is not None
+                and self._panel_resolved_spec(
+                    binding, subject=binding.frozen_data.plot_input
+                ) is not None
             ):
                 self._remount_panel_editor(binding)
             if (
@@ -3814,10 +3925,14 @@ class ConsolePresenter:
                             # card dark until the source's next run or until
                             # the operator picks the signal again.  That is
                             # the price of not rebuilding a refused host on
-                            # every beat.
+                            # every beat.  Everything the old port drove goes
+                            # with it, through _release_panel: a host kept
+                            # its picture, and a selection bridge kept
+                            # publishing ROI/fit results derived from the
+                            # old signal while the record named the new one.
                             if binding.port is not None:
-                                binding.port.close()
-                                binding.port = None
+                                self._release_panel(binding)
+                                self.view.show_panel(binding.panel_id, None)
                         else:
                             candidate_port.notify_presented(accepted)
                         binding.reported_condition = _error_text(error)
@@ -4116,7 +4231,7 @@ class ConsolePresenter:
             return None
         frozen = binding.frozen_data
         producer_node_id = self._direct_producer_node_id(binding.state.signal)
-        signal_options = self.signal_groups()
+        signal_options = self.signal_groups(binding.panel_id)
         if frozen is not None:
             # Edit describes the snapshot it holds -- the one Save writes --
             # not what the live signal has grown into since it was frozen.
@@ -4136,13 +4251,13 @@ class ConsolePresenter:
             "state": binding.state.document(),
             "parameter_surface": binding.parameter_surface,
             "signal_options": signal_options,
+            # The overlay picker writes the live record through the one
+            # admission, so it offers what that admission judges on
+            # (_overlay_basis) -- not the freeze: Edit's picture never draws
+            # a changed overlay anyway.
             "overlay_signal_options": self.overlay_signal_groups(
                 binding.state.signal,
-                (
-                    frozen.publication
-                    if frozen is not None
-                    else binding.display_publication
-                ),
+                self._overlay_basis(binding, binding.state.signal),
             ),
             "frozen_signal": None if frozen is None else frozen.signal,
             "frozen_publication": None if frozen is None else frozen.publication,
@@ -4402,6 +4517,18 @@ class ConsolePresenter:
         if frozen is None:
             raise RuntimeError(f"{binding.panel_id} has no frozen plot input")
         plot_input = frozen.plot_input
+        # Judged BEFORE a host is built, on the data it would draw: a record
+        # with nothing to draw there mounts on no host, and building one for
+        # _match_host_to_panel to refuse cost a render build and retire on
+        # every Edit open, Refresh and title edit.  The same refusal, and
+        # the same projection handed on, so nothing is projected twice.
+        projection = self._panel_projection(binding, subject=plot_input)
+        if projection is None or not projection.drawable:
+            raise PanelNotDrawable(
+                projection.vacancy
+                if projection is not None
+                else "panel target does not resolve on this Dataset"
+            )
         host = self._make_editor_host(plot_input, binding.state)
 
         if not callable(getattr(self.view, "show_panel_editor", None)):
@@ -4419,6 +4546,7 @@ class ConsolePresenter:
                 host,
                 restore_interaction=True,
                 interaction_input=plot_input,
+                projection=projection,
             )
         except BaseException:
             self._retire_plot_host(host)
@@ -4452,7 +4580,7 @@ class ConsolePresenter:
         the target moved, the geometry changed -- is replaced, as before.
         """
 
-        from zlc_data.snapshot_projection import indexed_schemas_compatible
+        from zlc_data.snapshot_projection import schemas_continue
 
         entry = binding.editor_configuration
         # The surface Edit has, or the one being staged for it: a host
@@ -4476,9 +4604,7 @@ class ConsolePresenter:
             return
         previous_schema = previous.snapshot.block.schema
         next_schema = frozen.snapshot.block.schema
-        if previous_schema != next_schema and not indexed_schemas_compatible(
-            previous_schema, next_schema
-        ):
+        if not schemas_continue(previous_schema, next_schema):
             # Plot's data pipeline permits only identical geometry or a
             # changed indexed window. A new ROI needs a new host before the
             # asynchronous update is submitted, not after its Future fails.
@@ -4545,14 +4671,13 @@ class ConsolePresenter:
             )
         )
         source.subscribe_focus_observation(
-            lambda focused_index, subject, generation, revision: (
+            lambda focused_index, subject, generation, _revision: (
                 self._enqueue_panel_focus(
                     panel_id,
                     host,
                     focused_index,
                     subject,
                     generation,
-                    revision,
                 )
             )
         )
@@ -5048,7 +5173,7 @@ class ConsolePresenter:
         self._release_panel(binding)
         self.view.remove_panel(key)
         for previews in self._auto_task_previews.values():
-            previews.pop(key, None)
+            previews.discard(key)
         return True
 
     def remove_panel(self, panel_id: str) -> None:
@@ -5712,14 +5837,13 @@ class ConsolePresenter:
             )
         )
         binding.selections.subscribe_focus_observation(
-            lambda focused_index, subject, generation, revision: (
+            lambda focused_index, subject, generation, _revision: (
                 self._enqueue_panel_focus(
                     binding.panel_id,
                     source_host,
                     focused_index,
                     subject,
                     generation,
-                    revision,
                 )
             )
         )
@@ -5925,7 +6049,14 @@ class ConsolePresenter:
             ):
                 continue
             if document:
-                host.set_crosshair_selector(document["x"], document["y"])
+                # The record is canonical (the event's ``selector``), and
+                # the sibling may draw either axis in another unit.
+                host.set_crosshair_selector(
+                    document["x"], document["y"], display=False
+                )
+                self._track_panel_configuration(
+                    binding, host, host.describe_display()
+                )
             else:
                 # Removal must tolerate absence: the sibling may never
                 # have held the marker (a freshly mounted editor between
@@ -5940,6 +6071,14 @@ class ConsolePresenter:
                     except Exception:
                         return
                     target.remove_selector(SelectorKind.CROSSHAIR)
+
+                    def _present_removal() -> None:
+                        if target is binding.host or target is binding.editor_host:
+                            self._track_panel_configuration(
+                                binding, target, target.describe_display()
+                            )
+
+                    self._enqueue_panel_interaction(_present_removal)
 
                 state_future.add_done_callback(_remove_if_present)
         self._track_panel_configuration(
@@ -5957,9 +6096,13 @@ class ConsolePresenter:
         exact_subject: bool = True,
         subject: object | None = None,
         data_generation: object = None,
-        data_revision: object = None,
     ) -> tuple[object, object] | None:
-        """Validate one gesture against its exact current surface."""
+        """Validate one gesture against its exact current surface.
+
+        The same RUN is enough: a gesture names a place on the picture, which
+        a later shot of that run does not move.  A region something is cut
+        from is held to its exact revision by the selection bridge, not here.
+        """
 
         publication = None
         plot_input = None
@@ -5978,25 +6121,13 @@ class ConsolePresenter:
             # is refused below, so the record need not travel with it.
             publication = binding.frozen_data.publication
             plot_input = binding.frozen_data.plot_input
-        if observation is None:
-            identity_matches = plot_identity_matches_plot_input(
-                plot_input,
-                data_generation,
-                data_revision,
-            ) or plot_generation_matches_plot_input(
-                plot_input,
-                data_generation,
-            )
-        else:
-            identity_matches = observation_matches_plot_input(
-                observation,
-                plot_input,
-            ) or same_plot_generation(observation, plot_input)
+        if observation is not None:
+            data_generation = getattr(observation, "data_generation", None)
             subject = getattr(observation, "subject", None)
         if (
             publication is None
             or plot_input is None
-            or not identity_matches
+            or not plot_generation_matches_plot_input(plot_input, data_generation)
         ):
             return None
         description = self._panel_accepted_display(binding, source)
@@ -6130,7 +6261,6 @@ class ConsolePresenter:
         focused_index: int | None,
         subject: object,
         data_generation: object,
-        data_revision: object,
     ) -> None:
         self._enqueue_panel_interaction(
             lambda: self._route_panel_focus(
@@ -6139,7 +6269,6 @@ class ConsolePresenter:
                 focused_index,
                 subject,
                 data_generation,
-                data_revision,
             )
         )
 
@@ -6239,7 +6368,6 @@ class ConsolePresenter:
         focused_index: int | None,
         subject: object,
         data_generation: object,
-        data_revision: object,
     ) -> None:
         binding = self.panels.get(str(panel_id))
         if binding is None:
@@ -6251,7 +6379,6 @@ class ConsolePresenter:
             exact_subject=False,
             subject=subject,
             data_generation=data_generation,
-            data_revision=data_revision,
         )
         if accepted is None or accepted[1].kind is not PlotKind.FACET_GRID:
             return
@@ -6374,24 +6501,15 @@ class ConsolePresenter:
         )
         if accepted is None:
             return
-        if publication is None and panel_selection_binds_a_revision(
-            observation.state
-        ):
-            # A region something is CUT from must name the exact publication
-            # it was cut from, and the bridge resolved exactly that one by
-            # the observation's own generation and revision.  If it could
-            # not be resolved the picture is gone and the region with it.
-            #
-            # What it may NOT be asked to be is the publication the panel
-            # has ACCEPTED.  The host renders every revision it is handed
-            # while acceptance runs on the board's beat, so on a live panel
-            # those two are routinely different objects -- and requiring
-            # them to be the same refused every region the operator drew
-            # after the first: the ROI kept the first box's shape for ever.
-            # A region that cuts nothing needs no publication at all: it
-            # marks a place on the picture, and on a live rolling panel the
-            # publication under that picture changes with every shot.
-            return
+        # The bridge resolved the region's exact publication by the
+        # observation's own generation and revision (None only for a region
+        # that binds no revision, see route_observation).  What it may NOT
+        # be asked to be is the publication the panel has ACCEPTED: the
+        # host renders every revision it is handed while acceptance runs on
+        # the board's beat, so on a live panel those two are routinely
+        # different objects -- and requiring them to be the same refused
+        # every region the operator drew after the first: the ROI kept the
+        # first box's shape for ever.
         if not panel_selection_matches_subject(
             observation.state, observation.subject
         ):
@@ -6606,8 +6724,10 @@ class ConsolePresenter:
             else None
         )
         if description is None:
+            # ``subject`` as given: None IS the shown snapshot, and only an
+            # answer about that is the card's own condition.
             resolved = self._panel_resolved_spec(
-                binding, selected, subject=snapshot
+                binding, selected, subject=subject
             )
             display = selected.display
             focused_cell = selected.focused_cell
@@ -6975,12 +7095,12 @@ class ConsolePresenter:
                 continue
             binding.previewed += (signal,)
             if self._is_task(binding):
-                self._auto_task_previews.setdefault(binding.node_id, {})[
-                    panel.panel_id
-                ] = signal
+                self._auto_task_previews.setdefault(
+                    binding.node_id, set()
+                ).add(panel.panel_id)
 
     def _reconcile_task_previews(self, binding: LogicBinding) -> None:
-        tracked = self._auto_task_previews.pop(binding.node_id, {})
+        tracked = self._auto_task_previews.pop(binding.node_id, set())
         for panel_id in tracked:
             self._remove_panel_now(panel_id)
 
@@ -7385,7 +7505,7 @@ class ConsolePresenter:
             )
             if publication is not None:
                 input_bundle = tuple(
-                    (name.rsplit("/", 1)[-1], value.canonical_schema or value.snapshot.block.schema,
+                    (signal_output_name(name), value.canonical_schema or value.snapshot.block.schema,
                      value.snapshot)
                     for name, value in publication.signals.items()
                 )
@@ -7394,7 +7514,7 @@ class ConsolePresenter:
                 producer = None if parts is None else self.logic.get(parts[0])
                 names = (
                     tuple(output.name for output in self._logic_outputs(producer))
-                    if producer is not None else (selected_source.rsplit("/", 1)[-1],)
+                    if producer is not None else (signal_output_name(selected_source),)
                 )
                 input_bundle = tuple((name, None, None) for name in names)
             outputs = self._logic_outputs(binding)
@@ -7404,7 +7524,7 @@ class ConsolePresenter:
                 )
                 if publication is not None:
                     output_bundle = tuple(
-                        (name.rsplit("/", 1)[-1], value.canonical_schema or value.snapshot.block.schema,
+                        (signal_output_name(name), value.canonical_schema or value.snapshot.block.schema,
                          value.snapshot)
                         for name, value in publication.signals.items()
                     )
@@ -7590,6 +7710,15 @@ class ConsolePresenter:
             )
             return True
         try:
+            # Admission BEFORE the build reads a device: a device under a
+            # Control's tune holds its own I/O lock for the whole tune (an
+            # N100 rate change: seconds), and the build read it here on the
+            # Qt thread -- the console froze for the tune, then was refused.
+            holders = self.session.device_use.command_holders(
+                tuple(finalization.device_keys.values())
+            )
+            if holders:
+                raise DeviceUseBusy(holders)
             candidate = self._build_logic_candidate(binding, finalization)
         except Exception as error:
             binding.draft_error = _error_text(error)
@@ -8038,7 +8167,7 @@ class ConsolePresenter:
                 lifecycle = "live" if description.live else "finished"
             published.append(
                 (
-                    name.rsplit("/", 1)[-1] or name,
+                    signal_output_name(name),
                     format_signal_shape(
                         None if description is None else description.schema
                     ),
@@ -8189,7 +8318,7 @@ class ConsolePresenter:
             bundled: dict[str, str] = {}
             for members in bundles.values():
                 anchor = selected if selected in members else members[0]
-                names = ", ".join(key.rsplit("/", 1)[-1] for key in members)
+                names = ", ".join(signal_output_name(key) for key in members)
                 bundled[anchor] = f"{groups.get(anchor, anchor)} · {names}"
             return tuple(bundled), bundled, {}
         return options, labels, groups

@@ -11,8 +11,6 @@ from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 import importlib
 import math
-import os
-import sys
 import threading
 from typing import Any, Callable
 
@@ -117,11 +115,7 @@ class _QtModules:
 
 _QT_MODULES: _QtModules | None = None
 _QT_WIDGET_CLASS: type[Any] | None = None
-_QT_APPLICATION: object | None = None
 _QT_FONT_FAMILY: str | None = None
-_IPYTHON_QT_LOOP_ENABLED = False
-_IPYKERNEL_WAKE_TIMER: object | None = None
-_IPYKERNEL_WAKE_INTERVAL_MS = 50
 _QT_WINDOW_BIND_RETRY_INTERVAL_MS = 16
 _QT_WINDOW_BIND_MAX_ATTEMPTS = 8
 
@@ -148,112 +142,6 @@ def _register_qt5_font(qt_gui: object) -> str:
     return expected
 
 
-def _install_ipykernel_wake_timer(shell: object) -> None:
-    """Bound how long ipykernel's idle Qt loop can starve the asyncio loop.
-
-    ipykernel with a dedicated kernel QEventLoop (7.x, and 6.x since ~6.16)
-    parks the idle kernel inside ``kernel.app.qt_event_loop``'s ``exec()``
-    and only leaves it on new shell-socket activity.  Two stalls follow: an
-    execute request that arrives while the loop is being re-entered can miss
-    its edge-triggered wake (the next cell hangs before its body even
-    starts), and a cell suspended in a top-level ``await`` never resumes
-    because asyncio timers cannot fire while ``exec()`` blocks the asyncio
-    loop.  Quitting the kernel's dedicated QEventLoop on a short interval
-    caps both stalls at the timer period; ipykernel re-enters the loop about
-    1 ms later after draining pending asyncio callbacks.  ipykernel builds
-    without the dedicated loop (early 6.x) idle in ``QApplication.exec_()``
-    directly, which must not be quit from a timer (that would tear down
-    nested loops), so the timer is only installed when the dedicated kernel
-    QEventLoop exists.
-    """
-
-    global _IPYKERNEL_WAKE_TIMER
-    if _IPYKERNEL_WAKE_TIMER is not None:
-        return
-    kernel = getattr(shell, "kernel", None)
-    if kernel is None:
-        return
-    qt_loop = getattr(getattr(kernel, "app", None), "qt_event_loop", None)
-    if not callable(getattr(qt_loop, "quit", None)):
-        return
-    modules = _load_qt5_modules()
-
-    def wake_kernel() -> None:
-        # Re-resolve each tick: %gui off/on replaces the kernel's QEventLoop.
-        loop = getattr(getattr(kernel, "app", None), "qt_event_loop", None)
-        if loop is not None:
-            loop.quit()
-
-    timer = modules.QtCore.QTimer(modules.QtWidgets.QApplication.instance())
-    timer.setInterval(_IPYKERNEL_WAKE_INTERVAL_MS)
-    timer.timeout.connect(wake_kernel)
-    timer.start()
-    _IPYKERNEL_WAKE_TIMER = timer
-
-
-def _enable_ipython_qt_loop() -> None:
-    """Install IPython's Qt pump once when a widget is created in a notebook."""
-
-    global _IPYTHON_QT_LOOP_ENABLED
-    if _IPYTHON_QT_LOOP_ENABLED:
-        return
-    if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() in {
-        "offscreen",
-        "minimal",
-    }:
-        return
-    # A shell that could be running this has already imported IPython --
-    # that is how it exists.  So its absence from sys.modules is proof there
-    # is no shell, and it is the one answer that costs two thirds of a
-    # second to hear: importing IPython to be told "not in one" was paid by
-    # every widget a plain process created.
-    ipython_module = sys.modules.get("IPython")
-    if ipython_module is None:
-        return
-    try:
-        get_ipython = getattr(ipython_module, "get_ipython")
-        shell = get_ipython()
-    except (AttributeError, ImportError, ModuleNotFoundError):
-        return
-    if shell is None:
-        return
-    run_line_magic = getattr(shell, "run_line_magic", None)
-    if not callable(run_line_magic):
-        return
-    try:
-        run_line_magic("gui", "qt5")
-    except Exception:
-        return
-    _IPYTHON_QT_LOOP_ENABLED = True
-    _install_ipykernel_wake_timer(shell)
-
-
-def _configure_qt5_high_dpi(qt_core: object, qt_widgets: object) -> None:
-    """Set process-wide Qt5 density attributes before QApplication exists."""
-
-    application_type = getattr(qt_widgets, "QApplication", None)
-    qt = getattr(qt_core, "Qt", None)
-    if application_type is None or qt is None or application_type.instance() is not None:
-        return
-    for name in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps"):
-        attribute = getattr(qt, name, None)
-        if attribute is not None:
-            application_type.setAttribute(attribute, True)
-
-
-def _missing_qt5_high_dpi_attributes(qt_core: object, application: object) -> tuple[str, ...]:
-    qt = getattr(qt_core, "Qt", None)
-    test_attribute = getattr(application, "testAttribute", None)
-    if qt is None or not callable(test_attribute):
-        return ()
-    return tuple(
-        name
-        for name in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps")
-        if getattr(qt, name, None) is not None
-        and not bool(test_attribute(getattr(qt, name)))
-    )
-
-
 def _load_qt5_modules() -> _QtModules:
     global _QT_MODULES
     if _QT_MODULES is not None:
@@ -267,7 +155,6 @@ def _load_qt5_modules() -> _QtModules:
             "Qt5PlotWidget requires PyQt5; "
             "install the root `zou-lab-control` product."
         ) from error
-    _configure_qt5_high_dpi(qt_core, qt_widgets)
     _QT_MODULES = _QtModules(qt_core, qt_gui, qt_widgets)
     return _QT_MODULES
 
@@ -275,47 +162,23 @@ def _load_qt5_modules() -> _QtModules:
 def ensure_qt5_application(
     argv: list[str] | tuple[str, ...] | None = None,
 ) -> object:
-    """Return the owner-thread QApplication with Qt5 DPR support enabled.
+    """Return the owner-thread QApplication with the plot font registered.
 
-    Density attributes must be selected before the first QApplication is
-    created.  Calling this entry point instead of constructing QApplication
-    directly gives both standalone programs and notebook-launched Qt windows
-    the same per-monitor DPR contract.
+    The application has ONE owner, ``zlc_ui.qt.ensure_qt_app``: High-DPI
+    attributes before construction, owner-thread checks, the notebook's Qt
+    loop and the protection against Qt's teardown at interpreter exit.  A
+    second constructor here had drifted from it -- a notebook with a window
+    and a plot ran the ``%gui`` magic twice and two kernel wake timers, and
+    a process that only drew plots exited without that protection.  This
+    adds only what a plot needs: the packaged Helvetica Light.
     """
 
-    global _QT_APPLICATION
     modules = _load_qt5_modules()
-    QtCore, QtWidgets = modules.QtCore, modules.QtWidgets
-    application = QtWidgets.QApplication.instance()
-    if application is not None:
-        if not isinstance(application, QtWidgets.QApplication):
-            raise RuntimeError("the active Qt application is not a QApplication")
-        if QtCore.QThread.currentThread() != application.thread():
-            raise RuntimeError("QApplication must be accessed from its owner thread")
-        missing = _missing_qt5_high_dpi_attributes(QtCore, application)
-        if missing:
-            raise RuntimeError(
-                "the existing QApplication was created without Qt5 High-DPI "
-                f"attributes ({', '.join(missing)}); restart the process and call "
-                "ensure_qt5_application() before constructing QApplication"
-            )
-        _register_qt5_font(modules.QtGui)
-        _QT_APPLICATION = application
-        _enable_ipython_qt_loop()
-        return application
-    if threading.current_thread() is not threading.main_thread():
-        raise RuntimeError("QApplication must be created on the Python main thread")
-    if argv is not None and not isinstance(argv, (list, tuple)):
-        raise TypeError("QApplication argv must be a list, tuple, or None")
-    selected_argv = sys.argv if argv is None else argv
-    arguments = list(selected_argv)
-    if any(not isinstance(value, str) for value in arguments):
-        raise TypeError("QApplication arguments must be strings")
-    _configure_qt5_high_dpi(QtCore, QtWidgets)
-    _QT_APPLICATION = QtWidgets.QApplication(arguments)
+    from zlc_ui.qt import ensure_qt_app
+
+    application = ensure_qt_app(argv)
     _register_qt5_font(modules.QtGui)
-    _enable_ipython_qt_loop()
-    return _QT_APPLICATION
+    return application
 
 
 def _qt5_plot_widget_class() -> type[Any]:
@@ -536,8 +399,6 @@ def _qt5_plot_widget_class() -> type[Any]:
             if not isinstance(auto_present, bool):
                 raise TypeError("auto_present must be a boolean")
             ensure_qt5_application()
-            _register_qt5_font(modules.QtGui)
-            _enable_ipython_qt_loop()
             super().__init__(parent)
             self._host = host
             self._auto_present = auto_present
@@ -776,8 +637,24 @@ def _qt5_plot_widget_class() -> type[Any]:
                 front = self._queued_front
                 self._queued_front = None
                 self._front_signal_pending = False
+            current = self._front
             if front is not None and (
-                self._auto_present or self._gesture_front is not None
+                self._auto_present
+                or self._gesture_front is not None
+                # A density change is this widget's own surface event, and
+                # its re-render is the same shot at the new backing density
+                # (``_install_preview`` holds a staged widget to the shot it
+                # shows).  No shot coordination ever presents it, so on a
+                # stopped source the old density stayed on screen, scaled.
+                or (
+                    current is not None
+                    and not math.isclose(
+                        current.device_pixel_ratio,
+                        front.device_pixel_ratio,
+                        rel_tol=0.0,
+                        abs_tol=1.0e-12,
+                    )
+                )
             ):
                 latest = self._host.front
                 if (
@@ -1019,30 +896,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return
             if self._pointer_button is not None or self._gesture_front is not None:
                 self._cancel_active_interaction()
-            future = self._host.set_device_pixel_ratio(selected)
-            if self._unsubscribe is None:
-                # A staged widget has no front subscription, but a DPR change
-                # is this widget's own surface event: hand the re-rendered
-                # front through the queued handoff auto-present uses.  The
-                # front carries the same data revision at the new backing
-                # density, so cross-host shot coordination is unaffected.
-                def hand_over(done: Future[object]) -> None:
-                    if done.cancelled() or done.exception() is not None:
-                        return
-                    front = getattr(done.result(), "front", None)
-                    current = self._front
-                    if (
-                        front is not None
-                        and not self._closed
-                        and (
-                            current is None
-                            or front.identity.sequence > current.identity.sequence
-                        )
-                    ):
-                        self._on_front(front)
-
-                future.add_done_callback(hand_over)
-            self._track(future)
+            self._track(self._host.set_device_pixel_ratio(selected))
 
         def paintEvent(self, event: object) -> None:
             painter = modules.QtGui.QPainter(self)

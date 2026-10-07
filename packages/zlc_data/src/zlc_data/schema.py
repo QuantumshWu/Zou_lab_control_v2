@@ -37,6 +37,26 @@ def _ordered_subset(candidate: tuple[AxisId, ...], available: tuple[AxisId, ...]
     return positions == sorted(positions)
 
 
+def _folded(codes: np.ndarray | range) -> np.ndarray | range:
+    """One code vector as the mapping it is: a range wherever it is one.
+
+    ``range(n)`` and the array ``0..n-1`` name the same rows, so a schema
+    built through one and a schema built through the other are one schema
+    -- by equality, hash and fingerprint alike.  The authored encoding is
+    kept as written; this is only what they are compared by.
+    """
+
+    if isinstance(codes, range):
+        return codes
+    first = int(codes[0])
+    if codes.size == 1:
+        return range(first, first + 1)
+    step = int(codes[1]) - first
+    if step and bool(np.all(np.diff(codes) == step)):
+        return range(first, first + step * codes.size, step)
+    return codes
+
+
 @dataclass(frozen=True, eq=False)
 class DomainSpec:
     """One physical domain and its logical named axes.
@@ -56,6 +76,9 @@ class DomainSpec:
     #: None is the ordinary, already complete mapping: (1, 1) for every axis.
     axis_code_repeats: tuple[tuple[int, int], ...] | None = None
     _codes: Any = field(init=False, repr=False, compare=False, default=None)
+    #: ``axis_codes`` as the mappings they are (see ``_folded``): what
+    #: equality, hash and fingerprint compare.
+    _mapping: Any = field(init=False, repr=False, compare=False, default=None)
     #: Filled on first request, per row asked: the live commit asks the
     #: same domain the same question for every event it publishes.
     _coordinate_counts: Any = field(init=False, repr=False, compare=False, default=None)
@@ -151,6 +174,9 @@ class DomainSpec:
         object.__setattr__(self, "shape", shape)
         object.__setattr__(self, "axes", axes)
         object.__setattr__(self, "axis_codes", normalized_codes)
+        object.__setattr__(self, "_mapping", None if normalized_codes is None else tuple(
+            _folded(codes) for codes in normalized_codes
+        ))
         object.__setattr__(self, "axis_code_repeats", repeats)
         object.__setattr__(self, "_codes", [None] * len(axes))
         object.__setattr__(self, "_coordinate_counts", {})
@@ -169,12 +195,12 @@ class DomainSpec:
             left == right if isinstance(left, range) and isinstance(right, range)
             else False if isinstance(left, range) or isinstance(right, range)
             else np.array_equal(left, right)
-            for left, right in zip(self.axis_codes, other.axis_codes, strict=True)
+            for left, right in zip(self._mapping, other._mapping, strict=True)
         )
 
     def __hash__(self) -> int:
-        return hash((self.shape, self.axes, None if self.axis_codes is None else tuple(
-            codes if isinstance(codes, range) else tuple(codes) for codes in self.axis_codes
+        return hash((self.shape, self.axes, None if self._mapping is None else tuple(
+            codes if isinstance(codes, range) else tuple(codes) for codes in self._mapping
         ), self.axis_code_repeats))
 
     @cached_property
@@ -248,30 +274,38 @@ class DomainSpec:
         primary = self.coordinate_axis(axis_id)
         return (primary,) + tuple(axis for axis in self.axes if axis.coordinate_of == primary.axis_id)
 
-    def coordinate_counts(self, current_row: int = -1) -> tuple[int, ...]:
+    def coordinate_counts(
+        self, current_row: int = -1, present: np.ndarray | None = None,
+    ) -> tuple[int, ...]:
         """Distinct coordinates along each axis, the other axes held at ``current_row``.
 
-        With every carrier row present this is a property of the domain and
-        the row, so it is computed once per row and kept: a monitor asks it
-        of one domain at its last row for every event it ever publishes.
+        ``present`` limits the count to those carrier rows (a finite run's
+        written ones); None is every row.  An alternative coordinate moves
+        with its primary, so neither holds the other fixed.  With every
+        carrier row present this is a property of the domain and the row, so
+        it is computed once per row and kept: a monitor asks it of one domain
+        at its last row for every event it ever publishes.
         """
 
         if not self.axes:
             return ()
         row = int(current_row) % self.size
-        counts = self._coordinate_counts.get(row)
+        if present is not None and (present.dtype != np.dtype(bool) or present.shape != (self.size,)):
+            raise ValueError("present rows must be a bool vector matching the carrier")
+        counts = self._coordinate_counts.get(row) if present is None else None
         if counts is None:
             result: list[int] = []
             primary_ids = tuple(axis.coordinate_of or axis.axis_id for axis in self.axes)
             codes = tuple(self.codes(axis.axis_id) for axis in self.axes)
             for target, target_codes in enumerate(codes):
-                rows = np.ones(self.size, dtype=bool)
+                rows = np.ones(self.size, dtype=bool) if present is None else present.copy()
                 for index, other_codes in enumerate(codes):
                     if primary_ids[index] != primary_ids[target]:
                         rows &= other_codes == other_codes[row]
                 result.append(int(np.unique(target_codes[rows]).size))
             counts = tuple(result)
-            self._coordinate_counts[row] = counts
+            if present is None:
+                self._coordinate_counts[row] = counts
         return counts
 
     def coordinate_rows(self, current_row: int) -> slice | np.ndarray:

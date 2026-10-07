@@ -883,6 +883,45 @@ def test_task_can_accept_a_stop_inside_its_terminal_commit(tmp_path: Path) -> No
         plane.close()
 
 
+def test_a_task_start_the_plane_refuses_ends_failed_and_says_why(tmp_path) -> None:
+    """A Start the signal plane refuses is a failed run, not a host starting.
+
+    Another producer already holds this Task's generation on the plane.  The
+    host ends FAILED with the plane's reason, its run directory records the
+    failure instead of standing empty, and the next Start -- once the name
+    is free -- is not refused as pending work.
+    """
+
+    declaration = DatasetOutputDeclaration("value", "test.value")
+    wake = Event()
+    plane = SignalDataPlane()
+    squatter = _Source("refused-task", declaration)
+    plane.begin_generation(squatter)
+
+    class Node:
+        def execute(self, context):
+            context.report_progress("measuring")
+            context.commit_live({"value": monitor_output(declaration, 1.0)})
+            return {}
+
+    host = _host(Node(), plane, wake, instance_id="refused-task", kind="task",
+                 outputs=(declaration,))
+    try:
+        with pytest.raises(RuntimeError, match="already active"):
+            host.start(run_root=tmp_path, input_summary={})
+        observation = host.poll()
+        assert observation.terminal and observation.phase == "failed", observation
+        assert "already active" in observation.error
+        document = json.loads((host.run_directory / "run.json").read_text())
+        assert document["status"]["state"] == "failed"
+        plane.retire(squatter)
+        host.start(run_root=tmp_path, input_summary={})
+        assert _wait(host, wake).phase == "done"
+    finally:
+        host.shutdown()
+        plane.close()
+
+
 class _Source:
     def __init__(
         self,
@@ -1317,9 +1356,17 @@ def test_processor_input_range_keeps_siblings_together_and_releases_history(view
         assert a.run_record == b.run_record and a.event_record == b.event_record
         values = a.values.reshape(-1).tolist()
         assert b.values.reshape(-1).tolist() == [10.0 * value for value in values]
-        assert a.snapshot.expanded_validity().reshape(-1).tolist() == [value != 3.0 for value in values]
-        np.testing.assert_array_equal(a.snapshot.materialize().block.sigma, np.full(a.values.shape, 0.25))
-        assert a.event_record["device_settings"]["source"]["epoch_ranges"] == ((int(values[0]), int(values[-1])),)
+        # A window is its N positions from the first event on: a row the
+        # bundle did not hold yet is a hole (0.0 here), invalid in every
+        # sibling, with no sigma and no record.
+        held = [value != 0.0 for value in values]
+        assert a.snapshot.expanded_validity().reshape(-1).tolist() == [
+            ok and value != 3.0 for value, ok in zip(values, held)]
+        assert b.snapshot.expanded_validity().reshape(-1).tolist() == [
+            ok and value != 3.0 for value, ok in zip(values, held)]
+        np.testing.assert_array_equal(a.snapshot.materialize().block.sigma.reshape(-1)[held], 0.25)
+        numbers = [int(value) for value, ok in zip(values, held) if ok]
+        assert a.event_record["device_settings"]["source"]["epoch_ranges"] == ((numbers[0], numbers[-1]),)
         seen.append(values)
         if finish == "failed" and len(seen) == 3:
             raise RuntimeError("range processor failed")
@@ -1358,7 +1405,7 @@ def test_processor_input_range_keeps_siblings_together_and_releases_history(view
         settle(lambda: len(seen) == 2)
         publish(4)
         settle(lambda: len(seen) == 3)
-        assert seen == ([[2.0], [2.0, 3.0], [3.0, 4.0]] if view == "window"
+        assert seen == ([[0.0, 2.0], [2.0, 3.0], [3.0, 4.0]] if view == "window"
                         else [[2.0], [3.0], [4.0]])
         if finish == "cancel":
             consumer.cancel()
@@ -1527,9 +1574,9 @@ def test_a_run_refused_for_its_input_leaves_no_directory(tmp_path) -> None:
 def test_a_schema_advance_ends_a_processor_cancelled_not_failed() -> None:
     """GenerationSchemaAdvanced says so itself: NOT a fault.
 
-    An output that changes shape needs a new generation -- a derivation
-    whose Point domain grows one row per shot while a window fills, or a
-    pulse restart that changes the frame shape.  Landing it as ``failed``
+    An output that changes shape needs a new generation -- a program whose
+    result takes its shape from the data, or a pulse restart that changes
+    the frame shape.  Landing it as ``failed``
     made the console clear ``following`` for good, so the restart that
     would have granted that new generation never came: occupancy vanished
     from the overlay combobox permanently.  CANCELLED is the phase an
