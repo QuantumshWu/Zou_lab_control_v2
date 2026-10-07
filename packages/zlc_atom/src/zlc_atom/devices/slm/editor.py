@@ -65,7 +65,10 @@ def _snapshot(values: np.ndarray, signal: str, revision: int, generation: str):
     )
 
 
-def _host(build_host, generation: str, values: np.ndarray, signal: str, title: str):
+def _host(
+    build_host, generation: str, values: np.ndarray, signal: str, title: str,
+    *, side_distribution: bool,
+):
     prefix = f"slm_editor.{signal}"
     return build_host(
         _snapshot(values, signal, 0, generation),
@@ -78,6 +81,7 @@ def _host(build_host, generation: str, values: np.ndarray, signal: str, title: s
         # 490 x 357 logical viewport users had before phase-layer controls;
         # settings live on separate tabs instead of shrinking this surface.
         size=_DEFAULT_PLOT_SIZE,
+        parameters={"side_distribution": side_distribution},
     )
 
 
@@ -192,16 +196,23 @@ class SlmEditorControl(QtCore.QObject):
             max_workers=1, thread_name_prefix="slm-command"
         )
         self._generation = f"control.{self.device_key}"
+        # The Pattern page's two plots are pictures read side by side, by
+        # their shape: without the side distribution and colorbar beside
+        # each, there is less to read than the pattern itself.  The
+        # Wavefront page keeps both.
         self._target_host = _host(
-            build_host, self._generation, self._target, "target", "Target intensity"
+            build_host, self._generation, self._target, "target", "Target intensity",
+            side_distribution=False,
         )
         self._phase_host = _host(
             build_host, self._generation,
             self._phase, "phase", "Science phase (pre-correction)",
+            side_distribution=False,
         )
         self._wavefront_host = _host(
             build_host, self._generation,
             self._wavefront_phase, "wavefront", "Wavefront phase (rad)",
+            side_distribution=True,
         )
         self._target_host.set_interaction_enabled(False)
         self._phase_host.set_interaction_enabled(False)

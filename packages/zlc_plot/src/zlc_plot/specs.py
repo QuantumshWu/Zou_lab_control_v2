@@ -1056,6 +1056,18 @@ def history_window_requirement(
     return window
 
 
+#: Rolling and Image lay their side distribution out only while this is on.
+#: An Image's colorbar stands on the distribution's axis, so it goes with it,
+#: and the picture keeps the box it had beside them.
+_SIDE_DISTRIBUTION_PARAMETER = ParameterSpec(
+    "side_distribution",
+    bool,
+    RenderEffect.LAYOUT,
+    default=True,
+    label="Side distribution",
+)
+
+
 def _build_parameter_schema(
     kind: PlotKind,
     semantic_kind: PlotKind,
@@ -1143,21 +1155,17 @@ def _build_parameter_schema(
     if semantic_kind is PlotKind.IMAGE:
         # A FacetGrid whose cell is an image carries the FULL image surface:
         # the focused cell is the standalone Image kind, so its parameters
-        # (colorbar included) must exist here too.  The overview keeps the
-        # colorbar hidden through the renderer's visibility mechanism.
+        # (colorbar and side distribution included) must exist here too.
+        # The overview keeps the colorbar hidden through the renderer's
+        # visibility mechanism.
         entries.extend(_image_parameters(style))
+        entries.append(_SIDE_DISTRIBUTION_PARAMETER)
     if kind is PlotKind.ROLLING:
         entries.extend(
             (
                 _bin_count_parameter(_ROLLING_DISTRIBUTION_BIN_EFFECTS),
                 _window_parameter(100),
-                ParameterSpec(
-                    "side_distribution",
-                    bool,
-                    RenderEffect.LAYOUT,
-                    default=True,
-                    label="Side distribution",
-                ),
+                _SIDE_DISTRIBUTION_PARAMETER,
                 # How many shots each drawn point averages: 1 is the shot
                 # itself, N is the mean of the last N -- the live "rate
                 # over the recent past" view, with the standard error of

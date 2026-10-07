@@ -1371,6 +1371,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             # a label wherever it likes and no margin can be reserved for
             # a place that moves.
             image_scene=self._draws_height_bars(spec, state),
+            image_side_distribution=(
+                not isinstance(semantic_spec(spec), ImagePlot)
+                or bool(state["side_distribution"])
+            ),
             layout=self._defaults.layout,
             style=self._defaults.style,
         )
