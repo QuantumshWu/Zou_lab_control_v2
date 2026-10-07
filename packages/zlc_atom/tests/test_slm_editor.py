@@ -908,8 +908,8 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
                     )
                 ),
             )
-            # The Pattern page's pictures stand without a side distribution
-            # or colorbar; the Wavefront page keeps both.
+            # The Editor's pictures stand without a side distribution or
+            # colorbar.
             _pump(
                 app,
                 lambda: roles(control._target_widget) == ["image"]
@@ -935,7 +935,7 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
             _pump(
                 app,
                 lambda: control._wavefront_widget.size() == QtCore.QSize(490, 357)
-                and roles(control._wavefront_widget) == ["colorbar", "distribution", "image"],
+                and roles(control._wavefront_widget) == ["image"],
             )
             assert isinstance(control._wavefront_parameter_scroll, FluentScrollArea)
             assert isinstance(control._wavefront_plot_scroll, FluentScrollArea)

@@ -65,10 +65,7 @@ def _snapshot(values: np.ndarray, signal: str, revision: int, generation: str):
     )
 
 
-def _host(
-    build_host, generation: str, values: np.ndarray, signal: str, title: str,
-    *, side_distribution: bool,
-):
+def _host(build_host, generation: str, values: np.ndarray, signal: str, title: str):
     prefix = f"slm_editor.{signal}"
     return build_host(
         _snapshot(values, signal, 0, generation),
@@ -81,7 +78,10 @@ def _host(
         # 490 x 357 logical viewport users had before phase-layer controls;
         # settings live on separate tabs instead of shrinking this surface.
         size=_DEFAULT_PLOT_SIZE,
-        parameters={"side_distribution": side_distribution},
+        # The target, the phase solved for it and the wavefront added to it
+        # are read by their shape, not off a colour scale: none draws a side
+        # distribution or colorbar beside it.
+        parameters={"side_distribution": False},
     )
 
 
@@ -196,23 +196,16 @@ class SlmEditorControl(QtCore.QObject):
             max_workers=1, thread_name_prefix="slm-command"
         )
         self._generation = f"control.{self.device_key}"
-        # The Pattern page's target and the science phase solved for it are
-        # read by their shape, not off a colour scale, so they draw without
-        # a side distribution or colorbar.  The Wavefront preview keeps
-        # both: its colorbar is the only scale of its phase in rad.
         self._target_host = _host(
-            build_host, self._generation, self._target, "target", "Target intensity",
-            side_distribution=False,
+            build_host, self._generation, self._target, "target", "Target intensity"
         )
         self._phase_host = _host(
             build_host, self._generation,
             self._phase, "phase", "Science phase (pre-correction)",
-            side_distribution=False,
         )
         self._wavefront_host = _host(
             build_host, self._generation,
             self._wavefront_phase, "wavefront", "Wavefront phase (rad)",
-            side_distribution=True,
         )
         self._target_host.set_interaction_enabled(False)
         self._phase_host.set_interaction_enabled(False)
