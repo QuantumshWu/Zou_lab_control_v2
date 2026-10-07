@@ -12137,6 +12137,8 @@ class MatplotlibRenderer:
             return
         self._artists[signature_key] = signature
         collection = self._artists.get(f"{key}:points")
+        path_collection = self._artists.get(f"{key}:point-paths")
+        path_ends = self._artists.get(f"{key}:point-path-ends")
         labels: list[Any] = self._artists.setdefault(f"{key}:point-labels", [])
         statuses = None if overlay is None else overlay.statuses_for(self.spec, facet_value)
         if (
@@ -12145,11 +12147,15 @@ class MatplotlibRenderer:
         ):
             if collection is not None:
                 collection.set_visible(False)
+            if path_collection is not None:
+                path_collection.set_visible(False)
+            if path_ends is not None:
+                path_ends.set_visible(False)
             for label in labels:
                 label.set_visible(False)
             return
 
-        from matplotlib.collections import EllipseCollection
+        from matplotlib.collections import EllipseCollection, LineCollection
         from matplotlib.colors import to_rgba
 
         canonical = np.asarray(overlay.coordinates, dtype=float)
@@ -12214,6 +12220,56 @@ class MatplotlibRenderer:
             for status in statuses
         )
         linewidths = tuple(tokens[status].linewidth for status in statuses)
+        if overlay.paths_xy is None:
+            if path_collection is not None:
+                path_collection.set_visible(False)
+            if path_ends is not None:
+                path_ends.set_visible(False)
+        else:
+            paths = np.empty_like(overlay.paths_xy)
+            paths[..., 0] = x_quantity.canonical_unit.convert_value_to(
+                overlay.paths_xy[..., 0], x_quantity.display_unit
+            )
+            paths[..., 1] = y_quantity.canonical_unit.convert_value_to(
+                overlay.paths_xy[..., 1], y_quantity.display_unit
+            )
+            path_colors = tuple(
+                to_rgba(
+                    self.style.palette.line_color(index),
+                    0.0 if edgecolors[index][-1] == 0.0
+                    else self.style.artists.curve.alpha,
+                )
+                for index in range(overlay.count)
+            )
+            if path_collection is None:
+                path_collection = LineCollection(
+                    paths,
+                    colors=path_colors,
+                    linewidths=self.style.artists.curve.linewidth,
+                    zorder=self.style.artists.point_zorder - 0.5,
+                    clip_on=True,
+                )
+                axis.add_collection(path_collection)
+                self._artists[f"{key}:point-paths"] = path_collection
+            else:
+                path_collection.set_segments(paths)
+                path_collection.set_colors(path_colors)
+                path_collection.set_visible(True)
+            if path_ends is None:
+                path_ends = axis.scatter(
+                    paths[:, -1, 0], paths[:, -1, 1],
+                    s=self.style.artists.curve_marker_size_pt ** 2,
+                    marker="s", facecolors="none", edgecolors=path_colors,
+                    linewidths=linewidths,
+                    zorder=self.style.artists.point_zorder,
+                    clip_on=True,
+                )
+                self._artists[f"{key}:point-path-ends"] = path_ends
+            else:
+                path_ends.set_offsets(paths[:, -1, :])
+                path_ends.set_edgecolors(path_colors)
+                path_ends.set_linewidths(linewidths)
+                path_ends.set_visible(True)
         # Matplotlib treats a tuple as one custom ``(offset, dash)``
         # specification; use a list for per-element styles instead.
         linestyles = [

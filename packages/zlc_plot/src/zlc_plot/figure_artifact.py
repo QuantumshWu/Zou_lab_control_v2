@@ -287,6 +287,10 @@ def _overlay_payload(plot_input: object, prefix: str) -> tuple[dict[str, np.ndar
     overlay = plot_input.overlay
     arrays = {f"{prefix}.coordinates": np.asarray(overlay.coordinates, dtype="<f8")}
     document: dict[str, object] = {"revision": overlay.revision, "coordinates": f"{prefix}.coordinates"}
+    if overlay.paths_xy is not None:
+        key = f"{prefix}.paths_xy"
+        arrays[key] = np.asarray(overlay.paths_xy, dtype="<f8")
+        document["paths_xy"] = key
     for name, values in (("point_ids", overlay.point_ids), ("labels", overlay.labels)):
         if values is not None:
             key = f"{prefix}.{name}"
@@ -311,7 +315,7 @@ def _overlay_payload(plot_input: object, prefix: str) -> tuple[dict[str, np.ndar
 def _restore_overlay(snapshot: OwnedSnapshot, arrays: Mapping[str, np.ndarray], value: object) -> object:
     if value is None:
         return snapshot
-    allowed = {"revision", "coordinates", "point_ids", "labels", "static_statuses", "status"}
+    allowed = {"revision", "coordinates", "point_ids", "labels", "static_statuses", "status", "paths_xy"}
     if not isinstance(value, Mapping) or not {"revision", "coordinates"} <= set(value) or set(value) - allowed:
         raise ValueError("figure overlay fields differ")
     def strings(name: str) -> tuple[str, ...] | None:
@@ -322,6 +326,7 @@ def _restore_overlay(snapshot: OwnedSnapshot, arrays: Mapping[str, np.ndarray], 
         strings("point_ids"), None if labels is None else tuple(None if item == "" else item for item in labels),
         None if "static_statuses" not in value else tuple(PointStatus(item) for item in strings("static_statuses")),
         None if "status" not in value else snapshot_from_manifest(value["status"], arrays),
+        None if "paths_xy" not in value else np.asarray(arrays[str(value["paths_xy"])]),
     ))
 
 

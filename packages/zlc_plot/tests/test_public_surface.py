@@ -104,10 +104,12 @@ def test_image_frames_replace_the_complete_layer_and_keep_new_run_overlay(entry)
     overlay = ImagePointOverlay(
         10, np.asarray(((1.0, 0.5),)),
         static_statuses=(PointStatus.OCCUPIED,),
+        paths_xy=np.asarray((((1.0, 0.5), (2.0, 1.0), (1.0, 1.0)),)),
     )
     incoming = ImagePointOverlay(
         0, np.asarray(((1.0, 0.5),)),
         static_statuses=(PointStatus.EMPTY,),
+        paths_xy=np.asarray((((1.0, 0.5), (1.0, 0.5), (0.0, 1.0)),)),
     )
     spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
     service = RenderProcess("image-frame-contract") if entry == "process" else None
@@ -134,14 +136,16 @@ def test_image_frames_replace_the_complete_layer_and_keep_new_run_overlay(entry)
         assert host.front is not None
         assert host.front.identity.data_generation == "image-run-b"
         assert host.front.identity.data_revision == 10
+        with_paths = operation.front.buffer.as_rgba().copy()
 
         operation = update(bare)
         assert operation.front.identity.data_revision == 11
         assert operation.front.identity.image_overlay_revision is None
-        reference = RasterPlotHost.from_plot(first, spec)
+        reference = RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
         try:
             reference.wait_for_front(timeout=30)
-            reference.update_data(second).result(timeout=30)
+            next_frame = reference.update_data(ImageFrame(second, incoming)).result(timeout=30)
+            np.testing.assert_array_equal(with_paths, next_frame.front.buffer.as_rgba())
             clean = reference.update_data(bare).result(timeout=30).front
             np.testing.assert_array_equal(
                 operation.front.buffer.as_rgba(), clean.buffer.as_rgba(),
@@ -153,6 +157,62 @@ def test_image_frames_replace_the_complete_layer_and_keep_new_run_overlay(entry)
         host.close(timeout=30)
         if service is not None:
             service.close(timeout=30)
+
+def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> None:
+    """An XY path is ordered geometry, not a sorted X-axis curve."""
+
+    from dataclasses import replace
+    from PIL import Image
+    from zlc_data.figure_archive import read_archive
+    from zlc_plot import read_figure_plot, save_figure_artifact
+    from zlc_plot.errors import RevisionError
+
+    paths = np.asarray((
+        ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (1.0, 1.0), (0.0, 0.0)),
+        ((2.0, 1.0),) * 5,
+    ))
+    overlay = ImagePointOverlay(
+        0, paths[:, 0, :], point_ids=("moving", "stationary"), paths_xy=paths,
+    )
+    assert not overlay.paths_xy.flags.writeable
+    empty = ImagePointOverlay(0, np.empty((0, 2)), paths_xy=np.empty((0, 5, 2)))
+    assert empty.paths_xy.shape == (0, 5, 2)
+    spec = ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row"))
+    original = ImageFrame(_image_snapshot(), overlay)
+    image, archive = save_figure_artifact(
+        tmp_path / "paths", plot_input=original, spec=spec, parameters={}, size="2x2",
+    )
+    info, arrays, datasets = read_archive(archive)
+    restored, recipe = read_figure_plot(info, arrays, datasets, "data")
+    assert isinstance(restored, ImageFrame)
+    np.testing.assert_array_equal(restored.snapshot.block.values, original.snapshot.block.values)
+    np.testing.assert_array_equal(restored.overlay.paths_xy, paths)
+    assert restored.overlay.point_ids == ("moving", "stationary")
+    session = PlotSession(
+        restored, recipe["spec"], parameters=recipe["parameters"], size=recipe["size"],
+    )
+    try:
+        artists = session._renderer._artists
+        np.testing.assert_array_equal(artists["image:point-paths"].get_segments(), paths)
+        np.testing.assert_array_equal(artists["image:point-path-ends"].get_offsets(), paths[:, -1, :])
+        colors = artists["image:point-paths"].get_colors()
+        assert not np.array_equal(colors[0], colors[1])
+        composed = session.rgba().copy()
+        session._renderer.draw()
+        # Same tolerance as the existing native/Agg image parity cases.
+        assert np.max(np.abs(composed.astype(np.int16) - session.rgba().astype(np.int16))) <= 4
+        changed = paths.copy()
+        changed[0, 1, 0] = 0.5
+        with pytest.raises(RevisionError, match="different content"):
+            session.configure(image_overlay=replace(restored.overlay, paths_xy=changed))
+    finally:
+        session.close()
+    redrawn, _archive = save_figure_artifact(
+        tmp_path / "reopened", plot_input=restored, spec=recipe["spec"],
+        parameters=recipe["parameters"], size=recipe["size"],
+    )
+    with Image.open(image) as first, Image.open(redrawn) as second:
+        np.testing.assert_array_equal(np.asarray(first), np.asarray(second))
 
 def test_image_site_numbers_use_their_ring_status_style() -> None:
     """A small ordinal must remain visually attached to its status ring."""

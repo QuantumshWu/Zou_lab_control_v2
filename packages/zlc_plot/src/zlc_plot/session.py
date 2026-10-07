@@ -690,6 +690,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             and left.static_statuses == right.static_statuses
             and same_snapshot(left.status, right.status)
             and np.array_equal(left.coordinates, right.coordinates)
+            and (
+                left.paths_xy is right.paths_xy
+                or (left.paths_xy is not None and right.paths_xy is not None
+                    and np.array_equal(left.paths_xy, right.paths_xy))
+            )
         )
 
     @classmethod

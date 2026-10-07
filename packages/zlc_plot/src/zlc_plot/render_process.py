@@ -2187,6 +2187,7 @@ class RenderProcess:
                 document = snapshot_document if isinstance(value, OwnedSnapshot) else (
                     "overlay", value.revision, value.coordinates, value.point_ids,
                     value.labels, value.static_statuses, snapshot_document,
+                    value.paths_xy,
                 )
             entries.append((local, child_key, value, tuple(children), document))
             return _INPUT_REF, local
@@ -3248,7 +3249,7 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
         )
         return OwnedSnapshot(ref, block)
     if kind == "overlay":
-        _kind, revision, coordinates, point_ids, labels, statuses, status = value
+        _kind, revision, coordinates, point_ids, labels, statuses, status, paths = value
         return ImagePointOverlay(
             revision,
             np.asarray(coordinates),
@@ -3260,6 +3261,7 @@ def _owned_input(value: tuple, inputs: Mapping[int, object]) -> object:
                 if status is None
                 else _owned_input(status, inputs)
             ),
+            paths_xy=None if paths is None else np.asarray(paths),
         )
     raise ValueError(f"unknown render input kind {kind!r}")
 

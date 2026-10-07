@@ -240,6 +240,12 @@ class ImagePointOverlay:
 
     Hand-authored/calibration markers have no run axes.  Their one immutable
     ``static_statuses`` vector is the other, mutually exclusive case.
+
+    ``paths_xy``, when supplied, contains one ordered canonical x/y polyline
+    per point, with shape ``(N, K, 2)`` and at least one vertex.  Repeated
+    vertices and backtracking retain their order.  Point circles mark the
+    supplied anchors; squares mark the last vertex of each path.  Path colours
+    follow the shared palette in point order.
     """
 
     revision: int
@@ -248,6 +254,7 @@ class ImagePointOverlay:
     labels: tuple[str | None, ...] | None = None
     static_statuses: tuple[PointStatus, ...] | None = None
     status: OwnedSnapshot | None = None
+    paths_xy: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         revision = integer(self.revision, "revision", minimum=0)
@@ -265,6 +272,24 @@ class ImagePointOverlay:
             dtype=np.float64,
         ).reshape(canonical.shape)
         count = int(frozen.shape[0])
+
+        paths = self.paths_xy
+        if paths is not None:
+            paths = np.asarray(paths)
+            if (
+                paths.ndim != 3 or paths.shape[0] != count
+                or paths.shape[1] < 1 or paths.shape[2] != 2
+            ):
+                raise ValueError("paths_xy must have shape (N, K, 2), K >= 1")
+            if paths.dtype.kind not in "biuf":
+                raise TypeError("paths_xy must be numeric")
+            paths = np.asarray(paths, dtype=np.float64)
+            if not np.all(np.isfinite(paths)):
+                raise ValueError("paths_xy must be finite")
+            paths = np.frombuffer(
+                np.ascontiguousarray(paths).tobytes(order="C"),
+                dtype=np.float64,
+            ).reshape(paths.shape)
 
         point_ids = self.point_ids
         if point_ids is not None:
@@ -308,6 +333,7 @@ class ImagePointOverlay:
         object.__setattr__(self, "point_ids", point_ids)
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "static_statuses", static)
+        object.__setattr__(self, "paths_xy", paths)
 
     @staticmethod
     def _validate_dynamic_status(
