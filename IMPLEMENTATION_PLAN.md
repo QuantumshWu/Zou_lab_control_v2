@@ -455,7 +455,10 @@
 - B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。
 - Domain Task仍在B决定科学数据、路径及非Figure NPZ/JSON并register artifact；只把Figure执行能力由composition注入C。direct/notebook显式使用本地Plot，不把TaskArtifactContext或Runtime变成Plot owner。
 
-### 2.7 SLM GPU重排（单次实验Task在实施，未宣告硬件验收）
+### 2.7 SLM GPU重排（单次实验Task已完成软件验证，硬件待验收）
+
+- 2026-10-07 完成一次Pulse全流程：真实Qt操作、RTX5070Laptop GPU与虚拟设备，单个Context/Calibration自动生成2×2目标，首次9个occupied、复拍4/4填充；四个preview真实接受有效数据，phase不混入camera geometry，保存Figure可重开。此为128×128功能验收，不冒充全幅400阱或实验原子存活率。最后一次匹配/全部相位计算/回传13.34ms，GPU准备2.35s单列；18帧名义300ms、虚拟播放581ms，均有实际分阶段报告。窗口/children已关闭，证据仅在ignored research。
+- 对齐master `b1d8a1f2` 后12项Task/发现/overlay/状态定向检查通过。提前失败不归属旧run的播放记录，partial phase保留该图自己的device receipt；结束释放整段pinned movie，不把已保存影片留在completed node。软件实现位于worktree，未合并master；真实SLM服务端与客户端须同时更新sequence protocol v2，光学刷新/settle与原子损失仍需实验机验收。
 
 - 2026-10-07 当前Task输入为一个source Science Context、一个source Calibration和一个operator-authored Pulse。target_rows/target_columns默认3×3，从源roster现有格点生成中央完整矩形并保留对应权重；目标读出复用同一Calibration子集，不要求上传final Target/Context，也不另写final Science Context。
 - 光学核心与原子政策已在既有owner内分开：Task将第一张照片的valid occupied站点转为整数available_source_indices，调用plan_rearrangement(prepared, indices)，再把plan交给compute_rearrangement(prepared, plan)。保留采集前生成的CSR、预热的Numba匹配和原数值路线；本轮不新增scheduler/minimax/备用算法，不宣称任意碰撞约束下的全局最优。
