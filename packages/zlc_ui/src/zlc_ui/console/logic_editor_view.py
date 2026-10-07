@@ -29,6 +29,7 @@ from zlc_ui.fluent import (
     scaled_px,
 )
 from zlc_ui.form import FluentParameterForm, FormSpec
+from zlc_ui.form.qt_form import _form_label_width
 
 
 class LogicEditorView(QtWidgets.QWidget):
@@ -202,7 +203,13 @@ class LogicEditorView(QtWidgets.QWidget):
         }
         if structure != self._applied_structure:
             self._applied_structure = structure
+            label_width = _form_label_width((*spec.fields, *artifact_spec.fields))
+            self.artifact_form.set_label_width(label_width)
+            self.form.set_label_width(label_width)
             for widget in self._contributions.values():
+                set_width = getattr(widget, "set_label_width", None)
+                if callable(set_width):
+                    set_width(label_width)
                 widget.update_projection(incoming)
             self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
             self.artifact_form.setVisible(bool(artifact_spec.keys))

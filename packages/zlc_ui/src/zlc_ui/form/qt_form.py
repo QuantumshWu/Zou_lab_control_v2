@@ -1498,6 +1498,21 @@ class FluentParameterForm(QtWidgets.QWidget):
             default=0,
         )
 
+    def set_label_width(self, width: int) -> None:
+        """Share an editor column across forms without rewriting their values."""
+        if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
+            raise ValueError("label width must be a positive integer")
+        if width == self._label_width:
+            return
+        self._label_width = width
+        for field in self._spec.fields:
+            row = self._rows[field.key]
+            if isinstance(row, FluentSettingRow):
+                label = (_automatic_label(field, self._auto_switches[field.key].isChecked())
+                         if field.key in self._auto_switches else field.row_label)
+                row.set_label(label, width=width)
+        self.updateGeometry()
+
     def widget_for(self, key: str) -> QtWidgets.QWidget:
         try:
             return self._widgets[key]

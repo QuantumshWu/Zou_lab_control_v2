@@ -909,6 +909,7 @@ assert source_header.child(0).text() == 'frames  [1 × 1 × (3×96×128)]'
 handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()
+assert editor.artifact_form.widget_for('calibration_path').mapTo(editor, QtCore.QPoint()).x() == editor.form.widget_for('repeat').mapTo(editor, QtCore.QPoint()).x()
 publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
