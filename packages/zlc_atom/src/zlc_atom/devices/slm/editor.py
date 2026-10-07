@@ -424,11 +424,18 @@ class SlmEditorControl(QtCore.QObject):
             ("Grid", "Checkerboard", "Gaussian", "Flat Top", "Text")
         )
         form.addWidget(self._preset_type, 0, 1)
+        # Sites start 25 target pixels apart.  The spacing used to be a
+        # fraction of the SLM, which on a 1024 x 1272 panel put them 170
+        # pixels apart; only a target too small to hold the default grid
+        # that far apart gets the widest spacing that still holds it.
+        rows, columns = 5, 7
         specs = (
-            ("rows", "N rows", True, 5, 1, self.shape[0]),
-            ("columns", "M columns", True, 7, 1, self.shape[1]),
-            ("spacing_y", "Spacing Y", True, max(1, self.shape[0] // 6), 1, self.shape[0]),
-            ("spacing_x", "Spacing X", True, max(1, self.shape[1] // 8), 1, self.shape[1]),
+            ("rows", "N rows", True, rows, 1, self.shape[0]),
+            ("columns", "M columns", True, columns, 1, self.shape[1]),
+            ("spacing_y", "Spacing Y", True,
+             min(25, (self.shape[0] - 1) // (rows - 1)), 1, self.shape[0]),
+            ("spacing_x", "Spacing X", True,
+             min(25, (self.shape[1] - 1) // (columns - 1)), 1, self.shape[1]),
             ("intensity", "Intensity", False, 1.0, 0.0, 1000.0),
             ("edge", "Edge", False, max(2, min(self.shape) // 32), 0.0, min(self.shape)),
             ("radius_y", "Radius Y", False, max(1, self.shape[0] // 8), 1, self.shape[0]),

@@ -51,7 +51,9 @@ of the SLM height; its center and X/Y diameters are editable, and Off means
 uniform full-raster solver illumination. Wavefront puts full-raster Steering
 X/Y and Noll Z4-Z11 under the same Zernike switch. Pattern authoring offers
 exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
-and English/Chinese Text with both minimum site spacing and atom budget.
+and English/Chinese Text with both minimum site spacing and atom budget. Grid
+and Checkerboard sites start 25 target pixels apart, closer only where the
+target cannot hold the default 5 x 7 grid at that spacing.
 A strict Target JSON stores intensity plus objective only for Editor authoring
 import/export. Run consumers take no separate Target: a strict Science Context
 NPZ is their sole Target truth and stores it with the pre-command 16-bit circular
