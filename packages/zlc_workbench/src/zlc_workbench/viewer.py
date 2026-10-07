@@ -1201,7 +1201,7 @@ class _ArchiveDatasetProducer:
         self._overlay_signal = f"{self._data_signal}/overlay"
         self._run_record = None if run_record is None else dict(run_record)
         overlay = plot_input.overlay if isinstance(plot_input, ImageFrame) else None
-        self._status = None if overlay is None else self._status_snapshot(plot_input)
+        self._status = None if overlay is None else overlay.status
         outputs = [DatasetOutputDeclaration("data", "figure.dataset")]
         if self._status is not None:
             from zlc_plot import IMAGE_POINT_OVERLAY_CONTRACT
@@ -1225,67 +1225,6 @@ class _ArchiveDatasetProducer:
     @property
     def overlay_signal(self) -> str:
         return self._overlay_signal if self._status is not None else ""
-
-    @staticmethod
-    def _status_snapshot(frame: object) -> object | None:
-        import numpy as np
-
-        from zlc_data import (
-            AxisId,
-            AxisSpec,
-            DatasetSchema,
-            DomainSpec,
-            SITE,
-            ValidityContract,
-            ValueSchema,
-            owned_snapshot_from_arrays,
-        )
-        from zlc_plot import PointStatus
-
-        overlay = frame.overlay
-        if overlay.status is not None:
-            return overlay.status
-        if overlay.static_statuses is None:
-            return None
-        image = frame.snapshot
-        count = len(overlay.static_statuses)
-        site_axis = AxisSpec(
-            AxisId("figure.overlay.site"),
-            "Site",
-            SITE,
-            count,
-            coordinates=tuple(range(1, count + 1)),
-        )
-        schema = DatasetSchema(
-            image.block.schema.repeat_domain,
-            image.block.schema.point_domain,
-            DomainSpec((count,), (site_axis,)),
-            ValueSchema(
-                ValidityContract.components(site_axis.axis_id),
-                np.dtype("?"),
-                "1",
-                name="occupied",
-            ),
-        )
-        occupied = np.asarray(
-            tuple(status is PointStatus.OCCUPIED for status in overlay.static_statuses),
-            dtype=np.bool_,
-        )
-        valid = np.asarray(
-            tuple(
-                status in (PointStatus.EMPTY, PointStatus.OCCUPIED)
-                for status in overlay.static_statuses
-            ),
-            dtype=np.bool_,
-        )
-        shape = schema.physical_shape
-        return owned_snapshot_from_arrays(
-            schema,
-            np.broadcast_to(occupied, shape),
-            image.block.revision,
-            validity=np.broadcast_to(valid, shape),
-            stream_generation=image.ref.stream_generation,
-        )
 
     def publish(
         self, plane: object, *, source_publication: tuple[str, object] | None = None
@@ -1317,6 +1256,16 @@ class _ArchiveDatasetProducer:
                 if status is None
                 else status.block.schema.cell_domain.axes[0]
             )
+            if status_axis is None and overlay.count:
+                from zlc_data import AxisId, AxisSpec, SITE
+
+                # Static annotations have point identity, not measurements.
+                # Keep their passive geometry without fabricating a bool
+                # status Dataset or losing UNKNOWN/INVALID through conversion.
+                status_axis = AxisSpec(
+                    AxisId("figure.overlay.site"), "Site", SITE, overlay.count,
+                    coordinates=tuple(range(1, overlay.count + 1)),
+                )
             if status_axis is not None:
                 point_ids = tuple(
                     overlay.point_ids
@@ -1337,6 +1286,8 @@ class _ArchiveDatasetProducer:
                         point_ids,
                         status_axis=status_axis,
                         labels=labels,
+                        paths_xy=overlay.paths_xy,
+                        static_statuses=overlay.static_statuses,
                     )
                 )
         outputs = {

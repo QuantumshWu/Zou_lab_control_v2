@@ -1956,9 +1956,11 @@ def test_save_image_captures_the_whole_window_in_today_folder(saved, monkeypatch
         window.close()
         _wait_until(lambda: not window.is_visible())
 
+@pytest.mark.parametrize("static", (False, True))
 def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     saved,
     tmp_path,
+    static,
 ) -> None:
     """The archive is the redraw input; calibration is not reopened."""
 
@@ -1997,13 +1999,18 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         snapshot.ref.revision,
         validity=np.ones(status_shape, dtype=np.bool_),
     )
+    from zlc_plot import PointStatus
+
+    paths = np.asarray((((2.5, 3.5), (3.5, 4.5), (3.5, 4.5), (2.5, 3.5)),
+                        ((7.5, 9.5), (7.5, 8.5), (7.5, 8.5), (2.5, 3.5))))
     overlay = ImagePointOverlay(
         7,
         np.asarray(((2.5, 3.5), (7.5, 9.5))),
         ("site-0", "site-1"),
         ("0", "1"),
-        None,
-        occupied,
+        (PointStatus.UNKNOWN, PointStatus.INVALID) if static else None,
+        None if static else occupied,
+        paths,
     )
     frozen = _frozen_surface(
         state,
@@ -2030,7 +2037,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     archive = written.archive
     with np.load(archive, allow_pickle=False) as payload:
         assert "data.overlay.coordinates" in payload.files
-        assert "data.overlay.status" in payload.files
+        assert "data.overlay.paths_xy" in payload.files
+        assert ("data.overlay.status" in payload.files) is (not static)
 
     real_view = _ViewerView()
     real_view.dpr = 1.75
@@ -2054,18 +2062,19 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             restored_frame.overlay.coordinates,
             overlay.coordinates,
         )
-        assert (
-            restored_frame.overlay.status.block.schema
-            == overlay.status.block.schema
-        )
-        np.testing.assert_array_equal(
-            restored_frame.overlay.status.block.values,
-            overlay.status.block.values,
-        )
-        np.testing.assert_array_equal(
-            restored_frame.overlay.status.block.validity,
-            overlay.status.block.validity,
-        )
+        np.testing.assert_array_equal(restored_frame.overlay.paths_xy, paths)
+        np.testing.assert_array_equal(host._session.image_overlay.paths_xy, paths)
+        if static:
+            assert restored_frame.overlay.static_statuses == overlay.static_statuses
+            assert restored_frame.overlay.status is None
+            assert not active["state"].overlay_signal
+            assert [decl.name for decl in real_presenter._archive_producers[0].dataset_output_declarations] == ["data"]
+            np.testing.assert_array_equal(host._session._renderer._artists["image:point-paths"].get_segments(), paths)
+            assert host._session._renderer._artists["image:point-path-arrows"]
+        else:
+            assert restored_frame.overlay.status.block.schema == overlay.status.block.schema
+            np.testing.assert_array_equal(restored_frame.overlay.status.block.values, overlay.status.block.values)
+            np.testing.assert_array_equal(restored_frame.overlay.status.block.validity, overlay.status.block.validity)
         assert host.describe_display().result().value.spec.kind.value == "image"
         assert active["state"].selector
         assert host.selector_state(SelectorKind.AREA).result().value.value == (
@@ -2170,14 +2179,17 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         real_presenter._archive_producers = (producer,)
         front = plane.freeze()
         assert front.publication(source_signal) is updated
-        assert front.publication(active["state"].overlay_signal) is updated
+        if not static:
+            assert front.publication(active["state"].overlay_signal) is updated
 
         def refitted():
             real_presenter.beat()
             publication = plane.latest_publication(offset_signal)
+            roi = plane.latest_publication(derived_roi)
             return (
                 publication is not None
                 and publication.direct_parent_refs == (updated.event_ref,)
+                and roi is not None and roi.direct_parent_refs == (updated.event_ref,)
                 and real_presenter.panels[source_panel_id].display_publication is updated
             )
 

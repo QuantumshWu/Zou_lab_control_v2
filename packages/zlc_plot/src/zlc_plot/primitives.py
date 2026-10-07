@@ -96,6 +96,8 @@ def image_point_overlay_geometry(
     status_axis: AxisSpec,
     labels: object | None = None,
     coordinates_are_indices: bool = False,
+    paths_xy: object | None = None,
+    static_statuses: object | None = None,
 ) -> dict[str, object]:
     """Build the strict plain geometry document paired with an overlay signal."""
 
@@ -130,7 +132,7 @@ def image_point_overlay_geometry(
                 _axis_coordinates(y_axis, centers[:, 1]),
             )
         )
-    return {
+    document = {
         "coordinate_frame": (
             None
             if x_axis.coordinate_frame is None
@@ -146,6 +148,20 @@ def image_point_overlay_geometry(
             status_axis.coordinate_at(index) for index in range(status_axis.size)
         ],
     }
+    if paths_xy is not None or static_statuses is not None:
+        layer = ImagePointOverlay(
+            revision=0, coordinates=centers, paths_xy=paths_xy,
+            static_statuses=static_statuses,
+        )
+        if layer.paths_xy is not None:
+            paths = layer.paths_xy
+            if coordinates_are_indices:
+                paths = np.stack((_axis_coordinates(x_axis, paths[..., 0]),
+                                  _axis_coordinates(y_axis, paths[..., 1])), axis=-1)
+            document["paths_xy"] = paths.tolist()
+        if layer.static_statuses is not None:
+            document["static_statuses"] = [status.value for status in layer.static_statuses]
+    return document
 
 
 def image_point_overlay_geometry_matches(
@@ -181,7 +197,7 @@ def _validated_overlay_geometry(
         "status_axis_id",
         "status_coordinates",
     }
-    if set(geometry) != expected:
+    if not expected <= set(geometry) or set(geometry) - expected - {"paths_xy", "static_statuses"}:
         raise ValueError("image overlay geometry fields are not canonical")
     ids = tuple(str(value).strip() for value in tuple(geometry["point_ids"]))
     labels = tuple(str(value).strip() for value in tuple(geometry["labels"]))
@@ -468,6 +484,7 @@ def image_point_overlay_from_signal(
         point_ids=ids,
         labels=labels,
         status=status,
+        paths_xy=geometry.get("paths_xy"),
     )
 
 

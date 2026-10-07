@@ -1287,8 +1287,11 @@ class ConsolePresenter:
                 point_ids=point_ids,
                 labels=tuple(str(value) for value in geometry["labels"]),
                 static_statuses=tuple(
+                    PointStatus(value) for value in geometry["static_statuses"]
+                ) if "static_statuses" in geometry else tuple(
                     PointStatus.UNKNOWN for _ in point_ids
                 ),
+                paths_xy=geometry.get("paths_xy"),
             )
         binding.overlay_revision += 1
         return ImageFrame(snapshot, overlay), event_records
