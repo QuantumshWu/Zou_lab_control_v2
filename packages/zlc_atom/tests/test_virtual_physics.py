@@ -2055,6 +2055,23 @@ def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> 
         assert slm_solver.rearrangement_clearance(emitted) >= 4.5
         assert scheduled["selected_count"] == min(count, 100)
         assert scheduled["detour_ratio"] <= 1.002
+    # Pair pruning must preserve the brute-force continuous minimum, including
+    # held/resumed motion, duplicate points and arithmetic at different scales.
+    rng = np.random.default_rng(20261007)
+    for scale in (1e-6, 1., 1e6, 1e12):
+        start = rng.normal(size=(24, 2)) * scale
+        translation = np.linspace(0., 1., 7)[:, None, None] * np.array([3., -2.]) * scale
+        rigid = start[None] + translation
+        moving = rigid + rng.normal(size=rigid.shape) * scale
+        held = moving.copy()
+        held[1:4] = held[0]
+        for path in (rigid, moving, held):
+            squared, _, _ = slm_solver._rearrangement_pair_metrics(path)
+            assert slm_solver.rearrangement_clearance(path) == np.sqrt(np.min(squared))
+    for distance in (0., np.nextafter(4.5, 0.), 4.5, np.nextafter(4.5, np.inf)):
+        path = np.array([[[0., 0.], [0., distance]], [[1., 0.], [1., distance]]])
+        assert slm_solver.rearrangement_clearance(path) == distance
+    assert slm_solver.rearrangement_clearance([[[0, 0], [0, 2]], [[0, 2], [0, 0]]]) == 0
 
 
 @pytest.mark.parametrize("shape", ((64, 80), (127, 159)))
@@ -2226,6 +2243,28 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         translated = slm_solver.compute_rearrangement(
             translated_prepared, slm_solver.plan_rearrangement(translated_prepared, np.arange(4)), motion_frames=5,
         )
+        held_plan = slm_solver.plan_rearrangement(translated_prepared, np.arange(4))
+        held_plan = {**held_plan, "motion_yx": np.stack((held_plan["motion_yx"][0],
+                    held_plan["motion_yx"][0], held_plan["motion_yx"][-1])), "fraction": np.array([0., .4, 1.])}
+        delivered = []
+        held = slm_solver.compute_rearrangement(
+            translated_prepared, held_plan, motion_frames=5,
+            frame_ready=lambda index, frame: delivered.append((index, frame)),
+        )
+        assert held["verified_frame_reuses"] == 1
+        np.testing.assert_array_equal(held["phase_codes"][0], held["phase_codes"][1])
+        assert held["pupil_phase_step_rms_rad"][1] < 1e-6
+        assert [index for index, _ in delivered] == list(range(5))
+        assert all(not frame.flags.writeable for _, frame in delivered)
+        for frame, (_, code) in enumerate(delivered):
+            positions = held["sites_yx"][frame] - center
+            field = pupil.astype(float) * np.exp(1j * (phase_from_codes(code, shape).astype(float) + aberration))
+            actual = np.einsum("jh,hw,jw->j", np.exp(-2j * np.pi * positions[:, 0, None] * y),
+                               field, np.exp(-2j * np.pi * positions[:, 1, None] * x), optimize=True)
+            np.testing.assert_allclose(held["actual_fields"][frame], actual, rtol=2e-5,
+                                       atol=2e-5 * np.min(abs(actual)))
+            relative = abs(actual / held["desired_amplitudes"][frame]) ** 2
+            assert relative.max() / relative.min() <= 1.01
         for frame, residue in ((0, 1), (1, 2), (3, 4)):
             positions = translated["sites_yx"][frame]
             signed = positions - center

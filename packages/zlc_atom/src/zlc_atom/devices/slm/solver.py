@@ -325,24 +325,29 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
     }
 
 
-def _rearrangement_pair_metrics(motion, source_indices=None):
+def _rearrangement_pair_metrics(motion, source_indices=None, target_indices=None):
     """One continuous same-time pair-distance calculation for gates and routing."""
     size = motion.shape[1]
     selected = np.arange(size) if source_indices is None else np.asarray(source_indices, np.intp)
-    minimum = np.full((len(selected), size), np.inf)
+    paired = None if target_indices is None else np.asarray(target_indices, np.intp)
+    minimum = np.full((len(selected), size) if paired is None else (len(selected),), np.inf)
     intervals = np.zeros_like(minimum, np.intp)
     times = np.zeros_like(minimum)
     for index in range(max(1, len(motion) - 1)):
         start = motion[index]
         end = motion[min(index + 1, len(motion) - 1)]
-        relative = start[selected, None] - start[None]
-        velocity = (end - start)[selected, None] - (end - start)[None]
+        relative = start[selected, None] - start[None] if paired is None else start[selected] - start[paired]
+        velocity = ((end - start)[selected, None] - (end - start)[None] if paired is None else
+                    (end - start)[selected] - (end - start)[paired])
         speed = np.sum(velocity ** 2, axis=-1)
         at = np.divide(-np.sum(relative * velocity, axis=-1), speed,
                        out=np.zeros_like(speed), where=speed > 0)
         at = np.clip(at, 0., 1.)
         squared = np.sum((relative + at[..., None] * velocity) ** 2, axis=-1)
-        squared[np.arange(len(selected)), selected] = np.inf
+        if paired is None:
+            squared[np.arange(len(selected)), selected] = np.inf
+        else:
+            squared[selected == paired] = np.inf
         update = squared < minimum
         minimum[update], intervals[update], times[update] = squared[update], index, at[update]
     return minimum, intervals, times
@@ -354,8 +359,30 @@ def rearrangement_clearance(motion_yx: object) -> float:
     if (motion.ndim != 3 or motion.shape[2] != 2 or len(motion) < 1
             or not np.all(np.isfinite(motion))):
         raise ValueError("motion_yx must contain finite frame, site, Y/X coordinates")
-    squared, _, _ = _rearrangement_pair_metrics(motion)
-    return float(np.sqrt(np.min(squared, initial=np.inf)))
+    if motion.shape[1] < 2:
+        return np.inf
+    initial, _, _ = _rearrangement_pair_metrics(motion[:1])
+    upper = float(np.min(initial))
+    if not np.any(motion[1:] != motion[:1]):
+        return float(np.sqrt(upper))
+    displacement = motion - motion[:1]
+    translation = np.mean(displacement, axis=1, keepdims=True)
+    residual = displacement - translation
+    radius = np.max(np.linalg.norm(residual, axis=-1), axis=0)
+    # The common translation cancels in every pair. A site's residual stays
+    # inside this vertex-radius bound along each continuous linear segment.
+    # Bound roundoff of the two subtractions/two-component norm outward;
+    # this is arithmetic error, not a physical clearance tolerance.
+    epsilon = np.finfo(np.float64).eps
+    gamma = 8 * epsilon / (1 - 8 * epsilon)
+    radius += gamma * np.sqrt(2.) * (np.max(abs(motion), axis=(0, 2))
+                                   + np.max(abs(motion[0]), axis=1) + np.max(abs(translation)))
+    lower = np.nextafter(np.sqrt(initial) - radius[:, None] - radius[None], -np.inf)
+    first, second = np.nonzero(np.triu(lower <= np.nextafter(np.sqrt(upper), np.inf), 1))
+    if len(first):
+        squared, _, _ = _rearrangement_pair_metrics(motion, first, second)
+        upper = min(upper, float(np.min(squared)))
+    return float(np.sqrt(upper))
 
 
 def preset_grid(
@@ -2327,14 +2354,6 @@ extern "C" __global__ void anderson_update(const float2* field,const float* targ
   for(int j=t;j<N;j+=256){if(target[j]<=0){c[j]=make_float2(0,0);continue;}double a=candidate[j]*normalizer;float2 p=phase[j];c[j]=make_float2((float)(a*p.x),(float)(a*p.y));}
   if(!t){state[0]=bad?1:min(count+1,2);state[1]=(slot+1)%3;}
 }
-extern "C" __global__ void clearance(const double* p,double* distances,int F,int N){
- int i=blockIdx.x*blockDim.x+threadIdx.x,j=blockIdx.y*blockDim.y+threadIdx.y;if(i>=N||j>=i)return;
- double best=1e300;
- for(int f=0;f<F;++f){int a=(f*N+i)*2,b=(f*N+j)*2;double y=p[a]-p[b],x=p[a+1]-p[b+1],yy=0,xx=0;
-  if(f+1<F){yy=p[a+N*2]-p[b+N*2]-y;xx=p[a+N*2+1]-p[b+N*2+1]-x;}
-  double v=yy*yy+xx*xx,t=v>0?fmin(1,fmax(0,-(y*yy+x*xx)/v)):0;y+=t*yy;x+=t*xx;best=fmin(best,y*y+x*x);}
- distances[i*N+j]=best;
-}
 '''
 
 
@@ -2367,12 +2386,19 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
                     pointer, pointer, integer, integer, integer, integer]
     gemm.restype = integer
     number = len(geometry["source_yx"])
+    maximum_selected = min(number, len(geometry["target_yx"]))
     maximum_removed = max(0, number - len(geometry["target_yx"]))
+    # Unselected integer sites share one band per source X. Each selected
+    # trajectory can add at most one(X, fractional-Y) band per frame.
+    source_columns = len(np.unique(geometry["source_yx"][:, 1]))
+    motion_bands = (min(number, source_columns + maximum_selected) + 15) // 16 * 16
     halo_columns = len(np.unique(geometry["source_yx"][:, 1, None] + np.arange(-2, 3))) if maximum_removed else 0
-    capacity = (number + halo_columns + 15) // 16 * 16
+    # The full halo-column superset includes every stationary source X.
+    projection_bands = (min(number + 25 * maximum_removed, maximum_selected + halo_columns) + 15) // 16 * 16
+    capacity = max(motion_bands, projection_bands if maximum_removed else motion_bands)
     module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
     names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
-             "pack_forward", "encode", "field_project", "anderson_begin", "anderson_update", "clearance")
+             "pack_forward", "encode", "field_project", "anderson_begin", "anderson_update")
     kernels = {name: module.get_function(name) for name in names}
     gpu = dict(cp=cp, cublas=cublas, cufft=cufft, stream=stream, module=module, kernels=kernels,
                library=library, gemm=gemm, shape=shape, number=number,
@@ -2403,6 +2429,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
                 if stop_requested is not None and stop_requested():
                     raise InterruptedError("SLM rearrangement preparation stopped")
                 dtype = cp.float32 if precise else cp.float16
+                work_capacity = capacity if precise else motion_bands
                 work_module = cp.RawModule(code="#define HALF 0\n" + _REARRANGEMENT_CUDA) if precise else module
                 work_kernels = {name: work_module.get_function(name) for name in names} if precise else kernels
                 h, w = (size // factor for size in shape)
@@ -2412,18 +2439,18 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
                 cublas.setStream(handle, stream.ptr)
                 work = dict(shape=(h, w), padded=padded, ly=ly, handle=handle,
                             typecode=0 if precise else 2, module=work_module, kernels=work_kernels,
-                            forward=cp.empty((2 * padded, capacity), dtype),
-                            spectrum=cp.empty((capacity, ly), cp.complex64),
-                            transformed=cp.empty((capacity, ly), cp.complex64),
+                            forward=cp.empty((2 * padded, work_capacity), dtype),
+                            spectrum=cp.empty((work_capacity, ly), cp.complex64),
+                            transformed=cp.empty((work_capacity, ly), cp.complex64),
                             field_gemm=cp.empty((2, h, 2 * padded), dtype),
-                            projected=cp.empty((2, h, capacity), cp.float32),
+                            projected=cp.empty((2, h, work_capacity), cp.float32),
                             actual=cp.empty(number, cp.complex64),
                             index=(gpu["resources"][1]["index"] if precise
                                    else cp.arange(number, dtype=cp.int32) % (16 * ly)),
                             frequencies=gpu["frequencies"],
                             alpha=np.asarray(1, np.float32), beta=np.asarray(0, np.float32),
                             plans={band: cufft.Plan1d(ly, cufft.CUFFT_C2C, band)
-                                   for band in range(16, capacity + 1, 16)})
+                                   for band in range(16, work_capacity + 1, 16)})
                 if precise:
                     # The final decision uses FP32 roots/packing on the same finite
                     # Fourier map. Roots, emitted optical field and query indices
@@ -2431,17 +2458,17 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
                     work["optical"] = gpu["resources"][1]["optical"]
                     gpu["measurement"] = work
                     if maximum_removed:
-                        work.update(backward=cp.empty((capacity, 2 * padded), cp.float32),
-                                    packed=cp.empty((2, h, capacity), cp.float32),
+                        work.update(backward=cp.empty((work_capacity, 2 * padded), cp.float32),
+                                    packed=cp.empty((2, h, work_capacity), cp.float32),
                                     image=cp.empty((2, h, 2 * padded), cp.float32))
                 else:
-                    work.update(backward=cp.empty((capacity, 2 * padded), dtype),
-                                packed=cp.empty((2, h, capacity), dtype),
+                    work.update(backward=cp.empty((work_capacity, 2 * padded), dtype),
+                                packed=cp.empty((2, h, work_capacity), dtype),
                                 image=cp.empty((2, h, 2 * padded), cp.float32),
                                 pupil=cp.asarray(pupil[::factor, ::factor]
                                                  / np.float32(gpu["pupil_scale"]) * factor ** 2))
                     if factor == 1:
-                        work.update(capacity=capacity, optical=cp.empty((h, w), cp.complex64),
+                        work.update(capacity=work_capacity, optical=cp.empty((h, w), cp.complex64),
                                     codes=cp.empty((h, w), cp.uint8),
                                     physical_pupil=cp.asarray(pupil),
                                     incident=cp.asarray(incident, cp.float32))
@@ -2476,14 +2503,9 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
             gpu["amplitude"] = cp.ones(number, cp.float32)
             gpu["motion_actual"] = cp.empty((motion_count, number), cp.complex64)
             gpu["motion_indices"] = {factor: cp.zeros((motion_count, number), cp.int32) for factor in factors}
-            gpu["motion_frequencies"] = cp.zeros((motion_count * capacity, 2), cp.float64)
+            gpu["motion_frequencies"] = cp.zeros((motion_count * motion_bands, 2), cp.float64)
             gpu["motion_offsets"] = cp.zeros(motion_count + 1, cp.int64)
             gpu["frame_index"] = cp.zeros(1, cp.int32)
-            gpu["distances"] = cp.full((number, number), cp.inf, cp.float64)
-            trial = cp.asarray(geometry["source_yx"][None], cp.float64)
-            kernels["clearance"](((number + 15) // 16,) * 2, (16, 16),
-                                 (trial, gpu["distances"], np.int32(1), np.int32(number)))
-            float(cp.sqrt(cp.min(gpu["distances"])))
             stream.synchronize()
     except BaseException:
         close()
@@ -2772,17 +2794,11 @@ def prepare_rearrangement(
                 gpu["graphs"][band].launch(stream)
             stream.synchronize()
             area = int(np.prod(shape))
-            size = 1 << (max(512, area) - 1).bit_length()
-            maximum_size = 1 << (max(512, int(maximum_motion_frames) * area) - 1).bit_length()
-            free_blocks, reserved_bytes = 0, 0
-            while size <= maximum_size:
-                blocks = [gpu["output_pool"].malloc(size), gpu["output_pool"].malloc(size)]
-                del blocks
-                free_blocks += 2
-                reserved_bytes += 2 * size
-                size *= 2
-            if gpu["output_pool"].n_free_blocks() != free_blocks:
-                raise MemoryError("SLM output buffers could not all be reserved before planning")
+            reserved_bytes = 1 << (max(512, int(maximum_motion_frames) * area) - 1).bit_length()
+            reservation = gpu["output_pool"].malloc(reserved_bytes)
+            del reservation
+            if gpu["output_pool"].n_free_blocks() != 1:
+                raise MemoryError("SLM output buffer could not be reserved before planning")
         free_memory, total_memory = cp.cuda.runtime.memGetInfo()
         return {
             **geometry, "gpu": gpu, "close": gpu["close"],
@@ -2797,7 +2813,6 @@ def prepare_rearrangement(
             "source_brightness": float(np.sqrt(np.sum(power) / np.sum(intensities[0], dtype=np.float64))),
             "source_support_intensity_ratio": ratio,
             "initial_phase_codes": _frozen(codes), "initial_phase": _frozen(phase),
-            "initial_pattern_phase": freeze_pattern_phase(phase + gpu["incident_cpu"], shape),
         }
     except BaseException:
         gpu["close"]()
@@ -2860,6 +2875,7 @@ def compute_rearrangement(
             "sites_yx": np.empty((0, source_count, 2)), "actual_fields": np.empty((0, source_count), np.complex64),
             "desired_amplitudes": np.empty((0, source_count)), "active_sites": np.empty((0, source_count), bool),
             "motion_frames": 0, "fade_frames": 0, "iterations": (), "emitted_frame_count": 0,
+            "verified_frame_reuses": 0,
             "frame_solve_ms": np.empty(0), "frame_copy_ms": np.empty(0), "frame_ready_ms": np.empty(0),
             "clearance": rearrangement_clearance(path), "fade_clearance": np.inf,
             "surplus_stationary_clearance": np.inf, "maximum_step": 0., "recommended_motion_frames": 0,
@@ -2947,7 +2963,7 @@ def compute_rearrangement(
         discard_ratio = np.zeros(motion_frames)
         projection_updates = np.zeros(motion_frames, np.int32)
         frame_solve_ms, frame_copy_ms, frame_ready_ms = (np.zeros(motion_frames) for _ in range(3))
-        callback_ms, proposals_evaluated, emitted_count = 0., 0, 0
+        callback_ms, proposals_evaluated, emitted_count, verified_reuses = 0., 0, 0, 0
         publication_open = True
         copy_begin, copy_end = cp.cuda.Event(), cp.cuda.Event()
         if len(removed):
@@ -2967,105 +2983,113 @@ def compute_rearrangement(
             band = (int(counts[index]) + 15) // 16 * 16
             same_positions = (index and np.array_equal(sites[index], sites[index - 1])
                               and np.array_equal(positive[index], positive[index - 1]))
-            gpu["frame_index"].fill(index)
-            if same_positions:
-                movie[index] = baseline_codes
-                coefficients[index] = coefficients[index - 1]
-                actual_gpu[index].set(baseline_fields, stream=stream)
-                gpu["frame_index"].fill(index + 1)
-                iteration_counts[index] = 0
-            elif iterations is None:
-                gpu["graphs"][band].launch(stream)
-            else:
-                _rearrangement_load_frame(gpu, warm_previous=True)
-                if coarse_updates:
-                    _rearrangement_amplitude_updates(gpu, gpu["resources"][2], band, coarse_updates)
-                _rearrangement_amplitude_updates(gpu, native, band, native_updates)
-                _rearrangement_propagate(gpu, native, band, "encode")
-                _rearrangement_select_roots(gpu["measurement"], band)
-                _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
-                _rearrangement_store_frame(gpu)
-            fields[index] = actual_gpu[index].get()
-            # The next baseline must warm from the same uncorrected state as
-            # the previous bulk solver, not from the published correction.
-            baseline_fields = fields[index].copy()
-            baseline_coefficient = coefficients[index].copy()
-            baseline_codes[:] = movie[index]
             mask = positive[index]
-            values = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
-            ratio = float(values.max() / values.min())
-            if iterations is None and (not np.isfinite(ratio) or ratio > tolerance):
-                gpu["kernels"]["anderson_begin"]((1,), (256,),
-                    (coefficients[index], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
-                gain = float(gpu["weight_exponent"])
-                residual = np.where(mask, np.log(np.maximum(abs(fields[index]), 1e-30)
-                                    / np.maximum(desired[index], 1e-30)), 0.)
-                residual -= residual.sum() / mask.sum() * mask
-                merit = float(np.sum(residual ** 2) / mask.sum())
-                for _ in range(8):
-                    if stop_requested is not None and stop_requested():
-                        stream.synchronize()
-                        raise InterruptedError("SLM rearrangement stopped")
-                    if np.isfinite(ratio) and ratio <= tolerance:
-                        break
-                    gpu["frame_index"].fill(index)
-                    _rearrangement_load_frame(gpu)
-                    gpu["kernels"]["anderson_update"]((1,), (256,),
-                        (actual_gpu[index], gpu["amplitude"], gpu["coefficients"], gpu["aa_phase"],
-                         gpu["aa_g"], gpu["aa_r"], gpu["aa_candidate"], gpu["aa_state"],
-                         np.int32(number), np.float32(gain)))
-                    _rearrangement_select_roots(native, band)
-                    _rearrangement_propagate(gpu, native, band, "encode")
-                    _rearrangement_select_roots(gpu["measurement"], band)
-                    _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
-                    field = gpu["measurement"]["actual"].get()
-                    values = abs(field[mask] / desired[index, mask]) ** 2
-                    proposed_ratio = float(values.max() / values.min())
-                    update = np.zeros(number)
-                    update[mask] = np.log(np.maximum(abs(field[mask]), 1e-30) / desired[index, mask])
-                    update[mask] -= update[mask].mean()
-                    proposed_merit = float(np.sum(update ** 2) / mask.sum())
-                    accepted = np.isfinite(proposed_ratio) and (proposed_merit < merit or proposed_ratio <= tolerance)
-                    dot = float(update @ residual)
-                    if accepted:
-                        coefficients[index] = gpu["coefficients"]
-                        movie[index] = native["codes"]
-                        actual_gpu[index] = gpu["measurement"]["actual"]
-                        fields[index] = field
-                        residual, merit, ratio = update, proposed_merit, proposed_ratio
-                    if not accepted or dot < 0:
-                        gain *= .5
-                        gpu["aa_state"].fill(0)
-                    proposals_evaluated += 1
-                    iteration_counts[index] += 1
-            if len(removed):
-                # The same Fourier model verifies and suppresses the removed
-                # occupied trapping neighborhoods before publishing this map.
-                gpu["kernels"]["field_project"](grid, (256,),
-                    (movie[index], native["optical"], native["image"], gpu["previous_base"],
-                     gpu["previous_corrected"], native["physical_pupil"], native["incident"],
-                     native["codes"], *map(np.int32, (*shape, native["padded"], 0))))
-                gpu["current_base"][:] = native["optical"]
-                reused = False
-                if same_positions:
+            reuse_verified = False
+            if same_positions and discard_ratio[index - 1] <= .01:
+                values = abs(fields[index - 1, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
+                ratio = float(values.max() / values.min())
+                if np.isfinite(ratio) and ratio <= tolerance:
                     movie[index] = movie[index - 1]
                     fields[index] = fields[index - 1]
                     actual_gpu[index] = actual_gpu[index - 1]
+                    coefficients[index] = coefficients[index - 1]
+                    discard_ratio[index] = discard_ratio[index - 1]
+                    iteration_counts[index] = 0
+                    verified_reuses += 1
+                    reuse_verified = True
+            if not reuse_verified:
+                gpu["frame_index"].fill(index)
+                if same_positions:
+                    movie[index] = baseline_codes
+                    coefficients[index] = coefficients[index - 1]
+                    actual_gpu[index].set(baseline_fields, stream=stream)
+                    gpu["frame_index"].fill(index + 1)
+                    iteration_counts[index] = 0
+                elif iterations is None:
+                    gpu["graphs"][band].launch(stream)
+                else:
+                    _rearrangement_load_frame(gpu, warm_previous=True)
+                    if coarse_updates:
+                        _rearrangement_amplitude_updates(gpu, gpu["resources"][2], band, coarse_updates)
+                    _rearrangement_amplitude_updates(gpu, native, band, native_updates)
+                    _rearrangement_propagate(gpu, native, band, "encode")
+                    _rearrangement_select_roots(gpu["measurement"], band)
+                    _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
+                    _rearrangement_store_frame(gpu)
+                fields[index] = actual_gpu[index].get()
+                # The next baseline must warm from the same uncorrected state as
+                # the previous bulk solver, not from the published correction.
+                baseline_fields = fields[index].copy()
+                baseline_coefficient = coefficients[index].copy()
+                baseline_codes[:] = movie[index]
+                mask = positive[index]
+                values = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
+                ratio = float(values.max() / values.min())
+                if iterations is None and (not np.isfinite(ratio) or ratio > tolerance):
+                    gpu["kernels"]["anderson_begin"]((1,), (256,),
+                        (coefficients[index], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
+                    gain = float(gpu["weight_exponent"])
+                    residual = np.where(mask, np.log(np.maximum(abs(fields[index]), 1e-30)
+                                        / np.maximum(desired[index], 1e-30)), 0.)
+                    residual -= residual.sum() / mask.sum() * mask
+                    merit = float(np.sum(residual ** 2) / mask.sum())
+                    for _ in range(8):
+                        if stop_requested is not None and stop_requested():
+                            stream.synchronize()
+                            raise InterruptedError("SLM rearrangement stopped")
+                        if np.isfinite(ratio) and ratio <= tolerance:
+                            break
+                        gpu["frame_index"].fill(index)
+                        _rearrangement_load_frame(gpu)
+                        gpu["kernels"]["anderson_update"]((1,), (256,),
+                            (actual_gpu[index], gpu["amplitude"], gpu["coefficients"], gpu["aa_phase"],
+                             gpu["aa_g"], gpu["aa_r"], gpu["aa_candidate"], gpu["aa_state"],
+                             np.int32(number), np.float32(gain)))
+                        _rearrangement_select_roots(native, band)
+                        _rearrangement_propagate(gpu, native, band, "encode")
+                        _rearrangement_select_roots(gpu["measurement"], band)
+                        _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
+                        field = gpu["measurement"]["actual"].get()
+                        values = abs(field[mask] / desired[index, mask]) ** 2
+                        proposed_ratio = float(values.max() / values.min())
+                        update = np.zeros(number)
+                        update[mask] = np.log(np.maximum(abs(field[mask]), 1e-30) / desired[index, mask])
+                        update[mask] -= update[mask].mean()
+                        proposed_merit = float(np.sum(update ** 2) / mask.sum())
+                        accepted = np.isfinite(proposed_ratio) and (proposed_merit < merit or proposed_ratio <= tolerance)
+                        dot = float(update @ residual)
+                        if accepted:
+                            coefficients[index] = gpu["coefficients"]
+                            movie[index] = native["codes"]
+                            actual_gpu[index] = gpu["measurement"]["actual"]
+                            fields[index] = field
+                            residual, merit, ratio = update, proposed_merit, proposed_ratio
+                        if not accepted or dot < 0:
+                            gain *= .5
+                            gpu["aa_state"].fill(0)
+                        proposals_evaluated += 1
+                        iteration_counts[index] += 1
+                if len(removed):
+                    # The same Fourier model verifies and suppresses the removed
+                    # occupied trapping neighborhoods before publishing this map.
                     gpu["kernels"]["field_project"](grid, (256,),
                         (movie[index], native["optical"], native["image"], gpu["previous_base"],
                          gpu["previous_corrected"], native["physical_pupil"], native["incident"],
                          native["codes"], *map(np.int32, (*shape, native["padded"], 0))))
-                    values = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
-                    if values.max() / values.min() <= tolerance and discard_ratio[index - 1] <= .01:
-                        discard_ratio[index] = discard_ratio[index - 1]
-                        iteration_counts[index] = 0
-                        reused = True
-                elif index:
-                    gpu["kernels"]["field_project"](grid, (256,),
-                        (native["codes"], native["optical"], native["image"], gpu["previous_base"],
-                         gpu["previous_corrected"], native["physical_pupil"], native["incident"],
-                         native["codes"], *map(np.int32, (*shape, native["padded"], 1))))
-                if not reused:
+                    gpu["current_base"][:] = native["optical"]
+                    if same_positions:
+                        movie[index] = movie[index - 1]
+                        fields[index] = fields[index - 1]
+                        actual_gpu[index] = actual_gpu[index - 1]
+                        gpu["kernels"]["field_project"](grid, (256,),
+                            (movie[index], native["optical"], native["image"], gpu["previous_base"],
+                             gpu["previous_corrected"], native["physical_pupil"], native["incident"],
+                             native["codes"], *map(np.int32, (*shape, native["padded"], 0))))
+                    elif index:
+                        gpu["kernels"]["field_project"](grid, (256,),
+                            (native["codes"], native["optical"], native["image"], gpu["previous_base"],
+                             gpu["previous_corrected"], native["physical_pupil"], native["incident"],
+                             native["codes"], *map(np.int32, (*shape, native["padded"], 1))))
                     query_sites = np.concatenate((sites[index], halo_sites))
                     query_indices, query_frequencies, query_counts, _ = _rearrangement_bind(gpu, query_sites[None])
                     projection_band = (int(query_counts[0]) + 15) // 16 * 16
@@ -3104,9 +3128,9 @@ def compute_rearrangement(
                     actual_gpu[index] = projection["actual"][:source_count]
                     movie[index] = native["codes"]
                     discard_ratio[index] = discarded
-                gpu["previous_base"][:] = gpu["current_base"]
-                gpu["previous_corrected"][:] = native["optical"]
-            coefficients[index] = baseline_coefficient
+                    gpu["previous_base"][:] = gpu["current_base"]
+                    gpu["previous_corrected"][:] = native["optical"]
+                coefficients[index] = baseline_coefficient
             values = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
             bright_ratio = float(values.max() / values.min())
             valid = (np.isfinite(bright_ratio) and bright_ratio <= tolerance and
@@ -3158,7 +3182,8 @@ def compute_rearrangement(
         "phase_codes": codes, "sites_yx": sites, "actual_fields": fields,
         "desired_amplitudes": desired, "active_sites": positive,
         "motion_frames": motion_frames, "fade_frames": fade_frames, "iterations": tuple(map(int, iteration_counts)),
-        "emitted_frame_count": emitted_count, "frame_solve_ms": frame_solve_ms,
+        "emitted_frame_count": emitted_count, "verified_frame_reuses": verified_reuses,
+        "frame_solve_ms": frame_solve_ms,
         "frame_copy_ms": frame_copy_ms, "frame_ready_ms": frame_ready_ms,
         "clearance": clearance, "fade_clearance": fade_clearance,
         "surplus_stationary_clearance": stationary_clearance,
