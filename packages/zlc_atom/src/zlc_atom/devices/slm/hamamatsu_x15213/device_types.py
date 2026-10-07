@@ -9,7 +9,7 @@ from dataclasses import replace
 import logging
 import os
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 import re
 import struct
 import sys
@@ -437,7 +437,7 @@ def _open_dvi_presenter(
             raise RuntimeError("X15213 DVI transport rejected the frame") from result[0]
 
     def present(frame: object) -> None:
-        send("present", frame if type(frame) is int else np.array(frame, copy=True))
+        send("present", frame if type(frame) is int or not np.asarray(frame).flags.writeable else np.array(frame, copy=True))
 
     def prepare(frames: object) -> None:
         send("prepare", frames)
@@ -1184,27 +1184,27 @@ class X15213Adapter:
             )
         return canonical
 
-    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object) -> dict[str, object]:
-        """Map and preload every frame before the first display command."""
+    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object, *, frame_count: int | None = None) -> dict[str, object]:
+        """Preload a movie, or accept ordered verified frames into a bounded FIFO."""
         if self._closed:
             raise RuntimeError("X15213 is closed")
         started = time.perf_counter()
         if self._sequence is not None:
             self.release_phase_sequence()
-        frames, intervals = phase_sequence_codes(codes, _SHAPE_YX, frame_interval_seconds)
+        frames, intervals = phase_sequence_codes(codes, _SHAPE_YX, frame_interval_seconds, frame_count=frame_count)
         # The physical owner retains logical codes, not a float32 copy of
         # every frame. Its public phase snapshot decodes the confirmed frame.
-        if frames.flags.writeable or np.asarray(codes).flags.writeable:
+        if frames is not None and (frames.flags.writeable or np.asarray(codes).flags.writeable):
             frames = np.frombuffer(frames.tobytes(), dtype=np.uint8).reshape(frames.shape)
-        mapped = [self._gray_codes(frame) for frame in frames]
+        mapped = [] if frames is None else [self._gray_codes(frame) for frame in frames]
         grays = tuple(value[0] for value in mapped)
-        mapping = mapped[0][1]
+        mapping = mapped[0][1] if mapped else self._mapping_snapshot()
         slots = []
         if self._transport == "dvi":
             if self._presenter is None:
                 self._presenter = _open_dvi_presenter(self._display_name)
             self._presenter[2](grays)
-        else:
+        elif frames is not None:
             # Reuse only the existing vendor frame-memory API. Never overwrite
             # the currently visible slot while preparing a sequence.
             slots = [slot for slot in range(len(frames) + 1) if slot != self._display_slot][:len(frames)]
@@ -1215,17 +1215,47 @@ class X15213Adapter:
                 ), "Write_FMemArray sequence preload")
         self._sequence_cancel.clear()
         prepared = {
-            "frame_count": len(frames),
+            "frame_count": len(intervals),
             "frame_intervals_seconds": intervals.tolist(),
             "prepare_ms": (time.perf_counter() - started) * 1000,
             "mapping_revision": int(mapping["mapping_revision"]),
+            "streaming": frames is None, "queue_capacity": 2 if frames is None else 0,
         }
         self._sequence = {
             "codes": frames, "grays": grays, "slots": slots, "mapping": mapping,
             "intervals": intervals, "command_revision": self.command_revision,
             "prepared": prepared,
+            "queue": Queue(maxsize=2) if frames is None else None,
+            "submitted": 0, "playing": False, "mapping_ms": [], "queued_at": [],
         }
         return dict(prepared)
+
+    def submit_phase_frame(self, index: int, codes: object) -> None:
+        sequence = self._sequence
+        if sequence is None or sequence["queue"] is None:
+            raise RuntimeError("Streaming SLM phase sequence has not been prepared")
+        if type(index) is not int or index != sequence["submitted"] or index >= len(sequence["intervals"]):
+            raise ValueError("SLM streaming frame index is not the next declared frame")
+        frame = np.asarray(codes)
+        if frame.dtype != np.uint8 or frame.shape != _SHAPE_YX:
+            raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
+        if frame.flags.writeable:
+            frame = np.frombuffer(frame.tobytes(), dtype=np.uint8).reshape(_SHAPE_YX)
+        mapped_at = time.perf_counter()
+        gray, mapping = self._gray_codes(frame)
+        if mapping["mapping_revision"] != sequence["mapping"]["mapping_revision"]:
+            raise RuntimeError("stale streaming SLM mapping")
+        mapping_ms = (time.perf_counter() - mapped_at) * 1000
+        while not self._sequence_cancel.is_set() and self._sequence is sequence:
+            try:
+                sequence["queue"].put((frame, gray), timeout=0.01)
+                sequence["mapping_ms"].append(mapping_ms)
+                sequence["queued_at"].append(time.perf_counter())
+                sequence["submitted"] += 1
+                return
+            except Full:
+                pass
+        raise RuntimeError("SLM phase sequence cancelled before accepting its frame")
 
     def cancel_phase_sequence(self) -> None:
         """Interrupt local pacing; the last acknowledged frame stays displayed."""
@@ -1239,11 +1269,14 @@ class X15213Adapter:
             self._presenter[2](np.empty((0, *_RASTER_YX), dtype=np.uint8))
 
     def play_phase_sequence(self) -> dict[str, object]:
-        sequence, self._sequence = self._sequence, None
+        sequence = self._sequence
         if self._closed:
             raise RuntimeError("X15213 is closed")
         if sequence is None:
             raise RuntimeError("SLM phase sequence has not been prepared")
+        if sequence["playing"]:
+            raise RuntimeError("SLM phase sequence is already playing")
+        sequence["playing"] = True
         mapping = sequence["mapping"]
         if sequence["command_revision"] != self.command_revision or mapping["mapping_revision"] != self.mapping_revision:
             error = RuntimeError("stale prepared SLM sequence; prepare from the current device state")
@@ -1253,7 +1286,7 @@ class X15213Adapter:
                 error.add_note(f"SLM sequence cleanup failed: {cleanup_error}")
             raise error
         started = time.perf_counter()
-        dispatch, acknowledgments = [], []
+        dispatch, acknowledgments, queue_wait = [], [], []
         result = {
             **sequence["prepared"], "played_frames": 0, "cancelled": False,
             "acknowledgment": ("native-gdi-flush-and-exact-raster-check" if self._transport == "dvi"
@@ -1300,11 +1333,22 @@ class X15213Adapter:
                 result["pacing"] = "win32-high-resolution-waitable-timer"
             else:
                 result["pacing"] = "threading-event-wait"
-            for index, (canonical, gray, interval) in enumerate(zip(
-                sequence["codes"], sequence["grays"], sequence["intervals"]
-            )):
+            for index, interval in enumerate(sequence["intervals"]):
                 if self._sequence_cancel.is_set():
                     break
+                if sequence["queue"] is not None:
+                    queued_started = time.perf_counter()
+                    while not self._sequence_cancel.is_set():
+                        try:
+                            canonical, gray = sequence["queue"].get(timeout=0.01)
+                            break
+                        except Empty:
+                            pass
+                    queue_wait.append((time.perf_counter() - queued_started) * 1000)
+                    if self._sequence_cancel.is_set():
+                        break
+                else:
+                    canonical, gray = sequence["codes"][index], sequence["grays"][index]
                 previous_phase, previous_gray, previous_receipt = self._phase, self._last_gray, self._last_receipt
                 frame_started = time.perf_counter()
                 dispatch.append((frame_started - started) * 1000)
@@ -1313,9 +1357,16 @@ class X15213Adapter:
                     self._last_receipt = self._receipt(mapping, outcome="unknown", stage="sequence-display-pending", readback="not-run")
                 try:
                     if self._transport == "dvi":
-                        self._presenter[0](index)
+                        self._presenter[0](gray if sequence["queue"] is not None else index)
                     else:
-                        slot = sequence["slots"][index]
+                        if sequence["queue"] is not None:
+                            slot = 1 if self._display_slot == 0 else 0
+                            _check(self._sdk.Write_FMemArray(
+                                self._board_id, gray.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                                int(gray.size), _SHAPE_YX[1], _SHAPE_YX[0], slot,
+                            ), "Write_FMemArray sequence frame")
+                        else:
+                            slot = sequence["slots"][index]
                         _check(self._sdk.Change_DispSlot(self._board_id, slot), "Change_DispSlot")
                         self._display_slot = slot
                         observed = self._readback()
@@ -1352,6 +1403,10 @@ class X15213Adapter:
             result["acknowledged_ms"] = acknowledgments
             result["actual_frame_intervals_ms"] = np.diff(dispatch).tolist()
             result["play_ms"] = (time.perf_counter() - started) * 1000
+            result["queue_wait_ms"] = queue_wait
+            result["mapping_ms"] = list(sequence["mapping_ms"])
+            result["first_dispatch_ms"] = dispatch[0] if dispatch else None
+            result["first_acknowledged_ms"] = acknowledgments[0] if acknowledgments else None
             with self._state_lock:
                 if self._phase is not None and self._phase.dtype == np.uint8:
                     # A single slice must not keep the whole uploaded movie

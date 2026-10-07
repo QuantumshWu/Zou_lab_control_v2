@@ -15,6 +15,8 @@ import logging
 import socket
 import socketserver
 import struct
+import sys
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 import time
 from typing import Callable, Mapping
@@ -114,6 +116,7 @@ def _open_slm_server(
 
     sequence_token = None
     sequence_owner = None
+    sequence_upload = None
 
     def response(ok: bool, error: str | None, *, include_phase: bool, sequence=None):
         phase = slm.last_commanded_phase if include_phase else None
@@ -136,7 +139,7 @@ def _open_slm_server(
         return metadata, payload
 
     def command(request, payload, connection):
-        nonlocal sequence_token, sequence_owner
+        nonlocal sequence_token, sequence_owner, sequence_upload
         fields = set(request)
         if (
             type(request.get("version")) is not int
@@ -164,10 +167,10 @@ def _open_slm_server(
                                  include_phase=False,
                                  sequence={"sequence_token": sequence_token} if request["method"] == "play_sequence" else None)
             with connections_lock:
-                sequence_token, sequence_owner = None, None
-        elif request.get("method") == "prepare_sequence" and fields == {
+                sequence_token, sequence_owner, sequence_upload = None, None, None
+        elif request.get("method") == "prepare_sequence" and fields in ({
             "version", "method", "command_revision", "mapping_revision", "shape_yx", "frame_count", "frame_intervals_seconds"
-        }:
+        }, {"version", "method", "command_revision", "mapping_revision", "shape_yx", "frame_count", "frame_intervals_seconds", "streaming"}):
             if (type(request["command_revision"]) is not int or type(request["mapping_revision"]) is not int
                 or request["command_revision"] != slm.command_revision or request["mapping_revision"] != slm.mapping_revision):
                 return response(False, "stale SLM command; refresh from the physical device before sending", include_phase=True)
@@ -176,16 +179,25 @@ def _open_slm_server(
                 or not isinstance(request["shape_yx"], list)
                 or any(type(value) is not int for value in request["shape_yx"])
                 or request["shape_yx"] != list(slm.shape_yx)
-                or len(payload) != request["frame_count"] * slm.shape_yx[0] * slm.shape_yx[1]):
+                or ("streaming" in request and request["streaming"] is not True)
+                or len(payload) != (0 if request.get("streaming") else request["frame_count"] * slm.shape_yx[0] * slm.shape_yx[1])):
                 return response(False, "invalid SLM phase sequence payload", include_phase=True)
             try:
-                frames = np.frombuffer(payload, dtype=np.uint8).reshape(request["frame_count"], *slm.shape_yx)
-                prepared = slm.prepare_phase_sequence(frames, request["frame_intervals_seconds"])
+                # Retire old upload ownership before replacing the physical
+                # queue: a late old-channel EOF must not stop a new stream.
+                with connections_lock:
+                    sequence_token, sequence_owner, sequence_upload = None, None, None
+                if request.get("streaming"):
+                    prepared = slm.prepare_phase_sequence(None, request["frame_intervals_seconds"], frame_count=request["frame_count"])
+                else:
+                    frames = np.frombuffer(payload, dtype=np.uint8).reshape(request["frame_count"], *slm.shape_yx)
+                    prepared = slm.prepare_phase_sequence(frames, request["frame_intervals_seconds"])
             except Exception as error:
                 reply = response(False, f"{type(error).__name__}: {error}", include_phase=True)
             else:
                 with connections_lock:
                     sequence_token, sequence_owner = uuid4().hex, connection
+                    sequence_upload = {"connection": None, "frame_count": request["frame_count"]} if request.get("streaming") else None
                 reply = response(True, None, include_phase=False, sequence={**prepared, "sequence_token": sequence_token})
         elif request.get("method") not in {"apply", "apply_codes"} or fields != {
             "version", "method", "command_revision", "mapping_revision", "shape_yx"
@@ -214,7 +226,7 @@ def _open_slm_server(
         else:
             try:
                 with connections_lock:
-                    sequence_token, sequence_owner = None, None
+                    sequence_token, sequence_owner, sequence_upload = None, None, None
                 phase = (phase_from_codes(np.frombuffer(payload, dtype=np.uint8).reshape(slm.shape_yx), slm.shape_yx)
                          if request["method"] == "apply_codes" else
                          np.frombuffer(payload, dtype="<f4").reshape(slm.shape_yx))
@@ -232,9 +244,10 @@ def _open_slm_server(
     closing = False
 
     def handle(connection: socket.socket, address, server) -> None:
-        nonlocal sequence_token, sequence_owner
+        nonlocal sequence_token, sequence_owner, sequence_upload
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         client = f"{address[0]}:{address[1]}" if address else "?"
+        bound_token, expected_frames, accepted_frames = None, 0, 0
         with connections_lock:
             if closing:
                 return
@@ -253,7 +266,39 @@ def _open_slm_server(
                     return
                 connection.settimeout(_SERVER_SOCKET_TIMEOUT)
                 request, payload = _recv_packet(connection)
-                if request.get("method") == "cancel_sequence":
+                if request.get("method") == "bind_sequence_upload":
+                    with connections_lock:
+                        valid = (set(request) == {"version", "method", "sequence_token"}
+                                 and type(request.get("version")) is int and request["version"] == _REMOTE_VERSION
+                                 and not payload and bound_token is None and sequence_upload is not None
+                                 and sequence_token is not None and request.get("sequence_token") == sequence_token
+                                 and sequence_upload["connection"] is None and connection is not sequence_owner)
+                        if valid:
+                            bound_token, expected_frames = sequence_token, sequence_upload["frame_count"]
+                            sequence_upload["connection"] = connection
+                    reply = ({"version": _REMOTE_VERSION, "ok": valid,
+                              "error": None if valid else "SLM streaming upload binding is not current"}, b"")
+                elif request.get("method") == "submit_sequence_frame":
+                    with connections_lock:
+                        valid = (set(request) == {"version", "method", "sequence_token", "index"}
+                                 and type(request.get("version")) is int and request["version"] == _REMOTE_VERSION
+                                 and sequence_token is not None and request.get("sequence_token") == sequence_token
+                                 and bound_token == sequence_token and sequence_upload is not None
+                                 and sequence_upload["connection"] is connection
+                                 and type(request.get("index")) is int
+                                 and len(payload) == slm.shape_yx[0] * slm.shape_yx[1])
+                    error = None
+                    if valid:
+                        try:
+                            slm.submit_phase_frame(request["index"], np.frombuffer(payload, np.uint8).reshape(slm.shape_yx))
+                            accepted_frames += 1
+                        except Exception as exception:
+                            error = f"{type(exception).__name__}: {exception}"
+                    else:
+                        error = "invalid or expired SLM streaming frame"
+                    # This is queue admission, not a hardware/display acknowledgment.
+                    reply = ({"version": _REMOTE_VERSION, "ok": error is None, "error": error}, b"")
+                elif request.get("method") == "cancel_sequence":
                     # Cancellation does not wait behind the playback command.
                     # The prepared token identifies this one sequence only.
                     with connections_lock:
@@ -285,11 +330,19 @@ def _open_slm_server(
             if not closing:
                 _LOG.info("SLM CONNECTION FAILED client=%s error=%s: %s", client, type(error).__name__, error)
         finally:
+            # An orphaned producer cannot supply the missing suffix. Do not
+            # wait behind its play command before waking the physical FIFO.
+            # A completely admitted movie still drains its queued tail.
+            with connections_lock:
+                if (bound_token is not None and bound_token == sequence_token
+                    and sequence_upload is not None and sequence_upload["connection"] is connection
+                    and accepted_frames < expected_frames):
+                    slm.cancel_phase_sequence()
             with command_lock:
                 with connections_lock:
                     owns_preparation = sequence_owner is connection
                     if owns_preparation:
-                        sequence_token, sequence_owner = None, None
+                        sequence_token, sequence_owner, sequence_upload = None, None, None
                 if owns_preparation:
                     slm.release_phase_sequence()
             with connections_lock:
@@ -374,13 +427,18 @@ def _rpc_call(
             "shape_yx": shape_yx,
         }
         payload = bytes(payload)
-    elif method == "prepare_sequence" and len(arguments) == 6:
-        command_revision, mapping_revision, shape_yx, frame_count, intervals, payload = arguments
+    elif method == "prepare_sequence" and len(arguments) in {6, 7}:
+        command_revision, mapping_revision, shape_yx, frame_count, intervals, payload = arguments[:6]
         metadata = {"version": _REMOTE_VERSION, "method": method,
                     "command_revision": command_revision, "mapping_revision": mapping_revision,
                     "shape_yx": shape_yx, "frame_count": frame_count, "frame_intervals_seconds": intervals}
         payload = memoryview(payload).cast("B")
-    elif method in {"play_sequence", "cancel_sequence", "release_sequence"} and len(arguments) == 1:
+        if len(arguments) == 7:
+            metadata["streaming"] = arguments[6]
+    elif method == "submit_sequence_frame" and len(arguments) == 3:
+        metadata = {"version": _REMOTE_VERSION, "method": method, "sequence_token": arguments[0], "index": arguments[1]}
+        payload = memoryview(arguments[2]).cast("B")
+    elif method in {"play_sequence", "cancel_sequence", "release_sequence", "bind_sequence_upload"} and len(arguments) == 1:
         metadata, payload = {"version": _REMOTE_VERSION, "method": method, "sequence_token": arguments[0]}, b""
     else:
         raise ValueError("invalid local SLM remote call")
@@ -424,7 +482,8 @@ class _RemoteSlmAdapter:
         self._closed = False
         self._sequence_token: str | None = None
         self._sequence_intervals: list[float] = []
-        self._sequence_codes: np.ndarray | None = None
+        self._sequence_codes: np.ndarray | list[np.ndarray | None] | None = None
+        self._sequence_upload: dict[str, object] | None = None
         self._describe()
 
     def _accept_state(
@@ -519,9 +578,10 @@ class _RemoteSlmAdapter:
                 if playback["played_frames"]:
                     if receipt.get("outcome") != "known-new":
                         raise ValueError("SLM playback did not confirm its last displayed frame")
-                    commanded = phase_from_codes(
-                        self._sequence_codes[playback["played_frames"] - 1], self._shape_yx
-                    )
+                    confirmed = self._sequence_codes[playback["played_frames"] - 1]
+                    if confirmed is None:
+                        raise ValueError("SLM playback confirmed an unsubmitted frame")
+                    commanded = phase_from_codes(confirmed, self._shape_yx)
                 else:
                     commanded = self.last_commanded_phase
             self._accept_state(
@@ -640,10 +700,10 @@ class _RemoteSlmAdapter:
                 raise RuntimeError(error)
             return canonical
 
-    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object) -> dict[str, object]:
+    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object, *, frame_count: int | None = None) -> dict[str, object]:
         started = time.perf_counter()
-        frames, intervals = phase_sequence_codes(codes, self._shape_yx, frame_interval_seconds)
-        if frames.nbytes > _MAX_REMOTE_SEQUENCE_BYTES:
+        frames, intervals = phase_sequence_codes(codes, self._shape_yx, frame_interval_seconds, frame_count=frame_count)
+        if len(intervals) * self._shape_yx[0] * self._shape_yx[1] > _MAX_REMOTE_SEQUENCE_BYTES:
             raise ValueError("SLM phase sequence exceeds the remote sequence payload bound")
         prepared = {}
         with self._lock:
@@ -651,15 +711,17 @@ class _RemoteSlmAdapter:
                 raise RuntimeError("remote SLM is closed")
             if self._uncertain:
                 self._describe()
+            self._stop_sequence_upload()
             self._sequence_token = None
             self._sequence_codes = None
             self._sequence_intervals = []
-            borrowed = not np.asarray(codes).flags.writeable and frames.flags.c_contiguous
-            payload = memoryview(frames).cast("B") if borrowed else frames.tobytes()
-            error = self._request("prepare_sequence", (
+            borrowed = frames is not None and not np.asarray(codes).flags.writeable and frames.flags.c_contiguous
+            payload = b"" if frames is None else memoryview(frames).cast("B") if borrowed else frames.tobytes()
+            arguments = (
                 self._command_revision, self._mapping_revision, list(self._shape_yx),
-                len(frames), intervals.tolist(), payload,
-            ), sequence=prepared, commanded=self.last_commanded_phase)
+                len(intervals), intervals.tolist(), payload,
+            )
+            error = self._request("prepare_sequence", arguments + ((True,) if frames is None else ()), sequence=prepared, commanded=self.last_commanded_phase)
             if error is not None:
                 raise RuntimeError(error)
             token = prepared.pop("sequence_token", None)
@@ -670,11 +732,116 @@ class _RemoteSlmAdapter:
             # The solver hands out protected readonly storage; retain its
             # view. Writable callers use the already-serialized upload bytes,
             # so no second full movie copy is needed for receipt reconstruction.
-            self._sequence_codes = (frames if borrowed else
+            self._sequence_codes = ([None] * len(intervals) if frames is None else frames if borrowed else
                                     np.frombuffer(payload, dtype=np.uint8).reshape(frames.shape))
+            if frames is None:
+                connection = socket.create_connection(self._endpoint, timeout=self._timeout)
+                try:
+                    connection.settimeout(self._timeout + sum(self._sequence_intervals))
+                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    reply, body = _rpc_call(connection, "bind_sequence_upload", (token,), self._timeout)
+                    if (set(reply) != {"version", "ok", "error"} or reply["version"] != _REMOTE_VERSION
+                        or type(reply["ok"]) is not bool or body):
+                        raise ValueError("SLM streaming binding returned an invalid acknowledgment")
+                    if not reply["ok"]:
+                        raise RuntimeError(reply["error"])
+                except BaseException:
+                    connection.close()
+                    raise
+                upload = self._sequence_upload = {"queue": Queue(maxsize=2), "stop": Event(), "error": None,
+                                                 "submitted": 0, "connection": connection, "upload_ms": [], "queue_wait_ms": []}
+
+                def send_frames():
+                    try:
+                        with connection:
+                            for _ in intervals:
+                                while not upload["stop"].is_set():
+                                    try:
+                                        index, frame = upload["queue"].get(timeout=0.01)
+                                        break
+                                    except Empty:
+                                        pass
+                                if upload["stop"].is_set():
+                                    return
+                                sent_at = time.perf_counter()
+                                reply, body = _rpc_call(connection, "submit_sequence_frame", (token, index, frame), self._timeout)
+                                if (set(reply) != {"version", "ok", "error"} or reply["version"] != _REMOTE_VERSION
+                                    or type(reply["ok"]) is not bool or body):
+                                    raise ValueError("SLM streaming upload returned an invalid queue acknowledgment")
+                                if not reply["ok"]:
+                                    raise RuntimeError(reply["error"])
+                                upload["upload_ms"].append((time.perf_counter() - sent_at) * 1000)
+                    except BaseException as exception:
+                        if not upload["stop"].is_set():
+                            upload["error"] = exception
+                            upload["stop"].set()
+                            try:
+                                self.cancel_phase_sequence()
+                            except BaseException as cleanup_error:
+                                exception.add_note(f"SLM upload cancellation failed: {cleanup_error}")
+                    finally:
+                        upload["connection"] = None
+
+                upload["thread"] = Thread(target=send_frames, name="slm-sequence-upload", daemon=True)
+                try:
+                    upload["thread"].start()
+                except BaseException:
+                    connection.close()
+                    self._sequence_upload = None
+                    raise
         return {**prepared, "upload_roundtrip_ms": (time.perf_counter() - started) * 1000}
 
+    def submit_phase_frame(self, index: int, codes: object) -> None:
+        upload = self._sequence_upload
+        if upload is None:
+            raise RuntimeError("Streaming SLM phase sequence has not been prepared")
+        if upload["stop"].is_set():
+            if upload["error"] is not None:
+                raise upload["error"]
+            raise RuntimeError("SLM phase sequence cancelled before accepting its frame")
+        retained = self._sequence_codes
+        if type(index) is not int or index != upload["submitted"] or index >= len(self._sequence_intervals):
+            raise ValueError("SLM streaming frame index is not the next declared frame")
+        frame = np.asarray(codes)
+        if frame.dtype != np.uint8 or frame.shape != self._shape_yx:
+            raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
+        if frame.flags.writeable or not frame.flags.c_contiguous:
+            frame = np.frombuffer(frame.tobytes(), np.uint8).reshape(self._shape_yx)
+        queued_at = time.perf_counter()
+        while not upload["stop"].is_set():
+            try:
+                # Retain exactly what is sent so final authoritative metadata
+                # can identify the last confirmed frame without another movie copy.
+                retained[index] = frame
+                upload["queue"].put((index, frame), timeout=0.01)
+                upload["submitted"] += 1
+                upload["queue_wait_ms"].append((time.perf_counter() - queued_at) * 1000)
+                return
+            except Full:
+                pass
+        if upload["error"] is not None:
+            raise upload["error"]
+        raise RuntimeError("SLM phase sequence cancelled before accepting its frame")
+
+    def _stop_sequence_upload(self) -> None:
+        upload = self._sequence_upload
+        if upload is None:
+            return
+        upload["stop"].set()
+        connection = upload["connection"]
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        upload["thread"].join(self._timeout)
+        if upload["thread"].is_alive():
+            raise RuntimeError("SLM streaming uploader has not stopped")
+        self._sequence_upload = None
+
     def cancel_phase_sequence(self) -> None:
+        if self._sequence_upload is not None:
+            self._sequence_upload["stop"].set()
         token = self._sequence_token
         if token is None:
             return
@@ -687,6 +854,7 @@ class _RemoteSlmAdapter:
 
     def release_phase_sequence(self) -> None:
         with self._lock:
+            self._stop_sequence_upload()
             token, self._sequence_token = self._sequence_token, None
             self._sequence_codes = None
             self._sequence_intervals = []
@@ -729,7 +897,12 @@ class _RemoteSlmAdapter:
                 self._connection.settimeout(timeout)
                 try:
                     error = self._request("play_sequence", (token,))
-                except BaseException:
+                except BaseException as exception:
+                    if self._sequence_upload is not None:
+                        try:
+                            self.cancel_phase_sequence()
+                        except BaseException as cleanup_error:
+                            exception.add_note(f"SLM stream cancellation failed: {cleanup_error}")
                     self._mark_unknown()
                     raise
                 if error is not None:
@@ -738,12 +911,26 @@ class _RemoteSlmAdapter:
                 if not isinstance(result, dict):
                     self._mark_unknown()
                     raise ValueError("SLM playback did not return a final sequence receipt")
+                upload = self._sequence_upload
+                if upload is not None:
+                    result = {**result, "upload_ms": list(upload["upload_ms"]), "producer_queue_wait_ms": list(upload["queue_wait_ms"])}
+                    with self._state_lock:
+                        self._receipt = {**self._receipt, "sequence": result}
+                    if upload["error"] is not None:
+                        raise upload["error"]
                 return {**result, "play_roundtrip_ms": (time.perf_counter() - started) * 1000,
                         "cancellation_errors": cancellation_errors, "receipt": self.last_command_receipt}
             finally:
                 finished.set()
                 if watcher is not None:
                     watcher.join(self._timeout)
+                active_error = sys.exception()
+                try:
+                    self._stop_sequence_upload()
+                except BaseException as cleanup_error:
+                    if active_error is None:
+                        raise
+                    active_error.add_note(f"SLM uploader cleanup failed: {cleanup_error}")
                 self._sequence_token = None
                 self._sequence_intervals = []
                 self._sequence_codes = None
@@ -758,6 +945,7 @@ class _RemoteSlmAdapter:
         finally:
             with self._lock:
                 self._closed = True
+                self._stop_sequence_upload()
                 self._sequence_token = None
                 self._sequence_intervals = []
                 self._sequence_codes = None

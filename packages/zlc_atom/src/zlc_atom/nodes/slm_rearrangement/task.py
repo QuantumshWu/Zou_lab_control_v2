@@ -6,6 +6,7 @@ from pathlib import Path
 from time import perf_counter, monotonic, time_ns
 import sys
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from zlc_data import (AxisId, AxisSpec, COMPONENT, SCAN_POINT, SPATIAL_Y, SPATIAL_X,
@@ -177,7 +178,9 @@ class SlmRearrangementTask:
             raise ValueError("Rearrangement requires a calibrated spots Science Context")
         if tuple(np.asarray(science_context["phase"]).shape) != tuple(slm.shape_yx):
             raise ValueError("Science Context shape differs from the selected SLM")
-        if not all(callable(getattr(slm, method, None)) for method in ("prepare_phase_sequence", "play_phase_sequence", "release_phase_sequence")):
+        if not all(callable(getattr(slm, method, None)) for method in (
+                "prepare_phase_sequence", "submit_phase_frame", "play_phase_sequence",
+                "cancel_phase_sequence", "release_phase_sequence")):
             raise ValueError("The selected SLM does not offer phase-sequence playback")
         source, weights, order = _registration_order(calibration, science_context, self.context_path)
         if target_intensity is None:
@@ -345,6 +348,9 @@ class SlmRearrangementTask:
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
         arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
+        confirmed_phase = self.slm.last_commanded_phase
+        if confirmed_phase is not None:
+            arrays["last_confirmed_phase"] = confirmed_phase
         for index, value in enumerate(self._detections):
             prefix = ("before", "after")[index]
             arrays.update({prefix + "_" + name: item for name, item in value.items()})
@@ -354,6 +360,7 @@ class SlmRearrangementTask:
                         "brightness_minimum_to_initial", "brightness_maximum_to_initial",
                         "brightness_mean_to_initial", "phase_error_rms_rad", "phase_step_max_rad",
                         "pupil_phase_step_rms_rad", "discard_intensity_ratios", "field_projection_updates",
+                        "frame_solve_ms", "frame_copy_ms", "frame_ready_ms",
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
                         "actual_fields", "active_sites"):
                 if key in self._result: arrays[key] = self._result[key]
@@ -410,7 +417,7 @@ class SlmRearrangementTask:
                 ("maximum_step", "recommended_motion_frames", "clearance", "fade_clearance",
                  "surplus_stationary_clearance", "release_verified", "recommended_release_hold_frames",
                  "discard_reference_limit", "discard_converged", "converged",
-                 "noop", "fade_frames") if key in self._result}
+                 "noop", "fade_frames", "emitted_frame_count") if key in self._result}
         encoded = json.dumps(_plain_json(summary), allow_nan=False, separators=(",", ":"))
         arrays["metadata"] = np.asarray(encoded)
         archive = atomic_write_file(data / "rearrangement.npz", lambda f: np.savez(f, **arrays))
@@ -484,7 +491,8 @@ class SlmRearrangementTask:
             lines.append(f"{key.replace('_', ' ')}: {value}")
         lines.extend(["Playback acknowledgments are transport facts, not optical vblank measurements.",
                       "Target filling is not individual-atom identity tracking.",
-                      "compute_* entries are nested inside matching_holograms_and_copy; do not add nested or overlapping windows."])
+                      "compute/feed and device playback overlap inside online_rearrangement; do not add overlapping windows.",
+                      "compute_callback is bounded queue/backpressure time, not numerical solving."])
         if error is not None: lines.append(f"Error: {error}")
         context.register_artifact("summary_text", atomic_write_text(directory/"summary.txt", '\n'.join(lines)+'\n'), role="summary")
         return archive
@@ -565,9 +573,10 @@ class SlmRearrangementTask:
             camera_timeout = capture.timeout
             capture.timeout = max(camera_timeout, firing_started+self._pulse_timing['before_end_seconds']-monotonic()+camera_timeout)
             playback_finished_wall = None
+            playback_finished_at = None
 
             def photograph(cycle, index):
-                nonlocal playback_finished_wall, playback_attempted
+                nonlocal playback_finished_wall, playback_finished_at, playback_attempted
                 # Camera receive is independent: callback dispatch time is not
                 # the exposure timestamp of a queued second photograph.
                 node._commit_direct_cycle(cycle, index)
@@ -584,15 +593,86 @@ class SlmRearrangementTask:
                 start = perf_counter()
                 plan = self._plan = plan_rearrangement(prepared, np.flatnonzero(mask & valid))
                 self._timings['matching']=(perf_counter()-start)*1000
-                self._result = compute_rearrangement(prepared, plan,
-                    motion_frames=self.motion_frames,
-                    support_tolerance=self.intensity_tolerance,
-                    require_converged=False,
-                    stop_requested=context.cancel_requested)
-                self._timings["matching_holograms_and_copy"] = (perf_counter()-start)*1000
-                for name,value in self._result["timing_ms"].items(): self._timings["compute_"+name] = float(value)
-                if not self._result["converged"]:
-                    raise RuntimeError("The phase sequence did not pass its encoded-field quality checks; nothing was played. See the partial numeric report.")
+                online_started = start
+                playback = None
+                # The existing Task worker computes; one worker waits on the
+                # device's existing play operation. Mapping/display ownership
+                # remains in the SLM server, including on the same machine.
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="slm-play") as player:
+                    def play():
+                        nonlocal playback_finished_wall, playback_finished_at
+                        began = perf_counter()
+                        try:
+                            return self.slm.play_phase_sequence(stop_requested=context.cancel_requested)
+                        finally:
+                            playback_finished_wall = time_ns()
+                            playback_finished_at = monotonic()
+                            self._timings["sequence_play_and_final_settle"] = (perf_counter()-began)*1000
+
+                    def frame_ready(index, codes):
+                        nonlocal playback, playback_attempted
+                        check_cancelled(context)
+                        if playback is None:
+                            remaining = deadline-monotonic()
+                            if remaining < nominal:
+                                raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
+                            began = perf_counter()
+                            self.slm.prepare_phase_sequence(None, 1/self.frame_rate_hz, frame_count=self.motion_frames)
+                            self._timings["sequence_prepare"] = (perf_counter()-began)*1000
+                            self._timings["first_verified_frame_ready"] = (began-online_started)*1000
+                            playback_attempted = True
+                            playback = player.submit(play)
+                            context.report_progress("Computing and playing verified SLM frames")
+                        if playback.done():
+                            playback.result()  # Preserve an actual device error.
+                            raise RuntimeError("SLM playback ended before all frames were submitted")
+                        try:
+                            self.slm.submit_phase_frame(index, codes)
+                        except BaseException as admission_error:
+                            # A real display/upload failure can wake a blocked
+                            # queue producer as "cancelled". The play result,
+                            # not that wake-up symptom, owns the device error.
+                            if not playback.done():
+                                try:
+                                    self.slm.cancel_phase_sequence()
+                                except BaseException as cleanup:
+                                    admission_error.add_note(f"SLM cancellation also failed: {cleanup}")
+                            try:
+                                playback.result()
+                            except BaseException as device_error:
+                                if device_error is not admission_error:
+                                    device_error.add_note(f"Frame submission also failed: {admission_error}")
+                                raise
+                            raise
+
+                    try:
+                        self._result = compute_rearrangement(prepared, plan,
+                            motion_frames=self.motion_frames,
+                            support_tolerance=self.intensity_tolerance,
+                            require_converged=False, frame_ready=frame_ready,
+                            stop_requested=context.cancel_requested)
+                        self._timings["compute_and_feed"] = (perf_counter()-online_started)*1000
+                        for name, value in self._result["timing_ms"].items():
+                            self._timings["compute_"+name] = float(value)
+                        if not self._result["converged"]:
+                            raise RuntimeError("The phase sequence did not pass its encoded-field quality checks; playback is stopped at its verified prefix. See the partial numeric report.")
+                        if playback is not None:
+                            self._playback = playback.result()
+                    except BaseException as error:
+                        if playback is not None:
+                            if not playback.done():
+                                try:
+                                    self.slm.cancel_phase_sequence()
+                                except BaseException as cleanup:
+                                    error.add_note(f"SLM cancellation also failed: {cleanup}")
+                            try:
+                                self._playback = playback.result()
+                            except BaseException as cleanup:
+                                if cleanup is not error:
+                                    error.add_note(f"SLM playback also failed: {cleanup}")
+                        raise
+                    finally:
+                        self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000
                 if not len(self._result["phase_codes"]):
                     self._playback = {"frame_count": 0, "played_frames": 0, "cancelled": False,
                                       "noop": True, "acknowledgment": "No new phase commanded"}
@@ -601,25 +681,10 @@ class SlmRearrangementTask:
                     capture.timeout = max(camera_timeout,
                         firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
                     return
-                context.report_progress("Uploading the complete phase sequence to the SLM owner")
-                start = perf_counter()
-                self.slm.prepare_phase_sequence(self._result["phase_codes"], 1/self.frame_rate_hz)
-                self._timings["sequence_upload_and_prepare"] = (perf_counter()-start)*1000
-                # Check budget before moving the atoms. Final optical settling
-                # is part of the playback receipt and the runtime deadline.
-                remaining = deadline-monotonic()
-                if remaining < nominal:
-                    raise RuntimeError(f"After computation/upload only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
-                context.report_progress(f"Playing {len(self._result['phase_codes'])} SLM frames", current=0, total=len(self._result['phase_codes']))
-                start = perf_counter()
-                playback_attempted = True
-                self._playback = self.slm.play_phase_sequence(stop_requested=context.cancel_requested)
-                self._timings["sequence_play_and_final_settle"] = (perf_counter()-start)*1000
-                playback_finished_wall = time_ns()
                 if self._playback["cancelled"] or self._playback["played_frames"] != len(self._result["phase_codes"]):
                     raise RuntimeError("SLM sequence stopped before its target frame")
-                self._timings["verification_deadline_margin"] = (deadline-monotonic())*1000
-                if monotonic() > deadline:
+                self._timings["verification_deadline_margin"] = (deadline-playback_finished_at)*1000
+                if playback_finished_at > deadline:
                     raise RuntimeError("SLM playback missed the conservative after-imaging deadline; verification is not accepted")
                 context.report_progress("SLM target held; acquiring verification photograph", current=1, total=2)
                 # This Task knows the next trigger is intentionally later in

@@ -157,6 +157,17 @@ if len(sequence["phase_codes"]):
 prepared["close"]()
 ```
 
+The Task uses the same solver with `frame_ready(index, readonly_frame)`:
+each encoded map passes its bright/discard checks and host transfer before
+being submitted. A private two-frame uploader queue and a two-frame device
+queue overlap later computation, mapping/upload and local paced playback.
+The complete caller-owned read-only movie remains available for archival;
+published frames are never overwritten. The streaming device API is
+`prepare_phase_sequence(None, interval, frame_count=N)` followed by ordered
+`submit_phase_frame(index, frame)` and the existing playback call. The Task
+starts playback on the first verified map and skips preparation/playback for
+empty/no-change results.
+
 `motion_frames=N` is the total displayed map count: it includes the endpoint
 and excludes the already displayed source. Unselected source light fades within
 these same N maps; there is no extra removal prefix. Empty occupancy is a
@@ -184,18 +195,37 @@ gate proves atom release, moving-well shape, liquid-crystal response or survival
 Full-native 1024 × 1272 checks on an RTX 5070 Laptop GPU used the lab pupil,
 25-bin source spacing and 10 total maps:
 
-| Case | CPU planner | Generator, including host transfer | Independent bright ratio / discarded-region ratio after fade |
+| Case | CPU planner | Standalone shared generator, including host transfer | Independent bright ratio / discarded-region ratio after fade |
 | --- | ---: | ---: | ---: |
-| Archived 35 → 9, no selected-trap movement | 0.66–1.28 ms | 53–89 ms | 1.008742 / 0.00001081 |
-| 225 → 100, fixed-seed 112 occupied, uniform weights | 42.7 ms after pair-distance caching | 69–116 ms | 1.009875 / 0.003415 |
+| Archived 35 → 9, no selected-trap movement | 0.66–1.28 ms | 63.76 ms | 1.008742 / 0.00001081 |
+| Synthetic 225 → 100, fixed-seed 112 occupied, uniform weights | 42.7 ms after pair-distance caching | 63.54 ms | 1.009875 / 0.003415 |
 
 Preparation is outside these online windows: measured 1.74 s and 2.66 s
 respectively, with repeated preparation about 0.43 s and 0.76–0.88 s; new CUDA
-compilation can take longer. Generator host transfer was about 0.7–1.3 ms and
+compilation can take longer. Per-frame host transfers summed to about 1.8–2.0 ms and
 is already included in its total. Independent complex128 propagation checked
 every delivered map. Repeated close released the owned GPU arenas; generated
 source preparation retained a constant 10.4 MB CuPy FFT cache, not per-run growth.
 These are local measurements, not an exact T400 timing prediction.
+
+Matched real-GPU computation plus simulated X15213/RPC playback, authored at
+60 Hz, measured the following. The window starts at generator entry, after
+matching; streaming setup was performed before that window.
+
+| Case | First software output, sequential → pipeline | Compute start → playback call complete, sequential → pipeline |
+| --- | ---: | ---: |
+| 35 → 9 | 109.69 → 37.74 ms | 331.75 → 262.52 ms |
+| 225 → 100 | 94.21 → 35.55 ms | 316.25 → 254.16 ms |
+
+All 10 maps were acknowledged. Actual software intervals were about 17–20 ms
+(roughly 50–59 Hz), not proven 60 Hz optical refresh. The final profile hold
+was applied once, with about 33 ms remaining after the last interval.
+During overlap, generator wall time was 113.82/127.94 ms, including callback
+time 3.23/1.04 ms; concurrent in-process upload/mapping and CPU/GIL scheduling
+also expand the solver wall window. This is not pure CUDA kernel time, and
+overlapping generation/upload/playback windows must not be added. The shared
+frame-major solver preserved every phase byte, measured field and quality
+metric bit-for-bit against both saved pre-pipeline results.
 
 ### One-shot SLM Rearrangement Task
 
@@ -229,7 +259,8 @@ Invalid classification remains invalid, never an empty-site assertion.
 **Movement frames** is the total N maps, with integrated fade. There are no
 separate removal-ramp, dark-tolerance or matching-radius controls. At the defaults,
 16 maps / 60 Hz gives a nominal display duration of about 267 ms; computation,
-upload and any remaining final optical settle add to it. **Maximum intensity
+upload and playback now overlap, while startup stalls and any remaining final
+optical settle extend the measured window. **Maximum intensity
 spread (%)** (`intensity_error_percent`, default 1%) means the weighted
 maximum/minimum intensity ratio minus one; 1% maps to a solver ratio of 1.01.
 It is not a bound on absolute trap-depth change or atom loss.
@@ -250,12 +281,15 @@ Actual Config-filled periods and nested loops determine the conservative
 verification deadline. Camera reception continues independently during GPU/SLM
 work. Late playback or an evidently early verification photo is rejected;
 a host receive timestamp is not a physical exposure timestamp. The physical
-SLM owner plays a bulk-preloaded sequence locally, acknowledges every frame,
+SLM owner plays verified frames locally as they arrive, acknowledges every frame,
 and applies remaining final settle only once. Update both client and server
 for sequence protocol v2. DVI acknowledgements prove software rendering,
 not vblank or liquid-crystal settling.
-The current implementation generates the complete movie before bulk upload;
-computation, upload and playback are not pipelined.
+Queue admission/upload acknowledgement is not display acknowledgement. Missing
+frames or slow acknowledgements extend actual cadence; frames are not skipped.
+If a later frame fails quality or computation, playback is cancelled and joined:
+earlier verified frames may already have played. The report keeps the actual
+confirmed prefix and partial outcome, not an assertion that nothing was shown.
 
 The three automatic previews are before photo + occupancy, after photo +
 occupancy, and source/final phase. The **trajectory** signal stores full ordered
@@ -278,13 +312,17 @@ NPZ + PNG pairs. No extra final Science Context is written. Report rendering
 and movie archival stay out of the photo-to-playback critical path.
 Preparation, readout, matching, complete calculation/host transfer, upload,
 playback/final settle and saving are separate timing windows; nested or
-overlapping windows must not be added. Stop/failure saves partial evidence
+overlapping windows must not be added. First verified host frame, first display
+acknowledgement, callback time (including backpressure) and total completion are reported separately.
+Stop/failure saves partial evidence
 and the last confirmed phase; unknown device outcomes remain explicit.
 Target filling is not per-atom identity-tracked survival.
 
-Current acceptance: 34 focused tests passed and the native virtual Task flow
-completed. The FigureViewer source-identity follow-up remains in progress;
-experimental SLM optical response and atom-survival acceptance are still pending.
+Current acceptance: the earlier batch native virtual Task flow and 34 focused
+tests passed. Streaming numerical/RPC checks pass, but its formal native Task
+flow is being checked. The sparse FigureViewer static/dynamic seam is fixed and
+visually accepted; dense trajectory styling is still being refined. Final whole
+flow, experimental SLM optical response and atom-survival acceptance remain pending.
 
 Task Console, Device Control, Pulse Editor and SLM Editor share one
 `ExperimentSession`, named devices, signal plane and sequencer. Loaded-device

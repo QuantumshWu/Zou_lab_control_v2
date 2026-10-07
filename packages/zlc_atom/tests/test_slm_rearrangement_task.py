@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+from queue import Empty, Full, Queue
 from threading import Event
 from types import SimpleNamespace
 import time
@@ -90,25 +91,65 @@ class _SequenceSlm(_Slm):
         self.preparations, self.plays, self.releases = [], 0, 0
         self.play_error = None
         self.cleanup_error = None
+        self.cancel = Event()
+        self.frames = None
+        self.confirmed = 0
 
-    def prepare_phase_sequence(self, codes, frame_interval_seconds):
+    def prepare_phase_sequence(self, codes, frame_interval_seconds, *, frame_count=None):
         self.trace.append("upload")
-        self.preparations.append((np.array(codes), frame_interval_seconds))
-        return {"frame_count": len(codes), "prepare_ms": .01}
+        values = np.empty((frame_count, *self.shape_yx), np.uint8) if codes is None else np.array(codes)
+        self.preparations.append((values, frame_interval_seconds))
+        self.frames = Queue(maxsize=2)
+        self.confirmed = 0
+        self.cancel.clear()
+        if codes is not None:
+            for index, frame in enumerate(values):
+                self.submit_phase_frame(index, frame)
+        return {"frame_count": len(values), "prepare_ms": .01, "streaming": codes is None}
+
+    def submit_phase_frame(self, index, codes):
+        self.preparations[-1][0][index] = codes
+        while not self.cancel.is_set():
+            try:
+                self.frames.put((index, np.array(codes)), timeout=.01)
+                return
+            except Full:
+                pass
+        raise RuntimeError("the SLM stream was cancelled")
+
+    def cancel_phase_sequence(self):
+        self.cancel.set()
 
     def play_phase_sequence(self, stop_requested=None):
         self.trace.append("play")
         self.plays += 1
-        if self.play_error is not None:
-            raise self.play_error
         codes = self.preparations[-1][0]
-        self.apply_phase(phase_from_codes(codes[-1], self.shape_yx))
-        return {"played_frames": len(codes), "cancelled": False,
-                "final_settle_completed": True, "physical_vblank_observed": False,
-                "acknowledgment": "test device", "receipt": self.last_command_receipt}
+        try:
+            if self.play_error is not None:
+                raise self.play_error
+            while self.confirmed < len(codes) and not self.cancel.is_set():
+                if stop_requested is not None and stop_requested():
+                    self.cancel.set()
+                    break
+                try:
+                    index, frame = self.frames.get(timeout=.01)
+                except Empty:
+                    continue
+                assert index == self.confirmed
+                self.apply_phase(phase_from_codes(frame, self.shape_yx))
+                self.confirmed += 1
+        finally:
+            result = {"frame_count": len(codes), "played_frames": self.confirmed,
+                      "cancelled": self.cancel.is_set(), "final_settle_completed": self.confirmed == len(codes),
+                      "physical_vblank_observed": False, "acknowledgment": "test device"}
+            self.receipt_overrides["sequence"] = result
+            self.cancel.set()  # Wake a producer on a device failure too.
+        return {**result, "receipt": self.last_command_receipt}
 
     def release_phase_sequence(self):
         self.releases += 1
+        self.cancel.set()
+        self.frames = None
         if self.cleanup_error is not None:
             raise self.cleanup_error
 
@@ -196,6 +237,9 @@ def experiment(tmp_path, monkeypatch, request):
             assert camera._records.produced_count == 2
         frames = kwargs["motion_frames"] if len(planned["source_indices"]) else 0
         codes = np.full((frames, *slm.shape_yx), 32, np.uint8)
+        codes.flags.writeable = False
+        for index, frame in enumerate(codes):
+            kwargs["frame_ready"](index, frame)
         starts = np.asarray(state.prepare_arguments["source_yx"], dtype=np.float64)[planned["source_indices"]]
         points = starts.copy()
         points[:len(planned["assigned_source_indices"])] = state.prepare_arguments["target_yx"][planned["assigned_target_indices"]]
@@ -447,9 +491,10 @@ def test_buffered_second_frame_is_not_accepted_from_its_late_callback(experiment
     assert json.loads((e.context.run_directory / "summary.json").read_text())["status"] == "failed"
 
 
-@pytest.mark.parametrize("stopped", [False, True])
-def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeypatch, stopped):
+@pytest.mark.parametrize("ending", ["device", "stopped", "numeric"])
+def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeypatch, ending):
     e = experiment
+    stopped = ending == "stopped"
     phase_figures = []
 
     def figures(path, **values):
@@ -472,19 +517,47 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
             patch.setattr(task_module, "compute_rearrangement", compute)
             with pytest.raises(RuntimeError, match="cancelled"):
                 e.task.execute(e.context)
-    else:
+    elif ending == "device":
         e.slm.play_error = RuntimeError("injected sequence failure")
         e.slm.cleanup_error = RuntimeError("injected release failure")
         original_play = e.slm.play_phase_sequence
+        original_submit = e.slm.submit_phase_frame
+        submit_blocked = Event()
+
+        def blocked_submit(index, frame):
+            if index == 0:
+                return original_submit(index, frame)
+            submit_blocked.set()
+            assert e.slm.cancel.wait(2)
+            raise RuntimeError("queue admission cancelled before accepting its frame")
 
         def partial_play(stop_requested=None):
             # A failed play can leave a later frame confirmed. That current
             # receipt must not retag the earlier source-phase figure.
-            e.slm.apply_phase(phase_from_codes(e.slm.preparations[-1][0][0], e.slm.shape_yx))
+            index, frame = e.slm.frames.get(timeout=2)
+            assert index == 0
+            e.slm.apply_phase(phase_from_codes(frame, e.slm.shape_yx))
+            e.slm.confirmed = 1
+            assert submit_blocked.wait(2), "display failure occurs during blocked submission, not its precheck"
             return original_play(stop_requested)
 
         monkeypatch.setattr(e.slm, "play_phase_sequence", partial_play)
-        with pytest.raises(RuntimeError, match="injected sequence failure"):
+        monkeypatch.setattr(e.slm, "submit_phase_frame", blocked_submit)
+        with pytest.raises(RuntimeError, match="injected sequence failure") as failure:
+            e.task.execute(e.context)
+        assert any("queue admission cancelled" in note for note in failure.value.__notes__)
+    else:
+        original = e.compute
+
+        def rejected(*args, **kwargs):
+            ready = kwargs["frame_ready"]
+            kwargs["frame_ready"] = lambda index, frame: ready(index, frame) if index == 0 else None
+            result = original(*args, **kwargs)
+            result["converged"] = False
+            return result
+
+        monkeypatch.setattr(task_module, "compute_rearrangement", rejected)
+        with pytest.raises(RuntimeError, match="encoded-field quality checks"):
             e.task.execute(e.context)
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["status"] == ("stopped" if stopped else "failed")
@@ -496,9 +569,12 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
     phase, phase_device = phase_figures[0]
     np.testing.assert_array_equal(phase.block.values[0, 0], e.task.science_context["phase"])
     assert phase_device["command_receipt"] == summary["capture_events"]["phase"]["device_snapshots"]["slm"]["command_receipt"]
-    if not stopped:
+    if ending == "device":
         assert phase_device["command_revision"] < summary["device_snapshots"]["slm"]["command_revision"]
         assert not np.array_equal(e.slm.last_commanded_phase, phase.block.values[0, 0])
+    elif ending == "numeric":
+        assert "encoded-field quality checks" in summary["error"]
+        assert summary["playback"]["cancelled"], "a successful cancelled play must not mask numerical rejection"
     with np.load(e.context.artifacts["partial_data"][0], allow_pickle=False) as data:
         np.testing.assert_array_equal(data["before_valid"], [True, True, False, True, True, True])
         assert "before_image" in data.files and "after_image" not in data.files

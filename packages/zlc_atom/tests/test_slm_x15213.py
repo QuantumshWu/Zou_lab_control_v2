@@ -1488,3 +1488,201 @@ def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(
         server.server_close()
         worker.join(2)
         physical.close()
+
+
+@pytest.mark.parametrize("ending", ["complete", "stop", "upload-failure", "lost-reply"])
+def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypatch, ending):
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as physical_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as remote_module
+
+    delivered, errors, playback = [], [], []
+    first_display, blocked_producer, unblock_display, producer_done = (threading.Event() for _ in range(4))
+    frames = np.frombuffer(bytes(np.arange(12, dtype=np.uint8).repeat(1024 * 1272)), np.uint8).reshape(12, 1024, 1272)
+
+    def present(gray):
+        assert isinstance(gray, np.ndarray) and not gray.flags.writeable
+        delivered.append(gray.copy())
+        first_display.set()
+        if ending == "stop":
+            assert unblock_display.wait(2)
+
+    monkeypatch.setattr(physical_module, "_display", lambda _name: {"name": "test-display"})
+    monkeypatch.setattr(physical_module, "_prepare_dvi_controller", lambda _serial: False)
+    monkeypatch.setattr(physical_module, "_open_dvi_presenter", lambda _name: (present, lambda: None, lambda _frames: None))
+    original_rpc = remote_module._rpc_call
+
+    def rpc(endpoint, method, arguments, timeout):
+        if ending == "upload-failure" and method == "submit_sequence_frame" and arguments[1] == 2:
+            raise socket.timeout("upload queue reply lost")
+        reply = original_rpc(endpoint, method, arguments, timeout)
+        if method == "submit_sequence_frame":
+            assert reply[1] == b"" and "state" not in reply[0], "queue admission is not hardware ACK"
+        if method == "play_sequence" and reply[0]["ok"]:
+            assert reply[1] == b"" and reply[0]["state"]["phase_bytes"] == 0
+            if ending == "lost-reply":
+                raise socket.timeout("final stream reply lost")
+        return reply
+
+    monkeypatch.setattr(remote_module, "_rpc_call", rpc)
+    physical = X15213Adapter(_config(transport="dvi", flip_x=True, flip_y=True))
+    server, worker = running_slm_server(physical)
+    remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2)
+
+    def play():
+        try:
+            playback.append(remote.play_phase_sequence())
+        except BaseException as error:
+            errors.append(error)
+
+    def produce():
+        try:
+            for index, frame in enumerate(frames):
+                if index == 6:
+                    blocked_producer.set()
+                remote.submit_phase_frame(index, frame)
+                if index == 0:
+                    assert first_display.wait(2), "first frame must display before the complete movie exists"
+                if ending != "stop":
+                    time.sleep(.023)  # Explicit simulated GPU production slower than nominal 60 Hz.
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            producer_done.set()
+
+    player = Thread(target=play)
+    producer = Thread(target=produce)
+    try:
+        prepared = remote.prepare_phase_sequence(None, 1 / 60, frame_count=12)
+        assert prepared["streaming"] and prepared["queue_capacity"] == 2
+        assert physical._sequence["codes"] is None and physical._sequence["queue"].maxsize == 2
+        player.start(); producer.start()
+        assert first_display.wait(2) and not producer_done.is_set()
+        if ending == "stop":
+            assert blocked_producer.wait(2)
+            assert not producer_done.wait(.04), "a full bounded stream must backpressure, never drop/overwrite"
+            remote.cancel_phase_sequence()
+            unblock_display.set()
+        producer.join(3); player.join(3)
+        assert not producer.is_alive() and not player.is_alive()
+        assert remote._sequence_upload is None and remote._sequence_codes is None
+        assert physical._sequence is None
+        if ending == "complete":
+            assert errors == [] and playback[0]["played_frames"] == len(frames)
+            assert max(playback[0]["queue_wait_ms"]) > 1, "underrun waits are measured, not hidden/skipped"
+            assert len(playback[0]["upload_ms"]) == len(frames)
+            assert playback[0]["final_settle_completed"]
+        elif ending == "stop":
+            assert playback[0]["cancelled"] and playback[0]["played_frames"] == 1
+            assert any("cancelled" in str(error) for error in errors)
+        elif ending == "upload-failure":
+            assert any("upload queue reply lost" in str(error) for error in errors)
+            assert physical.last_command_receipt["sequence"]["cancelled"]
+            assert remote.last_command_receipt["outcome"] == "known-new", "final play receipt confirms the partial phase"
+        else:
+            assert any("final stream reply lost" in str(error) for error in errors)
+            assert remote.last_command_receipt["outcome"] == "unknown" and remote.last_commanded_phase is None
+        for frame, gray in zip(frames, delivered):
+            np.testing.assert_array_equal(gray, physical._phase_to_gray[frame[::-1, ::-1]])
+        if ending != "lost-reply":
+            confirmed = physical.last_command_receipt["sequence"]["played_frames"]
+            np.testing.assert_array_equal(remote.last_commanded_phase,
+                                          frames[confirmed - 1].astype(np.float32) * np.float32(2 * np.pi / 256))
+    finally:
+        unblock_display.set()
+        remote.cancel_phase_sequence()
+        if producer.is_alive(): producer.join(3)
+        if player.is_alive(): player.join(3)
+        remote.close()
+        server.shutdown(); server.server_close(); worker.join(2)
+        physical.close()
+
+
+@pytest.mark.parametrize("admitted", [0, 1, 3])
+def test_remote_stream_upload_eof_stops_only_an_unfinished_current_prefix(monkeypatch, admitted):
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as physical_module
+    import zlc_atom.devices.slm.hamamatsu_x15213.remote as remote_module
+
+    monkeypatch.setattr(physical_module, "_display", lambda _name: {"name": "test-display"})
+    monkeypatch.setattr(physical_module, "_prepare_dvi_controller", lambda _serial: False)
+    monkeypatch.setattr(physical_module, "_open_dvi_presenter", lambda _name: (lambda _frame: None, lambda: None, lambda _frames: None))
+    physical = X15213Adapter(_config(transport="dvi"))
+    initial = np.full(physical.shape_yx, np.float32(37 * 2 * np.pi / 256))
+    physical.apply_phase(initial)
+    server, worker = running_slm_server(physical)
+    endpoint = ("127.0.0.1", server.server_address[1])
+    primary = socket.create_connection(endpoint, timeout=2)
+    uploader = socket.create_connection(endpoint, timeout=2)
+    replies, errors = [], []
+    player = None
+    newcomer = None
+    try:
+        def prepare():
+            metadata, payload = remote_module._rpc_call(primary, "prepare_sequence", (
+                physical.command_revision, 0, list(physical.shape_yx), 3, [1 / 60] * 3, b"", True,
+            ), 2)
+            assert metadata["ok"] and payload == b""
+            return metadata["sequence"]["sequence_token"]
+
+        token = prepare()
+        assert remote_module._rpc_call(uploader, "bind_sequence_upload", (token,), 2)[0]["ok"]
+        if admitted == 0:
+            # The old channel dies after new physical buffers exist but
+            # before their new token is published. It must not cancel them.
+            original_prepare = physical.prepare_phase_sequence
+
+            def replace_stream(*args, **kwargs):
+                prepared = original_prepare(*args, **kwargs)
+                uploader.shutdown(socket.SHUT_RDWR)
+                uploader.close()
+                time.sleep(.03)
+                assert not physical._sequence_cancel.is_set()
+                return prepared
+
+            with monkeypatch.context() as patch:
+                patch.setattr(physical, "prepare_phase_sequence", replace_stream)
+                replacement = prepare()
+            assert replacement != token
+            token = replacement
+            uploader = socket.create_connection(endpoint, timeout=2)
+            assert remote_module._rpc_call(uploader, "bind_sequence_upload", (token,), 2)[0]["ok"]
+
+        def play():
+            try:
+                replies.append(remote_module._rpc_call(primary, "play_sequence", (token,), 2))
+            except BaseException as error:
+                errors.append(error)
+
+        player = Thread(target=play)
+        player.start()
+        deadline = time.monotonic() + 2
+        while not physical._sequence["playing"] and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert physical._sequence["playing"]
+        for index in range(admitted):
+            frame = np.full(physical.shape_yx, index + 11, np.uint8)
+            assert remote_module._rpc_call(uploader, "submit_sequence_frame", (token, index, frame), 2)[0]["ok"]
+        uploader.shutdown(socket.SHUT_RDWR)
+        uploader.close()
+        player.join(2)
+        assert not player.is_alive() and errors == []
+        receipt = replies[0][0]["state"]["receipt"]["sequence"]
+        assert receipt["cancelled"] is (admitted < 3)
+        assert receipt["played_frames"] <= admitted
+        if admitted == 3:
+            assert receipt["played_frames"] == 3 and receipt["final_settle_completed"]
+        # EOF released the actual command owner; a new ordinary handshake
+        # must work and return the retained confirmed phase, not queued pixels.
+        newcomer = _RemoteSlmAdapter(*endpoint, 2)
+        confirmed = receipt["played_frames"]
+        expected = initial if confirmed == 0 else np.full(physical.shape_yx, confirmed + 10, np.float32) * np.float32(2 * np.pi / 256)
+        np.testing.assert_array_equal(newcomer.last_commanded_phase, expected)
+        assert newcomer.last_command_receipt["outcome"] == "known-new"
+        assert physical._sequence is None
+    finally:
+        physical.cancel_phase_sequence()
+        uploader.close()
+        primary.close()
+        if player is not None: player.join(2)
+        if newcomer is not None: newcomer.close()
+        server.shutdown(); server.server_close(); worker.join(2)
+        physical.close()

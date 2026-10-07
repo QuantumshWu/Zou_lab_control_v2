@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from threading import Event
+from queue import Empty, Full, Queue
 import time
 from typing import Callable
 
@@ -89,17 +90,40 @@ class VirtualSLM:
             receipt["sequence"] = self._sequence_receipt
         return receipt
 
-    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object) -> dict[str, object]:
+    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object, *, frame_count: int | None = None) -> dict[str, object]:
         started = time.perf_counter()
-        frames, intervals = phase_sequence_codes(codes, self.shape_yx, frame_interval_seconds)
-        if np.asarray(codes).flags.writeable:
+        frames, intervals = phase_sequence_codes(codes, self.shape_yx, frame_interval_seconds, frame_count=frame_count)
+        if frames is not None and np.asarray(codes).flags.writeable:
             frames = np.frombuffer(frames.tobytes(), dtype=np.uint8).reshape(frames.shape)
-        prepared = {"frame_count": len(frames), "frame_intervals_seconds": intervals.tolist(),
+        prepared = {"frame_count": len(intervals), "frame_intervals_seconds": intervals.tolist(),
                     "prepare_ms": (time.perf_counter() - started) * 1000,
-                    "upload_roundtrip_ms": 0.0, "mapping_revision": 0}
-        self._sequence = (frames, intervals, self._command_revision, prepared)
+                    "upload_roundtrip_ms": 0.0, "mapping_revision": 0,
+                    "streaming": frames is None, "queue_capacity": 2 if frames is None else 0}
+        self._sequence = {"codes": frames, "intervals": intervals, "command_revision": self._command_revision,
+                          "prepared": prepared, "queue": Queue(maxsize=2) if frames is None else None,
+                          "submitted": 0, "playing": False}
         self._sequence_cancel.clear()
         return dict(prepared)
+
+    def submit_phase_frame(self, index: int, codes: object) -> None:
+        sequence = self._sequence
+        if sequence is None or sequence["queue"] is None:
+            raise RuntimeError("Streaming SLM phase sequence has not been prepared")
+        if type(index) is not int or index != sequence["submitted"] or index >= len(sequence["intervals"]):
+            raise ValueError("SLM streaming frame index is not the next declared frame")
+        frame = np.asarray(codes)
+        if frame.dtype != np.uint8 or frame.shape != self.shape_yx:
+            raise ValueError("SLM streaming frame must be uint8 matching the full device shape")
+        if frame.flags.writeable:
+            frame = np.frombuffer(frame.tobytes(), np.uint8).reshape(self.shape_yx)
+        while not self._sequence_cancel.is_set() and self._sequence is sequence:
+            try:
+                sequence["queue"].put(frame, timeout=0.01)
+                sequence["submitted"] += 1
+                return
+            except Full:
+                pass
+        raise RuntimeError("SLM phase sequence cancelled before accepting its frame")
 
     def cancel_phase_sequence(self) -> None:
         self._sequence_cancel.set()
@@ -108,24 +132,44 @@ class VirtualSLM:
         self._sequence = None
 
     def play_phase_sequence(self, stop_requested: Callable[[], bool] | None = None) -> dict[str, object]:
-        sequence, self._sequence = self._sequence, None
+        sequence = self._sequence
         if sequence is None:
             raise RuntimeError("SLM phase sequence has not been prepared")
-        codes, intervals, revision, prepared = sequence
-        if revision != self._command_revision:
+        if sequence["playing"]:
+            raise RuntimeError("SLM phase sequence is already playing")
+        sequence["playing"] = True
+        codes, intervals, prepared = sequence["codes"], sequence["intervals"], sequence["prepared"]
+        if sequence["command_revision"] != self._command_revision:
+            self.release_phase_sequence()
             raise RuntimeError("stale prepared SLM sequence")
         started = time.perf_counter()
-        dispatch, acknowledgments = [], []
+        dispatch, acknowledgments, queue_wait = [], [], []
         result = {**prepared, "played_frames": 0, "cancelled": False,
                   "acknowledgment": "simulation-state", "physical_vblank_observed": False,
                   "final_settle_ms": 0.0, "final_settle_completed": False}
         self._command_revision += 1
         failed = False
         try:
-            for frame, interval in zip(codes, intervals):
+            for index, interval in enumerate(intervals):
                 if self._sequence_cancel.is_set() or (stop_requested is not None and stop_requested()):
                     self._sequence_cancel.set()
                     break
+                if sequence["queue"] is not None:
+                    queued_started = time.perf_counter()
+                    while not self._sequence_cancel.is_set():
+                        if stop_requested is not None and stop_requested():
+                            self._sequence_cancel.set()
+                            break
+                        try:
+                            frame = sequence["queue"].get(timeout=0.01)
+                            break
+                        except Empty:
+                            pass
+                    queue_wait.append((time.perf_counter() - queued_started) * 1000)
+                    if self._sequence_cancel.is_set():
+                        break
+                else:
+                    frame = codes[index]
                 frame_started = time.perf_counter()
                 dispatch.append((frame_started - started) * 1000)
                 canonical = phase_from_codes(frame, self.shape_yx)
@@ -147,9 +191,12 @@ class VirtualSLM:
             result.update(cancelled=self._sequence_cancel.is_set(), dispatch_ms=dispatch,
                           acknowledged_ms=acknowledgments, actual_frame_intervals_ms=np.diff(dispatch).tolist(),
                           play_ms=(time.perf_counter() - started) * 1000)
-            result["final_settle_completed"] = result["played_frames"] == len(codes) and not result["cancelled"]
+            result.update(queue_wait_ms=queue_wait, first_dispatch_ms=dispatch[0] if dispatch else None,
+                          first_acknowledged_ms=acknowledgments[0] if acknowledgments else None)
+            result["final_settle_completed"] = result["played_frames"] == len(intervals) and not result["cancelled"]
             self._stage = "sequence-failed" if failed else "sequence-cancelled" if result["cancelled"] else "sequence-complete"
             self._sequence_receipt = result
+            self.release_phase_sequence()
         return {**result, "receipt": self.last_command_receipt}
 
     def close(self) -> None:

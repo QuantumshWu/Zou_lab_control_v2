@@ -64,20 +64,30 @@ def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
 
 
 def phase_sequence_codes(
-    codes: object, shape_yx: tuple[int, int], frame_interval_seconds: object
-) -> tuple[np.ndarray, np.ndarray]:
-    """Validate logical frames and keep a readonly view of the caller's movie."""
+    codes: object, shape_yx: tuple[int, int], frame_interval_seconds: object,
+    *, frame_count: int | None = None,
+) -> tuple[np.ndarray | None, np.ndarray]:
+    """Validate a caller-owned movie or declared bounded-stream frame count."""
     shape = _shape(shape_yx)
-    source = np.asarray(codes)
-    if source.dtype != np.uint8 or source.ndim != 3 or source.shape[1:] != shape or not len(source):
-        raise ValueError("SLM phase sequence must be nonempty uint8 frames matching the full device shape")
+    source = None if codes is None else np.asarray(codes)
+    if source is None:
+        if type(frame_count) is not int or frame_count <= 0:
+            raise ValueError("Streaming SLM sequence needs a positive declared frame_count")
+        count = frame_count
+    else:
+        if source.dtype != np.uint8 or source.ndim != 3 or source.shape[1:] != shape or not len(source):
+            raise ValueError("SLM phase sequence must be nonempty uint8 frames matching the full device shape")
+        count = len(source)
+        if frame_count is not None and frame_count != count:
+            raise ValueError("SLM frame_count differs from its phase sequence")
     intervals = np.asarray(frame_interval_seconds, dtype=np.float64)
     if intervals.ndim == 0:
-        intervals = np.full(len(source), intervals.item(), dtype=np.float64)
-    if intervals.shape != (len(source),) or not np.all(np.isfinite(intervals)) or np.any(intervals <= 0):
+        intervals = np.full(count, intervals.item(), dtype=np.float64)
+    if intervals.shape != (count,) or not np.all(np.isfinite(intervals)) or np.any(intervals <= 0):
         raise ValueError("SLM frame intervals must be finite positive seconds, one per frame")
-    frames = source.view()
-    frames.flags.writeable = False
+    frames = None if source is None else source.view()
+    if frames is not None:
+        frames.flags.writeable = False
     return frames, np.frombuffer(intervals.tobytes(), dtype=np.float64)
 
 
