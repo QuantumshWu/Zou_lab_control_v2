@@ -457,6 +457,8 @@
 
 ### 2.7 SLM GPU重排（单次实验Task已完成软件验证，硬件待验收）
 
+- 真机曝光检查失败后再次Start的`producer generation is already active`已定位为Task在prepare之后、collect之前退出时只关闭相机，未退休内部camera producer。沿既有Feedback的同一清理方式补全generation退休，不放宽Runtime的active-owner检查、不改变FiniteCapture的先停止接收后drain语义；实际曝光回读拒绝后修改曝光、同session重新采集的定向红绿验证通过。
+
 - 2026-10-07 完成一次Pulse全流程：真实Qt操作、RTX5070Laptop GPU与虚拟设备，单个Context/Calibration自动生成2×2目标，首次9个occupied、复拍4/4填充；四个preview真实接受有效数据，phase不混入camera geometry，保存Figure可重开。此为128×128功能验收，不冒充全幅400阱或实验原子存活率。最后一次匹配/全部相位计算/回传13.34ms，GPU准备2.35s单列；18帧名义300ms、虚拟播放581ms，均有实际分阶段报告。窗口/children已关闭，证据仅在ignored research。
 - 对齐master `b1d8a1f2` 后12项Task/发现/overlay/状态定向检查通过。提前失败不归属旧run的播放记录，partial phase保留该图自己的device receipt；结束释放整段pinned movie，不把已保存影片留在completed node。软件实现位于worktree，未合并master；真实SLM服务端与客户端须同时更新sequence protocol v2，光学刷新/settle与原子损失仍需实验机验收。
 

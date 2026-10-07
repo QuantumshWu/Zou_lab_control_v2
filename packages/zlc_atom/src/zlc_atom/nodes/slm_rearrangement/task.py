@@ -594,6 +594,10 @@ class SlmRearrangementTask:
                 capture.stopped = True
                 try: capture.close()
                 except BaseException as cleanup: cleanup_errors.append(cleanup)
+                # Collect never ran, so it could not retire the generation
+                # opened by prepare. Match the existing Feedback cleanup.
+                try: self.signal_plane.retire(capture.node)
+                except BaseException as cleanup: cleanup_errors.append(cleanup)
             for cleanup in (self.slm.release_phase_sequence, None if prepared is None else prepared["close"]):
                 if cleanup is not None:
                     try: cleanup()

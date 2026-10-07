@@ -344,12 +344,17 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         host.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare"])
+@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "actual-exposure"])
 def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experiment, monkeypatch, failure):
     e = experiment
     if failure == "short-gap":
         e.task.sequence = _sequence(.001)
         error_type, message = ValueError, "playback alone"
+    elif failure == "actual-exposure":
+        working_point = e.camera.working_point
+        monkeypatch.setattr(e.camera, "working_point", lambda:
+            replace(working_point(), exposure_seconds=.01000001))
+        error_type, message = ValueError, "camera's actual exposure"
     else:
         previous = {"played_frames": 7, "play_ms": 321., "cancelled": False}
         e.slm.receipt_overrides["sequence"] = previous
@@ -370,6 +375,15 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
     if failure == "gpu-prepare":
         assert summary["device_snapshots"]["slm"]["command_receipt"]["sequence"] == previous
         assert e.slm.commands == [], "early failure must retain the preceding device command"
+    if failure == "actual-exposure":
+        # The operator changes exposure and starts again in the same session.
+        # Hardware is closed, but the companion producer must be released too.
+        monkeypatch.setattr(e.camera, "working_point", working_point)
+        e.task.exposure_seconds = .001
+        retry = _RunContext(e.context.run_directory.parent / "retry", e.camera, e.board, e.trace)
+        result = e.task.execute(retry)
+        assert Path(result["artifact_path"]).is_file()
+        assert e.board.fires == [(1, 1)] and e.slm.plays == 1
 
 
 def test_buffered_second_frame_is_not_accepted_from_its_late_callback(experiment):
