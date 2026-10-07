@@ -2069,8 +2069,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             assert restored_frame.overlay.status is None
             assert not active["state"].overlay_signal
             assert [decl.name for decl in real_presenter._archive_producers[0].dataset_output_declarations] == ["data"]
-            np.testing.assert_array_equal(host._session._renderer._artists["image:point-paths"].get_segments(), paths)
-            assert host._session._renderer._artists["image:point-path-arrows"]
+            np.testing.assert_array_equal(host._session._renderer._artists["image:point-paths"]._zlc_point_path_inputs[1], paths)
+            assert host._session._renderer._artists["image:point-paths"].get_paths()
         else:
             assert restored_frame.overlay.status.block.schema == overlay.status.block.schema
             np.testing.assert_array_equal(restored_frame.overlay.status.block.values, overlay.status.block.values)

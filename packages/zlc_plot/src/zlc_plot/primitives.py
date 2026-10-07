@@ -259,11 +259,11 @@ class ImagePointOverlay:
 
     ``paths_xy``, when supplied, contains one ordered canonical x/y polyline
     per point, with shape ``(N, K, 2)`` and at least one vertex.  Repeated
-    vertices and backtracking retain their order.  Point circles mark the
-    supplied anchors; filled squares mark the last vertex of each path.  Path
-    colours follow the shared palette in point order.  Arrows show direction;
-    bounded annotations use common vertex indices (0 is the initial position)
-    and compress repeated vertices into labelled wait ranges.
+    vertices and backtracking retain their order. The supplied anchors use the
+    same site glyph/status colours as other image annotations; thinner paths
+    terminate in one arrow at the actual last position. Same-status site/path/
+    head coverage is painted as one union, applying alpha once. A common vertex
+    range (0 is initial) and sparse exceptional-order annotations show timing.
     """
 
     revision: int

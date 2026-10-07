@@ -25,7 +25,7 @@ import re
 from threading import RLock
 from enum import Enum
 from time import time
-from types import CodeType, MappingProxyType
+from types import CodeType, MappingProxyType, MethodType
 from typing import Any, Iterable, Mapping, Sequence
 import weakref
 
@@ -1092,6 +1092,100 @@ def _point_ring_radius(
     if nearest.size == 0:
         return float(fallback)
     return float(fraction) * float(np.median(nearest))
+
+
+def _point_path_union_paths(collection: Any) -> list[Any]:
+    """One filled coverage union per SiteMap status, like the SEM glyph.
+
+    The artist retains the exact data geometry. Its ordinary get_paths call
+    materializes display-pixel outlines for native composition and export at
+    their actual transforms/DPI; no independent raster or status truth exists.
+    """
+    from matplotlib.path import Path as DrawPath
+
+    axes, figure = collection.axes, collection.figure
+    points, paths, radii, colours, widths, dashed = collection._zlc_point_path_inputs
+    signature = (tuple(axes.get_xlim()), tuple(axes.get_ylim()),
+                 tuple(axes.bbox.bounds), figure.dpi,
+                 id(axes.xaxis._scale), id(axes.yaxis._scale))
+    if collection._zlc_point_path_signature == signature:
+        return collection._paths
+    theta = np.linspace(0., 2.*np.pi, 65)[:-1]
+    unit = np.column_stack((np.cos(theta), np.sin(theta)))
+    circle = DrawPath.unit_circle()
+
+    def polygon(vertices):
+        return DrawPath(np.vstack((vertices, vertices[0])),
+            np.asarray((DrawPath.MOVETO, *([DrawPath.LINETO]*(len(vertices)-1)), DrawPath.CLOSEPOLY), np.uint8))
+
+    pixels = axes.transData.transform(paths.reshape(-1, 2)).reshape(paths.shape)
+    rings = axes.transData.transform(
+        (points[:, None, :] + unit[None, :, :]*np.asarray(radii)).reshape(-1, 2)
+    ).reshape(len(points), len(unit), 2)
+    groups: dict[tuple, list[Any]] = {}
+    group_colours = []
+    for index, (ring, path) in enumerate(zip(rings, pixels, strict=True)):
+        colour = tuple(colours[index])
+        if colour[3] <= 0.:
+            continue
+        if colour not in groups:
+            groups[colour] = []
+            group_colours.append(colour)
+        polygons = groups[colour]
+        stroke = float(widths[index])*figure.dpi/144.
+        tangent = np.roll(ring, -1, axis=0)-np.roll(ring, 1, axis=0)
+        normal = np.column_stack((tangent[:, 1], -tangent[:, 0]))
+        normal /= np.linalg.norm(normal, axis=1)[:, None]
+        area = np.sum(ring[:, 0]*np.roll(ring[:, 1], -1)-ring[:, 1]*np.roll(ring[:, 0], -1))
+        if area < 0.:
+            normal *= -1.
+        outer, inner = ring + normal*stroke, ring - normal*stroke
+        if dashed[index]:
+            # The standard INVALID ring is dashed; each visible arc is a
+            # positive closed ribbon, never a second translucent stroke.
+            distance = np.r_[0., np.cumsum(np.linalg.norm(np.diff(np.vstack((ring, ring[0])), axis=0), axis=1))]
+            dash = max(1., float(widths[index])*figure.dpi/72.*3.7)
+            for part in range(len(ring)):
+                if int(distance[part]/dash) % 2 == 0:
+                    quad = np.asarray((outer[part], outer[(part+1)%len(ring)], inner[(part+1)%len(ring)], inner[part]))
+                    polygons.append(polygon(quad if area > 0. else quad[::-1]))
+        else:
+            polygons.extend((polygon(outer if area > 0. else outer[::-1]),
+                             polygon(inner[::-1] if area > 0. else inner)))
+        delta = np.diff(path, axis=0)
+        length = np.linalg.norm(delta, axis=1)
+        moving = np.flatnonzero(length > 0.)
+        if not len(moving):
+            continue
+        # Repeats/collinear samples carry time, not extra paint geometry.
+        # Keep every real corner/reversal at display-pixel precision; the
+        # immutable scientific path and its timing annotations stay untouched.
+        paint = path[np.r_[moving, len(path)-1]]
+        directions = np.diff(paint, axis=0)/length[moving, None]
+        cross = directions[:-1, 0]*directions[1:, 1]-directions[:-1, 1]*directions[1:, 0]
+        corners = (np.abs(cross)>1e-9) | (np.sum(directions[:-1]*directions[1:], axis=1)<0.)
+        paint = paint[np.r_[0, np.flatnonzero(corners)+1, len(paint)-1]]
+        delta = np.diff(paint, axis=0)
+        paint_length = np.linalg.norm(delta, axis=1)
+        half = stroke*.5  # path width is half the common site stroke
+        for step in range(len(delta)):
+            direction = delta[step]/paint_length[step]
+            normal = np.asarray((-direction[1], direction[0]))*half
+            polygons.append(polygon(np.asarray((paint[step]-normal, paint[step+1]-normal,
+                                                paint[step+1]+normal, paint[step]+normal))))
+        # Round joins close the ribbons without painting alpha twice.
+        polygons.extend(DrawPath(circle.vertices*half+vertex, circle.codes) for vertex in paint)
+        direction = delta[-1]/paint_length[-1]
+        head_length = min(float(widths[index])*figure.dpi/72.*3., float(length.sum())*.4)
+        normal = np.asarray((-direction[1], direction[0]))*head_length*.4
+        tip = path[-1]
+        base = tip-direction*head_length
+        polygons.append(polygon(np.asarray((tip, base+normal, base-normal))))
+    joined = [DrawPath.make_compound_path(*polygons) for polygons in groups.values()]
+    collection._paths = joined
+    collection.set_facecolors(group_colours)
+    collection._zlc_point_path_signature = signature
+    return joined
 
 
 def _image_coordinate_scale(values: np.ndarray) -> str | tuple[float, ...]:
@@ -3428,6 +3522,7 @@ class MatplotlibRenderer:
                     else None
                 ),
             )
+            self._settle_owned_boxes()
             cells = tuple(getattr(payload, "cells", ()))
             for key, axes, index in painted:
                 cell = None if index is None else cells[index]
@@ -3441,7 +3536,6 @@ class MatplotlibRenderer:
                     if cell is None
                     else getattr(cell, "facet_value_canonical", None),
                 )
-            self._settle_owned_boxes()
             # Chrome is part of the prepared scene, not a side effect of
             # painting it. Screen and file consumers must receive the same
             # frames, ticks and titles even when no screen front is requested.
@@ -12109,376 +12203,237 @@ class MatplotlibRenderer:
             )
 
     def _update_image_point_overlay(
-        self,
-        axis: Any,
-        payload: Any,
-        overlay: ImagePointOverlay | None,
-        state: DisplayState,
-        key: str,
-        facet_value: object | None,
+        self, axis: Any, payload: Any, overlay: ImagePointOverlay | None,
+        state: DisplayState, key: str, facet_value: object | None,
     ) -> None:
-        """Mutate ONE image surface's point layer, independently of its raster.
-
-        Takes the surface it paints on, like every other per-plot painter, and
-        gates on the SEMANTIC spec, so a FacetGrid of image cells carries the
-        site overlay on each cell instead of dropping it at the outer spec.
-
-        The overlay keeps the same repeat/point carrier as the image.  Its one
-        resolution rule applies this PlotSpec's scopes and the current facet;
-        a surface that still pools either leading axis has no single-shot
-        status and displays no judgement ring.
-        """
-
+        """Paint the common site layer and its optional joined movement paths."""
         if not isinstance(self.semantic_spec, ImagePlot):
             return
-        x_quantity = getattr(payload, "x", None)
-        y_quantity = getattr(payload, "y", None)
+        x_quantity, y_quantity = getattr(payload, "x", None), getattr(payload, "y", None)
         if x_quantity is None or y_quantity is None:
             raise TypeError("Image point overlays require image coordinate quantities")
         signature = (
-            None if overlay is None else overlay.revision,
-            None if overlay is None else id(overlay),
-            facet_value,
-            bool(state["show_point_labels"]),
-            str(getattr(x_quantity, "display_unit", "")),
-            str(getattr(y_quantity, "display_unit", "")),
+            None if overlay is None else (overlay.revision, id(overlay)), facet_value,
+            bool(state["show_point_labels"]), str(x_quantity.display_unit), str(y_quantity.display_unit),
+            (() if overlay is None or overlay.paths_xy is None else
+             (tuple(axis.get_xlim()), tuple(axis.get_ylim()), tuple(axis.bbox.bounds), self._figure.dpi)),
         )
-        signature_key = f"{key}:points-signature"
-        if signature == self._artists.get(signature_key):
+        if signature == self._artists.get(f"{key}:points-signature"):
             return
-        self._artists[signature_key] = signature
+        self._artists[f"{key}:points-signature"] = signature
         collection = self._artists.get(f"{key}:points")
-        path_collection = self._artists.get(f"{key}:point-paths")
-        path_ends = self._artists.get(f"{key}:point-path-ends")
-        path_arrows: list[Any] = self._artists.setdefault(f"{key}:point-path-arrows", [])
-        path_labels: list[Any] = self._artists.setdefault(f"{key}:point-path-labels", [])
-        for artist in (*path_arrows, *path_labels):
+        joined = self._artists.get(f"{key}:point-paths")
+        labels = self._artists.setdefault(f"{key}:point-labels", [])
+        path_labels = self._artists.setdefault(f"{key}:point-path-labels", [])
+        timebase = self._artists.get(f"{key}:point-path-timebase")
+        for artist in (*path_labels,):
             artist.set_visible(False)
-        labels: list[Any] = self._artists.setdefault(f"{key}:point-labels", [])
+        if timebase is not None:
+            timebase.set_visible(False)
         statuses = None if overlay is None else overlay.statuses_for(self.spec, facet_value)
-        if (
-            overlay is None or overlay.count == 0
-            or (overlay.status is not None and statuses is None)
-        ):
-            if collection is not None:
-                collection.set_visible(False)
-            if path_collection is not None:
-                path_collection.set_visible(False)
-            if path_ends is not None:
-                path_ends.set_visible(False)
-            for label in labels:
-                label.set_visible(False)
+        if overlay is None or not overlay.count or (overlay.status is not None and statuses is None):
+            for artist in (collection, joined, *labels):
+                if artist is not None:
+                    artist.set_visible(False)
             return
 
-        from matplotlib.collections import EllipseCollection, LineCollection, PathCollection
+        from matplotlib.collections import EllipseCollection
         from matplotlib.colors import to_rgba
-        from matplotlib.patches import FancyArrowPatch
-        from matplotlib.transforms import ScaledTranslation
+        from matplotlib.transforms import IdentityTransform, ScaledTranslation
 
-        canonical = np.asarray(overlay.coordinates, dtype=float)
-        x_display = np.asarray(
-            x_quantity.canonical_unit.convert_value_to(
-                canonical[:, 0], x_quantity.display_unit
-            ),
-            dtype=float,
-        )
-        y_display = np.asarray(
-            y_quantity.canonical_unit.convert_value_to(
-                canonical[:, 1], y_quantity.display_unit
-            ),
-            dtype=float,
-        )
-        points = np.column_stack((x_display, y_display))
-        x_domain = np.asarray(getattr(x_quantity, "canonical", ()), dtype=float)
-        y_domain = np.asarray(getattr(y_quantity, "canonical", ()), dtype=float)
-        spans = tuple(
-            float(np.ptp(values[np.isfinite(values)]))
-            for values in (x_domain, y_domain)
-            if bool(np.any(np.isfinite(values)))
-        )
-        finite_spans = tuple(span for span in spans if span > 0.0)
-        singleton_radius = (
-            min(finite_spans) * self.style.artists.point_single_radius_fraction
-            if finite_spans
-            else self.style.artists.point_single_radius_fraction
-        )
-        canonical_radius = _point_ring_radius(
-            canonical,
-            fraction=self.style.artists.point_auto_radius_fraction,
-            fallback=singleton_radius,
-        )
-
-        def display_radius(quantity: Any) -> float:
-            converted = np.asarray(
-                quantity.canonical_unit.convert_value_to(
-                    (0.0, canonical_radius), quantity.display_unit
-                ),
-                dtype=float,
-            )
-            return abs(float(converted[1] - converted[0]))
-
-        radius_x = display_radius(x_quantity)
-        radius_y = display_radius(y_quantity)
-        statuses = statuses or (
-            PointStatus.UNKNOWN,
-        ) * overlay.count
-        tokens = {
-            PointStatus.UNKNOWN: self.style.artists.point_unknown,
-            PointStatus.EMPTY: self.style.artists.point_empty,
-            PointStatus.OCCUPIED: self.style.artists.point_occupied,
-            PointStatus.INVALID: self.style.artists.point_invalid,
-        }
-        edgecolors = tuple(
-            to_rgba(
-                tokens[status].color,
-                0.0 if overlay.status is not None and status is PointStatus.INVALID
-                else tokens[status].alpha,
-            )
-            for status in statuses
-        )
-        linewidths = tuple(tokens[status].linewidth for status in statuses)
+        canonical = np.asarray(overlay.coordinates, float)
+        points = np.column_stack((
+            x_quantity.canonical_unit.convert_value_to(canonical[:, 0], x_quantity.display_unit),
+            y_quantity.canonical_unit.convert_value_to(canonical[:, 1], y_quantity.display_unit),
+        ))
+        image_coordinates = [values[np.isfinite(values)] for values in
+            (np.asarray(x_quantity.canonical, float), np.asarray(y_quantity.canonical, float))]
+        spans = [float(np.ptp(values)) for values in image_coordinates if len(values)]
+        spans = [span for span in spans if span > 0.]
+        pitches = []
+        for values in image_coordinates:
+            steps = np.abs(np.diff(values))
+            steps = steps[steps>0.]
+            if len(steps):
+                pitches.append(float(np.median(steps)))
+        fraction = self.style.artists.point_auto_radius_fraction
+        fallback = (min(spans) if spans else 1.)*self.style.artists.point_single_radius_fraction
+        # Sparse selected markers must not inflate the common SiteMap glyph.
+        # This UI heuristic is bounded by image scale, never a calibration ROI.
+        radius = min(_point_ring_radius(canonical, fraction=fraction, fallback=fallback),
+                     max(fallback, fraction*(min(pitches) if pitches else 1.)))
+        def display_radius(quantity):
+            value = quantity.canonical_unit.convert_value_to((0., radius), quantity.display_unit)
+            return abs(float(value[1]-value[0]))
+        radii = (display_radius(x_quantity), display_radius(y_quantity))
+        statuses = statuses or (PointStatus.UNKNOWN,)*overlay.count
+        tokens = {PointStatus.UNKNOWN:self.style.artists.point_unknown,
+                  PointStatus.EMPTY:self.style.artists.point_empty,
+                  PointStatus.OCCUPIED:self.style.artists.point_occupied,
+                  PointStatus.INVALID:self.style.artists.point_invalid}
+        colours = tuple(to_rgba(tokens[status].color,
+            0. if overlay.status is not None and status is PointStatus.INVALID else tokens[status].alpha)
+            for status in statuses)
+        widths = tuple(tokens[status].linewidth for status in statuses)
+        dashed = tuple(status is PointStatus.INVALID for status in statuses)
         if overlay.paths_xy is None:
-            if path_collection is not None:
-                path_collection.set_visible(False)
-            if path_ends is not None:
-                path_ends.set_visible(False)
-        else:
-            paths = np.empty_like(overlay.paths_xy)
-            paths[..., 0] = x_quantity.canonical_unit.convert_value_to(
-                overlay.paths_xy[..., 0], x_quantity.display_unit
-            )
-            paths[..., 1] = y_quantity.canonical_unit.convert_value_to(
-                overlay.paths_xy[..., 1], y_quantity.display_unit
-            )
-            path_colors = tuple(
-                to_rgba(
-                    self.style.palette.line_color(index),
-                    0.0 if edgecolors[index][-1] == 0.0
-                    else self.style.artists.curve.alpha,
-                )
-                for index in range(overlay.count)
-            )
-            # A dynamic occupancy layer keeps its judgement-ring colours.
-            # Static path diagrams instead attach the source marker to its
-            # one stable trajectory colour.
-            if overlay.status is None:
-                edgecolors = path_colors
-            if path_collection is None:
-                path_collection = LineCollection(
-                    paths,
-                    colors=path_colors,
-                    linewidths=self.style.artists.curve.linewidth,
-                    zorder=self.style.artists.point_zorder - 0.5,
-                    clip_on=True,
-                )
-                axis.add_collection(path_collection)
-                self._artists[f"{key}:point-paths"] = path_collection
-            else:
-                path_collection.set_segments(paths)
-                path_collection.set_colors(path_colors)
-                path_collection.set_visible(True)
-            if path_ends is None:
-                path_ends = axis.scatter(
-                    paths[:, -1, 0], paths[:, -1, 1],
-                    s=self.style.artists.curve_marker_size_pt ** 2,
-                    marker="s", facecolors=path_colors, edgecolors=path_colors,
-                    linewidths=linewidths,
-                    zorder=self.style.artists.point_zorder,
-                    clip_on=True,
-                )
-                self._artists[f"{key}:point-path-ends"] = path_ends
-            else:
-                path_ends.set_offsets(paths[:, -1, :])
-                path_ends.set_facecolors(path_colors)
-                path_ends.set_edgecolors(path_colors)
-                path_ends.set_linewidths(linewidths)
-                path_ends.set_visible(True)
-            # One ephemeral stack for the whole surface, including IDs.
-            # Different paths may start/end/wait at the same coordinate at
-            # different frames; their text must not occupy the same slot.
-            annotation_slots: dict[tuple[float, float], int] = {}
-            source_slots = np.zeros(overlay.count, dtype=int)
-            for index, position in enumerate(points):
-                named = ((overlay.labels is not None and overlay.labels[index])
-                         or (overlay.point_ids is not None and overlay.point_ids[index]))
-                if named and edgecolors[index][-1] > 0.0:
-                    location = tuple(position)
-                    source_slots[index] = annotation_slots.get(location, 0)
-                    annotation_slots[location] = int(source_slots[index]) + 1
-            arrows_used = labels_used = 0
-            for index, path in enumerate(paths):
-                if path_colors[index][-1] == 0.0:
-                    continue
-                delta = np.diff(overlay.paths_xy[index], axis=0)
-                moving = np.flatnonzero(np.any(delta != 0.0, axis=1))
-                # Three direction marks suffice even for a long sequence;
-                # every scientific vertex remains in the line and archive.
-                chosen = moving[np.linspace(0, len(moving)-1, min(3, len(moving)), dtype=int)]
-                for step in chosen:
-                    if arrows_used == len(path_arrows):
-                        arrow = FancyArrowPatch(
-                            path[step], path[step+1], arrowstyle="-|>",
-                            mutation_scale=self.style.artists.curve_marker_size_pt,
-                            shrinkA=0.0, shrinkB=0.0,
-                            linewidth=self.style.artists.curve.linewidth,
-                            zorder=self.style.artists.point_zorder,
-                            clip_on=True,
-                        )
-                        axis.add_patch(arrow)
-                        path_arrows.append(arrow)
-                    arrow = path_arrows[arrows_used]
-                    arrow.set_positions(path[step], path[step+1])
-                    arrow.set_color(path_colors[index])
-                    arrow.set_visible(True)
-                    arrows_used += 1
-
-                waiting = np.concatenate(((False,), ~np.any(delta != 0.0, axis=1), (False,)))
-                edges = np.flatnonzero(waiting[1:] != waiting[:-1])
-                wait_runs = list(zip(edges[::2], edges[1::2], strict=True))
-                # Label start/end, at most three wait runs, and three turns.
-                # Returning to the same position combines its step labels
-                # instead of painting contradictory text on top of itself.
-                entries = [(step, f"f{step}") for step in (0, len(path)-1)
-                           if not any(start <= step <= end for start, end in wait_runs)]
-                selected_waits = np.linspace(0, len(wait_runs)-1, min(3, len(wait_runs)), dtype=int)
-                entries.extend((wait_runs[j][0], f"wait f{wait_runs[j][0]}–f{wait_runs[j][1]}")
-                               for j in selected_waits)
-                if len(moving) > 1:
-                    previous, following = delta[moving[:-1]], delta[moving[1:]]
-                    cross = previous[:, 0]*following[:, 1] - previous[:, 1]*following[:, 0]
-                    scale = np.linalg.norm(previous, axis=1)*np.linalg.norm(following, axis=1)
-                    turn = (np.abs(cross) > 1e-7*scale) | (np.sum(previous*following, axis=1) < 0.0)
-                    turns = [int(step) for step in moving[1:][turn]
-                             if not any(start <= step <= end for start, end in wait_runs)]
-                    chosen_turns = np.linspace(0, len(turns)-1, min(3, len(turns)), dtype=int)
-                    entries.extend((turns[j], f"f{turns[j]}") for j in chosen_turns)
-                annotations: dict[tuple[float, float], list[str]] = {}
-                for step, text in entries:
-                    annotations.setdefault(tuple(path[step]), []).append(text)
-                for position, texts in annotations.items():
-                    if labels_used == len(path_labels):
-                        path_labels.append(axis.annotate(
-                            "", position, xytext=(4.0, -4.0), textcoords="offset points",
-                            ha="left", va="top", fontsize=self.style.fonts.fit_annotation_pt,
-                            zorder=self.style.artists.point_label_zorder, clip_on=True,
-                        ))
-                    label = path_labels[labels_used]
-                    label.xy = position
-                    pixel = axis.transData.transform(position)
-                    left = pixel[0] < (axis.bbox.x0 + axis.bbox.x1)*0.5
-                    lower = pixel[1] < (axis.bbox.y0 + axis.bbox.y1)*0.5
-                    slot = annotation_slots.get(position, 0)
-                    annotation_slots[position] = slot + 1
-                    offset = 4.0 + slot*(self.style.fonts.fit_annotation_pt + 2.0)
-                    label.set_position((4.0 if left else -4.0, offset if lower else -offset))
-                    label.set_ha("left" if left else "right")
-                    label.set_va("bottom" if lower else "top")
-                    label.set_text(", ".join(dict.fromkeys(texts)))
-                    label.set_color(path_colors[index])
-                    label.set_visible(bool(state["show_point_labels"]))
-                    labels_used += 1
-        # Matplotlib treats a tuple as one custom ``(offset, dash)``
-        # specification; use a list for per-element styles instead.
-        linestyles = [
-            "--" if status is PointStatus.INVALID else "-" for status in statuses
-        ]
-        wanted_type = EllipseCollection if overlay.paths_xy is None else PathCollection
-        if collection is not None and not isinstance(collection, wanted_type):
-            collection.remove()
-            collection = None
-        if overlay.paths_xy is not None:
+            if joined is not None:
+                joined.set_visible(False)
             if collection is None:
-                collection = axis.scatter(
-                    points[:, 0], points[:, 1],
-                    s=self.style.artists.curve_marker_size_pt ** 2,
-                    marker="o", facecolors="none", edgecolors=edgecolors,
-                    linewidths=linewidths, zorder=self.style.artists.point_zorder,
-                    clip_on=True,
-                )
+                collection = EllipseCollection(
+                    widths=np.full(overlay.count, 2.*radii[0]), heights=np.full(overlay.count, 2.*radii[1]),
+                    angles=np.zeros(overlay.count), units="xy", offsets=points, transOffset=axis.transData,
+                    facecolors="none", edgecolors=colours, linewidths=widths,
+                    linestyles=["--" if value else "-" for value in dashed],
+                    zorder=self.style.artists.point_zorder, clip_on=True)
+                axis.add_collection(collection)
                 self._artists[f"{key}:points"] = collection
             else:
                 collection.set_offsets(points)
-                collection.set_edgecolors(edgecolors)
-                collection.set_linewidths(linewidths)
+                collection.set_widths(np.full(overlay.count, 2.*radii[0]))
+                collection.set_heights(np.full(overlay.count, 2.*radii[1]))
+                collection.set_angles(np.zeros(overlay.count))
+                collection.set_edgecolors(colours)
+                collection.set_linewidths(widths)
+                collection.set_linestyles(["--" if value else "-" for value in dashed])
                 collection.set_visible(True)
-        elif collection is None:
-            collection = EllipseCollection(
-                widths=np.full(overlay.count, 2.0 * radius_x),
-                heights=np.full(overlay.count, 2.0 * radius_y),
-                angles=np.zeros(overlay.count),
-                units="xy",
-                offsets=points,
-                transOffset=axis.transData,
-                facecolors="none",
-                edgecolors=edgecolors,
-                linewidths=linewidths,
-                linestyles=linestyles,
-                zorder=self.style.artists.point_zorder,
-                clip_on=True,
-            )
-            axis.add_collection(collection)
-            self._artists[f"{key}:points"] = collection
         else:
-            collection.set_offsets(points)
-            collection.set_widths(np.full(overlay.count, 2.0 * radius_x))
-            collection.set_heights(np.full(overlay.count, 2.0 * radius_y))
-            collection.set_angles(np.zeros(overlay.count))
-            collection.set_edgecolors(edgecolors)
-            collection.set_linewidths(linewidths)
-            collection.set_linestyles(linestyles)
-            collection.set_visible(True)
+            if collection is not None:
+                collection.set_visible(False)
+            paths = np.empty_like(overlay.paths_xy)
+            paths[..., 0] = x_quantity.canonical_unit.convert_value_to(overlay.paths_xy[..., 0], x_quantity.display_unit)
+            paths[..., 1] = y_quantity.canonical_unit.convert_value_to(overlay.paths_xy[..., 1], y_quantity.display_unit)
+            if joined is None:
+                joined = PolyCollection([], edgecolors="none", linewidths=0.,
+                    zorder=self.style.artists.point_zorder, clip_on=True)
+                joined.set_transform(IdentityTransform())
+                joined.get_paths = MethodType(_point_path_union_paths, joined)
+                joined.set_snap(False)
+                joined._zlc_point_path_inputs = (points, paths, radii, colours, widths, dashed)
+                joined._zlc_point_path_signature = None
+                axis.add_collection(joined)
+                self._artists[f"{key}:point-paths"] = joined
+            joined._zlc_point_path_inputs = (points, paths, radii, colours, widths, dashed)
+            joined._zlc_point_path_signature = None
+            joined.set_visible(True)
+            if timebase is None:
+                timebase = axis.text(.015, .015, "", transform=axis.transAxes, ha="left", va="bottom",
+                    fontsize=self.style.fonts.fit_annotation_pt, color=self.style.palette.annotation,
+                    zorder=self.style.artists.point_label_zorder, clip_on=True)
+                self._artists[f"{key}:point-path-timebase"] = timebase
+            timebase.set_text(f"f0 → f{paths.shape[1]-1}")
+            timebase.set_visible(bool(state["show_point_labels"]))
+            used = 0
+            for index, path in enumerate(paths):
+                if colours[index][3] <= 0.:
+                    continue
+                delta = np.diff(overlay.paths_xy[index], axis=0)
+                moving = np.flatnonzero(np.any(delta != 0., axis=1))
+                if not len(moving):
+                    continue
+                waiting = np.r_[False, ~np.any(delta != 0., axis=1), False]
+                edges = np.flatnonzero(waiting[1:] != waiting[:-1])
+                waits = list(zip(edges[::2], edges[1::2], strict=True))
+                entries = [(len(path)-1, f"f{len(path)-1}")] if np.array_equal(path[0], path[-1]) else []
+                selected = np.linspace(0, len(waits)-1, min(2, len(waits)), dtype=int)
+                entries.extend((waits[j][0], f"f{waits[j][0]}–{waits[j][1]}") for j in selected)
+                if len(moving) > 1:
+                    previous, following = delta[moving[:-1]], delta[moving[1:]]
+                    cross = previous[:, 0]*following[:, 1]-previous[:, 1]*following[:, 0]
+                    scale = np.linalg.norm(previous, axis=1)*np.linalg.norm(following, axis=1)
+                    turns = [int(step) for step in moving[1:][(np.abs(cross)>1e-7*scale) | (np.sum(previous*following, axis=1)<0.)]
+                             if not any(start<=step<=end for start,end in waits)]
+                    selected = np.linspace(0, len(turns)-1, min(2, len(turns)), dtype=int)
+                    entries.extend((turns[j], f"f{turns[j]}") for j in selected)
+                for step, text in entries:
+                    if used == len(path_labels):
+                        path_labels.append(axis.annotate("", path[step], xytext=(-2.,-2.), textcoords="offset points",
+                            ha="right", va="top", fontsize=self.style.fonts.fit_annotation_pt,
+                            zorder=self.style.artists.point_label_zorder, clip_on=True))
+                    label = path_labels[used]
+                    label.xy = path[step]
+                    label.set_text(text)
+                    label.set_color(colours[index])
+                    label.set_visible(bool(state["show_point_labels"]))
+                    used += 1
 
         while len(labels) < overlay.count:
-            labels.append(
-                axis.text(
-                    0.0,
-                    0.0,
-                    "",
-                    ha="right",
-                    va="bottom",
-                    fontsize=self.style.fonts.fit_annotation_pt,
-                    zorder=self.style.artists.point_label_zorder,
-                    clip_on=True,
-                )
-            )
+            labels.append(axis.text(0.,0.,"",ha="right",va="bottom",
+                fontsize=self.style.fonts.fit_annotation_pt,
+                zorder=self.style.artists.point_label_zorder,clip_on=True))
         show_labels = bool(state["show_point_labels"])
-        point_ids = overlay.point_ids
-        point_labels = overlay.labels
-        label_x = points[:, 0] + (
-            radius_x if axis.xaxis_inverted() else -radius_x
-        )
-        label_y = points[:, 1] + (
-            -radius_y if axis.yaxis_inverted() else radius_y
-        )
         for index, label in enumerate(labels):
-            visible = (
-                show_labels and index < overlay.count
-                and edgecolors[index][-1] > 0.0
-            )
+            visible = show_labels and index < overlay.count and colours[index][3] > 0.
             label.set_visible(visible)
             if not visible:
                 continue
-            if overlay.paths_xy is None:
-                label.set_transform(axis.transData)
-                label.set_ha("right")
-                label.set_va("bottom")
-                label.set_position((label_x[index], label_y[index]))
+            label.set_transform(axis.transData)
+            label.set_fontsize(self.style.fonts.fit_annotation_pt)
+            label.set_ha("right")
+            label.set_va("bottom")
+            label.set_position((points[index,0] + (radii[0] if axis.xaxis_inverted() else -radii[0]),
+                                points[index,1] + (-radii[1] if axis.yaxis_inverted() else radii[1])))
+            label.set_color(colours[index])
+            label.set_text((None if overlay.labels is None else overlay.labels[index])
+                           or (None if overlay.point_ids is None else overlay.point_ids[index]) or "")
+        if overlay.paths_xy is not None and show_labels:
+            # Same site-label typography and close anchor; only local alternatives
+            # resolve collisions. Containment outranks overlap, never clipping a
+            # label to make the collision count look better.
+            renderer = _prepare_renderer(self._figure.canvas.get_renderer())
+            source = [label for label in labels if label.get_visible() and label.get_text()]
+            pixel_points = axis.transData.transform(points)
+            nominal = self.style.fonts.fit_annotation_pt
+            if source and len(points)>1:
+                pitch = _point_ring_radius(pixel_points, fraction=1., fallback=axis.bbox.width)
+                widest = max(renderer.get_text_width_height_descent(label.get_text(),label.get_fontproperties(),False)[0] for label in source)
+                ratio = min(1.,.9*pitch/widest) if widest else 1.
+                font = nominal*max(self.style.fonts.facet_compact_scale,ratio)
             else:
-                pixel = axis.transData.transform(points[index])
-                left = pixel[0] < (axis.bbox.x0 + axis.bbox.x1)*0.5
-                lower = pixel[1] < (axis.bbox.y0 + axis.bbox.y1)*0.5
-                offset = 4.0 + source_slots[index]*(self.style.fonts.fit_annotation_pt + 2.0)
-                label.set_transform(axis.transData + ScaledTranslation(
-                    (4.0 if left else -4.0)/72.0,
-                    (offset if lower else -offset)/72.0, self._figure.dpi_scale_trans,
-                ))
-                label.set_ha("left" if left else "right")
-                label.set_va("bottom" if lower else "top")
-                label.set_position(points[index])
-            label.set_color(edgecolors[index])
-            explicit = None if point_labels is None else point_labels[index]
-            point_id = None if point_ids is None else point_ids[index]
-            label.set_text(explicit or point_id or "")
+                font = nominal
+            ordered = [(label,points[i],False) for i,label in enumerate(labels[:overlay.count])
+                       if label.get_visible() and label.get_text()]
+            ordered += [(label,np.asarray(label.xy),True) for label in path_labels if label.get_visible()]
+            placed = np.empty((len(ordered),4),float)
+            used = 0
+            gap = 2.*self._figure.dpi/72.
+            directions = ((-1,1),(1,1),(-1,-1),(1,-1),(-1,0),(1,0),(0,1),(0,-1))
+            for label,position,annotation in ordered:
+                label.set_fontsize(font)
+                bounds = label.get_window_extent(renderer)
+                width,height = bounds.width,bounds.height
+                pixel = axis.transData.transform(position)
+                edge = axis.transData.transform(np.asarray((position+[radii[0],0.],position+[0.,radii[1]])))
+                at_site = bool(np.any(np.all(points == position,axis=1)))
+                site_radius = np.linalg.norm(edge-pixel,axis=1) if not annotation or at_site else (0.,0.)
+                candidates = []
+                for dx,dy in directions:
+                    offx,offy = dx*(gap+site_radius[0]),dy*(gap+site_radius[1])
+                    label.set_ha("right" if dx<0 else "left" if dx>0 else "center")
+                    label.set_va("top" if dy<0 else "bottom" if dy>0 else "center")
+                    if annotation:
+                        label.set_position((offx*72./self._figure.dpi,offy*72./self._figure.dpi))
+                    else:
+                        label.set_position(position)
+                        label.set_transform(axis.transData+ScaledTranslation(
+                            offx/self._figure.dpi,offy/self._figure.dpi,self._figure.dpi_scale_trans))
+                    box = np.asarray(label.get_window_extent(renderer).extents)
+                    overlap = np.maximum(0.,np.minimum(box[2:],placed[:used,2:])-np.maximum(box[:2],placed[:used,:2]))
+                    area = float(np.prod(overlap,axis=1).sum())
+                    inside = max(0.,min(box[2],axis.bbox.x1)-max(box[0],axis.bbox.x0))*max(0.,min(box[3],axis.bbox.y1)-max(box[1],axis.bbox.y0))
+                    outside = max(0.,width*height-inside)
+                    candidates.append((outside>1e-6,outside if outside>1e-6 else 0.,area,offx,offy,dx,dy,box))
+                _outside,outside,area,offx,offy,dx,dy,box = min(candidates,key=lambda value:value[:3])
+                placed[used] = box
+                used += 1
+                label.set_ha("right" if dx<0 else "left" if dx>0 else "center")
+                label.set_va("top" if dy<0 else "bottom" if dy>0 else "center")
+                if annotation:
+                    label.set_position((offx*72./self._figure.dpi,offy*72./self._figure.dpi))
+                else:
+                    label.set_position(position)
+                    label.set_transform(axis.transData+ScaledTranslation(
+                        offx/self._figure.dpi,offy/self._figure.dpi,self._figure.dpi_scale_trans))
 
     def _update_pulse_timeline(
         self,

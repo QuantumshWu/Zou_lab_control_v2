@@ -163,6 +163,7 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     """An XY path is ordered geometry, not a sorted X-axis curve."""
 
     from dataclasses import replace
+    from matplotlib.colors import to_rgba
     from PIL import Image
     from zlc_data.figure_archive import read_archive
     from zlc_plot import read_figure_plot, save_figure_artifact
@@ -175,6 +176,7 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     ))
     overlay = ImagePointOverlay(
         0, paths[:, 0, :], point_ids=("moving", "stationary", "later start"), paths_xy=paths,
+        static_statuses=(PointStatus.OCCUPIED,)*3,
     )
     assert not overlay.paths_xy.flags.writeable
     empty = ImagePointOverlay(0, np.empty((0, 2)), paths_xy=np.empty((0, 5, 2)))
@@ -196,19 +198,22 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     )
     try:
         artists = session._renderer._artists
-        np.testing.assert_array_equal(artists["image:point-paths"].get_segments(), paths)
-        np.testing.assert_array_equal(artists["image:point-path-ends"].get_offsets(), paths[:, -1, :])
-        colors = artists["image:point-paths"].get_colors()
-        assert not np.array_equal(colors[0], colors[1])
+        joined = artists["image:point-paths"]
+        np.testing.assert_array_equal(joined._zlc_point_path_inputs[1], paths)
+        assert len(joined.get_paths()) == 1
+        np.testing.assert_array_equal(joined.get_facecolors()[0],
+            to_rgba(
+                session._renderer.style.artists.point_occupied.color,
+                session._renderer.style.artists.point_occupied.alpha))
         assert not artists["image"].get_visible()
-        assert len(artists["image:point-path-ends"].get_facecolors()) == 3
-        assert artists["image:point-path-arrows"]
+        assert "image:point-path-ends" not in artists and "image:point-path-arrows" not in artists
         path_labels = [label.get_text() for label in artists["image:point-path-labels"] if label.get_visible()]
-        assert "wait f2–f3" in path_labels and "wait f0–f4" in path_labels
-        assert "f0, f4" in path_labels
+        assert "f2–3" in path_labels and "f0–4" not in path_labels
+        assert "f4" in path_labels
+        assert artists["image:point-path-timebase"].get_text() == "f0 → f4"
         coincident = [label.get_position() for label in artists["image:point-path-labels"]
-                      if label.get_visible() and label.xy == (1.0, 1.0)]
-        assert len(coincident) == 2 and len(set(coincident)) == 2
+                      if label.get_visible() and tuple(label.xy) == (1.0, 1.0)]
+        assert len(coincident) == 1
         composed = session.rgba().copy()
         session._renderer.draw()
         # Same tolerance as the existing native/Agg image parity cases.
@@ -221,9 +226,8 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
         session.set_parameter("show_point_labels", False)
         assert not any(label.get_visible() for label in
                        (*artists["image:point-labels"], *artists["image:point-path-labels"]))
+        assert not artists["image:point-path-timebase"].get_visible()
         assert artists["image:point-paths"].get_visible()
-        assert artists["image:point-path-ends"].get_visible()
-        assert all(arrow.get_visible() for arrow in artists["image:point-path-arrows"])
         session.set_parameter("show_point_labels", True)
         np.testing.assert_array_equal(composed, session.rgba())
         changed = paths.copy()
@@ -238,6 +242,69 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     )
     with Image.open(image) as first, Image.open(redrawn) as second:
         np.testing.assert_array_equal(np.asarray(first), np.asarray(second))
+
+    # Dense renderer-only stress: every explicit ID survives, without the
+    # repetitive f0/final stamps that obscured neighbouring source IDs.
+    yy, xx = np.meshgrid(10.+6.*np.arange(10), 10.+6.*np.arange(10), indexing="ij")
+    points = np.column_stack((xx.ravel(), yy.ravel()))
+    dense_paths = points[:, None, :] + np.linspace(0., 1., 5)[None, :, None]*np.asarray((.45, .25))
+    schema = make_dataset_schema(repeat_domain(size=1), mapped_domain_from_columns({"sample": [0.]}),
+        cell_axes=(axis("row", size=84), axis("column", size=84)), dtype=np.float64)
+    values = np.zeros((1, 1, 84, 84))
+    values[0, 0, points[:, 1].astype(int), points[:, 0].astype(int)] = 1.
+    dense = PlotSession(ImageFrame(make_snapshot(schema, values, 0), ImagePointOverlay(
+        0, points, labels=tuple(str(i+1) for i in range(100)), paths_xy=dense_paths,
+        static_statuses=(PointStatus.OCCUPIED,)*100)),
+        spec, parameters={"show_image": False, "side_distribution": False})
+    try:
+        dense.rgba()
+        joined = dense._renderer._artists["image:point-paths"]
+        np.testing.assert_allclose(joined._zlc_point_path_inputs[2], (1.8, 1.8))
+        np.testing.assert_array_equal(joined._zlc_point_path_inputs[1], dense_paths)
+        # Collinear samples retain scientific time but need only two paint
+        # endpoints, not a 64-vertex join at each original sample.
+        assert sum(len(path.vertices) for path in joined.get_paths()) < 20000
+        texts = dense._renderer._artists["image:point-labels"]
+        assert sum(text.get_visible() for text in texts) == 100
+        assert not any(text.get_visible() for text in dense._renderer._artists["image:point-path-labels"])
+        renderer = dense._renderer.figure.canvas.get_renderer()
+        boxes = [text.get_window_extent(renderer) for text in texts]
+        assert not any(first.overlaps(second) for i, first in enumerate(boxes) for second in boxes[i+1:])
+    finally:
+        dense.close()
+
+    # Shared crossing/collinear/source junctions are one filled coverage union,
+    # not three successive translucent draws of the same status colour.
+    starts = np.asarray(((8.,32.),(32.,8.),(18.,32.)))
+    ends = np.asarray(((56.,32.),(32.,56.),(48.,32.)))
+    alpha_paths = np.stack((starts, ends), axis=1)
+    alpha = PlotSession(ImageFrame(make_snapshot(schema, values, 0), ImagePointOverlay(
+        0, starts, paths_xy=alpha_paths, static_statuses=(PointStatus.OCCUPIED,)*3)),
+        spec, parameters={"show_image":False,"side_distribution":False,"show_point_labels":False},
+        device_pixel_ratio=3.)
+    try:
+        rgba = alpha.rgba()
+        renderer = alpha._renderer
+        token = renderer.style.artists.point_occupied
+        expected = np.floor(255.*(np.asarray(to_rgba(token.color))[:3]*token.alpha + 1.-token.alpha))
+        radius = renderer._artists["image:point-paths"]._zlc_point_path_inputs[2][0]
+        assert radius == pytest.approx(83.*renderer.style.artists.point_single_radius_fraction)
+        for point in ((32.,32.),(40.,32.),(8.+radius,32.),(55.5,32.)):
+            pixel = renderer.primary_axes.transData.transform(point)
+            x,y = int(pixel[0]),rgba.shape[0]-1-int(pixel[1])
+            region = rgba[y-1:y+2,x-1:x+2,:3].min(axis=(0,1))
+            assert np.all(region >= expected-2), (point,region,expected)
+            assert np.max(np.abs(region-expected)) <= 3, (point,region,expected)
+    finally:
+        alpha.close()
+    ordinary = PlotSession(ImageFrame(make_snapshot(schema, values, 0), ImagePointOverlay(
+        0, starts, labels=("1", "2", "3"), static_statuses=(PointStatus.OCCUPIED,)*3)), spec)
+    try:
+        # The cap is one common glyph rule, not a path-only workaround.
+        for point, label in zip(starts, ordinary._renderer._artists["image:point-labels"], strict=True):
+            assert point[0]-label.get_position()[0] == pytest.approx(radius)
+    finally:
+        ordinary.close()
 
 def test_image_site_numbers_use_their_ring_status_style() -> None:
     """A small ordinal must remain visually attached to its status ring."""
@@ -301,6 +368,16 @@ def test_image_site_numbers_use_their_ring_status_style() -> None:
             )
     finally:
         session.close()
+    single = PlotSession(ImageFrame(snapshot, ImagePointOverlay(
+        0, np.asarray(((.5, .5),)), labels=("1",), static_statuses=(PointStatus.OCCUPIED,))),
+        ImagePlot(AxisRef.cell_data("column"), AxisRef.cell_data("row")))
+    try:
+        # A single marker on the tiny image retains the existing positive
+        # image-span fallback rather than inflating to the cell-pitch cap.
+        position = single._renderer._artists["image:point-labels"][0].get_position()
+        assert .5-position[0] == pytest.approx(single._renderer.style.artists.point_single_radius_fraction)
+    finally:
+        single.close()
 
 def test_session_fit_all_facets_returns_one_result_per_painted_cell() -> None:
     spec = FacetGridPlot(
