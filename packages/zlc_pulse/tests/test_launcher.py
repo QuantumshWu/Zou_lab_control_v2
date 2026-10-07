@@ -14,6 +14,7 @@ SHARED_LAUNCHER = ROOT.parents[1] / "bin" / "_launch.bat"
 BUILD_LAUNCHER = ROOT.parents[1] / "bin" / "build_and_program.bat"
 ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
 INSTALL_LAUNCHER = ROOT.parents[1] / "bin" / "install_requirements.bat"
+GPU_INSTALL_LAUNCHER = ROOT.parents[1] / "bin" / "install_slm_gpu.bat"
 TOOLS_RESOLVER = ROOT / "fpga" / "_resolve_tools.bat"
 FPGA_SOURCES = ROOT / "fpga" / "pulse_streamer"
 
@@ -148,6 +149,21 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     launched = _run_batch(cwd=ROOT, python_path=failing)
     assert launched.returncode == 7, launched.stdout + launched.stderr
     assert "pulse_editor exited with code 7" in launched.stdout
+
+    # GPU installation shares the real installer and environment resolver.
+    # The fake interpreter proves dispatch/exit handling without installing
+    # packages globally or downloading CUDA wheels during this test.
+    gpu_environment = dict(estimate_environment, ZLC_FPGA_PYTHON=str(fake), TEMP=str(tmp_path))
+    gpu = _run_cmd(["cmd.exe", "/d", "/c", str(GPU_INSTALL_LAUNCHER)], cwd=ROOT, env=gpu_environment)
+    assert gpu.returncode == 0, gpu.stdout + gpu.stderr
+    assert f'{ROOT.parents[1]}[slm-gpu]' in gpu.stdout
+    assert "GPU dot + FFT: PASS" in gpu.stdout
+    assert "-m pip check" in gpu.stdout and "-m zou_lab_control check" in gpu.stdout
+    assert (tmp_path / "zlc-slm-gpu-install.log").is_file()
+    gpu_environment["ZLC_FPGA_PYTHON"] = str(failing)
+    gpu_failed = _run_cmd(["cmd.exe", "/d", "/c", str(GPU_INSTALL_LAUNCHER)], cwd=ROOT, env=gpu_environment)
+    assert gpu_failed.returncode == 7, gpu_failed.stdout + gpu_failed.stderr
+    assert "failed with code 7" in gpu_failed.stdout
 
 
 def _assert_every_python_line_enters_through_the_bootstrap(launcher: Path) -> None:
