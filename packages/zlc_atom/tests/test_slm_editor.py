@@ -867,6 +867,10 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
     import zlc_atom.devices.slm.editor as editor
     from zlc_ui.fluent import FluentScrollArea, FluentSwitch, FluentTabWidget
 
+    def roles(widget):
+        front = widget.presented_front
+        return None if front is None else sorted(axis.role for axis in front.interaction.axes)
+
     with _editor(tmp_path, monkeypatch) as (app, _, control):
         try:
             _pump(app, lambda: control.solver_idle)
@@ -904,6 +908,13 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
                     )
                 ),
             )
+            # The Editor's pictures stand without a side distribution or
+            # colorbar.
+            _pump(
+                app,
+                lambda: roles(control._target_widget) == ["image"]
+                and roles(control._phase_widget) == ["image"],
+            )
             assert control._plot_panel.height() >= 350
             assert isinstance(control._plot_scroll, FluentScrollArea)
             assert not control._plot_scroll.widgetResizable()
@@ -923,7 +934,8 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
             tabs.setCurrentIndex(control._wavefront_tab_index)
             _pump(
                 app,
-                lambda: control._wavefront_widget.size() == QtCore.QSize(490, 357),
+                lambda: control._wavefront_widget.size() == QtCore.QSize(490, 357)
+                and roles(control._wavefront_widget) == ["image"],
             )
             assert isinstance(control._wavefront_parameter_scroll, FluentScrollArea)
             assert isinstance(control._wavefront_plot_scroll, FluentScrollArea)
@@ -952,6 +964,7 @@ def test_editor_keeps_the_original_plot_size_and_resizes_both_scrollable_surface
                     )
                     and control._plot_scroll.horizontalScrollBar().maximum() > 0
                     and control._plot_scroll.verticalScrollBar().maximum() > 0
+                    and roles(control._target_widget) == ["image"]
                 ),
             )
             assert control.status_text == "Plot size 4x4; hardware unchanged"

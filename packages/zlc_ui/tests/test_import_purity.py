@@ -26,9 +26,11 @@ FORBIDDEN_ROOTS = {
 #: Every alternative to importing that here puts a second copy of the prefix
 #: table in the view layer, and a formatter and a parser that must agree with
 #: each other across a layer boundary is a formatter and a parser that will
-#: one day not.  Nothing else in zlc_data may be reached: the ban exists so
-#: this layer renders view models and never touches the data model, and one
-#: named module does not change that.
+#: one day not.  ``figure_padded`` lives there too, beside the formatter: a
+#: count written in its bound's width is the same kind of rule.  Nothing
+#: else in zlc_data may be reached: the ban exists so this layer renders view
+#: models and never touches the data model, and one named module does not
+#: change that.
 ALLOWED_MODULES = {"zlc_data.units"}
 
 

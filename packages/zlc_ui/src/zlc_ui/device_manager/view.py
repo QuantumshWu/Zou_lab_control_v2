@@ -309,6 +309,7 @@ class DeviceControlView(QtWidgets.QWidget):
         # Only the CURRENT column is a number of our own; every other heading
         # takes its width from the widget under it, in _align_headings.
         self.current_heading.setFixedWidth(window_pad(8.0))
+        self.current_heading.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         # These two name a control that is centred in its cell, so the word is
         # centred over it rather than hanging off the column's left edge.
         for heading in (self.live_heading, self.apply_heading):
@@ -356,7 +357,9 @@ class DeviceControlView(QtWidgets.QWidget):
 
         key = field.key
         self._retire_field_row(key)
-        current = ElidedLabel("\u2014")
+        # Right-aligned in its fixed column: the unit stands still and the
+        # digits change to its left, as a reading's do.
+        current = ElidedLabel("\u2014", align=QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
         current.setFixedWidth(self.current_heading.width())
         # The switch lives in a cell of its own so a field with no live
         # write can leave the CELL EMPTY without the row closing up: the

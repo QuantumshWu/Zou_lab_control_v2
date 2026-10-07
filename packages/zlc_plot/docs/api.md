@@ -477,7 +477,7 @@ print(image_session.resolved_color_limits(display=True))
 image_session.reset_color_limits(mode="tight")
 ```
 
-Image side-distribution 中始终只有一组 color-limit handles。它们是显示色阶的控制，
+Image side-distribution 中始终只有一组 color-limit handles（`side_distribution=False` 时没有 side distribution，也就没有 handles 和 colorbar）。它们是显示色阶的控制，
 不属于 `SelectorKind`，不会出现在 `selectors` / `selector_state()` / fit scope 中；
 空白处点击不会创建另一组。`resolved_color_limits(display=False)` 返回 canonical value
 unit 下实际画入当前 frame 的范围，`display=True` 返回当前显示单位；

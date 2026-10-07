@@ -21,7 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
-from zlc_data.units import DEFAULT_UNITS
+from zlc_data.units import DEFAULT_UNITS, figure_padded
 
 from zlc_pulse import (
     PulseSequence,
@@ -252,7 +252,7 @@ class SeamlessScanMeasurement:
         for port, _value, index, points in changed:
             check_cancelled(context)
             context.report_progress(
-                f"Setting {port_label(port)} ({index + 1}/{points})"
+                f"Setting {port_label(port)} ({figure_padded(index + 1, points)}/{points})"
             )
         streamed, _columns = self._streamed_sequence(board, self._api_values_for(outer_row))
         return self.sequencer.compile_pulse(streamed, board.geometry, board.clock_hz)
@@ -273,7 +273,7 @@ class SeamlessScanMeasurement:
         for port, value, index, points in changed:
             check_cancelled(context)
             context.report_progress(
-                f"Setting {port_label(port)} ({index + 1}/{points})"
+                f"Setting {port_label(port)} ({figure_padded(index + 1, points)}/{points})"
             )
             axis = next(axis for axis in self.outer_axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
@@ -370,7 +370,7 @@ class SeamlessScanMeasurement:
                     "would play values its run record does not name"
                 )
             context.report_progress(
-                f"Scanning point {progress_base + 1}/{progress_total}; shots",
+                f"Scanning point {figure_padded(progress_base + 1, progress_total)}/{progress_total}; shots",
                 current=progress_base * shots,
                 total=progress_total * shots,
             )
@@ -426,7 +426,8 @@ class SeamlessScanMeasurement:
                     source_publication=source_publication,
                 )
                 context.report_progress(
-                    f"Scanning point {progress_base + delivered // shots + 1}/{progress_total}; shots",
+                    f"Scanning point {figure_padded(progress_base + delivered // shots + 1, progress_total)}"
+                    f"/{progress_total}; shots",
                     current=progress_base * shots + delivered + 1,
                     total=progress_total * shots,
                 )

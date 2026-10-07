@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 
 from PyQt5 import QtCore, QtWidgets
 
+from zlc_data.units import figure_padded
 from zlc_ui.fluent import (
     ACCENT,
     GREEN,
@@ -216,11 +217,14 @@ class PointReviewView(FluentFrame):
                 check.setChecked(point_id not in excluded)
         finally:
             self._syncing = False
-        kept = len(self._point_ids) - len(excluded)
-        suffix = f" · Selected {len(selected)}" if selected else ""
+        detected = len(self._point_ids)
+        kept = detected - len(excluded)
+        # Each count in the detected count's width, so the words after it
+        # stay put as it changes.
+        suffix = f" · Selected {figure_padded(len(selected), detected)}" if selected else ""
         self.status.show_message(
-            f"Detected {len(self._point_ids)} · Excluded {len(excluded)} "
-            f"· Final {kept}{suffix}",
+            f"Detected {detected} · Excluded {figure_padded(len(excluded), detected)} "
+            f"· Final {figure_padded(kept, detected)}{suffix}",
             severity="task" if selected else "idle",
         )
         self.exclude_selected_button.setEnabled(bool(selected))

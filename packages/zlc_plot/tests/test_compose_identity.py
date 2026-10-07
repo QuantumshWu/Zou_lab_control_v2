@@ -159,6 +159,21 @@ def test_composed_frame_is_full_draw_exact_across_a_tick_shrink() -> None:
         # Steady state composes over the cached chrome background.
         session.update_data(_snapshot(schema, size, 30.0, 4, seed=6))
         assert _composed_matches_full_draw(session) == 0
+
+        # Without its side distribution the picture stands alone, in the
+        # box it had, and back again.
+        image_box = session.surface_plan.axes[0].box
+        session.set_parameter("side_distribution", False)
+        session.update_data(_snapshot(schema, size, 30.0, 5, seed=7))
+        assert [plan.role for plan in session.surface_plan.axes] == ["image"]
+        assert session.surface_plan.axes[0].box == image_box
+        assert _composed_matches_full_draw(session) == 0
+        session.set_parameter("side_distribution", True)
+        session.update_data(_snapshot(schema, size, 30.0, 6, seed=8))
+        assert [plan.role for plan in session.surface_plan.axes] == [
+            "image", "distribution", "colorbar",
+        ]
+        assert _composed_matches_full_draw(session) == 0
     finally:
         session.close()
 

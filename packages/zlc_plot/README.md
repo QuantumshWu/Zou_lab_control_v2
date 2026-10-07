@@ -257,7 +257,7 @@ Pulse preview 或嵌套 scroll area 可调用 `widget.set_interaction_enabled(Fa
 
 ## Plot kinds 与固定尺寸
 
-公开的六种 plot kind 是 Curve、Image、Histogram、Rolling、FacetGrid 和 PulseTimeline。Rolling 通过 `side_distribution` 参数选择是否显示 side distribution。FacetGrid 可沿Repeat、Point或Cell-data任一具名axis展开；同一个grid的cells使用同一种Curve、Image或Histogram kind。
+公开的六种 plot kind 是 Curve、Image、Histogram、Rolling、FacetGrid 和 PulseTimeline。Rolling 与 Image（含 FacetGrid image cell 的 Focus）通过 `side_distribution` 参数选择是否显示 side distribution；Image 关掉时立在其轴上的 colorbar 一并不画，图像框不动。FacetGrid 可沿Repeat、Point或Cell-data任一具名axis展开；同一个grid的cells使用同一种Curve、Image或Histogram kind。
 FacetGrid 只有一个 facet 轴，它的显示单位由 `facet_display_unit` 单独声明，不与 x/value 共用。
 
 未经 authoring 时每种 kind 显示什么，由 `zlc_plot/_kinds/defaults.py` 一张表决定；每个 kind 的 `default_spec`、FacetGrid 的 cell kind 选择和「从当前 plot 要一个 grid」都只是对这张表的读取。表按 `classify_axes` 得到的 axis family 分组，从不按 axis 名字特判：R（repeat）是统计量，只被 reduce 或被 Histogram pool；H（Runtime 的 primary index）除 Rolling 自己走它之外也是统计量，只在其它轴都没有结构时作 curve 最后的 x；S（scan axis，slowest first）是位置：最内层是 curve 的 x，两层是 heatmap，最外层是 grid 的 facet，无人认领的 scan 轴保持可编辑的 Reduced；E（`READOUT_EVENT` Point axis，如 camera frame、survival pair）是子测量的选择：grid 给每个 event 一个 cell，无 scan 的 curve 沿它走，其它情况在构造默认spec时Scope到该轴实际的末coordinate，不隐式跟随；D（Cell-data payload）是内容：声明的 picture 或两条 content 轴成 image，剩下的一条 content 在 palette 能分辨时成group，否则 reduce。size为1的axis仍是provenance；其中event axis即使只有一个坐标仍可标识一个cell。`tests/test_default_roles.py`枚举全表。Limit 类display字段（relim与x/y/color范围）声明为`portable=False`：panel identity改变时它们随semantic/fit一起从新vocabulary重新开始，只有外观字段跨kind携带。

@@ -82,6 +82,44 @@ def test_a_static_rolling_panel_reuses_its_chrome_background(monkeypatch) -> Non
     finally:
         session.close()
 
+def test_the_meter_keeps_its_words_still_while_its_number_changes_width() -> None:
+    """The operator's report: the name above a rolling panel slid sideways.
+
+    The meter was right-aligned, so every newest value that gained or lost a
+    character (``.6g`` drops trailing zeros, a sign comes and goes) moved the
+    words before it, shot after shot.  The series name now stays put from the
+    first frame -- narrow, wide and narrow again -- and the number changes to
+    its right.
+    """
+
+    rng = np.random.default_rng(3)
+    schema = make_dataset_schema(
+        repeat_domain(size=20),
+        mapped_domain_from_columns({"site": np.arange(8.0)}),
+    )
+    session = PlotSession(
+        make_snapshot(schema, rng.normal(size=(20, 8)), revision=1),
+        RollingPlot(group=AxisRef.point("site")),
+        device_pixel_ratio=2.0,
+    )
+    try:
+        renderer = session._renderer
+        lefts, texts = [], []
+        for revision, value in enumerate((12.5, -0.00193362, 3.0, 1234.5678, 0.25), start=2):
+            session.update_data(make_snapshot(schema, np.full((20, 8), value), revision=revision))
+            session.rgba()
+            meter = renderer._artists["rolling:latest"]
+            extent = meter.get_window_extent(renderer.figure.canvas.get_renderer())
+            texts.append(meter.get_text())
+            lefts.append(extent.x0)
+            frame = meter.axes.bbox
+            assert extent.x1 <= frame.x0 + MatplotlibRenderer._ROLLING_METER_RIGHT * frame.width + 1.0
+        assert all(" · " in text for text in texts), texts
+        assert len(set(texts)) == len(texts), texts
+        assert max(lefts) - min(lefts) < 0.5, (texts, lefts)
+    finally:
+        session.close()
+
 def test_churn_counts_invalidation_not_a_missing_background() -> None:
     """The escape hatch must not be a one-way door.
 

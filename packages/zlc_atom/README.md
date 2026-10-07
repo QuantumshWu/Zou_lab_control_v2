@@ -38,7 +38,8 @@ target and solves only its latest edit into a Pattern/base phase in the
 background. It has only **Pattern** and **Wavefront** pages. Pattern retains two
 independent `2x2 = 490 x 357` logical target and pre-correction science-phase
 plots. A shared **Size** selector also controls the independent Wavefront
-preview; scrollable canvases avoid overlap or clipping at larger presets.
+preview; scrollable canvases avoid overlap or clipping at larger presets. All
+three plots are bare pictures, without a side distribution or colorbar.
 The three plots are hosts in a render child, never in the console process:
 opened from a device card in the experiment flow, the Editor borrows the
 console's Edit/Save child; opened without an application it starts a private
@@ -50,7 +51,9 @@ of the SLM height; its center and X/Y diameters are editable, and Off means
 uniform full-raster solver illumination. Wavefront puts full-raster Steering
 X/Y and Noll Z4-Z11 under the same Zernike switch. Pattern authoring offers
 exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
-and English/Chinese Text with both minimum site spacing and atom budget.
+and English/Chinese Text with both minimum site spacing and atom budget. Grid
+and Checkerboard sites start 25 target pixels apart, closer only where the
+target cannot hold the default 5 x 7 grid at that spacing.
 A strict Target JSON stores intensity plus objective only for Editor authoring
 import/export. Run consumers take no separate Target: a strict Science Context
 NPZ is their sole Target truth and stores it with the pre-command 16-bit circular

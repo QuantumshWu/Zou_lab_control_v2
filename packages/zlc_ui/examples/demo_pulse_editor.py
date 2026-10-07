@@ -222,7 +222,7 @@ def populate(editor) -> None:
         source_dirty=False,
         repeats=0,
         busy=False,
-        progress_text="held at point 2/16: fake_value = 0.5",
+        progress_text="held at scan point \u20072 of 16",
         progress_polling=False,
     ))
     target = editor

@@ -922,6 +922,17 @@ def _plain_digits(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") or "0"
 
 
+def figure_padded(value: object, widest: object) -> str:
+    """``value`` written in as many characters as ``widest``, padded on the left
+    with figure spaces (U+2007, a digit's width in a font with tabular digits).
+
+    For a count that climbs while it is read -- shot 9 of 200, then 10 -- so
+    whatever follows it on the line stands still.
+    """
+
+    return str(value).rjust(len(str(widest)), "\u2007")
+
+
 def format_quantity(
     value: object,
     unit: UnitLike = "1",
@@ -1053,6 +1064,7 @@ __all__ = [
     "UnitError",
     "UnitLike",
     "UnitRegistry",
+    "figure_padded",
     "format_quantity",
     "parse_quantity",
     "prefix_for",

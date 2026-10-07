@@ -434,7 +434,8 @@ class SurfacePlan:
     facet_typography: FacetTypographyPlan | None
     #: FacetGrid only: the focused-cell geometry, resolved through the SAME
     #: image split the standalone Image kind gets -- (image, distribution,
-    #: colorbar) AxesPlans over the overview's full data region.  The
+    #: colorbar) AxesPlans, or the image alone without its side
+    #: distribution, over the overview's full data region.  The
     #: renderer uses it when the focused cell is an image so the focused
     #: view carries the standalone kind's complete chrome.
     facet_focus_axes: tuple[AxesPlan, ...] | None
@@ -738,6 +739,7 @@ def _split_image(
     region_px: tuple[float, float] | None = None,
     image_height_over_width: float | None = None,
     scene: bool = False,
+    side_distribution: bool = True,
 ) -> tuple[AxesPlan, ...]:
     """The image and its two strips, measured in units of the IMAGE's width.
 
@@ -753,6 +755,10 @@ def _split_image(
     the split's five ratios sum to one, so the colorbar still ends at the
     region's right edge.  Where it binds, the leftover simply stays unused,
     on the side ``style.image_anchor`` leaves free.
+
+    Without ``side_distribution`` the image is laid out alone, in the box
+    it has beside its strips; the colorbar stands on the distribution's
+    axis and goes with it.
     """
 
     span = data.width * split.image
@@ -785,6 +791,10 @@ def _split_image(
     )
     if scene:
         image = _scene_box(image, data, split, region_px, distribution)
+    if not side_distribution:
+        # Switching the strips off never moves or resizes the picture; with
+        # nothing labelled beside it, it owns the room out to the edges.
+        return (AxesPlan("image", image, room=_margin_room(image)),)
     # Neighbours split their gap; the outer edges own the figure's margins.
     # The rail's room stops half way to the colorbar: a bound printed under
     # the colorbar reads as the colorbar's, whatever axis it belongs to.
@@ -942,6 +952,7 @@ def resolve_surface(
     rolling_side_distribution: bool | None = None,
     image_height_over_width: float | None = None,
     image_scene: bool = False,
+    image_side_distribution: bool = True,
     layout: PlotLayoutConfig,
     style: PlotStyleConfig,
 ) -> SurfacePlan:
@@ -1034,6 +1045,7 @@ def resolve_surface(
             region_px=(data_width, data_height),
             image_height_over_width=image_height_over_width,
             scene=image_scene,
+            side_distribution=image_side_distribution,
         )
     elif canonical_kind == "rolling":
         assert rolling_side_distribution is not None
@@ -1091,6 +1103,7 @@ def resolve_surface(
             ),
             image_height_over_width=facet_topology.cell_height_over_width,
             scene=image_scene,
+            side_distribution=image_side_distribution,
         )
     else:
         axes = (AxesPlan("main", data, room=_margin_room(data)),)

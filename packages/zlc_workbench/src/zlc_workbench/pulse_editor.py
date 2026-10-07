@@ -62,7 +62,7 @@ from zlc_pulse import (
     read_config_values,
     pulse_field_value,
 )
-from zlc_data.units import format_quantity
+from zlc_data.units import figure_padded, format_quantity
 from zlc_durable import unique_path
 from zlc_plot import PANEL_SIZE_NAMES, bracket_color
 from zlc_ui import (
@@ -1121,7 +1121,7 @@ class PulseEditorPresenter:
         self._applied_scan: tuple[
             str,
             tuple[str, ...],
-            tuple[tuple[float, ...], ...],
+            tuple[tuple[str, ...], ...],
         ] | None = None
         self._held_point: int | None = None
         #: What the last Hold or Step left playing: the revision its row was
@@ -2689,7 +2689,7 @@ class PulseEditorPresenter:
         # the board is playing something older the moment it no longer is.
         self._adopt_board_state(board_state)
         self._done(
-            f"the board is holding scan point {held} of this pulse; "
+            f"the board is holding scan point {held + 1} of this pulse; "
             "the draft and its scan table are kept"
             if held is not None
             else f"synced from the board - {len(source.periods)} period(s)"
@@ -2742,7 +2742,8 @@ class PulseEditorPresenter:
         *,
         digest: str,
     ) -> None:
-        """Freeze the table that was actually handed to the sequencer."""
+        """Freeze the display text of the table actually handed to the sequencer:
+        each axis in its own decimals, padded with figure spaces to its widest."""
 
         if not wire_rows:
             self._applied_scan = None
@@ -2753,10 +2754,29 @@ class PulseEditorPresenter:
         from zlc_pulse import scan_columns_for, scan_rows_from_wire
 
         columns = scan_columns_for(source, params=self._compiler_target()[0])
+        # Read back from the wire, 0.3 arrives as 0.30000000000000004: each
+        # axis is written to twelve digits, every row in that axis's own
+        # decimals (or mantissa digits) with a digit-wide minus (U+2012), and
+        # padded with figure spaces to its widest, so the progress line's
+        # words stay put from point to point.
+        texts = []
+        for values in zip(*scan_rows_from_wire(wire_rows, columns)):
+            shown = [f"{float(value):.12g}" for value in values]
+            if any("e" in text for text in shown):
+                digits = max(
+                    sum(character.isdigit() for character in text.partition("e")[0]) for text in shown
+                )
+                shown = [f"{float(value):.{digits - 1}e}" for value in values]
+            else:
+                decimals = max(len(text.partition(".")[2]) for text in shown)
+                shown = [f"{float(value):.{decimals}f}" for value in values]
+            shown = [text.replace("-", "\u2012") for text in shown]
+            widest = max(shown, key=len)
+            texts.append([figure_padded(text, widest) for text in shown])
         self._applied_scan = (
             str(digest),
             tuple(column.name for column in columns),
-            scan_rows_from_wire(wire_rows, columns),
+            tuple(zip(*texts)),
         )
 
     def _acquire_command(self, *, present: bool = True) -> bool:
@@ -4393,7 +4413,7 @@ class PulseEditorPresenter:
 
     def _hold_failed(self, held: int, error: BaseException) -> None:
         self._scan_progress = f"cannot hold that point: {error}"
-        self._warn(f"cannot hold scan point {held}: {error}")
+        self._warn(f"cannot hold scan point {held + 1}: {error}")
         self._refresh_scan_page()
 
     def _settle_hold(
@@ -4411,10 +4431,11 @@ class PulseEditorPresenter:
             # What the board reports for it from now on is this draft's row,
             # for ``synchronized`` to recognise until the draft changes.
             self._held_program = (revision, state.applied_digest)
-            self._scan_progress = f"held at scan point {held} of {count}"
+            # Counted from 1, as the running line counts it.
+            self._scan_progress = f"held at scan point {figure_padded(held + 1, count)} of {count}"
         else:
             self._scan_progress = f"cannot hold that point: {error}"
-            self._warn(f"cannot hold scan point {held}: {error}")
+            self._warn(f"cannot hold scan point {held + 1}: {error}")
             if not state.firing:
                 self._release_drive()
         self._adopt_board_state(state)
@@ -4472,11 +4493,10 @@ class PulseEditorPresenter:
             return
         point = int(cursor) % len(rows)
         values = ", ".join(
-            f"{name} = {format_quantity(float(value), '1')}"
-            for name, value in zip(names, rows[point], strict=True)
+            f"{name} = {text}" for name, text in zip(names, rows[point], strict=True)
         )
         self._scan_progress = (
-            f"Scan: point {point + 1} / {len(rows)}"
+            f"Scan: point {figure_padded(point + 1, len(rows))} / {len(rows)}"
             + (f"  {values}" if values else "")
         )
         self.view.set_scan_progress_text(self._scan_progress)

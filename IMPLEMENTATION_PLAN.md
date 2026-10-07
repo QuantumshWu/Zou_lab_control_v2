@@ -1,6 +1,6 @@
 # ZLC — Current Implementation Status
 
-更新时间：2026-09-25
+更新时间：2026-10-07
 
 状态：`PLOT/RUNTIME/WORKBENCH CUT COMPLETE / OVERALL GOAL IN PROGRESS`
 
@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- 不带侧分布与colorbar的Image（2026-10-07，用户要求）：Image（含FacetGrid image cell的Focus）声明Rolling同一个`side_distribution`显示参数；关闭时`_split_image`只给出原位置原大小的图像框，侧分布与立在其轴上的colorbar一并不布局，渲染、手势、render子进程协议、Figure存档语法与kernel warm均不改，普通Image的色限/colorbar区域不动。SLM Editor的Target intensity、Science phase与Wavefront三张图都以`parameters={"side_distribution": False}`建host。验证：`test_compose_identity`关闭时图像框与开启时相同，来回切换后compose与完整重绘逐像素相同、开启后三条轴回来，`test_slm_editor`三张图的轴（改前为红）；正式入口截图核对Pattern/Wavefront两页。
 - finite run 读者只搬新到的行（2026-09-25）：`data_view` 的 `_packed_carry` 命中时同一个 run 的所有 view 共用一块 scratch、每发只写新行（不再有 `np.concatenate((old, tail))` 拷整个 run）；容量随已到行数几何增长，最多为已到行数的 2 倍、不超过 schema 声明的整个 run，提前停下的 run 不为没采的部分占内存（按声明大小一次分配时，42 点×100 repeat 的 1200×1920 uint8 扫描第二发就在每个面板子进程提交 9.7 GB）。每行在锁内只写一次：后继的段接着 scratch 已写的段时只写其后的行，更早的 view 持有永不再写的只读前缀，被取消或拒绝的预备帧写下的行由下一帧接着用，不再另拷一份整 run。Rolling 在 finite run 上按段身份携带已归约的 repeat 行、只重算新段落到的 repeat（与 indexed 窗口同一个 `_segment_history`）。
 - 读出提取整叠向量化（2026-09-24，用户点名）：`extract_box_signals`从逐站点Python循环改为一次rint定位+一次fancy-index gather+按窗口连续像素求和（int精确；窗内有任一非有限像素则该窗没有总和、为NaN，与PSF读出同一规则；越界仍以同一句拒绝），并接受`(F,H,W)`整叠；`extract_psf_signals`的完整窗快路径同样接受整叠（窗与环一次gather，每窗的匹配滤波仍是该窗连续乘积的求和，逐帧逐字相同），不完整窗退回逐帧逐站点；`TrapCalibration.signals_of_frames`；occupancy每份calibration只读一次它负责的cell。测试`test_readout_stack_extraction`：整叠==逐帧==老的逐站点参照（含NaN/inf/贴边/半整数中心）、PSF两种背景、calibration整叠==逐帧、occupancy逐帧计数==对应calibration的`signals`。
 - 同源复查第二轮（2026-09-24）：「节点/设备说的事被整份草稿是否投影成功挡住」这一类还有一处：`finalize_logic_draft`只在草稿投影成功时才问设备的字段可用性（`resolve_field_availability`），于是刚加的、有一个字段不对的节点上，相机做不到的Photoelectrons开关照样可点、显示为开。改为只要设备绑定齐就问，不可用布尔的有效值False照写；测试补「草稿投影失败时开关仍不可用、显示False」。查过没有别的：`defaulted`在投影前算，帧数与输出都读原始草稿。
