@@ -13,6 +13,7 @@ from typing import Any
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from zlc_data.units import figure_padded
 from zlc_ui.fluent import (
     detach_widget,
     ACCENT,
@@ -65,7 +66,11 @@ def _coordinate_text(value: object) -> str:
 
 
 def _escaped(text: str) -> str:
-    """Plain text as rich text: the strip quotes names it does not control."""
+    """Plain text as rich text: the strip quotes names it does not control.
+
+    A figure space pads a climbing count to its axis size; rich text folds a
+    run of them into one ordinary space unless it is kept as written.
+    """
 
     return (
         str(text)
@@ -73,6 +78,7 @@ def _escaped(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace(" ", "&nbsp;")
+        .replace("\u2007", '<span style="white-space:pre">\u2007</span>')
     )
 
 
@@ -184,7 +190,8 @@ def data_structure_fragments(
 
     def count_text(group_index: int, position: int, size: object) -> str:
         if group_index == 0 and position < len(landed):
-            return str(int(landed[position]))
+            # In the size's width: 9 -> 10 -> 100 moved every group after it.
+            return figure_padded(int(landed[position]), int(size))
         return str(int(size))
 
     sizes: list[tuple[str, str | None, object]] = []

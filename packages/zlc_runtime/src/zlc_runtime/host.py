@@ -9,6 +9,7 @@ import threading
 from types import MappingProxyType
 
 from zlc_data import OwnedSnapshot, canonical_text, finite_real
+from zlc_data.units import figure_padded
 
 from .dataset_output import (
     DatasetOutputDeclaration,
@@ -116,7 +117,8 @@ class NodeProgress:
     def text(self) -> str:
         if self.current is None:
             return self.message
-        return f"{self.message} {self.current}/{self.total}"
+        # In the total's width, so a climbing count moves nothing after it.
+        return f"{self.message} {figure_padded(self.current, self.total)}/{self.total}"
 
 
 @dataclass(frozen=True, slots=True)

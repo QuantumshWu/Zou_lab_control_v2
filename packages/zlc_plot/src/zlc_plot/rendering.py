@@ -56,6 +56,7 @@ from ._selector_scene import (
     SelectorSceneKind,
     SelectorSceneStyle,
     SelectorTarget,
+    SelectorText,
 )
 from .layout import SurfacePlan, facet_focus_box, facet_focus_room, fitted_facet_cell_title
 from .parameters import RenderEffect
@@ -687,6 +688,13 @@ def _series_slot(group_key: Sequence[Any], count: int) -> int:
 
 
 _EXPLICIT_UNIT_SUFFIX = re.compile(r"(?:\[[^\[\]]+\]|\([^()]+\))\s*$")
+#: A number as a readout prints one -- sign, exponent and all -- or the word
+#: it prints where it has none.  What is left with every one taken out is the
+#: readout's words; while they stay, its numbers change without moving them.
+_READOUT_NUMBER = re.compile(
+    r"[-+]?(?:\d+\.?\d*|\.\d+|inf)(?:e[-+]?\d+)?|\bnan\b|\bNaN\b|\u2014", re.ASCII
+)
+_DIGIT = re.compile(r"\d", re.ASCII)
 def _literal_text(text: str) -> str:
     """Producer and operator text, made safe to hand a text artist.
 
@@ -4400,6 +4408,8 @@ class MatplotlibRenderer:
                        id(artist.get_transform()), artist.get_clip_on(), None if clip is None else tuple(clip.bounds),
                        id(artist.get_clip_path()), id(artist.get_bbox_patch()), artist.get_usetex(),
                        tuple(map(id, artist.get_path_effects())), artist.get_antialiased(),
+                       artist.get_horizontalalignment(), artist.get_verticalalignment(),
+                       getattr(artist, "_multialignment", None),
                        getattr(artist, "span", None), getattr(artist, "pad_pt", None))
                 if entry[1] != key:
                     entry[1] = key
@@ -9735,7 +9745,7 @@ class MatplotlibRenderer:
                 1.0 - inset,
                 text,
                 transform=axes.transAxes,
-                ha="right",
+                ha="left",
                 va="top",
                 fontsize=self.style.fonts.annotation_pt,
                 fontfamily=self.style.fonts.resolved_family,
@@ -9745,6 +9755,7 @@ class MatplotlibRenderer:
             self._artists[f"{key}:h3d_cage_readout"] = readout
         elif readout.get_text() != text:
             readout.set_text(text)
+        self._pin_readout(readout, 1.0 - inset)
         readout.set_visible(True)
 
     def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
@@ -10489,7 +10500,7 @@ class MatplotlibRenderer:
             from matplotlib.transforms import offset_copy
 
             latest_text = history.text(
-                0.97,
+                self._ROLLING_METER_RIGHT,
                 1.0,
                 "",
                 transform=offset_copy(
@@ -10497,7 +10508,7 @@ class MatplotlibRenderer:
                     y=self.style.render.compact_axes_title_pad_pt, units="points",
                 ),
                 color=self.style.palette.readout,
-                ha="right",
+                ha="left",
                 va="bottom",
                 clip_on=False,
                 fontsize=self.style.fonts.annotation_pt,
@@ -10559,6 +10570,10 @@ class MatplotlibRenderer:
                 tick_profile="rolling",
             )
 
+    #: Where the rolling meter's widest text ends, as a fraction of the
+    #: history axes: above the frame, at its right.
+    _ROLLING_METER_RIGHT = 0.97
+
     def _update_rolling_meter(self) -> None:
         """Read the selected series from the accepted payload, also between frames."""
 
@@ -10585,7 +10600,17 @@ class MatplotlibRenderer:
                 getattr(item, "group_key", ()), len(cycle)
             )])
         value = "—" if latest is None else f"{latest:.6g}"
-        text.set_text(f"{_literal_text(label)} · {value}" if label else value)
+        words = f"{_literal_text(label)} · " if label else ""
+        text.set_text(f"{words}{value}")
+        # Room for the widest a ``.6g`` value prints (two-digit exponents),
+        # from the first frame: held to the widest SHOWN, a meter of
+        # near-zero or signed data still stepped left minutes into a run, at
+        # each first -0.00193362.
+        self._pin_readout(
+            text,
+            self._ROLLING_METER_RIGHT,
+            reserve=(f"{words}-0.000000000", f"{words}-0.00000e+00"),
+        )
 
     #: Side-chrome artist keys the focused image cell creates under its
     #: ``facet:<i>`` surface namespace.  Purged together with the side axes so
@@ -12841,6 +12866,8 @@ class MatplotlibRenderer:
                 self._selector_topologies[kind] = topology
             for artist, primitive in zip(artists, primitives, strict=True):
                 self._mutate_selector_artist(artist, primitive)
+                if isinstance(primitive, SelectorText) and primitive.horizontal_alignment == "right":
+                    self._pin_readout(artist, primitive.position[0])
         self._sync_roi_text_visibility()
 
     def _sync_roi_text_visibility(self) -> None:
@@ -13434,43 +13461,101 @@ class MatplotlibRenderer:
             threshold_line.set_visible(not interactive or not chosen)
             label.set_visible(not interactive and chosen and bool(label.get_text()))
             if label.get_visible():
-                label.set_fontsize(self._annotation_size_that_fits(axis, label.get_text()))
+                self._pin_readout(label, 1.0 - self.style.render.axes_text_inset_fraction, fit=True)
         self._sync_roi_text_visibility()
 
-    def _annotation_size_that_fits(self, axis: Any, content: str) -> float:
-        """The size this annotation must shrink to in order to stay inside.
+    def _pin_readout(
+        self,
+        artist: Any,
+        right: float,
+        *,
+        fit: bool = False,
+        reserve: Sequence[str] = (),
+    ) -> None:
+        """Keep a live readout's words where they stand while its numbers change.
 
-        The classifier writes three numbers into the corner of the surface it
-        annotates.  In a panel they fit; in a facet cell they are fifteen
+        A readout pairs words with numbers that change while the operator
+        watches: a rolling meter's series and newest value, a crosshair's
+        coordinates and the pixel under it, a threshold and its fidelity.
+        Right-aligned, a number that gained or lost a character (``.6g``
+        drops trailing zeros, a sign comes and goes) moved every word before
+        it, shot after shot.  So the readout is left-aligned where the widest
+        text it has shown with these words -- or ``reserve``, the widest its
+        format can print -- ends at ``right`` (an axes fraction): its words
+        stand still and a number changes to their right.  A ``reserve`` is
+        the whole reservation, with no history, so a saved picture and a
+        reopened recipe draw it in one place; otherwise each set of words
+        keeps its own width, so a hover caption that comes and goes puts the
+        words back where they were.  A readout never starts left of the
+        figure: a name too long for the reservation keeps its first
+        characters.  The font's digits are all one width, so a text is
+        measured with every digit read as 0 -- the same width, and the
+        measurement cache sees a handful of shapes instead of every value.
+
+        ``fit`` is a facet cell's classifier, which shrinks to the room it
+        has.  In a panel its three numbers fit; in a cell they are fifteen
         characters against an inch, and at a fixed size they were drawn over
         the distribution they describe and then clipped by the cell's own
-        edge -- "hreshold 323.2" beside a histogram it hid.  Shortening the
-        text loses numbers an operator asked for; the room is what has to be
-        respected, so the text is measured against it, exactly as a cell
-        title is.
+        edge.  It shrinks by the widest text it has shown, not the text of
+        the moment, or its size would follow the digits too; where even the
+        smallest size cannot hold that text, it is right-aligned at ``right``
+        as it was before this rule (the start of its widest line may still be
+        cut by the cell).
         """
 
         from .layout import _text_width_pt
 
-        size = (
-            self.style.fonts.facet_fit_annotation_pt
-            if isinstance(self.spec, FacetGridPlot)
-            else self.style.fonts.annotation_pt
+        text = artist.get_text()
+        axis = artist.axes
+        dpi = float(self._figure.dpi)
+        if not text or axis is None or dpi <= 0.0:
+            return
+        nominal = (
+            (
+                self.style.fonts.facet_fit_annotation_pt
+                if isinstance(self.spec, FacetGridPlot)
+                else self.style.fonts.annotation_pt
+            )
+            if fit
+            else float(artist.get_fontsize())
         )
-        if not content:
-            return size
-        figure = getattr(getattr(axis, "figure", None), "dpi", None)
-        if figure is None or float(figure) <= 0.0:
-            return size
-        inset = 2.0 * self.style.render.axes_text_inset_fraction
-        room = float(axis.bbox.width) / (float(figure) / 72.0) * (1.0 - inset)
-        families = self.style.fonts.sans_serif
-        widest = max(
-            _text_width_pt(line, families, size) for line in content.splitlines()
-        )
-        if widest <= room or widest <= 0.0:
-            return size
-        return max(size * room / widest, self.style.fonts.facet_title_min_pt)
+
+        def measured(content: str) -> float:
+            # As matplotlib draws it: an escaped dollar is one glyph, and
+            # only a newline starts a line.
+            return max(
+                _text_width_pt(_DIGIT.sub("0", line.replace("\\$", "$")), self.style.fonts.sans_serif, nominal)
+                for line in content.split("\n")
+            )
+
+        shown = measured(text)
+        if reserve:
+            width = max(shown, *map(measured, reserve))
+        else:
+            words = _READOUT_NUMBER.sub("0", text)
+            held = artist.__dict__.setdefault("_zlc_readout_widths", {})
+            width = max(shown, held.get((words, nominal), 0.0))
+            held[(words, nominal)] = width
+        room = float(axis.bbox.width) * 72.0 / dpi
+        if room <= 0.0:
+            return
+        size = nominal
+        if fit:
+            usable = room * (1.0 - 2.0 * self.style.render.axes_text_inset_fraction)
+            fitted = nominal * usable / width if width > usable else nominal
+            size = max(fitted, self.style.fonts.facet_title_min_pt)
+            artist.set_fontsize(size)
+            if fitted < self.style.fonts.facet_title_min_pt:
+                artist.set_horizontalalignment("right")
+                artist.set_multialignment("right")
+                artist.set_position((right, artist.get_position()[1]))
+                return
+        scale = size / nominal
+        figure_edge = right * room + float(axis.bbox.x0) * 72.0 / dpi
+        drawn = min(width * scale, max(figure_edge, shown * scale))
+        artist.set_horizontalalignment("left")
+        artist.set_multialignment("left")
+        artist.set_position((right - drawn / room, artist.get_position()[1]))
 
     def _facet_mark_scale(self) -> float:
         """How much of its full weight a mark keeps inside a facet cell."""
@@ -13539,7 +13624,7 @@ class MatplotlibRenderer:
                     1.0 - self.style.render.axes_text_inset_fraction,
                     "",
                     transform=axis.transAxes,
-                    ha="right",
+                    ha="left",
                     va="top",
                     clip_on=True,
                     zorder=self.style.artists.fit_annotation_zorder,

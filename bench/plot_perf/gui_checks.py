@@ -11,6 +11,8 @@ from enum import Enum
 import html
 import re
 
+from zlc_data.units import figure_padded
+
 
 def _plain(value):
     if isinstance(value, Enum):
@@ -237,9 +239,13 @@ def _snapshot_shape(snapshot, source=None):
     # Every domain is a group on the card, an axis-free one too: its count
     # is 1 and its name a dash, not an absent group.
     for index, group in enumerate(structure):
-        counts = landed if index == 0 else [size for _name, size in group]
+        # The card pads a landed count to its axis size with figure spaces.
+        counts = (
+            None if landed is None
+            else [figure_padded(count, size) for count, (_name, size) in zip(landed, group)]
+        ) if index == 0 else [str(size) for _name, size in group]
         if counts is not None:
-            sizes.append("(" + (" × ".join(str(count) for count in counts) or "1") + ")")
+            sizes.append("(" + (" × ".join(counts) or "1") + ")")
         names.append("(" + (" × ".join(name for name, _size in group) or "—") + ")")
     return {"structure": _plain(structure), "landed": landed,
             "repeat_counts_status": "unchecked" if unchecked else "checked",

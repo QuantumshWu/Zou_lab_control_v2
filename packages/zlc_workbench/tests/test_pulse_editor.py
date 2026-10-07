@@ -4153,7 +4153,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert board.events == ["safe", "load", "fire forever"]
         assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
         assert presenter._held_point == 1
-        assert "held at scan point 1" in presenter._scan_progress
+        assert "held at scan point 2" in presenter._scan_progress  # row 1, as the running line counts it
         # The busy sentence comes down with the outcome, though a hold
         # refreshes nothing that would have rewritten it.
         assert view.summary.endswith("period(s)"), view.summary
@@ -4175,7 +4175,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert len(presenter.sequence.scan_bindings) == 1
         assert len(presenter._state.scan_rows) == 3
         assert presenter._held_point == 2
-        assert any("holding scan point 2" in text for text in view.done)
+        assert any("holding scan point 3" in text for text in view.done)  # row 2, counted from 1
 
         # The board's pulse would now replace an edited draft; declined, the
         # draft stays and the status line does not stay on "Syncing...".
