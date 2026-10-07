@@ -53,24 +53,28 @@ def _remote_phase_bytes(shape_yx: object) -> int:
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:
-    result = bytearray()
-    while len(result) < size:
-        chunk = connection.recv(size - len(result))
-        if not chunk:
+    result = bytearray(size)
+    target = memoryview(result)
+    received = 0
+    while received < size:
+        count = connection.recv_into(target[received:])
+        if not count:
             raise ConnectionError("SLM remote connection closed mid-message")
-        result.extend(chunk)
+        received += count
     return bytes(result)
 
 
 def _send_packet(
-    connection: socket.socket, metadata: Mapping[str, object], payload: bytes = b""
+    connection: socket.socket, metadata: Mapping[str, object], payload: bytes | memoryview = b""
 ) -> None:
     encoded = json.dumps(
         dict(metadata), separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     if len(encoded) > _MAX_REMOTE_METADATA_BYTES or len(payload) > _MAX_REMOTE_SEQUENCE_BYTES:
         raise ValueError("SLM remote message exceeds the maximum size")
-    connection.sendall(_REMOTE_HEADER.pack(len(encoded), len(payload)) + encoded + payload)
+    connection.sendall(_REMOTE_HEADER.pack(len(encoded), len(payload)) + encoded)
+    if payload:
+        connection.sendall(payload)
 
 
 def _recv_packet(connection: socket.socket) -> tuple[dict[str, object], bytes]:
@@ -112,7 +116,7 @@ def _open_slm_server(
     sequence_owner = None
 
     def response(ok: bool, error: str | None, *, include_phase: bool, sequence=None):
-        phase = slm.last_commanded_phase
+        phase = slm.last_commanded_phase if include_phase else None
         payload = (
             np.asarray(phase, dtype="<f4").tobytes()
             if include_phase and phase is not None
@@ -157,7 +161,7 @@ def _open_slm_server(
                 reply = response(False, f"{type(error).__name__}: {error}", include_phase=True)
             else:
                 reply = response(True, None,
-                                 include_phase=request["method"] != "play_sequence",
+                                 include_phase=False,
                                  sequence={"sequence_token": sequence_token} if request["method"] == "play_sequence" else None)
             with connections_lock:
                 sequence_token, sequence_owner = None, None
@@ -229,6 +233,7 @@ def _open_slm_server(
 
     def handle(connection: socket.socket, address, server) -> None:
         nonlocal sequence_token, sequence_owner
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         client = f"{address[0]}:{address[1]}" if address else "?"
         with connections_lock:
             if closing:
@@ -374,7 +379,7 @@ def _rpc_call(
         metadata = {"version": _REMOTE_VERSION, "method": method,
                     "command_revision": command_revision, "mapping_revision": mapping_revision,
                     "shape_yx": shape_yx, "frame_count": frame_count, "frame_intervals_seconds": intervals}
-        payload = bytes(payload)
+        payload = memoryview(payload).cast("B")
     elif method in {"play_sequence", "cancel_sequence", "release_sequence"} and len(arguments) == 1:
         metadata, payload = {"version": _REMOTE_VERSION, "method": method, "sequence_token": arguments[0]}, b""
     else:
@@ -384,6 +389,7 @@ def _rpc_call(
         return _recv_packet(endpoint)
     with socket.create_connection(endpoint, timeout=timeout) as connection:
         connection.settimeout(timeout)
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         _send_packet(connection, metadata, payload)
         return _recv_packet(connection)
 
@@ -478,6 +484,7 @@ class _RemoteSlmAdapter:
             if self._connection is None:
                 self._connection = socket.create_connection(self._endpoint, timeout=self._timeout)
                 self._connection.settimeout(self._timeout)
+                self._connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             value, payload = _rpc_call(self._connection, method, arguments, self._timeout)
             if not isinstance(value, dict) or set(value) not in ({"version", "ok", "error", "state"}, {"version", "ok", "error", "state", "sequence"}):
                 raise ValueError("SLM remote response has an invalid field set")
@@ -647,7 +654,8 @@ class _RemoteSlmAdapter:
             self._sequence_token = None
             self._sequence_codes = None
             self._sequence_intervals = []
-            payload = frames.tobytes()
+            borrowed = not np.asarray(codes).flags.writeable and frames.flags.c_contiguous
+            payload = memoryview(frames).cast("B") if borrowed else frames.tobytes()
             error = self._request("prepare_sequence", (
                 self._command_revision, self._mapping_revision, list(self._shape_yx),
                 len(frames), intervals.tolist(), payload,
@@ -662,7 +670,7 @@ class _RemoteSlmAdapter:
             # The solver hands out protected readonly storage; retain its
             # view. Writable callers use the already-serialized upload bytes,
             # so no second full movie copy is needed for receipt reconstruction.
-            self._sequence_codes = (frames if not np.asarray(codes).flags.writeable else
+            self._sequence_codes = (frames if borrowed else
                                     np.frombuffer(payload, dtype=np.uint8).reshape(frames.shape))
         return {**prepared, "upload_roundtrip_ms": (time.perf_counter() - started) * 1000}
 
@@ -684,7 +692,7 @@ class _RemoteSlmAdapter:
             self._sequence_intervals = []
             if token is None:
                 return
-            error = self._request("release_sequence", (token,))
+            error = self._request("release_sequence", (token,), commanded=self.last_commanded_phase)
             if error is not None:
                 raise RuntimeError(error)
 

@@ -92,11 +92,12 @@ class VirtualSLM:
     def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object) -> dict[str, object]:
         started = time.perf_counter()
         frames, intervals = phase_sequence_codes(codes, self.shape_yx, frame_interval_seconds)
-        phases = tuple(phase_from_codes(frame, self.shape_yx) for frame in frames)
+        if np.asarray(codes).flags.writeable:
+            frames = np.frombuffer(frames.tobytes(), dtype=np.uint8).reshape(frames.shape)
         prepared = {"frame_count": len(frames), "frame_intervals_seconds": intervals.tolist(),
                     "prepare_ms": (time.perf_counter() - started) * 1000,
                     "upload_roundtrip_ms": 0.0, "mapping_revision": 0}
-        self._sequence = (phases, intervals, self._command_revision, prepared)
+        self._sequence = (frames, intervals, self._command_revision, prepared)
         self._sequence_cancel.clear()
         return dict(prepared)
 
@@ -110,7 +111,7 @@ class VirtualSLM:
         sequence, self._sequence = self._sequence, None
         if sequence is None:
             raise RuntimeError("SLM phase sequence has not been prepared")
-        phases, intervals, revision, prepared = sequence
+        codes, intervals, revision, prepared = sequence
         if revision != self._command_revision:
             raise RuntimeError("stale prepared SLM sequence")
         started = time.perf_counter()
@@ -121,12 +122,13 @@ class VirtualSLM:
         self._command_revision += 1
         failed = False
         try:
-            for canonical, interval in zip(phases, intervals):
+            for frame, interval in zip(codes, intervals):
                 if self._sequence_cancel.is_set() or (stop_requested is not None and stop_requested()):
                     self._sequence_cancel.set()
                     break
                 frame_started = time.perf_counter()
                 dispatch.append((frame_started - started) * 1000)
+                canonical = phase_from_codes(frame, self.shape_yx)
                 self._world.apply_slm_phase(canonical)
                 acknowledgments.append((time.perf_counter() - started) * 1000)
                 self._outcome = "known-new"
@@ -145,7 +147,7 @@ class VirtualSLM:
             result.update(cancelled=self._sequence_cancel.is_set(), dispatch_ms=dispatch,
                           acknowledged_ms=acknowledgments, actual_frame_intervals_ms=np.diff(dispatch).tolist(),
                           play_ms=(time.perf_counter() - started) * 1000)
-            result["final_settle_completed"] = result["played_frames"] == len(phases) and not result["cancelled"]
+            result["final_settle_completed"] = result["played_frames"] == len(codes) and not result["cancelled"]
             self._stage = "sequence-failed" if failed else "sequence-cancelled" if result["cancelled"] else "sequence-complete"
             self._sequence_receipt = result
         return {**result, "receipt": self.last_command_receipt}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 from threading import Barrier, Thread
@@ -493,6 +494,39 @@ def test_dvi_server_transport_needs_no_vendor_dll_and_preserves_the_raster_path(
         adapter.close()
     assert not worker.is_alive()
     assert closed == [True]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native DVI raster uses Windows GDI")
+def test_native_dvi_raster_is_pixel_exact_and_releases_its_window(monkeypatch):
+    from PIL import ImageGrab
+    import zlc_atom.devices.slm.hamamatsu_x15213.device_types as module
+
+    # Use only a normal large primary desktop. An exact SLM-sized desktop
+    # must never be selected by this software-only acceptance test.
+    desktop = next((item for item in module._windows_displays()
+                    if item["primary"] and item["width"] > 1280 and item["height"] > 1024), None)
+    if desktop is None:
+        pytest.skip("pixel proof requires a normal desktop larger than the SLM raster")
+    x, y = int(desktop["x"]), int(desktop["y"])
+    monkeypatch.setattr(module, "_display", lambda _name: {"name": "software-test-only", "x": x, "y": y})
+    yy, xx = np.ogrid[:1024, :1272]
+    frame = np.asarray((37 * yy + 17 * xx) % 256, dtype=np.uint8)
+    movie = (frame, np.asarray(255 - frame, dtype=np.uint8))
+    present, close, prepare = module._open_dvi_presenter("software-test-only")
+    try:
+        prepare(movie)
+        for index in (0, 1):
+            present(index)
+            screenshot = np.asarray(ImageGrab.grab(bbox=(x, y, x + 1280, y + 1024), all_screens=True))
+            expected = np.zeros((1024, 1280), np.uint8)
+            expected[:, :1272] = movie[index]
+            np.testing.assert_array_equal(screenshot[:, :, :3], np.repeat(expected[:, :, None], 3, axis=2))
+        prepare(())
+        screenshot = np.asarray(ImageGrab.grab(bbox=(x, y, x + 1280, y + 1024), all_screens=True))
+        np.testing.assert_array_equal(screenshot[:, :, :3], np.repeat(expected[:, :, None], 3, axis=2))
+    finally:
+        close()
+    close()
 
 
 def test_broken_or_missing_usb_sdk_cannot_block_the_default_dvi_transport(
@@ -1201,7 +1235,9 @@ def test_remote_sequence_preloads_bulk_codes_and_paces_every_acknowledged_frame(
 
     def present(index):
         assert type(index) is int
-        delivered.append(preload[index].copy())
+        raster = np.zeros((1024, 1280), np.uint8)
+        raster[:, :1272] = preload[index]
+        delivered.append(raster)
         real_sleep(0.026 if index == 0 else 0.002)
 
     monkeypatch.setattr(physical_module, "_display", lambda _name: {"name": "test-display"})
@@ -1229,6 +1265,9 @@ def test_remote_sequence_preloads_bulk_codes_and_paces_every_acknowledged_frame(
         assert delivered == []
         assert remote.command_revision == physical.command_revision == 0
         assert prepared["frame_count"] == len(preload) == 16
+        assert "phases" not in physical._sequence
+        assert physical._sequence["codes"].dtype == np.uint8
+        assert all(gray.shape == physical.shape_yx for gray in preload)
         assert np.shares_memory(remote._sequence_codes, codes), "readonly solver movie is retained without another full copy"
         assert not remote._sequence_codes.flags.writeable
         result = remote.play_phase_sequence()
@@ -1237,7 +1276,7 @@ def test_remote_sequence_preloads_bulk_codes_and_paces_every_acknowledged_frame(
         assert result["played_frames"] == 16
         assert result["cancelled"] is False
         assert result["physical_vblank_observed"] is False
-        assert result["acknowledgment"] == "tkinter-render-and-exact-raster-check"
+        assert result["acknowledgment"] == "native-gdi-flush-and-exact-raster-check"
         assert len(result["dispatch_ms"]) == len(result["acknowledged_ms"]) == 16
         assert np.all(np.asarray(result["acknowledged_ms"]) > result["dispatch_ms"])
         assert np.all(np.asarray(result["actual_frame_intervals_ms"]) >= 1000 / 60 - 0.1)
@@ -1359,6 +1398,7 @@ def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(
             super().__init__()
             self.slots = {}
             self.changes = []
+            self.fail_change_at = None
 
         def Write_FMemArray(self, _board, source, size, width, height, slot):
             self.write_count += 1
@@ -1367,6 +1407,8 @@ def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(
 
         def Change_DispSlot(self, _board, slot):
             self.changes.append(slot)
+            if len(self.changes) == self.fail_change_at:
+                return 0
             self.display = self.slots[slot]
             return 1
 
@@ -1392,6 +1434,15 @@ def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(
         physical.release_phase_sequence()
         with pytest.raises(RuntimeError, match="not been prepared"):
             physical.play_phase_sequence()
+        physical.prepare_phase_sequence(codes, 0.001)
+        sdk.fail_change_at = len(sdk.changes) + 2
+        with pytest.raises(RuntimeError, match="Change_DispSlot"):
+            physical.play_phase_sequence()
+        assert physical.last_command_receipt["outcome"] == "known-old"
+        confirmed = physical.last_commanded_phase
+        np.testing.assert_array_equal(confirmed, codes[0].astype(np.float32) * np.float32(2 * np.pi / 256))
+        with pytest.raises(ValueError):
+            confirmed.flags.writeable = True
     finally:
         physical.close()
 

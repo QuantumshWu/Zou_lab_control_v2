@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from queue import Empty, Queue
 import re
+import struct
 import sys
 from threading import Event, Lock, Thread
 import time
@@ -237,19 +238,49 @@ def _native_dvi_client_geometry(hwnd: int) -> tuple[int, int, int, int]:
 
 def _open_dvi_presenter(
     display_name: str,
-) -> tuple[Callable[[object], None], Callable[[], None], Callable[[np.ndarray], None]]:
-    """Restore the exact physical-raster presenter used before USB-only M6."""
+) -> tuple[Callable[[object], None], Callable[[], None], Callable[[object], None]]:
+    """One persistent native grayscale raster in the existing owned window.
+
+    A completed command means BitBlt/GdiFlush and geometry checks succeeded.
+    It is a software drawing acknowledgment, not a physical vblank signal.
+    """
 
     geometry = _display(display_name)
     commands: Queue[object] = Queue()
     ready = Event()
     startup: list[BaseException] = []
+    target_window: list[int] = []
+    post_message: list[Callable] = []
+    wake_message = 0x8000 + 173
 
     def run() -> None:
+        root = label = window_proc = None
+        window_dc = memory_dc = bitmap = previous_bitmap = None
+        previous_proc = 0
+        hwnd = 0
         try:
             _set_dvi_thread_dpi_awareness()
             import tkinter as tk
-            from PIL import Image, ImageTk
+            import gc
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+            for function, arguments, result in (
+                (user32.GetDC, (wintypes.HWND,), ctypes.c_void_p),
+                (user32.ReleaseDC, (wintypes.HWND, ctypes.c_void_p), ctypes.c_int),
+                (user32.PostMessageW, (wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t), wintypes.BOOL),
+                (user32.SetWindowLongPtrW, (wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t), ctypes.c_ssize_t),
+                (user32.CallWindowProcW, (ctypes.c_void_p, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t), ctypes.c_ssize_t),
+                (user32.IsWindow, (wintypes.HWND,), wintypes.BOOL),
+                (gdi32.CreateCompatibleDC, (ctypes.c_void_p,), ctypes.c_void_p),
+                (gdi32.CreateDIBSection, (ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, wintypes.DWORD), ctypes.c_void_p),
+                (gdi32.SelectObject, (ctypes.c_void_p, ctypes.c_void_p), ctypes.c_void_p),
+                (gdi32.DeleteObject, (ctypes.c_void_p,), wintypes.BOOL),
+                (gdi32.DeleteDC, (ctypes.c_void_p,), wintypes.BOOL),
+                (gdi32.BitBlt, (ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, wintypes.DWORD), wintypes.BOOL),
+                (gdi32.GdiFlush, (), wintypes.BOOL),
+            ):
+                function.argtypes, function.restype = arguments, result
 
             root = tk.Tk(className="ZLC-X15213-DVI")
             root.withdraw()
@@ -263,64 +294,124 @@ def _open_dvi_presenter(
                 root, borderwidth=0, highlightthickness=0, background="black"
             )
             label.pack(fill="both", expand=True)
-            prepared_photos = []
-
-            def poll() -> None:
-                try:
-                    command = commands.get_nowait()
-                except Empty:
-                    root.after(2, poll)
-                    return
-                if command is None:
-                    root.destroy()
-                    return
-                operation, frame, done, result = command
-                try:
-                    if operation == "prepare":
-                        prepared_photos[:] = [
-                            ImageTk.PhotoImage(Image.fromarray(raster, mode="L"), master=root)
-                            for raster in frame
-                        ]
-                        return
-                    photo = (prepared_photos[frame] if type(frame) is int else
-                             ImageTk.PhotoImage(Image.fromarray(frame, mode="L"), master=root))
-                    label.configure(image=photo)
-                    label.image = photo
-                    root.update_idletasks()
-                    root.update()
-                    logical = (
-                        root.winfo_width(),
-                        root.winfo_height(),
-                        label.winfo_width(),
-                        label.winfo_height(),
-                    )
-                    native = _native_dvi_client_geometry(root.winfo_id())
-                    expected = (
-                        int(geometry["x"]),
-                        int(geometry["y"]),
-                        _RASTER_YX[1],
-                        _RASTER_YX[0],
-                    )
-                    if logical != (1280, 1024, 1280, 1024) or native != expected:
-                        raise RuntimeError(
-                            "X15213 DVI presenter was scaled instead of producing "
-                            "an exact 1280 x 1024 physical raster "
-                            f"(logical={logical!r}, native={native!r}, expected={expected!r})"
-                        )
-                except BaseException as error:
-                    result.append(error)
-                finally:
-                    done.set()
-                    root.after(0, poll)
-
             root.deiconify()
             root.lift()
+            root.update_idletasks()
+            root.update()
+            hwnd = label.winfo_id()
+            window_dc = user32.GetDC(hwnd)
+            memory_dc = gdi32.CreateCompatibleDC(window_dc)
+            # Packed BITMAPINFOHEADER plus 256 exact grayscale RGBQUADs.
+            # Negative height makes row zero the top physical row; width is
+            # already a multiple of the DIB's four-byte scanline alignment.
+            header = struct.pack("<IiiHHIIiiII", 40, 1280, -1024, 1, 8, 0,
+                                 1280 * 1024, 0, 0, 256, 256)
+            palette = bytes(value for gray in range(256) for value in (gray, gray, gray, 0))
+            bitmap_info = ctypes.create_string_buffer(header + palette)
+            bits = ctypes.c_void_p()
+            bitmap = gdi32.CreateDIBSection(window_dc, bitmap_info, 0, ctypes.byref(bits), None, 0)
+            if not window_dc or not memory_dc or not bitmap or not bits.value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            previous_bitmap = gdi32.SelectObject(memory_dc, bitmap)
+            raster = np.ctypeslib.as_array(
+                (ctypes.c_uint8 * (1280 * 1024)).from_address(bits.value)
+            ).reshape(_RASTER_YX)
+            raster[:] = 0
+            prepared_frames = []
+            have_frame = False
+
+            def geometry_check():
+                logical = (root.winfo_width(), root.winfo_height(), label.winfo_width(), label.winfo_height())
+                native = _native_dvi_client_geometry(hwnd)
+                expected = (int(geometry["x"]), int(geometry["y"]), 1280, 1024)
+                if logical != (1280, 1024, 1280, 1024) or native != expected:
+                    raise RuntimeError("X15213 DVI presenter was scaled instead of producing "
+                                       "an exact 1280 x 1024 physical raster "
+                                       f"(logical={logical!r}, native={native!r}, expected={expected!r})")
+
+            def draw():
+                if not gdi32.BitBlt(window_dc, 0, 0, 1280, 1024, memory_dc, 0, 0, 0x00CC0020):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not gdi32.GdiFlush():
+                    raise ctypes.WinError(ctypes.get_last_error())
+
+            def dispatch(window, message, wparam, lparam):
+                nonlocal prepared_frames, have_frame
+                if message == wake_message:
+                    try:
+                        command = commands.get_nowait()
+                    except Empty:
+                        return 0
+                    if command is None:
+                        user32.SetWindowLongPtrW(hwnd, -4, previous_proc)
+                        root.quit()
+                        return 0
+                    operation, frame, done, result = command
+                    try:
+                        if operation == "prepare":
+                            prepared_frames = frame
+                        else:
+                            source = prepared_frames[frame] if type(frame) is int else frame
+                            shape = np.asarray(source).shape
+                            if shape not in {_SHAPE_YX, _RASTER_YX} or np.asarray(source).dtype != np.uint8:
+                                raise ValueError("DVI requires a uint8 active phase frame or exact 1280 x 1024 raster")
+                            geometry_check()
+                            if not gdi32.GdiFlush():
+                                raise ctypes.WinError(ctypes.get_last_error())
+                            np.copyto(raster[:, :shape[1]], source)
+                            raster[:, shape[1]:] = 0
+                            have_frame = True
+                            draw()
+                    except BaseException as error:
+                        result.append(error)
+                    finally:
+                        done.set()
+                    return 0
+                result = user32.CallWindowProcW(previous_proc, window, message, wparam, lparam)
+                if message == 0x000F and have_frame:  # WM_PAINT restores the last raster.
+                    try:
+                        draw()
+                    except BaseException:
+                        _LOG.exception("X15213 native raster repaint failed")
+                return result
+
+            procedure_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
+                                              wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t)
+            window_proc = procedure_type(dispatch)
+            previous_proc = user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(window_proc, ctypes.c_void_p).value)
+            if not previous_proc:
+                raise ctypes.WinError(ctypes.get_last_error())
+            geometry_check()
+            target_window.append(hwnd)
+            post_message.append(user32.PostMessageW)
             ready.set()
-            root.after(0, poll)
+            if not commands.empty():
+                user32.PostMessageW(hwnd, wake_message, 0, 0)
             root.mainloop()
         except BaseException as error:
-            startup.append(error)
+            startup.append(error.with_traceback(None))
             ready.set()
+        finally:
+            if hwnd and previous_proc and user32.IsWindow(hwnd):
+                user32.SetWindowLongPtrW(hwnd, -4, previous_proc)
+            if memory_dc and previous_bitmap:
+                gdi32.SelectObject(memory_dc, previous_bitmap)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if memory_dc:
+                gdi32.DeleteDC(memory_dc)
+            if window_dc and hwnd:
+                user32.ReleaseDC(hwnd, window_dc)
+            if root is not None:
+                try:
+                    root.destroy()
+                except BaseException:
+                    pass
+            root = label = window_proc = None
+            # Tcl objects must be finalized on their creation thread, including
+            # cycles kept by callbacks on a window that has just been destroyed.
+            if "gc" in locals():
+                gc.collect()
 
     thread = Thread(target=run, name="x15213-dvi-presenter", daemon=True)
     thread.start()
@@ -338,6 +429,8 @@ def _open_dvi_presenter(
         done = Event()
         result: list[BaseException] = []
         commands.put((operation, frame, done, result))
+        if not post_message[0](target_window[0], wake_message, 0, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
         if not done.wait(5.0):
             raise TimeoutError("X15213 DVI transport did not acknowledge the frame")
         if result:
@@ -346,11 +439,15 @@ def _open_dvi_presenter(
     def present(frame: object) -> None:
         send("present", frame if type(frame) is int else np.array(frame, copy=True))
 
-    def prepare(frames: np.ndarray) -> None:
+    def prepare(frames: object) -> None:
         send("prepare", frames)
 
     def close() -> None:
+        if not thread.is_alive():
+            return
         commands.put(None)
+        if not post_message[0](target_window[0], wake_message, 0, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
         thread.join(5.0)
         if thread.is_alive():
             raise TimeoutError("X15213 DVI presenter did not close within 5 seconds")
@@ -748,7 +845,7 @@ class X15213Adapter:
         self._display_slot = 0
         self._transport = str(authored["transport"])
         self._presenter: tuple[
-            Callable[[object], None], Callable[[], None], Callable[[np.ndarray], None]
+            Callable[[object], None], Callable[[], None], Callable[[object], None]
         ] | None = None
         self._display_name = ""
         self._dvi_controller_mode_proven = False
@@ -822,6 +919,8 @@ class X15213Adapter:
     @property
     def last_commanded_phase(self) -> np.ndarray | None:
         with self._state_lock:
+            if self._phase is not None and self._phase.dtype == np.uint8:
+                self._phase = phase_from_codes(self._phase, _SHAPE_YX)
             return self._phase
 
     @property
@@ -857,7 +956,10 @@ class X15213Adapter:
                 phase_code.astype(np.uint16) + np.asarray(mapping["correction"], dtype=np.uint16)
             ) % 256
         return (
-            np.ascontiguousarray(self._phase_to_gray[phase_code], dtype=np.uint8),
+            np.frombuffer(
+                np.asarray(phase_code, dtype=np.uint8).tobytes().translate(self._phase_to_gray.tobytes()),
+                dtype=np.uint8,
+            ).reshape(_SHAPE_YX),
             mapping,
         )
 
@@ -1090,7 +1192,10 @@ class X15213Adapter:
         if self._sequence is not None:
             self.release_phase_sequence()
         frames, intervals = phase_sequence_codes(codes, _SHAPE_YX, frame_interval_seconds)
-        phases = tuple(phase_from_codes(frame, _SHAPE_YX) for frame in frames)
+        # The physical owner retains logical codes, not a float32 copy of
+        # every frame. Its public phase snapshot decodes the confirmed frame.
+        if frames.flags.writeable or np.asarray(codes).flags.writeable:
+            frames = np.frombuffer(frames.tobytes(), dtype=np.uint8).reshape(frames.shape)
         mapped = [self._gray_codes(frame) for frame in frames]
         grays = tuple(value[0] for value in mapped)
         mapping = mapped[0][1]
@@ -1098,9 +1203,7 @@ class X15213Adapter:
         if self._transport == "dvi":
             if self._presenter is None:
                 self._presenter = _open_dvi_presenter(self._display_name)
-            rasters = np.zeros((len(frames), *_RASTER_YX), dtype=np.uint8)
-            rasters[:, :, :_SHAPE_YX[1]] = grays
-            self._presenter[2](rasters)
+            self._presenter[2](grays)
         else:
             # Reuse only the existing vendor frame-memory API. Never overwrite
             # the currently visible slot while preparing a sequence.
@@ -1118,7 +1221,7 @@ class X15213Adapter:
             "mapping_revision": int(mapping["mapping_revision"]),
         }
         self._sequence = {
-            "phases": phases, "grays": grays, "slots": slots, "mapping": mapping,
+            "codes": frames, "grays": grays, "slots": slots, "mapping": mapping,
             "intervals": intervals, "command_revision": self.command_revision,
             "prepared": prepared,
         }
@@ -1153,16 +1256,52 @@ class X15213Adapter:
         dispatch, acknowledgments = [], []
         result = {
             **sequence["prepared"], "played_frames": 0, "cancelled": False,
-            "acknowledgment": ("tkinter-render-and-exact-raster-check" if self._transport == "dvi"
+            "acknowledgment": ("native-gdi-flush-and-exact-raster-check" if self._transport == "dvi"
                                else "sdk-slot-change-and-frame-memory-readback"),
             "physical_vblank_observed": False, "final_settle_ms": 0.0,
             "final_settle_completed": False,
         }
         with self._state_lock:
             self._command_revision += 1
+        timer = None
+
+        def wait_until(deadline):
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0 or self._sequence_cancel.is_set():
+                return self._sequence_cancel.is_set()
+            if timer is None:
+                return self._sequence_cancel.wait(remaining)
+            due = ctypes.c_longlong(-max(1, int(np.ceil(remaining * 10_000_000))))
+            if not kernel32.SetWaitableTimerEx(timer, ctypes.byref(due), 0, None, None, None, 0):
+                raise ctypes.WinError(ctypes.get_last_error())
+            while not self._sequence_cancel.is_set():
+                result = kernel32.WaitForSingleObject(timer, 10)
+                if result == 0:
+                    return self._sequence_cancel.is_set()
+                if result != 258:  # WAIT_TIMEOUT; check Stop between bounded waits.
+                    raise ctypes.WinError(ctypes.get_last_error())
+            return True
+
         try:
+            if os.name == "nt":
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CreateWaitableTimerExW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, wintypes.DWORD, wintypes.DWORD)
+                kernel32.CreateWaitableTimerExW.restype = ctypes.c_void_p
+                kernel32.SetWaitableTimerEx.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_longlong), ctypes.c_long,
+                                                       ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.ULONG)
+                kernel32.SetWaitableTimerEx.restype = wintypes.BOOL
+                kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, wintypes.DWORD)
+                kernel32.WaitForSingleObject.restype = wintypes.DWORD
+                kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+                kernel32.CloseHandle.restype = wintypes.BOOL
+                timer = kernel32.CreateWaitableTimerExW(None, None, 2, 0x001F0003)
+                if not timer:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                result["pacing"] = "win32-high-resolution-waitable-timer"
+            else:
+                result["pacing"] = "threading-event-wait"
             for index, (canonical, gray, interval) in enumerate(zip(
-                sequence["phases"], sequence["grays"], sequence["intervals"]
+                sequence["codes"], sequence["grays"], sequence["intervals"]
             )):
                 if self._sequence_cancel.is_set():
                     break
@@ -1197,24 +1336,31 @@ class X15213Adapter:
                     self._phase, self._last_gray = canonical, gray
                     self._last_receipt = self._receipt(mapping, outcome="known-new", stage="sequence-frame", readback=("presenter-ack" if self._transport == "dvi" else "matched-new"))
                 result["played_frames"] = index + 1
-                if self._sequence_cancel.wait(max(0.0, frame_started + float(interval) - time.perf_counter())):
+                if wait_until(frame_started + float(interval)):
                     break
             if result["played_frames"] == result["frame_count"] and not self._sequence_cancel.is_set():
                 settle_started = time.perf_counter()
-                self._sequence_cancel.wait(max(0.0, self._settle - (settle_started - acknowledged)))
+                wait_until(acknowledged + self._settle)
                 result["final_settle_ms"] = (time.perf_counter() - settle_started) * 1000
                 result["final_settle_completed"] = not self._sequence_cancel.is_set()
         finally:
             active_error = sys.exception()
+            if timer is not None:
+                kernel32.CloseHandle(timer)
             result["cancelled"] = self._sequence_cancel.is_set()
             result["dispatch_ms"] = dispatch
             result["acknowledged_ms"] = acknowledgments
             result["actual_frame_intervals_ms"] = np.diff(dispatch).tolist()
             result["play_ms"] = (time.perf_counter() - started) * 1000
             with self._state_lock:
+                if self._phase is not None and self._phase.dtype == np.uint8:
+                    # A single slice must not keep the whole uploaded movie
+                    # alive after playback. Retain only its confirmed pixels.
+                    self._phase = np.frombuffer(self._phase.tobytes(), dtype=np.uint8).reshape(_SHAPE_YX)
                 stage = self._last_receipt["stage"]
                 if stage in {"sequence-frame", "complete", "uncommanded"} or not dispatch:
-                    stage = "sequence-cancelled" if result["cancelled"] else "sequence-complete"
+                    stage = ("sequence-failed" if active_error is not None else
+                             "sequence-cancelled" if result["cancelled"] else "sequence-complete")
                 self._last_receipt = {
                     **self._last_receipt, "stage": stage,
                     "command_revision": self._command_revision, "sequence": result,
