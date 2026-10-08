@@ -441,11 +441,13 @@ class SlmRearrangementTask:
             spec = ImagePlot(x=AxisRef.cell_data(str(x_axis.axis_id)),
                              y=AxisRef.cell_data(str(y_axis.axis_id)))
             for index, record in enumerate(self._camera_recordings):
+                low, high = float(np.nanmin(record.image)), float(np.nanmax(record.image))
                 snapshot = owned_snapshot_from_arrays(template.block.schema,
                     np.asarray(record.image)[None,None], index,
                     validity=np.ones((1,1),bool), stream_generation=template.ref.stream_generation)
                 written = writer(frames_directory / f"frame_{index:04d}.png",
-                    plot_input=snapshot, spec=spec, parameters={}, size="4x4",
+                    plot_input=snapshot, spec=spec,
+                    parameters={"color_min": low, "color_max": low + .8*(high-low)}, size="4x4",
                     source={"task":self.instance_id,"source_ordinal":record.source_ordinal})
                 if hasattr(written, "result"): written = written.result()
                 png, npz = written
