@@ -500,6 +500,7 @@ Node new chunk
 - 扩展版TTL待执行事件FIFO深度32，DAC待执行action FIFO 64；保持4 scan slots、512行周期表、8个loop深4层、2048点每bank、10bit DAC与50MHz。行表和scan表是真BRAM（`blk_mem_gen_rows`/`blk_mem_gen_scan`），取行侧用loop栈走表并预取到一个小FIFO，scan点只在两个bank都驻留时才被取走，取不到就underflow并loud失败——seamless scan不因周期表而变。Fire前按实际repeat/scan/delay校验容量，超限拒绝不丢事件。资源估算以周期表版本本机routed基线校准；估算不是新版本完成布线或硬件验收的证明。用户已授权本机build-only验证资源和时序；program/flash与实验板验收仍需用户另行授权。
 
 - Load前核target ABI、clock、geometry与合法slot rows；delay FIFO capacity和循环接缝在Fire前按本次真实run/scan repeats验证，不先计算一个未请求的1×1执行。相同驻留程序与执行参数复用已验证结论；不把camera exposure或frames-per-cycle反向解释进Pulse program。
+- Pulse的board兼容性只使用既有`PulseTarget.abi_fingerprint`；Task resolver、ExperimentSession、Editor与LOAD不得以完整target对象相等代替它。通道显示label属于Pulse文档，改名保留到applied source但不改变硬件ABI；port key、lane映射、类型、位宽与latch关系仍属于ABI。文档相等继续包含label，不能为执行兼容而让编辑器忽略改名。
 - Fire成功返回现有已确认AppliedState；调用方不为相同事实追加snapshot/applied查询。更新重复次数只校验计数并共享已验证program/rows，计数不变复用原对象。Remote以现有LOAD/FIRE确认及已接纳装载状态交付相同事实，只有真正变更才重新装载；同连接未变scan rows沿既有装载引用复用，不新增状态缓存。
 - Count必须是合法hardware range内整数，不clamp/wrap。
 - Hardware SAFE把TTL拉低、把DAC data置safe码，并让DAC latch strobe继续走足够长以把该safe码真正锁进外部转换器，之后才gate住strobe；只gate而不锁存等于把safe码摆上引脚却永远送不进DAC，模拟输出会保持run的最后一个edge/ramp值。CTRL20在配置时即全部latch clock使能，所以配置后的park窗口就把safe码锁进转换器，不等第一次FIRE。DAC safe码固定为中码（`1 << (width-1)`，即RTL的`BUS_SAFE_VALUE`），`PulsePortSpec`不接受别的值，如同数字port固定为0，virtual与真板因此不会分叉。LOAD/FIRE前pins保持safe。

@@ -82,9 +82,10 @@ def resolve_pulse(
         sequence,
         bindings=tuple(replace(binding, scan=False) for binding in sequence.bindings),
     ), api_values)
-    if resolved.target != board.target:
+    # Display labels belong to the document, not the board's execution ABI.
+    if resolved.target.abi_fingerprint != board.target.abi_fingerprint:
         raise ValueError(
-            "calibration pulse target is incompatible with the connected board"
+            "pulse target ABI is incompatible with the connected board"
         )
     resolved, program = sequencer.compile_pulse(
         resolved, board.geometry, board.clock_hz

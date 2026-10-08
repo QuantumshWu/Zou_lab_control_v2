@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -13,8 +14,9 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_runtime.plane import SignalDataPlane
+from zlc_pulse import PulseTarget
 from zlc_workbench.session import ExperimentSession, Workspace
-from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
+from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
 
 @pytest.fixture
@@ -71,8 +73,17 @@ def test_the_pulse_must_exist_in_the_workspace(session) -> None:
 
 
 def test_session_loads_a_stem_or_plain_json_name_but_never_a_path(session) -> None:
+    sequence = ordinary_imaging_sequence()
+    renamed = PulseTarget(
+        raw_lanes=sequence.target.raw_lanes,
+        ports=tuple(replace(port, label=f"Operator {port.key}") for port in sequence.target.ports),
+        package_pins=sequence.target.package_pins,
+    )
+    write_ordinary_pulse(session.workspace.root, sequence=replace(sequence, target=renamed))
     assert session.load_pulse(PULSE_NAME)["name"] == PULSE_NAME
     assert session.load_pulse(f"{PULSE_NAME}.json")["name"] == PULSE_NAME
+    assert session.pulse_sequence.target == renamed
+    assert session.sequencer.applied().source.target == renamed
     for invalid in (
         ".",
         "..",

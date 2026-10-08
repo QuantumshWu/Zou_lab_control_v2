@@ -360,6 +360,14 @@ def test_pulse_resolver_uses_the_project_json_document(
     resource_spec = CALIBRATION_LOGIC_NODE.workspace_resources[0]
     resource = resource_spec.resolve(asset)
     assert resource.value == pulse_sequence("imaging_template.json")
+    target = resource.value.target
+    renamed = replace(resource.value, target=PulseTarget(
+        raw_lanes=target.raw_lanes,
+        ports=tuple(replace(port, label=f"Operator {port.key}") for port in target.ports),
+        package_pins=target.package_pins,
+    ))
+    assert renamed.target != target
+    assert renamed.target.abi_fingerprint == target.abi_fingerprint
 
     sequencer = VirtualPulseStreamer()
     sequencer.open()
@@ -373,7 +381,7 @@ def test_pulse_resolver_uses_the_project_json_document(
             ),
         )
         resolved = resolve_pulse(
-            resource.value,
+            renamed,
             path=resource.path,
             sequencer=sequencer,
             api_values=api_values,
@@ -382,6 +390,9 @@ def test_pulse_resolver_uses_the_project_json_document(
         assert resolved.program.slot_count == 0
         assert resolved.program.clock_hz == board.clock_hz
         assert resolved.program.channels == board.target.raw_lanes
+        assert resolved.sequence.target == renamed.target
+        arm_sequencer(sequencer, resolved)
+        assert sequencer.applied().source.target == renamed.target
 
         # A board whose pin map is not this pulse's.  It is described by a
         # SEQUENCER now, because that is what fills the pulse's config

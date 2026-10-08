@@ -849,10 +849,10 @@ class ExperimentSession:
         # loaded by name at all.
         sequence = resolve_api_parameters(state.sequence)
         board = self.sequencer.describe()
-        if sequence.target != board.target:
+        # Match the same execution ABI checked at LOAD, not display labels.
+        if sequence.target.abi_fingerprint != board.target.abi_fingerprint:
             raise ValueError(
-                f"pulse target {sequence.target!r} does not match the installed "
-                f"sequencer target {board.target!r}"
+                "pulse target ABI does not match the installed sequencer"
             )
         # Compiled BY the sequencer: a config parameter's number is the
         # board's, and it is baked into the program.  The filled sequence is
