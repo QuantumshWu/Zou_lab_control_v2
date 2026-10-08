@@ -467,6 +467,8 @@
 - Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
 - 第一张照片的valid occupied站点按源roster身份成为available_source_indices。共同planner按实际欧氏距离匹配min(可用源,目标数)：多余原子丢弃，其阱在序列内淡出；不足时正常部分填充，保存未填目标。无效分类仍为invalid，不改成empty。具体Task拥有相机分类和目标政策，solver只接收显式计划；不复制分类或新增编排框架。
 - 指派与路由主要目标改为最小最长实际路径min(max_i L_i)，不是总路程或完成时间。瓶颈指派同时选取源/目标子集并给出直线下界，已在目标位置的原子可以重新指派或让位。全过程最小间距为硬约束，所有候选按最长实际路径优先；记录下界、实际值及差距，不把有界搜索当全局最优，不保留旧总路程目标或静止原子豁免。
+- 同等最长路按并行移动行程、再按结点数择优，所有候选均有冲突修复机会；预算耗尽显式记录。公共时间参数按实际段长重建，分帧不再逐N循环，绕行不会继承近零时间比例导致帧数爆炸。Auto传递同一次只读采样结果，空占据零帧且不创建零长度质量轴。同位置改权重在LPI和Iterative均执行真实光学变化，Iterative不能仅因位置不变就复用旧权重结果；空计划和真正不变计划由统一函数判定，闭合运动不误判no-op。
+- Task更改最小间距复用原GPU光学工作区；统一no-op跳过采样及设备准备。提前并行Sequence准备的原型未证明端到端收益，已删除该调度分支，继续验证首图后才准备和播放；准备失败及时释放可能已分配的token。Recording先调度独占首帧的重排再发布私有相机数据。LPI编码/测量使用已有CUDA Graph，保持输出数学及质量门；相位变化与相位误差分开命名，未加入无法由当前设备响应数据证实的光学安全保证。逐张标准Figure导出仍在实验后，未另建跨进程导出缓存或私有图片编码路径。
 - motion_frames=N是实际显示的总图数，包含终点、不含已经显示的起点；淡出合入这N图，不额外生成R帧。空占据是零匹配且不播放新图。公开输入删除独立ramp/dark/radius参数；有界GPU及pinned host资源按N准备。沿已有phase projection/幅度更新求解，不重发明算法；连续帧间间距检查允许空间路径错时交叉，但不允许同一时刻越界。
 - UI的intensity_error_percent默认1%，转换为weighted max/min ratio门限1.01；准备与生成消费同一门限。丢弃占据站点在淡出后另须通过5×5原生Fourier像素区域最大光强/该站点初始中心光强≤0.01；同一稀疏算子的自适应复场投影最多64次，携带前帧校正，已验证不变图直接复用。其它背景仅诊断；相对初始阱亮度、焦面站点相位步长、pupil加权像素相位步长RMS、最大单帧位移与参考帧数分别保存，不能把数值均匀度或消光门当作原子释放/存活保证。
 - GPU/端点准备与source phase建立在Fire之前。Task只Fire一次原Pulse，稳定Period ID对应显示Name；共同compiler walker读取实际Config及嵌套loop。相机只arm一次并接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。曝光独立于Period时长，不比较、不自动调整；operator负责实际曝光/照明及相应Calibration有效性。保守after deadline仍检查完整计算、上传、播放与最终等待，host receive不冒充曝光时间。

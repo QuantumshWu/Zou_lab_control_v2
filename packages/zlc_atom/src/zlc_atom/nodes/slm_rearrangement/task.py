@@ -27,7 +27,7 @@ from zlc_atom.devices.slm.device import phase_from_codes
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.devices.slm.solver import (
     prepare_rearrangement, plan_rearrangement, compute_rearrangement,
-    rearrangement_diagnostics, sample_rearrangement,
+    rearrangement_diagnostics, sample_rearrangement, rearrangement_is_noop,
 )
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes.calibration import TrapCalibration
@@ -243,7 +243,6 @@ class SlmRearrangementTask:
             return False
         if self._prepared is not None:
             if (self.phase_method != fresh.phase_method
-                    or self.minimum_separation != fresh.minimum_separation
                     or self.intensity_tolerance != fresh.intensity_tolerance
                     or tuple(self.slm.shape_yx) != tuple(fresh.slm.shape_yx)
                     or self.science_context["pupil"] != fresh.science_context["pupil"]):
@@ -256,6 +255,8 @@ class SlmRearrangementTask:
         prepared = self._prepared
         self.__dict__.update(fresh.__dict__)
         self._prepared = prepared
+        if prepared is not None:
+            prepared["minimum_separation"] = self.minimum_separation
         return True
 
     def close(self):
@@ -357,6 +358,8 @@ class SlmRearrangementTask:
             cell_axes=(site,AxisSpec(AxisId('slm_rearrangement.coordinate'),'coordinate',COMPONENT,2,(0.,1.),coordinate_labels=('x','y'))),
             validity=np.zeros((1,n,len(self.points[0]),2),bool),value_unit='1')
         n = self._frame_count
+        if not n:
+            return
         frame = AxisSpec(AxisId('slm_rearrangement.output_frame'),'frame',SCAN_POINT,n,tuple(float(i) for i in range(n)))
         self._snapshots[QUALITY_OUTPUT.name] = self._snapshot(context,QUALITY_OUTPUT,np.zeros((1,n)),
             point_axes=(frame,),validity=np.zeros((1,n),bool))
@@ -464,7 +467,7 @@ class SlmRearrangementTask:
         if self._result is not None:
             for key in ("motion_yx", "fraction", "support_intensity_ratios", "sites_yx",
                         "brightness_minimum_to_initial", "brightness_maximum_to_initial",
-                        "brightness_mean_to_initial", "phase_error_rms_rad", "phase_step_max_rad",
+                        "brightness_mean_to_initial", "phase_change_from_initial_rms_rad", "focal_phase_error_rms_rad", "phase_step_max_rad",
                         "pupil_phase_step_rms_rad", "discard_intensity_ratios", "field_projection_updates",
                         "frame_solve_ms", "frame_copy_ms", "frame_ready_ms",
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
@@ -540,7 +543,8 @@ class SlmRearrangementTask:
             summary["removed_atoms"] = len(self._plan["removed_source_indices"])
             summary["planning"] = {key:self._plan[key] for key in
                 ("maximum_path_length", "maximum_path_lower_bound", "optimality_gap",
-                 "total_distance", "assignment_candidates", "routing") if key in self._plan}
+                 "parallel_travel_distance", "search_budget_exhausted", "total_distance",
+                 "assignment_candidates", "routing") if key in self._plan}
             summary["unfilled_target_indices"] = np.setdiff1d(
                 np.arange(len(self.points[1])), self._plan["assigned_target_indices"]).tolist()
         if self._result is not None:
@@ -725,6 +729,7 @@ class SlmRearrangementTask:
         self._camera_site_indices = self._camera_path_affine = None
         self._playback, self._result, self._plan = None, None, None
         playback_attempted = False
+        sequence_prepared = False
         run_started = perf_counter()
         try:
             check_cancelled(context)
@@ -801,7 +806,7 @@ class SlmRearrangementTask:
             playback_finished_at = None
 
             def photograph(cycle, index):
-                nonlocal playback_finished_wall, playback_finished_at, playback_attempted, nominal
+                nonlocal playback_finished_wall, playback_finished_at, playback_attempted, nominal, sequence_prepared
                 # Camera receive is independent: callback dispatch time is not
                 # the exposure timestamp of a queued second photograph.
                 if self.recording_frames is None:
@@ -821,14 +826,19 @@ class SlmRearrangementTask:
                 plan = self._plan = plan_rearrangement(prepared, np.flatnonzero(mask & valid))
                 self._timings['matching']=(perf_counter()-start)*1000
                 online_started = start
+                sampled = None
                 if self.frame_mode == "camera_step":
-                    indices = np.asarray(plan["source_indices"], np.intp)
-                    camera_path = self._camera_paths(np.asarray(plan["motion_yx"]), indices)[:, indices]
-                    sampled = sample_rearrangement(prepared, plan,
-                        maximum_step=self.max_camera_step, step_path=camera_path)
-                    self._frame_count = len(sampled["sites_yx"])
+                    if rearrangement_is_noop(prepared, plan):
+                        self._frame_count = 0
+                    else:
+                        indices = np.asarray(plan["source_indices"], np.intp)
+                        camera_path = self._camera_paths(np.asarray(plan["motion_yx"]), indices)[:, indices]
+                        sampled = sample_rearrangement(prepared, plan,
+                            maximum_step=self.max_camera_step, step_path=camera_path)
+                        self._frame_count = sampled["motion_frames"]
                     self._prepare_motion_outputs(context)
-                nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
+                nominal = (self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
+                           if self._frame_count else 0.)
                 self._timings["estimated_nominal_playback"] = nominal*1000
                 context.report_progress(f"Computing {self._frame_count} maps using {self.phase_method}")
                 playback = None
@@ -848,18 +858,20 @@ class SlmRearrangementTask:
                             self._timings["sequence_play_and_final_settle"] = (perf_counter()-began)*1000
 
                     def frame_ready(index, codes):
-                        nonlocal playback, playback_attempted
+                        nonlocal playback, playback_attempted, sequence_prepared
                         check_cancelled(context)
                         if recording_failed.is_set():
                             raise InterruptedError("Camera recording failed")
                         if playback is None:
+                            self._timings["first_verified_frame_ready"] = (perf_counter()-online_started)*1000
+                            began = perf_counter()
+                            sequence_prepared = True  # Failed binding may already own a server token.
+                            self.slm.prepare_phase_sequence(None, self._frame_interval, frame_count=self._frame_count)
+                            self._timings["sequence_prepare"] = (perf_counter()-began)*1000
+                            check_cancelled(context)
                             remaining = None if deadline is None else deadline-monotonic()
                             if remaining is not None and remaining < nominal:
                                 raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
-                            began = perf_counter()
-                            self.slm.prepare_phase_sequence(None, 1/self.frame_rate_hz, frame_count=self._frame_count)
-                            self._timings["sequence_prepare"] = (perf_counter()-began)*1000
-                            self._timings["first_verified_frame_ready"] = (began-online_started)*1000
                             playback_attempted = True
                             playback = player.submit(play)
                             context.report_progress(f"Computing and playing {self.phase_method} SLM frames")
@@ -889,7 +901,7 @@ class SlmRearrangementTask:
                         compute_started = perf_counter()
                         self._timings["compute_started_after_before_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
                         self._result = compute_rearrangement(prepared, plan,
-                            motion_frames=self._frame_count,
+                            motion_frames=self._frame_count, sampled=sampled,
                             support_tolerance=self.intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
                             stop_requested=stopped)
@@ -906,6 +918,12 @@ class SlmRearrangementTask:
                         if self.frame_mode == "camera_step" and self._camera_maximum_step > self.max_camera_step+rounding:
                             raise RuntimeError("Emitted trajectory exceeded the requested camera-pixel step")
                     except BaseException as error:
+                        if sequence_prepared and playback is None:
+                            try:
+                                self.slm.release_phase_sequence()
+                                sequence_prepared = False
+                            except BaseException as cleanup:
+                                error.add_note(f"SLM preparation cleanup also failed: {cleanup}")
                         if playback is not None:
                             if not playback.done():
                                 try:
@@ -952,11 +970,11 @@ class SlmRearrangementTask:
                     def record(cycle, index):
                         nonlocal movement
                         self._camera_recordings.extend(cycle)
-                        node._commit_direct_cycle(cycle, index)
                         if index == 0 and not stopped():
                             movement = worker.submit(photograph, cycle, 0)
                         elif movement is not None and movement.done():
                             movement.result()
+                        node._commit_direct_cycle(cycle, index)
                     try:
                         result = capture.collect(commit_cycle=record, retain_cycles=False)
                     except BaseException as error:
@@ -1001,10 +1019,13 @@ class SlmRearrangementTask:
             ratio = self._result.get("retained_intensity_ratios", self._result["support_intensity_ratios"])
             ratio_valid = np.ones(self._frame_count, bool) if len(ratio) else np.zeros(self._frame_count, bool)
             if not len(ratio): ratio = np.zeros(self._frame_count)
-            quality = self._snapshot(context, QUALITY_OUTPUT, ratio[None],
-                point_axes=(AxisSpec(AxisId("slm_rearrangement.output_frame"), "frame", SCAN_POINT,
-                 self._frame_count, tuple(float(i) for i in range(self._frame_count))),), validity=ratio_valid[None])
-            self._publish(context, ((TRAJECTORY_OUTPUT, trajectory), (QUALITY_OUTPUT, quality)))
+            if self._frame_count:
+                quality = self._snapshot(context, QUALITY_OUTPUT, ratio[None],
+                    point_axes=(AxisSpec(AxisId("slm_rearrangement.output_frame"), "frame", SCAN_POINT,
+                     self._frame_count, tuple(float(i) for i in range(self._frame_count))),), validity=ratio_valid[None])
+                self._publish(context, ((TRAJECTORY_OUTPUT, trajectory), (QUALITY_OUTPUT, quality)))
+            else:
+                self._publish(context, ((TRAJECTORY_OUTPUT, trajectory),))
             expected_final = (phase_from_codes(self._result["phase_codes"][-1], self.slm.shape_yx)
                               if len(self._result["phase_codes"]) else prepared["initial_phase"])
             confirmed = self.slm.last_commanded_phase
@@ -1039,7 +1060,7 @@ class SlmRearrangementTask:
                 # the evidence; its private acquisition is no longer a source.
                 try: self.signal_plane.retire(capture.node)
                 except BaseException as cleanup: cleanup_errors.append(cleanup)
-            for cleanup in (self.slm.release_phase_sequence,):
+            for cleanup in ((self.slm.release_phase_sequence,) if sequence_prepared else ()):
                 if cleanup is not None:
                     try: cleanup()
                     except BaseException as error: cleanup_errors.append(error)
