@@ -429,15 +429,22 @@ class SlmRearrangementTask:
         directory = context.run_directory
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
+        arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
         if self._camera_recordings:
             from PIL import Image
             frames_directory = directory / "frames"
             frames_directory.mkdir(exist_ok=True)
+            images = np.stack([record.image for record in self._camera_recordings])
+            arrays["recording_images"] = images
+            low, high = float(np.nanmin(images)), float(np.nanmax(images))
+            scale = 255. / (high-low) if high > low else 0.
             for index, record in enumerate(self._camera_recordings):
-                frame_path = atomic_write_file(frames_directory / f"frame_{index:04d}.tif",
-                    lambda stream, record=record: Image.fromarray(np.asarray(record.image)).save(stream, format="TIFF"))
+                pixels = np.nan_to_num((np.asarray(record.image, dtype=np.float32)-low)*scale,
+                                       nan=0., posinf=255., neginf=0.)
+                pixels = np.rint(np.clip(pixels, 0., 255.)).astype(np.uint8)
+                frame_path = atomic_write_file(frames_directory / f"frame_{index:04d}.jpg",
+                    lambda stream, pixels=pixels: Image.fromarray(pixels).save(stream, format="JPEG", quality=95))
                 context.register_artifact(f"camera_frame_{index:04d}", frame_path, role="data")
-        arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
         path_overlay = None
         confirmed_phase = self.slm.last_commanded_phase
         if confirmed_phase is not None:

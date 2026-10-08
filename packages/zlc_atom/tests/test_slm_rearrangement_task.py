@@ -751,11 +751,13 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
     assert summary["status"] == "completed"
     assert not summary["transport_outcomes"]["verification_accepted"]
     from PIL import Image
-    files = sorted((e.context.run_directory / "frames").glob("*.tif"))
+    files = sorted((e.context.run_directory / "frames").glob("*.jpg"))
     assert len(files) == 50
     for path, original in zip(files, expected, strict=True):
         with Image.open(path) as saved:
-            np.testing.assert_array_equal(np.asarray(saved), original)
+            assert saved.format == "JPEG" and np.asarray(saved).shape == original.shape
+    with np.load(e.context.run_directory / "data" / "rearrangement.npz", allow_pickle=False) as data:
+        np.testing.assert_array_equal(data["recording_images"], np.stack(expected))
 
 
 @pytest.mark.parametrize("ending", ["device", "stopped", "numeric"])
