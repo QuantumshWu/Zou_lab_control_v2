@@ -430,21 +430,27 @@ class SlmRearrangementTask:
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
         arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
+        writer = self._save_figure_artifact
+        if writer is None:
+            from zlc_plot import save_figure_artifact as writer
         if self._camera_recordings:
-            from PIL import Image
             frames_directory = directory / "frames"
             frames_directory.mkdir(exist_ok=True)
-            images = np.stack([record.image for record in self._camera_recordings])
-            arrays["recording_images"] = images
-            low, high = float(np.nanmin(images)), float(np.nanmax(images))
-            scale = 255. / (high-low) if high > low else 0.
+            template = self._snapshots[BEFORE_FRAME_OUTPUT.name]
+            y_axis, x_axis = template.block.schema.cell_domain.axes
+            spec = ImagePlot(x=AxisRef.cell_data(str(x_axis.axis_id)),
+                             y=AxisRef.cell_data(str(y_axis.axis_id)))
             for index, record in enumerate(self._camera_recordings):
-                pixels = np.nan_to_num((np.asarray(record.image, dtype=np.float32)-low)*scale,
-                                       nan=0., posinf=255., neginf=0.)
-                pixels = np.rint(np.clip(pixels, 0., 255.)).astype(np.uint8)
-                frame_path = atomic_write_file(frames_directory / f"frame_{index:04d}.jpg",
-                    lambda stream, pixels=pixels: Image.fromarray(pixels).save(stream, format="JPEG", quality=95))
-                context.register_artifact(f"camera_frame_{index:04d}", frame_path, role="data")
+                snapshot = owned_snapshot_from_arrays(template.block.schema,
+                    np.asarray(record.image)[None,None], index,
+                    validity=np.ones((1,1),bool), stream_generation=template.ref.stream_generation)
+                written = writer(frames_directory / f"frame_{index:04d}.png",
+                    plot_input=snapshot, spec=spec, parameters={}, size="4x4",
+                    source={"task":self.instance_id,"source_ordinal":record.source_ordinal})
+                if hasattr(written, "result"): written = written.result()
+                png, npz = written
+                context.register_artifact(f"camera_frame_{index:04d}", npz, role="figure", contract_id="zlc.figure")
+                context.register_artifact(f"camera_frame_{index:04d}_preview", png, role="preview")
         path_overlay = None
         confirmed_phase = self.slm.last_commanded_phase
         if confirmed_phase is not None:
@@ -608,9 +614,6 @@ class SlmRearrangementTask:
         context.register_artifact("artifact_path" if status == "completed" else "partial_data", archive,
             role="final" if status == "completed" else "checkpoint", contract_id=REARRANGEMENT_ARTIFACT_CONTRACT)
         # File rendering starts only after the second image or an actual failure.
-        writer = self._save_figure_artifact
-        if writer is None:
-            from zlc_plot import save_figure_artifact as writer
         for name, snap in self._snapshots.items():
             if name not in self._available_outputs: continue
             if name in {BEFORE_OCCUPIED_OUTPUT.name, AFTER_OCCUPIED_OUTPUT.name}: continue
