@@ -335,16 +335,23 @@ The three automatic previews are before photo + occupancy, after photo +
 occupancy, and source/final phase. The **trajectory** signal stores full ordered
 X,Y positions by step and source identity, including the initial position;
 it is not automatically plotted as Y against frame. Saved
-`figures/trajectory_2d.npz` + `.png` show a white XY plot using the common SiteMap
-glyphs, status colors and source identifiers. A thinner path terminates in one
-arrow; same-status site/path/head geometry is unioned before applying alpha once,
+`figures/trajectory_2d.npz` + `.png` overlay commanded paths on the actual before
+photograph, in its camera coordinates. They retain the same complete SiteMap,
+status, labels, image display and site-spacing-based sizes as the before/after
+photos. Existing Target-to-camera registration and the common image-coordinate
+conversion project the generated Fourier paths; no second path is planned.
+A thinner path ends in one arrow drawn short of the destination centre, without
+an extra endpoint dot; the numerical endpoint is unchanged. Site labels keep
+their ordinary positions and font. Same-status site/path/head geometry is unioned before applying alpha once,
 so joins and overlaps do not darken. There are no per-path colors or endpoint
 boxes. A shared frame range and compact exceptional-order tags keep text sparse.
-The Figure keeps the true
-source Target intensity Dataset; `show_image=False` hides only its pixel layer.
-The NPZ retains typed ordered XY vertices, including holds
-and backtracking, so FigureViewer can redraw it. These are planned trap paths,
-not measured atom tracks.
+The Figure keeps the true before-image Dataset and typed ordered camera XY
+vertices, including holds and backtracking, so FigureViewer can redraw it.
+Unselected sites keep their original static markers, without movement arrows.
+Original Fourier coordinates remain in the trajectory signal and numeric
+archive; `motion_camera_xy` records the registered camera projection.
+These are commanded trap paths, not measured atom tracks, and geometric
+registration alone does not independently verify optical handedness.
 
 After verification or failure, the run saves `summary.json`/`summary.txt`,
 `data/rearrangement.npz`, both available photographs and
@@ -360,6 +367,13 @@ acknowledgement, callback time (including backpressure) and total completion are
 Stop/failure saves partial evidence
 and the last confirmed phase; unknown device outcomes remain explicit.
 Target filling is not per-atom identity-tracked survival.
+
+The report separates moving and stationary assigned targets, their judged and
+occupied endpoints, and deliberately discarded atoms. Unknown or unaccepted
+verification is not counted as transport success. Requested frame rate is
+separate from observed logical-step/new-presentation cadence, photo receive
+and camera timestamp intervals, and the complete online window; these summaries
+derive from existing receipts rather than a new timing mechanism.
 
 Numerical/RPC/Task and public Figure tests cover verified prefixes, cancellation,
 early upload EOF, retained output ownership, and exact static/dynamic overlays.

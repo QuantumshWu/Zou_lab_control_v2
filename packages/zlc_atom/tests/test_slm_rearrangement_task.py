@@ -20,6 +20,7 @@ from zlc_atom.nodes.slm_rearrangement.logic_node import LOGIC_NODE, SLM_REARRANG
 from zlc_atom.nodes.slm_rearrangement.task import SlmRearrangementTask, pulse_timing
 from zlc_data.figure_archive import read_archive
 from zlc_plot import read_figure_plot
+from zlc_plot.primitives import image_point_overlay_geometry
 from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef, PulsePeriod, PulseSequence, sequence_to_tree
 from zlc_pulse.device import DoneReport
 from zlc_pulse.wire import STATUS_DONE
@@ -184,30 +185,49 @@ def _stub_figures(path, **kwargs):
 def experiment(tmp_path, monkeypatch, request):
     trace = []
     slm = _SequenceSlm(trace)
-    centers = np.asarray(((2., 2.), (4., 2.), (7., 2.), (2., 5.), (4., 5.), (7., 5.)))
-    calibration = _calibration_at(centers, shape=slm.shape_yx)
+    source_xy = np.asarray(((2., 2.), (4., 2.), (7., 2.), (2., 5.), (4., 5.), (7., 5.)))
+    affine_crop = getattr(request, "param", 4) == "camera-affine-roi"
+    sensor_shape = (18, 24) if affine_crop else slm.shape_yx
+    centers = source_xy @ np.asarray(((1., 0.), (1/3., 1.))) + (13/3., 3.) if affine_crop else source_xy
+    calibration = _calibration_at(centers, shape=sensor_shape)
+    if affine_crop:
+        calibration = replace(calibration, frame_contract=replace(calibration.frame_contract,
+            sensor_shape=sensor_shape, roi_xywh=(0, 0, sensor_shape[1], sensor_shape[0])))
     usable = np.ones(len(centers), bool)
     usable[2] = False
     calibration = replace(calibration, models=(replace(
         calibration.select_model(), usable_sites=usable,
     ),))
     target = np.zeros(slm.shape_yx, np.float32)
-    target[centers[:, 1].astype(int), centers[:, 0].astype(int)] = 1
+    target[source_xy[:, 1].astype(int), source_xy[:, 0].astype(int)] = 1
     source_context = _science_context(slm, target=target)
     images = []
     for before in (True, False):
-        image = np.zeros(slm.shape_yx, np.uint16)
-        image[centers[:, 1].astype(int), centers[:, 0].astype(int)] = 10
+        image = np.zeros(sensor_shape, np.uint16)
+        image[np.rint(centers[:, 1]).astype(int), np.rint(centers[:, 0]).astype(int)] = 10
         if not before:
-            image[2, 4] = 0
+            image[int(round(centers[1, 1])), int(round(centers[1, 0]))] = 0
         images.append(image)
-    camera = VirtualCamera(VirtualCameraConfig(frame_shape_yx=slm.shape_yx),
+    camera = VirtualCamera(VirtualCameraConfig(frame_shape_yx=sensor_shape),
                            frame_source=lambda exposure: images.pop(0))
+    if affine_crop:
+        set_roi = camera.set_roi
+        # Exercise a camera's accepted crop using its public readback path;
+        # Calibration.rebased remains the only calibration-coordinate owner.
+        monkeypatch.setattr(camera, "set_roi", lambda _requested: set_roi((4, 3, 14, 10)))
+        from zlc_atom.devices.simulation.camera import adapter as camera_module
+        record_type = camera_module.CameraFrameRecord
+        def sdk_timestamped_record(*args, **kwargs):
+            record = record_type(*args, **kwargs)
+            return replace(record, timestamp_seconds=100+4*record.source_ordinal,
+                           timestamp_microseconds=10000+20000*record.source_ordinal)
+        monkeypatch.setattr(camera_module, "CameraFrameRecord", sdk_timestamped_record)
     board = _Board(camera, trace)
     plane = SignalDataPlane()
     context = _RunContext(tmp_path / "run", camera, board, trace)
     state = SimpleNamespace(trace=trace, camera=camera, board=board, slm=slm,
-                            context=context, plane=plane, available_indices=[], closed=[], images=images)
+                            context=context, plane=plane, available_indices=[], closed=[], images=images,
+                            affine_crop=affine_crop, calibrated_centers=centers)
 
     def prepare(**kwargs):
         trace.append("prepare_gpu")
@@ -222,9 +242,10 @@ def experiment(tmp_path, monkeypatch, request):
         assert indices.dtype.kind in "iu" and indices.ndim == 1
         state.available_indices.append(indices.copy())
         n = min(len(indices), len(state.prepare_arguments["target_yx"]))
-        return {"assigned_source_indices": indices[:n], "assigned_target_indices": np.arange(n),
+        destinations = np.asarray((1, 0, 3, 2)) if n == 4 else np.arange(n)
+        return {"assigned_source_indices": indices[:n], "assigned_target_indices": destinations,
                 "removed_source_indices": indices[n:], "source_indices": indices[:n],
-                "target_indices": np.arange(n),
+                "target_indices": destinations,
                 "target_filled": np.arange(len(state.prepare_arguments["target_yx"])) < n}
 
     def compute(prepared, planned, **kwargs):
@@ -271,6 +292,7 @@ def experiment(tmp_path, monkeypatch, request):
         plane.close()
 
 
+@pytest.mark.parametrize("experiment", [4, "camera-affine-roi"], indirect=True)
 def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment):
     e = experiment
     authored = sequence_to_tree(e.task.sequence)
@@ -298,7 +320,34 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert result["target_filling_fraction"] is None
     assert summary["verification_complete"] is False
     assert summary["judged_target_filling_fraction"] == pytest.approx(2/3)
+    outcomes = summary["transport_outcomes"]
+    assert outcomes["verification_accepted"]
+    assert "not individual-atom identity" in outcomes["basis"]
+    assert outcomes["moving"] == {"assigned": 2, "judged": 1, "occupied": 1}
+    assert outcomes["stationary"] == {"assigned": 2, "judged": 2, "occupied": 1}
+    assignments = outcomes["assignments"]
+    assert [item["moving"] for item in assignments] == [True, False, True, False]
+    assert assignments[0]["after_valid"] is False and assignments[0]["after_occupied"] is None
+    assert assignments[1]["after_valid"] is True and assignments[1]["after_occupied"] is False
+    assert assignments[0]["source_label"] == "1" and assignments[0]["target_label"] == "3"
+    assert assignments[0]["source_index"] == 0 and assignments[0]["target_source_index"] == 2
+    observed = summary["observed_timing"]
+    assert observed["requested_interval_ms"] == pytest.approx(1000/60)
+    assert observed["logical_steps"] == 2
+    assert observed["command_interval_median_ms"] is None, "no fabricated cadence when the receipt has none"
+    assert observed["online_ms"] == summary["timing_ms"]["online_rearrangement"]
+    assert observed["playback_ms"] == summary["timing_ms"]["sequence_play_and_final_settle"]
+    if e.affine_crop:
+        assert observed["photo_camera_interval_ms"] == pytest.approx(4020.)
+        assert e.task._records[0].image.dtype == np.dtype('uint16')
+        assert e.task._records[0].image.shape == (10, 14)
+    else:
+        assert "photo_camera_interval_ms" not in observed
     assert [item["source_ordinal"] for item in summary["frame_records"]] == [0, 1]
+    with np.load(result["artifact_path"], allow_pickle=False) as data:
+        original_motion = data["motion_yx"].copy()
+    before_device_facts = None
+    before_parameters = None
     for name in ("before_frame", "after_frame", "phase", "trajectory_2d", "intensity_ratio"):
         archive = e.context.artifacts[name + "_figure"][0]
         assert archive.is_file()
@@ -306,15 +355,54 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         assert datasets
         loaded, recipe = read_figure_plot(info, arrays, datasets, next(iter(datasets)))
         assert loaded is not None and recipe["spec"] is not None
+        if name == "before_frame":
+            before_device_facts = info["sections"]["source"]["run_record"]["device_snapshots"]
+            before_parameters = recipe["parameters"]
         if name == "trajectory_2d":
+            path_device_facts = info["sections"]["source"]["run_record"]["device_snapshots"]
+            assert path_device_facts["camera"] == before_device_facts["camera"]
+            assert path_device_facts["slm"] == before_device_facts["slm"]
             selected = e.task._plan["source_indices"]
-            assert loaded.overlay.point_ids == tuple(e.task._overlay_geometry["point_ids"][i] for i in selected)
-            assert loaded.overlay.labels == tuple(e.task._overlay_geometry["labels"][i] for i in selected)
+            before = e.task._snapshots[task_module.BEFORE_FRAME_OUTPUT.name]
+            assert loaded.snapshot.block.schema == before.block.schema
+            np.testing.assert_array_equal(loaded.snapshot.block.values, before.block.values)
+            assert loaded.overlay.point_ids == tuple(e.task._overlay_geometry["point_ids"])
+            assert loaded.overlay.labels == tuple(e.task._overlay_geometry["labels"])
+            np.testing.assert_array_equal(loaded.overlay.status.block.values,
+                e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.block.values)
+            np.testing.assert_array_equal(loaded.overlay.status.expanded_validity(),
+                e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.expanded_validity())
+            assert loaded.overlay.paths_xy.shape == (6, 3, 2)
+            unselected = np.setdiff1d(np.arange(6), selected)
+            np.testing.assert_array_equal(loaded.overlay.paths_xy[unselected],
+                np.repeat(loaded.overlay.coordinates[unselected, None, :], 3, axis=1))
+            source_camera = e.calibrated_centers
+            roi_shift = np.asarray((4., 3.)) if e.affine_crop else np.zeros(2)
+            motion = original_motion
+            camera_indices = (motion[..., ::-1] @ np.asarray(((1., 0.), (1/3., 1.))) + (13/3., 3.)
+                              if e.affine_crop else motion[..., ::-1]) - roi_shift
+            full_indices = np.repeat((source_camera-roi_shift)[:, None, :], 3, axis=1)
+            full_indices[selected] = camera_indices.transpose(1, 0, 2)
+            expected = image_point_overlay_geometry(before, source_camera-roi_shift,
+                loaded.overlay.point_ids, status_axis=e.task._status_axis,
+                labels=loaded.overlay.labels, coordinates_are_indices=True, paths_xy=full_indices)
+            np.testing.assert_allclose(loaded.overlay.paths_xy, expected["paths_xy"], atol=1e-12)
+            np.testing.assert_allclose(loaded.overlay.paths_xy[:, 0], loaded.overlay.coordinates, atol=1e-12)
+            assert recipe["spec"].x.axis_id == str(before.block.schema.cell_domain.axes[1].axis_id)
+            assert recipe["spec"].y.axis_id == str(before.block.schema.cell_domain.axes[0].axis_id)
+            assert recipe["parameters"] == before_parameters
         from zlc_workbench.viewer import describe_archive
         description = describe_archive(info, arrays)
         assert e.task.instance_id in dict(dict(description.tabs)["Logic"])
     with np.load(result["artifact_path"], allow_pickle=False) as data:
         assert data["phase_codes"].shape == (2, 8, 10)
+        expected_end = e.prepare_arguments["target_yx"][e.task._plan["target_indices"]]
+        expected_start = e.task.points[0][e.task._plan["source_indices"]]
+        np.testing.assert_array_equal(data["motion_yx"], expected_start[None]
+            + np.linspace(0, 1, 3)[:, None, None]*(expected_end-expected_start)[None])
+        np.testing.assert_allclose(data["motion_camera_xy"],
+            np.asarray(expected["paths_xy"])[selected].transpose(1, 0, 2), atol=1e-12)
+        np.testing.assert_array_equal(data["before_thresholds"], np.full(6, 5.))
         assert not data["after_target_valid"][1] and not data["after_target_occupied"][1]
 
 
@@ -351,6 +439,9 @@ def test_explicit_end_target_does_not_invent_calibration_for_a_new_position(expe
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["assigned_atoms"] == 1 and summary["removed_atoms"] == 4
     assert summary["invalid_target_indices"] == [0] and not summary["verification_complete"]
+    assignment = summary["transport_outcomes"]["assignments"][0]
+    assert assignment["target_source_index"] is None and assignment["target_label"] is None
+    assert assignment["after_valid"] is False and assignment["after_occupied"] is None
     assert result["target_filling_fraction"] is None
     np.testing.assert_array_equal(e.task.points[1], [[1,1]])
 
@@ -492,7 +583,11 @@ def test_buffered_second_frame_is_not_accepted_from_its_late_callback(experiment
     with pytest.raises(RuntimeError, match="before SLM playback completed"):
         e.task.execute(e.context)
     assert e.board.fires == [(1, 1)] and e.slm.plays == 1
-    assert json.loads((e.context.run_directory / "summary.json").read_text())["status"] == "failed"
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["status"] == "failed"
+    assert summary["verification_complete"] is False
+    assert summary["target_filling_fraction"] is None
+    assert summary["judged_target_filling_fraction"] is None
 
 
 @pytest.mark.parametrize("ending", ["device", "stopped", "numeric"])
@@ -579,6 +674,11 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
     elif ending == "numeric":
         assert "encoded-field quality checks" in summary["error"]
         assert summary["playback"]["cancelled"], "a successful cancelled play must not mask numerical rejection"
+        outcomes = summary["transport_outcomes"]
+        assert not outcomes["verification_accepted"]
+        assert outcomes["moving"]["judged"] is None and outcomes["stationary"]["occupied"] is None
+        assert all(item["after_valid"] is None and item["after_occupied"] is None
+                   for item in outcomes["assignments"])
     with np.load(e.context.artifacts["partial_data"][0], allow_pickle=False) as data:
         np.testing.assert_array_equal(data["before_valid"], [True, True, False, True, True, True])
         assert "before_image" in data.files and "after_image" not in data.files

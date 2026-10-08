@@ -261,7 +261,9 @@ class ImagePointOverlay:
     per point, with shape ``(N, K, 2)`` and at least one vertex.  Repeated
     vertices and backtracking retain their order. The supplied anchors use the
     same site glyph/status colours as other image annotations; thinner paths
-    terminate in one arrow at the actual last position. Same-status site/path/
+    terminate in one arrow pointing towards, but drawn short of, the actual
+    last position. No extra endpoint dot is drawn; data coordinates are not
+    shortened. Site-label placement is unchanged by adding paths. Same-status site/path/
     head coverage is painted as one union, applying alpha once. A common vertex
     range (0 is initial) and sparse exceptional-order annotations show timing.
     """

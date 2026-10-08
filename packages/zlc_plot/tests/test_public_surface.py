@@ -164,6 +164,7 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
 
     from dataclasses import replace
     from matplotlib.colors import to_rgba
+    from matplotlib.path import Path as DrawPath
     from PIL import Image
     from zlc_data.figure_archive import read_archive
     from zlc_plot import read_figure_plot, save_figure_artifact
@@ -288,8 +289,27 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
         token = renderer.style.artists.point_occupied
         expected = np.floor(255.*(np.asarray(to_rgba(token.color))[:3]*token.alpha + 1.-token.alpha))
         radius = renderer._artists["image:point-paths"]._zlc_point_path_inputs[2][0]
-        assert radius == pytest.approx(83.*renderer.style.artists.point_single_radius_fraction)
-        for point in ((32.,32.),(40.,32.),(8.+radius,32.),(55.5,32.)):
+        assert radius == pytest.approx(10.*renderer.style.artists.point_auto_radius_fraction)
+        geometry = renderer._artists["image:point-paths"].get_paths()[0]
+        starts_at = np.flatnonzero(geometry.codes == DrawPath.MOVETO)
+        pieces = [geometry.vertices[first:last] for first,last in
+                  zip(starts_at,np.r_[starts_at[1:],len(geometry.vertices)],strict=True)]
+        heads = [piece for piece in pieces if len(piece) == 4]
+        assert len(heads) == 3
+        for head, start, end in zip(heads, starts, ends, strict=True):
+            begin, final = renderer.primary_axes.transData.transform((start,end))
+            direction = (final-begin)/np.linalg.norm(final-begin)
+            tip, base = head[0], head[1:3].mean(axis=0)
+            assert np.dot(final-tip,direction) > 0.
+            assert np.dot(tip-base,direction) > 0.
+            assert np.dot(base-begin,direction) > 0.
+        terminal_pixels = renderer.primary_axes.transData.transform(ends)
+        for piece in pieces:
+            if len(piece) == len(DrawPath.unit_circle().vertices):
+                center = (piece.min(axis=0)+piece.max(axis=0))*.5
+                assert np.all(np.linalg.norm(terminal_pixels-center,axis=1) > 1e-6)
+        head_point = renderer.primary_axes.transData.inverted().transform(heads[0][:3].mean(axis=0))
+        for point in ((32.,32.),(40.,32.),(8.+radius,32.),head_point):
             pixel = renderer.primary_axes.transData.transform(point)
             x,y = int(pixel[0]),rgba.shape[0]-1-int(pixel[1])
             region = rgba[y-1:y+2,x-1:x+2,:3].min(axis=(0,1))
@@ -300,11 +320,53 @@ def test_ordered_image_paths_survive_figure_roundtrip_and_render(tmp_path) -> No
     ordinary = PlotSession(ImageFrame(make_snapshot(schema, values, 0), ImagePointOverlay(
         0, starts, labels=("1", "2", "3"), static_statuses=(PointStatus.OCCUPIED,)*3)), spec)
     try:
-        # The cap is one common glyph rule, not a path-only workaround.
+        # Full supplied geometry owns the same radius with or without paths.
         for point, label in zip(starts, ordinary._renderer._artists["image:point-labels"], strict=True):
             assert point[0]-label.get_position()[0] == pytest.approx(radius)
     finally:
         ordinary.close()
+
+    yy, xx = np.meshgrid(10.+10.*np.arange(5), 10.+10.*np.arange(7), indexing="ij")
+    roster = np.column_stack((xx.ravel(), yy.ravel()))
+    roster_paths = np.repeat(roster[:, None, :], 5, axis=1)
+    roster_paths[0, :, 0] += np.linspace(0., 20., 5)
+    cropped_schema = make_dataset_schema(repeat_domain(size=1), mapped_domain_from_columns({"sample": [0.]}),
+        cell_axes=(axis("row", size=18), axis("column", size=24)), dtype=np.float64)
+    for snapshot in (make_snapshot(schema, values, 0),
+                     make_snapshot(cropped_schema, np.zeros((1, 1, 18, 24)), 0)):
+        source_label_properties = source_label_anchors = source_label_boxes = None
+        for paths in (None, roster_paths):
+            full_roster = PlotSession(ImageFrame(snapshot, ImagePointOverlay(
+                0, roster, labels=tuple(str(i+1) for i in range(35)), paths_xy=paths,
+                static_statuses=(PointStatus.OCCUPIED,)*35)), spec,
+                parameters={"show_image": False, "side_distribution": False})
+            try:
+                full_roster.rgba()
+                artists = full_roster._renderer._artists
+                token = full_roster._renderer.style.artists.point_occupied
+                site_labels = artists["image:point-labels"]
+                properties = [(label.get_text(), label.get_position(), label.get_fontproperties().copy(),
+                               label.get_ha(), label.get_va()) for label in site_labels]
+                anchors = np.asarray([label.get_transform().transform(label.get_position()) for label in site_labels])
+                renderer = full_roster._renderer.figure.canvas.get_renderer()
+                boxes = np.asarray([label.get_window_extent(renderer).extents for label in site_labels])
+                if paths is None:
+                    source_label_properties, source_label_anchors, source_label_boxes = properties, anchors, boxes
+                    for point, label in zip(roster, artists["image:point-labels"], strict=True):
+                        assert point[0]-label.get_position()[0] == pytest.approx(3.)
+                    np.testing.assert_array_equal(artists["image:points"].get_offsets(), roster)
+                    np.testing.assert_allclose(artists["image:points"].get_edgecolors(),
+                                               np.tile(to_rgba(token.color, token.alpha), (35, 1)))
+                else:
+                    assert properties == source_label_properties
+                    np.testing.assert_array_equal(anchors, source_label_anchors)
+                    np.testing.assert_array_equal(boxes, source_label_boxes)
+                    np.testing.assert_array_equal(artists["image:point-paths"]._zlc_point_path_inputs[0], roster)
+                    np.testing.assert_allclose(artists["image:point-paths"]._zlc_point_path_inputs[2], (3., 3.))
+                    np.testing.assert_allclose(artists["image:point-paths"].get_facecolors()[0],
+                                               to_rgba(token.color, token.alpha))
+            finally:
+                full_roster.close()
 
 def test_image_site_numbers_use_their_ring_status_style() -> None:
     """A small ordinal must remain visually attached to its status ring."""

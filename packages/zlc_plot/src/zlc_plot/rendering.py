@@ -1168,18 +1168,25 @@ def _point_path_union_paths(collection: Any) -> list[Any]:
         delta = np.diff(paint, axis=0)
         paint_length = np.linalg.norm(delta, axis=1)
         half = stroke*.5  # path width is half the common site stroke
+        direction = delta[-1]/paint_length[-1]
+        end_ring = axes.transData.transform(paths[index,-1]+unit*np.asarray(radii))
+        end_radius = float(np.max(np.linalg.norm(end_ring-path[-1],axis=1)))
+        gap = min(end_radius+stroke, float(paint_length[-1])*.4)
+        head_length = min(float(widths[index])*figure.dpi/72.*3.,
+                          (float(paint_length[-1])-gap)*.4)
+        tip = path[-1]-direction*gap
+        base = tip-direction*head_length
+        paint[-1] = base
         for step in range(len(delta)):
             direction = delta[step]/paint_length[step]
             normal = np.asarray((-direction[1], direction[0]))*half
             polygons.append(polygon(np.asarray((paint[step]-normal, paint[step+1]-normal,
                                                 paint[step+1]+normal, paint[step]+normal))))
-        # Round joins close the ribbons without painting alpha twice.
-        polygons.extend(DrawPath(circle.vertices*half+vertex, circle.codes) for vertex in paint)
-        direction = delta[-1]/paint_length[-1]
-        head_length = min(float(widths[index])*figure.dpi/72.*3., float(length.sum())*.4)
+        # Round internal joins, not the terminal point; the SiteMap ring above
+        # remains intact even when a path returns to its source coordinate.
+        polygons.extend(DrawPath(circle.vertices*half+vertex, circle.codes)
+                        for vertex in paint[:-1] if not np.array_equal(vertex,path[-1]))
         normal = np.asarray((-direction[1], direction[0]))*head_length*.4
-        tip = path[-1]
-        base = tip-direction*head_length
         polygons.append(polygon(np.asarray((tip, base+normal, base-normal))))
     joined = [DrawPath.make_compound_path(*polygons) for polygons in groups.values()]
     collection._paths = joined
@@ -12239,7 +12246,7 @@ class MatplotlibRenderer:
 
         from matplotlib.collections import EllipseCollection
         from matplotlib.colors import to_rgba
-        from matplotlib.transforms import IdentityTransform, ScaledTranslation
+        from matplotlib.transforms import IdentityTransform
 
         canonical = np.asarray(overlay.coordinates, float)
         points = np.column_stack((
@@ -12250,18 +12257,9 @@ class MatplotlibRenderer:
             (np.asarray(x_quantity.canonical, float), np.asarray(y_quantity.canonical, float))]
         spans = [float(np.ptp(values)) for values in image_coordinates if len(values)]
         spans = [span for span in spans if span > 0.]
-        pitches = []
-        for values in image_coordinates:
-            steps = np.abs(np.diff(values))
-            steps = steps[steps>0.]
-            if len(steps):
-                pitches.append(float(np.median(steps)))
         fraction = self.style.artists.point_auto_radius_fraction
         fallback = (min(spans) if spans else 1.)*self.style.artists.point_single_radius_fraction
-        # Sparse selected markers must not inflate the common SiteMap glyph.
-        # This UI heuristic is bounded by image scale, never a calibration ROI.
-        radius = min(_point_ring_radius(canonical, fraction=fraction, fallback=fallback),
-                     max(fallback, fraction*(min(pitches) if pitches else 1.)))
+        radius = _point_ring_radius(canonical, fraction=fraction, fallback=fallback)
         def display_radius(quantity):
             value = quantity.canonical_unit.convert_value_to((0., radius), quantity.display_unit)
             return abs(float(value[1]-value[0]))
@@ -12377,46 +12375,31 @@ class MatplotlibRenderer:
             label.set_text((None if overlay.labels is None else overlay.labels[index])
                            or (None if overlay.point_ids is None else overlay.point_ids[index]) or "")
         if overlay.paths_xy is not None and show_labels:
-            # Same site-label typography and close anchor; only local alternatives
-            # resolve collisions. Containment outranks overlap, never clipping a
-            # label to make the collision count look better.
+            # Source labels keep their common SiteMap placement. Only optional
+            # timing annotations avoid those already-placed label boxes.
             renderer = _prepare_renderer(self._figure.canvas.get_renderer())
             source = [label for label in labels if label.get_visible() and label.get_text()]
-            pixel_points = axis.transData.transform(points)
-            nominal = self.style.fonts.fit_annotation_pt
-            if source and len(points)>1:
-                pitch = _point_ring_radius(pixel_points, fraction=1., fallback=axis.bbox.width)
-                widest = max(renderer.get_text_width_height_descent(label.get_text(),label.get_fontproperties(),False)[0] for label in source)
-                ratio = min(1.,.9*pitch/widest) if widest else 1.
-                font = nominal*max(self.style.fonts.facet_compact_scale,ratio)
-            else:
-                font = nominal
-            ordered = [(label,points[i],False) for i,label in enumerate(labels[:overlay.count])
-                       if label.get_visible() and label.get_text()]
-            ordered += [(label,np.asarray(label.xy),True) for label in path_labels if label.get_visible()]
-            placed = np.empty((len(ordered),4),float)
-            used = 0
+            ordered = [(label,np.asarray(label.xy)) for label in path_labels if label.get_visible()]
+            placed = np.empty((len(source)+len(ordered),4),float)
+            for index, label in enumerate(source):
+                placed[index] = label.get_window_extent(renderer).extents
+            used = len(source)
             gap = 2.*self._figure.dpi/72.
             directions = ((-1,1),(1,1),(-1,-1),(1,-1),(-1,0),(1,0),(0,1),(0,-1))
-            for label,position,annotation in ordered:
-                label.set_fontsize(font)
+            for label,position in ordered:
+                label.set_fontsize(self.style.fonts.fit_annotation_pt)
                 bounds = label.get_window_extent(renderer)
                 width,height = bounds.width,bounds.height
                 pixel = axis.transData.transform(position)
                 edge = axis.transData.transform(np.asarray((position+[radii[0],0.],position+[0.,radii[1]])))
                 at_site = bool(np.any(np.all(points == position,axis=1)))
-                site_radius = np.linalg.norm(edge-pixel,axis=1) if not annotation or at_site else (0.,0.)
+                site_radius = np.linalg.norm(edge-pixel,axis=1) if at_site else (0.,0.)
                 candidates = []
                 for dx,dy in directions:
                     offx,offy = dx*(gap+site_radius[0]),dy*(gap+site_radius[1])
                     label.set_ha("right" if dx<0 else "left" if dx>0 else "center")
                     label.set_va("top" if dy<0 else "bottom" if dy>0 else "center")
-                    if annotation:
-                        label.set_position((offx*72./self._figure.dpi,offy*72./self._figure.dpi))
-                    else:
-                        label.set_position(position)
-                        label.set_transform(axis.transData+ScaledTranslation(
-                            offx/self._figure.dpi,offy/self._figure.dpi,self._figure.dpi_scale_trans))
+                    label.set_position((offx*72./self._figure.dpi,offy*72./self._figure.dpi))
                     box = np.asarray(label.get_window_extent(renderer).extents)
                     overlap = np.maximum(0.,np.minimum(box[2:],placed[:used,2:])-np.maximum(box[:2],placed[:used,:2]))
                     area = float(np.prod(overlap,axis=1).sum())
@@ -12428,12 +12411,7 @@ class MatplotlibRenderer:
                 used += 1
                 label.set_ha("right" if dx<0 else "left" if dx>0 else "center")
                 label.set_va("top" if dy<0 else "bottom" if dy>0 else "center")
-                if annotation:
-                    label.set_position((offx*72./self._figure.dpi,offy*72./self._figure.dpi))
-                else:
-                    label.set_position(position)
-                    label.set_transform(axis.transData+ScaledTranslation(
-                        offx/self._figure.dpi,offy/self._figure.dpi,self._figure.dpi_scale_trans))
+                label.set_position((offx*72./self._figure.dpi,offy*72./self._figure.dpi))
 
     def _update_pulse_timeline(
         self,

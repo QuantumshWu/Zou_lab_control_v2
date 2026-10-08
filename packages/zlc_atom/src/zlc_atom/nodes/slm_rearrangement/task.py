@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from time import perf_counter, monotonic, time_ns
 import sys
+from dataclasses import replace
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,7 +14,7 @@ from zlc_data import (AxisId, AxisSpec, COMPONENT, SCAN_POINT, SPATIAL_Y, SPATIA
                       DatasetSchema, DomainSpec, ValueSchema, ValidityContract, owned_snapshot_from_arrays)
 from zlc_durable import atomic_write_file, atomic_write_text, write_readable_json
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
-from zlc_plot import (AxisRef, CurvePlot, ImagePlot, PlotLabels, ImageFrame, ImagePointOverlay, PointStatus,
+from zlc_plot import (AxisRef, CurvePlot, ImagePlot, PlotLabels, ImageFrame,
                       IMAGE_POINT_OVERLAY_CONTRACT, IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
                       image_point_overlay_geometry)
 from zlc_pulse import PulseSequence
@@ -110,7 +111,8 @@ def _registration_order(calibration, context, context_path):
     order = np.asarray([original[tuple(center)] for center in registered.centers_xy], dtype=np.intp)
     if len(set(order)) != len(points):
         raise ValueError("The calibrated readout does not map one-to-one to SLM sites")
-    return points, target[points[:, 0], points[:, 1]], order
+    affine = np.asarray(registered.topology["affine_target_xy_to_image_xy"], dtype=float)
+    return points, target[points[:, 0], points[:, 1]], order, affine
 
 
 def compact_target(initial_target, rows, columns):
@@ -182,7 +184,8 @@ class SlmRearrangementTask:
                 "prepare_phase_sequence", "submit_phase_frame", "play_phase_sequence",
                 "cancel_phase_sequence", "release_phase_sequence")):
             raise ValueError("The selected SLM does not offer phase-sequence playback")
-        source, weights, order = _registration_order(calibration, science_context, self.context_path)
+        source, weights, order, self._target_to_calibration_xy = _registration_order(
+            calibration, science_context, self.context_path)
         if target_intensity is None:
             self.target_intensity, self.target_indices = compact_target(science_context['target_intensity'], self.target_rows, self.target_columns)
         else:
@@ -204,6 +207,7 @@ class SlmRearrangementTask:
         self._device_snapshots = {}
         self._available_outputs, self._capture_evidence = set(), {}
         self._overlay_geometry = None
+        self._camera_site_indices = self._camera_path_affine = None
 
     @property
     def dataset_output_declarations(self):
@@ -220,7 +224,11 @@ class SlmRearrangementTask:
                 "exposure_seconds": self.exposure_seconds, "motion_frames": self.motion_frames,
                 "frame_rate_hz": self.frame_rate_hz,
                 "minimum_separation": self.minimum_separation,
-                "intensity_tolerance": self.intensity_tolerance}
+                "intensity_tolerance": self.intensity_tolerance,
+                "target_registration": {
+                    "affine_target_xy_to_calibration_image_xy": self._target_to_calibration_xy.tolist(),
+                    "basis": "Geometric registration; camera/SLM handedness is not independently measured",
+                }}
 
     def _snapshot(self, context, declaration, values, **axes):
         return snapshot_from_array(values, producer=self.instance_id, signal=declaration.name,
@@ -265,6 +273,11 @@ class SlmRearrangementTask:
         roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
         cal = self.calibration.rebased(roi, point.binning_yx, shape)
         centers=cal.site_map.centers_xy[self.readout_order]
+        self._camera_site_indices = centers
+        self._camera_path_affine = self._target_to_calibration_xy.copy()
+        # Calibration owns the crop translation. Reuse its actual displacement
+        # for the same registered paths, rather than reimplementing ROI/binning.
+        self._camera_path_affine[2] += centers[0] - self.calibration.site_map.centers_xy[self.readout_order[0]]
         ids=tuple(f'site_{i:04d}' for i in range(n))
         labels=tuple(str(i+1) for i in range(n))
         self._overlay_geometry = image_point_overlay_geometry(image,centers,ids,
@@ -348,6 +361,7 @@ class SlmRearrangementTask:
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
         arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
+        path_overlay = None
         confirmed_phase = self.slm.last_commanded_phase
         if confirmed_phase is not None:
             arrays["last_confirmed_phase"] = confirmed_phase
@@ -365,6 +379,19 @@ class SlmRearrangementTask:
                         "actual_fields", "active_sites"):
                 if key in self._result: arrays[key] = self._result[key]
             if self.save_phase_sequence: arrays["phase_codes"] = self._result["phase_codes"]
+            if BEFORE_FRAME_OUTPUT.name in self._overlays:
+                before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
+                motion = self._result["motion_yx"]
+                indices = self._plan["source_indices"]
+                paths = np.repeat(self._camera_site_indices[:, None, :], len(motion), axis=1)
+                paths[indices] = (motion[..., ::-1] @ self._camera_path_affine[:2]
+                                  + self._camera_path_affine[2]).transpose(1, 0, 2)
+                geometry = image_point_overlay_geometry(before, self._camera_site_indices,
+                    self._overlay_geometry["point_ids"], status_axis=self._status_axis,
+                    labels=self._overlay_geometry["labels"], coordinates_are_indices=True, paths_xy=paths)
+                path_overlay = replace(self._overlays[BEFORE_FRAME_OUTPUT.name],
+                    revision=self._revision, paths_xy=np.asarray(geometry["paths_xy"]))
+                arrays["motion_camera_xy"] = path_overlay.paths_xy[indices].transpose(1, 0, 2)
         if self._plan is not None:
             for key in ("assigned_source_indices", "assigned_target_indices", "removed_source_indices",
                         "source_indices", "target_indices", "target_filled"):
@@ -395,14 +422,18 @@ class SlmRearrangementTask:
         arrays['generated_target_intensity']=self.target_intensity
         if self._detections:
             summary["before_occupied"] = int(self._detections[0]["occupied"].sum())
+        verification_accepted = status == "completed" and len(self._detections) == 2
         if len(self._detections) == 2:
             after = self._target_detection()
             arrays.update({"after_target_" + key: value for key, value in after.items()})
             summary.update(target_sites=len(after["occupied"]), judged_target_sites=int(after["valid"].sum()),
                            filled_target_sites=int(after["occupied"].sum()),
-                           verification_complete=bool(after["valid"].all()),
-                           target_filling_fraction=(float(after["occupied"].mean()) if after["valid"].all() else None),
-                           judged_target_filling_fraction=(float(after["occupied"][after["valid"]].mean()) if after["valid"].any() else None),
+                           verification_accepted=verification_accepted,
+                           verification_complete=verification_accepted and bool(after["valid"].all()),
+                           target_filling_fraction=(float(after["occupied"].mean())
+                               if verification_accepted and after["valid"].all() else None),
+                           judged_target_filling_fraction=(float(after["occupied"][after["valid"]].mean())
+                               if verification_accepted and after["valid"].any() else None),
                            missing_target_indices=np.flatnonzero(after["valid"] & ~after["occupied"]).tolist(),
                            invalid_target_indices=np.flatnonzero(~after["valid"]).tolist())
         if self._plan is not None:
@@ -418,6 +449,49 @@ class SlmRearrangementTask:
                  "surplus_stationary_clearance", "release_verified", "recommended_release_hold_frames",
                  "discard_reference_limit", "discard_converged", "converged",
                  "noop", "fade_frames", "emitted_frame_count") if key in self._result}
+            if path_overlay is not None:
+                summary["camera_path_coordinate_frame"] = self._overlay_geometry["coordinate_frame"]
+                indices = np.asarray(self._plan["source_indices"], dtype=np.intp)
+                targets = np.asarray(self._plan["target_indices"], dtype=np.intp)
+                moving = np.any(self._result["motion_yx"][1:] != self._result["motion_yx"][:1], axis=(0, 2))
+                accepted = verification_accepted
+                after = self._target_detection()
+                outcomes = {"basis": "Registered destination occupancy, not individual-atom identity tracking",
+                            "verification_accepted": accepted, "assignments": []}
+                for name, selected in (("moving", moving), ("stationary", ~moving)):
+                    judged = after["valid"][targets[selected]]
+                    occupied = after["occupied"][targets[selected]] & judged
+                    outcomes[name] = {"assigned": int(selected.sum()),
+                        "judged": int(judged.sum()) if accepted else None,
+                        "occupied": int(occupied.sum()) if accepted else None}
+                labels = self._overlay_geometry["labels"]
+                for source, target, moved in zip(indices, targets, moving, strict=True):
+                    target_source = int(self.target_indices[target])
+                    judged = bool(after["valid"][target]) if accepted else None
+                    outcomes["assignments"].append({"source_index": int(source), "source_label": labels[source],
+                        "target_index": int(target), "target_source_index": target_source if target_source >= 0 else None,
+                        "target_label": labels[target_source] if target_source >= 0 else None,
+                        "moving": bool(moved), "after_valid": judged,
+                        "after_occupied": bool(after["occupied"][target]) if judged else None})
+                summary["transport_outcomes"] = outcomes
+        playback = self._playback or {}
+        cadence = {"requested_interval_ms": 1000. / self.frame_rate_hz,
+                   "logical_steps": playback.get("played_frames"),
+                   "new_presentations": playback.get("newly_presented_frames"),
+                   "held_steps": playback.get("held_frames"),
+                   "online_ms": self._timings.get("online_rearrangement"),
+                   "playback_ms": self._timings.get("sequence_play_and_final_settle")}
+        for key, output in (("actual_step_intervals_ms", "command_interval_median_ms"),
+                            ("actual_frame_intervals_ms", "new_phase_interval_median_ms")):
+            values = playback.get(key) or ()
+            cadence[output] = float(np.median(values)) if len(values) else None
+        if len(self._records) == 2:
+            first, last = self._records
+            cadence["photo_receive_interval_ms"] = (last.host_received_at_ns-first.host_received_at_ns)/1e6
+            if first.timestamp_seconds is not None and last.timestamp_seconds is not None:
+                cadence["photo_camera_interval_ms"] = ((last.timestamp_seconds-first.timestamp_seconds)*1000.
+                    + (last.timestamp_microseconds-first.timestamp_microseconds)/1000.)
+        summary["observed_timing"] = cadence
         encoded = json.dumps(_plain_json(summary), allow_nan=False, separators=(",", ":"))
         arrays["metadata"] = np.asarray(encoded)
         archive = atomic_write_file(data / "rearrangement.npz", lambda f: np.savez(f, **arrays))
@@ -431,34 +505,19 @@ class SlmRearrangementTask:
             if name not in self._available_outputs: continue
             if name in {BEFORE_OCCUPIED_OUTPUT.name, AFTER_OCCUPIED_OUTPUT.name}: continue
             if name == TRAJECTORY_OUTPUT.name:
-                extent = self._result["motion_yx"].reshape(-1,2)
-                if not len(extent): extent = self.points[1]
-                pad = max(1., .08*float(np.ptp(extent,axis=0).max()))
-                y0,x0 = np.maximum(0,np.floor(extent.min(axis=0)-pad).astype(int))
-                y1,x1 = np.minimum(self.slm.shape_yx,np.ceil(extent.max(axis=0)+pad+1).astype(int))
-                source_image = snapshot_from_array(
-                    self.science_context["target_intensity"][None,y0:y1,x0:x1],
-                    producer=self.instance_id, signal="source_target",
-                    generation=str(getattr(context.generation,"value",context.generation)), revision=self._revision,
-                    cell_axes=(
-                        AxisSpec(AxisId("slm_rearrangement.path_y"),"Fourier y",SPATIAL_Y,int(y1-y0),tuple(float(i) for i in range(y0,y1))),
-                        AxisSpec(AxisId("slm_rearrangement.path_x"),"Fourier x",SPATIAL_X,int(x1-x0),tuple(float(i) for i in range(x0,x1)))),
-                    value_unit="1")
-                path = self._result["motion_yx"][:, :, ::-1].transpose(1,0,2)
-                ids = self._plan["source_indices"]
-                overlay = None if not len(ids) else ImagePointOverlay(
-                    revision=self._revision, coordinates=self.points[0][ids, ::-1],
-                    point_ids=tuple(self._overlay_geometry["point_ids"][i] for i in ids),
-                    labels=tuple(self._overlay_geometry["labels"][i] for i in ids),
-                    static_statuses=tuple(PointStatus.OCCUPIED for _ in ids), paths_xy=path)
-                plot_input = source_image if overlay is None else ImageFrame(source_image,overlay)
-                axes = source_image.block.schema.cell_domain.axes
+                if path_overlay is None:
+                    continue
+                before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
+                axes = before.block.schema.cell_domain.axes
+                elapsed = self._timings.get("online_rearrangement")
+                title = "Commanded trap paths" + (f" · {elapsed / 1000.:.3g} s" if elapsed is not None else "")
                 spec = ImagePlot(x=AxisRef.cell_data(str(axes[1].axis_id)),
                                  y=AxisRef.cell_data(str(axes[0].axis_id)),
-                                 labels=PlotLabels(title="Commanded trap paths", x="Fourier x (pixel)", y="Fourier y (pixel)"))
-                written = writer(figures / "trajectory_2d.png", plot_input=plot_input, spec=spec,
-                    parameters={"show_image":False, "side_distribution":False, "show_colorbar":False},
-                    size="4x4", source={"task":self.instance_id, "report":"trajectory_2d", "run_record":self._record()})
+                                 labels=PlotLabels(title=title))
+                written = writer(figures / "trajectory_2d.png", plot_input=ImageFrame(before, path_overlay), spec=spec,
+                    parameters={},
+                    size="4x4", source={"task":self.instance_id, "report":"trajectory_2d", "run_record":{
+                        **self._record(), "device_snapshots":self._capture_evidence[BEFORE_FRAME_OUTPUT.name]["device_snapshots"]}})
                 if hasattr(written,"result"): written=written.result()
                 png,npz=written
                 context.register_artifact("trajectory_2d_figure",npz,role="figure",contract_id="zlc.figure")
@@ -490,6 +549,13 @@ class SlmRearrangementTask:
             if key in summary: lines.append(f"{key.replace('_',' ')}: {summary[key]}")
         for key, value in summary.get("motion_diagnostics", {}).items():
             lines.append(f"{key.replace('_', ' ')}: {value}")
+        for name, values in summary.get("transport_outcomes", {}).items():
+            if name in {"moving", "stationary"}:
+                observed = (f"{values['occupied']}/{values['judged']} judged destinations occupied"
+                            if values["judged"] is not None else "verification not accepted")
+                lines.append(f"{name.title()}: {values['assigned']} assigned; {observed}")
+        for name, value in cadence.items():
+            lines.append(f"Observed {name.replace('_', ' ')}: {value if value is not None else 'not recorded'}")
         lines.extend(["Playback acknowledgments are transport facts, not optical vblank measurements.",
                       "Target filling is not individual-atom identity tracking.",
                       "compute/feed and device playback overlap inside online_rearrangement; do not add overlapping windows.",
@@ -516,6 +582,7 @@ class SlmRearrangementTask:
         self._snapshots, self._overlays, self._records, self._detections = {}, {}, [], []
         self._available_outputs, self._capture_evidence = set(), {}
         self._device_snapshots, self._overlay_geometry = {}, None
+        self._camera_site_indices = self._camera_path_affine = None
         self._playback, self._result, self._plan = None, None, None
         playback_attempted = False
         run_started = perf_counter()
