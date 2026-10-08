@@ -457,6 +457,7 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- Fourier正反传播复用同帧Y载频根：既有root入口在频率更新时生成float64正余弦，既有work按band容量持有complex128数组，删除每轮pack的重复三角计算。没有改变求解目标、数值精度、验收门限或播放节奏；独立传播和奇数尺寸直接用例通过，归档回放相位码、光场和迭代次数逐位一致。
 - 有线批次20–29复核：普通相位/序列灰度映射、归档读出和Pulse重编译一致；网络已非主要等待，不能把现场丢原子认定为通信故障。第28次无位置移动仍有末态缺失，计算光场的保留阱强度约为初始3.3倍；简单同步相位插值未复现塌阱，尚不能确定实际损失原因。summary JSON/text现直接汇总已有光强比例和相位步长，明确它们是计算而非实测/播放保证；不改分类阈值、Pulse或设备等待。
 - Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
 - 第一张照片的valid occupied站点按源roster身份成为available_source_indices。共同planner按实际欧氏距离匹配min(可用源,目标数)：多余原子丢弃，其阱在序列内淡出；不足时正常部分填充，保存未填目标。无效分类仍为invalid，不改成empty。具体Task拥有相机分类和目标政策，solver只接收显式计划；不复制分类或新增编排框架。

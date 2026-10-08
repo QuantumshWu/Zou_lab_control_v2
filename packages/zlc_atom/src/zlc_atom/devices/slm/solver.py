@@ -2195,12 +2195,12 @@ extern "C" __global__ void scatter(const float2* c,const int* index,float2* spec
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N){atomicAdd(&spectrum[index[i]].x,c[i].x);atomicAdd(&spectrum[index[i]].y,c[i].y);}}
 extern "C" __global__ void gather(const float2* spectrum,const int* index,float2* c,int N){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N)c[i]=spectrum[index[i]];}
-extern "C" __global__ void pack_inverse(const float2* spectrum,const double2* frequencies,real_t* packed,int H,int LY,int K){
+extern "C" __global__ void pack_inverse(const float2* spectrum,const double2* y_roots,real_t* packed,int H,int LY,int K){
  __shared__ float2 tile[32][33];
  int y=blockIdx.x*32+threadIdx.x,k=blockIdx.y*32+threadIdx.y;
  for(int j=0;j<32;j+=8)if(y<H&&k+j<K){
-  float2 v=spectrum[(k+j)*LY+(y-H/2+LY)%LY];double s,c;
-  sincos(6.2831853071795864769*frequencies[k+j].y*(y-H/2)/H,&s,&c);
+  float2 v=spectrum[(k+j)*LY+(y-H/2+LY)%LY];double2 root=y_roots[(k+j)*H+y];
+  double c=root.x,s=root.y;
   tile[threadIdx.y+j][threadIdx.x]=make_float2(v.x*c-v.y*s,v.x*s+v.y*c);}
  __syncthreads();
  int yy=blockIdx.x*32+threadIdx.y,kk=blockIdx.y*32+threadIdx.x;
@@ -2235,7 +2235,8 @@ extern "C" __global__ void pack_field(const float2* field,real_t* packed,int H,i
  float2 minus=d>0&&xm>=0?field[y*W+xm]:make_float2(0,0);
  pack_pair(packed,plus,minus,y,d,H,P);
 }
-extern "C" __global__ void select_roots(const double2* frequencies,real_t* backward,real_t* forward,int NF,int K,int P,int W){
+extern "C" __global__ void select_roots(const double2* frequencies,real_t* backward,real_t* forward,
+ double2* y_roots,int NF,int K,int P,int H,int W){
  __shared__ float2 tile[32][33];
  int x=blockIdx.x*32+threadIdx.x,k=blockIdx.y*32+threadIdx.y;
  for(int j=0;j<32;j+=8)if(x<P&&k+j<K){
@@ -2244,17 +2245,22 @@ extern "C" __global__ void select_roots(const double2* frequencies,real_t* backw
   float2 v=make_float2(c,s);tile[threadIdx.y+j][threadIdx.x]=v;
   if(backward){int r=(k+j)*2*P+x;backward[r]=cv(v.x);backward[r+P]=cv(v.y);}
  }
+ for(int j=0;j<32;j+=8)if(x<H&&k+j<K){
+  double s,c;
+  sincos(6.2831853071795864769*frequencies[k+j].y*(x-H/2)/H,&s,&c);
+  y_roots[(k+j)*H+x]=make_double2(c,s);
+ }
  __syncthreads();
  int xx=blockIdx.x*32+threadIdx.y,kk=blockIdx.y*32+threadIdx.x;
  for(int j=0;j<32;j+=8)if(xx+j<P&&kk<K){float2 v=tile[threadIdx.x][threadIdx.y+j];
   int out=(xx+j)*K+kk;
   forward[out]=cv(v.x);forward[out+P*K]=cv(v.y);}
 }
-extern "C" __global__ void pack_forward(const float* projected,const double2* frequencies,float2* spectrum,int H,int LY,int K){
+extern "C" __global__ void pack_forward(const float* projected,const double2* y_roots,float2* spectrum,int H,int LY,int K){
  __shared__ float2 tile[32][33];
  int k=blockIdx.x*32+threadIdx.x,y=blockIdx.y*32+threadIdx.y;
- for(int j=0;j<32;j+=8)if(k<K&&y+j<H){int r=(y+j)*K+k;double s,c;
-  sincos(6.2831853071795864769*frequencies[k].y*(y+j-H/2)/H,&s,&c);
+ for(int j=0;j<32;j+=8)if(k<K&&y+j<H){int r=(y+j)*K+k;double2 root=y_roots[k*H+y+j];
+  double c=root.x,s=root.y;
   float re=projected[r],im=projected[r+H*K];
   tile[threadIdx.y+j][threadIdx.x]=make_float2(re*c+im*s,im*c-re*s);}
  __syncthreads();
@@ -2440,6 +2446,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
                 work = dict(shape=(h, w), padded=padded, ly=ly, handle=handle,
                             typecode=0 if precise else 2, module=work_module, kernels=work_kernels,
                             forward=cp.empty((2 * padded, work_capacity), dtype),
+                            y_roots=cp.empty((work_capacity, h), cp.complex128),
                             spectrum=cp.empty((work_capacity, ly), cp.complex64),
                             transformed=cp.empty((work_capacity, ly), cp.complex64),
                             field_gemm=cp.empty((2, h, 2 * padded), dtype),
@@ -2514,11 +2521,11 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, maximum_m
 
 
 def _rearrangement_select_roots(work, band):
-    """Pack this frame's fixed frequencies once in this workspace's precision."""
-    padded = work["padded"]
-    work["kernels"]["select_roots"](((padded + 31) // 32, (band + 31) // 32), (32, 8),
+    """Cache X roots in workspace precision and Y carriers in double precision."""
+    padded, height = work["padded"], work["shape"][0]
+    work["kernels"]["select_roots"](((max(padded, height) + 31) // 32, (band + 31) // 32), (32, 8),
                                    (work["frequencies"], work.get("backward", np.uint64(0)), work["forward"],
-                                    *map(np.int32, (band, band, padded, work["shape"][1]))))
+                                    work["y_roots"], *map(np.int32, (band, band, padded, height, work["shape"][1]))))
 
 
 def _rearrangement_propagate(gpu, work, band, operation):
@@ -2534,7 +2541,7 @@ def _rearrangement_propagate(gpu, work, band, operation):
                            (work.get("coefficients", gpu["coefficients"]), work["index"], work["spectrum"], np.int32(number)))
         work["plans"][band].fft(work["spectrum"][:band], work["transformed"][:band], gpu["cufft"].CUFFT_INVERSE)
         kernels["pack_inverse"](((h + 31) // 32, (band + 31) // 32), (32, 8),
-                                (work["transformed"], work["frequencies"], work["packed"], np.int32(h), np.int32(ly), np.int32(band)))
+                                (work["transformed"], work["y_roots"], work["packed"], np.int32(h), np.int32(ly), np.int32(band)))
         status = gpu["gemm"](work["handle"], 0, 0, 2 * padded, 2 * h, band, alpha,
                              work["backward"].data.ptr, typecode, 2 * padded,
                              work["packed"].data.ptr, typecode, band, beta,
@@ -2567,7 +2574,7 @@ def _rearrangement_propagate(gpu, work, band, operation):
     if status:
         raise RuntimeError(f"SLM cuBLAS analysis failed ({status})")
     kernels["pack_forward"](((band + 31) // 32, (ly + 31) // 32), (32, 8),
-                            (work["projected"], work["frequencies"], work["spectrum"], np.int32(h), np.int32(ly), np.int32(band)))
+                            (work["projected"], work["y_roots"], work["spectrum"], np.int32(h), np.int32(ly), np.int32(band)))
     work["plans"][band].fft(work["spectrum"][:band], work["transformed"][:band], gpu["cufft"].CUFFT_FORWARD)
     kernels["gather"](((number + 255) // 256,), (256,),
                       (work["transformed"], work["index"], work["actual"], np.int32(number)))
