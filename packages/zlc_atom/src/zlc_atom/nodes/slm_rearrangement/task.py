@@ -24,7 +24,10 @@ from zlc_pulse.wire import STATUS_DONE, STATUS_RUNNING, STATUS_ERROR, STATUS_UND
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.slm.device import phase_from_codes
 from zlc_atom.devices.camera.contract import CameraFrameRecord
-from zlc_atom.devices.slm.solver import prepare_rearrangement, plan_rearrangement, compute_rearrangement
+from zlc_atom.devices.slm.solver import (
+    prepare_rearrangement, plan_rearrangement, compute_rearrangement,
+    rearrangement_diagnostics,
+)
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes.calibration import TrapCalibration
 from zlc_atom.nodes.calibration.calibration import reads_photoelectrons
@@ -44,6 +47,11 @@ TRAJECTORY_OUTPUT = DatasetOutputDeclaration("trajectory", "slm-rearrangement.tr
 QUALITY_OUTPUT = DatasetOutputDeclaration("intensity_ratio", "slm-rearrangement.intensity-ratio")
 OUTPUTS = (BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT, AFTER_FRAME_OUTPUT,
            AFTER_OCCUPIED_OUTPUT, PHASE_OUTPUT, TRAJECTORY_OUTPUT, QUALITY_OUTPUT)
+
+
+def rearrangement_outputs(frame_mode):
+    """Unknown auto-N diagnostics stay typed artifacts, not guessed live axes."""
+    return OUTPUTS[:5] if frame_mode == "camera_step" else OUTPUTS
 
 
 def pulse_timing(sequence, program, rows, before_period, after_period):
@@ -156,6 +164,7 @@ class SlmRearrangementTask:
                  target_intensity=None, target_path=None,
                  pulse_sequence, pulse_path, before_period, after_period,
                  exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
+                 phase_method="iterative", frame_mode="fixed", max_camera_step=1.,
                  minimum_separation=4.5, intensity_tolerance=1.01,
                  save_phase_sequence=True, save_figure_artifact=None):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
@@ -169,6 +178,16 @@ class SlmRearrangementTask:
         self.before_period, self.after_period = str(before_period), str(after_period)
         self.exposure_seconds = float(exposure_seconds)
         self.motion_frames = int(motion_frames)
+        self.phase_method, self.frame_mode = str(phase_method), str(frame_mode)
+        self.max_camera_step = float(max_camera_step)
+        if self.phase_method not in {"iterative", "lpi"} or self.frame_mode not in {"fixed", "camera_step"}:
+            raise ValueError("Unknown phase method or frame policy")
+        if not np.isfinite(self.max_camera_step) or self.max_camera_step <= 0:
+            raise ValueError("Maximum camera displacement must be finite and positive")
+        self._frame_count = self.motion_frames
+        self._prepared = None
+        self._gpu_reused = False
+        self._camera_maximum_step = None
         self.frame_rate_hz = float(frame_rate_hz)
         self.minimum_separation = float(minimum_separation)
         self.intensity_tolerance = float(intensity_tolerance)
@@ -211,7 +230,34 @@ class SlmRearrangementTask:
 
     @property
     def dataset_output_declarations(self):
-        return OUTPUTS
+        return rearrangement_outputs(self.frame_mode)
+
+    def restart_from(self, fresh):
+        """Adopt fresh run inputs, retaining only compatible numeric resources."""
+        if type(fresh) is not type(self):
+            return False
+        if self._prepared is not None:
+            if (self.phase_method != fresh.phase_method
+                    or self.minimum_separation != fresh.minimum_separation
+                    or self.intensity_tolerance != fresh.intensity_tolerance
+                    or tuple(self.slm.shape_yx) != tuple(fresh.slm.shape_yx)
+                    or self.science_context["pupil"] != fresh.science_context["pupil"]):
+                return False
+            pairs = (*zip(self.points, fresh.points), *zip(self.weights, fresh.weights),
+                     *((self.science_context[key], fresh.science_context[key])
+                       for key in ("phase", "pupil_amplitude", "operator_wavefront")))
+            if any(not np.array_equal(old, new) for old, new in pairs):
+                return False
+        prepared = self._prepared
+        self.__dict__.update(fresh.__dict__)
+        self._prepared = prepared
+        return True
+
+    def close(self):
+        """Host retirement, not the end of one experiment, owns GPU release."""
+        if self._prepared is not None:
+            self._prepared["close"]()
+            self._prepared = None
 
     def _record(self):
         return {"named_devices": {"camera": self.camera_key, "sequencer": self.sequencer_key, "slm": self.slm_key},
@@ -221,7 +267,12 @@ class SlmRearrangementTask:
                 "target_rows": self.target_rows, "target_columns": self.target_columns,
                 "target_source_indices": self.target_indices.tolist(),
                 "before_period": self.before_period, "after_period": self.after_period,
-                "exposure_seconds": self.exposure_seconds, "motion_frames": self.motion_frames,
+                "exposure_seconds": self.exposure_seconds,
+                "motion_frames": self.motion_frames if self.frame_mode == "fixed" else None,
+                "phase_method": self.phase_method, "frame_mode": self.frame_mode,
+                "requested_motion_frames": self.motion_frames,
+                "max_camera_step": self.max_camera_step, "camera_step_unit": "sensor pixel",
+                "gpu_preparation_reused": self._gpu_reused,
                 "frame_rate_hz": self.frame_rate_hz,
                 "minimum_separation": self.minimum_separation,
                 "intensity_tolerance": self.intensity_tolerance,
@@ -249,7 +300,7 @@ class SlmRearrangementTask:
                              MonitorCoverage(int(np.prod(self._snapshots[decl.name].block.values.shape[:2])),
                                              int(np.prod(self._snapshots[decl.name].block.values.shape[:2]))),
                              event_record=event)
-                             for decl in OUTPUTS})
+                             for decl in self.dataset_output_declarations})
 
     def _prepare_outputs(self, context, node):
         """One frozen output vocabulary; future results have real invalidity."""
@@ -282,7 +333,16 @@ class SlmRearrangementTask:
         labels=tuple(str(i+1) for i in range(n))
         self._overlay_geometry = image_point_overlay_geometry(image,centers,ids,
             status_axis=self._status_axis,labels=labels,coordinates_are_indices=True)
-        n = self.motion_frames+1
+        if self.frame_mode == "fixed":
+            self._prepare_motion_outputs(context)
+        self._snapshots[PHASE_OUTPUT.name] = self._snapshot(context,PHASE_OUTPUT,np.zeros((1,*self.slm.shape_yx),np.float32),
+            cell_axes=(SPATIAL_Y,SPATIAL_X),value_unit='rad')
+        # Camera/phase geometry is complete before mounting the first image.
+        context.set_run_record({**self._record(), IMAGE_POINT_OVERLAY_GEOMETRY_RECORD:self._overlay_geometry,
+                                "device_snapshots":dict(self._device_snapshots)})
+
+    def _prepare_motion_outputs(self, context):
+        n = self._frame_count+1
         frame = AxisSpec(AxisId('slm_rearrangement.frame'),'frame',SCAN_POINT,n,tuple(float(i) for i in range(n)))
         site = AxisSpec(AxisId('slm_rearrangement.source_site'),'site',COMPONENT,len(self.points[0]),
                         tuple(float(i+1) for i in range(len(self.points[0]))))
@@ -290,17 +350,20 @@ class SlmRearrangementTask:
             np.zeros((1,n,len(self.points[0]),2)),point_axes=(frame,),
             cell_axes=(site,AxisSpec(AxisId('slm_rearrangement.coordinate'),'coordinate',COMPONENT,2,(0.,1.),coordinate_labels=('x','y'))),
             validity=np.zeros((1,n,len(self.points[0]),2),bool),value_unit='1')
-        n = self.motion_frames
+        n = self._frame_count
         frame = AxisSpec(AxisId('slm_rearrangement.output_frame'),'frame',SCAN_POINT,n,tuple(float(i) for i in range(n)))
         self._snapshots[QUALITY_OUTPUT.name] = self._snapshot(context,QUALITY_OUTPUT,np.zeros((1,n)),
             point_axes=(frame,),validity=np.zeros((1,n),bool))
-        self._snapshots[PHASE_OUTPUT.name] = self._snapshot(context,PHASE_OUTPUT,np.zeros((1,*self.slm.shape_yx),np.float32),
-            cell_axes=(SPATIAL_Y,SPATIAL_X),value_unit='rad')
-        # Overlay geometry is a fixed run fact, available before any invalid
-        # future image is mounted. The first event must not create a host with
-        # a missing status roster that only a later photograph can repair.
-        context.set_run_record({**self._record(), IMAGE_POINT_OVERLAY_GEOMETRY_RECORD:self._overlay_geometry,
-                                "device_snapshots":dict(self._device_snapshots)})
+
+    def _camera_paths(self, motion, indices):
+        """Use the report's same registered sensor coordinates for step sizing."""
+        paths = np.repeat(self._camera_site_indices[:, None, :], len(motion), axis=1)
+        paths[indices] = (motion[..., ::-1] @ self._camera_path_affine[:2]
+                          + self._camera_path_affine[2]).transpose(1, 0, 2)
+        geometry = image_point_overlay_geometry(self._snapshots[BEFORE_FRAME_OUTPUT.name],
+            self._camera_site_indices, self._overlay_geometry["point_ids"], status_axis=self._status_axis,
+            labels=self._overlay_geometry["labels"], coordinates_are_indices=True, paths_xy=paths)
+        return np.asarray(geometry["paths_xy"]).transpose(1, 0, 2)
 
     def _publish_phase(self, context, phase):
         self._revision += 1
@@ -376,21 +439,23 @@ class SlmRearrangementTask:
                         "pupil_phase_step_rms_rad", "discard_intensity_ratios", "field_projection_updates",
                         "frame_solve_ms", "frame_copy_ms", "frame_ready_ms",
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
-                        "actual_fields", "active_sites"):
-                if key in self._result: arrays[key] = self._result[key]
+                        "actual_fields", "active_sites", "movement_fraction", "phase_center_yx",
+                        "desired_spectrum_coefficients", "target_synthesis_coefficients",
+                        "endpoint_synthesis_coefficients", "endpoint_field", "endpoint_phase",
+                        "source_field", "target_field", "target_requested_intensities",
+                        "source_synthesis_coefficients", "source_reconstruction_field",
+                        "start_synthesis_coefficients", "synthesis_coefficients",
+                        "retained_intensity_ratios", "all_active_support_intensity_ratios", "fading_intensity_ratios"):
+                if self._result.get(key) is not None:
+                    arrays[key] = self._result[key]
             if self.save_phase_sequence: arrays["phase_codes"] = self._result["phase_codes"]
             if BEFORE_FRAME_OUTPUT.name in self._overlays:
                 before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
                 motion = self._result["motion_yx"]
                 indices = self._plan["source_indices"]
-                paths = np.repeat(self._camera_site_indices[:, None, :], len(motion), axis=1)
-                paths[indices] = (motion[..., ::-1] @ self._camera_path_affine[:2]
-                                  + self._camera_path_affine[2]).transpose(1, 0, 2)
-                geometry = image_point_overlay_geometry(before, self._camera_site_indices,
-                    self._overlay_geometry["point_ids"], status_axis=self._status_axis,
-                    labels=self._overlay_geometry["labels"], coordinates_are_indices=True, paths_xy=paths)
+                paths = self._camera_paths(motion, indices)
                 path_overlay = replace(self._overlays[BEFORE_FRAME_OUTPUT.name],
-                    revision=self._revision, paths_xy=np.asarray(geometry["paths_xy"]))
+                    revision=self._revision, paths_xy=paths.transpose(1, 0, 2))
                 arrays["motion_camera_xy"] = path_overlay.paths_xy[indices].transpose(1, 0, 2)
         if self._plan is not None:
             for key in ("assigned_source_indices", "assigned_target_indices", "removed_source_indices",
@@ -400,6 +465,9 @@ class SlmRearrangementTask:
             if "motion_yx" in self._plan:
                 arrays["planned_motion_yx"] = self._plan["motion_yx"]
         summary = {**self._record(), "status": status, "error": None if error is None else str(error),
+                   "actual_motion_frames": None if self._result is None else len(self._result["phase_codes"]),
+                   "planned_motion_frames": self._frame_count if self._plan is not None else None,
+                   "actual_maximum_camera_step": self._camera_maximum_step,
                    "timing_ms": self._timings, "gpu": getattr(self, "_gpu_info", None),
                    "pulse_timing": getattr(self, "_pulse_timing", None), "playback": self._playback,
                    "device_snapshots": {**self._device_snapshots, "slm": {
@@ -448,10 +516,16 @@ class SlmRearrangementTask:
                 ("maximum_step", "recommended_motion_frames", "clearance", "fade_clearance",
                  "surplus_stationary_clearance", "release_verified", "recommended_release_hold_frames",
                  "discard_reference_limit", "discard_converged", "converged",
-                 "noop", "fade_frames", "emitted_frame_count") if key in self._result}
+                 "noop", "fade_frames", "emitted_frame_count", "quality_evaluated",
+                 "quality_scope", "quality_accepted", "phase_interpolation", "field_phase_reference",
+                 "source_coefficient_basis", "target_coefficient_basis", "phase_locked_amplitude_updates",
+                 "endpoint_support_intensity_ratio", "endpoint_iterations", "endpoint_balance_ms",
+                 "start_endpoint_iterations", "start_endpoint_balance_ms") if key in self._result}
             minimum = np.asarray(self._result["brightness_minimum_to_initial"])
             maximum = np.asarray(self._result["brightness_maximum_to_initial"])
             if len(minimum):
+                site_phase = np.asarray(self._result["phase_step_max_rad"])
+                pupil_phase = np.asarray(self._result["pupil_phase_step_rms_rad"])
                 summary["computed_field_diagnostics"] = {
                     "basis": "Computed encoded maps, not measured optical response or confirmed playback; power is relative to each selected source trap",
                     "minimum_power_ratio": float(minimum.min()),
@@ -459,8 +533,8 @@ class SlmRearrangementTask:
                     "final_minimum_power_ratio": float(minimum[-1]),
                     "final_mean_power_ratio": float(self._result["brightness_mean_to_initial"][-1]),
                     "final_maximum_power_ratio": float(maximum[-1]),
-                    "maximum_site_phase_step_rad": float(np.max(self._result["phase_step_max_rad"])),
-                    "maximum_pupil_phase_step_rms_rad": float(np.max(self._result["pupil_phase_step_rms_rad"])),
+                    "maximum_site_phase_step_rad": float(np.max(site_phase)) if site_phase.size else None,
+                    "maximum_pupil_phase_step_rms_rad": float(np.max(pupil_phase)) if pupil_phase.size else None,
                 }
             if path_overlay is not None:
                 summary["camera_path_coordinate_frame"] = self._overlay_geometry["coordinate_frame"]
@@ -554,7 +628,10 @@ class SlmRearrangementTask:
         summary["timing_ms"] = dict(self._timings)
         context.register_artifact("summary", write_readable_json(directory/"summary.json", _plain_json(summary)), role="summary")
         lines = ["SLM Rearrangement", f"Status: {status}", f"Pulse: {self.pulse_path}",
-                 f"Movement frames: {self.motion_frames}; nominal rate: {self.frame_rate_hz:g} Hz"]
+                 f"Method: {self.phase_method}; frame policy: {self.frame_mode}",
+                 f"Computed maps: {summary['actual_motion_frames']}; nominal rate: {self.frame_rate_hz:g} Hz",
+                 f"Maximum camera displacement: {self._camera_maximum_step} sensor pixel per frame",
+                 f"GPU preparation reused: {self._gpu_reused}"]
         if hasattr(self, "_pulse_timing"):
             lines.append(f"Available between imaging Periods: {self._pulse_timing['available_gap_seconds']:.6f} s")
         lines.extend(f"{name.replace('_',' ')}: {value:.3f} ms" for name,value in self._timings.items())
@@ -594,6 +671,8 @@ class SlmRearrangementTask:
     def execute(self, context):
         self.instance_id = context.instance_id
         self._timings = {}; prepared = capture = None
+        self._frame_count = self.motion_frames
+        self._camera_maximum_step = None
         self._snapshots, self._overlays, self._records, self._detections = {}, {}, [], []
         self._available_outputs, self._capture_evidence = set(), {}
         self._device_snapshots, self._overlay_geometry = {}, None
@@ -603,18 +682,23 @@ class SlmRearrangementTask:
         run_started = perf_counter()
         try:
             check_cancelled(context)
-            context.report_progress("Detecting GPU and preparing the source optical working point")
+            self._gpu_reused = self._prepared is not None
+            context.report_progress("Reusing prepared GPU working point" if self._gpu_reused
+                                    else "Detecting GPU and preparing the source optical working point")
             start = perf_counter()
-            prepared = prepare_rearrangement(shape_yx=self.slm.shape_yx,
-                source_yx=self.points[0], target_yx=self.points[1],
-                pupil_amplitude=self.science_context["pupil_amplitude"],
-                pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
-                source_intensities=self.weights[0], target_intensities=self.weights[1],
-                minimum_separation=self.minimum_separation,
-                support_tolerance=self.intensity_tolerance,
-                maximum_motion_frames=self.motion_frames,
-                endpoint_data={"source_phase": self.science_context["phase"]},
-                stop_requested=context.cancel_requested)
+            if self._prepared is None:
+                self._prepared = prepare_rearrangement(shape_yx=self.slm.shape_yx,
+                    source_yx=self.points[0], target_yx=self.points[1], method=self.phase_method,
+                    pupil_amplitude=self.science_context["pupil_amplitude"],
+                    pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
+                    phase_center_yx=tuple(self.science_context["pupil"]["center_xy"])[::-1],
+                    source_intensities=self.weights[0], target_intensities=self.weights[1],
+                    minimum_separation=self.minimum_separation,
+                    support_tolerance=self.intensity_tolerance,
+                    maximum_motion_frames=self.motion_frames if self.frame_mode == "fixed" else 16,
+                    endpoint_data={"source_phase": self.science_context["phase"]},
+                    stop_requested=context.cancel_requested)
+            prepared = self._prepared
             self._timings["gpu_prepare"] = (perf_counter()-start)*1000
             self._gpu_info = prepared["gpu_info"]
             context.report_progress(f"GPU ready: {self._gpu_info.get('device_name','CUDA')}; establishing source phase")
@@ -632,8 +716,9 @@ class SlmRearrangementTask:
             self._pulse_timing = pulse_timing(loaded.source, loaded.program, loaded.rows, self.before_period, self.after_period)
             self._frame_interval = 1/self.frame_rate_hz
             settle = float(self.slm.last_command_receipt.get("settle_seconds", 0.))
-            nominal = self.motion_frames*self._frame_interval + max(0., settle-self._frame_interval)
-            self._timings["estimated_nominal_playback"] = nominal*1000
+            nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
+            if self.frame_mode == "fixed":
+                self._timings["estimated_nominal_playback"] = nominal*1000
             photoelectron = reads_photoelectrons(self.calibration)
             node = CameraMeasurementNode(camera=self.camera,
                 request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
@@ -659,7 +744,7 @@ class SlmRearrangementTask:
             playback_finished_at = None
 
             def photograph(cycle, index):
-                nonlocal playback_finished_wall, playback_finished_at, playback_attempted
+                nonlocal playback_finished_wall, playback_finished_at, playback_attempted, nominal
                 # Camera receive is independent: callback dispatch time is not
                 # the exposure timestamp of a queued second photograph.
                 node._commit_direct_cycle(cycle, index)
@@ -672,11 +757,33 @@ class SlmRearrangementTask:
                         raise RuntimeError("The verification frame reached the camera queue before SLM playback completed")
                     return
                 self._timings["before_frame_available_after_fire"] = (cycle[0].host_received_at_ns-fire_wall)/1e6
-                context.report_progress(f"Computing {self.motion_frames} motion frames for {len(self.points[1])} targets")
                 start = perf_counter()
                 plan = self._plan = plan_rearrangement(prepared, np.flatnonzero(mask & valid))
                 self._timings['matching']=(perf_counter()-start)*1000
                 online_started = start
+                motion_fractions = None
+                if self.frame_mode == "camera_step":
+                    indices = np.asarray(plan["source_indices"], np.intp)
+                    knots = np.asarray(plan["motion_yx"])
+                    camera_path = self._camera_paths(knots, indices)
+                    distances = np.max(np.linalg.norm(np.diff(camera_path, axis=0), axis=-1), axis=1, initial=0.)
+                    fade = 2 if len(indices) < len(self.points[0]) else 0
+                    if len(indices) and np.any(distances > 0):
+                        subdivisions = np.maximum(1, np.ceil(distances/self.max_camera_step)).astype(np.int64)
+                        self._frame_count = fade + sum(map(int, subdivisions))
+                        nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
+                        if nominal > deadline-monotonic():
+                            raise RuntimeError(f"Camera step requires {self._frame_count} maps ({nominal:.6g}s nominal), exceeding the remaining Pulse gap")
+                        fractions = np.asarray(plan["fraction"])
+                        motion_fractions = np.concatenate([
+                            np.linspace(a,b,int(n)+1)[1:]
+                            for a,b,n in zip(fractions[:-1],fractions[1:],subdivisions,strict=True)])
+                    else:
+                        self._frame_count = max(1, fade) if len(indices) else 1
+                    self._prepare_motion_outputs(context)
+                nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
+                self._timings["estimated_nominal_playback"] = nominal*1000
+                context.report_progress(f"Computing {self._frame_count} maps using {self.phase_method}")
                 playback = None
                 # The existing Task worker computes; one worker waits on the
                 # device's existing play operation. Mapping/display ownership
@@ -700,12 +807,12 @@ class SlmRearrangementTask:
                             if remaining < nominal:
                                 raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
                             began = perf_counter()
-                            self.slm.prepare_phase_sequence(None, 1/self.frame_rate_hz, frame_count=self.motion_frames)
+                            self.slm.prepare_phase_sequence(None, 1/self.frame_rate_hz, frame_count=self._frame_count)
                             self._timings["sequence_prepare"] = (perf_counter()-began)*1000
                             self._timings["first_verified_frame_ready"] = (began-online_started)*1000
                             playback_attempted = True
                             playback = player.submit(play)
-                            context.report_progress("Computing and playing verified SLM frames")
+                            context.report_progress(f"Computing and playing {self.phase_method} SLM frames")
                         if playback.done():
                             playback.result()  # Preserve an actual device error.
                             raise RuntimeError("SLM playback ended before all frames were submitted")
@@ -731,17 +838,22 @@ class SlmRearrangementTask:
                     try:
                         compute_started = perf_counter()
                         self._result = compute_rearrangement(prepared, plan,
-                            motion_frames=self.motion_frames,
+                            motion_frames=self._frame_count, motion_fractions=motion_fractions,
                             support_tolerance=self.intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
                             stop_requested=context.cancel_requested)
                         self._timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
                         for name, value in self._result["timing_ms"].items():
                             self._timings["compute_"+name] = float(value)
-                        if not self._result["converged"]:
+                        if not self._result.get("quality_accepted", self._result["converged"]):
                             raise RuntimeError("The phase sequence did not pass its encoded-field quality checks; playback is stopped at its verified prefix. See the partial numeric report.")
                         if playback is not None:
                             self._playback = playback.result()
+                        camera_path = self._camera_paths(self._result["motion_yx"], plan["source_indices"])
+                        self._camera_maximum_step = float(np.max(np.linalg.norm(np.diff(camera_path,axis=0),axis=-1),initial=0.))
+                        rounding = 32*np.finfo(float).eps*max(1.,float(np.max(abs(camera_path))))
+                        if self.frame_mode == "camera_step" and self._camera_maximum_step > self.max_camera_step+rounding:
+                            raise RuntimeError("Emitted trajectory exceeded the requested camera-pixel step")
                     except BaseException as error:
                         if playback is not None:
                             if not playback.done():
@@ -786,9 +898,13 @@ class SlmRearrangementTask:
             self._timings["pulse_elapsed"] = report.elapsed_seconds*1000
             self._timings["pulse_report_retrieval_delay"] = report.report_delay_seconds*1000
             self._timings["experiment_before_save"] = (perf_counter()-run_started)*1000
+            if self.phase_method == "lpi":
+                diagnostics = rearrangement_diagnostics(prepared, self._result, stop_requested=context.cancel_requested)
+                self._timings["optical_diagnostics"] = float(diagnostics.pop("diagnostics_ms"))
+                self._result.update(diagnostics)
             self._revision += 1
             path = self._result["motion_yx"]
-            full_path = np.zeros((self.motion_frames+1, len(self.points[0]), 2), dtype=np.float64)
+            full_path = np.zeros((self._frame_count+1, len(self.points[0]), 2), dtype=np.float64)
             valid_path = np.zeros(full_path.shape[:-1], bool)
             if len(self._plan["source_indices"]):
                 full_path[:len(path), self._plan["source_indices"]] = path
@@ -802,12 +918,12 @@ class SlmRearrangementTask:
             trajectory = self._snapshot(context, TRAJECTORY_OUTPUT, path[None,:,:,::-1],
                                          point_axes=(frame_axis,), cell_axes=(site_axis,coordinate_axis),
                                          validity=np.repeat(valid_path[None,...,None],2,axis=-1),value_unit="1")
-            ratio = self._result["support_intensity_ratios"]
-            ratio_valid = np.ones(self.motion_frames, bool) if len(ratio) else np.zeros(self.motion_frames, bool)
-            if not len(ratio): ratio = np.zeros(self.motion_frames)
+            ratio = self._result.get("retained_intensity_ratios", self._result["support_intensity_ratios"])
+            ratio_valid = np.ones(self._frame_count, bool) if len(ratio) else np.zeros(self._frame_count, bool)
+            if not len(ratio): ratio = np.zeros(self._frame_count)
             quality = self._snapshot(context, QUALITY_OUTPUT, ratio[None],
                 point_axes=(AxisSpec(AxisId("slm_rearrangement.output_frame"), "frame", SCAN_POINT,
-                 self.motion_frames, tuple(float(i) for i in range(self.motion_frames))),), validity=ratio_valid[None])
+                 self._frame_count, tuple(float(i) for i in range(self._frame_count))),), validity=ratio_valid[None])
             self._publish(context, ((TRAJECTORY_OUTPUT, trajectory), (QUALITY_OUTPUT, quality)))
             expected_final = (phase_from_codes(self._result["phase_codes"][-1], self.slm.shape_yx)
                               if len(self._result["phase_codes"]) else prepared["initial_phase"])
@@ -843,7 +959,7 @@ class SlmRearrangementTask:
                 # the evidence; its private acquisition is no longer a source.
                 try: self.signal_plane.retire(capture.node)
                 except BaseException as cleanup: cleanup_errors.append(cleanup)
-            for cleanup in (self.slm.release_phase_sequence, None if prepared is None else prepared["close"]):
+            for cleanup in (self.slm.release_phase_sequence,):
                 if cleanup is not None:
                     try: cleanup()
                     except BaseException as error: cleanup_errors.append(error)
@@ -858,4 +974,4 @@ class SlmRearrangementTask:
                 raise first
 
 
-__all__ = ["SlmRearrangementTask", "pulse_timing"]
+__all__ = ["SlmRearrangementTask", "pulse_timing", "rearrangement_outputs"]

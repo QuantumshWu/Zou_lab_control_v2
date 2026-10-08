@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 import threading
@@ -467,6 +468,7 @@ class NodeHost:
             else None
         )
         self._closed = False
+        self._close_future: Future | None = None
         self._active = False
         self._terminal = False
         self._phase = "not started"
@@ -510,6 +512,20 @@ class NodeHost:
     @property
     def running(self) -> bool:
         return self._active
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def closing(self) -> bool:
+        return self._close_future is not None and not self._closed
+
+    @property
+    def close_future(self) -> Future | None:
+        """The existing resource-release operation, when shutdown is pending."""
+
+        return self._close_future
 
     @property
     def terminal(self) -> bool:
@@ -594,6 +610,8 @@ class NodeHost:
     ) -> None:
         if self._closed:
             raise RuntimeError("NodeHost is closed")
+        if self.closing:
+            raise RuntimeError("NodeHost is closing")
         if self._active:
             return
         if self._owner is not None and not self.worker_idle:
@@ -685,20 +703,29 @@ class NodeHost:
             self._retire_plane_state()
 
     def poll(self) -> LogicNodeObservation:
-        if self._mode == "worker":
+        if self._mode == "worker" or self.closing:
             self._poll_worker()
         elif self._processor_path in ("frozen", "follow"):
             self._poll_processor()
         return self.observation
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
+        """Retire this node; pending resource release is reaped by owner polls."""
+
         if self._closed:
-            return
+            return True
         if self._active:
             self.cancel("Host is closing")
             self.poll()
             if self._active:
                 raise RuntimeError("cannot close NodeHost before terminal")
+        close = getattr(self._node, "close", None)
+        if callable(close):
+            if self._close_future is None:
+                self._close_future = self._ensure_owner().submit("close", close)
+            self.poll()
+            if not self.worker_idle:
+                return False
         if (
             self._mode == "processor"
             and self._processor_path == "latest"
@@ -719,6 +746,9 @@ class NodeHost:
         self._ready_event.set()
         if self._owner is not None:
             self._owner.shutdown()
+        if self._close_future is not None:
+            self._close_future.result()
+        return True
 
     @property
     def generation(self) -> object:
@@ -886,6 +916,8 @@ class NodeHost:
     def _poll_worker(self) -> None:
         assert self._owner is not None
         for completion in self._owner.drain_completions():
+            if completion.kind == "close":
+                continue
             if completion.generation != self._owner.generation:
                 continue
             try:

@@ -159,9 +159,13 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
 
 
 @pytest.mark.parametrize("ending", ("done", "failed", "cancel-before-ready", "cancel-after-ready"))
-def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str) -> None:
+def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str, monkeypatch) -> None:
+    from concurrent.futures import Future
+
     plane, wake = SignalDataPlane(), Event()
     entered, arm, finish = Event(), Event(), Event()
+    closing, release = Event(), Event()
+    closed = []
 
     class Node:
         def execute(self, context):
@@ -172,7 +176,24 @@ def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str) -> Non
             context.report_ready()
             assert finish.wait(2)
 
+        def close(self):
+            assert threading.current_thread() is not threading.main_thread()
+            closed.append(True)
+            closing.set()
+            assert release.wait(2)
+
     host = _host(Node(), plane, wake, instance_id="acquisition", kind="measurement")
+    invoke_callbacks = Future._invoke_callbacks
+    callback_shutdown = []
+
+    def late_close_callback(future):
+        if future is host.close_future:
+            # Future is already FINISHED here, before its registered
+            # callbacks run. A late subscriber therefore runs immediately.
+            future.add_done_callback(lambda _done: callback_shutdown.append(host.shutdown()))
+        invoke_callbacks(future)
+
+    monkeypatch.setattr(Future, "_invoke_callbacks", late_close_callback)
     try:
         # A queued candidate is a valid wait target before activation.
         assert host.wait_ready(0) is False
@@ -206,12 +227,25 @@ def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str) -> Non
             assert _wait(host, wake).phase == expected
             with pytest.raises((RuntimeError, InterruptedError)):
                 host.wait_ready(0)
-        host.shutdown()
+            assert closed == [], "Stop or terminal completion released reusable resources"
+        assert host.shutdown() is False
+        assert closing.wait(1)
+        with pytest.raises(RuntimeError, match="closing"):
+            host.start()
+        release.set()
+        deadline = time.monotonic() + 2
+        while not host.shutdown() and time.monotonic() < deadline:
+            wake.wait(.01)
+            wake.clear()
+        assert host.shutdown() is True
+        assert closed == [True]
+        assert callback_shutdown == [True], "done callback ran before its mailbox completion existed"
         with pytest.raises(RuntimeError, match="closed"):
             host.wait_ready(0)
     finally:
         arm.set()
         finish.set()
+        release.set()
         if host.running:
             host.cancel("test cleanup")
             _wait(host, wake)

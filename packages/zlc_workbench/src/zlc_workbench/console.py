@@ -5519,16 +5519,23 @@ class ConsolePresenter:
             tuple(notes),
         )
 
-    def _commit_layout_candidate(self, candidate: _LayoutCandidate) -> None:
+    def _commit_layout_candidate(self, candidate: _LayoutCandidate) -> bool:
         """Replace the board once, after its complete candidate already exists."""
 
+        # Numeric resources may need an owner-thread release after the run
+        # ended. Keep the whole old board reachable until that hop completes.
+        pending_close = False
+        for binding in self.logic.values():
+            if binding.host is not None and binding.host.shutdown() is False:
+                pending_close = True
+        if pending_close:
+            return False
         for panel_id, binding in tuple(self.panels.items()):
             self.close_panel_editor(panel_id)
             self._release_panel(binding)
             self.view.remove_panel(panel_id)
         for node_id, binding in tuple(self.logic.items()):
             if binding.host is not None:
-                binding.host.shutdown()
                 self.session.signal_plane.retire(binding.host)
             close_editor = getattr(self.view, "close_logic_editor", None)
             if callable(close_editor):
@@ -5560,6 +5567,7 @@ class ConsolePresenter:
             self._apply_deriving(binding)
         self._refresh_console_projection()
         self._refresh_signal_choices()
+        return True
 
     def _running_logic(self) -> tuple[LogicBinding, ...]:
         """Every node still at work: started, or waiting to start."""
@@ -5622,8 +5630,10 @@ class ConsolePresenter:
             return
         running = self._running_logic()
         if not running:
-            self._commit_layout_candidate(candidate)
-            self._report(done, severity="task")
+            if self._commit_layout_candidate(candidate):
+                self._report(done, severity="task")
+            else:
+                self._pending_board = (candidate, done)
             return
         self._pending_board = (candidate, done)
         for binding in running:
@@ -7746,7 +7756,7 @@ class ConsolePresenter:
                 binding.owner_token,
                 binding.node_id,
                 candidate.claims,
-                stop=candidate.host.cancel,
+                stop=lambda reason: candidate.host.cancel(reason),
                 superseded=lambda: self._discard_candidate(binding, candidate),
             )
         except DeviceUseBusy as error:
@@ -7940,7 +7950,8 @@ class ConsolePresenter:
                 )
                 return False
             try:
-                binding.host.shutdown()
+                if binding.host.shutdown() is False:
+                    return False
                 self.session.signal_plane.retire(binding.host)
             except Exception as error:
                 self._report(
@@ -7996,10 +8007,10 @@ class ConsolePresenter:
 
         pending_board = self._pending_board
         if pending_board is not None and not self._running_logic():
-            self._pending_board = None
             candidate, done = pending_board
-            self._commit_layout_candidate(candidate)
-            self._report(done, severity="task")
+            if self._commit_layout_candidate(candidate):
+                self._pending_board = None
+                self._report(done, severity="task")
 
         for binding in tuple(self.logic.values()):
             candidate = binding.pending
@@ -8426,7 +8437,13 @@ class ConsolePresenter:
             candidate.reservation.abort()
             candidate.reservation = None
         try:
-            candidate.host.shutdown()
+            if candidate.host is not binding.host:
+                if candidate.host.shutdown() is False:
+                    candidate.host.close_future.add_done_callback(
+                        lambda _future: self._enqueue_panel_interaction(
+                            lambda: self._discard_candidate(binding, candidate)
+                        )
+                    )
         except Exception as error:
             self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
 
@@ -8458,7 +8475,27 @@ class ConsolePresenter:
                 self._refresh_console_projection()
                 return True
             try:
-                old_host.shutdown()
+                restart = getattr(binding.node, "restart_from", None)
+                reusable = (
+                    candidate.host is old_host
+                    or (
+                        callable(restart) and not old_host.closed
+                        and not old_host.closing and old_host.worker_idle
+                        and old_host.dataset_output_declarations
+                        == candidate.host.dataset_output_declarations
+                        and restart(candidate.node)
+                    )
+                )
+                if reusable:
+                    if candidate.host is not old_host:
+                        if candidate.host.shutdown() is False:
+                            binding.pending = candidate
+                            return True
+                        candidate.node, candidate.host = binding.node, old_host
+                elif old_host.shutdown() is False:
+                    binding.pending = candidate
+                    self._refresh_console_projection()
+                    return True
             except Exception as error:
                 self._discard_candidate(binding, candidate)
                 binding.draft_error = _error_text(error)
@@ -8494,6 +8531,7 @@ class ConsolePresenter:
         binding.artifact_results = ()
         binding.artifact_result_host = None
         binding.artifact_completion_order = 0
+        binding.preview_host = None
         try:
             if candidate.run_root is None:
                 candidate.host.start()

@@ -186,9 +186,10 @@ def experiment(tmp_path, monkeypatch, request):
     trace = []
     slm = _SequenceSlm(trace)
     source_xy = np.asarray(((2., 2.), (4., 2.), (7., 2.), (2., 5.), (4., 5.), (7., 5.)))
-    affine_crop = getattr(request, "param", 4) == "camera-affine-roi"
+    camera_step = getattr(request, "param", 4) == "camera-step"
+    affine_crop = getattr(request, "param", 4) in {"camera-affine-roi", "camera-step"}
     sensor_shape = (18, 24) if affine_crop else slm.shape_yx
-    centers = source_xy @ np.asarray(((1., 0.), (1/3., 1.))) + (13/3., 3.) if affine_crop else source_xy
+    centers = source_xy @ np.asarray(((1.5 if camera_step else 1., 0.), (1/3., 1.))) + (13/3., 3.) if affine_crop else source_xy
     calibration = _calibration_at(centers, shape=sensor_shape)
     if affine_crop:
         calibration = replace(calibration, frame_contract=replace(calibration.frame_contract,
@@ -243,9 +244,12 @@ def experiment(tmp_path, monkeypatch, request):
         state.available_indices.append(indices.copy())
         n = min(len(indices), len(state.prepare_arguments["target_yx"]))
         destinations = np.asarray((1, 0, 3, 2)) if n == 4 else np.arange(n)
+        starts = np.asarray(state.prepare_arguments["source_yx"])[indices[:n]]
+        ends = np.asarray(state.prepare_arguments["target_yx"])[destinations]
         return {"assigned_source_indices": indices[:n], "assigned_target_indices": destinations,
                 "removed_source_indices": indices[n:], "source_indices": indices[:n],
                 "target_indices": destinations,
+                "motion_yx": np.stack((starts, ends)), "fraction": np.asarray((0.,1.)),
                 "target_filled": np.arange(len(state.prepare_arguments["target_yx"])) < n}
 
     def compute(prepared, planned, **kwargs):
@@ -264,8 +268,11 @@ def experiment(tmp_path, monkeypatch, request):
         starts = np.asarray(state.prepare_arguments["source_yx"], dtype=np.float64)[planned["source_indices"]]
         points = starts.copy()
         points[:len(planned["assigned_source_indices"])] = state.prepare_arguments["target_yx"][planned["assigned_target_indices"]]
+        samples = (np.r_[0.,0.,0.,kwargs["motion_fractions"]] if kwargs.get("motion_fractions") is not None
+                   else np.linspace(0,1,kwargs["motion_frames"]+1))
         return {"phase_codes": codes, "converged": True,
-                "motion_yx": starts[None] + np.linspace(0,1,kwargs["motion_frames"]+1)[:,None,None]*(points-starts)[None],
+                "target_synthesis_coefficients": None,
+                "motion_yx": starts[None] + samples[:,None,None]*(points-starts)[None],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
                 "support_intensity_ratios": np.full(frames, 1.005),
                 "brightness_minimum_to_initial": np.linspace(2.3, 3.3, frames),
@@ -279,7 +286,7 @@ def experiment(tmp_path, monkeypatch, request):
     monkeypatch.setattr(task_module, "plan_rearrangement", plan)
     monkeypatch.setattr(task_module, "compute_rearrangement", compute)
     state.compute = compute
-    state.task = SlmRearrangementTask(
+    state.task_arguments = dict(
         camera=camera, camera_key="camera", sequencer=board, sequencer_key="pulse",
         slm=slm, slm_key="slm", signal_plane=plane,
         calibration=calibration, calibration_path=tmp_path / "calibration.json",
@@ -289,9 +296,11 @@ def experiment(tmp_path, monkeypatch, request):
         before_period="before", after_period="after", motion_frames=2,
         save_figure_artifact=_stub_figures,
     )
+    state.task = SlmRearrangementTask(**state.task_arguments)
     try:
         yield state
     finally:
+        state.task.close()
         camera.close()
         board.close()
         plane.close()
@@ -315,7 +324,7 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     np.testing.assert_array_equal(e.available_indices[0], [0, 1, 3, 4, 5])
     np.testing.assert_array_equal(e.task.target_indices, [1, 2, 4, 5])
     assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path", "end_target_path"}
-    assert e.slm.plays == 1 and e.closed == [True]
+    assert e.slm.plays == 1 and e.closed == []
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["target_sites"] == 4 and summary["judged_target_sites"] == 3
@@ -358,6 +367,7 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         assert "photo_camera_interval_ms" not in observed
     assert [item["source_ordinal"] for item in summary["frame_records"]] == [0, 1]
     with np.load(result["artifact_path"], allow_pickle=False) as data:
+        assert all(not data[key].dtype.hasobject for key in data.files)
         original_motion = data["motion_yx"].copy()
     before_device_facts = None
     before_parameters = None
@@ -434,6 +444,44 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
     assert e.board.fires == [(1, 1)]
 
 
+@pytest.mark.parametrize("experiment", ["camera-step"], indirect=True)
+def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation(experiment):
+    e = experiment
+    photos = [image.copy() for image in e.images]
+    e.task.frame_mode = "camera_step"
+    e.task.max_camera_step = .6
+    assert len(e.task.dataset_output_declarations) == 5
+    result = e.task.execute(e.context)
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    # Five Fourier pixels map to 7.5 sensor pixels through the real registered
+    # affine/cropped camera geometry: ceil(7.5/.6) + two source-fade maps.
+    assert summary["actual_motion_frames"] == 15
+    assert summary["requested_motion_frames"] == 2 and summary["motion_frames"] is None
+    assert summary["actual_maximum_camera_step"] <= .6 + 1e-12
+    with np.load(result["artifact_path"], allow_pickle=False) as data:
+        assert data["phase_codes"].shape[0] == 15
+        assert np.max(np.linalg.norm(np.diff(data["motion_camera_xy"],axis=0),axis=-1)) <= .6 + 1e-12
+    prepared = e.task._prepared
+    fresh = SlmRearrangementTask(**(e.task_arguments | {
+        "frame_mode": "camera_step", "max_camera_step": .6, "exposure_seconds": .03}))
+    assert e.task.restart_from(fresh)
+    assert e.task._prepared is prepared and e.task.exposure_seconds == .03
+    assert not e.task._detections and not e.task._records
+    again = _RunContext(e.context.run_directory.parent / "again", e.camera, e.board, e.trace)
+    e.images.extend(photos)
+    e.task.execute(again)
+    repeated = json.loads((again.run_directory / "summary.json").read_text())
+    assert repeated["gpu_preparation_reused"]
+    assert e.trace.count("prepare_gpu") == 1 and e.closed == []
+    changed_context = dict(e.task_arguments["science_context"])
+    changed_context["phase"] = np.remainder(changed_context["phase"] + .1, 2*np.pi)
+    changed = SlmRearrangementTask(**(e.task_arguments | {"science_context": changed_context}))
+    assert not e.task.restart_from(changed), "same file path cannot hide changed optical data"
+    assert e.task._prepared is prepared
+    e.task.close()
+    assert e.closed == [True]
+
+
 def test_explicit_end_target_does_not_invent_calibration_for_a_new_position(experiment):
     e = experiment
     old = e.task
@@ -465,11 +513,11 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
     e.task._save_figure_artifact = None
     wake = Event()
     host = NodeHost(e.task, e.plane, wake.set, instance_id="slm_rearrangement",
-                    kind="task", dataset_output_declarations=LOGIC_NODE.outputs,
+                    kind="task", dataset_output_declarations=e.task.dataset_output_declarations,
                     required_artifacts={item.name: item.contract_id for item in LOGIC_NODE.artifact_outputs},
                     task_name=LOGIC_NODE.api_name)
     publications = []
-    names = {declaration.name: host.signal_key(declaration.name) for declaration in LOGIC_NODE.outputs}
+    names = {declaration.name: host.signal_key(declaration.name) for declaration in e.task.dataset_output_declarations}
 
     def received(signals):
         if names["phase"] not in signals:
@@ -500,7 +548,7 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert observation.terminal and observation.phase == "done", observation
         assert observation.error is None and observation.progress is None
         assert e.board.fires == [(1, 1)] and e.slm.plays == 1
-        assert e.closed == [True]
+        assert e.closed == []
         assert len(publications) >= 4
         first, initial = publications[0]
         frozen = {name: snapshot.block.schema for name, snapshot in initial.items()}
@@ -544,7 +592,12 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
                 host.poll()
                 wake.wait(.01)
                 wake.clear()
-        host.shutdown()
+        deadline = time.monotonic() + 5
+        while not host.shutdown() and time.monotonic() < deadline:
+            host.poll()
+            wake.wait(.01)
+            wake.clear()
+        assert host.shutdown()
 
 
 @pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "after-arm"])
@@ -730,6 +783,15 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         sequence = _sequence()
         resource = ResolvedWorkspaceResource(tmp_path / "pulse.json", "zlc.pulse/slm-rearrangement", sequence)
         values = SLM_REARRANGEMENT_SCHEMA.draft_values()
+        camera_outputs = ("before_frame", "before_occupied", "after_frame", "after_occupied", "phase")
+        for phase_method in ("iterative", "lpi"):
+            assert tuple(output.name for output in LOGIC_NODE.outputs_for(
+                {**values, "phase_method": phase_method}, {})) == camera_outputs + ("trajectory", "intensity_ratio")
+            assert tuple(output.name for output in LOGIC_NODE.outputs_for(
+                {**values, "phase_method": phase_method, "frame_mode": "camera_step"}, {})) == camera_outputs
+            assert tuple(preview.output.name for preview in LOGIC_NODE.previews_for(
+                {**values, "phase_method": phase_method, "frame_mode": "camera_step"}, {})) == (
+                    "before_frame", "after_frame", "phase")
 
         def project():
             values.update(LOGIC_NODE.resolve_defaults(values, {"pulse_template": resource}))
@@ -745,6 +807,11 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             ("Select Period", ""), ("Before image", "before"), ("Transport", "gap"), ("Verify image", "after")]
         assert form.read_value("nominal_playback_seconds") == pytest.approx(16/60)
         assert not form.widget_for("nominal_playback_seconds").isEnabled()
+        assert form.read_value("phase_method") == "iterative"
+        assert form.read_value("frame_mode") == "fixed"
+        assert form.widget_for("motion_frames").isEnabled()
+        assert not form.widget_for("max_camera_step").isEnabled()
+        assert form.widget_for("intensity_error_percent").isEnabled()
         patches = []
         form.draft_changed.connect(patches.append)
         QtTest.QTest.keyClick(before, QtCore.Qt.Key_Down)
@@ -753,6 +820,42 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         values.update(before_period="before", after_period="after", motion_frames=32)
         project()
         assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
+        frame_mode = form.widget_for("frame_mode")
+        QtTest.QTest.keyClick(frame_mode, QtCore.Qt.Key_Down)
+        app.processEvents()
+        assert patches[-1]["values"] == {"frame_mode": "camera_step"}
+        values.update(patches[-1]["values"], max_camera_step=.75)
+        project()
+        assert not form.widget_for("motion_frames").isEnabled()
+        assert form.widget_for("max_camera_step").isEnabled()
+        assert form.read_value("motion_frames") == 32
+        assert form.read_value("max_camera_step") == .75
+        assert form.read_value("nominal_playback_seconds") is None
+        assert form.widget_for("nominal_playback_seconds").placeholderText() == "Pending occupancy"
+        QtTest.QTest.keyClick(frame_mode, QtCore.Qt.Key_Up)
+        app.processEvents()
+        values.update(patches[-1]["values"])
+        project()
+        assert form.read_value("frame_mode") == "fixed"
+        assert form.widget_for("motion_frames").isEnabled()
+        assert not form.widget_for("max_camera_step").isEnabled()
+        assert form.read_value("max_camera_step") == .75
+        assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
+        phase_method = form.widget_for("phase_method")
+        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
+        app.processEvents()
+        assert patches[-1]["values"] == {"phase_method": "lpi"}
+        values.update(patches[-1]["values"])
+        project()
+        assert form.widget_for("intensity_error_percent").isEnabled()
+        assert form.read_value("intensity_error_percent") == 1.
+        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Up)
+        app.processEvents()
+        values.update(patches[-1]["values"])
+        project()
+        assert form.widget_for("intensity_error_percent").isEnabled()
+        with pytest.raises(ValueError, match="max_camera_step"):
+            SLM_REARRANGEMENT_SCHEMA.draft_values({**values, "max_camera_step": 0.})
         resource = replace(resource, value=replace(sequence, periods=tuple(
             replace(period, name="Renamed first image") if period.period_id == "before" else period
             for period in sequence.periods)))

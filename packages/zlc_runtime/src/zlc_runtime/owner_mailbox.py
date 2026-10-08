@@ -32,7 +32,7 @@ class RunOwnerMailbox:
     ) -> None:
         self._wake = request_owner_wake
         self._thread_name = thread_name_prefix
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._tracked: set[Future] = set()
         self._completions: list[OwnerCompletion] = []
         self._generation = 0
@@ -76,25 +76,32 @@ class RunOwnerMailbox:
         with self._lock:
             self._tracked.add(future)
 
-        def done(completed: Future) -> None:
-            with self._lock:
-                self._tracked.discard(completed)
-                self._completions.append(
-                    OwnerCompletion(kind, generation, completed)
-                )
-            self._wake()
-
-        future.add_done_callback(done)
-
         def run() -> None:
             if not future.set_running_or_notify_cancel():
+                with self._lock:
+                    self._tracked.discard(future)
+                    self._completions.append(OwnerCompletion(kind, generation, future))
+                self._wake()
                 return
+            failure = None
             try:
                 result = work()
             except BaseException as error:
-                future.set_exception(error)
-            else:
-                future.set_result(result)
+                failure = error
+            # Publish completion BEFORE settling the same Future. A late
+            # done callback can run immediately, even before registered
+            # callbacks; its owner poll must already be able to reap this
+            # operation. The lock also prevents polling an unfinished Future.
+            # Current callbacks only enqueue short owner work. RLock permits
+            # a same-thread callback to inspect/reap the mailbox itself.
+            with self._lock:
+                self._tracked.discard(future)
+                self._completions.append(OwnerCompletion(kind, generation, future))
+                if failure is None:
+                    future.set_result(result)
+                else:
+                    future.set_exception(failure)
+            self._wake()
 
         try:
             threading.Thread(

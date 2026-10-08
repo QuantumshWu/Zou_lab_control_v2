@@ -2138,8 +2138,10 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     np.testing.assert_array_equal(next_sequence["desired_amplitudes"][1:, discarded], 0)
     assert next_sequence["release_verified"] is False
     assert next_sequence["recommended_release_hold_frames"] == 1
-    assert next_sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 7)
-    assert next_sequence["recommended_motion_frames"] == 3
+    np.testing.assert_array_equal(next_sequence["motion_yx"][:3],
+                                  np.broadcast_to(plan["motion_yx"][0], (3, 2, 2)))
+    assert next_sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 5)
+    assert next_sequence["recommended_motion_frames"] == 5
     assert next_sequence["converged"]
     assert np.max(next_sequence["support_intensity_ratios"]) <= 1.01
     y = (np.arange(height) - height // 2) / height
@@ -2172,9 +2174,23 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                     assert candidate["discard_intensity_ratios"][frame] == pytest.approx(ratio, rel=1e-3, abs=1e-7)
     assert not np.shares_memory(sequence["phase_codes"], next_sequence["phase_codes"])
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
-    for bad_count in (0, True, 1.5, 8):
+    for bad_count in (0, True, 1.5, 2):
         with pytest.raises(ValueError, match="motion_frames"):
             slm_solver.compute_rearrangement(prepared, plan, motion_frames=bad_count)
+    grown = slm_solver.compute_rearrangement(prepared, plan, motion_frames=9)
+    assert grown["motion_frames"] == prepared["maximum_motion_frames"] == 9
+    np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+    if shape == (64, 80):
+        stop_rebinding = iter((False, True))
+        with pytest.raises(InterruptedError, match="preparation stopped"):
+            slm_solver.compute_rearrangement(
+                prepared, plan, motion_frames=11,
+                stop_requested=lambda: next(stop_rebinding, True),
+            )
+        assert prepared["gpu"]["motion_capacity"] == 0
+        restored = slm_solver.compute_rearrangement(prepared, plan, motion_frames=5)
+        assert restored["converged"] and len(restored["phase_codes"]) == 5
+        np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
     with pytest.raises(InterruptedError):
         slm_solver.compute_rearrangement(prepared, plan, stop_requested=lambda: True)
     stop_after_first_motion = iter((False, False, True))
@@ -2277,8 +2293,141 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             )
             np.testing.assert_allclose(translated["actual_fields"][frame], expected, rtol=2e-5,
                                        atol=2e-5 * np.min(abs(expected)))
+        nonuniform = np.array([.1, .4, .5, .7, 1.])
+        sampled = slm_solver.sample_rearrangement(translated_prepared, held_plan, motion_frames=5,
+                                                  motion_fractions=nonuniform)
+        waypoint_movie = slm_solver.compute_rearrangement(
+            translated_prepared, held_plan, motion_frames=5, motion_fractions=nonuniform,
+        )
+        np.testing.assert_array_equal(waypoint_movie["motion_yx"], sampled["motion_yx"])
+        np.testing.assert_array_equal(sampled["movement_fraction"], nonuniform)
+        np.testing.assert_array_equal(sampled["motion_yx"][2], held_plan["motion_yx"][1])
+        for fractions in ([.1, .4, .5, .7, .9], [.1, .4, .4, .7, 1.], [.1, .4, 1.]):
+            with pytest.raises(ValueError, match="motion_fractions"):
+                slm_solver.sample_rearrangement(translated_prepared, held_plan, motion_frames=5,
+                                                motion_fractions=fractions)
     finally:
         translated_prepared["close"]()
+
+    # The alternate method uses this same fractional geometry/encoder; its
+    # amplitude balancing cannot change the prescribed interpolation phase.
+    lpi = slm_solver.prepare_rearrangement(
+        source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
+        minimum_separation=2, endpoint_iterations=40, maximum_motion_frames=3,
+        endpoint_data={"source_phase": source_phase}, method="lpi",
+        target_intensities=np.array([1., 1.7]),
+        phase_center_yx=center + np.array([.25, -.75]),
+    )
+    try:
+        lpi_plan = slm_solver.plan_rearrangement(lpi, np.arange(4))
+        delivered = []
+        movie = slm_solver.compute_rearrangement(
+            lpi, lpi_plan, motion_frames=7,
+            frame_ready=lambda index, frame: delivered.append((index, frame)),
+        )
+        assert movie["quality_evaluated"] and movie["converged"]
+        assert max(movie["iterations"]) <= 16
+        assert max(movie["iterations"]) > 0
+        assert movie["field_projection_updates"] == (0,) * 7
+        assert [index for index, _ in delivered] == list(range(7))
+        assert lpi["maximum_motion_frames"] == 7
+        np.testing.assert_array_equal(lpi["initial_phase"], source_phase)
+        np.testing.assert_array_equal(movie["motion_yx"], next_sequence["motion_yx"])
+        assert np.any(movie["sites_yx"] != np.floor(movie["sites_yx"]))
+        coefficients = movie["desired_spectrum_coefficients"]
+        selected, destinations = movie["source_indices"], movie["target_indices"]
+        gauge = (lpi["phase_center_yx"] - center) / shape
+        source_gauge = 2 * np.pi * np.sum((source[selected] - center) * gauge, axis=1)
+        target_gauge = 2 * np.pi * np.sum((target[destinations] - center) * gauge, axis=1)
+        delta = np.angle(movie["endpoint_synthesis_coefficients"] * np.exp(1j * target_gauge)
+                         * (lpi["source_field"][selected] * np.exp(1j * source_gauge)).conj())
+        current_gauge = 2 * np.pi * np.sum((movie["sites_yx"][:, selected] - center) * gauge, axis=-1)
+        intended_phase = (np.angle(lpi["source_field"][selected]) + source_gauge
+                          + movie["movement_fraction"][:, None] * delta - current_gauge)
+        np.testing.assert_allclose(np.angle(coefficients[:, selected] * np.exp(-1j * intended_phase)),
+                                   0., atol=1e-6)
+        corrected = movie["synthesis_coefficients"]
+        np.testing.assert_allclose(np.angle(corrected[movie["active_sites"]]
+                                          * coefficients[movie["active_sites"]].conj()), 0., atol=1e-6)
+        for index, (code, positions) in enumerate(zip(movie["phase_codes"], movie["sites_yx"])):
+            signed = positions - center
+            latent = np.einsum("j,jh,jw->hw", corrected[index].astype(np.complex128),
+                               np.exp(2j * np.pi * signed[:, 0, None] * y),
+                               np.exp(2j * np.pi * signed[:, 1, None] * x), optimize=True)
+            error = np.angle(np.exp(1j * (phase_from_codes(code, shape).astype(float)
+                                          + aberration - np.angle(latent))))
+            assert np.max(abs(error[pupil > 0])) < 2 * np.pi / 256 + 1e-4
+        diagnostics = slm_solver.rearrangement_diagnostics(lpi, movie)
+        assert diagnostics["quality_evaluated"]
+        assert diagnostics["retained_intensity_ratios"][-1] <= 1.01
+        np.testing.assert_allclose(diagnostics["actual_fields"][-1, selected], movie["endpoint_field"],
+                                   rtol=2e-4, atol=2e-4 * np.min(abs(movie["endpoint_field"])))
+        for index, (code, positions) in enumerate(zip(movie["phase_codes"], movie["sites_yx"])):
+            signed = positions - center
+            field = pupil.astype(float) * np.exp(1j * (phase_from_codes(code, shape).astype(float) + aberration))
+            actual = np.einsum("jh,hw,jw->j", np.exp(-2j * np.pi * signed[:, 0, None] * y),
+                               field, np.exp(-2j * np.pi * signed[:, 1, None] * x), optimize=True)
+            np.testing.assert_allclose(diagnostics["actual_fields"][index], actual, rtol=2e-5,
+                                       atol=2e-5 * np.min(abs(actual[movie["active_sites"][index]])))
+            relative = abs(actual[selected] / movie["desired_amplitudes"][index, selected]) ** 2
+            assert diagnostics["retained_intensity_ratios"][index] == pytest.approx(relative.max() / relative.min(), rel=2e-5)
+            assert relative.max() / relative.min() <= 1.01
+        assert movie["quality_evaluated"]  # diagnostics does not mutate the movie
+        with pytest.raises(ValueError):
+            movie["phase_codes"].setflags(write=True)
+        saved = movie["phase_codes"].copy()
+        shortage = slm_solver.compute_rearrangement(lpi, slm_solver.plan_rearrangement(lpi, [0]), motion_frames=7)
+        assert shortage["target_filled"].sum() == 1
+        assert shortage["endpoint_support_intensity_ratio"] <= 1.01
+        assert shortage["endpoint_iterations"] <= 64
+        np.testing.assert_array_equal(movie["phase_codes"], saved)
+        empty = slm_solver.compute_rearrangement(lpi, slm_solver.plan_rearrangement(lpi, []), motion_frames=7)
+        assert empty["noop"] and not len(empty["phase_codes"])
+        calls = []
+        def reject_frame(index, frame):
+            calls.append(index)
+            raise RuntimeError("consumer rejected map")
+        with pytest.raises(RuntimeError, match="consumer rejected map"):
+            slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, frame_ready=reject_frame)
+        assert calls == [0]
+    finally:
+        lpi["close"]()
+    np.testing.assert_array_equal(movie["phase_codes"], saved)
+    static_lpi = slm_solver.prepare_rearrangement(
+        source, source[:2], shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
+        minimum_separation=2, maximum_motion_frames=2, endpoint_iterations=20,
+        endpoint_data={"source_phase": source_phase}, method="lpi",
+    )
+    try:
+        static = slm_solver.compute_rearrangement(
+            static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=7,
+        )
+        assert static["maximum_step"] == 0
+        np.testing.assert_array_equal(static["phase_codes"][1:], np.broadcast_to(static["phase_codes"][1], (6, *shape)))
+        selected = static["source_indices"]
+        np.testing.assert_allclose(np.angle(static["desired_spectrum_coefficients"][:, selected]
+                                          * static_lpi["source_field"][selected].conj()), 0., atol=1e-6)
+        assert slm_solver.rearrangement_diagnostics(static_lpi, static)["support_intensity_ratios"][-1] <= 1.01
+    finally:
+        static_lpi["close"]()
+    if shape == (64, 80):
+        # More authored destinations than sources use the same prepared owner;
+        # only the actually filled endpoint is balanced once after selection.
+        larger_target = np.concatenate((source, source + np.array([12, 0])))
+        larger = slm_solver.prepare_rearrangement(
+            source, larger_target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
+            minimum_separation=2, maximum_motion_frames=2, endpoint_iterations=64,
+            target_intensities=np.full(8, 2.), endpoint_data={"source_phase": source_phase}, method="lpi",
+        )
+        try:
+            partial = slm_solver.compute_rearrangement(larger, slm_solver.plan_rearrangement(larger, np.arange(4)),
+                                                      motion_frames=5)
+            assert partial["target_filled"].sum() == 4
+            assert partial["endpoint_support_intensity_ratio"] <= 1.01
+            assert partial["endpoint_iterations"] <= 64
+            assert slm_solver.rearrangement_diagnostics(larger, partial)["support_intensity_ratios"][-1] <= 1.01
+        finally:
+            larger["close"]()
 
 
 

@@ -606,6 +606,14 @@ def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -
     replacement_id = presenter.add_logic("replacement")
     assert presenter.start_logic(old_id) is True
     old_host = presenter.logic[old_id].host
+    presenter.logic[old_id].node.restart_from = lambda _fresh: True
+    assert presenter.start_logic(old_id)
+    deadline = time.monotonic() + 2.0
+    while presenter.logic[old_id].pending is not None and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(.001)
+    assert presenter.logic[old_id].host is old_host
+    assert old_host.running
     assert presenter.start_logic(replacement_id) is True
     assert presenter.logic[replacement_id].pending is not None
     assert presenter.logic[replacement_id].host is None
@@ -1331,36 +1339,71 @@ def test_slm_feedback_form_has_a_visible_numeric_exposure_default(presenter) -> 
 
 
 
+@pytest.mark.parametrize("retire", ("remove", "board", "window"))
 def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
     presenter,
     tmp_path,
+    retire,
 ) -> None:
     import json
 
-    from zlc_atom.authoring import AuthoringSchema
+    from threading import Event, current_thread, main_thread
+
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
     from zlc_atom.nodes import (
         ArtifactCodec,
         ArtifactInputSpec,
         LogicNodeDescriptor,
         NodeKind,
         ResolvedArtifact,
+        WorkspaceResourceSpec,
     )
 
     builds: list[object] = []
     decodes: list[Path] = []
+    runs, closed = [], []
+    closing, release = Event(), Event()
+    release.set()
 
     def decode(path: Path) -> object:
         decodes.append(path)
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def build(*, artifact_path):
+    def build(*, artifact_path, pulse_resource):
         builds.append(artifact_path)
-        return SimpleNamespace(execute=lambda _context: {})
+        node = SimpleNamespace(artifact=artifact_path, pulse=pulse_resource,
+                               prepared=None, close_failure=False)
+
+        def execute(context):
+            if node.prepared is None:
+                node.prepared = object()
+            runs.append((node.artifact.value, node.pulse.value, node.prepared,
+                         context.run_directory))
+            context.report_progress("inputs accepted")
+
+        def restart_from(fresh):
+            if node.artifact.value.get("optical") != fresh.artifact.value.get("optical"):
+                return False
+            node.artifact, node.pulse = fresh.artifact, fresh.pulse
+            return True
+
+        def close():
+            assert current_thread() is not main_thread()
+            if node.prepared is not None:
+                closed.append(node)
+                closing.set()
+                assert release.wait(2)
+                node.prepared = None
+                if node.close_failure:
+                    raise RuntimeError("discard resource close failed")
+
+        node.execute, node.restart_from, node.close = execute, restart_from, close
+        return node
 
     descriptor = LogicNodeDescriptor(
         "artifact_consumer",
         NodeKind.TASK,
-        AuthoringSchema(),
+        AuthoringSchema((AuthoringField("pulse_template", "resource", "Pulse", "", required=True),)),
         input_specs=(
             ArtifactInputSpec(
                 "artifact_path",
@@ -1373,14 +1416,22 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
                 ),
             ),
         ),
+        workspace_resources=(WorkspaceResourceSpec(
+            "pulse_template", "probe.pulse", "pulses", (".json",),
+            lambda path: json.loads(path.read_text(encoding="utf-8")),
+            argument_name="pulse_resource",
+        ),),
         node_previews=(),
         build=build,
     )
     presenter.catalog = LogicCatalog((descriptor,))
     selected = tmp_path / "selected.json"
     selected.write_text('{"format":"probe"}', encoding="utf-8")
+    pulse = presenter.session.workspace.root / "pulses" / "restart-probe.json"
+    pulse.write_text('{"period":1}', encoding="utf-8")
     node_id = presenter.add_logic(
         "artifact_consumer",
+        values={"pulse_template": str(pulse)},
         artifact_inputs={"artifact_path": str(selected)},
     )
 
@@ -1398,6 +1449,90 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
     ]
     assert resolved.path == selected.resolve()
     assert resolved.value == {"format": "probe"}
+    deadline = time.monotonic() + 2
+    while presenter.logic[node_id].host.running and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(.001)
+    binding = presenter.logic[node_id]
+    original_host, original_node = binding.host, binding.node
+    assert original_host.observation.phase == "done"
+    original_prepared = original_node.prepared
+    decodes.clear()
+    selected.write_text('{"format":"probe","revision":2}', encoding="utf-8")
+    pulse.write_text('{"period":2}', encoding="utf-8")
+    assert presenter.start_logic(node_id)
+    deadline = time.monotonic() + 2
+    while (binding.pending is not None or binding.host.running) and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(.001)
+    assert binding.host is original_host and binding.node is original_node
+    assert decodes == [selected.resolve()]
+    assert runs[1][:3] == ({"format": "probe", "revision": 2}, {"period": 2}, original_prepared)
+    assert runs[1][3] != runs[0][3]
+    assert closed == []
+
+    # The plugin rejects optical reuse; replacement waits for its old owner
+    # to release off the UI thread, rather than requiring another Start.
+    selected.write_text('{"format":"probe","optical":1}', encoding="utf-8")
+    release.clear()
+    assert presenter.start_logic(node_id)
+    assert closing.wait(1)
+    assert binding.pending is not None and binding.host is original_host
+    release.set()
+    deadline = time.monotonic() + 2
+    while (binding.pending is not None or binding.host.running) and time.monotonic() < deadline:
+        presenter.poll_logic()
+        time.sleep(.001)
+    assert binding.host is not original_host
+    assert binding.host.observation.phase == "done"
+    assert runs[2][2] is not original_prepared
+    assert closed == [original_node]
+    if retire == "remove":
+        discarded = presenter._build_logic_candidate(
+            binding, presenter._finalize_logic_binding(binding, force=True))
+        discarded.node.prepared = object()
+        discarded.node.close_failure = True
+        closing.clear()
+        release.clear()
+        presenter._discard_candidate(binding, discarded)
+        assert closing.wait(1)
+        assert not discarded.host.closed
+        release.set()
+        deadline = time.monotonic() + 2
+        while not discarded.host.closed and time.monotonic() < deadline:
+            presenter.beat()
+            time.sleep(.001)
+        assert discarded.host.closed
+        assert discarded.node.prepared is None
+        presenter.beat()
+        errors = [text for severity, text in presenter.view.status
+                  if severity == "error" and "discard resource close failed" in text]
+        assert len(errors) == 1
+    final_node = binding.node
+    closing.clear()
+    release.clear()
+    close_requests = []
+    if retire == "remove":
+        assert presenter.remove_logic(node_id) is False
+    elif retire == "board":
+        assert presenter.clear_board()
+    else:
+        presenter._request_close = lambda: close_requests.append(True)
+        assert presenter.close() is False
+        presenter.beat()
+    assert closing.wait(1)
+    assert node_id in presenter.logic
+    release.set()
+    deadline = time.monotonic() + 2
+    while node_id in presenter.logic and time.monotonic() < deadline:
+        presenter.beat() if retire == "window" else presenter.poll_logic()
+        time.sleep(.001)
+    assert node_id not in presenter.logic
+    assert closed == ([original_node, discarded.node, final_node]
+                      if retire == "remove" else [original_node, final_node])
+    if retire == "window":
+        assert presenter._closed
+        assert close_requests == [True], "resource release needed a second Close click"
 
 
 def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(

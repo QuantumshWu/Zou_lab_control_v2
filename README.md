@@ -295,22 +295,38 @@ from the first photograph enter matching. Surplus atoms are discarded by fading
 their traps; shortage is a normal partial fill, not an acquisition failure.
 Invalid classification remains invalid, never an empty-site assertion.
 
-**Movement frames** is the total N maps, with integrated fade. There are no
-separate removal-ramp, dark-tolerance or matching-radius controls. At the defaults,
-16 maps / 60 Hz gives a nominal display duration of about 267 ms; computation,
-upload and playback now overlap, while startup stalls and any remaining final
-optical settle extend the measured window. **Maximum intensity
-spread (%)** (`intensity_error_percent`, default 1%) means the weighted
-maximum/minimum intensity ratio minus one; 1% maps to a solver ratio of 1.01.
-It is not a bound on absolute trap-depth change or atom loss.
+**Phase method** selects the existing **Iterative** method or **LPI (phase
+interpolation)**. Both share the same assignment, fractional paths, collision
+checks, device mapping and playback. LPI interpolates site phases in the pupil's
+optical-axis reference and holds those coefficient phases during amplitude
+balancing. It is not a claim of one-FFT-per-frame performance or flicker-free
+physical response. Offline endpoint synthesis weights are distinct from the
+measured model fields. The exact input Science Context is still displayed first.
 
-As a starting reference for linear-phase interpolation, aim for no more than
-about one Fourier bin per frame; this is not an atom-survival guarantee. Check
-the report's actual maximum step and reference frame count for one-bin steps.
-For the current minimum-total-distance 225 → 100 case above, the longest
-assignment edge is 190.39 bins and the actual maximum step with 10 maps is
-19.3447 bins; its routed timing gives a 194-frame one-bin-step reference.
-Minimum total distance is not minimum longest move or minimum playback time.
+**Frame count** selects fixed total maps or **Maximum camera step**. Fixed mode
+uses **Movement frames** (default 16); camera-step mode uses the maximum 2D
+Euclidean movement in **original sensor pixels**, not Fourier bins or binned
+image indices. It uses the existing Calibration/ROI/binning conversion, retains
+each path waypoint, and computes the actual count after occupancy is known.
+The inactive input retains its value. Both policies include up to two initial
+source-fade maps before moving; these are not hidden additional frames. Automatic
+duration is therefore pending until matching. An infeasible Pulse budget is
+reported, not repaired by skipping frames or enlarging the requested step.
+
+At the fixed defaults, 16 maps / 60 Hz is about 267 ms nominal. Computation,
+upload and playback overlap; startup stalls and remaining final optical settle
+extend the measured window. **Intensity tolerance (%)** (default 1%) is the
+weighted maximum/minimum ratio minus one. LPI accepts retained-site uniformity;
+Iterative additionally enforces its removed-neighborhood criterion. The report
+distinguishes retained, fading and all-active fields and reports background after
+the photographs. Common trap-depth changes due to redistribution are allowed;
+uniformity is not an atom-survival guarantee.
+
+Repeated Start reuses compatible GPU preparation, not old occupancy or results.
+Files and Pulse inputs are reread each time; changed optical inputs rebuild the
+working point. Stop keeps numeric resources; removing the node or closing the
+console releases them. The source phase is still re-established and the camera
+armed for every experiment. Minimum total distance is not minimum longest move or minimum playback time.
 Passing geometric clearance does not validate atomic transport. Pupil center
 and illumination must match the real beam, and phase
 continuity must be interpreted relative to the physical optical axis. A configured
@@ -332,9 +348,11 @@ earlier verified frames may already have played. The report keeps the actual
 confirmed prefix and partial outcome, not an assertion that nothing was shown.
 
 The three automatic previews are before photo + occupancy, after photo +
-occupancy, and source/final phase. The **trajectory** signal stores full ordered
+occupancy, and source/final phase. In fixed-frame mode the **trajectory** signal stores full ordered
 X,Y positions by step and source identity, including the initial position;
-it is not automatically plotted as Y against frame. Saved
+it is not automatically plotted as Y against frame. Camera-step mode does not
+publish guessed live trajectory/quality axes before their size is known; both
+remain available as the same saved typed Figure/NPZ artifacts with actual N. Saved
 `figures/trajectory_2d.npz` + `.png` overlay commanded paths on the actual before
 photograph, in its camera coordinates. They retain the same complete SiteMap,
 status, labels, image display and site-spacing-based sizes as the before/after

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from zlc_pulse import PulseSequence
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.slm.solver import (
     SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
@@ -32,10 +32,9 @@ from .task import (
     BEFORE_FRAME_OUTPUT,
     BEFORE_OCCUPIED_OUTPUT,
     PHASE_OUTPUT,
-    QUALITY_OUTPUT,
     REARRANGEMENT_ARTIFACT_CONTRACT,
-    TRAJECTORY_OUTPUT,
     SlmRearrangementTask,
+    rearrangement_outputs,
 )
 
 
@@ -72,19 +71,29 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
         AuthoringField("after_period", "text", "After imaging Period", "", required=True),
         AuthoringField("exposure_seconds", "float", "Camera exposure", .005, minimum=1e-9, unit="s",
                        description="Authored camera integration; the Task does not compare it with Pulse Period lengths."),
-        AuthoringField("motion_frames", "int", "Movement frames", 16, minimum=1, maximum=256,
-                       description="Total displayed maps. The report gives the largest movement per frame; approximately one Fourier pixel per frame is a starting reference, not an atom-survival guarantee."),
+        AuthoringField("frame_mode", "choice", "Frame count", "fixed",
+                       choices=(AuthoringChoice("fixed", "Fixed frames"),
+                                AuthoringChoice("camera_step", "Maximum camera step"))),
+        AuthoringField("motion_frames", "int", "Total frames", 16, minimum=1, maximum=256,
+                       enabled_when=("frame_mode", ("fixed",)),
+                       description="Total displayed maps, including up to two trap-removal frames and the destination; excludes the already displayed source."),
+        AuthoringField("max_camera_step", "float", "Maximum camera step", 1., minimum=1e-9, unit="pixel",
+                       enabled_when=("frame_mode", ("camera_step",)),
+                       description="Maximum two-dimensional Euclidean movement per frame in original camera sensor pixels. The actual frame count is determined after occupancy and path planning."),
         AuthoringField("frame_rate_hz", "float", "Display frame rate", 60., minimum=1e-9, unit="Hz",
                        description="Requested display cadence, not a measured liquid-crystal response."),
         AuthoringField(
             "nominal_playback_seconds", "float", "Display duration", None,
             derived=True, unit="s",
             description=(
-                "Movement frame count divided by the SLM frame rate. "
+                "Total frame count divided by the SLM frame rate. Automatic frame count remains pending until occupancy and path planning. "
                 "GPU computation, upload, preparation and any additional optical settling are excluded."
             ),
         ),
-        AuthoringField("minimum_separation", "float", "Minimum spacing", 4.5, minimum=0., unit="pixel",
+        AuthoringField("phase_method", "choice", "Phase method", "iterative",
+                       choices=(AuthoringChoice("iterative", "Iterative"), AuthoringChoice("lpi", "LPI (phase interpolation)")),
+                       description="LPI interpolates site phases, holds each frame's phases fixed during amplitude balancing, and records the iteration count. Both methods enforce the intensity tolerance."),
+        AuthoringField("minimum_separation", "float", "Minimum Fourier spacing", 4.5, minimum=0., unit="pixel",
                        description="Continuous separation of occupied traps, including surplus atoms while their traps fade. Fourier coordinates are not micrometres."),
         AuthoringField("intensity_error_percent", "float", "Intensity tolerance (%)", 1., minimum=0.,
                        description="Maximum/minimum intensity after division by requested site weights, minus one. This is not a bound on absolute trap-depth change or atom loss."),
@@ -96,6 +105,8 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
 
 def _resolve_defaults(values, resources):
     del resources
+    if values.get("frame_mode", "fixed") == "camera_step":
+        return {"nominal_playback_seconds": None}
     try:
         frames = int(values.get("motion_frames", 16))
         rate = float(values.get("frame_rate_hz", 60.))
@@ -186,8 +197,8 @@ def _rearrangement_editor_factory(parent=None):
             self._groups = (
                 ("Target grid", ("target_rows","target_columns")),
                 ("Imaging", ("before_period","after_period","exposure_seconds")),
-                ("Movement", ("motion_frames","frame_rate_hz","nominal_playback_seconds")),
-                ("Quality and output", ("minimum_separation","intensity_error_percent","save_phase_sequence")),
+                ("Movement", ("frame_mode","motion_frames","max_camera_step","frame_rate_hz","nominal_playback_seconds")),
+                ("Quality and output", ("phase_method","minimum_separation","intensity_error_percent","save_phase_sequence")),
             )
             self._forms = {}
             for title, keys in self._groups:
@@ -251,6 +262,7 @@ def _rearrangement_editor_factory(parent=None):
             for title, keys in self._groups:
                 selected = tuple(field for field in fields if field.key in keys)
                 self._forms[title].reconcile(FormSpec(selected), {field.key:values[field.key] for field in selected})
+            self.widget_for("nominal_playback_seconds").setPlaceholderText("Pending occupancy")
             use_grid = not str((projection.get("artifact_values") or {}).get("end_target_path", "")).strip()
             for key in ("target_rows", "target_columns"):
                 self.widget_for(key).setEnabled(use_grid)
@@ -274,9 +286,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactInputSpec("end_target_path", "End Target (blank = grid)", _TARGET_CODEC,
                           required=False, argument_name="end_target"),
     ),
-    outputs=(BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT, AFTER_FRAME_OUTPUT,
-             AFTER_OCCUPIED_OUTPUT, PHASE_OUTPUT, TRAJECTORY_OUTPUT, QUALITY_OUTPUT),
-    node_previews=(
+    declare_outputs=lambda values, devices: rearrangement_outputs(str(values.get("frame_mode", "fixed"))),
+    node_previews=(),
+    declare_previews=lambda values, devices: (
         NodePreviewSpec(BEFORE_FRAME_OUTPUT, "image", overlay=BEFORE_OCCUPIED_OUTPUT),
         NodePreviewSpec(AFTER_FRAME_OUTPUT, "image", overlay=AFTER_OCCUPIED_OUTPUT),
         NodePreviewSpec(PHASE_OUTPUT, "image"),

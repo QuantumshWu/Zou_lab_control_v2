@@ -457,6 +457,8 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- 同一Task提供Iterative/LPI与fixed/camera_step帧数政策；共享planner、分数路径、先去阱再移动的总N采样、设备映射/流水线/相机报告。camera_step按实际注册及ROI/binning的原始sensor二维像素距离逐段细分，保留waypoint。LPI用同一固定相位幅度均衡准备source/target合成系数并分清实际光场，在线插值相位后只修幅度，使保留site相对均匀；不声称一次IFFT，不做自由相位暗区投影，复拍后公共诊断报告背景。整体深度变化允许，无恒功率约束。
+- 同一配置Task/Host跨Start保留一个有界GPU工作区；每轮fresh输入及run数据重新建立，光学配置变化重备，Stop保留、退休/删除/shutdown后台释放。GPU容量不足只增长必要缓冲和重绑graph；pinned仅单帧staging，完整影片caller-owned。固定模式保留7 live输出；auto仅5相机/phase live，真实N轨迹/质量保存同一Figure/NPZ，避免冻结假轴。
 - Fourier正反传播复用同帧Y载频根：既有root入口在频率更新时生成float64正余弦，既有work按band容量持有complex128数组，删除每轮pack的重复三角计算。没有改变求解目标、数值精度、验收门限或播放节奏；独立传播和奇数尺寸直接用例通过，归档回放相位码、光场和迭代次数逐位一致。
 - 有线批次20–29复核：普通相位/序列灰度映射、归档读出和Pulse重编译一致；网络已非主要等待，不能把现场丢原子认定为通信故障。第28次无位置移动仍有末态缺失，计算光场的保留阱强度约为初始3.3倍；简单同步相位插值未复现塌阱，尚不能确定实际损失原因。summary JSON/text现直接汇总已有光强比例和相位步长，明确它们是计算而非实测/播放保证；不改分类阈值、Pulse或设备等待。
 - Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
@@ -470,12 +472,12 @@
 - 参数使用四组既有FluentParameterForm（Target grid、Imaging、Movement、Quality and output）。后续质量失败不得提交越过该帧的图；Task取消并等待播放，保存已经确认的前缀、partial和原错误，不再宣称失败时整部影片未播放。首帧host可用/显示确认、copy、callback含背压用时及total分别记录，total包含callback时间。
 - 相邻完全相同相位图发送前帧引用，复用mapping及已确认像素，通过HOLD保留每个authored时间槽，不重复DVI/USB/world apply。dispatch/ACK只列实际presentation，step/confirmation列全部逻辑步骤；最终settle从最后真实ACK起算。未知状态不HOLD，上传连接早断、旧token、Stop与错误主因均有定向验证。
 - 自动preview仍只有前图+占据、后图+占据、源/最终phase三张；相机geometry不污染phase。trajectory_2d改用真实before照片与同一完整SiteMap，将已有Fourier轨迹经已有Target→camera注册及公共图像坐标入口转换，保存原始Fourier数据和相机路径，不生成第二条科学轨迹。before/after/path共用相机坐标和图像显示，尺寸按完整站点间距；删除image-span/cell-pitch半径上限，不改公共颜色/线宽。路径仍只有末端单箭头，同色site/path/head并集单次alpha，未参与路径者保持静止图标。
-- 当前master仅修改路径展示与报告，不合入LPI。报告新增逐指派的移动/原地分类、末态有效/占据及主动舍弃；采用已有camera timestamp及播放回执列出实际间隔/新presentation/online耗时，与请求60Hz及名义时长分开。它们是注册后的命令与终点占据，不是原子身份跟踪或物理方向的独立标定。
+- 报告记录算法、帧数政策、实际N和sensor像素最大位移；逐指派的移动/原地分类、末态有效/占据及主动舍弃仍共用。采用已有camera timestamp及播放回执列出实际间隔/新presentation/online耗时，与请求60Hz及名义时长分开；不冒充原子身份跟踪或物理方向标定。
 - before/path的站点编号完全复用公共定位/字号，删除路径专属的站点编号重排；仅额外时序注释避让。绘制末段在真实终点前留空并去掉终点圆帽小点，短段不反向，原始坐标与照片/SiteMap图标保持不变。
 - 报告仅在复拍或实际失败后写：两张已有照片及counts/occupied/validity/threshold、源/终点目标、匹配与路径、默认开启的精确uint8序列、冻结Calibration/Context事实、实际Pulse/device receipts、分阶段时间及公共Figure NPZ+PNG。准备、readout、matching、generator solve/copy、upload、play/final settle与save窗口分别记录，重叠/包含窗口不相加。Stop/failure保留partial、原始错误与最后已确认phase；unknown outcome明确记录，释放预装载与pinned movie。
 - Windows新增用户要求的bin/install_slm_gpu.bat，复用唯一installer及Python resolver，按manifest安装slm-gpu pinned CuPy/CTK，不安装NVIDIA driver。进度与原始错误可见，保存%TEMP%/zlc-slm-gpu-install.log并保留exit code/pause；安装后显示解释器/GPU并执行真实dot+FFT。fake interpreter launcher验证与当前venv GPU小计算已通过，验证过程未执行安装或下载。
 - RTX5070 Laptop、完整1024×1272、25-bin格距、10图，同进程对照生成中位：静止35→9为68.94→46.41ms，移动225→100为72.69→66.62ms，刚性400为223.23→45.46ms，随机200/400占据→100为144.66→117.93ms。后两项分别包含几何setup204.75→28.54、50.73→20.04ms；保守pair下界删掉不可能决定clearance的比较，候选仍与brute-force精确相同。静止35的15/30图79.57/110.23→45.10/47.09ms，不将其冒充一般移动速度。
-- 准备删除无消费者initial_pattern_phase及死GPU clearance kernel；source35 max30的pinned预留252→64MiB，graph5→1，暖准备记录417–476→355–385ms；新CUDA编译2.49s另计。实测N==maximum第一次分配消耗预留块，两个仍持有的结果跨下一次compute及close保持独立有效，不清全局allocator，也不新增跨run工作点缓存。
+- 准备不保留无消费者的initial_pattern_phase、旧clearance kernel或历史影片；graph/缓冲按当前working point需要构建，旧host影片跨下一次compute和close保持独立有效，不清全局allocator。
 - 同一当前device/wire下，7775 solver流水线→优化solver流水线，计时完整含matching及首callback的prepare/bind：真实17/35→9、16图首输出27.53→58.56ms、总428.34→439.48ms（setup3.88→19.19，未证明小case全链路变快）；非刚性200/400→100、10图首输出100.32→34.08ms、总336.03→283.31ms。此前sequential→pipeline是不同基线，不拿它冒充本轮收益。冷准备、readout与save另计，软件ACK/模拟presenter不代表液晶响应。
 - exact重复图的CPU/RPC回放：10/15/30逻辑帧payload13.03/19.54/39.08→2.61MB，mapping及真实present各降到2；模拟100Mb/s总1197/1742/3432→394/473/720ms，本地231/319/579→196/286/530ms，不含GPU/准备。全不同帧仍有精确比较成本（本地10图一组中位+1.8ms）；受控idle追踪未证明固定的1G回退，mock小包等待本身有调度误差。未添加无证据的ACK窗口。实图压缩试验中LZ4移动uint8略增大；float32字节转置后省16%但总编解码约29ms，仅假设百兆有小收益，故不加入生产压缩、测速状态或依赖，profiling-only依赖已移除。
 - 每张实际相位码的独立complex128检查：35→9 worst bright1.008742、fade后removed5×5最大比1.0801e-5；225→100 worst bright1.009875、fade后最大比0.003415。225最小总距离解的最长指派边190.39 Fourier bins，10图实际最大步19.3447 bins，按同一路径/时间分配的≤1 bin/frame参考194图，不能把10图称为原子安全。35片段只有2张不同图，已验证静止后缀复用；它的pupil相位步RMS为0.570/1.141rad后接近0，不与焦面相位步长混称。
