@@ -583,6 +583,7 @@ Node new chunk
 
 ### 8.5 一次成像重排 Task
 
+- `slm_rearrangement_recording`复用同一Task执行器：用户Pulse、First imaging Period、录制张数（默认50）；首张收到的图对应标明的初始imaging，随后后台重排，采集不中断。不比较曝光/Period、重排预算或后续照片早晚，不拆Pulse。图片按原始数值逐张保存到frames/*.tif，复用原Task归档，不增加逐帧分析报告。最后一张不伪称重排后的验证；真实设备错误和Stop仍保存已收到的图片。
 - `slm_rearrangement`是具体Task plugin：输入source Science Context和Calibration，可选显式End Target JSON；留空时`target_rows/target_columns`（默认3×3）生成中央矩形。两者复用相同核心与源pupil/operator；目标位置未被当前Calibration覆盖时，照片照常保存但该位置的占据验证保持invalid，不复制邻居阈值或伪造标定。复用Camera Measurement、既有读出/分类、SLM solver、device sequence、TaskRun及公共Plot/Figure，不新增实验编排框架。
 - 参数界面直接复用四组FluentParameterForm：Target grid、Imaging、Movement、Quality and output；不另建参数控件或表单框架。
 - 同一配置Task/Host跨Start保留自己的GPU工作区；每轮仍fresh解析输入、重置运行数据并恢复/确认源相位和arm相机。光学配置或GPU几何改变时重备，Stop保留，退休/删除/shutdown后台释放。fixed声明原7个live输出；camera_step在占据前不知道真实N，只声明相同5个相机/phase输出，轨迹和质量按事后真实N保存公共Figure/NPZ，不猜测live轴，不改Runtime冻结词汇。

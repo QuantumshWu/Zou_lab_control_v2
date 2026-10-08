@@ -457,6 +457,7 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- 连续拍照Task `slm_rearrangement_recording`复用执行器/表单：初始imaging Period、默认50张，无复拍deadline/曝光比较；首帧启动后台重排，持续收图，逐张无损TIFF保存到frames/。仅复用原归档，不加逐帧分析；原两张验证Task保持语义。
 - 同一Task提供Iterative/LPI与fixed/camera_step帧数政策；共享planner、分数路径、先去阱再移动的总N采样、设备映射/流水线/相机报告。camera_step按实际注册及ROI/binning的原始sensor二维像素距离逐段细分，保留waypoint。LPI用同一固定相位幅度均衡准备source/target合成系数并分清实际光场，在线插值相位后只修幅度，使保留site相对均匀；不声称一次IFFT，不做自由相位暗区投影，复拍后公共诊断报告背景。整体深度变化允许，无恒功率约束。
 - 同一配置Task/Host跨Start保留一个有界GPU工作区；每轮fresh输入及run数据重新建立，光学配置变化重备，Stop保留、退休/删除/shutdown后台释放。GPU容量不足只增长必要缓冲和重绑graph；pinned仅单帧staging，完整影片caller-owned。固定模式保留7 live输出；auto仅5相机/phase live，真实N轨迹/质量保存同一Figure/NPZ，避免冻结假轴。
 - Fourier正反传播复用同帧Y载频根：既有root入口在频率更新时生成float64正余弦，既有work按band容量持有complex128数组，删除每轮pack的重复三角计算。没有改变求解目标、数值精度、验收门限或播放节奏；独立传播和奇数尺寸直接用例通过，归档回放相位码、光场和迭代次数逐位一致。

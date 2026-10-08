@@ -131,9 +131,14 @@ def _build(
     pulse_resource: ResolvedWorkspaceResource,
     end_target: ResolvedArtifact | None = None,
     save_figure_artifact: object = None,
+    recording_frames: int | None = None,
+    schema: AuthoringSchema = SLM_REARRANGEMENT_SCHEMA,
     **values: object,
 ) -> SlmRearrangementTask:
-    authored = SLM_REARRANGEMENT_SCHEMA.project_values(values)
+    if recording_frames is not None:
+        values["recording_frames"] = recording_frames
+    authored = schema.project_values(values)
+    recording = "recording_frames" in authored
     if not isinstance(calibration, ResolvedArtifact) or not isinstance(calibration.value, TrapCalibration):
         raise TypeError("calibration must be a resolved calibration artifact")
     if not isinstance(science_context, ResolvedArtifact):
@@ -141,11 +146,12 @@ def _build(
     if not isinstance(pulse_resource, ResolvedWorkspaceResource) or not isinstance(pulse_resource.value, PulseSequence):
         raise TypeError("pulse_resource must be a resolved imaging pulse")
     period_ids = tuple(period.period_id for period in pulse_resource.value.periods)
-    for key in ("before_period", "after_period"):
+    for key in (("before_period",) if recording else ("before_period", "after_period")):
         if authored[key] not in period_ids:
             raise ValueError(f"{key} names a Period absent from the selected imaging pulse")
-    if period_ids.index(authored["before_period"]) >= period_ids.index(authored["after_period"]):
+    if not recording and period_ids.index(authored["before_period"]) >= period_ids.index(authored["after_period"]):
         raise ValueError("Before imaging Period must precede after imaging Period")
+    authored.setdefault("after_period", "")
     destination = None
     if end_target is not None:
         destination, kind = end_target.value
@@ -174,7 +180,7 @@ def _build(
     )
 
 
-def _rearrangement_editor_factory(parent=None):
+def _rearrangement_editor_factory(parent=None, *, schema=SLM_REARRANGEMENT_SCHEMA):
     """Project the selected Pulse's Periods into the leaf's Fluent form."""
     from collections.abc import Mapping
     from dataclasses import replace
@@ -185,7 +191,7 @@ def _rearrangement_editor_factory(parent=None):
     class RearrangementForm(QtWidgets.QWidget):
         draft_changed = QtCore.pyqtSignal(object)
         managed_fields = tuple(
-            field.name for field in SLM_REARRANGEMENT_SCHEMA.fields
+            field.name for field in schema.fields
             if field.value_type != "resource"
         )
 
@@ -196,7 +202,7 @@ def _rearrangement_editor_factory(parent=None):
             layout.setSpacing(scaled_px(6,minimum=4))
             self._groups = (
                 ("Target grid", ("target_rows","target_columns")),
-                ("Imaging", ("before_period","after_period","exposure_seconds")),
+                ("Imaging", ("before_period","after_period","recording_frames","exposure_seconds")),
                 ("Movement", ("frame_mode","motion_frames","max_camera_step","frame_rate_hz","nominal_playback_seconds")),
                 ("Quality and output", ("phase_method","minimum_separation","intensity_error_percent","save_phase_sequence")),
             )

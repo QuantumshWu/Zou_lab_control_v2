@@ -8,6 +8,7 @@ import sys
 from dataclasses import replace
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import numpy as np
 from zlc_data import (AxisId, AxisSpec, COMPONENT, SCAN_POINT, SPATIAL_Y, SPATIAL_X,
@@ -162,11 +163,11 @@ class SlmRearrangementTask:
                  signal_plane, calibration, calibration_path, science_context,
                  science_context_path, target_rows=3, target_columns=3,
                  target_intensity=None, target_path=None,
-                 pulse_sequence, pulse_path, before_period, after_period,
+                 pulse_sequence, pulse_path, before_period, after_period="",
                  exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
                  phase_method="iterative", frame_mode="fixed", max_camera_step=1.,
                  minimum_separation=4.5, intensity_tolerance=1.01,
-                 save_phase_sequence=True, save_figure_artifact=None):
+                 save_phase_sequence=True, save_figure_artifact=None, recording_frames=None):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane = signal_plane
@@ -188,6 +189,10 @@ class SlmRearrangementTask:
         self._prepared = None
         self._gpu_reused = False
         self._camera_maximum_step = None
+        self.recording_frames = None if recording_frames is None else int(recording_frames)
+        if self.recording_frames is not None and self.recording_frames < 2:
+            raise ValueError("Recording requires at least two camera frames")
+        self._camera_recordings = []
         self.frame_rate_hz = float(frame_rate_hz)
         self.minimum_separation = float(minimum_separation)
         self.intensity_tolerance = float(intensity_tolerance)
@@ -230,7 +235,7 @@ class SlmRearrangementTask:
 
     @property
     def dataset_output_declarations(self):
-        return rearrangement_outputs(self.frame_mode)
+        return rearrangement_outputs("camera_step" if self.recording_frames is not None else self.frame_mode)
 
     def restart_from(self, fresh):
         """Adopt fresh run inputs, retaining only compatible numeric resources."""
@@ -270,6 +275,7 @@ class SlmRearrangementTask:
                 "exposure_seconds": self.exposure_seconds,
                 "motion_frames": self.motion_frames if self.frame_mode == "fixed" else None,
                 "phase_method": self.phase_method, "frame_mode": self.frame_mode,
+                "recording_frames": self.recording_frames,
                 "requested_motion_frames": self.motion_frames,
                 "max_camera_step": self.max_camera_step, "camera_step_unit": "sensor pixel",
                 "gpu_preparation_reused": self._gpu_reused,
@@ -423,6 +429,14 @@ class SlmRearrangementTask:
         directory = context.run_directory
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
+        if self._camera_recordings:
+            from PIL import Image
+            frames_directory = directory / "frames"
+            frames_directory.mkdir(exist_ok=True)
+            for index, record in enumerate(self._camera_recordings):
+                frame_path = atomic_write_file(frames_directory / f"frame_{index:04d}.tif",
+                    lambda stream, record=record: Image.fromarray(np.asarray(record.image)).save(stream, format="TIFF"))
+                context.register_artifact(f"camera_frame_{index:04d}", frame_path, role="data")
         arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
         path_overlay = None
         confirmed_phase = self.slm.last_commanded_phase
@@ -465,6 +479,7 @@ class SlmRearrangementTask:
             if "motion_yx" in self._plan:
                 arrays["planned_motion_yx"] = self._plan["motion_yx"]
         summary = {**self._record(), "status": status, "error": None if error is None else str(error),
+                   "recorded_frames": len(self._camera_recordings),
                    "actual_motion_frames": None if self._result is None else len(self._result["phase_codes"]),
                    "planned_motion_frames": self._frame_count if self._plan is not None else None,
                    "actual_maximum_camera_step": self._camera_maximum_step,
@@ -477,7 +492,7 @@ class SlmRearrangementTask:
                    "capture_events": self._capture_evidence,
                    "frame_records": [{"source_ordinal": r.source_ordinal, "host_received_at_ns": r.host_received_at_ns,
                      "timestamp_seconds": r.timestamp_seconds, "timestamp_microseconds": r.timestamp_microseconds}
-                     for r in self._records]}
+                     for r in (self._camera_recordings if self.recording_frames is not None else self._records)]}
         # Inputs are frozen values already read before Start. References alone
         # would become ambiguous when an operator overwrites a Calibration or
         # Context file for the next run. Numeric pupil arrays are reconstructed
@@ -490,7 +505,8 @@ class SlmRearrangementTask:
         arrays['generated_target_intensity']=self.target_intensity
         if self._detections:
             summary["before_occupied"] = int(self._detections[0]["occupied"].sum())
-        verification_accepted = status == "completed" and len(self._detections) == 2
+        verification_accepted = (self.recording_frames is None and status == "completed"
+                                 and len(self._detections) == 2)
         if len(self._detections) == 2:
             after = self._target_detection()
             arrays.update({"after_target_" + key: value for key, value in after.items()})
@@ -632,7 +648,7 @@ class SlmRearrangementTask:
                  f"Computed maps: {summary['actual_motion_frames']}; nominal rate: {self.frame_rate_hz:g} Hz",
                  f"Maximum camera displacement: {self._camera_maximum_step} sensor pixel per frame",
                  f"GPU preparation reused: {self._gpu_reused}"]
-        if hasattr(self, "_pulse_timing"):
+        if "available_gap_seconds" in getattr(self, "_pulse_timing", {}):
             lines.append(f"Available between imaging Periods: {self._pulse_timing['available_gap_seconds']:.6f} s")
         lines.extend(f"{name.replace('_',' ')}: {value:.3f} ms" for name,value in self._timings.items())
         for key in ("before_occupied", "filled_target_sites", "judged_target_sites", "target_sites", "target_filling_fraction"):
@@ -673,6 +689,9 @@ class SlmRearrangementTask:
         self._timings = {}; prepared = capture = None
         self._frame_count = self.motion_frames
         self._camera_maximum_step = None
+        self._camera_recordings = []
+        recording_failed = Event()
+        stopped = lambda: context.cancel_requested() or recording_failed.is_set()
         self._snapshots, self._overlays, self._records, self._detections = {}, {}, [], []
         self._available_outputs, self._capture_evidence = set(), {}
         self._device_snapshots, self._overlay_geometry = {}, None
@@ -713,7 +732,8 @@ class SlmRearrangementTask:
             start = perf_counter(); arm_sequencer(self.sequencer, pulse)
             self._timings["pulse_load"] = (perf_counter()-start)*1000
             loaded = self.sequencer.applied()
-            self._pulse_timing = pulse_timing(loaded.source, loaded.program, loaded.rows, self.before_period, self.after_period)
+            self._pulse_timing = (pulse_timing(loaded.source, loaded.program, loaded.rows, self.before_period, self.after_period)
+                                  if self.recording_frames is None else {})
             self._frame_interval = 1/self.frame_rate_hz
             settle = float(self.slm.last_command_receipt.get("settle_seconds", 0.))
             nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
@@ -722,9 +742,9 @@ class SlmRearrangementTask:
             photoelectron = reads_photoelectrons(self.calibration)
             node = CameraMeasurementNode(camera=self.camera,
                 request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
-                    roi_xywh=self.roi, repeat=2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
+                    roi_xywh=self.roi, repeat=self.recording_frames or 2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
                 signal_plane=self.signal_plane, producer=f"{self.instance_id}/camera")
-            start = perf_counter(); capture = node.prepare(should_stop=context.cancel_requested)
+            start = perf_counter(); capture = node.prepare(should_stop=stopped)
             self._timings["camera_arm"] = (perf_counter()-start)*1000
             self._device_snapshots["camera"] = dict(node.run_record["device_snapshots"]["camera"])
             actual = node.actual_working_point
@@ -735,11 +755,21 @@ class SlmRearrangementTask:
             fire_wall = time_ns()
             start = perf_counter(); execution = self.sequencer.fire(run_repeats=1, scan_repeats=1)
             self._timings["pulse_fire_request"] = (perf_counter()-start)*1000
-            self._pulse_timing = pulse_timing(execution.source, execution.program, execution.rows, self.before_period, self.after_period)
+            if self.recording_frames is None:
+                self._pulse_timing = pulse_timing(execution.source, execution.program, execution.rows, self.before_period, self.after_period)
+            else:
+                period = next(p for p in execution.source.periods if p.period_id == self.before_period)
+                point = tuple(execution.rows[0]) if execution.rows else ()
+                self._pulse_timing = {"before_period": {"id": period.period_id, "name": period.name or period.period_id},
+                    "program_digest": execution.program.digest,
+                    "pulse_duration_seconds": execution.program.frame_ticks(point)/execution.program.clock_hz,
+                    "timing_basis": "First received frame is the operator-selected first imaging; no exposure or playback-deadline validation"}
             self._device_snapshots["sequencer"] = sequencer_archive_snapshot(applied=execution)
-            deadline = firing_started + self._pulse_timing["after_start_seconds"] + self._pulse_timing["earliest_lane_delay_seconds"]
+            deadline = (firing_started + self._pulse_timing["after_start_seconds"] + self._pulse_timing["earliest_lane_delay_seconds"]
+                        if self.recording_frames is None else None)
             camera_timeout = capture.timeout
-            capture.timeout = max(camera_timeout, firing_started+self._pulse_timing['before_end_seconds']-monotonic()+camera_timeout)
+            capture.timeout = max(camera_timeout, firing_started+self._pulse_timing.get('before_end_seconds',
+                self._pulse_timing.get('pulse_duration_seconds', 0.))-monotonic()+camera_timeout)
             playback_finished_wall = None
             playback_finished_at = None
 
@@ -747,13 +777,14 @@ class SlmRearrangementTask:
                 nonlocal playback_finished_wall, playback_finished_at, playback_attempted, nominal
                 # Camera receive is independent: callback dispatch time is not
                 # the exposure timestamp of a queued second photograph.
-                node._commit_direct_cycle(cycle, index)
+                if self.recording_frames is None:
+                    node._commit_direct_cycle(cycle, index)
                 start = perf_counter()
                 mask, valid = self._read_photo(context, node, cycle, index)
                 self._timings[("before", "after")[index]+"_readout"] = (perf_counter()-start)*1000
                 if index == 1:
                     self._timings["after_frame_available_after_fire"] = (cycle[0].host_received_at_ns-fire_wall)/1e6
-                    if playback_finished_wall is None or cycle[0].host_received_at_ns < playback_finished_wall:
+                    if self.recording_frames is None and (playback_finished_wall is None or cycle[0].host_received_at_ns < playback_finished_wall):
                         raise RuntimeError("The verification frame reached the camera queue before SLM playback completed")
                     return
                 self._timings["before_frame_available_after_fire"] = (cycle[0].host_received_at_ns-fire_wall)/1e6
@@ -772,7 +803,7 @@ class SlmRearrangementTask:
                         subdivisions = np.maximum(1, np.ceil(distances/self.max_camera_step)).astype(np.int64)
                         self._frame_count = fade + sum(map(int, subdivisions))
                         nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
-                        if nominal > deadline-monotonic():
+                        if deadline is not None and nominal > deadline-monotonic():
                             raise RuntimeError(f"Camera step requires {self._frame_count} maps ({nominal:.6g}s nominal), exceeding the remaining Pulse gap")
                         fractions = np.asarray(plan["fraction"])
                         motion_fractions = np.concatenate([
@@ -793,7 +824,7 @@ class SlmRearrangementTask:
                         nonlocal playback_finished_wall, playback_finished_at
                         began = perf_counter()
                         try:
-                            return self.slm.play_phase_sequence(stop_requested=context.cancel_requested)
+                            return self.slm.play_phase_sequence(stop_requested=stopped)
                         finally:
                             playback_finished_wall = time_ns()
                             playback_finished_at = monotonic()
@@ -802,9 +833,11 @@ class SlmRearrangementTask:
                     def frame_ready(index, codes):
                         nonlocal playback, playback_attempted
                         check_cancelled(context)
+                        if recording_failed.is_set():
+                            raise InterruptedError("Camera recording failed")
                         if playback is None:
-                            remaining = deadline-monotonic()
-                            if remaining < nominal:
+                            remaining = None if deadline is None else deadline-monotonic()
+                            if remaining is not None and remaining < nominal:
                                 raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
                             began = perf_counter()
                             self.slm.prepare_phase_sequence(None, 1/self.frame_rate_hz, frame_count=self._frame_count)
@@ -841,7 +874,7 @@ class SlmRearrangementTask:
                             motion_frames=self._frame_count, motion_fractions=motion_fractions,
                             support_tolerance=self.intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
-                            stop_requested=context.cancel_requested)
+                            stop_requested=stopped)
                         self._timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
                         for name, value in self._result["timing_ms"].items():
                             self._timings["compute_"+name] = float(value)
@@ -873,12 +906,16 @@ class SlmRearrangementTask:
                     self._playback = {"frame_count": 0, "played_frames": 0, "cancelled": False,
                                       "noop": True, "acknowledgment": "No new phase commanded"}
                     playback_finished_wall = time_ns()
+                    if self.recording_frames is not None:
+                        return
                     context.report_progress("SLM target held; acquiring verification photograph", current=1, total=2)
                     capture.timeout = max(camera_timeout,
                         firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
                     return
                 if self._playback["cancelled"] or self._playback["played_frames"] != len(self._result["phase_codes"]):
                     raise RuntimeError("SLM sequence stopped before its target frame")
+                if self.recording_frames is not None:
+                    return
                 self._timings["verification_deadline_margin"] = (deadline-playback_finished_at)*1000
                 if playback_finished_at > deadline:
                     raise RuntimeError("SLM playback missed the conservative after-imaging deadline; verification is not accepted")
@@ -889,12 +926,37 @@ class SlmRearrangementTask:
                 capture.timeout = max(camera_timeout,
                     firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
 
-            result = capture.collect(commit_cycle=photograph, retain_cycles=False)
+            if self.recording_frames is None:
+                result = capture.collect(commit_cycle=photograph, retain_cycles=False)
+            else:
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="slm-recording-solve") as worker:
+                    movement = None
+                    def record(cycle, index):
+                        nonlocal movement
+                        self._camera_recordings.extend(cycle)
+                        node._commit_direct_cycle(cycle, index)
+                        if index == 0 and not stopped():
+                            movement = worker.submit(photograph, cycle, 0)
+                        elif movement is not None and movement.done():
+                            movement.result()
+                    try:
+                        result = capture.collect(commit_cycle=record, retain_cycles=False)
+                    except BaseException as error:
+                        recording_failed.set()
+                        if movement is not None:
+                            try: movement.result()
+                            except BaseException as cleanup:
+                                if cleanup is not error: error.add_note(f"Rearrangement also stopped: {cleanup}")
+                        raise
+                    if movement is not None:
+                        movement.result()
+                if len(self._camera_recordings) > 1:
+                    photograph((self._camera_recordings[-1],), 1)
             report = wait_for_report(self.sequencer, context)
             if report.fault or not report.status & STATUS_DONE or report.status & (STATUS_RUNNING|STATUS_ERROR|STATUS_UNDERFLOW):
                 raise RuntimeError(f"Pulse did not complete successfully: {report.fault or report.status}")
-            if result is None or result.cycle_count != 2:
-                raise RuntimeError("The authored Pulse did not deliver exactly two photographs")
+            if result is None or result.cycle_count != (self.recording_frames or 2):
+                raise RuntimeError("The camera did not deliver the requested photographs")
             self._timings["pulse_elapsed"] = report.elapsed_seconds*1000
             self._timings["pulse_report_retrieval_delay"] = report.report_delay_seconds*1000
             self._timings["experiment_before_save"] = (perf_counter()-run_started)*1000

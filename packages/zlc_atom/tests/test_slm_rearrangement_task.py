@@ -656,6 +656,108 @@ def test_buffered_second_frame_is_not_accepted_from_its_late_callback(experiment
     assert summary["judged_target_filling_fraction"] is None
 
 
+def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_saves_them(
+    experiment, monkeypatch,
+):
+    from zlc_atom.devices.simulation.camera import adapter as camera_module
+    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+
+    e = experiment
+    expected = []
+    template = e.images[0].copy()
+    for index in range(50):
+        image = template.copy()
+        image[0, 0] = 1000 + index  # Outside every calibrated site BOX.
+        expected.append(image)
+    e.images[:] = [image.copy() for image in expected]
+    raw_record = camera_module.CameraFrameRecord
+
+    def sdk_record(*args, **kwargs):
+        record = raw_record(*args, **kwargs)
+        return replace(record, timestamp_seconds=100 + record.source_ordinal // 20,
+                       timestamp_microseconds=(record.source_ordinal % 20) * 50000)
+
+    monkeypatch.setattr(camera_module, "CameraFrameRecord", sdk_record)
+    base = _sequence()
+    bright, dark = base.periods[0].states, base.periods[1].states
+    periods = tuple(period for index in range(50) for period in (
+        PulsePeriod(f"image_{index}", .001, "s", bright, name=f"Image {index+1}"),
+        PulsePeriod(f"gap_{index}", .001, "s", dark),
+    ))
+    sequence = replace(base, periods=periods)
+    authored = sequence_to_tree(sequence)
+    arguments = dict(e.task_arguments, recording_frames=50, pulse_sequence=sequence,
+                     before_period="image_0", exposure_seconds=.001)
+    arguments.pop("after_period")
+    e.task = SlmRearrangementTask(**arguments)
+    # No synthetic second trigger from the old two-photograph progress helper.
+    monkeypatch.setattr(e.context, "report_progress", lambda *args, **kwargs:
+                        _Context.report_progress(e.context, *args, **kwargs))
+
+    def fire(*, run_repeats, scan_repeats=1):
+        e.board.fires.append((run_repeats, scan_repeats))
+        e.trace.append("fire")
+        e.camera.trigger(50)
+        return e.board.applied().with_repeats(run_repeats, scan_repeats)
+
+    monkeypatch.setattr(e.board, "fire", fire)
+    collected, compute_started, compute_finished = Event(), Event(), Event()
+    play_started, play_finished = Event(), Event()
+    consumed = []
+    commit = CameraMeasurementNode._commit_direct_cycle
+
+    def commit_cycle(node, cycle, index):
+        commit(node, cycle, index)
+        consumed.extend(cycle)
+        if index == 49:
+            assert compute_started.is_set()
+            assert not compute_finished.is_set() and not play_finished.is_set()
+            collected.set()
+
+    monkeypatch.setattr(CameraMeasurementNode, "_commit_direct_cycle", commit_cycle)
+
+    def compute(*args, **kwargs):
+        compute_started.set()
+        result = e.compute(*args, **kwargs)
+        deadline = time.monotonic() + 2
+        while not collected.wait(.002):
+            assert time.monotonic() < deadline, "camera collector blocked behind computation"
+        compute_finished.set()
+        return result
+
+    play = e.slm.play_phase_sequence
+
+    def delayed_play(stop_requested=None):
+        play_started.set()
+        deadline = time.monotonic() + 2
+        while not collected.wait(.002):
+            assert time.monotonic() < deadline, "camera collector blocked behind playback"
+        try:
+            return play(stop_requested)
+        finally:
+            play_finished.set()
+
+    monkeypatch.setattr(task_module, "compute_rearrangement", compute)
+    monkeypatch.setattr(e.slm, "play_phase_sequence", delayed_play)
+    e.task.execute(e.context)
+    assert collected.is_set() and compute_finished.is_set() and play_finished.is_set()
+    assert e.board.safe_calls == 0
+    assert len(consumed) == 50
+    assert [record.source_ordinal for record in consumed] == list(range(len(consumed)))
+    assert e.board.fires == [(1, 1)] and len(e.board.loads) == 1
+    assert sequence_to_tree(sequence) == authored
+    assert e.slm.releases == 1
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["status"] == "completed"
+    assert not summary["transport_outcomes"]["verification_accepted"]
+    from PIL import Image
+    files = sorted((e.context.run_directory / "frames").glob("*.tif"))
+    assert len(files) == 50
+    for path, original in zip(files, expected, strict=True):
+        with Image.open(path) as saved:
+            np.testing.assert_array_equal(np.asarray(saved), original)
+
+
 @pytest.mark.parametrize("ending", ["device", "stopped", "numeric"])
 def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeypatch, ending):
     e = experiment
@@ -866,6 +968,32 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert form.read_value("before_period") == "deleted_period"
         offered = next(field for field in form.spec.fields if field.key == "before_period").choices
         assert offered[-1].label == "Unavailable: deleted_period"
+        from zlc_atom.nodes import discover_logic_nodes
+
+        recording = next(node for node in discover_logic_nodes() if node.api_name == "slm_rearrangement_recording")
+        recording_form = recording.ui_contributions[0]()
+        try:
+            recording_values = recording.authoring_schema.draft_values({"before_period": "before"})
+            recording_values.update(recording.resolve_defaults(recording_values, {"pulse_template": resource}))
+            recording_form.update_projection({
+                "form_spec": project_logic_schema(recording, workspace_root=str(tmp_path)),
+                "form_values": recording_values, "workspace_resources": {"pulse_template": resource},
+            })
+            app.processEvents()
+            recording_fields = {field.key: field for field in recording_form.spec.fields}
+            assert "after_period" not in recording_fields
+            assert recording_fields["before_period"].label == "First imaging Period"
+            assert recording_form.read_value("before_period") == "before"
+            assert recording_form.read_value("recording_frames") == 50
+            assert recording_form.widget_for("recording_frames").isEnabled()
+            assert tuple(recording_form._forms) == tuple(form._forms)
+            assert all(type(recording_form._forms[key]) is type(form._forms[key]) for key in form._forms)
+            assert recording_form.read_value("phase_method") == "iterative"
+            assert recording_form.read_value("frame_mode") == "fixed"
+            assert tuple(output.name for output in recording.outputs_for(recording_values, {})) == camera_outputs
+        finally:
+            recording_form.close()
+            recording_form.deleteLater()
     finally:
         form.close()
         form.deleteLater()
