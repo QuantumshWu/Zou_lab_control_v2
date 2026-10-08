@@ -585,7 +585,7 @@ Node new chunk
 - before使用源Calibration的注册站点，after使用生成目标所对应的同一Calibration子集及readout规则；invalid保持invalid。静态Target到camera注册复用既有注册数学，读取结果按站点映射重排，不复制threshold分类。自动preview仍为前图+占据、后图+占据、源/最终相位。trajectory_2d以真实before照片为Dataset，将已生成的Fourier轨迹经同一注册affine及公共图像坐标转换投到camera坐标，保留完整SiteMap/status/编号；未选中站点只保留静止图标。before、after和路径图共用图像坐标、尺寸规则与显示参数，不另做白底裁切图。原始Fourier轨迹/目标仍在科学数据中作诊断，命令预测与实际原子跟踪明确区分。Task不声明外部Dataset输入，不把内部相机publication伪装成此类输入parent。完整相位影片不在拍照关键路径上反复发布/渲染。
 - 报告按同一source→target指派列出移动/原地目标及末态已判定、占据、未判定数量，主动舍弃单列；未完成或时序未接受的复拍不冒充成功输运。实际相机时间间隔、逻辑step间隔、新相位presentation间隔及online总耗时从已有记录派生，与请求帧率分开，不新增时钟/回执机制。注册及传感器坐标事实写入报告，几何匹配不冒充已校验物理方向；本项只改展示/报告，保持现有求解、阈值、Pulse和播放算法。
 - Task把第一张已验证相位图交给既有sequence播放，并在同一计算路径继续生成后续图，实现计算/上传/显示重叠；不新增通用流水线框架。后续质量失败时必须取消并等待播放结束，保存真实已显示前缀及partial回执，不再宣称整部影片未播放。sequence在物理SLM owner本地逐frame确认且不跳帧；缺帧等待和慢确认会延长真实cadence并分别记录。DVI的软件presenter ack不冒充vblank/液晶响应；profile光学等待仅在最终帧补足一次。首帧可用、首帧确认、纯计算、队列背压及整段结束分别计时，重叠窗口不相加；成功RPC不反传已有影片。Stop保留最后已确认相位，unknown outcome明确保存。
-- report在复拍或真正失败之后写：保存两张不可替代照片、counts/occupied/validity/threshold、源与生成目标、matching/path、可选默认开启的精确uint8序列、冻结的source Context/Calibration事实、实际Pulse和device snapshots，以及GPU/接收/匹配/计算/上传/逐帧ack/最终等待与报告写入时间。重要图使用公共Figure NPZ+PNG，summary JSON/text用于比较帧数与填充率；不另写final Science Context，也不把填充率伪装为逐原子身份跟踪存活率。Stop/failure保留partial与原始错误，清理失败只附注，不覆盖原因。
+- report在复拍或真正失败之后写：保存两张不可替代照片、counts/occupied/validity/threshold、源与生成目标、matching/path、可选默认开启的精确uint8序列、冻结的source Context/Calibration事实、实际Pulse和device snapshots，以及GPU/接收/匹配/计算/上传/逐帧ack/最终等待与报告写入时间。重要图使用公共Figure NPZ+PNG，summary JSON/text用于比较帧数与填充率；同时直接汇总已有编码光场的保留阱相对初始光强范围、终点光强及相位步长，不把相对均匀度当作阱深不变。计算结果与实际已播放、实测光学响应分别命名，不增加在线传播。不另写final Science Context，也不把填充率伪装为逐原子身份跟踪存活率。Stop/failure保留partial与原始错误，清理失败只附注，不覆盖原因。
 
 ## 9. Calibration、Scan与Simulation
 

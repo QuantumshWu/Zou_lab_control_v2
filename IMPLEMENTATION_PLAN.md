@@ -457,6 +457,7 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- 有线批次20–29复核：普通相位/序列灰度映射、归档读出和Pulse重编译一致；网络已非主要等待，不能把现场丢原子认定为通信故障。第28次无位置移动仍有末态缺失，计算光场的保留阱强度约为初始3.3倍；简单同步相位插值未复现塌阱，尚不能确定实际损失原因。summary JSON/text现直接汇总已有光强比例和相位步长，明确它们是计算而非实测/播放保证；不改分类阈值、Pulse或设备等待。
 - Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
 - 第一张照片的valid occupied站点按源roster身份成为available_source_indices。共同planner按实际欧氏距离匹配min(可用源,目标数)：多余原子丢弃，其阱在序列内淡出；不足时正常部分填充，保存未填目标。无效分类仍为invalid，不改成empty。具体Task拥有相机分类和目标政策，solver只接收显式计划；不复制分类或新增编排框架。
 - 指派最小化总欧氏距离，不是最大边长或播放时间。直线冲突时采用有界等代价pair交换、先后移动等待及局部waypoint修复；保存指派下界、实际距离、detour ratio和routing方法，没有找到方案如实拒绝，不声称一般碰撞约束下全局最优。对只改变一条路径的候选，缓存其它pair并以同一连续数学重算该路径对其它路径；8个参考case的指派、移除名单、路径及时间分数逐位不变。

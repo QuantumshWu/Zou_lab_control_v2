@@ -268,6 +268,11 @@ def experiment(tmp_path, monkeypatch, request):
                 "motion_yx": starts[None] + np.linspace(0,1,kwargs["motion_frames"]+1)[:,None,None]*(points-starts)[None],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
                 "support_intensity_ratios": np.full(frames, 1.005),
+                "brightness_minimum_to_initial": np.linspace(2.3, 3.3, frames),
+                "brightness_mean_to_initial": np.linspace(2.31, 3.31, frames),
+                "brightness_maximum_to_initial": np.linspace(2.32, 3.32, frames),
+                "phase_step_max_rad": np.full(frames, .5),
+                "pupil_phase_step_rms_rad": np.full(frames, 1.1),
                 "background_intensity_ratios": np.zeros(frames), "timing_ms": {"total": .2}}
 
     monkeypatch.setattr(task_module, "prepare_rearrangement", prepare)
@@ -320,6 +325,14 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert result["target_filling_fraction"] is None
     assert summary["verification_complete"] is False
     assert summary["judged_target_filling_fraction"] == pytest.approx(2/3)
+    field = summary["computed_field_diagnostics"]
+    assert "not measured optical response" in field["basis"]
+    assert field["minimum_power_ratio"] == 2.3 and field["maximum_power_ratio"] == 3.32
+    assert field["final_minimum_power_ratio"] == 3.3 and field["final_mean_power_ratio"] == 3.31
+    assert field["final_maximum_power_ratio"] == 3.32
+    assert field["maximum_site_phase_step_rad"] == .5
+    assert field["maximum_pupil_phase_step_rms_rad"] == 1.1
+    assert "Computed field final mean power ratio: 3.31" in (e.context.run_directory / "summary.txt").read_text()
     outcomes = summary["transport_outcomes"]
     assert outcomes["verification_accepted"]
     assert "not individual-atom identity" in outcomes["basis"]

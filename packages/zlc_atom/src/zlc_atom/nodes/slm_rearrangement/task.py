@@ -449,6 +449,19 @@ class SlmRearrangementTask:
                  "surplus_stationary_clearance", "release_verified", "recommended_release_hold_frames",
                  "discard_reference_limit", "discard_converged", "converged",
                  "noop", "fade_frames", "emitted_frame_count") if key in self._result}
+            minimum = np.asarray(self._result["brightness_minimum_to_initial"])
+            maximum = np.asarray(self._result["brightness_maximum_to_initial"])
+            if len(minimum):
+                summary["computed_field_diagnostics"] = {
+                    "basis": "Computed encoded maps, not measured optical response or confirmed playback; power is relative to each selected source trap",
+                    "minimum_power_ratio": float(minimum.min()),
+                    "maximum_power_ratio": float(maximum.max()),
+                    "final_minimum_power_ratio": float(minimum[-1]),
+                    "final_mean_power_ratio": float(self._result["brightness_mean_to_initial"][-1]),
+                    "final_maximum_power_ratio": float(maximum[-1]),
+                    "maximum_site_phase_step_rad": float(np.max(self._result["phase_step_max_rad"])),
+                    "maximum_pupil_phase_step_rms_rad": float(np.max(self._result["pupil_phase_step_rms_rad"])),
+                }
             if path_overlay is not None:
                 summary["camera_path_coordinate_frame"] = self._overlay_geometry["coordinate_frame"]
                 indices = np.asarray(self._plan["source_indices"], dtype=np.intp)
@@ -549,6 +562,8 @@ class SlmRearrangementTask:
             if key in summary: lines.append(f"{key.replace('_',' ')}: {summary[key]}")
         for key, value in summary.get("motion_diagnostics", {}).items():
             lines.append(f"{key.replace('_', ' ')}: {value}")
+        for key, value in summary.get("computed_field_diagnostics", {}).items():
+            lines.append(f"Computed field {key.replace('_', ' ')}: {value}")
         for name, values in summary.get("transport_outcomes", {}).items():
             if name in {"moving", "stationary"}:
                 observed = (f"{values['occupied']}/{values['judged']} judged destinations occupied"
