@@ -30,6 +30,7 @@ class PulseConfigView(QtWidgets.QWidget):
         super().__init__(parent)
         self._projecting_entries = False
         self._binding_rows: dict[str, tuple] = {}
+        self._binding_headers: dict[str, FluentLabel] = {}
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = FluentScrollArea(self)
@@ -184,8 +185,44 @@ class PulseConfigView(QtWidgets.QWidget):
                 for widget in self._binding_rows.pop(field_id):
                     self._binding_grid.removeWidget(widget)
                     retire_widget(widget)
+        group_facts = {
+            field_id: (group_id, label)
+            for field_id, group_id, label in record.binding_groups
+        }
+        grouped = {}
+        for binding in record.bindings:
+            group_id, label = group_facts.get(binding[0], ("", "Pulse"))
+            grouped.setdefault(group_id, (label, []))[1].append(binding)
+        groups = sorted(grouped, key=lambda group_id: bool(group_id))
+        show_groups = any(groups)
+        for group_id in tuple(self._binding_headers):
+            if not show_groups or group_id not in grouped:
+                header = self._binding_headers.pop(group_id)
+                self._binding_grid.removeWidget(header)
+                retire_widget(header)
+        ordered_rows = []
+        row = 1
+        for group_id in groups:
+            label, bindings = grouped[group_id]
+            if show_groups:
+                header = self._binding_headers.get(group_id)
+                if header is None:
+                    header = FluentLabel()
+                    font = header.font()
+                    font.setBold(True)
+                    header.setFont(font)
+                    header.setContentsMargins(0, px(6), 0, 0)
+                    self._binding_headers[group_id] = header
+                header.setText(label or "Pulse")
+                index = self._binding_grid.indexOf(header)
+                if index < 0 or self._binding_grid.getItemPosition(index) != (row, 0, 1, 5):
+                    self._binding_grid.addWidget(header, row, 0, 1, 5)
+                row += 1
+            for binding in bindings:
+                ordered_rows.append((row, binding))
+                row += 1
         keys = record.available_names
-        for row, (field_id, label, key, default, effective, state) in enumerate(record.bindings):
+        for row, (field_id, label, key, default, effective, state) in ordered_rows:
             widgets = self._binding_rows.get(field_id)
             if widgets is None:
                 combo = FluentComboBox()
@@ -201,8 +238,8 @@ class PulseConfigView(QtWidgets.QWidget):
                 self._binding_rows[field_id] = widgets
             for column, widget in enumerate(widgets):
                 index = self._binding_grid.indexOf(widget)
-                if index < 0 or self._binding_grid.getItemPosition(index) != (row + 1, column, 1, 1):
-                    self._binding_grid.addWidget(widget, row + 1, column)
+                if index < 0 or self._binding_grid.getItemPosition(index) != (row, column, 1, 1):
+                    self._binding_grid.addWidget(widget, row, column)
             for column, value in ((0, label), (2, default), (3, effective), (4, state)):
                 if widgets[column].text() != value:
                     widgets[column].setText(value)

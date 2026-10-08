@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
@@ -44,6 +46,7 @@ class PulseScanView(QtWidgets.QWidget):
         info_layout.addWidget(self.scan_slots_label)
         self.bindings_label = FluentLabel("")
         self.bindings_label.setWordWrap(True)
+        self.bindings_label.setTextFormat(QtCore.Qt.RichText)
         info_layout.addWidget(self.bindings_label)
 
         run_row = QtWidgets.QHBoxLayout()
@@ -188,13 +191,23 @@ class PulseScanView(QtWidgets.QWidget):
 
     def set_bindings(self, bindings) -> None:
         records = tuple(bindings)
-        self.bindings_label.setText("\n".join(
-            f"{record.label} · " + " + ".join(
-                (["Scan"] if record.scan else [])
-                + ([record.source.upper()] if record.source != "default" else [])
-            )
-            for record in records
-        ))
+        groups = {}
+        for record in records:
+            groups.setdefault(record.group_id, (record.group_label, []))[1].append(record)
+        show_groups = any(groups)
+        lines = []
+        for group_id in sorted(groups, key=lambda group_id: bool(group_id)):
+            label, members = groups[group_id]
+            if show_groups:
+                if lines:
+                    lines.append("")
+                lines.append(f"<b>{escape(label or 'Pulse')}</b>")
+            for record in members:
+                modes = (["Scan"] if record.scan else []) + (
+                    [record.source.upper()] if record.source != "default" else []
+                )
+                lines.append(escape(f"{record.label} · " + " + ".join(modes)))
+        self.bindings_label.setText("<br>".join(lines))
         self.bindings_label.setVisible(bool(records))
 
     def set_progress_text(self, text: str) -> None:

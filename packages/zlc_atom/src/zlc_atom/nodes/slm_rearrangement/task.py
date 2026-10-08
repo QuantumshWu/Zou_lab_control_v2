@@ -75,7 +75,7 @@ def pulse_timing(sequence, program, rows, before_period, after_period):
             raise ValueError(f"{key.title()} imaging Period must play exactly once")
         result[key + "_start_seconds"] = starts[0] / program.clock_hz
         result[key + "_end_seconds"] = (starts[0] + durations[row]) / program.clock_hz
-        result[key + "_period"] = {"id": identity, "name": sequence.periods[row].name or identity}
+        result[key + "_period"] = {"id": identity, "name": sequence.period_label(identity)}
     if result["before_end_seconds"] > result["after_start_seconds"]:
         raise ValueError("Before imaging must finish before after imaging begins")
     # The operator identifies the imaging Period, not an SDK camera pin. A
@@ -772,7 +772,7 @@ class SlmRearrangementTask:
             else:
                 period = next(p for p in execution.source.periods if p.period_id == self.before_period)
                 point = tuple(execution.rows[0]) if execution.rows else ()
-                self._pulse_timing = {"before_period": {"id": period.period_id, "name": period.name or period.period_id},
+                self._pulse_timing = {"before_period": {"id": period.period_id, "name": execution.source.period_label(period.period_id)},
                     "program_digest": execution.program.digest,
                     "pulse_duration_seconds": execution.program.frame_ticks(point)/execution.program.clock_hz,
                     "timing_basis": "First received frame is the operator-selected first imaging; no exposure or playback-deadline validation"}

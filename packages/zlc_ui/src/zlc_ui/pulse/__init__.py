@@ -9,6 +9,7 @@ from .models import (
     ConnectionChoiceVM,
     ConnectionVM,
     ConfigPageRecord,
+    ComponentVM,
     DelayRowVM,
     FieldVM,
     PeriodVM,
@@ -22,6 +23,7 @@ from .preview_view import PulsePreviewView
 from .scan_line_edit import FluentScanLineEdit
 from .scan_view import PulseScanView
 from .config_view import PulseConfigView
+from .component_view import PulseComponentView
 from .schedule_view import BracketPost, ChannelNamesPanel, ChannelPanel, PeriodCard, PulseDragContainer, PulseScheduleView
 from .target_view import PulseTargetView
 
@@ -33,6 +35,7 @@ __all__ = [
     "DelayRowVM", "FieldVM",
     "FluentScanLineEdit", "PeriodCard", "PeriodVM", "PortRowVM",
     "PulseEditorHandle",
+    "ComponentVM", "PulseComponentView",
     "PulseEditorView", "PulsePreviewView", "PulseScanView", "PulseConfigView",
     "PulseScheduleView", "PulseTargetView", "PulseDragContainer",
     "BracketPost", "BracketVM", "ScanPageRecord", "ScheduleVM",

@@ -20,6 +20,7 @@ from zlc_pulse import (
     PulseSequence,
     PulseTarget,
     compile_sequence,
+    group_component,
     pulse_target_from_xdc,
     sequence_from_tree,
     sequence_to_tree,
@@ -346,7 +347,9 @@ def test_takeover_revokes_and_cancels_an_active_old_command(monkeypatch) -> None
 
 def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) -> None:
     geom = _sequence_geometry()
-    source = _sequence(slotted=True, configured=True)
+    source = group_component(
+        _sequence(slotted=True, configured=True), ("p0", "p1"), "Cooling", "cooling",
+    )
     program = compile_sequence(source, geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
@@ -372,6 +375,8 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             client.load_config_file(path)
             client.load(program, source=source, rows=((1,),))
             resident_author = streamer.applied().authored_source
+            assert resident_author.components == source.components
+            assert streamer.applied().source.components == source.components
             calls = []
             load_requests = []
             call = client._call_locked
@@ -402,6 +407,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
                 assert report.status == 4 and report.command_id > 0
                 assert report.cursor == 2
                 assert state.authored_source == source
+                assert state.source.components == source.components
                 assert state.source.period_by_id["p1"].duration == duration
                 assert state.program == compile_sequence(state.source, geom, 50e6)
                 assert state.rows == ((1,),)
@@ -416,6 +422,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             assert calls == ["applied", "describe", "load", "fire"]
             assert client.wait_done(1.0) is not None
             assert state.authored_source == source
+            assert state.source.components == source.components
             assert state.source.period_by_id["p1"].duration == 160
             calls.clear()
             again = client.fire(run_repeats=2, scan_repeats=3)

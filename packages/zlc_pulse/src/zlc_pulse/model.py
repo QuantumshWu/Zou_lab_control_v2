@@ -7,7 +7,7 @@ It deliberately has no editor state, run identity, or acquisition concepts.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
 from zlc_data.units import UnitError, resolve_unit
@@ -583,6 +583,23 @@ def brackets_disjoint(first: tuple[int, int], second: tuple[int, int]) -> bool:
     return first[1] <= second[0] or second[1] <= first[0]
 
 
+@dataclass(frozen=True)
+class PulseComponent:
+    """One named, continuous group; its waveform still lives in the sequence."""
+
+    component_id: str
+    name: str
+    period_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "component_id", _identifier(self.component_id, "component id"))
+        object.__setattr__(self, "name", _text(self.name, "component name"))
+        ids = tuple(_identifier(value, "component period id") for value in self.period_ids)
+        if not ids or len(ids) != len(set(ids)):
+            raise ValueError("component period ids must be non-empty and unique")
+        object.__setattr__(self, "period_ids", ids)
+
+
 @dataclass(frozen=True, init=False)
 class PulseSequence:
     name: str
@@ -594,6 +611,7 @@ class PulseSequence:
     #: Outer brackets first; a bracket that lies inside another follows it.
     brackets: tuple[PulseBracket, ...]
     run_repeats: int
+    components: tuple[PulseComponent, ...]
     _period_by_id: Mapping[str, PulsePeriod] = field(init=False, repr=False, compare=False)
     _bracket_bounds: tuple[tuple[int, int], ...] = field(init=False, repr=False, compare=False)
 
@@ -607,6 +625,7 @@ class PulseSequence:
         delays: tuple[OutputDelay, ...] = (),
         brackets: tuple[PulseBracket, ...] = (),
         run_repeats: int = 0,
+        components: tuple[PulseComponent, ...] = (),
     ) -> None:
         if target is None:
             raise TypeError("PulseSequence requires a target")
@@ -620,9 +639,32 @@ class PulseSequence:
         ids = tuple(period.period_id for period in periods)
         if len(ids) != len(set(ids)):
             raise ValueError("period ids must be unique")
-        display_names = tuple(period.name or period.period_id for period in periods)
+        component_values = tuple(components)
+        if any(not isinstance(component, PulseComponent) for component in component_values):
+            raise TypeError("components must contain PulseComponent values")
+        if len({component.component_id for component in component_values}) != len(component_values):
+            raise ValueError("component ids must be unique")
+        if len({component.name for component in component_values}) != len(component_values):
+            raise ValueError("component names must be unique")
+        component_owner: dict[str, str] = {}
+        component_bounds: dict[str, tuple[int, int]] = {}
+        for component in component_values:
+            if any(period_id not in ids for period_id in component.period_ids):
+                raise ValueError(f"component {component.name!r} references a missing period")
+            start = ids.index(component.period_ids[0])
+            end = start + len(component.period_ids)
+            if ids[start:end] != component.period_ids:
+                raise ValueError(f"component {component.name!r} must contain continuous periods in order")
+            if any(period_id in component_owner for period_id in component.period_ids):
+                raise ValueError("components cannot overlap or nest")
+            component_owner.update((period_id, component.component_id) for period_id in component.period_ids)
+            component_bounds[component.component_id] = (start, end)
+        display_names = tuple(
+            (component_owner.get(period.period_id), period.name or period.period_id)
+            for period in periods
+        )
         if len(display_names) != len(set(display_names)):
-            raise ValueError("period names must be unique (empty Name uses the period ID)")
+            raise ValueError("period names must be unique within their component (empty Name uses the period ID)")
         lane_owner = {lane: port for port in target.ports for lane in port.lanes}
         for period in periods:
             if len(period.states) != len(target.raw_lanes):
@@ -692,6 +734,16 @@ class PulseSequence:
             start, end = bounds[bracket.bracket_id]
             if start > end:
                 raise ValueError(f"bracket {bracket.bracket_id!r} end precedes its start")
+            for component in component_values:
+                extent = component_bounds[component.component_id]
+                if not (
+                    brackets_disjoint((start, end), extent)
+                    or bracket_contains((start, end), extent)
+                    or bracket_contains(extent, (start, end))
+                ):
+                    raise ValueError(
+                        f"bracket {bracket.bracket_id!r} partially crosses component {component.name!r}"
+                    )
         for index, outer in enumerate(bracket_values):
             for inner in bracket_values[index + 1:]:
                 first, second = bounds[outer.bracket_id], bounds[inner.bracket_id]
@@ -725,7 +777,19 @@ class PulseSequence:
             self, "_bracket_bounds", tuple(bounds[bracket.bracket_id] for bracket in ordered)
         )
         object.__setattr__(self, "run_repeats", run_repeats)
+        object.__setattr__(self, "components", tuple(sorted(
+            component_values, key=lambda component: component_bounds[component.component_id][0],
+        )))
         object.__setattr__(self, "_period_by_id", MappingProxyType(by_period))
+
+    def component_for_period(self, period_id: str) -> PulseComponent | None:
+        return next((component for component in self.components if period_id in component.period_ids), None)
+
+    def period_label(self, period_id: str) -> str:
+        period = self.period_by_id.get(period_id)
+        label = period_id if period is None else period.name or period.period_id
+        component = self.component_for_period(period_id)
+        return label if component is None else f"{component.name} / {label}"
 
     @property
     def bracket_bounds(self) -> tuple[tuple[int, int], ...]:
@@ -819,6 +883,271 @@ class PulseSequence:
             raise ValueError(f"no period exists with id {reference.period_id!r}")
         return str(period.unit)
 
+@dataclass(frozen=True)
+class Subpulse:
+    """An editable fragment, with no device delays or execution repeat count."""
+
+    name: str
+    target: PulseTarget
+    time_step_ns: float
+    periods: tuple[PulsePeriod, ...]
+    bindings: tuple[PulseBinding, ...] = ()
+    brackets: tuple[PulseBracket, ...] = ()
+
+    def __post_init__(self) -> None:
+        sequence = self.to_sequence()
+        if any(binding.kind == FIELD_DELAY for binding in sequence.bindings):
+            raise ValueError("subpulses cannot bind global output delays")
+        for name in ("name", "target", "time_step_ns", "periods", "bindings", "brackets"):
+            object.__setattr__(self, name, getattr(sequence, name))
+
+    def to_sequence(self) -> PulseSequence:
+        """Project the fragment into the existing editor, retaining every ID."""
+        return PulseSequence(
+            name=self.name, target=self.target, time_step_ns=self.time_step_ns,
+            periods=self.periods, bindings=self.bindings, brackets=self.brackets,
+        )
+
+
+def _component(sequence: PulseSequence, component_id: str) -> PulseComponent:
+    for component in sequence.components:
+        if component.component_id == component_id:
+            return component
+    raise ValueError(f"no component exists with id {component_id!r}")
+
+
+def _available_id(base: str, used: set[str]) -> str:
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _available_name(base: str, used: set[str]) -> str:
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base} ({suffix})"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def group_component(
+    sequence: PulseSequence, period_ids: tuple[str, ...], name: str,
+    component_id: str | None = None,
+) -> PulseSequence:
+    """Group existing consecutive periods without changing their identity or playback."""
+    selected = tuple(period_ids)
+    if len(selected) != len(set(selected)) or any(key not in sequence.period_by_id for key in selected):
+        raise ValueError("component selection must name existing unique periods")
+    members = tuple(period.period_id for period in sequence.periods if period.period_id in selected)
+    if component_id is None:
+        component_id = _available_id("component1", {item.component_id for item in sequence.components})
+    component = PulseComponent(component_id, name, members)
+    return replace(sequence, components=sequence.components + (component,))
+
+
+def ungroup_component(sequence: PulseSequence, component_id: str) -> PulseSequence:
+    """Remove a group, qualifying only names that would collide in the parent."""
+    component = _component(sequence, component_id)
+    used = {
+        period.name or period.period_id for period in sequence.periods
+        if sequence.component_for_period(period.period_id) is None
+    }
+    periods = []
+    for period in sequence.periods:
+        if period.period_id in component.period_ids:
+            label = period.name or period.period_id
+            if label in used:
+                period = replace(period, name=_available_name(sequence.period_label(period.period_id), used))
+            else:
+                used.add(label)
+        periods.append(period)
+    return replace(
+        sequence, periods=tuple(periods),
+        components=tuple(item for item in sequence.components if item != component),
+    )
+
+
+def _internal_brackets(sequence: PulseSequence, component: PulseComponent) -> tuple[PulseBracket, ...]:
+    ids = tuple(period.period_id for period in sequence.periods)
+    start = ids.index(component.period_ids[0])
+    extent = (start, start + len(component.period_ids))
+    return tuple(
+        bracket for bracket, bounds in zip(sequence.brackets, sequence.bracket_bounds, strict=True)
+        if bracket_contains(extent, bounds)
+    )
+
+
+def extract_subpulse(sequence: PulseSequence, component_id: str) -> Subpulse:
+    """Copy one group's contents; its parent's loops and delays stay in the Pulse."""
+    component = _component(sequence, component_id)
+    return Subpulse(
+        name=component.name, target=sequence.target, time_step_ns=sequence.time_step_ns,
+        periods=tuple(sequence.period_by_id[key] for key in component.period_ids),
+        bindings=tuple(binding for binding in sequence.bindings if binding.field_ref.period_id in component.period_ids),
+        brackets=_internal_brackets(sequence, component),
+    )
+
+
+def _remap_subpulse(
+    subpulse: Subpulse, component_id: str, used_periods: set[str], used_brackets: set[str],
+    *, retained_periods: tuple[str, ...] = (), retained_brackets: tuple[str, ...] = (),
+    previous_period_id: str | None = None, next_period_id: str | None = None,
+) -> tuple[tuple[PulsePeriod, ...], tuple[PulseBinding, ...], tuple[PulseBracket, ...]]:
+    period_ids = {
+        period.period_id: (
+            period.period_id if period.period_id in retained_periods
+            else _available_id(f"{component_id}_{period.period_id}", used_periods)
+        ) for period in subpulse.periods
+    }
+    periods = tuple(replace(
+        period, period_id=period_ids[period.period_id],
+        name=(period.name if period_ids[period.period_id] == period.period_id else period.name or period.period_id),
+    ) for period in subpulse.periods)
+    bindings = tuple(replace(
+        binding, field_ref=replace(binding.field_ref, period_id=period_ids[binding.field_ref.period_id]),
+    ) for binding in subpulse.bindings)
+    brackets = tuple(replace(
+        bracket,
+        bracket_id=(bracket.bracket_id if bracket.bracket_id in retained_brackets
+                    else _available_id(f"{component_id}_{bracket.bracket_id}", used_brackets)),
+        start_period_id=period_ids.get(bracket.start_period_id, next_period_id),
+        end_period_id=period_ids.get(bracket.end_period_id, previous_period_id),
+    ) for bracket in subpulse.brackets)
+    return periods, bindings, brackets
+
+
+def insert_subpulse(
+    sequence: PulseSequence | None, subpulse: Subpulse,
+    before_period_id: str | None = None, name: str | None = None,
+) -> PulseSequence:
+    """Insert an independent embedded instance; no file is followed at run time."""
+    if not isinstance(subpulse, Subpulse):
+        raise TypeError("subpulse must be Subpulse")
+    if sequence is not None:
+        if sequence.target.abi_fingerprint != subpulse.target.abi_fingerprint:
+            raise ValueError("subpulse target ABI differs from the Pulse")
+        if sequence.time_step_ns != subpulse.time_step_ns:
+            raise ValueError("subpulse time step differs from the Pulse")
+    existing = () if sequence is None else sequence.periods
+    ids = tuple(period.period_id for period in existing)
+    if before_period_id is not None and before_period_id not in ids:
+        raise ValueError(f"no period exists with id {before_period_id!r}")
+    position = len(ids) if before_period_id is None else ids.index(before_period_id)
+    components = () if sequence is None else sequence.components
+    if any(before_period_id in item.period_ids[1:] for item in components):
+        raise ValueError("a component cannot be inserted inside another component")
+    component_id = _available_id("component1", {item.component_id for item in components})
+    if name is None:
+        name = _available_name(subpulse.name, {item.name for item in components})
+    periods, bindings, brackets = _remap_subpulse(
+        subpulse, component_id, set(ids),
+        set() if sequence is None else {item.bracket_id for item in sequence.brackets},
+        previous_period_id=ids[position - 1] if position else None,
+        next_period_id=ids[position] if position < len(ids) else None,
+    )
+    component = PulseComponent(component_id, name, tuple(period.period_id for period in periods))
+    if sequence is None:
+        return PulseSequence(
+            name=subpulse.name, target=subpulse.target, time_step_ns=subpulse.time_step_ns,
+            periods=periods, bindings=bindings, brackets=brackets, components=(component,),
+        )
+    existing_brackets = tuple(
+        replace(bracket, start_period_id=periods[0].period_id)
+        if bounds == (position, position) else bracket
+        for bracket, bounds in zip(sequence.brackets, sequence.bracket_bounds, strict=True)
+    )
+    return replace(
+        sequence, periods=existing[:position] + periods + existing[position:],
+        bindings=sequence.bindings + bindings, brackets=existing_brackets + brackets,
+        components=components + (component,),
+    )
+
+
+def _parent_brackets_after_splice(
+    sequence: PulseSequence, component: PulseComponent, periods: tuple[PulsePeriod, ...],
+) -> tuple[PulseBracket, ...]:
+    """Keep enclosing and adjacent brackets anchored to the same surviving gaps."""
+    original = tuple(period.period_id for period in sequence.periods)
+    start = original.index(component.period_ids[0])
+    end = start + len(component.period_ids)
+    internal = _internal_brackets(sequence, component)
+    ids = original[:start] + tuple(period.period_id for period in periods) + original[end:]
+    delta = len(periods) - len(component.period_ids)
+    result = []
+    for bracket, (first, last) in zip(sequence.brackets, sequence.bracket_bounds, strict=True):
+        if bracket in internal:
+            continue
+        # No remaining bracket has a gap strictly inside the replaced range.
+        first = first + delta if first >= end else first
+        last = last + delta if last >= end else last
+        result.append(replace(
+            bracket,
+            start_period_id=ids[first] if first < len(ids) else None,
+            end_period_id=ids[last - 1] if last else None,
+        ))
+    return tuple(result)
+
+
+def replace_component(sequence: PulseSequence, component_id: str, subpulse: Subpulse) -> PulseSequence:
+    """Adopt edited contents, retaining IDs of existing member fields and parent loops."""
+    component = _component(sequence, component_id)
+    if not isinstance(subpulse, Subpulse):
+        raise TypeError("subpulse must be Subpulse")
+    if sequence.target.abi_fingerprint != subpulse.target.abi_fingerprint:
+        raise ValueError("subpulse target ABI differs from the Pulse")
+    if sequence.time_step_ns != subpulse.time_step_ns:
+        raise ValueError("subpulse time step differs from the Pulse")
+    internal = _internal_brackets(sequence, component)
+    ids = tuple(period.period_id for period in sequence.periods)
+    start = ids.index(component.period_ids[0])
+    end = start + len(component.period_ids)
+    periods, bindings, brackets = _remap_subpulse(
+        subpulse, component_id, set(sequence.period_by_id),
+        {item.bracket_id for item in sequence.brackets},
+        retained_periods=component.period_ids,
+        retained_brackets=tuple(item.bracket_id for item in internal),
+        previous_period_id=ids[start - 1] if start else None,
+        next_period_id=ids[end] if end < len(ids) else None,
+    )
+    new_bindings = {binding.field_ref: binding for binding in bindings}
+    merged_bindings = []
+    for binding in sequence.bindings:
+        if binding.field_ref.period_id not in component.period_ids:
+            merged_bindings.append(binding)
+        elif binding.field_ref in new_bindings:
+            merged_bindings.append(new_bindings.pop(binding.field_ref))
+    merged_bindings.extend(new_bindings.values())
+    return replace(
+        sequence, periods=sequence.periods[:start] + periods + sequence.periods[end:],
+        bindings=tuple(merged_bindings),
+        brackets=_parent_brackets_after_splice(sequence, component, periods) + brackets,
+        components=tuple(
+            replace(item, period_ids=tuple(period.period_id for period in periods))
+            if item == component else item for item in sequence.components
+        ),
+    )
+
+
+def remove_component(sequence: PulseSequence, component_id: str) -> PulseSequence:
+    """Delete this instance and its contents, preserving any enclosing Bracket."""
+    component = _component(sequence, component_id)
+    periods = tuple(period for period in sequence.periods if period.period_id not in component.period_ids)
+    if not periods:
+        raise ValueError("removing the only component leaves no periods; use Clear for the whole Pulse")
+    return replace(
+        sequence, periods=periods,
+        bindings=tuple(binding for binding in sequence.bindings if binding.field_ref.period_id not in component.period_ids),
+        brackets=_parent_brackets_after_splice(sequence, component, ()),
+        components=tuple(item for item in sequence.components if item != component),
+    )
+
+
 __all__ = [
     "ANALOG_MODES",
     "PERIOD_KIND_PERIOD",
@@ -837,6 +1166,14 @@ __all__ = [
     "PulseBinding",
     "PulsePeriod",
     "PulseBracket",
+    "PulseComponent",
+    "Subpulse",
+    "group_component",
+    "ungroup_component",
+    "extract_subpulse",
+    "insert_subpulse",
+    "replace_component",
+    "remove_component",
     "PulsePortSpec",
     "PulseSequence",
     "PulseTarget",

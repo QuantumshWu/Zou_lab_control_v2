@@ -137,3 +137,42 @@ Vivado products, the deployed `.bit`/`.ltx`, and the FPGA's volatile or flash
 programmed state are external machine artifacts, not Python package data.
 Normal experiment startup uses the already deployed bitstream and never builds
 or programs hardware.
+
+## Components and Subpulse files
+
+A `PulseComponent` groups consecutive periods in a `PulseSequence`. The Pulse
+still owns one flat set of periods, spacers, brackets and bindings; grouping
+does not add a loop, an output transition, a delay or another execution layer.
+Components do not overlap or nest. A bracket must be wholly inside a component,
+enclose it wholly, or lie outside it; partial crossings are rejected. A bracket
+with exactly the component's extent is included when that component is exported.
+
+```python
+from zlc_pulse import (
+    group_component, ungroup_component, extract_subpulse,
+    insert_subpulse, replace_component, read_subpulse, write_subpulse,
+)
+
+grouped = group_component(sequence, ("load", "compress", "cool"), "MOT")
+component_id = grouped.components[-1].component_id
+fragment = extract_subpulse(grouped, component_id)
+write_subpulse("MOT.subpulse.json", fragment)
+copied = insert_subpulse(grouped, read_subpulse("MOT.subpulse.json"))
+```
+
+`zlc.subpulse` is a non-executable file format. Pulse readers and the compiler
+do not accept a `Subpulse` as a runnable Pulse. Its `to_sequence()` projection
+allows the existing authoring tools to edit it; insert it into a complete Pulse
+to execute it. Each insertion copies its content and remaps private period,
+bracket and field identities. It never follows an external file at runtime.
+Existing instances therefore remain unchanged when the exported file is edited.
+
+Period display names are unique within their component; `period_label()` and
+`field_label()` qualify them with the component name where needed. Renaming a
+component changes labels, not stable API/scan identities. Config keys retain
+their existing shared meaning across all instances. All instances contribute
+to the same hardware row, loop and scan-slot budgets.
+
+Run/Scan repeats, target wiring and output delays belong to the complete Pulse.
+DAC Hold/Ramp continues from the preceding output when a component is inserted;
+the start value shown in an isolated fragment is not a measured entry state.

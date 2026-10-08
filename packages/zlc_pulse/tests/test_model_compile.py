@@ -637,3 +637,146 @@ def test_a_spacer_holds_its_dacs_and_takes_only_a_config_duration() -> None:
     assert [period.kind for period in reread.periods] == [
         PERIOD_KIND_PERIOD, PERIOD_KIND_SPACER, PERIOD_KIND_PERIOD,
     ]
+
+
+def test_component_grouping_and_editing_keep_one_flat_program() -> None:
+    from zlc_pulse import (
+        field_label, group_component, ungroup_component, extract_subpulse, replace_component,
+    )
+
+    authored = replace(
+        _sequence(bindings=(
+            PulseBinding(PulseFieldRef("duration", "p0"), "ns", scan=True),
+            PulseBinding(PulseFieldRef("duration", "p2"), "ns", scan=True),
+        ), delays=(OutputDelay("d0", 20),)),
+        brackets=(PulseBracket("outer", "p0", "p2", 2), PulseBracket("inner", "p0", "p1", 3)),
+        run_repeats=7,
+    )
+    grouped = group_component(authored, ("p0", "p1"), "Cooling", "cooling")
+    geometry = StreamerParams(max_rows=8, bank_size=2)
+    assert compile_sequence(grouped, geometry, 50e6) == compile_sequence(authored, geometry, 50e6)
+    assert ungroup_component(grouped, "cooling") == authored
+    assert grouped.period_label("p0") == "Cooling / p0"
+    assert field_label(grouped, grouped.bindings[0].field_ref) == "Cooling / p0.duration"
+    fragment = extract_subpulse(grouped, "cooling")
+    assert tuple(bracket.bracket_id for bracket in fragment.brackets) == ("inner",)
+    assert fragment.to_sequence().periods == authored.periods[:2]
+    assert replace_component(grouped, "cooling", fragment) == grouped
+    assert not hasattr(fragment, "delays") and not hasattr(fragment, "run_repeats")
+
+
+def test_subpulse_instances_have_independent_fields_and_shared_config_names() -> None:
+    from zlc_pulse import (
+        Subpulse, extract_subpulse, field_label, insert_subpulse, replace_component,
+        resolve_scan_point, ungroup_component,
+    )
+
+    source = _sequence(bindings=(
+        PulseBinding(PulseFieldRef("duration", "p0"), "ns", scan=True, source="api"),
+        PulseBinding(PulseFieldRef("duration", "p1"), "ns", source="config", config_key="shared_time"),
+    ))
+    fragment = Subpulse("Cooling", source.target, source.time_step_ns, source.periods, source.bindings)
+    once = insert_subpulse(None, fragment)
+    twice = insert_subpulse(once, fragment)
+    first, second = twice.components
+    assert set(first.period_ids).isdisjoint(second.period_ids)
+    assert [item.name for item in twice.components] == ["Cooling", "Cooling (2)"]
+    assert len({binding.field_id for binding in twice.bindings}) == 4
+    assert {binding.config_key for binding in twice.config_bindings} == {"shared_time"}
+    assert field_label(twice, twice.bindings[0].field_ref) == "Cooling / p0.duration"
+    assert field_label(twice, twice.bindings[2].field_ref) == "Cooling (2) / p0.duration"
+    values = {twice.bindings[0].field_id: 40, twice.bindings[2].field_id: 60}
+    resolved = resolve_api_parameters(twice, values)
+    configured, applied, _ = apply_config_values(resolved, {"shared_time": (80, "ns")})
+    assert applied == ("shared_time",)
+    assert configured.period_by_id[first.period_ids[1]].duration == 80
+    assert configured.period_by_id[second.period_ids[1]].duration == 80
+    played = resolve_scan_point(configured, (100, 120))
+    assert played.period_by_id[first.period_ids[0]].duration == 100
+    assert played.period_by_id[second.period_ids[0]].duration == 120
+    assert twice.period_by_id[first.period_ids[0]].duration == 20
+    edited = extract_subpulse(twice, first.component_id)
+    edited = replace(edited, periods=(replace(edited.periods[0], duration=40),) + edited.periods[1:])
+    updated = replace_component(twice, first.component_id, edited)
+    assert updated.bindings == twice.bindings
+    assert updated.period_by_id[second.period_ids[0]].duration == 20
+    assert updated.period_by_id[first.period_ids[0]].duration == 40
+    with np.testing.assert_raises_regex(ValueError, "scan slot"):
+        compile_sequence(resolve_api_parameters(twice), StreamerParams(num_slots=1), 50e6)
+    ungrouped = ungroup_component(ungroup_component(twice, first.component_id), second.component_id)
+    assert not ungrouped.components
+    assert len({period.name or period.period_id for period in ungrouped.periods}) == 6
+
+
+def test_component_boundaries_preserve_parent_brackets_and_reject_partial_crossing() -> None:
+    from zlc_pulse import (
+        PulseComponent, Subpulse, extract_subpulse, group_component, insert_subpulse,
+        remove_component, replace_component,
+    )
+
+    sequence = _sequence()
+    grouped = group_component(sequence, ("p0", "p1"), "First", "first")
+    for bad in (
+        PulseComponent("broken", "Broken", ("p0", "p2")),
+        PulseComponent("missing", "Missing", ("unknown",)),
+    ):
+        with np.testing.assert_raises(ValueError):
+            replace(sequence, components=(bad,))
+    with np.testing.assert_raises_regex(ValueError, "overlap"):
+        group_component(grouped, ("p1", "p2"), "Overlap")
+    with np.testing.assert_raises_regex(ValueError, "partially crosses"):
+        replace(grouped, brackets=(PulseBracket("cross", "p1", "p2", 2),))
+    grouped = replace(grouped, brackets=(PulseBracket("parent", "p0", "p2", 2),))
+    edited = extract_subpulse(grouped, "first")
+    edited = replace(edited, periods=edited.periods + (replace(edited.periods[-1], period_id="added"),))
+    longer = replace_component(grouped, "first", edited)
+    assert longer.bracket_bounds == ((0, 4),)
+    assert longer.brackets[0].start_period_id == "p0"
+    assert longer.brackets[0].end_period_id == "p2"
+    assert remove_component(longer, "first").bracket_bounds == ((0, 1),)
+    with np.testing.assert_raises_regex(ValueError, "inside another"):
+        insert_subpulse(grouped, edited, before_period_id="p1")
+    alone = insert_subpulse(None, edited)
+    with np.testing.assert_raises_regex(ValueError, "use Clear"):
+        remove_component(alone, alone.components[0].component_id)
+    empty_edge = Subpulse(
+        "Draft", sequence.target, 20, sequence.periods[:1],
+        brackets=(PulseBracket("before", "p0", None, 1), PulseBracket("after", None, "p0", 1)),
+    )
+    inserted = insert_subpulse(sequence, empty_edge, before_period_id="p1")
+    assert inserted.bracket_bounds == ((1, 1), (2, 2))
+    parent_empty = replace(sequence, brackets=(PulseBracket("gap", "p1", "p0", 2),))
+    inserted = insert_subpulse(parent_empty, extract_subpulse(grouped, "first"), before_period_id="p1")
+    assert inserted.bracket_bounds == ((1, 1),)
+
+
+def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None:
+    from zlc_pulse import (
+        extract_subpulse, group_component, insert_subpulse, read_pulse_document,
+        read_subpulse, subpulse_from_tree, subpulse_to_tree, write_subpulse,
+    )
+
+    authored = group_component(
+        replace(_sequence(), brackets=(PulseBracket("inner", "p0", "p1", 2),)),
+        ("p0", "p1"), "Cooling", "cooling",
+    )
+    assert sequence_from_tree(sequence_to_tree(authored)) == authored
+    assert sequence_from_tree(sequence_to_tree(_sequence())).components == ()
+    fragment = extract_subpulse(authored, "cooling")
+    tree = subpulse_to_tree(fragment)
+    assert tree["format"] == "zlc.subpulse"
+    assert not {"delays", "run_repeats", "components"}.intersection(tree)
+    assert subpulse_from_tree(tree) == fragment
+    path = tmp_path / "cooling.json"
+    write_subpulse(path, fragment)
+    assert read_subpulse(path) == fragment
+    with np.testing.assert_raises(ValueError):
+        read_pulse_document(path)
+    with np.testing.assert_raises(TypeError):
+        compile_sequence(fragment, StreamerParams(), 50e6)
+    with np.testing.assert_raises_regex(ValueError, "unknown subpulse"):
+        subpulse_from_tree({**tree, "run_repeats": 1})
+    twice = insert_subpulse(insert_subpulse(None, fragment), fragment)
+    assert len({bracket.bracket_id for bracket in twice.brackets}) == 2
+    assert twice.bracket_bounds == ((0, 2), (2, 4))
+    assert sequence_from_tree(sequence_to_tree(twice)) == twice

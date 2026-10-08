@@ -1,7 +1,7 @@
 """Editing a pulse sequence in a window, and seeing what it will do.
 
 Three packages had everything except the thing between them: zlc_pulse owns an
-immutable ``PulseSequence`` and what makes one legal, zlc_ui owns a four-page
+immutable ``PulseSequence`` and what makes one legal, zlc_ui owns the
 editor that speaks in plain view models, and zlc_plot draws a timeline.  Nothing
 turned one into the others, so the editor rendered nothing and the notebook had
 no way to look at a pulse before firing it.
@@ -42,9 +42,19 @@ from zlc_pulse import (
     PERIOD_KIND_SPACER,
     PulseBracket,
     PulseBinding,
+    PulseFieldRef,
     PulsePeriod,
     PulseSequence,
     PulseTarget,
+    Subpulse,
+    group_component,
+    ungroup_component,
+    extract_subpulse,
+    insert_subpulse,
+    replace_component,
+    remove_component,
+    read_subpulse,
+    write_subpulse,
 )
 from zlc_pulse import (
     TIME_UNIT_CHOICES,
@@ -81,6 +91,7 @@ from zlc_ui import (
     PortRowVM,
     BracketVM,
     ScheduleVM,
+    ComponentVM,
 )
 
 from .board import _guarded_slot
@@ -588,6 +599,17 @@ def project_schedule(
         periods=periods,
         analog_mode_choices=ANALOG_MODE_ROWS,
         brackets=() if sequence is None else _bracket_vms(sequence),
+        components=() if sequence is None else tuple(
+            ComponentVM(
+                component.component_id, component.name, component.period_ids,
+                _readable(fragment.to_sequence().played_nanoseconds()),
+                len(fragment.brackets),
+                tuple(bracket.bracket_id for bracket in fragment.brackets),
+                spacer_count=sum(period.kind == PERIOD_KIND_SPACER for period in fragment.periods),
+            )
+            for component in sequence.components
+            for fragment in (extract_subpulse(sequence, component.component_id),)
+        ),
         run_repeats=0 if sequence is None else sequence.run_repeats,
         # Every output the board can delay gets a row whether or not a pulse is
         # open, because the row IS the board telling the operator that output
@@ -821,7 +843,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         PulsePeriodMark(
             start,
             start + _nanoseconds(period.duration, period.unit) * 1e-9,
-            period.name or period.period_id,
+            sequence.period_label(period.period_id),
             spacer=period.kind == PERIOD_KIND_SPACER,
         )
         for start, period in zip(starts, sequence.periods)
@@ -1073,6 +1095,12 @@ class PulseEditorPresenter:
             raise TypeError("state must be PulseEditorState or None")
         self._state = state if state is not None else PulseEditorState()
         self._saved_state = self._state
+        self._component_context = ""
+        self._subpulse_draft: Subpulse | None = None
+        self._subpulse_saved: Subpulse | None = None
+        self._subpulse_path = ""
+        self._subpulse_visible_ports: frozenset[str] | None = None
+        self._component_projection_revision = 0
         self.path = str(path)
         #: Where the Open dialog starts when nothing is open yet.
         self.pulses_directory = str(pulses_directory)
@@ -1223,6 +1251,10 @@ class PulseEditorPresenter:
 
     def _edit_state(self, **changes: Any) -> None:
         sequence = changes.get("sequence")
+        if sequence is not None and "scan_rows" not in changes:
+            before_slots = () if self.sequence is None else tuple(b.field_id for b in self.sequence.scan_bindings)
+            if tuple(b.field_id for b in sequence.scan_bindings) != before_slots:
+                changes.update(scan_rows=(), scan_source_dirty=bool(self._state.scan_source))
         visible = self._state.visible_ports
         if visible is not None and sequence is not None and "visible_ports" not in changes:
             # The shown set names ports of one target.  Across a target
@@ -1234,6 +1266,192 @@ class PulseEditorPresenter:
                 key for key in sequence.target.by_key if key in visible or key not in before
             )
         self._accept_state(replace(self._state, **changes))
+
+    def _edited_candidate(self, action: str, args: tuple) -> PulseSequence | None:
+        if self.sequence is None:
+            return None
+        try:
+            candidate, dropped = prune_orphaned_bindings(_sequence_edited(self.sequence, action, args))
+            if dropped:
+                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here")
+            return candidate
+        except (TypeError, ValueError, KeyError) as error:
+            self._warn(str(error))
+            return None
+
+    def _refresh_component_document(self) -> None:
+        sequence = self.sequence
+        contexts = () if sequence is None else tuple((c.component_id, c.name) for c in sequence.components)
+        if self._component_context not in dict(contexts):
+            self._component_context = ""
+        context = self._component_context
+        fragment = extract_subpulse(sequence, context) if context else self._subpulse_draft
+        self._component_projection_revision += 1
+        vm = None
+        bindings = ()
+        if fragment is not None:
+            selected = fragment.to_sequence()
+            vm = project_schedule(
+                selected, revision=self._component_projection_revision,
+                visible_ports=self._state.visible_ports if context else self._subpulse_visible_ports,
+                config_values=self._active_config_values(), pins=self.pins if context else None,
+            )
+            if context:
+                # HOLD reads the real preceding Pulse, not an isolated zero-state
+                # preview of the fragment. IDs are still the parent's own IDs.
+                vm = replace(vm, periods=tuple(project_period(
+                    sequence, period, visible_ports=self._state.visible_ports,
+                    config_values=self._active_config_values(), scan_active=self._scan_armed(),
+                ) for period in selected.periods))
+            bindings = tuple((b.field_id, field_label(selected, b.field_ref), b.config_key)
+                             for b in selected.config_bindings)
+        self.view.set_component_document(
+            vm, contexts=contexts, context_id=context,
+            path="" if context else self._subpulse_path,
+            dirty=(self._state != self._saved_state if context else self._subpulse_draft != self._subpulse_saved),
+            bindings=bindings, config_names=tuple(self._active_config_values()),
+            busy=False,
+        )
+
+    def _discard_subpulse_edits(self) -> bool:
+        return self._subpulse_draft == self._subpulse_saved or self.view.confirm_component_discard()
+
+    def component_action(self, action: str, payload: object) -> None:
+        """Component file and grouping commands; all scientific edits use zlc_pulse."""
+        try:
+            if action in {"context", "edit"}:
+                context = str(payload or "")
+                if context and (self.sequence is None or context not in {c.component_id for c in self.sequence.components}):
+                    raise ValueError("that component no longer exists in this Pulse")
+                self._component_context = context
+            elif action in {"new", "open"}:
+                if not self._discard_subpulse_edits():
+                    return
+                if action == "open":
+                    chosen = self.view.ask_open_path(
+                        "Open Subpulse", self._subpulse_path or self.pulses_directory,
+                        "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
+                    )
+                    if not chosen:
+                        return
+                    self._subpulse_draft = self._subpulse_saved = read_subpulse(chosen)
+                    self._subpulse_path = str(chosen)
+                else:
+                    from zlc_pulse import pulse_target_from_xdc
+                    target = self.sequence.target if self.sequence is not None else self._board_target or pulse_target_from_xdc()
+                    step = self.sequence.time_step_ns if self.sequence is not None else self._board_step_ns or 1e9 / self._compiler_target()[1]
+                    self._subpulse_draft = Subpulse(
+                        "component", target, step,
+                        (PulsePeriod("period1", NEW_PULSE_PERIOD_NS, "ns", (0,) * len(target.raw_lanes)),),
+                    )
+                    self._subpulse_saved = None
+                    self._subpulse_path = ""
+                self._component_context = ""
+                self._subpulse_visible_ports = None
+            elif action in {"save", "save_as", "export"}:
+                if action == "save" and self._component_context:
+                    self.save_pulse()
+                    self._refresh_component_document()
+                    return
+                context = str(payload or self._component_context) if action == "export" else self._component_context
+                fragment = extract_subpulse(self.sequence, context) if context else self._subpulse_draft
+                if fragment is None:
+                    raise ValueError("create or open a Subpulse first")
+                target = self._subpulse_path if not context and action == "save" else ""
+                if not target:
+                    target = self.view.ask_save_path(
+                        "Save Subpulse", str(Path(self.pulses_directory or ".") / f"{fragment.name}.subpulse.json"),
+                        "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
+                    )
+                if not target:
+                    return
+                path = Path(target)
+                if not path.suffix:
+                    path = path.with_suffix(".subpulse.json")
+                if path.suffix.lower() != ".json":
+                    raise ValueError("a Subpulse file must have a .json suffix")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                write_subpulse(path, fragment)
+                if not context:
+                    self._subpulse_path = str(path)
+                    self._subpulse_saved = fragment
+                self._done(f"saved Subpulse {path.name}")
+            elif action == "insert":
+                fragment = (extract_subpulse(self.sequence, self._component_context)
+                            if self._component_context else self._subpulse_draft)
+                if fragment is None:
+                    raise ValueError("create or open a Subpulse first")
+                old = set() if self.sequence is None else {c.component_id for c in self.sequence.components}
+                candidate = insert_subpulse(self.sequence, fragment)
+                self._component_context = next(c.component_id for c in candidate.components if c.component_id not in old)
+                self._apply(candidate)
+            elif action == "group":
+                start, end, name = payload
+                if self.sequence is None:
+                    raise ValueError("open a Pulse before grouping its periods")
+                ids = tuple(self.sequence.period_by_id)
+                first, last = ids.index(start), ids.index(end)
+                if first > last:
+                    raise ValueError("component end must not precede its start")
+                self._apply(group_component(self.sequence, ids[first:last + 1], str(name)))
+            elif action in {"ungroup", "remove"}:
+                operation = ungroup_component if action == "ungroup" else remove_component
+                self._apply(operation(self.sequence, str(payload)))
+            elif action == "rename":
+                key, name = payload
+                if key:
+                    self._apply(replace(self.sequence, components=tuple(
+                        replace(c, name=str(name)) if c.component_id == key else c for c in self.sequence.components
+                    )))
+                elif self._subpulse_draft is not None:
+                    self._subpulse_draft = replace(self._subpulse_draft, name=str(name))
+            elif action in {"insert_period", "insert_spacer"}:
+                key, before = payload
+                self._edit_component_contents(str(key), action, (before,))
+            else:
+                raise ValueError(f"unknown Component action {action!r}")
+        except (TypeError, ValueError, KeyError, OSError) as error:
+            self._warn(f"cannot {action} Component: {error}")
+        self._refresh_component_document()
+
+    def edit_component(self, action: str, args: object) -> None:
+        self._edit_component_contents(self._component_context, action, tuple(args))
+
+    def _edit_component_contents(self, context: str, action: str, args: tuple) -> None:
+        if action == "visible_ports":
+            if context:
+                self.set_visible_ports(args[0])
+            else:
+                self._subpulse_visible_ports = frozenset(args[0])
+            self._refresh_component_document()
+            return
+        try:
+            if context:
+                if action == "document_name":
+                    self.component_action("rename", (context, args[0]))
+                    return
+                if action in {"period_name", "duration", "digital", "analog", "binding", "config_binding"}:
+                    # Real parent context supplies incoming DAC carry and stable IDs.
+                    self._apply(self._edited_candidate(action, args))
+                    self._refresh_component_document()
+                    return
+                fragment = extract_subpulse(self.sequence, context)
+            else:
+                fragment = self._subpulse_draft
+            if fragment is None:
+                raise ValueError("create or open a Subpulse first")
+            candidate, dropped = prune_orphaned_bindings(_sequence_edited(fragment.to_sequence(), action, args))
+            if dropped:
+                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here")
+            edited = Subpulse(candidate.name, candidate.target, candidate.time_step_ns,
+                              candidate.periods, candidate.bindings, candidate.brackets)
+            if context:
+                self._apply(replace_component(self.sequence, context, edited))
+            else:
+                self._subpulse_draft = edited
+        except (TypeError, ValueError, KeyError) as error:
+            self._warn(f"cannot edit Component: {error}")
+        self._refresh_component_document()
 
     # --------------------------------------------------------------- wiring
 
@@ -1308,6 +1526,8 @@ class PulseEditorPresenter:
         view.preview_selectors_toggled.connect(self._guarded(self.set_preview_selectors))
         view.preview_save_requested.connect(self._guarded(self.save_preview_image))
         view.target_apply_requested.connect(self._guarded(self.apply_target))
+        view.component_action_requested.connect(self._guarded(self.component_action))
+        view.component_edit_requested.connect(self._guarded(self.edit_component))
 
     # ------------------------------------------------------------- the pulse
 
@@ -1387,8 +1607,13 @@ class PulseEditorPresenter:
         if self.sequence is None:
             return ()
         return tuple(
-            BindingRecord(b.field_id, field_label(self.sequence, b.field_ref), b.scan, b.source)
+            BindingRecord(
+                b.field_id, field_label(self.sequence, b.field_ref), b.scan, b.source,
+                "" if component is None else component.component_id,
+                "Pulse" if component is None else component.name,
+            )
             for b in self.sequence.bindings if b.scan or b.source == "api"
+            for component in (self.sequence.component_for_period(b.field_ref.period_id),)
         )
 
     def _config_dirty(self) -> bool:
@@ -1434,6 +1659,7 @@ class PulseEditorPresenter:
         active = self._active_config_values()
         scan_active = self._scan_armed()
         bindings = []
+        binding_groups = []
         if self.sequence is not None:
             for b in self.sequence.config_bindings:
                 default = pulse_field_value(self.sequence, b.field_ref, b.unit)
@@ -1445,29 +1671,22 @@ class PulseEditorPresenter:
                     "Scan table" if b.scan and scan_active else
                     "Using default" if effective is None else "Config override",
                 ))
+                component = self.sequence.component_for_period(b.field_ref.period_id)
+                binding_groups.append((
+                    b.field_id, "" if component is None else component.component_id,
+                    "Pulse" if component is None else component.name,
+                ))
         self.view.set_config_page(ConfigPageRecord(
             file_path=self._config_path, dirty=self._config_dirty(),
             entries=self._config_rows, bindings=tuple(bindings),
             available_names=tuple(active),
             active_path=self._active_config_path(),
             busy=self._device_busy or self._stop_busy,
+            binding_groups=tuple(binding_groups),
         ))
 
     def set_config_binding(self, field_id: str, key: str) -> None:
-        if self.sequence is None:
-            return
-        key = str(key).strip()
-        if key:
-            key = config_parameter_key(key)
-        current = next((b for b in self.sequence.config_bindings if b.field_id == field_id), None)
-        if current is None:
-            raise ValueError("the field is not a Config parameter")
-        candidate = self._rebuilt(bindings=tuple(
-            replace(b, config_key=key) if b is current else b
-            for b in self.sequence.bindings
-        ))
-        if candidate is not None:
-            self._apply(candidate)
+        self._apply(self._edited_candidate("config_binding", (field_id, key)))
 
     def _config_file_operation(
         self, path: str, *, entries: Mapping[str, tuple[float, str]] | None = None,
@@ -1668,7 +1887,7 @@ class PulseEditorPresenter:
         self.refresh_preview()
 
     def set_period_name(self, period_id: str, name: str) -> None:
-        self._edit_period(period_id, lambda period: replace(period, name=str(name)))
+        self._edit_period(period_id, "period_name", str(name))
         self._refresh_scan_page()
 
     def set_duration(self, period_id: str, value: object, unit: str) -> None:
@@ -1680,27 +1899,10 @@ class PulseEditorPresenter:
         every intermediate value is briefly wrong.
         """
 
-        aligned = self._on_grid(value, unit, "duration")
-        if aligned is None:
-            return
-        self._edit_period(
-            period_id,
-            lambda period: replace(period, duration=aligned, unit=str(unit)),
-        )
+        self._edit_period(period_id, "duration", value, unit)
 
     def set_digital(self, period_id: str, port_key: str, high: bool) -> None:
-        port = self.sequence.target.by_key.get(str(port_key))
-        if port is None:
-            self._warn(f"{port_key} is not a port on this target")
-            return
-        index = self.sequence.target.raw_lanes.index(port.lanes[0])
-
-        def _edit(period: PulsePeriod) -> PulsePeriod:
-            states = list(period.states)
-            states[index] = 1 if high else 0
-            return replace(period, states=tuple(states))
-
-        self._edit_period(period_id, _edit)
+        self._edit_period(period_id, "digital", port_key, high)
 
     def set_analog(self, period_id: str, port_key: str, mode: str, value: object) -> None:
         """Set one DAC's level in one period; an empty value removes the step.
@@ -1718,19 +1920,9 @@ class PulseEditorPresenter:
         the step instead, which is the same statement read forwards.
         """
 
-        def _edit(period: PulsePeriod) -> PulsePeriod:
-            steps = tuple(step for step in period.analog_steps if step.port != port_key)
-            text = "" if value is None else str(value).strip()
-            selected_mode = str(mode)
-            if text and selected_mode != HOLD_MODE:
-                steps = steps + (
-                    AnalogStep(str(port_key), selected_mode, int(float(text))),
-                )
-            return replace(period, analog_steps=steps)
-
         # A level holds until something sets it again, so this changes what
         # every later card displays as well as this one.
-        self._edit_period(period_id, _edit, ripples_forward=True)
+        self._edit_period(period_id, "analog", port_key, mode, value, ripples_forward=True)
 
     def set_delay(self, port_key: str, value: object, unit: str) -> None:
         if self.sequence is None:
@@ -1765,23 +1957,7 @@ class PulseEditorPresenter:
         if self.sequence is None:
             self.start_new_pulse()
             return
-        periods = list(self.sequence.periods)
-        ids = [period.period_id for period in periods]
-        order = list(_sequence_item_order(self.sequence))
-        position = order.index(before_item) if before_item is not None else len(order)
-        period_position = sum(kind == "period" for kind, _key in order[:position])
-        model = periods[max(0, period_position - 1)] if periods else None
-        new_id = _unique_id((*ids, *(period.name for period in periods)), "period")
-        period = PulsePeriod(
-            period_id=new_id,
-            duration=model.duration if model else self.sequence.time_step_ns,
-            unit=model.unit if model else "ns",
-            states=model.states if model else (0,) * len(self.sequence.target.raw_lanes),
-            analog_steps=(),
-            name="",
-        )
-        order.insert(position, ("period", new_id))
-        self._apply_item_order(order, periods={p.period_id: p for p in (*periods, period)})
+        self._apply(self._edited_candidate("insert_period", (before_item,)))
 
     def insert_spacer(self, before_item: tuple[str, str] | None) -> None:
         """Add a spacer: time between two periods for a slow device to settle.
@@ -1801,73 +1977,13 @@ class PulseEditorPresenter:
         if self.sequence is None:
             self._warn("add a period first: a spacer is time between periods")
             return
-        periods = list(self.sequence.periods)
-        ids = [period.period_id for period in periods]
-        order = list(_sequence_item_order(self.sequence))
-        position = order.index(before_item) if before_item is not None else len(order)
-        period_position = sum(kind == "period" for kind, _key in order[:position])
-        neighbours = [
-            periods[index]
-            for index in (period_position - 1, period_position)
-            if 0 <= index < len(periods)
-        ]
-        lanes = len(self.sequence.target.raw_lanes)
-        states = tuple(int(all(period.states[lane] for period in neighbours)) for lane in range(lanes))
-        model = next((period for period in reversed(periods) if period.kind == PERIOD_KIND_SPACER), None)
-        new_id = _unique_id((*ids, *(period.name for period in periods)), "spacer")
-        spacer = PulsePeriod(
-            period_id=new_id,
-            duration=model.duration if model else 1.0,
-            unit=model.unit if model else "ms",
-            states=states,
-            analog_steps=(),
-            name="",
-            kind=PERIOD_KIND_SPACER,
-        )
-        order.insert(position, ("period", new_id))
-        self._apply_item_order(order, periods={p.period_id: p for p in (*periods, spacer)})
+        self._apply(self._edited_candidate("insert_spacer", (before_item,)))
 
     def reorder_items(self, order: Sequence[tuple[str, str]]) -> None:
-        self._apply_item_order(order)
-
-    def _apply_item_order(
-        self, order: Sequence[tuple[str, str]], *, periods: Mapping[str, PulsePeriod] | None = None,
-    ) -> None:
-        """Commit periods and their inclusive bracket anchors in one rebuild."""
-        if self.sequence is None:
-            return
-        by_id = {p.period_id: p for p in self.sequence.periods} if periods is None else dict(periods)
-        if not by_id:
-            self._warn("a sequence needs at least one period")
-            return
-        items = tuple(tuple(item) for item in order)
-        expected = {("period", key) for key in by_id}
-        for bracket in self.sequence.brackets:
-            expected.update((
-                ("bracket", bracket_post_key(bracket.bracket_id, "start")),
-                ("bracket", bracket_post_key(bracket.bracket_id, "end")),
-            ))
-        if len(items) != len(expected) or set(items) != expected:
-            raise ValueError("schedule order must contain each current item exactly once")
-        brackets = []
-        for bracket in self.sequence.brackets:
-            start = items.index(("bracket", bracket_post_key(bracket.bracket_id, "start")))
-            end = items.index(("bracket", bracket_post_key(bracket.bracket_id, "end")))
-            if end < start:
-                self._warn(f"bracket {bracket.bracket_id} end precedes its start")
-                return
-            first = next((key for kind, key in items[start + 1:] if kind == "period"), None)
-            last = next((key for kind, key in reversed(items[:end]) if kind == "period"), None)
-            brackets.append(PulseBracket(bracket.bracket_id, first, last, bracket.count))
-        self._apply(self._rebuilt(
-            periods=tuple(by_id[key] for kind, key in items if kind == "period"),
-            brackets=tuple(brackets),
-        ))
+        self._apply(self._edited_candidate("reorder_items", (order,)))
 
     def remove_period(self, period_id: str) -> None:
-        periods = {p.period_id: p for p in self.sequence.periods if p.period_id != period_id}
-        order = tuple(item for item in _sequence_item_order(self.sequence) if item != ("period", period_id))
-        self._apply_item_order(order, periods=periods)
+        self._apply(self._edited_candidate("remove_period", (period_id,)))
 
     def set_bracket(self, bracket_id: str, start: object, end: object, count: int) -> None:
         """Move one bracket's inclusive anchors, or recount it.
@@ -1876,41 +1992,15 @@ class PulseEditorPresenter:
         timeline gap.  Only explicit removal takes a bracket away.
         """
 
-        replaced = PulseBracket(
-            str(bracket_id),
-            None if start is None else str(start),
-            None if end is None else str(end),
-            int(count),
-        )
-        self._apply(self._rebuilt(brackets=tuple(
-            replaced if bracket.bracket_id == replaced.bracket_id else bracket
-            for bracket in self.sequence.brackets
-        )))
+        self._apply(self._edited_candidate("bracket", (bracket_id, start, end, count)))
 
     def add_bracket(self, start: object, end: object, count: int) -> None:
         """A new bracket around these periods; nested or disjoint, the model decides."""
 
-        if self.sequence is None:
-            return
-        bracket_id = _unique_id(
-            tuple(bracket.bracket_id for bracket in self.sequence.brackets), "bracket",
-        )
-        self._apply(self._rebuilt(brackets=self.sequence.brackets + (
-            PulseBracket(
-                bracket_id,
-                None if start is None else str(start),
-                None if end is None else str(end),
-                int(count),
-            ),
-        )))
+        self._apply(self._edited_candidate("bracket_add", (start, end, count)))
 
     def remove_bracket(self, bracket_id: str) -> None:
-        if self.sequence is None:
-            return
-        self._apply(self._rebuilt(brackets=tuple(
-            bracket for bracket in self.sequence.brackets
-            if bracket.bracket_id != str(bracket_id)
-        )))
+        self._apply(self._edited_candidate("bracket_remove", (bracket_id,)))
 
     def set_run_repeats(self, repeats: int) -> None:
         """Persist complete-Pulse runs per scan point; zero means infinite."""
@@ -2468,6 +2558,7 @@ class PulseEditorPresenter:
                 bindings=bindings,
                 delays=delays,
                 brackets=current.brackets,
+                components=current.components,
                 run_repeats=current.run_repeats,
             )
         except ValueError as error:
@@ -3871,28 +3962,7 @@ class PulseEditorPresenter:
         """Change independent Scan capability and the one base value source."""
         if self.sequence is None:
             return
-        reference = self._field_reference(str(field_kind), period_id, port_key)
-        if reference is None:
-            return
-        current = next((b for b in self.sequence.bindings if b.field_ref == reference), None)
-        binding = PulseBinding(
-            reference, current.unit if current is not None else self.sequence.field_unit(reference),
-            scan=scan, source=source,
-            config_key=current.config_key if current is not None and source == "config" else "",
-        )
-        bindings = tuple(
-            binding if b.field_ref == reference else b
-            for b in self.sequence.bindings
-            if b.field_ref != reference or scan or source != "default"
-        )
-        if current is None and (scan or source != "default"):
-            bindings += (binding,)
-        changes: dict[str, Any] = {"bindings": bindings}
-        if scan or source != "default":
-            owning = self._periods_owning(reference)
-            if owning is not None:
-                changes["periods"] = owning
-        candidate = self._rebuilt(**changes)
+        candidate = self._edited_candidate("binding", (field_kind, period_id, port_key, scan, source))
         if candidate is None:
             return
         state_changes: dict[str, Any] = {"sequence": candidate}
@@ -3919,58 +3989,6 @@ class PulseEditorPresenter:
             "(click a dot in the Edit tab)"
         )
         return False
-
-    def _periods_owning(self, reference) -> tuple[PulsePeriod, ...] | None:
-        """The periods, with this DAC field given a step of its own.
-
-        A DAC field exists only while its period sets that port, so binding a
-        cell that is merely HOLDING has to make the period own the level it
-        was showing.  Bound without that, the binding named a field that was
-        not there and every read of it raised; the operator saw a dot on a
-        pulse that would not load.  ``None`` when nothing has to change.
-        """
-
-        period = self.sequence.period_by_id.get(str(reference.period_id))
-        if period is None or any(
-            step.port == reference.port for step in period.analog_steps
-        ):
-            return None
-        port = self.sequence.target.by_key.get(str(reference.port))
-        if port is None:
-            return None
-        materialised = replace(
-            period,
-            analog_steps=period.analog_steps + (
-                AnalogStep(
-                    str(reference.port),
-                    ANALOG_MODE_CHOICES[0],
-                    _held_value(self.sequence, period, port),
-                ),
-            ),
-        )
-        return tuple(
-            materialised if item.period_id == period.period_id else item
-            for item in self.sequence.periods
-        )
-
-    def _field_reference(self, kind: str, period_id: object, port_key: object):
-        from zlc_pulse import PulseFieldRef
-
-        try:
-            if kind == "duration":
-                return PulseFieldRef("duration", period_id=str(period_id))
-            if kind == "analog":
-                return PulseFieldRef(
-                    "dac",
-                    period_id=str(period_id),
-                    port=str(port_key),
-                )
-            if kind == "delay":
-                return PulseFieldRef("delay", port=str(port_key))
-            raise ValueError(f"unknown binding intent {kind!r}")
-        except (TypeError, ValueError) as error:
-            self._warn(f"cannot bind that field: {error}")
-            return None
 
     # ------------------------------------------------------------- scan page
 
@@ -4526,6 +4544,7 @@ class PulseEditorPresenter:
 
     def refresh(self) -> None:
         self._refresh_config_page()
+        self._refresh_component_document()
         target = self._current_target()
         if self.sequence is None:
             # No pulse.  If a board is attached its ports, pins and clock are
@@ -4794,8 +4813,8 @@ class PulseEditorPresenter:
     def _edit_period(
         self,
         period_id: str,
-        edit: Callable[[PulsePeriod], PulsePeriod],
-        *,
+        action: str,
+        *args: object,
         ripples_forward: bool = False,
     ) -> None:
         """Change one period's values.  The card it lives in already shows them.
@@ -4808,22 +4827,14 @@ class PulseEditorPresenter:
 
         if self.sequence is None:
             return
-        periods = []
-        found = False
-        for period in self.sequence.periods:
-            if period.period_id == str(period_id):
-                found = True
-                periods.append(edit(period))
-            else:
-                periods.append(period)
-        if not found:
+        if str(period_id) not in self.sequence.period_by_id:
             self._warn(f"{period_id} is not a period in this sequence")
             return
         following = ()
         if ripples_forward:
-            order = [item.period_id for item in periods]
+            order = list(self.sequence.period_by_id)
             following = tuple(order[order.index(str(period_id)) + 1 :])
-        candidate = self._rebuilt(periods=tuple(periods))
+        candidate = self._edited_candidate(action, (period_id, *args))
         if candidate is None:
             self.view.set_period(project_period(
                 self.sequence, self.sequence.period_by_id[str(period_id)],
@@ -4921,6 +4932,7 @@ class PulseEditorPresenter:
             schedule.set_delay_row(_delay_row(candidate, port_key, bindings, self._active_config_values()))
         self._refresh_summary()
         self._refresh_config_page()
+        self._refresh_component_document()
         self._render_run_state()
         self.refresh_preview()
 
@@ -4940,10 +4952,15 @@ class PulseEditorPresenter:
         shown = project_schedule(
             self.sequence,
             path=self.path,
+            revision=self.revision,
             visible_ports=self._state.visible_ports,
             pins=self.pins,
             scan_points=len(self._state.scan_rows),
+            config_values=self._active_config_values(),
+            scan_active=self._scan_armed(),
         )
+        if shown.components:
+            self._push_schedule(shown)
         self.view.set_schedule_summary(
             total_text=shown.total_text,
             total_tooltip=shown.total_tooltip,
@@ -5017,7 +5034,7 @@ class PulseEditorPresenter:
         """Whether unsaved pulse and Config edits may go; asked once per close."""
 
         return self._preview_close_requested or (
-            self._discard_pulse_edits() and self._discard_config_edits()
+            self._discard_pulse_edits() and self._discard_config_edits() and self._discard_subpulse_edits()
         )
 
     def prepare_preview_close(self) -> bool:
@@ -5108,6 +5125,170 @@ def replace_sequence(sequence: PulseSequence, **changes: Any) -> PulseSequence:
     """
 
     return replace(sequence, **changes)
+
+
+def _reordered_sequence(
+    sequence: PulseSequence, order: Sequence[tuple[str, str]],
+    periods: Mapping[str, PulsePeriod] | None = None,
+) -> PulseSequence:
+    """One edit of the flat timeline, for both a Pulse and a Subpulse draft."""
+    by_id = dict(sequence.period_by_id) if periods is None else dict(periods)
+    if not by_id:
+        raise ValueError("a sequence needs at least one period")
+    items = tuple(tuple(item) for item in order)
+    expected = {("period", key) for key in by_id}
+    for bracket in sequence.brackets:
+        expected.update((
+            ("bracket", bracket_post_key(bracket.bracket_id, "start")),
+            ("bracket", bracket_post_key(bracket.bracket_id, "end")),
+        ))
+    if len(items) != len(expected) or set(items) != expected:
+        raise ValueError("schedule order must contain each current item exactly once")
+    brackets = []
+    for bracket in sequence.brackets:
+        start = items.index(("bracket", bracket_post_key(bracket.bracket_id, "start")))
+        end = items.index(("bracket", bracket_post_key(bracket.bracket_id, "end")))
+        if end < start:
+            raise ValueError(f"bracket {bracket.bracket_id} end precedes its start")
+        first = next((key for kind, key in items[start + 1:] if kind == "period"), None)
+        last = next((key for kind, key in reversed(items[:end]) if kind == "period"), None)
+        brackets.append(replace(bracket, start_period_id=first, end_period_id=last))
+    ids = tuple(key for kind, key in items if kind == "period")
+    members = {component.component_id: set(component.period_ids) & set(ids)
+               for component in sequence.components}
+    # An inserted card strictly between two members belongs to that group.
+    # Boundary insertions stay outside; the Component editor owns its edges.
+    for index, key in enumerate(ids):
+        if key in sequence.period_by_id or not 0 < index < len(ids) - 1:
+            continue
+        left = sequence.component_for_period(ids[index - 1])
+        right = sequence.component_for_period(ids[index + 1])
+        if left is not None and left == right:
+            members[left.component_id].add(key)
+    return replace(
+        sequence, periods=tuple(by_id[key] for key in ids), brackets=tuple(brackets),
+        bindings=tuple(binding for binding in sequence.bindings
+                       if binding.field_ref.period_id is None or binding.field_ref.period_id in by_id),
+        components=tuple(replace(component, period_ids=tuple(
+            key for key in ids if key in members[component.component_id]
+        )) for component in sequence.components if members[component.component_id]),
+    )
+
+
+def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> PulseSequence:
+    """The existing authoring operations, independent of which view emitted them.
+
+    There is no second Subpulse editor algorithm: a candidate is built here,
+    then its owning document accepts it. No device or view is touched.
+    """
+    if action == "document_name":
+        return replace(sequence, name=str(args[0]))
+    if action in {"period_name", "duration", "digital", "analog"}:
+        key = str(args[0])
+        period = sequence.period_by_id[key]
+        if action == "period_name":
+            edited = replace(period, name=str(args[1]))
+        elif action == "duration":
+            value, unit = args[1:]
+            edited = replace(period, duration=align_to_grid(
+                float(value), str(unit), sequence.time_step_ns, "duration"
+            ), unit=str(unit))
+        elif action == "digital":
+            port_key, high = args[1:]
+            port = sequence.target.by_key[str(port_key)]
+            states = list(period.states)
+            states[sequence.target.raw_lanes.index(port.lanes[0])] = int(bool(high))
+            edited = replace(period, states=tuple(states))
+        else:
+            port_key, mode, value = args[1:]
+            steps = tuple(step for step in period.analog_steps if step.port != port_key)
+            text = "" if value is None else str(value).strip()
+            if text and str(mode) != HOLD_MODE:
+                steps += (AnalogStep(str(port_key), str(mode), int(float(text))),)
+            edited = replace(period, analog_steps=steps)
+        return replace(sequence, periods=tuple(
+            edited if item.period_id == key else item for item in sequence.periods
+        ))
+    if action == "binding":
+        kind, period_id, port_key, scan, source = args
+        reference = PulseFieldRef(
+            "dac" if kind == "analog" else str(kind),
+            period_id=None if kind == "delay" else str(period_id),
+            port=None if kind == "duration" else str(port_key),
+        )
+        current = next((b for b in sequence.bindings if b.field_ref == reference), None)
+        binding = PulseBinding(
+            reference, current.unit if current else sequence.field_unit(reference),
+            scan=scan, source=source,
+            config_key=current.config_key if current and source == "config" else "",
+        )
+        bindings = tuple(binding if b.field_ref == reference else b
+                         for b in sequence.bindings
+                         if b.field_ref != reference or scan or source != "default")
+        if current is None and (scan or source != "default"):
+            bindings += (binding,)
+        periods = sequence.periods
+        period = sequence.period_by_id.get(str(reference.period_id))
+        if (scan or source != "default") and reference.kind == "dac" and period is not None:
+            if not any(step.port == reference.port for step in period.analog_steps):
+                port = sequence.target.by_key[reference.port]
+                owned = replace(period, analog_steps=period.analog_steps + (
+                    AnalogStep(reference.port, ANALOG_MODE_CHOICES[0], _held_value(sequence, period, port)),
+                ))
+                periods = tuple(owned if p.period_id == period.period_id else p for p in periods)
+        return replace(sequence, periods=periods, bindings=bindings)
+    if action == "config_binding":
+        field_id, key = args
+        key = str(key).strip()
+        if key:
+            key = config_parameter_key(key)
+        if not any(b.field_id == field_id for b in sequence.config_bindings):
+            raise ValueError("the field is not a Config parameter")
+        return replace(sequence, bindings=tuple(
+            replace(b, config_key=key) if b.field_id == field_id else b for b in sequence.bindings
+        ))
+    if action in {"insert_period", "insert_spacer"}:
+        before, = args
+        periods = sequence.periods
+        order = list(_sequence_item_order(sequence))
+        position = len(order) if before is None else order.index(tuple(before))
+        index = sum(kind == "period" for kind, _key in order[:position])
+        spacer = action == "insert_spacer"
+        model = (next((p for p in reversed(periods) if p.kind == PERIOD_KIND_SPACER), None)
+                 if spacer else periods[max(0, index - 1)])
+        neighbours = [periods[i] for i in (index - 1, index) if 0 <= i < len(periods)]
+        states = (tuple(int(all(p.states[lane] for p in neighbours))
+                        for lane in range(len(sequence.target.raw_lanes))) if spacer else model.states)
+        key = _unique_id((*sequence.period_by_id, *(p.name for p in periods)), "spacer" if spacer else "period")
+        added = PulsePeriod(
+            key, model.duration if model else 1.0, model.unit if model else "ms", states,
+            kind=PERIOD_KIND_SPACER if spacer else "period",
+        )
+        order.insert(position, ("period", key))
+        return _reordered_sequence(sequence, order, {p.period_id: p for p in (*periods, added)})
+    if action == "reorder_items":
+        return _reordered_sequence(sequence, args[0])
+    if action == "remove_period":
+        key = str(args[0])
+        return _reordered_sequence(
+            sequence, tuple(item for item in _sequence_item_order(sequence) if item != ("period", key)),
+            {p.period_id: p for p in sequence.periods if p.period_id != key},
+        )
+    if action in {"bracket", "bracket_add"}:
+        if action == "bracket_add":
+            start, end, count = args
+            key = _unique_id(tuple(b.bracket_id for b in sequence.brackets), "bracket")
+        else:
+            key, start, end, count = args
+        changed = PulseBracket(str(key), None if start is None else str(start),
+                               None if end is None else str(end), int(count))
+        brackets = (sequence.brackets + (changed,) if action == "bracket_add" else tuple(
+            changed if b.bracket_id == key else b for b in sequence.brackets
+        ))
+        return replace(sequence, brackets=brackets)
+    if action == "bracket_remove":
+        return replace(sequence, brackets=tuple(b for b in sequence.brackets if b.bracket_id != str(args[0])))
+    raise ValueError(f"unknown Pulse edit {action!r}")
 
 
 def _target_from_records(target: object, records: Sequence[object]) -> PulseTarget:

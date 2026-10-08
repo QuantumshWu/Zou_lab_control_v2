@@ -156,6 +156,19 @@ class BracketVM:
 
 
 @dataclass(frozen=True)
+class ComponentVM:
+    """One collapsed, contiguous group of existing timeline items."""
+
+    component_id: str
+    name: str
+    period_ids: tuple[str, ...]
+    total_text: str = ""
+    bracket_count: int = 0
+    bracket_ids: tuple[str, ...] = ()
+    spacer_count: int = 0
+
+
+@dataclass(frozen=True)
 class DelayRowVM:
     port_key: str
     value: FieldVM
@@ -250,6 +263,7 @@ class ScheduleVM:
     scan_summary_text: str = ""
     min_bracket_count: int = 1
     default_bracket_count: int = 2
+    components: tuple[ComponentVM, ...] = ()
 
     @property
     def item_order(self) -> tuple[tuple[str, str], ...]:
@@ -279,6 +293,8 @@ class BindingRecord:
     label: str
     scan: bool = False
     source: str = "default"
+    group_id: str = ""
+    group_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -292,6 +308,7 @@ class ConfigPageRecord:
     bindings: tuple[tuple[str, str, str, str, str, str], ...] = ()
     active_path: str = ""
     busy: bool = False
+    binding_groups: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -332,6 +349,7 @@ __all__ = [
     "ConnectionChoiceVM",
     "ConnectionVM",
     "ConfigPageRecord",
+    "ComponentVM",
     "DelayRowVM",
     "FieldVM",
     "PeriodVM",

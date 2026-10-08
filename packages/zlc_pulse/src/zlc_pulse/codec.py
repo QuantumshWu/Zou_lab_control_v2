@@ -32,16 +32,19 @@ from .model import (
     OutputDelay,
     PulseBinding,
     PulseBracket,
+    PulseComponent,
     PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
     PulseTarget,
+    Subpulse,
 )
 
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse"
+SUBPULSE_TREE_FORMAT = "zlc.subpulse"
 #: Config keys are cross-pulse names authored in the Config tab.
 CONFIG_VALUES_FORMAT = "zlc.pulse.config_values"
 CONFIG_VALUES_DIRECTORY = "config_values"
@@ -191,7 +194,7 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
         raise TypeError("sequence must be PulseSequence")
     sequence.require_nonempty_brackets()
     target = sequence.target
-    return {
+    tree = {
         "format": PULSE_TREE_FORMAT,
         "name": sequence.name,
         "time_step_ns": sequence.time_step_ns,
@@ -257,6 +260,13 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
         ],
         "run_repeats": sequence.run_repeats,
     }
+    if sequence.components:
+        tree["components"] = [
+            {"component_id": component.component_id, "name": component.name,
+             "period_ids": list(component.period_ids)}
+            for component in sequence.components
+        ]
+    return tree
 
 
 def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
@@ -280,6 +290,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             "run_repeats",
         ),
         "pulse",
+        optional=("components",),
     )
     declared = tree["format"]
     if not isinstance(declared, str):
@@ -408,9 +419,57 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         delays=delays,
         brackets=brackets,
         run_repeats=tree["run_repeats"],
+        components=tuple(
+            PulseComponent(
+                component_id=component["component_id"], name=component["name"],
+                period_ids=tuple(_array(component["period_ids"], "component period_ids")),
+            )
+            for component in (
+                _object(item, ("component_id", "name", "period_ids"), "pulse component")
+                for item in _array(tree.get("components", []), "pulse components")
+            )
+        ),
     )
     sequence.require_nonempty_brackets()
     return sequence
+
+
+def subpulse_to_tree(subpulse: Subpulse) -> dict[str, Any]:
+    """Serialize a fragment with its own non-executable file grammar."""
+    if not isinstance(subpulse, Subpulse):
+        raise TypeError("subpulse must be Subpulse")
+    tree = sequence_to_tree(subpulse.to_sequence())
+    tree["format"] = SUBPULSE_TREE_FORMAT
+    del tree["delays"]
+    del tree["run_repeats"]
+    return tree
+
+
+def subpulse_from_tree(tree: Mapping[str, Any]) -> Subpulse:
+    tree = _object(
+        tree, ("format", "name", "time_step_ns", "target", "periods", "bindings", "brackets"),
+        "subpulse",
+    )
+    if tree["format"] != SUBPULSE_TREE_FORMAT:
+        raise ValueError(f"not a {SUBPULSE_TREE_FORMAT} subpulse")
+    sequence = sequence_from_tree({
+        **tree, "format": PULSE_TREE_FORMAT, "delays": [], "run_repeats": 0,
+    })
+    return Subpulse(
+        name=sequence.name, target=sequence.target, time_step_ns=sequence.time_step_ns,
+        periods=sequence.periods, bindings=sequence.bindings, brackets=sequence.brackets,
+    )
+
+
+def read_subpulse(path: str | os.PathLike[str]) -> Subpulse:
+    return subpulse_from_tree(parse_pulse_tree_json(Path(path).expanduser().read_text(encoding="utf-8")))
+
+
+def write_subpulse(path: str | os.PathLike[str], subpulse: Subpulse) -> None:
+    body = subpulse_to_tree(subpulse)
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(destination, readable_json_bytes(body))
 
 
 def _config_value_entry(key: object, number: object, unit: object) -> tuple[float, str]:
@@ -486,6 +545,11 @@ __all__ = [
     "CURRENT_CONFIG_VALUES",
     "CONFIG_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
+    "SUBPULSE_TREE_FORMAT",
+    "read_subpulse",
+    "write_subpulse",
+    "subpulse_from_tree",
+    "subpulse_to_tree",
     "PULSE_EDITOR_DEFAULTS",
     "PULSE_EDITOR_FIELDS",
     "check_pulse_editor_fields",

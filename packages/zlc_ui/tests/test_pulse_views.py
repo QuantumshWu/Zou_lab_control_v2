@@ -1015,7 +1015,7 @@ from dataclasses import replace
 import sys
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import ConfigPageRecord, PulseEditorView, PulseEditorHandle
+from zlc_ui.pulse import BindingRecord, ConfigPageRecord, PulseEditorView, PulseEditorHandle, ScanPageRecord
 from zlc_ui.fluent import read_editable_combo
 app = ensure_qt_app(["pulse-config"])
 qt_errors = []
@@ -1142,6 +1142,31 @@ assert config._binding_rows['dac:p1:x'][1] is original_combos['dac:p1:x']
 assert config._binding_rows['dac:p2:x'][1] is original_combos['dac:p2:x']
 handle.set_config_page(replace(record, bindings=(record.bindings[1],)))
 assert config._binding_rows['dac:p2:x'][1] is original_combos['dac:p2:x']
+handle.set_config_page(replace(
+    record, bindings=(*record.bindings, extra),
+    binding_groups=(("dac:p1:x", "mot", "MOT & cooling"),
+                    ("dac:p2:x", "pgc", "PGC")),
+))
+assert tuple(config._binding_headers) == ("", "mot", "pgc")
+assert config._binding_headers["mot"].text() == "MOT & cooling"
+positions = {
+    field: config._binding_grid.getItemPosition(config._binding_grid.indexOf(widgets[0]))[0]
+    for field, widgets in config._binding_rows.items()
+}
+assert positions["dac:new:x"] < positions["dac:p1:x"] < positions["dac:p2:x"]
+assert config._binding_rows["dac:p2:x"][1] is original_combos["dac:p2:x"]
+assert all(widgets[1].currentText() == "bias" for widgets in config._binding_rows.values())
+handle.set_config_page(record)
+assert not config._binding_headers
+assert config._binding_rows["dac:p2:x"][1] is original_combos["dac:p2:x"]
+view.scan_view.set_page(ScanPageRecord(bindings=(
+    BindingRecord("dac:p1:x", "Load · bias", scan=True, group_id="mot", group_label="MOT & cooling"),
+    BindingRecord("dac:p2:x", "Cool · bias", source="api", group_id="pgc", group_label="PGC"),
+    BindingRecord("delay:x", "Delay", source="api"),
+)))
+scan_text = view.scan_view.bindings_label.text()
+assert scan_text.index("<b>Pulse</b>") < scan_text.index("MOT &amp; cooling") < scan_text.index("<b>PGC</b>")
+assert "Load · bias · Scan" in scan_text and "Cool · bias · API" in scan_text
 assert not qt_errors, qt_errors
 view.finish_close()
 ''')
@@ -1747,3 +1772,63 @@ assert post.count_spin.text() == "10000" and not post.count_spin.property("numer
 post.close(); post.deleteLater()
 """
     )
+
+
+def test_components_collapse_expand_and_move_existing_timeline_items(run_qt) -> None:
+    run_qt(_schedule_source() + r'''
+from dataclasses import replace
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import BracketVM, ComponentVM, PulseEditorView, PulseEditorHandle
+from zlc_ui.pulse.schedule_view import PeriodCard
+import json
+app = ensure_qt_app(["pulse-components"])
+view = PulseEditorView()
+handle = PulseEditorHandle(None, view)
+third = replace(periods[0], period_id="p3", name="Three")
+component = ComponentVM("mot", "MOT", ("p1", "p2"), "16 us", 1, ("b",))
+vm = replace(vm, periods=(*periods, third), brackets=(BracketVM("b", "p1", "p2", 2),), components=(component,))
+handle.set_schedule(vm)
+view.resize(1280, 820); view.show(); app.processEvents()
+main = view.schedule_view
+assert set(main._cards) == {"p3"}, "collapsed contents must not construct period widgets"
+assert len(main.drag_container.items()) == 2
+assert main.drag_container.flat_order() == vm.item_order
+card = main._component_cards["mot"]
+card.expand_button.click(); app.processEvents()
+assert set(main._cards) == {"p1", "p2", "p3"}
+assert main.drag_container.flat_order() == vm.item_order
+edits = []
+handle.duration_committed.connect(lambda *args: edits.append(args))
+main._cards["p1"].duration_edit.setText("5")
+main._cards["p1"].duration_edit.editingFinished.emit()
+assert edits == [("p1", 5.0, "us")], edits
+data = QtCore.QMimeData()
+data.setData(main.drag_container.ITEM_MIME, QtCore.QByteArray(json.dumps(("component", "mot")).encode()))
+assert main.drag_container._proposal_at(data, len(main.drag_container.items())) == (("period", "p3"), *vm.item_order[:-1])
+card.expand_button.click(); app.processEvents()
+assert set(main._cards) == {"p3"}
+assert main.drag_container._proposal_at(data, 2) == (("period", "p3"), *vm.item_order[:-1])
+actions = []
+handle.component_action_requested.connect(lambda *args: actions.append(args))
+main.drag_container.show_selection(card="mot")
+main.remove_button.click()
+assert actions == [("remove", "mot")], actions
+local = replace(vm, document_generation=2, periods=periods, components=())
+handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
+view.tabs.setCurrentWidget(view.component_view); app.processEvents()
+assert view.component_view._buttons["save"].text() == "Save Pulse"
+assert not view.component_view.schedule_view.run_button.isVisible()
+assert not view.component_view.schedule_view.names_panel.name_edit.isVisible()
+assert not view.component_view.schedule_view.names_panel._rows["d0"].isEnabled()
+assert view.component_view.schedule_view.names_panel._rows["d0"].isReadOnly()
+assert main.names_panel._rows["d0"].isEnabled()
+assert isinstance(view.component_view.schedule_view._cards["p1"], PeriodCard)
+events = []
+handle.component_edit_requested.connect(lambda *args: events.append(args))
+view.component_view.schedule_view._cards["p1"].name_edit.setText("Load")
+view.component_view.schedule_view._cards["p1"].name_edit.editingFinished.emit()
+assert events == [("period_name", ("p1", "Load"))], events
+view.finish_close(); view.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+''')

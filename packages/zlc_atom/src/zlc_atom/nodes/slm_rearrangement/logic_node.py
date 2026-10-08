@@ -250,7 +250,7 @@ def _rearrangement_editor_factory(parent=None, *, schema=SLM_REARRANGEMENT_SCHEM
             choices = (FormChoice("Select Period", ""),)
             if isinstance(sequence, PulseSequence):
                 choices += tuple(
-                    FormChoice(period.name or period.period_id, period.period_id)
+                    FormChoice(sequence.period_label(period.period_id), period.period_id)
                     for period in sequence.periods
                 )
             values = projection.get("form_values") or {}

@@ -309,6 +309,7 @@ class _EditorView:
         "config_new_requested", "config_load_requested", "config_refresh_requested",
         "config_save_requested", "config_save_as_requested", "config_unload_requested",
         "config_entries_edited", "config_binding_committed",
+        "component_action_requested", "component_edit_requested",
         "scan_array_load_requested", "scan_source_edited",
         "scan_repeats_committed", "scan_hold_requested", "scan_step_requested",
         "scan_program_load_requested", "scan_template_requested",
@@ -437,6 +438,19 @@ class _EditorView:
     def confirm_pulse_discard(self) -> bool:
         self.pulse_discard_asked = getattr(self, "pulse_discard_asked", 0) + 1
         return getattr(self, "discard_pulse_answer", True)
+
+    def set_component_document(
+        self, schedule, *, contexts=(), context_id="", path="", dirty=False,
+        bindings=(), config_names=(), busy=False,
+    ) -> None:
+        self.component_document = SimpleNamespace(
+            schedule=schedule, contexts=contexts, context_id=context_id,
+            path=path, dirty=dirty, bindings=bindings,
+            config_names=config_names, busy=busy,
+        )
+
+    def confirm_component_discard(self) -> bool:
+        return getattr(self, "discard_component_answer", True)
 
     # -- the preview -----------------------------------------------------
 
@@ -1271,6 +1285,136 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
         # The file names the pulse: saved as mine.json, it is "mine" -- the
         # name typed before the save only proposed a file name.
         assert presenter.sequence.name == "mine" and len(presenter.sequence.periods) == expected
+    finally:
+        presenter.close()
+
+
+def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequence, tmp_path) -> None:
+    """Grouping preserves the program; inserted copies and the file draft own edits."""
+    from zlc_pulse import AnalogStep, compile_sequence, read_subpulse
+
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
+    before, first, last = sequence.periods[:3]
+    sequence = replace(sequence, periods=(
+        replace(before, analog_steps=(AnalogStep(dac.key, "edge", 123),)),
+        *sequence.periods[1:],
+    ))
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+    try:
+        view.bracket_add_requested.emit(first.period_id, last.period_id, 2)
+        view.binding_committed.emit("duration", first.period_id, None, True, "config")
+        duration_field = presenter.sequence.config_bindings[0].field_id
+        view.config_binding_committed.emit(duration_field, "imaging_time")
+        baseline = compile_sequence(presenter.sequence, *presenter._compiler_target())
+        view.component_action_requested.emit("group", (first.period_id, last.period_id, "MOT"))
+        original, = presenter.sequence.components
+        assert original.period_ids == (first.period_id, last.period_id)
+        assert compile_sequence(presenter.sequence, *presenter._compiler_target()) == baseline
+
+        subpulse_path = tmp_path / "mot.subpulse.json"
+        view.save_answer = str(subpulse_path)
+        view.component_action_requested.emit("export", original.component_id)
+        exported = read_subpulse(subpulse_path)
+        assert exported.bindings[0].config_key == "imaging_time"
+        view.open_answer = str(subpulse_path)
+        view.component_action_requested.emit("open", None)
+        assert view.component_document.context_id == ""
+        assert presenter._subpulse_draft == exported
+        _run_scan(view, "import numpy as np\nscan_table = np.array([[0.002], [0.004]])\n")
+        assert len(presenter.state.scan_rows) == 2
+        copies = []
+        for _ in range(2):
+            view.component_action_requested.emit("context", "")
+            view.component_action_requested.emit("insert", None)
+            copies.append(next(component for component in presenter.sequence.components
+                               if component.component_id == view.component_document.context_id))
+            assert presenter.state.scan_rows == ()
+            assert presenter.state.scan_source_dirty
+        assert len({component.component_id for component in presenter.sequence.components}) == 3
+        ids = tuple(period.period_id for period in presenter.sequence.periods)
+        assert len(ids) == len(set(ids))
+        assert len({bracket.bracket_id for bracket in presenter.sequence.brackets}) == 3
+        assert all(set(copy.period_ids).isdisjoint(original.period_ids) for copy in copies)
+        assert set(copies[0].period_ids).isdisjoint(copies[1].period_ids)
+        groups = dict((field, group) for field, group, _label in view.config_page.binding_groups)
+        assert set(groups.values()) == {original.component_id, *(copy.component_id for copy in copies)}
+        assert all(binding.config_key == "imaging_time" for binding in presenter.sequence.config_bindings)
+        assert {record.group_id for record in view.scan_view.page.bindings} == set(groups.values())
+
+        # Editing a real instance must resolve HOLD from the real preceding
+        # Pulse, not the zero-state start of an extracted Subpulse.
+        view.component_action_requested.emit("edit", original.component_id)
+        view.component_edit_requested.emit("binding", ("analog", first.period_id, dac.key, False, "config"))
+        value = next(step.value for step in presenter.sequence.period_by_id[first.period_id].analog_steps
+                     if step.port == dac.key)
+        assert value == 123
+        view.component_edit_requested.emit("duration", (first.period_id, 8.0, "ms"))
+        assert presenter.sequence.period_by_id[first.period_id].duration == 8.0
+        assert presenter.sequence.period_by_id[first.period_id].unit == "ms"
+        assert presenter._subpulse_draft == exported
+        assert all(presenter.sequence.period_by_id[copy.period_ids[0]].duration == first.duration
+                   for copy in copies)
+
+        # Boundary insertions belong to the edited component while its parent
+        # brackets, outside periods and existing API identities remain intact.
+        view.bracket_add_requested.emit(before.period_id, sequence.periods[-1].period_id, 3)
+        outer = next(bracket for bracket in presenter.sequence.brackets
+                     if bracket.start_period_id == before.period_id)
+        inner = next(bracket for bracket in presenter.sequence.brackets
+                     if bracket.start_period_id == first.period_id)
+        view.component_edit_requested.emit("binding", ("duration", last.period_id, None, False, "api"))
+        api, = presenter.sequence.api_bindings
+        topology = presenter.sequence
+        outside = tuple(period for period in topology.periods if period.period_id not in original.period_ids)
+        view.component_edit_requested.emit("insert_period", (("bracket", inner.bracket_id + ":start"),))
+        view.component_edit_requested.emit("insert_spacer", (None,))
+        members = next(component.period_ids for component in presenter.sequence.components
+                       if component.component_id == original.component_id)
+        assert members[1:-1] == original.period_ids
+        assert presenter.sequence.period_by_id[members[-1]].kind == "spacer"
+        assert tuple(period for period in presenter.sequence.periods if period.period_id not in members) == outside
+        assert outer in presenter.sequence.brackets
+        assert presenter.sequence.api_bindings == (api,)
+        for key in (members[0], members[-1]):
+            view.component_edit_requested.emit("remove_period", (key,))
+        assert presenter.sequence.components == topology.components
+        assert presenter.sequence.periods == topology.periods
+        view.component_edit_requested.emit("bracket", (inner.bracket_id, first.period_id, last.period_id, 4))
+        assert outer in presenter.sequence.brackets
+        assert next(bracket.count for bracket in presenter.sequence.brackets
+                    if bracket.bracket_id == inner.bracket_id) == 4
+        assert presenter.sequence.api_bindings == (api,)
+        view.component_edit_requested.emit("binding", ("duration", last.period_id, None, False, "default"))
+
+        parent = presenter.sequence
+        view.component_action_requested.emit("context", "")
+        view.component_edit_requested.emit("duration", (first.period_id, 7.0, "ms"))
+        view.component_action_requested.emit("rename", ("", "MOT revised"))
+        assert presenter.sequence is parent
+        assert presenter._subpulse_draft.periods[0].duration == 7.0
+        assert view.component_document.dirty
+        view.component_action_requested.emit("save", None)
+        assert read_subpulse(subpulse_path) == presenter._subpulse_draft
+        view.component_action_requested.emit("open", None)
+        assert presenter._subpulse_draft.name == "MOT revised"
+        assert presenter._subpulse_draft.periods[0].duration == 7.0
+        assert not view.component_document.dirty
+
+        pulse_path = tmp_path / "assembled.json"
+        view.save_answer = str(pulse_path)
+        view.component_action_requested.emit("edit", original.component_id)
+        view.component_action_requested.emit("save", None)
+        saved = presenter.sequence
+        compiled = compile_sequence(saved, *presenter._compiler_target())
+        assert presenter.path == str(pulse_path)
+        presenter.clear_all()
+        view.open_answer = str(pulse_path)
+        assert presenter.ask_for_pulse()
+        assert presenter.sequence == saved
+        assert compile_sequence(presenter.sequence, *presenter._compiler_target()) == compiled
+        assert len(presenter.sequence.components) == 3
+        assert not view.warnings, view.warnings
     finally:
         presenter.close()
 

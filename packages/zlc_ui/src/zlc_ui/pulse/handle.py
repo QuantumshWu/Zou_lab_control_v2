@@ -27,7 +27,7 @@ from pathlib import Path
 from PyQt5 import QtCore
 
 from .editor_view import PulseEditorView
-from .models import ConfigPageRecord, ConnectionVM
+from .models import ConfigPageRecord, ConnectionVM, ScheduleVM
 
 
 class PulseEditorHandle(QtCore.QObject):
@@ -51,6 +51,8 @@ class PulseEditorHandle(QtCore.QObject):
     config_unload_requested = QtCore.pyqtSignal()
     config_entries_edited = QtCore.pyqtSignal(object)
     config_binding_committed = QtCore.pyqtSignal(str, str)
+    component_action_requested = QtCore.pyqtSignal(str, object)
+    component_edit_requested = QtCore.pyqtSignal(str, object)
 
     # -- the schedule ----------------------------------------------------
     port_label_committed = QtCore.pyqtSignal(str, str)
@@ -111,6 +113,7 @@ class PulseEditorHandle(QtCore.QObject):
         schedule = view.schedule_view
         scan = view.scan_view
         config = view.config_view
+        component = view.component_view
         preview = view.preview_view
         target = view.target_view
 
@@ -131,6 +134,10 @@ class PulseEditorHandle(QtCore.QObject):
         ):
             getattr(schedule, name).connect(getattr(self, name))
         schedule.run_requested.connect(self.fire_requested)
+        schedule.component_action_requested.connect(self._component_action)
+        component.action_requested.connect(self._component_action)
+        component.edit_requested.connect(self.component_edit_requested)
+        component.feedback_requested.connect(self.feedback_requested)
         scan.repeats_committed.connect(self.scan_repeats_committed)
         scan.hold_requested.connect(self.scan_hold_requested)
         scan.step_requested.connect(self.scan_step_requested)
@@ -251,6 +258,31 @@ class PulseEditorHandle(QtCore.QObject):
         button = self._view.schedule_view.channel_panel.config_status_button
         button.setText(Path(record.active_path).name if record.active_path else "none")
         button.setToolTip(record.active_path or "No active Config file; Pulse defaults are used.")
+
+    def _component_action(self, action: str, payload: object) -> None:
+        if action == "edit":
+            self._view.tabs.setCurrentWidget(self._view.component_view)
+        self.component_action_requested.emit(action, payload)
+
+    def set_component_document(
+        self,
+        schedule: ScheduleVM | None,
+        *,
+        contexts: tuple[tuple[str, str], ...] = (),
+        context_id: str = "",
+        path: str = "",
+        dirty: bool = False,
+        bindings: tuple[tuple[str, str, str], ...] = (),
+        config_names: tuple[str, ...] = (),
+        busy: bool = False,
+    ) -> None:
+        self._view.component_view.set_document(
+            schedule, contexts=contexts, context_id=context_id, path=path,
+            dirty=dirty, bindings=bindings, config_names=config_names, busy=busy,
+        )
+
+    def confirm_component_discard(self) -> bool:
+        return self._view.confirm("Unsaved Subpulse", "Discard unsaved Subpulse edits?", "Discard", "Cancel")
 
     # ---------------------------------------------------------- the schedule
 

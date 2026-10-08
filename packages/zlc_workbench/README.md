@@ -143,6 +143,25 @@ intermediate shot.
 
 ## Save boundaries
 
+Pulse Editor's **Group Component** collects a named continuous range without
+changing its waveform. Component cards default to collapsed. **Expand** uses
+the same timeline, Period cards, Bracket posts and scroll area; dragging the
+component header moves the whole block. **Ungroup** restores individual cards;
+the ordinary **Remove** action deletes the selected component's content.
+
+The **Component** tab edits either an existing Pulse instance or a standalone
+Subpulse draft, using the same field and timeline operations. For an instance,
+**Save Pulse** writes the full Pulse and **Export Subpulse** writes a reusable
+fragment. For a standalone file, **Save Subpulse** writes only that file and
+**Insert into Pulse** creates an independent embedded copy. Switching context
+does not discard an unsaved file draft; replacing or closing it asks first.
+Run/Connect and global delay controls are not offered for a standalone fragment.
+
+Scan/API fields and Config references are grouped by explicit component
+identity. The Config values file is still one named table; grouping does not
+rename keys or copy values into Pulse files. Component references remain part
+of the Pulse's saved authoring content and survive remote Load/Sync.
+
 - Header **Save Layout** writes stopped node drafts, named-device choices,
   signal wiring, panel layout/state and each panel's identity: a panel's
   ROI/fit outputs are published under `@logic/<panel id>/<output>` and a

@@ -1,4 +1,4 @@
-"""Pure editor shell that composes the four pulse pages."""
+"""Pure editor shell composing Pulse, Component and board authoring pages."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from zlc_ui.fluent import (
 from .preview_view import PulsePreviewView
 from .scan_view import PulseScanView
 from .config_view import PulseConfigView
+from .component_view import PulseComponentView
 from .schedule_view import PulseScheduleView
 from .target_view import PulseTargetView
 
@@ -80,8 +81,10 @@ class PulseEditorView(QtWidgets.QWidget):
         self.preview_view = PulsePreviewView()
         self.scan_view = PulseScanView()
         self.config_view = PulseConfigView()
+        self.component_view = PulseComponentView()
         self.target_view = PulseTargetView()
         self.tabs.add_permanent_tab(self.schedule_view, "Edit")
+        self.tabs.add_permanent_tab(self.component_view, "Component")
         self.tabs.add_permanent_tab(self.preview_view, "Preview")
         self.tabs.add_permanent_tab(self.scan_view, "Scan")
         self.tabs.add_permanent_tab(self.config_view, "Config")
