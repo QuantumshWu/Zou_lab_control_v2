@@ -1795,6 +1795,8 @@ assert set(main._cards) == {"p3"}, "collapsed contents must not construct period
 assert len(main.drag_container.items()) == 2
 assert main.drag_container.flat_order() == vm.item_order
 card = main._component_cards["mot"]
+assert card.width() == main._cards["p3"].width()
+assert card._actions_popup is None
 card.expand_button.click(); app.processEvents()
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
@@ -1811,6 +1813,13 @@ assert set(main._cards) == {"p3"}
 assert main.drag_container._proposal_at(data, 2) == (("period", "p3"), *vm.item_order[:-1])
 actions = []
 handle.component_action_requested.connect(lambda *args: actions.append(args))
+card.more_button.click(); app.processEvents()
+assert card._actions_popup.isVisible()
+export = next(button for button in card._actions_popup.findChildren(QtWidgets.QPushButton) if button.text() == "Export Subpulse")
+export.click(); app.processEvents()
+assert not card._actions_popup.isVisible()
+assert actions == [("export", "mot")], actions
+actions.clear()
 main.drag_container.show_selection(card="mot")
 main.remove_button.click()
 assert actions == [("remove", "mot")], actions

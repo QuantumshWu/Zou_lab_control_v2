@@ -19,7 +19,8 @@ from zlc_ui.fluent import (
     ACCENT, BG, GREEN, GREY, ORANGE, RED, TEXT, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes, FluentDialogWindow,
-    signals_blocked,
+    ElidedLabel, FluentPopup, FluentSettingsPopupAnchor,
+    show_fluent_popup_for_anchor, signals_blocked,
 )
 
 from ._layout import (
@@ -824,44 +825,77 @@ class ComponentCard(FluentGroupBox):
     def __init__(self, component: ComponentVM, parent=None) -> None:
         super().__init__("Component", parent, title_color=ACCENT)
         self.component_id = component.component_id
-        self.setFixedWidth(px(206, minimum=180))
+        self.setFixedWidth(period_card_width())
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         column = QtWidgets.QVBoxLayout(self)
-        column.setContentsMargins(px(12), px(12), px(12), px(12))
-        column.setSpacing(px(8))
-        self.name_label = FluentLabel("")
-        self.name_label.setWordWrap(True)
+        column.setContentsMargins(px(7), px(7), px(7), px(7))
+        column.setSpacing(px(4, minimum=3))
+        name_row = QtWidgets.QHBoxLayout()
+        name_row.setSpacing(px(4, minimum=3))
+        self.name_label = ElidedLabel("")
         font = self.name_label.font()
         font.setBold(True)
         self.name_label.setFont(font)
+        name_row.addWidget(self.name_label, 1)
+        self.more_button = FluentButton("⋯", color=GREY)
+        self.more_button.setFixedSize(row_height(), row_height())
+        self.more_button.setAccessibleName("Component actions")
+        self.more_button.setToolTip("Rename, export or ungroup this component")
+        self.more_button.clicked.connect(self._toggle_actions)
+        name_row.addWidget(self.more_button)
+        column.addLayout(name_row)
         self.summary_label = FluentLabel("")
-        self.summary_label.setWordWrap(True)
-        column.addWidget(self.name_label)
         column.addWidget(self.summary_label)
-        actions = QtWidgets.QGridLayout()
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(px(6))
         self.expand_button = FluentButton("Expand", color=ACCENT)
         self.expand_button.clicked.connect(lambda: self.action_requested.emit("expand", self.component_id))
-        actions.addWidget(self.expand_button, 0, 0)
-        for action, label, row, col in (("edit", "Edit", 0, 1), ("rename", "Rename", 1, 0), ("export", "Export", 1, 1), ("ungroup", "Ungroup", 2, 0)):
-            button = FluentButton(label, color=GREY)
-            button.setToolTip({"edit": "Open this instance in the Component tab", "export": "Export this instance as an independent Subpulse", "ungroup": "Remove the grouping; keep every period and bracket", "rename": "Rename this component"}[action])
-            button.clicked.connect(lambda _checked=False, a=action: self.action_requested.emit(a, self.component_id))
-            actions.addWidget(button, row, col, 1, 2 if action == "ungroup" else 1)
+        self.edit_button = FluentButton("Edit", color=GREY)
+        self.edit_button.setToolTip("Open this instance in the Component tab")
+        self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(px(4, minimum=3))
+        actions.addWidget(self.expand_button)
+        actions.addWidget(self.edit_button)
+        actions.addStretch(1)
         column.addLayout(actions)
         column.addStretch(1)
+        self._actions_popup = None
         self.set_component(component, expanded=False)
+
+    def _toggle_actions(self) -> None:
+        if self._actions_popup is None:
+            self._actions_popup = FluentPopup(self)
+            self._actions_anchor = FluentSettingsPopupAnchor(self._actions_popup, self.more_button)
+            layout = QtWidgets.QVBoxLayout(self._actions_popup)
+            layout.setContentsMargins(px(7), px(7), px(7), px(7))
+            layout.setSpacing(px(4, minimum=3))
+            for action, text in (("rename", "Rename"), ("export", "Export Subpulse"), ("ungroup", "Ungroup")):
+                button = FluentButton(text, color=GREY)
+                button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                button.clicked.connect(lambda _checked=False, a=action: self._choose_action(a))
+                layout.addWidget(button)
+        self._actions_anchor.toggle(self._actions_popup, present=self._place_actions)
+
+    def _place_actions(self) -> None:
+        show_fluent_popup_for_anchor(
+            self._actions_popup, self.more_button, self._actions_popup,
+            minimum_width=1, minimum_height=1,
+            maximum_height=self._actions_popup.sizeHint().height(),
+        )
+
+    def _choose_action(self, action: str) -> None:
+        self._actions_popup.hide()
+        self.action_requested.emit(action, self.component_id)
 
     def set_component(self, component: ComponentVM, *, expanded: bool) -> None:
         self.name_label.setText(component.name)
+        self.name_label.setToolTip(component.name)
         periods = len(component.period_ids) - component.spacer_count
         brackets = component.bracket_count
         counts = [f"{periods} period{'s' if periods != 1 else ''}"]
         if component.spacer_count:
             counts.append(f"{component.spacer_count} spacer{'s' if component.spacer_count != 1 else ''}")
         counts.append(f"{brackets} bracket{'s' if brackets != 1 else ''}")
-        self.summary_label.setText(component.total_text + "\n" + " · ".join(counts))
+        self.summary_label.setText("\n".join((component.total_text, *counts)))
         self.expand_button.setText("Collapse" if expanded else "Expand")
 
 
