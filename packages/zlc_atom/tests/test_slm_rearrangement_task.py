@@ -233,7 +233,9 @@ def experiment(tmp_path, monkeypatch, request):
     def prepare(**kwargs):
         trace.append("prepare_gpu")
         state.prepare_arguments = kwargs
-        return {"gpu_info": {"device_name": "test CUDA boundary"},
+        return {"source_yx": kwargs["source_yx"], "target_yx": kwargs["target_yx"],
+                "minimum_separation": kwargs["minimum_separation"],
+                "gpu_info": {"device_name": "test CUDA boundary"},
                 "initial_phase": source_context["phase"],
                 "close": lambda: state.closed.append(True)}
 
@@ -265,20 +267,17 @@ def experiment(tmp_path, monkeypatch, request):
         codes.flags.writeable = False
         for index, frame in enumerate(codes):
             kwargs["frame_ready"](index, frame)
-        starts = np.asarray(state.prepare_arguments["source_yx"], dtype=np.float64)[planned["source_indices"]]
-        points = starts.copy()
-        points[:len(planned["assigned_source_indices"])] = state.prepare_arguments["target_yx"][planned["assigned_target_indices"]]
-        samples = (np.r_[0.,0.,0.,kwargs["motion_fractions"]] if kwargs.get("motion_fractions") is not None
-                   else np.linspace(0,1,kwargs["motion_frames"]+1))
+        samples = task_module.sample_rearrangement(prepared, planned, motion_frames=kwargs["motion_frames"])
         return {"phase_codes": codes, "converged": True,
                 "target_synthesis_coefficients": None,
-                "motion_yx": starts[None] + samples[:,None,None]*(points-starts)[None],
+                "motion_yx": samples["motion_yx"],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
                 "support_intensity_ratios": np.full(frames, 1.005),
                 "brightness_minimum_to_initial": np.linspace(2.3, 3.3, frames),
                 "brightness_mean_to_initial": np.linspace(2.31, 3.31, frames),
                 "brightness_maximum_to_initial": np.linspace(2.32, 3.32, frames),
                 "phase_step_max_rad": np.full(frames, .5),
+                "frame_ready_ms": .2 * np.arange(1, frames + 1),
                 "pupil_phase_step_rms_rad": np.full(frames, 1.1),
                 "background_intensity_ratios": np.zeros(frames), "timing_ms": {"total": .2}}
 
@@ -293,7 +292,8 @@ def experiment(tmp_path, monkeypatch, request):
         science_context=source_context, science_context_path=tmp_path / "science_context.npz",
         target_rows=1 if getattr(request, "param", 4) == 2 else 2, target_columns=2,
         pulse_sequence=_sequence(), pulse_path=tmp_path / "operator.json",
-        before_period="before", after_period="after", motion_frames=2,
+        before_period="before", after_period="after", motion_frames=4,
+        minimum_separation=0., phase_method="iterative",
         save_figure_artifact=_stub_figures,
     )
     state.task = SlmRearrangementTask(**state.task_arguments)
@@ -355,7 +355,10 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert assignments[0]["source_index"] == 0 and assignments[0]["target_source_index"] == 2
     observed = summary["observed_timing"]
     assert observed["requested_interval_ms"] == pytest.approx(1000/60)
-    assert observed["logical_steps"] == 2
+    assert observed["logical_steps"] == 4
+    assert observed["first_motion_map_number"] == 2, "only one map removes unused source traps"
+    assert observed["first_motion_ready_after_before_frame_ms"] == pytest.approx(
+        summary["timing_ms"]["compute_started_after_before_frame"] + .4)
     assert observed["command_interval_median_ms"] is None, "no fabricated cadence when the receipt has none"
     assert observed["online_ms"] == summary["timing_ms"]["online_rearrangement"]
     assert observed["playback_ms"] == summary["timing_ms"]["sequence_play_and_final_settle"]
@@ -395,16 +398,16 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
                 e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.block.values)
             np.testing.assert_array_equal(loaded.overlay.status.expanded_validity(),
                 e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.expanded_validity())
-            assert loaded.overlay.paths_xy.shape == (6, 3, 2)
+            assert loaded.overlay.paths_xy.shape == (6, 5, 2)
             unselected = np.setdiff1d(np.arange(6), selected)
             np.testing.assert_array_equal(loaded.overlay.paths_xy[unselected],
-                np.repeat(loaded.overlay.coordinates[unselected, None, :], 3, axis=1))
+                np.repeat(loaded.overlay.coordinates[unselected, None, :], 5, axis=1))
             source_camera = e.calibrated_centers
             roi_shift = np.asarray((4., 3.)) if e.affine_crop else np.zeros(2)
             motion = original_motion
             camera_indices = (motion[..., ::-1] @ np.asarray(((1., 0.), (1/3., 1.))) + (13/3., 3.)
                               if e.affine_crop else motion[..., ::-1]) - roi_shift
-            full_indices = np.repeat((source_camera-roi_shift)[:, None, :], 3, axis=1)
+            full_indices = np.repeat((source_camera-roi_shift)[:, None, :], 5, axis=1)
             full_indices[selected] = camera_indices.transpose(1, 0, 2)
             expected = image_point_overlay_geometry(before, source_camera-roi_shift,
                 loaded.overlay.point_ids, status_axis=e.task._status_axis,
@@ -418,11 +421,11 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         description = describe_archive(info, arrays)
         assert e.task.instance_id in dict(dict(description.tabs)["Logic"])
     with np.load(result["artifact_path"], allow_pickle=False) as data:
-        assert data["phase_codes"].shape == (2, 8, 10)
+        assert data["phase_codes"].shape == (4, 8, 10)
         expected_end = e.prepare_arguments["target_yx"][e.task._plan["target_indices"]]
         expected_start = e.task.points[0][e.task._plan["source_indices"]]
         np.testing.assert_array_equal(data["motion_yx"], expected_start[None]
-            + np.linspace(0, 1, 3)[:, None, None]*(expected_end-expected_start)[None])
+            + np.array([0., 0., 1/3, 2/3, 1.])[:, None, None]*(expected_end-expected_start)[None])
         np.testing.assert_allclose(data["motion_camera_xy"],
             np.asarray(expected["paths_xy"])[selected].transpose(1, 0, 2), atol=1e-12)
         np.testing.assert_array_equal(data["before_thresholds"], np.full(6, 5.))
@@ -454,12 +457,12 @@ def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation
     result = e.task.execute(e.context)
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     # Five Fourier pixels map to 7.5 sensor pixels through the real registered
-    # affine/cropped camera geometry: ceil(7.5/.6) + two source-fade maps.
-    assert summary["actual_motion_frames"] == 15
-    assert summary["requested_motion_frames"] == 2 and summary["motion_frames"] is None
+    # affine/cropped camera geometry: ceil(7.5/.6) + one removal map.
+    assert summary["actual_motion_frames"] == 14
+    assert summary["requested_motion_frames"] == 4 and summary["motion_frames"] is None
     assert summary["actual_maximum_camera_step"] <= .6 + 1e-12
     with np.load(result["artifact_path"], allow_pickle=False) as data:
-        assert data["phase_codes"].shape[0] == 15
+        assert data["phase_codes"].shape[0] == 14
         assert np.max(np.linalg.norm(np.diff(data["motion_camera_xy"],axis=0),axis=-1)) <= .6 + 1e-12
     prepared = e.task._prepared
     fresh = SlmRearrangementTask(**(e.task_arguments | {
@@ -495,7 +498,7 @@ def test_explicit_end_target_does_not_invent_calibration_for_a_new_position(expe
         target_intensity=target, target_path=old.context_path.parent / "end-target.json",
         pulse_sequence=old.sequence, pulse_path=old.pulse_path,
         before_period=old.before_period, after_period=old.after_period,
-        motion_frames=2, save_figure_artifact=_stub_figures)
+        motion_frames=4, minimum_separation=0., phase_method="iterative", save_figure_artifact=_stub_figures)
     result = e.task.execute(e.context)
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["assigned_atoms"] == 1 and summary["removed_atoms"] == 4
@@ -906,7 +909,8 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             ("Select Period", ""), ("Before image", "before"), ("Transport", "gap"), ("Verify image", "after")]
         assert form.read_value("nominal_playback_seconds") == pytest.approx(16/60)
         assert not form.widget_for("nominal_playback_seconds").isEnabled()
-        assert form.read_value("phase_method") == "iterative"
+        assert form.read_value("phase_method") == "lpi"
+        assert form.read_value("minimum_separation") == 15.
         assert form.read_value("frame_mode") == "fixed"
         assert form.widget_for("motion_frames").isEnabled()
         assert not form.widget_for("max_camera_step").isEnabled()
@@ -941,14 +945,14 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert form.read_value("max_camera_step") == .75
         assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
         phase_method = form.widget_for("phase_method")
-        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
+        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Up)
         app.processEvents()
-        assert patches[-1]["values"] == {"phase_method": "lpi"}
+        assert patches[-1]["values"] == {"phase_method": "iterative"}
         values.update(patches[-1]["values"])
         project()
         assert form.widget_for("intensity_error_percent").isEnabled()
         assert form.read_value("intensity_error_percent") == 1.
-        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Up)
+        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
         app.processEvents()
         values.update(patches[-1]["values"])
         project()
@@ -985,7 +989,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             assert recording_form.widget_for("recording_frames").isEnabled()
             assert tuple(recording_form._forms) == tuple(form._forms)
             assert all(type(recording_form._forms[key]) is type(form._forms[key]) for key in form._forms)
-            assert recording_form.read_value("phase_method") == "iterative"
+            assert recording_form.read_value("phase_method") == "lpi"
             assert recording_form.read_value("frame_mode") == "fixed"
             assert tuple(output.name for output in recording.outputs_for(recording_values, {})) == camera_outputs
         finally:

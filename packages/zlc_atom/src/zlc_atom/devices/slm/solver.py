@@ -134,8 +134,11 @@ def prepare_rearrangement_geometry(
     source_yx: object, target_yx: object, *, shape_yx: tuple[int, int],
     minimum_separation: float,
 ) -> dict[str, object]:
-    """Prepare native endpoint geometry and Euclidean assignment costs."""
+    """Prepare native endpoint geometry and Euclidean bottleneck edge costs."""
     from scipy.optimize import linear_sum_assignment  # noqa: PLC0415
+    from scipy.sparse import csr_matrix  # noqa: PLC0415
+    from scipy.sparse.csgraph import maximum_bipartite_matching  # noqa: PLC0415
+    from scipy.spatial.distance import pdist  # noqa: PLC0415
 
     shape = _pair(shape_yx, "shape_yx")
     if not np.array_equal(np.asarray(shape_yx), shape):
@@ -158,6 +161,8 @@ def prepare_rearrangement_geometry(
     distance = np.linalg.norm(target[:, None].astype(float) - source[None], axis=-1)
     # Import and initialize the established assignment implementation before imaging.
     linear_sum_assignment(np.zeros((1, 1)))
+    maximum_bipartite_matching(csr_matrix([[True]]), perm_type="column")
+    pdist(np.zeros((1, 2)), metric="sqeuclidean")
     return {
         "source_yx": source, "target_yx": target, "shape_yx": shape,
         "assignment_costs": _frozen(distance),
@@ -166,13 +171,17 @@ def prepare_rearrangement_geometry(
 
 
 def plan_rearrangement(prepared: Mapping[str, object], available_source_indices: object) -> dict[str, object]:
-    """Fill min(available sources, target sites); report surplus for discarding.
+    """Minimize the longest path, subject to continuous same-time clearance.
 
-    The assignment minimizes total Euclidean distance. Straight simultaneous
-    paths still require the emitted continuous-clearance gate; this is not a
-    claim of global optimal routing under collision constraints.
+    Threshold matching gives an exact assignment lower bound. Conflict-directed
+    reassignment and waypoint/wait repair are bounded searches; the returned
+    maximum is globally optimal only when it reaches that lower bound.
     """
+    from heapq import heappop, heappush  # noqa: PLC0415
     from scipy.optimize import linear_sum_assignment  # noqa: PLC0415
+    from scipy.sparse import csr_matrix  # noqa: PLC0415
+    from scipy.sparse.csgraph import maximum_bipartite_matching  # noqa: PLC0415
+    from scipy.spatial.distance import pdist  # noqa: PLC0415
 
     source, target = prepared["source_yx"], prepared["target_yx"]
     indices = np.asarray(available_source_indices)
@@ -182,131 +191,204 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
             or np.any(indices < 0) or np.any(indices >= len(source))):
         raise ValueError("available_source_indices must contain integer indices into the prepared source roster")
     available = np.unique(indices).astype(np.intp, copy=False)
-    if len(available):
-        target_indices, columns = linear_sum_assignment(prepared["assignment_costs"][:, available])
-        assigned = available[columns]
-    else:
-        target_indices, assigned = np.empty(0, np.intp), np.empty(0, np.intp)
-    removed = available[~np.isin(available, assigned)]
-    order = np.argsort(assigned)
-    ordered_sources = assigned[order]
-    ordered_targets = target_indices[order].copy()
-    start, destination = source[ordered_sources].astype(float), target[ordered_targets].astype(float)
-    motion = np.stack((start, destination))
-    lower_bound = float(np.sum(np.linalg.norm(destination - start, axis=-1)))
-    separation = prepared["minimum_separation"]
-    route = "simultaneous straight paths"
-    nearest, _, _ = _rearrangement_pair_metrics(motion)
-    if len(assigned) > 1 and np.min(nearest) < separation ** 2:
-        # Resolve equal-cost assignment ties, then try first/last ordering of
-        # the offending pair. These are waits on the same straight segments,
-        # not a claim of a general collision-constrained global planner.
-        for _ in range(len(assigned)):
-            if np.min(nearest) >= separation ** 2:
+    costs = np.asarray(prepared["assignment_costs"])[:, available]
+    cardinality = min(costs.shape)
+    separation = float(prepared["minimum_separation"])
+    endpoints = [("initial occupied sources", source[available])]
+    if cardinality == len(target):
+        endpoints.append(("required target sites", target))
+    for name, points in endpoints:
+        # All occupied sources coexist before surplus fade. All target sites
+        # are mandatory only when there are enough atoms: a sparse target
+        # subset must not be rejected because two unused endpoints are close.
+        clearance = float(np.sqrt(np.min(pdist(points, metric="sqeuclidean"), initial=np.inf)))
+        if clearance < separation:
+            raise ValueError(f"{name} clearance {clearance:g} is below the authored minimum separation {separation:g}")
+    radii = np.unique(costs)
+
+    def assignment(blocked):
+        if not cardinality:
+            return 0., np.empty(0, np.intp), np.empty(0, np.intp)
+        allowed = np.ones(costs.shape, bool)
+        for row, column in blocked:
+            allowed[row, column] = False
+        # Every member of the smaller roster must be filled. Start at its
+        # nearest-neighbour lower bound: a translated400-site array needs one
+        # sparse matching, not binary probes through dense long-distance graphs.
+        nearest = np.min(np.where(allowed, costs, np.inf), axis=1 if costs.shape[0] <= costs.shape[1] else 0)
+        lo = int(np.searchsorted(radii, np.max(nearest)))
+        hi, stride = lo, 1
+        while hi < len(radii):
+            matching = maximum_bipartite_matching(
+                csr_matrix(allowed & (costs <= radii[hi])), perm_type="column")
+            if np.count_nonzero(matching >= 0) == cardinality:
                 break
-            closest = nearest
-            i, j = np.unravel_index(np.argmin(closest), closest.shape)
-            swapped = destination.copy()
-            swapped[[i, j]] = swapped[[j, i]]
-            swap_cost = float(np.sum(np.linalg.norm(swapped - start, axis=-1)))
-            candidate = np.stack((start, swapped))
-            changed, _, _ = _rearrangement_pair_metrics(candidate, (i, j))
-            swap_closest = closest.copy()
-            swap_closest[[i, j]] = changed
-            swap_closest[:, [i, j]] = changed.T
-            before_count = np.count_nonzero(closest < separation ** 2)
-            after_count = np.count_nonzero(swap_closest < separation ** 2)
-            if (np.isclose(swap_cost, lower_bound, rtol=0, atol=1e-12 * max(1., lower_bound))
-                    and (after_count < before_count or
-                         (after_count == before_count and np.min(swap_closest) > np.min(closest)))):
-                destination = swapped
-                ordered_targets[[i, j]] = ordered_targets[[j, i]]
-                motion = candidate
-                nearest = swap_closest
-                route = "equal-cost pair tie resolved"
-                if np.min(nearest) >= separation ** 2:
+            lo, hi, stride = hi + 1, min(len(radii), hi + stride), stride * 2
+        if hi == len(radii):
+            hi -= 1
+            if lo > hi:
+                return None
+            matching = maximum_bipartite_matching(csr_matrix(allowed), perm_type="column")
+            if np.count_nonzero(matching >= 0) != cardinality:
+                return None
+        while lo < hi:
+            middle = (lo + hi) // 2
+            matching = maximum_bipartite_matching(
+                csr_matrix(allowed & (costs <= radii[middle])), perm_type="column")
+            if np.count_nonzero(matching >= 0) == cardinality:
+                hi = middle
+            else:
+                lo = middle + 1
+        # Only a tie break inside the exact bottleneck radius. Squared edge
+        # length favours coordinated short moves over long relay shortcuts.
+        rows, columns = linear_sum_assignment(
+            np.where(allowed & (costs <= radii[lo]), costs ** 2, np.inf))
+        order = np.argsort(columns)
+        return float(radii[lo]), rows[order], columns[order]
+
+    def repair(motion, nearest):
+        start, destination = motion[0], motion[-1]
+        # Conflict-based precedence search preserves straight geometric length.
+        # Each edge orders two complete moves; every emitted segment is checked
+        # again, including new interactions created by waiting. Static atoms are
+        # obstacles here, not exempt agents; later reassignment/waypoints can
+        # move them as well. Cyclic priorities are rejected, not serialized into
+        # a deadlock or disguised as an impossibility proof.
+        moving = np.any(destination != start, axis=1)
+        schedules = [(np.inf, 0, frozenset())]
+        seen_schedules = {frozenset()}
+        for _ in range(32):
+            if not schedules:
+                break
+            _, _, constraints = heappop(schedules)
+            begins = np.zeros(len(start))
+            for iteration in range(len(start)):
+                previous = begins.copy()
+                for first, second in constraints:
+                    begins[second] = max(begins[second], begins[first] + 1.)
+                if np.array_equal(previous, begins):
                     break
+            else:
                 continue
-            for first in (i, j):
-                middle = start.copy()
-                middle[first] = destination[first]
-                candidate = np.stack((start, middle, destination))
-                candidate_nearest, _, _ = _rearrangement_pair_metrics(candidate)
-                if np.min(candidate_nearest) >= separation ** 2:
-                    motion, route = candidate, "first-agent then remaining straight paths"
-                    nearest = candidate_nearest
-                    break
-                middle = destination.copy()
-                middle[first] = start[first]
-                candidate = np.stack((start, middle, destination))
-                candidate_nearest, _, _ = _rearrangement_pair_metrics(candidate)
-                if np.min(candidate_nearest) >= separation ** 2:
-                    motion, route = candidate, "remaining agents then last straight path"
-                    nearest = candidate_nearest
-                    break
-            if np.min(nearest) >= separation ** 2:
+            knots = np.unique(np.r_[0., begins[moving], begins[moving] + 1.])
+            candidate = start[None] + np.clip(knots[:, None] - begins[None], 0., 1.)[..., None] * (destination - start)
+            closest, _, _ = _rearrangement_pair_metrics(candidate)
+            if np.min(closest) >= separation ** 2:
+                return candidate, knots / knots[-1], "straight paths with coordinated waits"
+            i, j = np.unravel_index(np.argmin(closest), closest.shape)
+            if not moving[i] or not moving[j]:
+                continue
+            for edge in ((i, j), (j, i)):
+                child = constraints | {edge}
+                if child not in seen_schedules:
+                    seen_schedules.add(child)
+                    heappush(schedules, (knots[-1], len(seen_schedules), child))
+        fractions = np.array([0., 1.])
+        for _ in range(min(16, len(start))):
+            nearest, segments, local_times = _rearrangement_pair_metrics(motion)
+            before_count = np.count_nonzero(nearest < separation ** 2)
+            i, j = np.unravel_index(np.argmin(nearest), nearest.shape)
+            interval = int(segments[i, j])
+            local_time = float(local_times[i, j])
+            when = fractions[interval] + local_time * (fractions[interval + 1] - fractions[interval])
+            if not 0 < when < 1:
                 break
+            vertex = (interval if local_time <= 1e-10 else
+                      interval + 1 if local_time >= 1 - 1e-10 else None)
+            if vertex in (0, len(motion) - 1):
+                break
+            middle = motion[interval] + local_time * (motion[interval + 1] - motion[interval])
+            direction = middle[i] - middle[j]
+            if np.linalg.norm(direction) < 1e-12:
+                velocity = (motion[interval + 1, i] - motion[interval, i]
+                            - motion[interval + 1, j] + motion[interval, j])
+                direction = np.asarray([-velocity[1], velocity[0]])
+            if np.linalg.norm(direction) < 1e-12:
+                break
+            direction /= np.linalg.norm(direction)
+            candidates = []
+            for which, sign in ((i, 1), (j, -1)):
+                for side in (1., -1.):
+                    for margin in (1.5, 2., 3.):
+                        waypoint = middle.copy()
+                        anchor = middle[j] if which == i else middle[i]
+                        waypoint[which] = anchor + sign * side * margin * separation * direction
+                        if np.any(waypoint < 0) or np.any(waypoint >= prepared["shape_yx"]):
+                            continue
+                        candidate = motion.copy() if vertex is not None else np.insert(
+                            motion, interval + 1, waypoint, axis=0)
+                        if vertex is not None:
+                            candidate[vertex] = waypoint
+                        # Other paths are unchanged: inserting their linear
+                        # interpolation does not alter any pair distance.
+                        changed, _, _ = _rearrangement_pair_metrics(candidate, (which,))
+                        after = nearest.copy()
+                        after[which], after[:, which] = changed[0], changed[0]
+                        after_count = np.count_nonzero(after < separation ** 2)
+                        if (after_count < before_count or
+                                (after_count == before_count and np.min(after) > np.min(nearest))):
+                            length = float(np.max(np.linalg.norm(
+                                np.diff(candidate, axis=0), axis=-1).sum(axis=0), initial=0.))
+                            candidates.append((after_count, length, candidate, after))
+            if not candidates:
+                break
+            _, _, motion, nearest = min(candidates, key=lambda item: (item[0], item[1]))
+            if vertex is None:
+                fractions = np.insert(fractions, interval + 1, when)
+            if np.min(nearest) >= separation ** 2:
+                return motion, fractions, "joint assignment and waypoint clearance repair"
+        return None
+
+    lower_bound, rows, columns = assignment(())
+    queue = [(lower_bound, 0, frozenset(), rows, columns)]
+    seen = {frozenset()}
+    best, best_length, evaluated = None, np.inf, 0
+    # Branch on both members of the closest conflicting assignment pair. No
+    # source is locked merely because its start coincides with a target.
+    # Bounds order the search by max length, not total length or agent count.
+    while queue and evaluated < 128:
+        bound, _, blocked, rows, columns = heappop(queue)
+        if bound > best_length:
             break
-        if np.min(nearest) < separation ** 2:
-            fractions = np.linspace(0., 1., len(motion))
-            for _ in range(min(16, len(assigned))):
-                nearest, segments, local_times = _rearrangement_pair_metrics(motion)
-                before_count = np.count_nonzero(nearest < separation ** 2)
-                i, j = np.unravel_index(np.argmin(nearest), nearest.shape)
-                interval = int(segments[i, j])
-                local_time = float(local_times[i, j])
-                when = fractions[interval] + local_time * (fractions[interval + 1] - fractions[interval])
-                if not 0 < when < 1:
-                    break
-                vertex = (interval if local_time <= 1e-10 else
-                          interval + 1 if local_time >= 1 - 1e-10 else None)
-                middle = motion[interval] + local_time * (motion[interval + 1] - motion[interval])
-                relative_point = middle[i] - middle[j]
-                direction = relative_point.copy()
-                if np.linalg.norm(direction) < 1e-12:
-                    v = (motion[interval + 1, i] - motion[interval, i]
-                         - motion[interval + 1, j] + motion[interval, j])
-                    direction = np.asarray([-v[1], v[0]])
-                if np.linalg.norm(direction) < 1e-12:
-                    break
-                direction /= np.linalg.norm(direction)
-                candidates = []
-                for which, sign in ((i, 1), (j, -1)):
-                    if np.array_equal(start[which], destination[which]):
-                        continue
-                    for side in (1., -1.):
-                        for margin in (1.5, 2., 3.):
-                            waypoint = middle.copy()
-                            anchor = middle[j] if which == i else middle[i]
-                            waypoint[which] = anchor + sign * side * margin * separation * direction
-                            if np.any(waypoint < 0) or np.any(waypoint >= prepared["shape_yx"]):
-                                continue
-                            candidate = motion.copy() if vertex is not None else np.insert(
-                                motion, interval + 1, waypoint, axis=0)
-                            if vertex is not None:
-                                candidate[vertex] = waypoint
-                            # Other paths are unchanged: inserting their linear
-                            # interpolation does not alter any pair distance.
-                            changed, _, _ = _rearrangement_pair_metrics(candidate, (which,))
-                            after = nearest.copy()
-                            after[which], after[:, which] = changed[0], changed[0]
-                            after_count = np.count_nonzero(after < separation ** 2)
-                            if (after_count < before_count or
-                                    (after_count == before_count and np.min(after) > np.min(nearest))):
-                                length = float(np.linalg.norm(np.diff(candidate, axis=0), axis=-1).sum())
-                                candidates.append((after_count, length, candidate, after))
-                if not candidates:
-                    break
-                _, _, motion, nearest = min(candidates, key=lambda item: (item[0], item[1]))
-                if vertex is None:
-                    fractions = np.insert(fractions, interval + 1, when)
-                route = "bounded local waypoint clearance repair"
-                if np.min(nearest) >= separation ** 2:
-                    break
-            if rearrangement_clearance(motion) < separation:
-                raise ValueError("no valid schedule found at the authored minimum separation")
-    target_by_source = dict(zip(ordered_sources, ordered_targets))
-    target_indices = np.asarray([target_by_source[int(index)] for index in assigned], np.intp)
+        evaluated += 1
+        start = source[available[columns]].astype(float)
+        destination = target[rows].astype(float)
+        motion = np.stack((start, destination))
+        displacement = destination - start
+        if np.all(displacement == displacement[:1]):
+            # Initial occupied endpoints were checked above. Exact common
+            # translation keeps every pair distance unchanged.
+            nearest, clear = None, True
+        else:
+            nearest, _, _ = _rearrangement_pair_metrics(motion)
+            clear = np.min(nearest, initial=np.inf) >= separation ** 2
+        repaired = ((motion, np.array([0., 1.]), "bottleneck assignment; simultaneous straight paths")
+                    if clear else repair(motion, nearest) if evaluated <= 8 else None)
+        if repaired is not None:
+            vertices, fractions, route = repaired
+            maximum = float(np.max(np.linalg.norm(np.diff(vertices, axis=0), axis=-1).sum(axis=0), initial=0.))
+            if maximum < best_length:
+                best, best_length = (rows, columns, vertices, fractions, route), maximum
+            if best_length <= np.nextafter(lower_bound, np.inf):
+                break
+        if clear:
+            continue
+        i, j = np.unravel_index(np.argmin(nearest), nearest.shape)
+        for which in (i, j):
+            child = blocked | {(int(rows[which]), int(columns[which]))}
+            if child in seen:
+                continue
+            seen.add(child)
+            match = assignment(child)
+            if match is not None and match[0] <= best_length:
+                heappush(queue, (match[0], len(seen), child, match[1], match[2]))
+    if best is None:
+        raise ValueError("no valid schedule found at the authored minimum separation")
+    ordered_targets, columns, motion, fractions, route = best
+    ordered_sources = available[columns]
+    removed = available[~np.isin(available, ordered_sources)]
+    order = np.argsort(ordered_targets)
+    assigned, target_indices = ordered_sources[order], ordered_targets[order]
     filled = np.zeros(len(target), bool)
     filled[target_indices] = True
     distance = float(np.linalg.norm(np.diff(motion, axis=0), axis=-1).sum())
@@ -318,10 +400,10 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
         "target_filled": _frozen(filled),
         "initial_occupied_count": len(available), "selected_count": len(assigned),
         "motion_yx": _frozen(motion.astype(np.float64)),
-        "fraction": _frozen(fractions if route == "bounded local waypoint clearance repair"
-                            else np.linspace(0., 1., len(motion))), "total_distance": distance,
-        "euclidean_lower_bound": lower_bound, "routing": route,
-        "detour_ratio": distance / lower_bound if lower_bound else 1.,
+        "fraction": _frozen(fractions), "total_distance": distance,
+        "maximum_path_length": best_length, "maximum_path_lower_bound": lower_bound,
+        "optimality_gap": max(0., best_length - lower_bound),
+        "routing": route, "assignment_candidates": evaluated,
     }
 
 
@@ -336,14 +418,18 @@ def _rearrangement_pair_metrics(motion, source_indices=None, target_indices=None
     for index in range(max(1, len(motion) - 1)):
         start = motion[index]
         end = motion[min(index + 1, len(motion) - 1)]
-        relative = start[selected, None] - start[None] if paired is None else start[selected] - start[paired]
-        velocity = ((end - start)[selected, None] - (end - start)[None] if paired is None else
-                    (end - start)[selected] - (end - start)[paired])
-        speed = np.sum(velocity ** 2, axis=-1)
-        at = np.divide(-np.sum(relative * velocity, axis=-1), speed,
+        delta = end - start
+        if paired is None:
+            y, x = (start[selected, None, axis] - start[None, :, axis] for axis in (0, 1))
+            vy, vx = (delta[selected, None, axis] - delta[None, :, axis] for axis in (0, 1))
+        else:
+            y, x = (start[selected, axis] - start[paired, axis] for axis in (0, 1))
+            vy, vx = (delta[selected, axis] - delta[paired, axis] for axis in (0, 1))
+        speed = vy ** 2 + vx ** 2
+        at = np.divide(-(y * vy + x * vx), speed,
                        out=np.zeros_like(speed), where=speed > 0)
         at = np.clip(at, 0., 1.)
-        squared = np.sum((relative + at[..., None] * velocity) ** 2, axis=-1)
+        squared = (y + at * vy) ** 2 + (x + at * vx) ** 2
         if paired is None:
             squared[np.arange(len(selected)), selected] = np.inf
         else:
@@ -2159,7 +2245,7 @@ __device__ real_t cv(float a){return a;}
 #endif
 extern "C" __global__ void load_motion_frame(int* counter,const int* native_indices,const int* coarse_indices,
  const double2* frequencies,const long long* offsets,const float2* coefficients,int* native_index,int* coarse_index,
- const float* amplitudes,double2* frequency,float2* current,float* target,int N,int K,int warm_previous){
+ const float* amplitudes,double2* frequency,float2* current,float* target,int N,int K,int warm_previous,int preserve_phase){
  __shared__ int frame;int t=threadIdx.x;
  if(!t){frame=counter[0];counter[0]=frame+1;}__syncthreads();
  unsigned long long row=(unsigned long long)frame*N;
@@ -2167,7 +2253,9 @@ extern "C" __global__ void load_motion_frame(int* counter,const int* native_indi
   native_index[j]=native_indices[row+j];coarse_index[j]=coarse_indices[row+j];target[j]=amplitudes[row+j];
   float2 c=coefficients[row+j];
   if(warm_previous&&frame>0){float previous=amplitudes[row-N+j];
-   if(previous>0){c=coefficients[row-N+j];float scale=target[j]/previous;c.x*=scale;c.y*=scale;}}
+   if(previous>0){float2 prior=coefficients[row-N+j];float scale=target[j]/previous;
+    if(preserve_phase){scale*=hypotf(prior.x,prior.y)/fmaxf(hypotf(c.x,c.y),1e-30f);}
+    else c=prior;c.x*=scale;c.y*=scale;}}
   current[j]=target[j]>0?c:make_float2(0,0);}
  long long begin=offsets[frame],end=offsets[frame+1];
  for(int j=t;j<K;j+=256)frequency[j]=j<end-begin?frequencies[begin+j]:make_double2(0,0);
@@ -2490,6 +2578,8 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 for band in work["plans"]:
                     _rearrangement_select_roots(work, band)
                     if precise:
+                        if method == "lpi":
+                            _rearrangement_propagate(gpu, work, band, "encode")
                         _rearrangement_propagate(gpu, work, band, "forward")
                     else:
                         _rearrangement_propagate(gpu, work, band, "roundtrip")
@@ -2597,7 +2687,7 @@ def _rearrangement_amplitude_updates(gpu, work, band, count):
              gpu["aa_g"], gpu["aa_r"], gpu["aa_candidate"], gpu["aa_state"], number, gpu["weight_exponent"]))
 
 
-def _rearrangement_load_frame(gpu, *, warm_previous=False):
+def _rearrangement_load_frame(gpu, *, warm_previous=False, preserve_phase=False):
     """Stage one row; its incremented counter stays fixed until the next load."""
     native = gpu["resources"][1]
     coarse = gpu["resources"].get(2, native)
@@ -2605,7 +2695,8 @@ def _rearrangement_load_frame(gpu, *, warm_previous=False):
         (gpu["frame_index"], gpu["motion_indices"][1], gpu["motion_indices"].get(2, gpu["motion_indices"][1]),
          gpu["motion_frequencies"], gpu["motion_offsets"], gpu["motion_coefficients"],
          native["index"], coarse["index"], gpu["motion_amplitudes"], gpu["frequencies"], gpu["coefficients"],
-         gpu["amplitude"], np.int32(gpu["number"]), np.int32(native["capacity"]), np.int32(warm_previous)))
+         gpu["amplitude"], np.int32(gpu["number"]), np.int32(native["capacity"]),
+         np.int32(warm_previous), np.int32(preserve_phase)))
 
 
 def _rearrangement_store_frame(gpu):
@@ -2946,17 +3037,15 @@ def prepare_rearrangement(
 
 
 def sample_rearrangement(
-    prepared: Mapping[str, object], plan: Mapping[str, object], *, motion_frames: int,
-    motion_fractions: object | None = None,
+    prepared: Mapping[str, object], plan: Mapping[str, object], *, motion_frames: int | None = None,
+    maximum_step: float | None = None, step_path: object | None = None,
 ) -> dict[str, object]:
-    """Sample the shared total-N, fade-then-move schedule without GPU work.
+    """Choose N, then share one source-removal map and waypoint-safe movement.
 
-    Task uses these same actual fractional coordinates to check sensor-pixel
-    displacement. No coordinate rounding or hidden frames occur here.
+    Auto only chooses N; giving that N explicitly returns identical positions
+    and phase progress. step_path supplies the same knots in the caller's
+    distance units (the Task uses native camera sensor pixels).
     """
-    if isinstance(motion_frames, bool) or int(motion_frames) != motion_frames or motion_frames < 1:
-        raise ValueError("motion_frames must be a positive integer")
-    count = int(motion_frames)
     source, target = prepared["source_yx"], prepared["target_yx"]
     selected = np.asarray(plan["source_indices"], np.intp)
     destinations = np.asarray(plan["target_indices"], np.intp)
@@ -2968,23 +3057,52 @@ def sample_rearrangement(
             or not np.array_equal(path[-1], target[destinations])):
         raise ValueError("plan endpoints do not match the prepared source roster and target")
     faded = np.flatnonzero(~np.isin(np.arange(len(source)), selected))
-    fade_frames = min(2, count) if len(faded) else 0
-    spatial_motion = np.any(path != path[:1])
+    spatial_motion = bool(np.any(path != path[:1]))
+    fade = 1 if len(faded) else 0
+    widths = np.diff(fractions)
+    if np.any(widths <= 0) or fractions[0] != 0 or fractions[-1] != 1:
+        raise ValueError("plan fractions must increase from zero to one")
+    automatic = maximum_step is not None
+    if automatic:
+        if motion_frames is not None:
+            raise ValueError("choose motion_frames or maximum_step, not both")
+        maximum_step = _scalar(maximum_step, "maximum_step")
+        if maximum_step <= 0:
+            raise ValueError("maximum_step must be positive")
+        coordinates = path if step_path is None else np.asarray(step_path, np.float64)
+        if coordinates.shape != path.shape or not np.all(np.isfinite(coordinates)):
+            raise ValueError("step_path must contain the plan knots in the chosen distance units")
+        distances = np.linalg.norm(np.diff(coordinates, axis=0), axis=-1)
+        longest = float(np.max(np.sum(distances, axis=0), initial=0.))
+        count = (fade + max(len(widths), int(np.ceil(longest / maximum_step)))
+                 if spatial_motion else max(1, fade))
+        required = np.maximum(1, np.ceil(np.max(distances, axis=1, initial=0.) / maximum_step)).astype(np.int64)
+    else:
+        if (motion_frames is None or isinstance(motion_frames, bool)
+                or int(motion_frames) != motion_frames or motion_frames < 1):
+            raise ValueError("motion_frames must be a positive integer")
+        count = int(motion_frames)
+    fade_frames = min(fade, count)
     if spatial_motion and count <= fade_frames:
-        raise ValueError("motion_frames must leave a movement frame after the source fade")
-    progress = np.zeros(count)
-    if count > fade_frames:
-        if motion_fractions is None:
-            progress[fade_frames:] = np.arange(1, count - fade_frames + 1) / (count - fade_frames)
-        else:
-            fractions_input = np.asarray(motion_fractions, np.float64)
-            if (fractions_input.shape != (count - fade_frames,) or not np.all(np.isfinite(fractions_input))
-                    or np.any(fractions_input <= 0) or np.any(np.diff(fractions_input) <= 0)
-                    or fractions_input[-1] != 1.):
-                raise ValueError("motion_fractions must increase in (0,1], end at 1 and match movement frame count")
-            progress[fade_frames:] = fractions_input
-    elif motion_fractions is not None and np.asarray(motion_fractions).size:
-        raise ValueError("motion_fractions must match movement frame count")
+        raise ValueError("motion_frames must leave a movement frame after the source-removal map")
+    if spatial_motion:
+        moving_count = count - fade_frames
+        if moving_count < len(widths):
+            raise ValueError(f"motion_frames must include {fade_frames + len(widths)} maps to preserve all path waypoints")
+        # The same deterministic allocation in both modes keeps every corner:
+        # no frame-to-frame chord can cut through a planned clearance boundary.
+        subdivisions = np.ones(len(widths), dtype=np.int64)
+        for _ in range(moving_count - len(widths)):
+            subdivisions[int(np.argmax(widths / subdivisions))] += 1
+        if automatic:
+            while np.any(subdivisions < required):
+                subdivisions[int(np.argmax(widths / subdivisions))] += 1
+                count += 1
+        progress = np.concatenate((np.zeros(fade_frames), *(
+            np.linspace(a, b, int(n) + 1)[1:]
+            for a, b, n in zip(fractions[:-1], fractions[1:], subdivisions, strict=True))))
+    else:
+        progress = np.zeros(count)
     segment = np.clip(np.searchsorted(fractions, progress, side="right") - 1, 0, len(path) - 2)
     mix = (progress - fractions[segment]) / (fractions[segment + 1] - fractions[segment])
     moving = path[segment] + mix[:, None, None] * (path[segment + 1] - path[segment])
@@ -2993,14 +3111,16 @@ def sample_rearrangement(
     if clearance < prepared["minimum_separation"]:
         raise ValueError(f"emitted trajectory clearance {clearance:g} is below {prepared['minimum_separation']:g}")
     fade_clearance = stationary_clearance = np.inf
-    if len(removed):
-        stationary = np.broadcast_to(source[removed], (len(actual_path), len(removed), 2))
-        with_removed = np.concatenate((actual_path, stationary), axis=1)
-        fade_clearance = rearrangement_clearance(with_removed[:fade_frames + 1])
-        stationary_clearance = rearrangement_clearance(with_removed)
+    if len(faded):
+        # Empty but still illuminated traps also participate in the transition.
+        stationary = np.broadcast_to(source[faded], (fade_frames + 1, len(faded), 2))
+        fade_clearance = rearrangement_clearance(np.concatenate((actual_path[:fade_frames + 1], stationary), axis=1))
         if fade_clearance < prepared["minimum_separation"]:
             raise ValueError(f"trajectory clearance during surplus fade {fade_clearance:g} "
                              f"is below {prepared['minimum_separation']:g}")
+    if len(removed):
+        stationary = np.broadcast_to(source[removed], (len(actual_path), len(removed), 2))
+        stationary_clearance = rearrangement_clearance(np.concatenate((actual_path, stationary), axis=1))
     sites = np.broadcast_to(source, (count, len(source), 2)).astype(np.float64).copy()
     sites[:, selected] = moving
     velocity = np.max(np.linalg.norm(np.diff(path, axis=0), axis=-1)
@@ -3011,7 +3131,7 @@ def sample_rearrangement(
         "clearance": clearance, "fade_clearance": fade_clearance,
         "surplus_stationary_clearance": stationary_clearance,
         "maximum_step": float(np.max(np.linalg.norm(np.diff(actual_path, axis=0), axis=-1), initial=0.)),
-        "recommended_motion_frames": int(np.ceil(velocity)) + fade_frames,
+        "recommended_motion_frames": max(1, int(np.ceil(velocity)) + fade_frames),
     }
 
 
@@ -3021,12 +3141,11 @@ def compute_rearrangement(
     support_tolerance: float = SPOT_SUPPORT_TOLERANCE,
     require_converged: bool = True, stop_requested: Callable[[], bool] | None = None,
     frame_ready: Callable[[int, np.ndarray], None] | None = None,
-    motion_fractions: object | None = None,
 ) -> dict[str, object]:
     """Emit N native maps with one continuous coefficient trajectory.
 
-    Both methods fade unused beams at the source, then follow the same sampled
-    fractional path, with N total maps. LPI holds the interpolated coefficient
+    Both methods remove unused beams in one source-position map, then follow the
+    same sampled fractional path, with N total maps. LPI holds the interpolated coefficient
     phases during bounded encoded-field amplitude balancing; it never uses the
     iterative method's free-phase removed-neighborhood projection. Pupil phase
     steps and background are measured after playback by the shared diagnostics.
@@ -3105,7 +3224,7 @@ def compute_rearrangement(
                           "callback": 0., "first_frame_ready": 0., "first_frame_solve": 0., "first_frame_copy": 0.,
                           "total": (time.perf_counter() - started) * 1000},
         }
-    sampled = sample_rearrangement(prepared, plan, motion_frames=motion_frames, motion_fractions=motion_fractions)
+    sampled = sample_rearrangement(prepared, plan, motion_frames=motion_frames)
     actual_path, sites = sampled["motion_yx"], sampled["sites_yx"]
     progress = sampled["movement_fraction"]
     clearance = sampled["clearance"]
@@ -3147,20 +3266,16 @@ def compute_rearrangement(
                         endpoint_iterations=endpoint_updates, endpoint_balance_ms=endpoint_ms)
         source_amplitude = abs(prepared["source_synthesis_coefficients"]).astype(np.float64)
         start_coefficient = prepared["source_synthesis_coefficients"][source_indices]
-        start_updates, start_ms = 0, 0.
         if fade_frames:
             if np.any(path != path[:1]):
-                start_endpoint = _rearrangement_balance_endpoint(
-                    prepared["gpu"], source[source_indices], prepared["target_intensities"][target_indices],
-                    start_coefficient, 64, tolerance, stop_requested)
-                if start_endpoint["ratio"] > tolerance or not np.isfinite(start_endpoint["ratio"]):
-                    raise RuntimeError(f"LPI selected source endpoint did not meet authored intensity ratio {tolerance:g}: {start_endpoint['ratio']:.6g}")
-                start_coefficient = start_endpoint["coefficients"]
-                start_updates, start_ms = start_endpoint["iterations"], start_endpoint["timing_ms"]
+                # This is an initial guess, not a separately displayed endpoint.
+                # The actual fade frames own their fixed-phase amplitude solve.
+                start_coefficient = start_coefficient * np.sqrt(
+                    prepared["target_intensities"][target_indices] / prepared["source_intensities"][source_indices])
+                start_coefficient /= np.linalg.norm(start_coefficient)
             else:
                 start_coefficient = endpoint_coefficient
-        metadata.update(start_synthesis_coefficients=_frozen(start_coefficient),
-                        start_endpoint_iterations=start_updates, start_endpoint_balance_ms=start_ms)
+        metadata.update(start_synthesis_coefficients=_frozen(start_coefficient))
         spectrum_amplitude = np.broadcast_to(source_amplitude, desired.shape).copy()
         moving_amplitude = ((1 - progress[:, None]) * abs(start_coefficient)
                             + progress[:, None] * abs(endpoint_coefficient))
@@ -3214,7 +3329,6 @@ def compute_rearrangement(
         frame_solve_ms, frame_copy_ms, frame_ready_ms = (np.zeros(motion_frames) for _ in range(3))
         callback_ms, proposals_evaluated, emitted_count, verified_reuses = 0., 0, 0, 0
         publication_open = True
-        copy_begin, copy_end = cp.cuda.Event(), cp.cuda.Event()
         if len(removed) and method == "iterative":
             projection = gpu["projection"]
             halo_offset = np.indices((5, 5)).reshape(2, -1).T - 2
@@ -3243,7 +3357,10 @@ def compute_rearrangement(
                     verified_reuses += 1
                 else:
                     gpu["frame_index"].fill(index)
-                    _rearrangement_load_frame(gpu)
+                    # Carry only the previous accepted amplitude through motion;
+                    # the current LPI phase and exact endpoint remain authored.
+                    _rearrangement_load_frame(gpu, warm_previous=0 < progress[index] < 1,
+                                              preserve_phase=True)
                     _rearrangement_select_roots(gpu["measurement"], band)
                     work = gpu["measurement"]
                     gpu["kernels"]["anderson_begin"]((1,), (256,),
@@ -3433,12 +3550,10 @@ def compute_rearrangement(
                 raise RuntimeError(f"SLM {method} frame {index} did not meet authored intensity ratio {tolerance:g}; "
                                    f"bright {bright_ratio:.6g}{detail}")
             frame_solve_ms[index] = (time.perf_counter() - frame_started) * 1000
-            copy_begin.record(stream)
+            copy_started = time.perf_counter()
             movie[index].get(out=gpu["host_frame"], stream=stream, blocking=True)
             host[index] = gpu["host_frame"]
-            copy_end.record(stream)
-            copy_end.synchronize()
-            frame_copy_ms[index] = cp.cuda.get_elapsed_time(copy_begin, copy_end)
+            frame_copy_ms[index] = (time.perf_counter() - copy_started) * 1000
             frame_ready_ms[index] = (time.perf_counter() - started) * 1000
             if frame_ready is not None and publication_open:
                 callback_started = time.perf_counter()
