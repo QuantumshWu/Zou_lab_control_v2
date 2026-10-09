@@ -439,6 +439,7 @@ class SlmRearrangementTask:
         if self._camera_recordings:
             frames_directory = directory / "frames"
             frames_directory.mkdir(exist_ok=True)
+            recording_pngs = []
             template = self._snapshots[BEFORE_FRAME_OUTPUT.name]
             y_axis, x_axis = template.block.schema.cell_domain.axes
             spec = ImagePlot(x=AxisRef.cell_data(str(x_axis.axis_id)),
@@ -454,8 +455,27 @@ class SlmRearrangementTask:
                     source={"task":self.instance_id,"source_ordinal":record.source_ordinal})
                 if hasattr(written, "result"): written = written.result()
                 png, npz = written
+                recording_pngs.append(png)
                 context.register_artifact(f"camera_frame_{index:04d}", npz, role="figure", contract_id="zlc.figure")
                 context.register_artifact(f"camera_frame_{index:04d}_preview", png, role="preview")
+            # Repackage the public Plot previews; no second camera renderer,
+            # colour scaling, or work on the acquisition/playback path.
+            from PIL import Image
+
+            def following_frames():
+                for path in recording_pngs[1:]:
+                    with Image.open(path) as frame:
+                        yield frame
+
+            frames = following_frames()
+            try:
+                with Image.open(recording_pngs[0]) as first:
+                    gif = atomic_write_file(directory / "imaging.gif", lambda stream: first.save(
+                        stream, format="GIF", save_all=True, append_images=frames,
+                        duration=200, loop=0, disposal=2))
+            finally:
+                frames.close()
+            context.register_artifact("imaging_gif", gif, role="preview")
         path_overlay = None
         confirmed_phase = self.slm.last_commanded_phase
         if confirmed_phase is not None:

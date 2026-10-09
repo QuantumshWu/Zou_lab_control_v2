@@ -174,8 +174,12 @@ class _RunContext(_Context):
 
 
 def _stub_figures(path, **kwargs):
+    from PIL import Image
+
     path = Path(path)
-    path.write_bytes(b"test preview")
+    ordinal = int(kwargs.get("source", {}).get("source_ordinal", 0))
+    with Image.new("RGB", (8, 8), (ordinal, 0, 0)) as preview:
+        preview.save(path)
     archive = path.with_suffix(".npz")
     np.savez(archive, test_stub=np.asarray(1))
     return path, archive
@@ -781,6 +785,14 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
     files = sorted((e.context.run_directory / "frames").glob("*.png"))
     assert len(files) == 50
     assert all(path.with_suffix(".npz").is_file() for path in files)
+    from PIL import Image
+
+    with Image.open(e.context.run_directory / "imaging.gif") as animation:
+        assert animation.n_frames == 50 and animation.info["loop"] == 0
+        for index in range(50):
+            animation.seek(index)
+            assert animation.info["duration"] == 200
+            assert animation.convert("RGB").getpixel((0, 0)) == (index, 0, 0)
 
 
 @pytest.mark.parametrize("ending", ["device", "stopped", "numeric"])
