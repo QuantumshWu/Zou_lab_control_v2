@@ -383,6 +383,8 @@
 
 ### 2.3 Figure与Viewer
 
+- PNG通过公共PlotSession.save默认无损level1，保持原像素及显式pil_kwargs覆盖；不为Task另建writer或绘图路径。
+
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。纯文件保存复用Session配置/投影/fit与renderer，在最终导出DPI准备，不创建临时screen Host、compose、capture或restore；交互Host保存先在该Host worker上核对settled recipe与数据，再由recipe新建同一种导出session写archive与图（面板自己的session带着Normal模式的历史limits，与从archive重开的画面可能差一个deadband），面板屏幕不受影响。Curve/Histogram/Image/3D实际导出均0 screen compose、0 capture、1 savefig，与同最终DPI的普通Host导出逐像素相同；相对旧默认screen DPR准备的PNG有像素变化，不宣称旧PNG exact。现有artifact/configuration与失败保留用例9项通过，证据不入Git。

@@ -132,5 +132,12 @@ def test_saved_value_name_is_used_when_the_figure_is_redrawn(tmp_path) -> None:
         assert session.viewport == viewport
         assert session.describe_display().limits.x == viewport[0]
         assert session._renderer.primary_axes.get_ylabel() == "Survival"
+        from PIL import Image
+
+        session.save(tmp_path / "fast.png", restore_display=False)
+        session.save(tmp_path / "compressed.png", restore_display=False,
+                     pil_kwargs={"compress_level": 6})
+        with Image.open(tmp_path / "fast.png") as fast, Image.open(tmp_path / "compressed.png") as compressed:
+            np.testing.assert_array_equal(np.asarray(fast), np.asarray(compressed))
     finally:
         session.close()
