@@ -27,7 +27,7 @@ from zlc_atom.devices.slm.device import phase_from_codes
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.devices.slm.solver import (
     prepare_rearrangement, plan_rearrangement, compute_rearrangement,
-    rearrangement_diagnostics,
+    rearrangement_diagnostics, sample_rearrangement,
 )
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes.calibration import TrapCalibration
@@ -165,8 +165,8 @@ class SlmRearrangementTask:
                  target_intensity=None, target_path=None,
                  pulse_sequence, pulse_path, before_period, after_period="",
                  exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
-                 phase_method="iterative", frame_mode="fixed", max_camera_step=1.,
-                 minimum_separation=4.5, intensity_tolerance=1.01,
+                 phase_method="lpi", frame_mode="fixed", max_camera_step=1.,
+                 minimum_separation=15., intensity_tolerance=1.01,
                  save_phase_sequence=True, save_figure_artifact=None, recording_frames=None):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
@@ -539,7 +539,8 @@ class SlmRearrangementTask:
             summary["assigned_atoms"] = len(self._plan["assigned_source_indices"])
             summary["removed_atoms"] = len(self._plan["removed_source_indices"])
             summary["planning"] = {key:self._plan[key] for key in
-                ("total_distance", "euclidean_lower_bound", "detour_ratio", "routing") if key in self._plan}
+                ("maximum_path_length", "maximum_path_lower_bound", "optimality_gap",
+                 "total_distance", "assignment_candidates", "routing") if key in self._plan}
             summary["unfilled_target_indices"] = np.setdiff1d(
                 np.arange(len(self.points[1])), self._plan["assigned_target_indices"]).tolist()
         if self._result is not None:
@@ -550,8 +551,7 @@ class SlmRearrangementTask:
                  "noop", "fade_frames", "emitted_frame_count", "quality_evaluated",
                  "quality_scope", "quality_accepted", "phase_interpolation", "field_phase_reference",
                  "source_coefficient_basis", "target_coefficient_basis", "phase_locked_amplitude_updates",
-                 "endpoint_support_intensity_ratio", "endpoint_iterations", "endpoint_balance_ms",
-                 "start_endpoint_iterations", "start_endpoint_balance_ms") if key in self._result}
+                 "endpoint_support_intensity_ratio", "endpoint_iterations", "endpoint_balance_ms") if key in self._result}
             minimum = np.asarray(self._result["brightness_minimum_to_initial"])
             maximum = np.asarray(self._result["brightness_maximum_to_initial"])
             if len(minimum):
@@ -603,6 +603,21 @@ class SlmRearrangementTask:
                             ("actual_frame_intervals_ms", "new_phase_interval_median_ms")):
             values = playback.get(key) or ()
             cadence[output] = float(np.median(values)) if len(values) else None
+        if self._result is not None:
+            moving_steps = np.flatnonzero(np.any(np.diff(self._result["motion_yx"], axis=0) != 0, axis=(1, 2)))
+            if len(moving_steps):
+                first_motion = int(moving_steps[0])
+                cadence["first_motion_map_number"] = first_motion + 1
+                ready = self._result.get("frame_ready_ms", ())
+                compute_origin = self._timings.get("compute_started_after_before_frame")
+                if compute_origin is not None and first_motion < len(ready):
+                    cadence["first_motion_ready_after_before_frame_ms"] = compute_origin + float(ready[first_motion])
+                confirmed = playback.get("confirmed_ms") or ()
+                call_origin = self._timings.get("sequence_call_after_before_frame")
+                if call_origin is not None and first_motion < len(confirmed):
+                    # Server-relative ACK time: local call precedes the server's
+                    # playback origin. This is a lower bound, never optical time.
+                    cadence["first_motion_ack_earliest_after_before_frame_ms"] = call_origin + float(confirmed[first_motion])
         if len(self._records) == 2:
             first, last = self._records
             cadence["photo_receive_interval_ms"] = (last.host_received_at_ns-first.host_received_at_ns)/1e6
@@ -791,6 +806,8 @@ class SlmRearrangementTask:
                 # the exposure timestamp of a queued second photograph.
                 if self.recording_frames is None:
                     node._commit_direct_cycle(cycle, index)
+                if index == 0:
+                    self._timings["before_callback_after_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
                 start = perf_counter()
                 mask, valid = self._read_photo(context, node, cycle, index)
                 self._timings[("before", "after")[index]+"_readout"] = (perf_counter()-start)*1000
@@ -804,25 +821,12 @@ class SlmRearrangementTask:
                 plan = self._plan = plan_rearrangement(prepared, np.flatnonzero(mask & valid))
                 self._timings['matching']=(perf_counter()-start)*1000
                 online_started = start
-                motion_fractions = None
                 if self.frame_mode == "camera_step":
                     indices = np.asarray(plan["source_indices"], np.intp)
-                    knots = np.asarray(plan["motion_yx"])
-                    camera_path = self._camera_paths(knots, indices)
-                    distances = np.max(np.linalg.norm(np.diff(camera_path, axis=0), axis=-1), axis=1, initial=0.)
-                    fade = 2 if len(indices) < len(self.points[0]) else 0
-                    if len(indices) and np.any(distances > 0):
-                        subdivisions = np.maximum(1, np.ceil(distances/self.max_camera_step)).astype(np.int64)
-                        self._frame_count = fade + sum(map(int, subdivisions))
-                        nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
-                        if deadline is not None and nominal > deadline-monotonic():
-                            raise RuntimeError(f"Camera step requires {self._frame_count} maps ({nominal:.6g}s nominal), exceeding the remaining Pulse gap")
-                        fractions = np.asarray(plan["fraction"])
-                        motion_fractions = np.concatenate([
-                            np.linspace(a,b,int(n)+1)[1:]
-                            for a,b,n in zip(fractions[:-1],fractions[1:],subdivisions,strict=True)])
-                    else:
-                        self._frame_count = max(1, fade) if len(indices) else 1
+                    camera_path = self._camera_paths(np.asarray(plan["motion_yx"]), indices)[:, indices]
+                    sampled = sample_rearrangement(prepared, plan,
+                        maximum_step=self.max_camera_step, step_path=camera_path)
+                    self._frame_count = len(sampled["sites_yx"])
                     self._prepare_motion_outputs(context)
                 nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
                 self._timings["estimated_nominal_playback"] = nominal*1000
@@ -835,6 +839,7 @@ class SlmRearrangementTask:
                     def play():
                         nonlocal playback_finished_wall, playback_finished_at
                         began = perf_counter()
+                        self._timings["sequence_call_after_before_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
                         try:
                             return self.slm.play_phase_sequence(stop_requested=stopped)
                         finally:
@@ -882,8 +887,9 @@ class SlmRearrangementTask:
 
                     try:
                         compute_started = perf_counter()
+                        self._timings["compute_started_after_before_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
                         self._result = compute_rearrangement(prepared, plan,
-                            motion_frames=self._frame_count, motion_fractions=motion_fractions,
+                            motion_frames=self._frame_count,
                             support_tolerance=self.intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
                             stop_requested=stopped)

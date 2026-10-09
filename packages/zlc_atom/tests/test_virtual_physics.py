@@ -2001,14 +2001,26 @@ def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> 
     assert slm_solver.rearrangement_clearance(empty["motion_yx"]) == np.inf
     with pytest.raises(ValueError, match="integer"):
         slm_solver.plan_rearrangement(prepared, [True, True, True])
-    # Squared distance chooses the other pairing (9 rather than11). Actual
-    # Euclidean length is smaller for this pairing:1+sqrt(10)<2+sqrt(5).
+    # The shorter total pairing has a longer bottleneck. The authored goal is
+    # min(max(path)), so2+sqrt(5)wins over1+sqrt(10).
     euclidean = slm_solver.prepare_rearrangement_geometry(
         [[2, 2], [2, 3]], [[2, 4], [3, 5]], shape_yx=(16, 16), minimum_separation=.1,
     )
     shortest = slm_solver.plan_rearrangement(euclidean, [0, 1])
-    np.testing.assert_array_equal(shortest["assigned_source_indices"], [1, 0])
-    assert shortest["total_distance"] == pytest.approx(1 + np.sqrt(10))
+    np.testing.assert_array_equal(shortest["assigned_source_indices"], [0, 1])
+    assert shortest["total_distance"] == pytest.approx(2 + np.sqrt(5))
+    assert shortest["maximum_path_length"] == pytest.approx(np.sqrt(5))
+    assert shortest["optimality_gap"] == 0
+    # Keeping the three overlapping sites fixed would make one atom travel
+    # four pitches. Joint assignment must instead move all four by one pitch.
+    relay = slm_solver.prepare_rearrangement_geometry(
+        [[25, 25], [25, 50], [25, 75], [25, 100]],
+        [[25, 50], [25, 75], [25, 100], [25, 125]],
+        shape_yx=(160, 160), minimum_separation=15,
+    )
+    shifted = slm_solver.plan_rearrangement(relay, np.arange(4))
+    np.testing.assert_array_equal(shifted["motion_yx"][-1] - shifted["motion_yx"][0], [[0, 25]] * 4)
+    assert shifted["maximum_path_length"] == shifted["maximum_path_lower_bound"] == 25
     fewer_sources = slm_solver.prepare_rearrangement_geometry(
         [[2, 2]], [[10, 8], [4, 3]], shape_yx=(16, 16), minimum_separation=1,
     )
@@ -2036,9 +2048,9 @@ def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> 
         )
         scheduled = slm_solver.plan_rearrangement(geometry, [0, 1])
         assert slm_solver.rearrangement_clearance(scheduled["motion_yx"]) >= separation
-        assert scheduled["total_distance"] == pytest.approx(scheduled["euclidean_lower_bound"])
-    # Reported15×15 input: both112-atom draws need bounded local detours,
-    # including a collision occurring at an already inserted waypoint.
+        assert scheduled["maximum_path_length"] == pytest.approx(scheduled["maximum_path_lower_bound"])
+    # The same dense rosters now use a common bottleneck assignment, including
+    # initially stationary sites when they must participate in cooperative moves.
     grid = np.argwhere(preset_grid((1024, 1272), (15, 15), spacing_yx=(25, 25)) > 0)
     geometry = slm_solver.prepare_rearrangement_geometry(
         grid, grid.reshape(15, 15, 2)[2:12, 2:12].reshape(-1, 2),
@@ -2054,7 +2066,27 @@ def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> 
         emitted = vertices[segment] + mix[:, None, None] * (vertices[segment + 1] - vertices[segment])
         assert slm_solver.rearrangement_clearance(emitted) >= 4.5
         assert scheduled["selected_count"] == min(count, 100)
-        assert scheduled["detour_ratio"] <= 1.002
+        assert scheduled["optimality_gap"] == 0
+    # Raising the authored clearance needs coordinated waits, not reduced
+    # clearance or immovable overlapping source/target sites.
+    small = np.argwhere(preset_grid((256, 320), (5, 7), spacing_yx=(25, 25)) > 0)
+    stricter = slm_solver.prepare_rearrangement_geometry(
+        small, small.reshape(5, 7, 2)[:, 1:6].reshape(-1, 2),
+        shape_yx=(256, 320), minimum_separation=20,
+    )
+    scheduled = slm_solver.plan_rearrangement(stricter, np.random.default_rng(0).choice(35, 27, replace=False))
+    assert len(scheduled["motion_yx"]) > 2
+    assert slm_solver.rearrangement_clearance(scheduled["motion_yx"]) >= 20
+    assert scheduled["maximum_path_length"] == scheduled["maximum_path_lower_bound"] == 25
+    for starts, ends, message in (
+        ([[20, 20], [20, 25]], [[40, 20]], "initial occupied sources"),
+        ([[20, 20], [20, 40]], [[40, 20], [40, 25]], "required target sites"),
+    ):
+        impossible = slm_solver.prepare_rearrangement_geometry(starts, ends, shape_yx=(64, 64), minimum_separation=10)
+        with pytest.raises(ValueError, match=message):
+            slm_solver.plan_rearrangement(impossible, [0, 1])
+    # The same close target roster is legitimate when only one site is filled.
+    assert slm_solver.plan_rearrangement(impossible, [0])["selected_count"] == 1
     # Pair pruning must preserve the brute-force continuous minimum, including
     # held/resumed motion, duplicate points and arithmetic at different scales.
     rng = np.random.default_rng(20261007)
@@ -2072,6 +2104,34 @@ def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> 
         path = np.array([[[0., 0.], [0., distance]], [[1., 0.], [1., distance]]])
         assert slm_solver.rearrangement_clearance(path) == distance
     assert slm_solver.rearrangement_clearance([[[0, 0], [0, 2]], [[0, 2], [0, 0]]]) == 0
+
+
+def test_rearrangement_step_and_fixed_share_waypoints_and_phase_progress():
+    from zlc_atom.devices.slm import solver
+
+    # Two traps move in separate parallel corridors, with a shared right-angle
+    # waypoint. Both frame modes must retain the corner rather than cut it.
+    path = np.array([[[10., 10.], [10., 30.]],
+                     [[20., 10.], [20., 30.]],
+                     [[20., 20.], [20., 40.]]])
+    geometry = solver.prepare_rearrangement_geometry(
+        path[0], path[-1], shape_yx=(64, 64), minimum_separation=15.)
+    plan = {"source_indices": np.array([0, 1]), "target_indices": np.array([0, 1]),
+            "removed_source_indices": np.array([], dtype=int),
+            "motion_yx": path, "fraction": np.array([0., .4, 1.])}
+    sensor_path = path @ np.array([[.5, .1], [0., .8]]) + 1000.
+    automatic = solver.sample_rearrangement(
+        geometry, plan, maximum_step=.7, step_path=sensor_path)
+    count = len(automatic["sites_yx"])
+    fixed = solver.sample_rearrangement(geometry, plan, motion_frames=count)
+    for key in ("motion_yx", "sites_yx", "movement_fraction"):
+        np.testing.assert_array_equal(automatic[key], fixed[key])
+    assert any(np.array_equal(frame, path[1]) for frame in fixed["motion_yx"])
+    assert fixed["clearance"] >= 15.
+    camera_motion = fixed["motion_yx"] @ np.array([[.5, .1], [0., .8]]) + 1000.
+    assert np.max(np.linalg.norm(np.diff(camera_motion, axis=0), axis=-1)) <= .7 + 1e-12
+    with pytest.raises(ValueError, match="preserve all path waypoints"):
+        solver.sample_rearrangement(geometry, plan, motion_frames=1)
 
 
 @pytest.mark.parametrize("shape", ((64, 80), (127, 159)))
@@ -2128,20 +2188,20 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         sequence["phase_codes"].setflags(write=True)
     next_sequence = slm_solver.compute_rearrangement(prepared, plan, motion_frames=7)
     assert len(next_sequence["phase_codes"]) == 7
-    assert next_sequence["fade_frames"] == 2
+    assert next_sequence["fade_frames"] == 1
     np.testing.assert_array_equal(next_sequence["fraction"], np.r_[0., np.arange(1, 8) / 7])
     np.testing.assert_array_equal(
         next_sequence["sites_yx"][:, plan["source_indices"]], next_sequence["motion_yx"][1:],
     )
     discarded = plan["removed_source_indices"]
-    assert np.all(next_sequence["desired_amplitudes"][0, discarded] > 0)
-    np.testing.assert_array_equal(next_sequence["desired_amplitudes"][1:, discarded], 0)
+    np.testing.assert_array_equal(next_sequence["desired_amplitudes"][:, discarded], 0)
     assert next_sequence["release_verified"] is False
     assert next_sequence["recommended_release_hold_frames"] == 1
-    np.testing.assert_array_equal(next_sequence["motion_yx"][:3],
-                                  np.broadcast_to(plan["motion_yx"][0], (3, 2, 2)))
-    assert next_sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 5)
-    assert next_sequence["recommended_motion_frames"] == 5
+    np.testing.assert_array_equal(next_sequence["motion_yx"][:2],
+                                  np.broadcast_to(plan["motion_yx"][0], (2, 2, 2)))
+    assert np.any(next_sequence["motion_yx"][2] != plan["motion_yx"][0])
+    assert next_sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 6)
+    assert next_sequence["recommended_motion_frames"] == 4
     assert next_sequence["converged"]
     assert np.max(next_sequence["support_intensity_ratios"]) <= 1.01
     y = (np.arange(height) - height // 2) / height
@@ -2174,7 +2234,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                     assert candidate["discard_intensity_ratios"][frame] == pytest.approx(ratio, rel=1e-3, abs=1e-7)
     assert not np.shares_memory(sequence["phase_codes"], next_sequence["phase_codes"])
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
-    for bad_count in (0, True, 1.5, 2):
+    for bad_count in (0, True, 1.5, 1):
         with pytest.raises(ValueError, match="motion_frames"):
             slm_solver.compute_rearrangement(prepared, plan, motion_frames=bad_count)
     grown = slm_solver.compute_rearrangement(prepared, plan, motion_frames=9)
@@ -2293,19 +2353,12 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             )
             np.testing.assert_allclose(translated["actual_fields"][frame], expected, rtol=2e-5,
                                        atol=2e-5 * np.min(abs(expected)))
-        nonuniform = np.array([.1, .4, .5, .7, 1.])
-        sampled = slm_solver.sample_rearrangement(translated_prepared, held_plan, motion_frames=5,
-                                                  motion_fractions=nonuniform)
+        sampled = slm_solver.sample_rearrangement(translated_prepared, held_plan, motion_frames=5)
         waypoint_movie = slm_solver.compute_rearrangement(
-            translated_prepared, held_plan, motion_frames=5, motion_fractions=nonuniform,
+            translated_prepared, held_plan, motion_frames=5,
         )
         np.testing.assert_array_equal(waypoint_movie["motion_yx"], sampled["motion_yx"])
-        np.testing.assert_array_equal(sampled["movement_fraction"], nonuniform)
         np.testing.assert_array_equal(sampled["motion_yx"][2], held_plan["motion_yx"][1])
-        for fractions in ([.1, .4, .5, .7, .9], [.1, .4, .4, .7, 1.], [.1, .4, 1.]):
-            with pytest.raises(ValueError, match="motion_fractions"):
-                slm_solver.sample_rearrangement(translated_prepared, held_plan, motion_frames=5,
-                                                motion_fractions=fractions)
     finally:
         translated_prepared["close"]()
 
