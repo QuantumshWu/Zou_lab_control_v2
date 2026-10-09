@@ -64,7 +64,8 @@ def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
     source = np.asarray(codes)
     if source.shape != shape or source.dtype != np.uint8:
         raise ValueError("SLM phase codes must be a uint8 matrix matching the full device shape")
-    radians = source.astype(np.float32) * np.float32(_TWO_PI / 256)
+    radians = source.astype(np.float32)
+    radians *= np.float32(_TWO_PI / 256)
     return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
 
 
