@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 2026-10-09重排延迟整改：有限Camera接收容量以已知总帧数为额外上界，保留Monitor预算和完整周期要求；SLM优化以实际15帧/60Hz/原质量门为基准，区分GPU执行、主机同步、上传背压与播放，不能用不同GPU理论参数替代实验机延迟实测。
+
 - Frame Survival增加可编辑配对行及Publish all，保持一个survival输出和现有pair/site归属；只发布所选行，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。UI复用Fluent rows与原Logic贡献入口，源schema直接来自Runtime目录。
 
 - Component交互整改（2026-10-09，完成，worktree待人工验收）：Shift逐项追加/取消实际点击的item，不补范围；Group直接消费选区，非连续/选中Bracket未完整归入时拒绝并保留选区，成功聚焦默认名输入。名称卡内直接改，删除起止/命名窗口及Rename菜单。展开改为左右同色窄端包围内容、内部自动全选；多组件独立展开，任一端选择/拖动代表整体。PulseDragContainer只保留一份选区，删旧单卡/post状态和点击转发；多选拖动与remove_items一次提交，空选区Remove不再删最后一项，Shift点checkbox/输入框不改数据。现有UI相关7项、presenter 3项通过；正式launcher真实Qt点选验证第1/3项不补第2项、拒绝错误Group、完整选区分组直接改名、双端与全部内部高亮、Shift不改TTL、保存重开/编译，以及两个组件同时展开，zlc_ui截图留ignored research，窗口已关闭。不改model/文件格式/FPGA。
@@ -91,7 +93,7 @@
 
 - 同源复核收尾：RecordQueue区分Stop保留尾部与设备Close释放尾部/失败引用，所有Camera/Waveform adapter在实际关闭成功后使用同一清理入口，SDK拒绝关闭仍保留可重试状态。N100坏帧/序号/时间错误只终止当前capture，原接收线程继续idle drain以支持普通Restart；实际串口I/O故障仍终止接收并明确拒绝重新arm。原直接用例验证释放弱引用、拒绝关闭重试和坏包后恢复，未接实验硬件。
 - Runtime数值物化仍只有一条路径，数组消费者不再构建后丢弃event record；完整记录按需准备，同一atomic bundle的有限prefix及相同indexed窗口共享已准备记录，补记录不重建数组。记录合并、时间坐标填充移出公共锁，旧请求不能覆盖新缓存，Frozen记录不变。64条有限记录逐次取数组的时间条目遍历2080→0；四个同源完整视图8320→2080，合并均不持公共锁。新的平坦不可变完整记录仍需O(N)索引构建（首条带record_timing的记录一次整体复制，只有之后的记录逐条核冲突；finite记录合并在锁内只取append-only buffer的引用与范围），不声称全部完整读取为O(增量)，不引入链式记录容器或第二套缓存owner。并发新旧请求、不同窗口及原sigma/validity物化直接验证通过。
-- 持续采集与发布复用中立RecordQueue，SDK取数仍由具体adapter执行。Camera/Waveform的公开receive-buffer参数已从schema、Request、工厂和用户run参数删除，不隐藏到高级表单；内部保留Camera128MiB及Waveform2秒容量策略，有限目标数不决定缓冲。成功arm请求的应用接收容量记录在只读acquisition事实中，不冒称SDK ring实际相同。真实/Virtual禁止drop-oldest，序号、溢出、正常Stop尾部与history语义不变；原有限/持续采集、容量和Stop用例及正式表单截图通过，未操作实验硬件。旧Layout中的废弃字段由通用当前字段交集恢复忽略，不添加专属兼容或自动改写原文件。
+- 持续采集与发布复用中立RecordQueue，SDK取数仍由具体adapter执行。Camera/Waveform的公开receive-buffer参数已从schema、Request、工厂和用户run参数删除，不隐藏到高级表单；内部保留Camera128MiB及Waveform2秒容量策略，有限总帧数另作为接收容量上界，不能分配本次不可能用到的槽位。成功arm请求的应用接收容量记录在只读acquisition事实中，不冒称SDK ring实际相同。真实/Virtual禁止drop-oldest，序号、溢出、正常Stop尾部与history语义不变；原有限/持续采集、容量和Stop用例及正式表单截图通过，未操作实验硬件。旧Layout中的废弃字段由通用当前字段交集恢复忽略，不添加专属兼容或自动改写原文件。
 - Run metadata改为generation一次声明，删除LiveDatasetOutput的逐event run_record及重复整表比较；所有生产者、Processor describe_run、Viewer与Task companion已接同一入口。有限结果只持自身数据与祖先元数据，未消费exact输入和已连接same-shot/Frozen所需payload仍按真实所有权保留；exact live队列明确限额，finite replay按需读取，Monitor弃置replay树已删除。Latest/Exact终态均收尾，后续失败保留已验证partial prefix并传播失败；显式Remove/Clear退休被移除owner，不破坏独立Frozen值。
 - 绘图传输沿原input token一次安装静态结构并按真实依赖释放；Scope说明只持其AxisSpec。单次Freeze/Save复用同run记录转换。长期Rolling的tick缓存限定工作集，删除后台全局gc.freeze及回收阈值改写；共享segment退休沿既有进程消息通知，在最后读者释放后解除映射。接收/Runtime/Plot有界性、关闭与重开分别验证，长期时钟坐标与window2000短压测不冒充20小时真机运行。全部benchmark、诊断和截图只留ignored research，不入Git。
 - 同源资源收口补齐：共享映射最后读者晚于service关闭时，退休线程在最终映射关闭后正常退出；relayout同时清旧Axes量化几何缓存。32个退休segment不再留空闲映射，旧front跨pool/service关闭仍可读；12次尺寸切换缓存只含当前Axes。Overlay的Last/Scope在公共语义入口先限制Repeat/Point域，再解析坐标，避免拿image像素轴去解析site状态域；不增加overlay私有Last算法。

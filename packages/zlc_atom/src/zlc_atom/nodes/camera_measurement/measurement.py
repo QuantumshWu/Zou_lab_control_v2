@@ -852,6 +852,8 @@ class CameraMeasurementNode:
                 f"Internal receive buffer {_RECEIVE_BUFFER_MIB} MiB cannot hold "
                 f"one {self.frames_per_cycle}-frame cycle at {frame_bytes} bytes/frame"
             )
+        if self.repeat:
+            count = min(count, self.repeat * self.frames_per_cycle)
         return count
 
     def _configure_capture(self) -> CameraWorkingPoint:

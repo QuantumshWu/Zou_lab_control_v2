@@ -459,6 +459,8 @@ Node new chunk
 
 ### 7.2 Camera
 
+- 接收内存预算是容量上限，不是必须分满的目标。有限采集的SDK环形缓存及应用FIFO不超过本次已知总帧数；持续采集继续按预算分配，不能按科学history缩小。只有确实可能产生的数据需要接收存储，不为两帧采集构造数万帧槽位。
+
 - Occupancy的每一帧可以用自己的calibration：`ArtifactInputSpec(per_frame=True)`让一个artifact输入除了给每帧兜底的那份路径外，再按`"<name>[<frame>]"`（帧从1数，操作员看到的编号）给某几帧各自一份；表单里只有源的一个周期多于一帧时才出现「· frame k」行（帧数先问源的生产者草稿`frames_per_cycle`，没有草稿再问plane最新publication里readout-event角色的Point轴；生产者的草稿一变，console重投影每个读它信号的节点的编辑器，所以行数跟着相机的frames_per_cycle立即变），空行表示该帧读兜底那份；投影给表单的值恰好是表单的键（每行都有值，表单拒绝多一个少一个键）；行就是周期的帧：周期缩短，超出的帧连同它的路径一起从草稿里删掉（不藏着——藏着会让Start因一个看不见的行被拒），周期变长，新帧从空开始，单帧周期没有逐帧行也就没有逐帧路径；每次finalization都先做这一步，所以Start和编辑器看到同一份草稿；finalization把同一文件只解码一次，build拿到`calibration`加`calibration_by_frame`。读出提取对整叠帧一次gather（`extract_box_signals`/`extract_psf_signals`收`(F,H,W)`答`(F,N)`，`TrapCalibration.signals_of_frames`），每个窗口仍按自己的连续像素求和，所以整叠答案与逐帧逐字相同；occupancy每份calibration只读一次它负责的那些cell。processor的规矩：每帧读的是同一组site（site_ids必须一致，否则拒绝），各帧用自己的阈值与usable集判定，ROI重定位对每份calibration一起做，帧号超过周期帧数或源没有帧轴却给了逐帧calibration都拒绝；run record只在有某帧自己的calibration时才写`calibration_paths_by_frame`，没有的run记录得和以前一模一样。
 - 节点可以给操作员留空的字段自己定默认值：`LogicNodeDescriptor.resolve_defaults(values, resources)`在workspace资源解析之后、草稿投影之前被问，只填空字段，每次finalization重算，草稿本身不写入（默认跟着资源走）。Calibration用它把reference before/readout/reference after三个API字段默认成所选pulse按period顺序的前三个API参数（`zlc_pulse.api_bindings_in_period_order`：按period位置、同period先duration后DAC、delay最后），所以用为此写的模板时默认就是对的；操作员选过的字段不动。字段还可以声明为**派生**（`AuthoringField(derived=True)`）：不论草稿里有什么都取同一个钩子的值、表单只显示不可编辑（字段的description就是禁用原因）、草稿从不持有它。Calibration的「Camera exposure seconds」就是派生的：它开的camera measurement武装相机用的曝光=三个窗里最长的（reference，`camera_exposure_seconds`一处规则），请求校验它不短于reference窗，run record照记相机实际积分的值。
 
@@ -560,6 +562,8 @@ Node new chunk
 - 静态求解按target形状选路：sparse spots（site阵列）走WGS-Kim；dense image target（Editor的Gaussian/Flat Top等预设或导入图像）走MRAF，从radial-transport/mapping seed起步，边长≥512且有≥64像素平坦内部的target先在四分之一分辨率收敛再抬升为seed（multigrid）。有平坦内部时以该内部95/5百分位强度比≤1%为停止判据，否则以merit停滞为判据，两者都要求相对rms≤0.5%；到不了就跑满有界迭代并如实报告。SLM Feedback只接受spots target，已有静态Editor/Feedback默认CPU行为不因安装GPU依赖而改变。
 
 ### 8.4 GPU二维重排
+
+- LPI在线阶段不为未播放的目标子集另作端点求解；已准备的端点系数保留指定相位，只作实际输出的初值，实际终点与其它帧共用原幅度校正及质量门。GPU可在有界迭代组内执行同一更新/判据，满足门后冻结更新，不改变作者帧数、帧率或相位轨迹；最后仍核实际编码场。不得以微调容差或改变图数冒充吞吐优化。
 
 - 同一Task提供`phase_method=iterative|lpi`，默认LPI、保留Iterative。只切换相位生成；占据、源/目标政策、指派、分数坐标路径、间距检查、逻辑相位码和设备mapping及流水线共用。整体光功率因去阱重新分配是允许的，不加恒功率约束；检查相对目标权重的均匀度及相位/过渡。最小trap间距是可调硬约束，默认15个原生Fourier像素，与SLM Target的25 gap同单位。
 - LPI从实际source和离线target站点复场，在相同光学轴参考下沿最短模2π分支插值；没有位移的identity保持源相位，零运动不追加突变的target相位帧。不额外发明像素相位混合算法，也不把稀疏场重建声称为原始完整hologram。端点参考和实际编码结果分开。
