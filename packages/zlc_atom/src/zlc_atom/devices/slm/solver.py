@@ -246,55 +246,125 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
         order = np.argsort(columns)
         return float(radii[lo]), rows[order], columns[order]
 
-    def repair(motion, nearest):
+    search_limited = False
+
+    def repair(motion, initial_nearest):
+        nonlocal search_limited
         start, destination = motion[0], motion[-1]
-        # Conflict-based precedence search preserves straight geometric length.
-        # Each edge orders two complete moves; every emitted segment is checked
-        # again, including new interactions created by waiting. Static atoms are
-        # obstacles here, not exempt agents; later reassignment/waypoints can
-        # move them as well. Cyclic priorities are rejected, not serialized into
-        # a deadlock or disguised as an impossibility proof.
+        velocity = destination - start
         moving = np.any(destination != start, axis=1)
-        schedules = [(np.inf, 0, frozenset())]
+        speeds = np.linalg.norm(velocity, axis=1)
+        first, second = np.triu_indices(len(start), 1)
+        # An immutable site is an obstacle for the whole straight path: no
+        # departure delay can fix that collision. Reassignment/waypoints below
+        # can still move it, so this only skips an impossible waiting search.
+        static_collision = np.any((initial_nearest < separation ** 2)
+                                  & (~moving[:, None] | ~moving[None, :]))
+        schedules = ([] if static_collision else
+                     [(float(speeds.max(initial=0.)), 0, frozenset(), np.zeros(len(start)), initial_nearest)])
         seen_schedules = {frozenset()}
+        unsafe_delays = {}
+        best_wait, best_wait_distance = None, np.inf
         for _ in range(32):
             if not schedules:
                 break
-            _, _, constraints = heappop(schedules)
-            begins = np.zeros(len(start))
-            for iteration in range(len(start)):
-                previous = begins.copy()
-                for first, second in constraints:
-                    begins[second] = max(begins[second], begins[first] + 1.)
-                if np.array_equal(previous, begins):
-                    break
-            else:
-                continue
-            knots = np.unique(np.r_[0., begins[moving], begins[moving] + 1.])
-            candidate = start[None] + np.clip(knots[:, None] - begins[None], 0., 1.)[..., None] * (destination - start)
-            closest, _, _ = _rearrangement_pair_metrics(candidate)
+            distance, _, constraints, begins, closest = heappop(schedules)
             if np.min(closest) >= separation ** 2:
-                return candidate, knots / knots[-1], "straight paths with coordinated waits"
-            i, j = np.unravel_index(np.argmin(closest), closest.shape)
-            if not moving[i] or not moving[j]:
+                if distance < best_wait_distance:
+                    knots = np.unique(np.r_[0., begins[moving], begins[moving] + 1.])
+                    progress = np.where(knots[:, None] >= begins[None] + 1., 1.,
+                                        np.clip(knots[:, None] - begins[None], 0., 1.))
+                    candidate = start[None] + progress[..., None] * velocity
+                    # The compact per-pair calculation and the final shared
+                    # trajectory gate must agree; never relax the hard limit.
+                    if rearrangement_clearance(candidate) >= separation:
+                        best_wait, best_wait_distance = candidate, distance
                 continue
-            for edge in ((i, j), (j, i)):
-                child = constraints | {edge}
-                if child not in seen_schedules:
-                    seen_schedules.add(child)
-                    heappush(schedules, (knots[-1], len(seen_schedules), child))
+            i, j = np.unravel_index(np.argmin(closest), closest.shape)
+            pair = (min(i, j), max(i, j))
+            if pair not in unsafe_delays:
+                a, b = pair
+                unsafe_delays[pair] = _rearrangement_unsafe_delay(
+                    start[a], destination[a], start[b], destination[b], separation)
+            forbidden = unsafe_delays[pair]
+            if forbidden is None:
+                continue
+            i, j = pair
+            for origin, follower, lag in ((i, j, forbidden[1]), (j, i, -forbidden[0])):
+                if not np.isfinite(lag):
+                    continue
+                # Boundaries of the open unsafe interval are safe in exact
+                # arithmetic. Absolute-coordinate interpolation needs more
+                # room than one ULP of a small delay. Convert a conservative
+                # float64 arithmetic bound to time; do not lower clearance.
+                scale = max(1., float(np.max(abs(start[[i, j]]))), float(np.max(abs(destination[[i, j]]))))
+                roundoff_time = 64 * np.finfo(float).eps * scale / min(speeds[i], speeds[j])
+                lag = float(np.nextafter(lag + roundoff_time, np.inf))
+                old_edges = {(a, b): value for a, b, value in constraints}
+                old_edges[origin, follower] = max(lag, old_edges.get((origin, follower), -np.inf))
+                child = frozenset((a, b, value) for (a, b), value in old_edges.items())
+                if child in seen_schedules:
+                    continue
+                seen_schedules.add(child)
+                updated = begins.copy()
+                successors = [[] for _ in start]
+                for a, b, value in child:
+                    successors[a].append((b, value))
+                pending, valid = [origin], True
+                while pending and valid:
+                    a = pending.pop()
+                    for b, value in successors[a]:
+                        required = updated[a] + value
+                        if required > updated[b]:
+                            # Parent constraints are feasible. A newly positive
+                            # cycle must include the new/tightened edge, hence
+                            # would increase its origin. Zero/negative cycles
+                            # remain valid, unlike a DAG-only precedence rule.
+                            if b == origin:
+                                valid = False
+                                break
+                            updated[b] = required
+                            pending.append(b)
+                if not valid:
+                    continue
+                changed = updated != begins
+                affected = changed[first] | changed[second]
+                a, b = first[affected], second[affected]
+                child_closest = closest.copy()
+                if len(a):
+                    delta = updated[b] - updated[a]
+                    u, v = np.clip(delta, 0., 1.)[:, None], np.clip(-delta, 0., 1.)[:, None]
+                    # For each pair these four vertices describe its entire
+                    # held/moving interaction, including fractional overlap.
+                    # Each pair has its own three segments; the existing
+                    # continuous formula is the only distance implementation.
+                    paired_motion = np.stack((
+                        np.concatenate((start[a], start[b])),
+                        np.concatenate((start[a] + velocity[a] * u, start[b] + velocity[b] * v)),
+                        np.concatenate((destination[a] - velocity[a] * v, destination[b] - velocity[b] * u)),
+                        np.concatenate((destination[a], destination[b]))))
+                    values, _, _ = _rearrangement_pair_metrics(
+                        paired_motion, np.arange(len(a)), np.arange(len(a)) + len(a))
+                    child_closest[a, b], child_closest[b, a] = values, values
+                knots = np.unique(np.r_[0., updated[moving], updated[moving] + 1.])
+                active = (knots[:-1, None] >= updated) & (knots[:-1, None] < updated + 1.)
+                cost = float(np.sum(np.diff(knots) * np.max(active * speeds, axis=1, initial=0.)))
+                heappush(schedules, (cost, len(seen_schedules), child, updated, child_closest))
+        search_limited |= bool(schedules)
+        if best_wait is not None:
+            return best_wait, "straight paths with continuous departure delays"
         fractions = np.array([0., 1.])
+        nearest = initial_nearest.copy()
         for _ in range(min(16, len(start))):
-            nearest, segments, local_times = _rearrangement_pair_metrics(motion)
             before_count = np.count_nonzero(nearest < separation ** 2)
             i, j = np.unravel_index(np.argmin(nearest), nearest.shape)
-            interval = int(segments[i, j])
-            local_time = float(local_times[i, j])
+            _, segments, local_times = _rearrangement_pair_metrics(motion, (i,), (j,))
+            interval = int(segments[0])
+            local_time = float(local_times[0])
             when = fractions[interval] + local_time * (fractions[interval + 1] - fractions[interval])
             if not 0 < when < 1:
                 break
-            vertex = (interval if local_time <= 1e-10 else
-                      interval + 1 if local_time >= 1 - 1e-10 else None)
+            vertex = interval if local_time == 0. else interval + 1 if local_time == 1. else None
             if vertex in (0, len(motion) - 1):
                 break
             middle = motion[interval] + local_time * (motion[interval + 1] - motion[interval])
@@ -308,6 +378,11 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
             direction /= np.linalg.norm(direction)
             candidates = []
             for which, sign in ((i, 1), (j, -1)):
+                old_row_count = np.count_nonzero(nearest[which] < separation ** 2)
+                unaffected_minimum = min(
+                    float(np.min(nearest[:which, :which], initial=np.inf)),
+                    float(np.min(nearest[:which, which + 1:], initial=np.inf)),
+                    float(np.min(nearest[which + 1:, which + 1:], initial=np.inf)))
                 for side in (1., -1.):
                     for margin in (1.5, 2., 3.):
                         waypoint = middle.copy()
@@ -322,33 +397,36 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
                         # Other paths are unchanged: inserting their linear
                         # interpolation does not alter any pair distance.
                         changed, _, _ = _rearrangement_pair_metrics(candidate, (which,))
-                        after = nearest.copy()
-                        after[which], after[:, which] = changed[0], changed[0]
-                        after_count = np.count_nonzero(after < separation ** 2)
+                        after_count = before_count + 2 * (np.count_nonzero(changed[0] < separation ** 2) - old_row_count)
+                        after_minimum = min(unaffected_minimum, float(np.min(changed[0], initial=np.inf)))
                         if (after_count < before_count or
-                                (after_count == before_count and np.min(after) > np.min(nearest))):
+                                (after_count == before_count and after_minimum > np.min(nearest))):
                             length = float(np.max(np.linalg.norm(
                                 np.diff(candidate, axis=0), axis=-1).sum(axis=0), initial=0.))
-                            candidates.append((after_count, length, candidate, after))
+                            candidates.append((after_count, length, candidate, which, changed[0]))
             if not candidates:
                 break
-            _, _, motion, nearest = min(candidates, key=lambda item: (item[0], item[1]))
+            _, _, motion, which, changed = min(candidates, key=lambda item: (item[0], item[1]))
+            nearest[which], nearest[:, which] = changed, changed
             if vertex is None:
                 fractions = np.insert(fractions, interval + 1, when)
             if np.min(nearest) >= separation ** 2:
-                return motion, fractions, "joint assignment and waypoint clearance repair"
+                return motion, "joint assignment and waypoint clearance repair"
+        else:
+            search_limited = True
         return None
 
     lower_bound, rows, columns = assignment(())
     queue = [(lower_bound, 0, frozenset(), rows, columns)]
     seen = {frozenset()}
-    best, best_length, evaluated = None, np.inf, 0
+    repaired_assignments = {}
+    best, best_score, evaluated = None, (np.inf, np.inf, np.inf), 0
     # Branch on both members of the closest conflicting assignment pair. No
     # source is locked merely because its start coincides with a target.
     # Bounds order the search by max length, not total length or agent count.
     while queue and evaluated < 128:
         bound, _, blocked, rows, columns = heappop(queue)
-        if bound > best_length:
+        if bound > best_score[0]:
             break
         evaluated += 1
         start = source[available[columns]].astype(float)
@@ -362,14 +440,28 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
         else:
             nearest, _, _ = _rearrangement_pair_metrics(motion)
             clear = np.min(nearest, initial=np.inf) >= separation ** 2
-        repaired = ((motion, np.array([0., 1.]), "bottleneck assignment; simultaneous straight paths")
-                    if clear else repair(motion, nearest) if evaluated <= 8 else None)
+        if clear:
+            repaired = motion, "bottleneck assignment; simultaneous straight paths"
+        else:
+            # Different forbidden-edge nodes may yield the same exact mapping.
+            # Routing depends on that mapping, not on which unused assignment
+            # edges were forbidden. Reuse it, but retain both search nodes.
+            mapping = columns.tobytes(), rows.tobytes()
+            if mapping not in repaired_assignments:
+                repaired_assignments[mapping] = repair(motion, nearest)
+            repaired = repaired_assignments[mapping]
         if repaired is not None:
-            vertices, fractions, route = repaired
-            maximum = float(np.max(np.linalg.norm(np.diff(vertices, axis=0), axis=-1).sum(axis=0), initial=0.))
-            if maximum < best_length:
-                best, best_length = (rows, columns, vertices, fractions, route), maximum
-            if best_length <= np.nextafter(lower_bound, np.inf):
+            vertices, route = repaired
+            lengths = np.linalg.norm(np.diff(vertices, axis=0), axis=-1)
+            maximum = float(np.max(lengths.sum(axis=0), initial=0.))
+            parallel_distance = float(np.max(lengths, axis=1, initial=0.).sum())
+            score = maximum, parallel_distance, len(vertices)
+            if score < best_score:
+                best, best_score = (rows, columns, vertices, route), score
+            # Reaching the geometric bound alone need not minimize waiting.
+            # Straight parallel distance has the same lower bound, so only
+            # when both reach it is further equal-length search redundant.
+            if best_score[0] <= np.nextafter(lower_bound, np.inf) and best_score[1] <= np.nextafter(lower_bound, np.inf):
                 break
         if clear:
             continue
@@ -380,18 +472,37 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
                 continue
             seen.add(child)
             match = assignment(child)
-            if match is not None and match[0] <= best_length:
+            if match is not None and match[0] <= best_score[0]:
                 heappush(queue, (match[0], len(seen), child, match[1], match[2]))
     if best is None:
         raise ValueError("no valid schedule found at the authored minimum separation")
-    ordered_targets, columns, motion, fractions, route = best
+    ordered_targets, columns, motion, route = best
+    # Simplify the winning joint path, not the sampler: every replacement
+    # segment passes the same continuous clearance gate. Other segments are
+    # unchanged, and triangle inequality cannot increase any path length or
+    # the sum of maximum segment travel. This removes redundant near-coincident
+    # events without merging times by a tolerance or weakening separation.
+    removed_vertices, vertex = 0, 1
+    while vertex < len(motion) - 1:
+        if rearrangement_clearance(motion[[vertex - 1, vertex + 1]]) >= separation:
+            motion = np.delete(motion, vertex, axis=0)
+            removed_vertices += 1
+            vertex = max(1, vertex - 1)
+        else:
+            vertex += 1
+    if removed_vertices:
+        route += "; checked waypoint shortcuts"
+    motion, fractions, _ = _rearrangement_motion_timing(motion)
     ordered_sources = available[columns]
     removed = available[~np.isin(available, ordered_sources)]
     order = np.argsort(ordered_targets)
     assigned, target_indices = ordered_sources[order], ordered_targets[order]
     filled = np.zeros(len(target), bool)
     filled[target_indices] = True
-    distance = float(np.linalg.norm(np.diff(motion, axis=0), axis=-1).sum())
+    lengths = np.linalg.norm(np.diff(motion, axis=0), axis=-1)
+    best_score = (float(np.max(lengths.sum(axis=0), initial=0.)),
+                  float(np.max(lengths, axis=1, initial=0.).sum()), len(motion))
+    distance = float(lengths.sum())
     return {
         "assigned_source_indices": _frozen(assigned),
         "assigned_target_indices": _frozen(target_indices),
@@ -401,10 +512,92 @@ def plan_rearrangement(prepared: Mapping[str, object], available_source_indices:
         "initial_occupied_count": len(available), "selected_count": len(assigned),
         "motion_yx": _frozen(motion.astype(np.float64)),
         "fraction": _frozen(fractions), "total_distance": distance,
-        "maximum_path_length": best_length, "maximum_path_lower_bound": lower_bound,
-        "optimality_gap": max(0., best_length - lower_bound),
+        "maximum_path_length": best_score[0], "maximum_path_lower_bound": lower_bound,
+        "optimality_gap": max(0., best_score[0] - lower_bound),
+        "parallel_travel_distance": best_score[1],
+        "shortcut_vertices_removed": removed_vertices,
         "routing": route, "assignment_candidates": evaluated,
+        "search_budget_exhausted": bool((search_limited or (queue and evaluated >= 128))
+                                        and best_score[1] > np.nextafter(lower_bound, np.inf)),
     }
+
+
+def _rearrangement_motion_timing(motion):
+    """Retain corners, remove global idle knots, and bound the common speed.
+
+    Reparameterizing a complete simultaneous segment does not change any
+    same-time pair clearance. A local detour must receive time proportional
+    to its actual travel, not its old nearly-zero collision-time interval.
+    """
+    distances = np.max(np.linalg.norm(np.diff(motion, axis=0), axis=-1), axis=1, initial=0.)
+    if not np.any(distances):
+        keep = np.array([0, len(motion) - 1])
+        return motion[keep], np.array([0., 1.]), keep
+    keep = np.r_[0, np.flatnonzero(distances > 0) + 1]
+    cumulative = np.r_[0., np.cumsum(distances[distances > 0])]
+    return motion[keep], cumulative / cumulative[-1], keep
+
+
+def _rearrangement_unsafe_delay(start_i, end_i, start_j, end_j, separation):
+    """Open unsafe interval of delta=start_time_j-start_time_i, or None.
+
+    Both straight moves last one unit, with endpoints held before/after.
+    During motion, ||r+a*u-b*v||<d intersects the unit (u,v) square in a
+    convex set; projecting delta=u-v gives an interval. Endpoint holds add
+    rays attached to its four edges. Extremes lie on an edge or where the
+    moving relative line is tangent to the separation circle.
+    """
+    from math import sqrt  # noqa: PLC0415
+
+    rx, ry = float(start_i[0] - start_j[0]), float(start_i[1] - start_j[1])
+    ax, ay = float(end_i[0] - start_i[0]), float(end_i[1] - start_i[1])
+    bx, by = float(end_j[0] - start_j[0]), float(end_j[1] - start_j[1])
+    distance = float(separation)
+    if distance == 0:
+        return None
+    boundary = []
+    lower_unbounded = upper_unbounded = False
+    # (relative start, direction, delta scale/offset, unbounded side).
+    for x, y, dx, dy, scale, offset, lower in (
+        (rx, ry, -bx, -by, -1., 0., True),       # i held at start
+        (rx + ax, ry + ay, -bx, -by, -1., 1., False),  # i held at end
+        (rx, ry, ax, ay, 1., 0., False),         # j held at start
+        (rx - bx, ry - by, ax, ay, 1., -1., True),  # j held at end
+    ):
+        speed = dx * dx + dy * dy
+        if speed:
+            cross = x * dy - y * dx
+            discriminant = distance * distance * speed - cross * cross
+            if discriminant <= 0:
+                continue
+            center = -(x * dx + y * dy) / speed
+            radius = sqrt(discriminant) / speed
+            lo, hi = max(0., center - radius), min(1., center + radius)
+            if lo >= hi:
+                continue
+        elif x * x + y * y < distance * distance:
+            lo, hi = 0., 1.
+        else:
+            continue
+        boundary.extend((scale * lo + offset, scale * hi + offset))
+        lower_unbounded |= lower
+        upper_unbounded |= not lower
+    vx, vy = ax - bx, ay - by
+    speed = vx * vx + vy * vy
+    cross_b = vx * by - vy * bx
+    if speed and cross_b:
+        cross_r = vx * ry - vy * rx
+        radius = distance * sqrt(speed)
+        for sign in (-1., 1.):
+            delta = (sign * radius - cross_r) / cross_b
+            when = -(vx * (rx + bx * delta) + vy * (ry + by * delta)) / speed
+            if max(0., delta) <= when <= min(1., delta + 1.):
+                boundary.append(delta)
+    if not boundary:
+        return None
+    lo = -np.inf if lower_unbounded else min(boundary)
+    hi = np.inf if upper_unbounded else max(boundary)
+    return (lo, hi) if lo < hi else None
 
 
 def _rearrangement_pair_metrics(motion, source_indices=None, target_indices=None):
@@ -2807,6 +3000,19 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                 gpu["graphs"][band] = stream.end_capture()
                 gpu["frame_index"].fill(0)
                 gpu["graphs"][band].launch(stream)
+        else:
+            # LPI uses the same precise propagation, without Python dispatch
+            # between its encode/measure kernels on every amplitude iteration.
+            work = gpu["measurement"]
+            for band in native["plans"]:
+                if stop_requested is not None and stop_requested():
+                    raise InterruptedError("SLM rearrangement preparation stopped")
+                _rearrangement_select_roots(work, band)
+                stream.begin_capture()
+                _rearrangement_propagate(gpu, work, band, "encode")
+                _rearrangement_propagate(gpu, work, band, "forward")
+                gpu["graphs"][band] = stream.end_capture()
+                gpu["graphs"][band].launch(stream)
         stream.synchronize()
         gpu["motion_capacity"] = count
 
@@ -3056,12 +3262,36 @@ def sample_rearrangement(
             or not np.array_equal(path[0], source[selected])
             or not np.array_equal(path[-1], target[destinations])):
         raise ValueError("plan endpoints do not match the prepared source roster and target")
+    if not len(selected):
+        # Empty occupancy does not issue a source-removal map. In particular,
+        # Auto must not validate an unplayed fade that Fixed/compute skips.
+        return {
+            "motion_frames": 0, "motion_yx": _frozen(path[:1]),
+            "fraction": _frozen(np.zeros(1)), "sites_yx": _frozen(np.empty((0, len(source), 2))),
+            "movement_fraction": _frozen(np.empty(0)), "fade_frames": 0,
+            "clearance": np.inf, "fade_clearance": np.inf, "surplus_stationary_clearance": np.inf,
+            "maximum_step": 0., "recommended_motion_frames": 0,
+        }
+    if np.any(np.diff(fractions) <= 0) or fractions[0] != 0 or fractions[-1] != 1:
+        raise ValueError("plan fractions must increase from zero to one")
+    original_shape = path.shape
+    path, fractions, keep = _rearrangement_motion_timing(path)
     faded = np.flatnonzero(~np.isin(np.arange(len(source)), selected))
     spatial_motion = bool(np.any(path != path[:1]))
     fade = 1 if len(faded) else 0
     widths = np.diff(fractions)
-    if np.any(widths <= 0) or fractions[0] != 0 or fractions[-1] != 1:
-        raise ValueError("plan fractions must increase from zero to one")
+    def allocate(count):
+        # These ceilings include every highest-priority width/n allocation
+        # needed by N. Remove only the excess lowest-priority allocations;
+        # there are fewer than len(widths), instead of looping N times.
+        subdivisions = np.maximum(1, np.ceil(count * widths)).astype(np.int64)
+        for _ in range(int(subdivisions.sum()) - count):
+            priority = np.divide(widths, subdivisions - 1,
+                                 out=np.full(len(widths), np.inf), where=subdivisions > 1)
+            last = len(widths) - 1 - int(np.argmin(priority[::-1]))
+            subdivisions[last] -= 1
+        return subdivisions
+
     automatic = maximum_step is not None
     if automatic:
         if motion_frames is not None:
@@ -3069,14 +3299,29 @@ def sample_rearrangement(
         maximum_step = _scalar(maximum_step, "maximum_step")
         if maximum_step <= 0:
             raise ValueError("maximum_step must be positive")
-        coordinates = path if step_path is None else np.asarray(step_path, np.float64)
-        if coordinates.shape != path.shape or not np.all(np.isfinite(coordinates)):
+        coordinates = np.asarray(plan["motion_yx"], np.float64) if step_path is None else np.asarray(step_path, np.float64)
+        if coordinates.shape != original_shape or not np.all(np.isfinite(coordinates)):
             raise ValueError("step_path must contain the plan knots in the chosen distance units")
+        coordinates = coordinates[keep]
         distances = np.linalg.norm(np.diff(coordinates, axis=0), axis=-1)
         longest = float(np.max(np.sum(distances, axis=0), initial=0.))
         count = (fade + max(len(widths), int(np.ceil(longest / maximum_step)))
                  if spatial_motion else max(1, fade))
         required = np.maximum(1, np.ceil(np.max(distances, axis=1, initial=0.) / maximum_step)).astype(np.int64)
+        if spatial_motion and np.any(required > 1):
+            # All required increments have priority >= this value. Counting
+            # every such increment bounds N directly; binary search chooses
+            # the smallest N under the same allocation used by Fixed.
+            priority = float(np.min(widths[required > 1] / (required[required > 1] - 1)))
+            lo = count - fade
+            hi = max(lo, int(np.maximum(1, np.ceil(widths / priority)).sum()) + len(widths))
+            while lo < hi:
+                middle = (lo + hi) // 2
+                if np.all(allocate(middle) >= required):
+                    hi = middle
+                else:
+                    lo = middle + 1
+            count = fade + lo
     else:
         if (motion_frames is None or isinstance(motion_frames, bool)
                 or int(motion_frames) != motion_frames or motion_frames < 1):
@@ -3091,13 +3336,7 @@ def sample_rearrangement(
             raise ValueError(f"motion_frames must include {fade_frames + len(widths)} maps to preserve all path waypoints")
         # The same deterministic allocation in both modes keeps every corner:
         # no frame-to-frame chord can cut through a planned clearance boundary.
-        subdivisions = np.ones(len(widths), dtype=np.int64)
-        for _ in range(moving_count - len(widths)):
-            subdivisions[int(np.argmax(widths / subdivisions))] += 1
-        if automatic:
-            while np.any(subdivisions < required):
-                subdivisions[int(np.argmax(widths / subdivisions))] += 1
-                count += 1
+        subdivisions = allocate(moving_count)
         progress = np.concatenate((np.zeros(fade_frames), *(
             np.linspace(a, b, int(n) + 1)[1:]
             for a, b, n in zip(fractions[:-1], fractions[1:], subdivisions, strict=True))))
@@ -3126,6 +3365,7 @@ def sample_rearrangement(
     velocity = np.max(np.linalg.norm(np.diff(path, axis=0), axis=-1)
                       / np.diff(fractions)[:, None], initial=0.)
     return {
+        "motion_frames": count,
         "motion_yx": _frozen(actual_path), "fraction": _frozen(np.arange(count + 1) / count),
         "sites_yx": _frozen(sites), "movement_fraction": _frozen(progress), "fade_frames": fade_frames,
         "clearance": clearance, "fade_clearance": fade_clearance,
@@ -3135,12 +3375,24 @@ def sample_rearrangement(
     }
 
 
+def rearrangement_is_noop(prepared: Mapping[str, object], plan: Mapping[str, object]) -> bool:
+    """One decision for device admission and computation of an existing plan."""
+    selected = np.asarray(plan["source_indices"], np.intp)
+    if not len(selected):
+        return True
+    path = np.asarray(plan["motion_yx"])
+    return (len(selected) == len(prepared["source_yx"]) and not np.any(path != path[:1])
+            and np.array_equal(prepared["source_intensities"][selected],
+                               prepared["target_intensities"][np.asarray(plan["target_indices"], np.intp)]))
+
+
 def compute_rearrangement(
     prepared: dict[str, object], plan: Mapping[str, object], *,
     motion_frames: int = 16, iterations: int | None = None,
     support_tolerance: float = SPOT_SUPPORT_TOLERANCE,
     require_converged: bool = True, stop_requested: Callable[[], bool] | None = None,
     frame_ready: Callable[[int, np.ndarray], None] | None = None,
+    sampled: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Emit N native maps with one continuous coefficient trajectory.
 
@@ -3163,7 +3415,8 @@ def compute_rearrangement(
         raise RuntimeError("SLM rearrangement workspace is closed")
     if stop_requested is not None and stop_requested():
         raise InterruptedError("SLM rearrangement stopped")
-    if (isinstance(motion_frames, bool) or int(motion_frames) != motion_frames or motion_frames < 1
+    if (isinstance(motion_frames, bool) or int(motion_frames) != motion_frames or motion_frames < 0
+            or (motion_frames == 0 and not rearrangement_is_noop(prepared, plan))
             or (iterations is not None and
                 (isinstance(iterations, bool) or int(iterations) != iterations or iterations < 0))):
         raise ValueError("motion_frames must be positive and iterations nonnegative integers")
@@ -3194,10 +3447,7 @@ def compute_rearrangement(
         "field_phase_reference": "fft-center", "phase_interpolation": "shortest-modulo-2pi" if method == "lpi" else "adaptive-field-phase",
         "quality_scope": "retained-sites" if method == "lpi" else "active-sites-and-removed-neighborhood",
     }
-    unchanged = (selected_count == source_count and np.array_equal(path[0], path[-1])
-                 and np.array_equal(prepared["source_intensities"][source_indices],
-                                    prepared["target_intensities"][target_indices]))
-    if not selected_count or unchanged:
+    if rearrangement_is_noop(prepared, plan):
         return {
             **plan, **metadata, "noop": True, "phase_codes": _frozen(np.empty((0, *shape), np.uint8)),
             "motion_yx": _frozen(path[:1]), "fraction": _frozen(np.zeros(1)),
@@ -3213,7 +3463,8 @@ def compute_rearrangement(
             "discard_intensity_ratios": np.empty(0), "discard_reference_limit": .01,
             "discard_converged": True, "field_projection_updates": (),
             "brightness_minimum_to_initial": np.empty(0), "brightness_maximum_to_initial": np.empty(0),
-            "brightness_mean_to_initial": np.empty(0), "phase_error_rms_rad": np.empty(0),
+            "brightness_mean_to_initial": np.empty(0), "phase_change_from_initial_rms_rad": np.empty(0),
+            "focal_phase_error_rms_rad": np.empty(0),
             "phase_step_max_rad": np.empty(0), "center_sample_power_proxy": np.empty(0),
             "pupil_phase_step_rms_rad": np.empty(0),
             "converged": True, "quality_accepted": True, "quality_evaluated": True,
@@ -3224,7 +3475,10 @@ def compute_rearrangement(
                           "callback": 0., "first_frame_ready": 0., "first_frame_solve": 0., "first_frame_copy": 0.,
                           "total": (time.perf_counter() - started) * 1000},
         }
-    sampled = sample_rearrangement(prepared, plan, motion_frames=motion_frames)
+    if sampled is None:
+        sampled = sample_rearrangement(prepared, plan, motion_frames=motion_frames)
+    elif sampled["motion_frames"] != motion_frames or len(sampled["sites_yx"]) != motion_frames:
+        raise ValueError("sampled trajectory must match motion_frames")
     actual_path, sites = sampled["motion_yx"], sampled["sites_yx"]
     progress = sampled["movement_fraction"]
     clearance = sampled["clearance"]
@@ -3236,8 +3490,11 @@ def compute_rearrangement(
     initial_amplitude = abs(initial).astype(np.float64)
     desired = np.broadcast_to(initial_amplitude, (motion_frames, source_count)).copy()
     destination_amplitude = prepared["source_brightness"] * np.sqrt(prepared["target_intensities"][target_indices])
+    # Optical weights can change even when no trap changes position. Keep that
+    # authored transition separate from the geometrical movement fraction.
+    amplitude_fraction = progress if np.any(path != path[:1]) else np.arange(1, motion_frames + 1) / motion_frames
     amplitude_progress = (np.minimum(1., np.arange(1, motion_frames + 1) / fade_frames)
-                          if fade_frames else progress)
+                          if fade_frames else amplitude_fraction)
     desired[:, source_indices] = ((1 - amplitude_progress[:, None]) * initial_amplitude[source_indices]
                                   + amplitude_progress[:, None] * destination_amplitude)
     if fade_frames:
@@ -3277,8 +3534,8 @@ def compute_rearrangement(
                 start_coefficient = endpoint_coefficient
         metadata.update(start_synthesis_coefficients=_frozen(start_coefficient))
         spectrum_amplitude = np.broadcast_to(source_amplitude, desired.shape).copy()
-        moving_amplitude = ((1 - progress[:, None]) * abs(start_coefficient)
-                            + progress[:, None] * abs(endpoint_coefficient))
+        moving_amplitude = ((1 - amplitude_fraction[:, None]) * abs(start_coefficient)
+                            + amplitude_fraction[:, None] * abs(endpoint_coefficient))
         spectrum_amplitude[:, source_indices] = (
             (1 - amplitude_progress[:, None]) * source_amplitude[source_indices]
             + amplitude_progress[:, None] * moving_amplitude) if fade_frames else moving_amplitude
@@ -3367,8 +3624,7 @@ def compute_rearrangement(
                         (gpu["coefficients"], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
                     limit = 16 if iterations is None else int(iterations)
                     for updates in range(limit + 1):
-                        _rearrangement_propagate(gpu, work, band, "encode")
-                        _rearrangement_propagate(gpu, work, band, "forward")
+                        gpu["graphs"][band].launch(stream)
                         field = work["actual"][:number].get(stream=stream)
                         relative = abs(field[source_indices].astype(np.complex128) / desired[index, source_indices]) ** 2
                         bright_ratio = float(relative.max() / relative.min())
@@ -3402,7 +3658,7 @@ def compute_rearrangement(
                     reuse_verified = True
             if not reuse_verified:
                 gpu["frame_index"].fill(index)
-                if same_positions:
+                if same_positions and np.array_equal(normalized[index], normalized[index - 1]):
                     movie[index] = baseline_codes
                     coefficients[index] = coefficients[index - 1]
                     actual_gpu[index].set(baseline_fields, stream=stream)
@@ -3592,7 +3848,8 @@ def compute_rearrangement(
             "quality_scope": "retained-sites", "background_intensity_ratios": np.empty(0),
             "discard_intensity_ratios": np.empty(0), "field_projection_updates": tuple(map(int, projection_updates)),
             "brightness_minimum_to_initial": np.empty(0), "brightness_maximum_to_initial": np.empty(0),
-            "brightness_mean_to_initial": np.empty(0), "phase_error_rms_rad": np.empty(0),
+            "brightness_mean_to_initial": np.empty(0), "phase_change_from_initial_rms_rad": np.empty(0),
+            "focal_phase_error_rms_rad": np.empty(0),
             "phase_step_max_rad": np.empty(0), "pupil_phase_step_rms_rad": np.empty(0),
             "center_sample_power_proxy": np.empty(0), "phase_encoding": "uint8:2pi/256",
             "encoded_correction_proposals": 0, "release_verified": False,
@@ -3619,7 +3876,7 @@ def compute_rearrangement(
     background_ratio = background / np.min(selected_intensity, axis=1)
     retained_relative = relative[:, source_indices]
     retained_ratios = retained_relative.max(axis=1) / retained_relative.min(axis=1)
-    phase_error = np.angle(selected_fields * initial[source_indices].conj()[None])
+    phase_change = np.angle(selected_fields * initial[source_indices].conj()[None])
     phase_step = np.angle(selected_fields * np.concatenate((initial[source_indices][None], selected_fields[:-1])).conj())
     total_ms = (time.perf_counter() - started) * 1000
     prepare_ms = (after_prepare - started) * 1000
@@ -3646,7 +3903,8 @@ def compute_rearrangement(
         "brightness_maximum_to_initial": brightness.max(axis=1),
         "brightness_mean_to_initial": brightness.mean(axis=1),
         "center_sample_power_proxy": selected_intensity.sum(axis=1) / (np.prod(shape) * gpu["pupil_energy"]),
-        "phase_error_rms_rad": np.sqrt(np.mean(phase_error ** 2, axis=1)),
+        "phase_change_from_initial_rms_rad": np.sqrt(np.mean(phase_change ** 2, axis=1)),
+        "focal_phase_error_rms_rad": np.empty(0),
         "phase_step_max_rad": np.max(abs(phase_step), axis=1),
         "pupil_phase_step_rms_rad": pupil_phase_step,
         "encoded_correction_proposals": proposals_evaluated, "phase_encoding": "uint8:2pi/256",
@@ -3667,7 +3925,9 @@ def rearrangement_diagnostics(
 
     Called after playback/second photo, not a hidden LPI publication gate.
     Fields use the FFT-center phase reference; phase_center_yx only specifies
-    the LPI interpolation gauge. No optical response or atom survival is inferred.
+    the LPI interpolation gauge. Phase change from the initial field is distinct
+    from LPI focal-field error relative to its prescribed synthesis phase.
+    No optical response or atom survival is inferred.
     """
     import time  # noqa: PLC0415
 
@@ -3728,8 +3988,12 @@ def rearrangement_diagnostics(
     brightness = abs(selected_fields / initial[None]) ** 2
     selected_intensity = intensity[:, source_indices]
     background = np.max(np.where(~positive, intensity, 0), axis=1) / np.min(selected_intensity, axis=1) if count else np.empty(0)
-    phase_error = np.angle(selected_fields * initial.conj()[None])
+    phase_change = np.angle(selected_fields * initial.conj()[None])
     phase_step = np.angle(selected_fields * np.concatenate((initial[None], selected_fields[:-1])).conj())
+    focal_phase_error = np.empty(0)
+    if result["method"] == "lpi" and count:
+        prescribed = np.asarray(result["desired_spectrum_coefficients"])[:, source_indices]
+        focal_phase_error = np.sqrt(np.mean(np.angle(selected_fields * prescribed.conj()) ** 2, axis=1))
     retained_relative = relative[:, source_indices]
     retained_ratios = (retained_relative.max(axis=1) / retained_relative.min(axis=1)) if count else np.empty(0)
     fading_ratios = np.full(count, np.nan)
@@ -3751,7 +4015,8 @@ def rearrangement_diagnostics(
         "brightness_maximum_to_initial": _frozen(brightness.max(axis=1) if count else np.empty(0)),
         "brightness_mean_to_initial": _frozen(brightness.mean(axis=1) if count else np.empty(0)),
         "center_sample_power_proxy": _frozen(selected_intensity.sum(axis=1) / (np.prod(prepared["shape_yx"]) * gpu["pupil_energy"])),
-        "phase_error_rms_rad": _frozen(np.sqrt(np.mean(phase_error ** 2, axis=1)) if count else np.empty(0)),
+        "phase_change_from_initial_rms_rad": _frozen(np.sqrt(np.mean(phase_change ** 2, axis=1)) if count else np.empty(0)),
+        "focal_phase_error_rms_rad": _frozen(focal_phase_error),
         "phase_step_max_rad": _frozen(np.max(abs(phase_step), axis=1) if count else np.empty(0)),
         "pupil_phase_step_rms_rad": _frozen(pupil_steps),
         "quality_evaluated": True, "discard_converged": discarded_ok,
