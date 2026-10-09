@@ -1570,7 +1570,7 @@ def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(
         physical.close()
 
 
-@pytest.mark.parametrize("ending", ["complete", "stop", "upload-failure", "lost-reply"])
+@pytest.mark.parametrize("ending", ["complete", "stop", "upload-failure", "receiver-failure", "lost-reply"])
 def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypatch, ending):
     import zlc_atom.devices.slm.hamamatsu_x15213.device_types as physical_module
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as remote_module
@@ -1590,13 +1590,17 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
     monkeypatch.setattr(physical_module, "_prepare_dvi_controller", lambda _serial: False)
     monkeypatch.setattr(physical_module, "_open_dvi_presenter", lambda _name: (present, lambda: None, lambda _frames: None))
     original_rpc = remote_module._rpc_call
+    original_send = remote_module._send_packet
+
+    def send(endpoint, metadata, payload=b""):
+        if (ending == "upload-failure" and metadata.get("method") == "submit_sequence_frame"
+                and metadata["index"] == 2):
+            raise socket.timeout("upload write failed")
+        return original_send(endpoint, metadata, payload)
 
     def rpc(endpoint, method, arguments, timeout):
-        if ending == "upload-failure" and method == "submit_sequence_frame" and arguments[1] == 2:
-            raise socket.timeout("upload queue reply lost")
+        assert method != "submit_sequence_frame", "frames must not wait for an application-layer ACK"
         reply = original_rpc(endpoint, method, arguments, timeout)
-        if method == "submit_sequence_frame":
-            assert reply[1] == b"" and "state" not in reply[0], "queue admission is not hardware ACK"
         if method == "play_sequence" and reply[0]["ok"]:
             assert reply[1] == b"" and reply[0]["state"]["phase_bytes"] == 0
             if ending == "lost-reply":
@@ -1604,7 +1608,17 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
         return reply
 
     monkeypatch.setattr(remote_module, "_rpc_call", rpc)
+    monkeypatch.setattr(remote_module, "_send_packet", send)
     physical = X15213Adapter(_config(transport="dvi", flip_x=True, flip_y=True))
+    if ending == "receiver-failure":
+        original_submit = physical.submit_phase_frame
+
+        def rejected_frame(index, frame):
+            if index == 2:
+                raise ValueError("receiver rejected frame 2")
+            return original_submit(index, frame)
+
+        monkeypatch.setattr(physical, "submit_phase_frame", rejected_frame)
     server, worker = running_slm_server(physical)
     remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2)
 
@@ -1635,6 +1649,8 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
         prepared = remote.prepare_phase_sequence(None, 1 / 60, frame_count=12)
         assert prepared["streaming"] and prepared["queue_capacity"] == 2
         assert physical._sequence["codes"] is None and physical._sequence["queue"].maxsize == 2
+        if ending == "stop":
+            remote._sequence_upload["connection"].setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
         player.start(); producer.start()
         assert first_display.wait(2) and not producer_done.is_set()
         if ending == "stop":
@@ -1649,16 +1665,18 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
         if ending == "complete":
             assert errors == [] and playback[0]["played_frames"] == len(frames)
             assert max(playback[0]["queue_wait_ms"]) > 1, "underrun waits are measured, not hidden/skipped"
-            assert len(playback[0]["upload_ms"]) == len(frames)
-            assert playback[0]["repeat_packet_count"] == playback[0]["repeated_frames"] == 8
-            assert playback[0]["acknowledged_upload_payload_bytes"] == 4 * frames[0].nbytes
+            assert len(playback[0]["send_ms"]) == playback[0]["sent_frames"] == len(frames)
+            assert playback[0]["sent_repeat_packet_count"] == playback[0]["repeated_frames"] == 8
+            assert playback[0]["sent_upload_payload_bytes"] == 4 * frames[0].nbytes
+            assert "acknowledged_upload_payload_bytes" not in playback[0]
             assert playback[0]["mapped_frame_count"] == 4
             assert playback[0]["authored_timing_completed"]
         elif ending == "stop":
             assert playback[0]["cancelled"] and playback[0]["played_frames"] == 1
             assert any("cancelled" in str(error) for error in errors)
-        elif ending == "upload-failure":
-            assert any("upload queue reply lost" in str(error) for error in errors)
+        elif ending in {"upload-failure", "receiver-failure"}:
+            message = "upload write failed" if ending == "upload-failure" else "receiver rejected frame 2"
+            assert any(message in str(error) for error in errors)
             assert physical.last_command_receipt["sequence"]["cancelled"]
             assert remote.last_command_receipt["outcome"] == "known-new", "final play receipt confirms the partial phase"
         else:
@@ -1744,12 +1762,19 @@ def test_remote_stream_upload_eof_stops_only_an_unfinished_current_prefix(monkey
         assert physical._sequence["playing"]
         for index in range(admitted):
             frame = np.full(physical.shape_yx, index + 11, np.uint8)
-            assert remote_module._rpc_call(uploader, "submit_sequence_frame", (token, index, frame), 2)[0]["ok"]
+            remote_module._send_packet(uploader, {"version": remote_module._REMOTE_VERSION,
+                "method": "submit_sequence_frame", "sequence_token": token, "index": index}, memoryview(frame).cast("B"))
+        uploader.settimeout(.03)
+        with pytest.raises(socket.timeout):
+            uploader.recv(1)  # No successful submit reply is placed on this stream.
         uploader.shutdown(socket.SHUT_RDWR)
         uploader.close()
         player.join(2)
         assert not player.is_alive() and errors == []
         receipt = replies[0][0]["state"]["receipt"]["sequence"]
+        assert replies[0][0]["ok"] is (admitted == 3)
+        if admitted < 3:
+            assert f"closed after {admitted}/3 frames" in replies[0][0]["error"]
         assert receipt["cancelled"] is (admitted < 3)
         assert receipt["played_frames"] <= admitted
         if admitted == 3:
@@ -1867,8 +1892,9 @@ def test_repeat_reuse_preserves_odd_word_tail_strided_codes_and_owned_phase():
         for index, frame in enumerate(codes): remote.submit_phase_frame(index, frame)
         player.join(2)
         assert not player.is_alive() and errors == []
-        assert replies[0]["repeat_packet_count"] == 2
-        assert replies[0]["acknowledged_upload_payload_bytes"] == 30
+        assert replies[0]["sent_repeat_packet_count"] == 2
+        assert replies[0]["sent_upload_payload_bytes"] == 30
+        assert replies[0]["sent_frames"] == 4
         assert replies[0]["frame_actions"] == ["presented", "held", "presented", "held"]
         np.testing.assert_array_equal(remote.last_commanded_phase, phase_from_codes(codes[-1], (3, 5)))
         with pytest.raises(ValueError): remote.last_commanded_phase.flags.writeable = True

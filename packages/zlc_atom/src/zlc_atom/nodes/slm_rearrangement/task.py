@@ -223,7 +223,7 @@ class SlmRearrangementTask:
         contract = calibration.frame_contract
         self.roi = contract.roi_xywh
         self._revision = 0
-        self._snapshots, self._overlays, self._records, self._detections = {}, {}, [], []
+        self._snapshots, self._records, self._detections = {}, [], []
         self._timings, self._playback, self._result, self._plan = {}, None, None, None
         self._device_snapshots = {}
         self._available_outputs, self._capture_evidence = set(), {}
@@ -384,10 +384,14 @@ class SlmRearrangementTask:
         self._publish(context, ((PHASE_OUTPUT, snap),))
 
     def _read_photo(self, context, node, cycle, index):
+        label = ("before", "after")[index]
+        snapshot_started = perf_counter()
         self._revision += 1
         snap = frames_snapshot((cycle,), producer=self.instance_id,
             generation=str(getattr(context.generation, "value", context.generation)),
             revision=self._revision, working_point=node.actual_working_point, value_unit=node.frame_value_unit)
+        self._timings[label+"_image_snapshot"] = (perf_counter()-snapshot_started)*1000
+        classification_started = perf_counter()
         point = node.actual_working_point
         roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
         cal = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
@@ -400,6 +404,7 @@ class SlmRearrangementTask:
         valid = (cal.site_map.valid_sites & model.usable_sites & np.isfinite(detection.counts)
                  & np.isfinite(detection.thresholds))[order]
         occupied = detection.occupied[order] & valid
+        self._timings[label+"_classification"] = (perf_counter()-classification_started)*1000
         site = self._status_axis
         frame_decl, occ_decl = ((BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT),
                                (AFTER_FRAME_OUTPUT, AFTER_OCCUPIED_OUTPUT))[index]
@@ -407,18 +412,13 @@ class SlmRearrangementTask:
             DomainSpec((site.size,), (site,)), ValueSchema(ValidityContract.components(site.axis_id), np.dtype('?'), '1', name='occupied'))
         status = owned_snapshot_from_arrays(status_schema, occupied[None,None], snap.block.revision,
             validity=valid[None,None], stream_generation=snap.ref.stream_generation)
-        geometry = self._overlay_geometry
         self._capture_evidence[frame_decl.name] = {"device_snapshots": {**self._device_snapshots, "slm": {
             "identity":str(self.slm.identity),"shape_yx":list(self.slm.shape_yx),
             "command_revision":self.slm.command_revision,"mapping_revision":self.slm.mapping_revision,
             "command_receipt":dict(self.slm.last_command_receipt)}},"source_ordinal":cycle[0].source_ordinal}
-        self._capture_evidence[frame_decl.name]["camera_source"] = {
-            "signal":node.signal_key("frames"),"generation":str(getattr(node.generation,'value',node.generation)),
-            "source_ordinal":cycle[0].source_ordinal}
+        publication_started = perf_counter()
         self._publish(context, ((frame_decl, snap), (occ_decl, status)))
-        # Reports use the same geometry and exact validity as the live overlay.
-        from zlc_plot.primitives import image_point_overlay_from_signal
-        self._overlays[frame_decl.name] = image_point_overlay_from_signal(geometry, status, snap, revision=self._revision)
+        self._timings[label+"_publication"] = (perf_counter()-publication_started)*1000
         self._detections.append({"counts": detection.counts[order], "occupied": occupied,
                                   "valid": valid, "thresholds": detection.thresholds[order]})
         self._records.append(cycle[0])
@@ -430,6 +430,16 @@ class SlmRearrangementTask:
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
         arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
+        # Report overlays use the live snapshots, but are not acquisition work.
+        from zlc_plot.primitives import image_point_overlay_from_signal
+        overlays = {
+            frame.name: image_point_overlay_from_signal(
+                self._overlay_geometry, self._snapshots[occupied.name],
+                self._snapshots[frame.name], revision=self._revision)
+            for frame, occupied in ((BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT),
+                                    (AFTER_FRAME_OUTPUT, AFTER_OCCUPIED_OUTPUT))
+            if frame.name in self._available_outputs
+        }
         writer = self._save_figure_artifact
         if writer is None:
             from zlc_plot import save_figure_artifact as writer
@@ -498,12 +508,12 @@ class SlmRearrangementTask:
                 if self._result.get(key) is not None:
                     arrays[key] = self._result[key]
             if self.save_phase_sequence: arrays["phase_codes"] = self._result["phase_codes"]
-            if BEFORE_FRAME_OUTPUT.name in self._overlays:
+            if BEFORE_FRAME_OUTPUT.name in overlays:
                 before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
                 motion = self._result["motion_yx"]
                 indices = self._plan["source_indices"]
                 paths = self._camera_paths(motion, indices)
-                path_overlay = replace(self._overlays[BEFORE_FRAME_OUTPUT.name],
+                path_overlay = replace(overlays[BEFORE_FRAME_OUTPUT.name],
                     revision=self._revision, paths_xy=paths.transpose(1, 0, 2))
                 arrays["motion_camera_xy"] = path_overlay.paths_xy[indices].transpose(1, 0, 2)
         if self._plan is not None:
@@ -619,6 +629,7 @@ class SlmRearrangementTask:
                    "new_presentations": playback.get("newly_presented_frames"),
                    "held_steps": playback.get("held_frames"),
                    "online_ms": self._timings.get("online_rearrangement"),
+                   "camera_frame_to_playback_return_ms": self._timings.get("camera_frame_to_sequence_return"),
                    "playback_ms": self._timings.get("sequence_play")}
         for key, output in (("actual_step_intervals_ms", "command_interval_median_ms"),
                             ("actual_frame_intervals_ms", "new_phase_interval_median_ms")):
@@ -675,7 +686,7 @@ class SlmRearrangementTask:
                 context.register_artifact("trajectory_2d_preview",png,role="preview")
                 continue
             image = name in {BEFORE_FRAME_OUTPUT.name, AFTER_FRAME_OUTPUT.name, PHASE_OUTPUT.name}
-            plot_input = ImageFrame(snap, self._overlays[name]) if name in self._overlays else snap
+            plot_input = ImageFrame(snap, overlays[name]) if name in overlays else snap
             spec = (ImagePlot(x=AxisRef.cell_data(str(snap.block.schema.cell_domain.axes[1].axis_id)),
                               y=AxisRef.cell_data(str(snap.block.schema.cell_domain.axes[0].axis_id)),
                               labels=PlotLabels(title=name.replace('_', ' '))) if image else
@@ -740,7 +751,7 @@ class SlmRearrangementTask:
         self._camera_recordings = []
         recording_failed = Event()
         stopped = lambda: context.cancel_requested() or recording_failed.is_set()
-        self._snapshots, self._overlays, self._records, self._detections = {}, {}, [], []
+        self._snapshots, self._records, self._detections = {}, [], []
         self._available_outputs, self._capture_evidence = set(), {}
         self._device_snapshots, self._overlay_geometry = {}, None
         self._camera_site_indices = self._camera_path_affine = None
@@ -806,7 +817,7 @@ class SlmRearrangementTask:
                 request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
                     roi_xywh=self.roi, repeat=self.recording_frames or 2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
                 signal_plane=self.signal_plane, producer=f"{self.instance_id}/camera")
-            start = perf_counter(); capture = node.prepare(should_stop=stopped)
+            start = perf_counter(); capture = node.prepare(owns_generation=False, should_stop=stopped)
             self._timings["camera_arm"] = (perf_counter()-start)*1000
             self._device_snapshots["camera"] = dict(node.run_record["device_snapshots"]["camera"])
             actual = node.actual_working_point
@@ -842,8 +853,6 @@ class SlmRearrangementTask:
                 nonlocal playback_finished_wall, playback_finished_at, playback_attempted, nominal, sequence_prepared
                 # Camera receive is independent: callback dispatch time is not
                 # the exposure timestamp of a queued second photograph.
-                if self.recording_frames is None:
-                    node._commit_direct_cycle(cycle, index)
                 if index == 0:
                     self._timings["before_callback_after_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
                 start = perf_counter()
@@ -890,6 +899,7 @@ class SlmRearrangementTask:
                             playback_finished_wall = time_ns()
                             playback_finished_at = monotonic()
                             self._timings["sequence_play"] = (perf_counter()-began)*1000
+                            self._timings["camera_frame_to_sequence_return"] = (playback_finished_wall-cycle[0].host_received_at_ns)/1e6
 
                     def frame_ready(index, codes):
                         nonlocal playback, playback_attempted
@@ -994,7 +1004,7 @@ class SlmRearrangementTask:
                     firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
 
             if self.recording_frames is None:
-                result = capture.collect(commit_cycle=photograph, retain_cycles=False)
+                terminal = capture.read_cycles(photograph)
             else:
                 with ThreadPoolExecutor(max_workers=1, thread_name_prefix="slm-recording-solve") as worker:
                     movement = None
@@ -1005,9 +1015,8 @@ class SlmRearrangementTask:
                             movement = worker.submit(photograph, cycle, 0)
                         elif movement is not None and movement.done():
                             movement.result()
-                        node._commit_direct_cycle(cycle, index)
                     try:
-                        result = capture.collect(commit_cycle=record, retain_cycles=False)
+                        terminal = capture.read_cycles(record)
                     except BaseException as error:
                         recording_failed.set()
                         if movement is not None:
@@ -1022,7 +1031,7 @@ class SlmRearrangementTask:
             report = wait_for_report(self.sequencer, context)
             if report.fault or not report.status & STATUS_DONE or report.status & (STATUS_RUNNING|STATUS_ERROR|STATUS_UNDERFLOW):
                 raise RuntimeError(f"Pulse did not complete successfully: {report.fault or report.status}")
-            if result is None or result.cycle_count != (self.recording_frames or 2):
+            if not terminal.no_more_frames or capture.completed_cycles != (self.recording_frames or 2):
                 raise RuntimeError("The camera did not deliver the requested photographs")
             self._timings["pulse_elapsed"] = report.elapsed_seconds*1000
             self._timings["pulse_report_retrieval_delay"] = report.report_delay_seconds*1000
@@ -1085,10 +1094,6 @@ class SlmRearrangementTask:
                     capture.stopped = True
                     try: capture.close()
                     except BaseException as cleanup: cleanup_errors.append(cleanup)
-                # The Task's own before/after snapshots and archive now own
-                # the evidence; its private acquisition is no longer a source.
-                try: self.signal_plane.retire(capture.node)
-                except BaseException as cleanup: cleanup_errors.append(cleanup)
             for cleanup in ((self.slm.release_phase_sequence,) if sequence_prepared else ()):
                 if cleanup is not None:
                     try: cleanup()

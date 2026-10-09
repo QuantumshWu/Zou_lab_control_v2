@@ -313,8 +313,14 @@ def experiment(tmp_path, monkeypatch, request):
 
 
 @pytest.mark.parametrize("experiment", [4, "camera-affine-roi"], indirect=True)
-def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment):
+def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment, monkeypatch):
     e = experiment
+    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+
+    def private_commit(*args, **kwargs):
+        pytest.fail("Rearrangement must not publish a duplicate private Camera signal")
+
+    monkeypatch.setattr(CameraMeasurementNode, "_commit_direct_cycle", private_commit)
     authored = sequence_to_tree(e.task.sequence)
     # Integration is independent of the trigger Period's length, including
     # camera readback longer than the entire authored imaging Period.
@@ -337,6 +343,8 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert e.slm.plays == 1 and e.closed == []
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert not any("camera_source" in event for event in summary["capture_events"].values())
+    assert all("/camera/" not in item.name for item in e.plane.describe_signals())
     assert summary["target_sites"] == 4 and summary["judged_target_sites"] == 3
     assert summary["filled_target_sites"] == 2
     assert summary["missing_target_indices"] == [0]
@@ -372,6 +380,9 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert observed["command_interval_median_ms"] is None, "no fabricated cadence when the receipt has none"
     assert observed["online_ms"] == summary["timing_ms"]["online_rearrangement"]
     assert observed["playback_ms"] == summary["timing_ms"]["sequence_play"]
+    assert observed["camera_frame_to_playback_return_ms"] >= summary["timing_ms"]["sequence_call_after_before_frame"]
+    assert 0 <= summary["timing_ms"]["before_classification"] <= summary["timing_ms"]["before_readout"]
+    assert 0 <= summary["timing_ms"]["before_publication"] <= summary["timing_ms"]["before_readout"]
     assert summary["timing_ms"]["estimated_nominal_playback"] == pytest.approx(
         summary["actual_motion_frames"] / e.task.frame_rate_hz * 1000)
     if e.affine_crop:
@@ -407,9 +418,9 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
             assert loaded.overlay.point_ids == tuple(e.task._overlay_geometry["point_ids"])
             assert loaded.overlay.labels == tuple(e.task._overlay_geometry["labels"])
             np.testing.assert_array_equal(loaded.overlay.status.block.values,
-                e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.block.values)
+                e.task._snapshots[task_module.BEFORE_OCCUPIED_OUTPUT.name].block.values)
             np.testing.assert_array_equal(loaded.overlay.status.expanded_validity(),
-                e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.expanded_validity())
+                e.task._snapshots[task_module.BEFORE_OCCUPIED_OUTPUT.name].expanded_validity())
             assert loaded.overlay.paths_xy.shape == (6, 5, 2)
             unselected = np.setdiff1d(np.arange(6), selected)
             np.testing.assert_array_equal(loaded.overlay.paths_xy[unselected],
@@ -703,11 +714,12 @@ def test_buffered_second_frame_is_not_accepted_from_its_late_callback(experiment
     assert summary["judged_target_filling_fraction"] is None
 
 
+@pytest.mark.parametrize("stop_after_first", [False, True])
 def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_saves_them(
-    experiment, monkeypatch,
+    experiment, monkeypatch, stop_after_first,
 ):
     from zlc_atom.devices.simulation.camera import adapter as camera_module
-    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+    from zlc_atom.nodes.camera_measurement.measurement import FiniteCapture
 
     e = experiment
     expected = []
@@ -751,21 +763,31 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
     collected, compute_started, compute_finished = Event(), Event(), Event()
     play_started, play_finished = Event(), Event()
     consumed = []
-    commit = CameraMeasurementNode._commit_direct_cycle
+    read_cycles = FiniteCapture.read_cycles
 
-    def commit_cycle(node, cycle, index):
-        commit(node, cycle, index)
-        consumed.extend(cycle)
-        if index == 0:
-            # This test emits all fifty triggers at once. Synchronize the
-            # synthetic burst instead of assuming which Python thread wins.
-            assert compute_started.wait(2)
-        if index == 49:
-            assert compute_started.is_set()
-            assert not compute_finished.is_set() and not play_finished.is_set()
-            collected.set()
+    def read(capture, on_cycle):
+        def accept(cycle, index):
+            on_cycle(cycle, index)
+            consumed.extend(cycle)
+            if index == 0:
+                # All fifty frames are accepted before requesting intake Stop.
+                # The remaining complete cycles must still reach the recorder.
+                assert compute_started.wait(2)
+                if stop_after_first:
+                    with e.camera._records._condition:
+                        assert e.camera._records._condition.wait_for(
+                            lambda: e.camera._records.produced_count == 50, timeout=2)
+                    capture.should_stop = lambda: True
+            if index == 49:
+                assert compute_started.is_set()
+                assert not compute_finished.is_set() and not play_finished.is_set()
+                collected.set()
+        terminal = read_cycles(capture, accept)
+        assert capture.stopped == stop_after_first
+        assert terminal.produced_count == 50 and terminal.no_more_frames
+        return terminal
 
-    monkeypatch.setattr(CameraMeasurementNode, "_commit_direct_cycle", commit_cycle)
+    monkeypatch.setattr(FiniteCapture, "read_cycles", read)
 
     def compute(*args, **kwargs):
         compute_started.set()

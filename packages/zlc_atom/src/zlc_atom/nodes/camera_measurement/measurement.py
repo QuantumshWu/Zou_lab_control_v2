@@ -449,6 +449,61 @@ class FiniteCapture:
         self.terminal: CameraCaptureTerminalRecord | None = None
         self._pending_records: list[CameraFrameRecord] = []
 
+    def read_cycles(
+        self,
+        on_cycle: Callable[[tuple[CameraFrameRecord, ...], int], None],
+    ) -> CameraCaptureTerminalRecord:
+        """Consume cycles without requiring a second, private publication.
+
+        Stop drains every already accepted complete cycle; failure does not.
+        Measurement publishers and Tasks use this same acquisition lifecycle.
+        """
+        if self.closed:
+            raise RuntimeError("finite capture is closed")
+        if not callable(on_cycle):
+            raise TypeError("on_cycle must be callable")
+        try:
+            for index in range(self.repeat):
+                cycle = self.next_cycle()
+                if cycle is None:
+                    break
+                on_cycle(cycle, index)
+            terminal = self.close()
+            # Stop first fixes the accepted prefix. Keep every complete cycle
+            # from it, including a cycle partly read when Stop arrived.
+            complete = min(self.repeat, terminal.produced_count // self.frames_per_cycle)
+            while self.completed_cycles < complete:
+                pending = self._pending_records
+                pending.extend(self.node.read_records(
+                    self.frames_per_cycle - len(pending), timeout=0.0, exact=True,
+                ))
+                cycle = _strict_cycle_ordinals(
+                    pending, expected_start=self.completed_cycles * self.frames_per_cycle,
+                    frames_per_cycle=self.frames_per_cycle,
+                )
+                pending.clear()
+                index = self.completed_cycles
+                self.completed_cycles += 1
+                on_cycle(cycle, index)
+            remaining = terminal.produced_count - self.node._next_record_ordinal
+            if remaining:
+                self.node.read_records(remaining, timeout=0.0, exact=True)
+            self._pending_records.clear()
+            terminal = replace(terminal, no_more_frames=True)
+            self.terminal = terminal
+        except BaseException as error:
+            if not self.closed:
+                try:
+                    self.camera.finish_record_capture()
+                except BaseException as cleanup:
+                    error.add_note(f"camera cleanup also failed: {cleanup}")
+                finally:
+                    self.closed = True
+            if self.owns_generation:
+                self.node.signal_plane.retire(self.node)
+            raise
+        return terminal
+
     def collect(
         self,
         *,
@@ -479,50 +534,13 @@ class FiniteCapture:
             raise TypeError("commit_cycle must be callable")
         keep = self.owns_generation if retain_cycles is None else bool(retain_cycles)
         retained: list[tuple[CameraFrameRecord, ...]] = []
-        try:
-            for index in range(self.repeat):
-                cycle = self.next_cycle()
-                if cycle is None:
-                    break
-                commit_cycle(cycle, index)
-                if keep:
-                    retained.append(cycle)
-            terminal = self.close()
-            # Stop first fixes the accepted prefix. Keep every complete cycle
-            # from it, including a cycle partly read when Stop arrived.
-            complete = min(self.repeat, terminal.produced_count // self.frames_per_cycle)
-            while self.completed_cycles < complete:
-                pending = self._pending_records
-                pending.extend(self.node.read_records(
-                    self.frames_per_cycle - len(pending), timeout=0.0, exact=True,
-                ))
-                cycle = _strict_cycle_ordinals(
-                    pending, expected_start=self.completed_cycles * self.frames_per_cycle,
-                    frames_per_cycle=self.frames_per_cycle,
-                )
-                pending.clear()
-                index = self.completed_cycles
-                self.completed_cycles += 1
-                commit_cycle(cycle, index)
-                if keep:
-                    retained.append(cycle)
-            remaining = terminal.produced_count - self.node._next_record_ordinal
-            if remaining:
-                self.node.read_records(remaining, timeout=0.0, exact=True)
-            self._pending_records.clear()
-            terminal = replace(terminal, no_more_frames=True)
-            self.terminal = terminal
-        except BaseException as error:
-            if not self.closed:
-                try:
-                    self.camera.finish_record_capture()
-                except BaseException as cleanup:
-                    error.add_note(f"camera cleanup also failed: {cleanup}")
-                finally:
-                    self.closed = True
-            if self.owns_generation:
-                self.node.signal_plane.retire(self.node)
-            raise
+
+        def accept_cycle(cycle, index):
+            commit_cycle(cycle, index)
+            if keep:
+                retained.append(cycle)
+
+        terminal = self.read_cycles(accept_cycle)
         if not self.completed_cycles:
             if self.owns_generation:
                 self.node.signal_plane.retire(self.node)

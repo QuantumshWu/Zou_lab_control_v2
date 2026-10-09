@@ -468,7 +468,10 @@
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
 - 用户指定N帧/帧率定义完整播放时间槽，sequence不追加未实测的profile尾等待；普通单图apply的profile等待保留。软件命令确认、authored timing完成与液晶光学稳定明确分开，复拍余量仍由用户Pulse负责。物理SLM与proxy内部仅保留同一已确认命令的一种表示，uint8在公共弧度消费者首次读取时才展开，不为播放完成回执作全幅浮点物化。
-- 同步SLM remote协议v3；拒绝不同版本，错误指明两端需一起更新。Task不再次重建末态浮点相位去比较设备已经确认的同一图，保留完整played_frames/known-new/非None事实检查并从owner取真实相位发布。
+- 同步SLM remote协议v4；拒绝不同版本，错误指明两端需一起更新。Task不再次重建末态浮点相位去比较设备已经确认的同一图，保留完整played_frames/known-new/非None事实检查并从owner取真实相位发布。
+- 删除每帧admission ACK往返，保留一次upload bind及完整play回执。TCP/server FIFO背压、连续编号、最终真实played prefix与相位确认不变；发送计数不冒充确认计数。既有上传记录转交首个真实错误并取消主播放，主动Stop/旧token EOF分清；本地worker先记录写错再取消/关闭，清理完成后汇总其结果，避免check-before-join遗漏错误。
+- 相机首图链复用FiniteCapture唯一read_cycles读周期/Stop排空/terminal路径；普通Measurement.collect在其上发布，重排Task直接消费记录，只发布自己的before/after，不再保留无消费者的私有Camera signal与伪camera_source引用。报告Overlay移到_save，拍照时的device receipt仍即时冻结，不能用末态代替初态证据。
+- 报告拆分首/后图snapshot、classification、publication，并单列camera_frame_to_sequence_return完整窗口。仅GPU/规划开始的计时不再代替相机record到播放返回；SDK/host时间戳不冒充硬件触发边沿。
 - Windows播放只在最后1 ms检查截止时钟，前段仍用高精度timer；保持完整authored间隔及取消，不做提前/追赶。此前额外timeBeginPeriod探针没有收益，未保留。尾段忙等的CPU代价与完整流水线收益分别量测，不能用局部节拍收益声称已消除上传长尾。
 
 - 常暖按同进程GPU共享，既有prepared/close持有生命周期；独立scratch不污染相位求解，正式GPU活动期间暂停，不复制Task级保温worker，不改用户光学帧率或全局驱动设置。
