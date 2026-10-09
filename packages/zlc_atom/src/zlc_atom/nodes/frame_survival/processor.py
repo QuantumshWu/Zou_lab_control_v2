@@ -12,8 +12,8 @@ case there would hide experiment-specific pairing inside a general
 classifier. This processor owns frame-general pairing for any multi-frame
 cycle.
 
-WHAT IT PUBLISHES.  One dataset, ``survival``, holding EVERY forward frame
-pair at once as ONE labelled point axis: a three-frame cycle carries pair
+WHAT IT PUBLISHES.  One dataset, ``survival``, holding the selected forward
+frame pairs as ONE labelled point axis. By default a three-frame cycle carries pair
 entries "0-1", "0-2", "1-2" straight from the data -- one identity per
 pair, the calibration model-axis pattern (numeric identity, readable
 labels).  A pair is WHICH sub-measurement of the cycle is being asked
@@ -78,6 +78,31 @@ def _forward_pairs(frames: int) -> tuple[tuple[int, int], ...]:
     )
 
 
+def _checked_pairs(pairs) -> tuple[tuple[int, int], ...] | None:
+    """Validate authored frame indices; None explicitly means all forward pairs."""
+
+    if pairs is None:
+        return None
+    if not isinstance(pairs, (tuple, list)) or not pairs:
+        raise ValueError("frame survival pairs must contain at least one pair")
+    checked = []
+    for pair in pairs:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError("frame survival pairs must contain start/end frame indices")
+        if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer))
+               for value in pair):
+            raise ValueError("frame survival pair indices must be non-negative integers")
+        start, end = map(int, pair)
+        if start < 0 or end < 0:
+            raise ValueError("frame survival pair indices must be non-negative integers")
+        if start >= end:
+            raise ValueError("frame survival pairs require start < end")
+        checked.append((start, end))
+    if len(set(checked)) != len(checked):
+        raise ValueError("frame survival pairs must not contain duplicates")
+    return tuple(checked)
+
+
 def _frame_rows(schema: DatasetSchema, frame_axis: AxisSpec) -> np.ndarray:
     """Physical frame rows within each distinct non-frame Point coordinate."""
 
@@ -103,13 +128,14 @@ def _frame_rows(schema: DatasetSchema, frame_axis: AxisSpec) -> np.ndarray:
 
 
 class FrameSurvivalProcessor:
-    """Pair every forward frame combination of one judged cycle."""
+    """Publish selected forward frame combinations of one judged cycle."""
 
     def __init__(
         self,
         *,
         producer: str = "frame_survival",
         source_signal: str | None = None,
+        pairs: tuple[tuple[int, int], ...] | None = None,
     ) -> None:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
@@ -117,6 +143,7 @@ class FrameSurvivalProcessor:
         self.source_signal = (
             None if source_signal is None else str(source_signal).strip()
         )
+        self.pairs = _checked_pairs(pairs)
         # Event and canonical geometry coexist; neither evicts the other's plan.
         self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
 
@@ -160,12 +187,10 @@ class FrameSurvivalProcessor:
         return frame_axes[0], cell_axes[0]
 
     def _output_schema(
-        self, source: DatasetSchema, *, frame_rows: np.ndarray | None = None,
+        self, source: DatasetSchema, *, frame_rows: np.ndarray,
+        pairs: tuple[tuple[int, int], ...],
     ) -> DatasetSchema:
         frame_axis, site_axis = self._source_axes(source)
-        if frame_rows is None:
-            frame_rows = _frame_rows(source, frame_axis)
-        pairs = _forward_pairs(frame_axis.size)
         # Labels carry the SOURCE frame coordinates, whatever the frame axis
         # declared -- numbers or names, since a typed coordinate may be either:
         # the pair identity an operator reads is the one the frame axis already
@@ -222,20 +247,26 @@ class FrameSurvivalProcessor:
         if saved is not None and (saved[0] is schema or saved[0] == schema):
             return saved[1]
         frame_axis, _site_axis = self._source_axes(schema)
+        pairs = _forward_pairs(frame_axis.size) if self.pairs is None else self.pairs
+        if any(end >= frame_axis.size for _start, end in pairs):
+            raise ValueError(
+                f"frame survival selected pairs need frame {max(end for _, end in pairs)} "
+                f"but the source carries {frame_axis.size} frames"
+            )
         rows = _frame_rows(schema, frame_axis)
-        output = self._output_schema(schema, frame_rows=rows)
+        output = self._output_schema(schema, frame_rows=rows, pairs=pairs)
         if canonical:
             # Groups are inserted in first-physical-row order by _frame_rows.
-            plan = (output, np.min(rows, axis=1), np.max(rows, axis=1))
+            plan = (output, np.min(rows, axis=1), np.max(rows, axis=1), pairs)
         else:
-            pairs = np.asarray(_forward_pairs(frame_axis.size), dtype=np.intp)
-            plan = (output, rows[:, pairs[:, 0]].reshape(-1), rows[:, pairs[:, 1]].reshape(-1))
+            indices = np.asarray(pairs, dtype=np.intp)
+            plan = (output, rows[:, indices[:, 0]].reshape(-1), rows[:, indices[:, 1]].reshape(-1), pairs)
         self._plans[canonical] = (schema, plan)
         return plan
 
     def _pair(self, occupied: OwnedSnapshot) -> OwnedSnapshot:
         schema = occupied.block.schema
-        output_schema, condition, later = self._plan(schema)
+        output_schema, condition, later, _pairs = self._plan(schema)
         values = np.asarray(occupied.materialize().block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
         # The denominator stays per-site validity, independently in each
@@ -262,7 +293,7 @@ class FrameSurvivalProcessor:
         source_schema = snapshot.block.schema
         frame_axis, _site_axis = self._source_axes(source_schema)
         frames = frame_axis.size
-        pair_count = len(_forward_pairs(frames))
+        pair_count = len(self._plan(source_schema)[3])
         total = (
             survival.block.schema.repeat_domain.size
             * survival.block.schema.point_domain.size
@@ -274,7 +305,7 @@ class FrameSurvivalProcessor:
                 or signal_value.cell_origin is None
             ):
                 raise ValueError("finite source event lacks canonical placement")
-            canonical, first_rows, last_rows = self._plan(signal_value.canonical_schema, canonical=True)
+            canonical, first_rows, last_rows, _pairs = self._plan(signal_value.canonical_schema, canonical=True)
             # The source ledger counts (cycles x frames) cells; this output
             # counts (cycles x pairs).  A cycle publishes all of its frames
             # together, so the translation is exact -- and refused loudly
@@ -329,11 +360,12 @@ class FrameSurvivalProcessor:
     def describe_run(self, inputs: dict[str, SignalValue]) -> dict[str, object]:
         source = next(iter(inputs.values()))
         frame_axis, _site = self._source_axes(source.schema)
+        pairs = self._plan(source.schema)[3]
         return {
             "parameters": {
                 "occupancy_signal": self.source_signal or source.name,
                 "frames": frame_axis.size,
-                "pairs": len(_forward_pairs(frame_axis.size)),
+                "pairs": pairs,
             },
         }
 

@@ -66,15 +66,24 @@ def _occupied_snapshot(
     )
 
 
-def test_pairing_identity_per_entry() -> None:
+@pytest.mark.parametrize("pairs", (None, ((1, 2), (0, 2))))
+def test_pairing_identity_per_entry(pairs) -> None:
     rng = np.random.default_rng(3)
     occupied = rng.random((40, 3, 6)) < 0.5
-    processor = FrameSurvivalProcessor()
-    survival = processor._pair(_occupied_snapshot(occupied))
+    processor = FrameSurvivalProcessor(pairs=pairs)
+    source = _occupied_snapshot(occupied)
+    survival = processor._pair(source)
+    selected = _forward_pairs(3) if pairs is None else pairs
     values = np.asarray(survival.block.values)
     validity = np.asarray(survival.expanded_validity())
-    assert values.shape == (40, 3, 6)  # (cycles, pairs, sites)
-    for entry, (condition, value) in enumerate(_forward_pairs(3)):
+    assert values.shape == (40, len(selected), 6)  # (cycles, selected pairs, sites)
+    assert survival.block.schema.point_domain.axes[0].coordinate_labels == tuple(
+        f"{start}-{end}" for start, end in selected
+    )
+    assert processor.describe_run({"occupied": SignalValue("occupied", source, None)})[
+        "parameters"
+    ]["pairs"] == selected
+    for entry, (condition, value) in enumerate(selected):
         eligible = occupied[:, condition, :]
         np.testing.assert_array_equal(validity[:, entry, :], eligible)
         np.testing.assert_array_equal(
@@ -167,6 +176,15 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
     )
     with pytest.raises(ValueError, match="occupied"):
         processor._pair(float_snapshot)
+    for pairs in ((), ((0, 1), (0, 1)), ((1, 0),), ((0, 0),),
+                  ((-1, 1),), ((0., 1),), ((False, 1),)):
+        with pytest.raises(ValueError, match="pair"):
+            FrameSurvivalProcessor(pairs=pairs)
+    selected = FrameSurvivalProcessor(pairs=((1, 3),))
+    with pytest.raises(ValueError, match="need frame 3"):
+        selected._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
+    restored = selected._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool)))
+    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("1-3",)
 
 
 def test_connecting_judged_frames_names_the_right_signal() -> None:
@@ -214,8 +232,9 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
     assert survival.canonical_schema.repeat_domain.size == 5
 
 
-@pytest.mark.parametrize("frames", (2, 3, 4))
-def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) -> None:
+@pytest.mark.parametrize("frames,pairs", ((2, None), (3, None), (4, None),
+                                        (4, ((1, 3), (0, 2)))))
+def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, pairs) -> None:
     from types import SimpleNamespace
     from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
     from zlc_atom.nodes.frame_survival import SURVIVAL_OUTPUTS
@@ -233,13 +252,14 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) 
         ((8, 3), (8, 7), (2, 3), (2, 7)),
         (("frame", "V"), ("other", "Hz")), run_repeats=2,
     )
-    processor = FrameSurvivalProcessor(producer="survival")
+    processor = FrameSurvivalProcessor(producer="survival", pairs=pairs)
     scan = SimpleNamespace(instance_id="scan", dataset_output_declarations=(SCAN_OUTPUT,),
                            signal_key=lambda name: f"@logic/scan/{name}")
     result = SimpleNamespace(instance_id="survival", dataset_output_declarations=SURVIVAL_OUTPUTS,
                              signal_key=lambda name: f"@logic/survival/{name}")
     plane = SignalDataPlane()
-    pair_count = frames * (frames - 1) // 2
+    selected = _forward_pairs(frames) if pairs is None else pairs
+    pair_count = len(selected)
     expected = np.zeros((2, 4, pair_count, 3), dtype=bool)
     eligible = np.zeros_like(expected)
     try:
@@ -261,15 +281,12 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames) 
                     (repeat * 4 + point + 1) * pair_count, 8 * pair_count,
                 )
                 plane.commit_live(result, {"survival": output})
-                entry = 0
-                for earlier in range(frames):
-                    for later in range(earlier + 1, frames):
-                        before, after = frame_codes.index(earlier), frame_codes.index(later)
-                        trial = (occupied[repeat, point, before]
-                                 & valid[repeat, point, before] & valid[repeat, point, after])
-                        eligible[repeat, point, entry] = trial
-                        expected[repeat, point, entry] = trial & occupied[repeat, point, after]
-                        entry += 1
+                for entry, (earlier, later) in enumerate(selected):
+                    before, after = frame_codes.index(earlier), frame_codes.index(later)
+                    trial = (occupied[repeat, point, before]
+                             & valid[repeat, point, before] & valid[repeat, point, after])
+                    eligible[repeat, point, entry] = trial
+                    expected[repeat, point, entry] = trial & occupied[repeat, point, after]
                 live = plane.current_dataset("@logic/survival/survival").materialize()
                 np.testing.assert_array_equal(live.block.values, expected.reshape(2, -1, 3))
                 np.testing.assert_array_equal(live.expanded_validity(), eligible.reshape(2, -1, 3))
@@ -332,7 +349,8 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
         )
 
 
-def test_monitor_source_translates_coverage_to_own_geometry() -> None:
+@pytest.mark.parametrize("pairs", (None, ((0, 2),)))
+def test_monitor_source_translates_coverage_to_own_geometry(pairs) -> None:
     """The real-bench failure: a camera-monitor chain hands MonitorCoverage
     counted in (cycles x frames); the published ledger must count THIS
     output's geometry (one pair row per cycle) or the runtime refuses it."""
@@ -341,7 +359,7 @@ def test_monitor_source_translates_coverage_to_own_geometry() -> None:
 
     occupied = np.zeros((4, 3, 2), dtype=bool)
     snapshot = _occupied_snapshot(occupied)
-    outputs = FrameSurvivalProcessor().evaluate(
+    outputs = FrameSurvivalProcessor(pairs=pairs).evaluate(
         SignalValue(
             "@logic/occupancy/occupied",
             snapshot,
@@ -350,8 +368,9 @@ def test_monitor_source_translates_coverage_to_own_geometry() -> None:
     )
     survival = outputs["survival"]
     assert isinstance(survival.coverage, MonitorCoverage)
-    assert survival.coverage.total_cells == 4 * 3  # cycles x pair rows
-    assert survival.coverage.written_cells == 4 * 3
+    pair_count = len(_forward_pairs(3) if pairs is None else pairs)
+    assert survival.coverage.total_cells == 4 * pair_count
+    assert survival.coverage.written_cells == 4 * pair_count
     # The constructor itself validates ledger-vs-geometry, so constructing
     # the LiveDatasetOutput above IS the regression proof.
 

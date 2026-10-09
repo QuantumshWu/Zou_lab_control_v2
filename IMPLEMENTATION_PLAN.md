@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Frame Survival增加可编辑配对行及Publish all，保持一个survival输出和现有pair/site归属；只发布所选行，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。UI复用Fluent rows与原Logic贡献入口，源schema直接来自Runtime目录。
+
 - Component交互整改（2026-10-09，完成，worktree待人工验收）：Shift逐项追加/取消实际点击的item，不补范围；Group直接消费选区，非连续/选中Bracket未完整归入时拒绝并保留选区，成功聚焦默认名输入。名称卡内直接改，删除起止/命名窗口及Rename菜单。展开改为左右同色窄端包围内容、内部自动全选；多组件独立展开，任一端选择/拖动代表整体。PulseDragContainer只保留一份选区，删旧单卡/post状态和点击转发；多选拖动与remove_items一次提交，空选区Remove不再删最后一项，Shift点checkbox/输入框不改数据。现有UI相关7项、presenter 3项通过；正式launcher真实Qt点选验证第1/3项不补第2项、拒绝错误Group、完整选区分组直接改名、双端与全部内部高亮、Shift不改TTL、保存重开/编译，以及两个组件同时展开，zlc_ui截图留ignored research，窗口已关闭。不改model/文件格式/FPGA。
 - Component卡片密度修正（2026-10-08）：删除独立206/min180宽度，改用Period的158缩放规则并统一padding7/spacing4；本机正式窗口实宽由180变134逻辑px，与Period同宽。名称用公共ElidedLabel，常驻只Expand/Edit，低频操作移入懒建FluentPopup；菜单动作先收起再发既有intent。既有组件UI用例验证宽度一致、懒建菜单及Export路由，正式窗口截图核对折叠/展开与菜单，未改model/编译/参数或硬件。
 - Pulse Component（2026-10-08，完成，worktree待人工验收）：连续分组复用既有flat Period/Bracket/binding；独立`zlc.subpulse`只作编辑/插入，Pulse reader/compiler不直接执行它。公共组/解组/导出/插入/替换/删除维护稳定ID、父Bracket与Config共享key，保存/Remote往返保留组件。默认折叠且不构建内部PeriodCard；真屏迭代后删除挤压空间的上下双schedule，改为主timeline原位展开共用卡片/滚动；Component页区分当前实例与独立草稿，隐藏无效全局编辑入口，Config/Scan按显式实例身份分组。Pulse/Subpulse共用字段与结构编辑操作；字段集合变化清掉旧scan table，连接跨target/clock时也携components。领域23、Remote 1、presenter流程与对应共享编辑13项通过，UI组件/原拖动/控件复用/Config分组定向通过。正式`apps.pulse_editor.create_window`→真实Qt按钮/输入→zlc_ui.capture_window验收已走通4-period MOT分组、改时长、导出/读回、独立草稿与原实例隔离、重复插入、Save Pulse/重开及编译，截图与探针在ignored research，窗口已关闭。不改FPGA，无运行期文件引用或第二套编译器。

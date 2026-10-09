@@ -156,7 +156,7 @@ Node new chunk
 ### 4.2 Identity与processors
 
 - Occupancy对每个Repeat/Point cell的图像独立应用校准，只检查SPATIAL_Y/X图像及校准尺寸，不限制Point具名轴数量；frame、scan及其它领先轴连同codes/坐标/单位原样传递，只有图像Cell-data转为site判决/计数。校准放在哪块crop上、帧是count还是photoelectron，都读帧自己的事实：两条SPATIAL轴的sensor_pixel_xy坐标（首坐标=origin，步长=binning，长度=尺寸）与value unit（count单位，或无单位/`1`=photoelectron），所以scan或derive转来的帧与相机直出的帧同样定位、同样拒绝单位不符；相机run record只补帧说不出的整块传感器尺寸。每个cell是第几帧读Point domain里readout-event轴的codes，不按轴尺寸做稠密C序展开。Live仍只处理event，terminal处理完整保留数据。
-- Frame Survival按唯一READOUT_EVENT定位frame轴，在每组其它Point坐标内部做forward pair；只把frame替换为pair，保留scan轴，不跨扫描点配对。finite coverage与placement按同一canonical frame-row映射转成pair-row，不把所有事件写到point origin 0。
+- Frame Survival按唯一READOUT_EVENT定位frame轴，在每组其它Point坐标内部做forward pair；只把frame替换为pair，保留scan轴，不跨扫描点配对。Edit以公共rows控件显示起始/结束frame及Add/Remove，Publish all显示并跟随源的全部正向配对，手动编辑则只发布列表中的有序配对，仍是一个survival signal。配对列表统一决定schema、values、validity、finite coverage与placement，不先计算全部再仅隐藏。单信号Editor从既有目录投影不可变source schema供选择，不读取像素或新增订阅；源暂时缺帧沿原following机制等待。
 - 不变的event/canonical frame拓扑各在现有Processor中规划一次；placement只定位本event覆盖的有序group范围，不每shot扫描整份canonical frame表。
 - SignalDescription持有不可变canonical schema，physical shape由该schema派生。Logic/Panel Outputs与Source列表从Plot公共schema_structure读取三domain轴大小，只显示三组数字维度，不添加轴名或单位；长度1的轴也保留乘1，不再只打印扁平Point carrier长度。原signal name和Panel标题的轴名行不变，UI仍只接收投影后的文本。
 - Signal目录只随其结构、生命周期与parent generation事实改变；值revision不属于菜单事实。Plane保留唯一不可变目录，Console从这一份目录产生并复用rows与overlay候选；无变更的idle/new-value拍不重建菜单。菜单家族匹配不是same-shot许可，实际呈现仍核exact publication。
