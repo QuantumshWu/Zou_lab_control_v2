@@ -267,7 +267,9 @@ def experiment(tmp_path, monkeypatch, request):
         codes.flags.writeable = False
         for index, frame in enumerate(codes):
             kwargs["frame_ready"](index, frame)
-        samples = task_module.sample_rearrangement(prepared, planned, motion_frames=kwargs["motion_frames"])
+        samples = kwargs.get("sampled")
+        if samples is None:
+            samples = task_module.sample_rearrangement(prepared, planned, motion_frames=kwargs["motion_frames"])
         return {"phase_codes": codes, "converged": True,
                 "target_synthesis_coefficients": None,
                 "motion_yx": samples["motion_yx"],
@@ -320,7 +322,8 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert e.board.fires == [(1, 1)] and len(e.board.loads) == 1
     assert sequence_to_tree(e.task.sequence) == authored
     assert e.board.loads[0][1].periods == e.task.sequence.periods
-    assert e.trace.index("fire") < e.trace.index("compute") < e.trace.index("upload") < e.trace.index("play") < e.trace.index("after_trigger")
+    assert e.trace.index("fire") < e.trace.index("compute") < e.trace.index("play") < e.trace.index("after_trigger")
+    assert e.trace.index("fire") < e.trace.index("upload") < e.trace.index("play")
     np.testing.assert_array_equal(e.available_indices[0], [0, 1, 3, 4, 5])
     np.testing.assert_array_equal(e.task.target_indices, [1, 2, 4, 5])
     assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path", "end_target_path"}
@@ -433,8 +436,12 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
 
 
 @pytest.mark.parametrize("occupied_count", [0, 2])
-def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occupied_count):
+@pytest.mark.parametrize("frame_mode", ["fixed", "camera_step"])
+def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occupied_count, frame_mode):
     e = experiment
+    e.task.frame_mode = frame_mode
+    if not occupied_count:
+        e.task.minimum_separation = 100.  # No unplayed removal action to validate.
     e.images[0][:] = 0
     for y, x in e.task.points[0][:occupied_count]:
         e.images[0][y, x] = 10
@@ -444,12 +451,22 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
     assert summary["status"] == "completed" and summary["assigned_atoms"] == occupied_count
     assert len(summary["unfilled_target_indices"]) == 4 - occupied_count
     assert e.slm.plays == int(occupied_count > 0)
+    if not occupied_count:
+        assert not e.slm.preparations
     assert e.board.fires == [(1, 1)]
 
 
 @pytest.mark.parametrize("experiment", ["camera-step"], indirect=True)
-def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation(experiment):
+def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation(experiment, monkeypatch):
     e = experiment
+    sample = task_module.sample_rearrangement
+    sampled_calls = []
+
+    def count_sample(*args, **kwargs):
+        sampled_calls.append(kwargs)
+        return sample(*args, **kwargs)
+
+    monkeypatch.setattr(task_module, "sample_rearrangement", count_sample)
     photos = [image.copy() for image in e.images]
     e.task.frame_mode = "camera_step"
     e.task.max_camera_step = .6
@@ -461,10 +478,14 @@ def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation
     assert summary["actual_motion_frames"] == 14
     assert summary["requested_motion_frames"] == 4 and summary["motion_frames"] is None
     assert summary["actual_maximum_camera_step"] <= .6 + 1e-12
+    assert len(sampled_calls) == 1, "auto must pass its sampled result into generation"
     with np.load(result["artifact_path"], allow_pickle=False) as data:
         assert data["phase_codes"].shape[0] == 14
         assert np.max(np.linalg.norm(np.diff(data["motion_camera_xy"],axis=0),axis=-1)) <= .6 + 1e-12
     prepared = e.task._prepared
+    changed_spacing = SlmRearrangementTask(**(e.task_arguments | {"minimum_separation": .5}))
+    assert e.task.restart_from(changed_spacing)
+    assert e.task._prepared is prepared and prepared["minimum_separation"] == .5
     fresh = SlmRearrangementTask(**(e.task_arguments | {
         "frame_mode": "camera_step", "max_camera_step": .6, "exposure_seconds": .03}))
     assert e.task.restart_from(fresh)
@@ -712,6 +733,10 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
     def commit_cycle(node, cycle, index):
         commit(node, cycle, index)
         consumed.extend(cycle)
+        if index == 0:
+            # This test emits all fifty triggers at once. Synchronize the
+            # synthetic burst instead of assuming which Python thread wins.
+            assert compute_started.wait(2)
         if index == 49:
             assert compute_started.is_set()
             assert not compute_finished.is_set() and not play_finished.is_set()
