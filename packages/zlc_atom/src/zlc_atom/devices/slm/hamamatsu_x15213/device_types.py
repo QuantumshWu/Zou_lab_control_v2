@@ -1332,13 +1332,11 @@ class X15213Adapter:
         started = time.perf_counter()
         dispatch, acknowledgments, queue_wait = [], [], []
         step_started, confirmations, frame_actions = [], [], []
-        last_display_acknowledged = None
         result = {
             **sequence["prepared"], "played_frames": 0, "cancelled": False,
             "acknowledgment": ("native-gdi-flush-and-exact-raster-check" if self._transport == "dvi"
                                else "sdk-slot-change-and-frame-memory-readback"),
-            "physical_vblank_observed": False, "final_settle_ms": 0.0,
-            "final_settle_completed": False,
+            "physical_vblank_observed": False, "authored_timing_completed": False,
         }
         with self._state_lock:
             self._command_revision += 1
@@ -1439,7 +1437,7 @@ class X15213Adapter:
                                 previous_phase=previous_phase, previous_gray=previous_gray, previous_receipt=previous_receipt,
                             )
                         raise
-                    acknowledged = last_display_acknowledged = time.perf_counter()
+                    acknowledged = time.perf_counter()
                     acknowledgments.append((acknowledged - started) * 1000)
                     with self._state_lock:
                         self._phase, self._last_gray = canonical, gray
@@ -1450,10 +1448,7 @@ class X15213Adapter:
                 if wait_until(frame_started + float(interval)):
                     break
             if result["played_frames"] == result["frame_count"] and not self._sequence_cancel.is_set():
-                settle_started = time.perf_counter()
-                wait_until(last_display_acknowledged + self._settle)
-                result["final_settle_ms"] = (time.perf_counter() - settle_started) * 1000
-                result["final_settle_completed"] = not self._sequence_cancel.is_set()
+                result["authored_timing_completed"] = True
         finally:
             active_error = sys.exception()
             if timer is not None:

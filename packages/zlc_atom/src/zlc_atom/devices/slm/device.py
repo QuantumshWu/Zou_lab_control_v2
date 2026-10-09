@@ -146,6 +146,7 @@ def _validated_state(
     receipt: object,
     *,
     commanded_phase: np.ndarray | None = None,
+    commanded_codes: np.ndarray | None = None,
 ) -> tuple[str, tuple[int, int], np.ndarray | None, int, int, dict[str, object]]:
     if (
         not isinstance(identity, str)
@@ -182,17 +183,25 @@ def _validated_state(
         or frozen_receipt["mapping_revision"] > mapping_revision
     ):
         raise ValueError("SLM command receipt mapping is newer than device truth")
-    # A successful ACK returns metadata, not new phase pixels. Its local
-    # commanded snapshot was already canonicalized at the input boundary.
-    known_command = commanded_phase is not None and phase is commanded_phase
-    canonical = phase if known_command else None if phase is None else canonical_phase(phase, shape)
-    if phase is not None and not known_command and (
-        np.asarray(phase).flags.writeable or not np.array_equal(phase, canonical)
-    ):
-        raise ValueError("SLM last_commanded_phase must be an immutable canonical snapshot")
-    if (canonical is None) != (frozen_receipt["outcome"] == "unknown"):
+    if commanded_codes is not None:
+        # Internal confirmed codes are a distinct representation, not radians.
+        if (phase is not commanded_codes or commanded_phase is not None
+                or not isinstance(phase, np.ndarray) or phase.dtype != np.uint8
+                or phase.shape != shape or phase.flags.writeable):
+            raise ValueError("SLM confirmed phase codes must be a readonly uint8 matrix matching the full device shape")
+        snapshot = phase
+    else:
+        # A successful ACK returns metadata, not new phase pixels. Its local
+        # commanded snapshot was already canonicalized at the input boundary.
+        known_command = commanded_phase is not None and phase is commanded_phase
+        snapshot = phase if known_command else None if phase is None else canonical_phase(phase, shape)
+        if phase is not None and not known_command and (
+            np.asarray(phase).flags.writeable or not np.array_equal(phase, snapshot)
+        ):
+            raise ValueError("SLM last_commanded_phase must be an immutable canonical snapshot")
+    if (snapshot is None) != (frozen_receipt["outcome"] == "unknown"):
         raise ValueError("SLM phase knowledge differs from its command receipt")
-    return identity, shape, canonical, command_revision, mapping_revision, frozen_receipt
+    return identity, shape, snapshot, command_revision, mapping_revision, frozen_receipt
 
 
 

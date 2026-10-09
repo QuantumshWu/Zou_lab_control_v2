@@ -141,7 +141,7 @@ class _SequenceSlm(_Slm):
                 self.confirmed += 1
         finally:
             result = {"frame_count": len(codes), "played_frames": self.confirmed,
-                      "cancelled": self.cancel.is_set(), "final_settle_completed": self.confirmed == len(codes),
+                      "cancelled": self.cancel.is_set(), "authored_timing_completed": self.confirmed == len(codes),
                       "physical_vblank_observed": False, "acknowledgment": "test device"}
             self.receipt_overrides["sequence"] = result
             self.cancel.set()  # Wake a producer on a device failure too.
@@ -327,7 +327,10 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert sequence_to_tree(e.task.sequence) == authored
     assert e.board.loads[0][1].periods == e.task.sequence.periods
     assert e.trace.index("fire") < e.trace.index("compute") < e.trace.index("play") < e.trace.index("after_trigger")
-    assert e.trace.index("fire") < e.trace.index("upload") < e.trace.index("play")
+    if e.task.frame_mode == "fixed":
+        assert e.trace.index("upload") < e.trace.index("fire")
+    else:
+        assert e.trace.index("fire") < e.trace.index("upload") < e.trace.index("compute")
     np.testing.assert_array_equal(e.available_indices[0], [0, 1, 3, 4, 5])
     np.testing.assert_array_equal(e.task.target_indices, [1, 2, 4, 5])
     assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path", "end_target_path"}
@@ -368,7 +371,9 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         summary["timing_ms"]["compute_started_after_before_frame"] + .4)
     assert observed["command_interval_median_ms"] is None, "no fabricated cadence when the receipt has none"
     assert observed["online_ms"] == summary["timing_ms"]["online_rearrangement"]
-    assert observed["playback_ms"] == summary["timing_ms"]["sequence_play_and_final_settle"]
+    assert observed["playback_ms"] == summary["timing_ms"]["sequence_play"]
+    assert summary["timing_ms"]["estimated_nominal_playback"] == pytest.approx(
+        summary["actual_motion_frames"] / e.task.frame_rate_hz * 1000)
     if e.affine_crop:
         assert observed["photo_camera_interval_ms"] == pytest.approx(4020.)
         assert e.task._records[0].image.dtype == np.dtype('uint16')
@@ -456,7 +461,8 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
     assert len(summary["unfilled_target_indices"]) == 4 - occupied_count
     assert e.slm.plays == int(occupied_count > 0)
     if not occupied_count:
-        assert not e.slm.preparations
+        assert len(e.slm.preparations) == int(frame_mode == "fixed")
+        assert e.slm.confirmed == 0 and e.slm.releases == int(frame_mode == "fixed")
     assert e.board.fires == [(1, 1)]
 
 
@@ -628,8 +634,8 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert host.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "after-arm"])
-def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experiment, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "after-arm", "sequence-prepare", "prepared-stop"])
+def test_preplay_failures_keep_pulse_unchanged_and_release_resources(experiment, monkeypatch, failure):
     e = experiment
     if failure == "short-gap":
         e.task.sequence = _sequence(.001)
@@ -640,6 +646,16 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
             raise RuntimeError("injected post-arm failure")
         monkeypatch.setattr(e.task, "_prepare_outputs", refused)
         error_type, message = RuntimeError, "post-arm failure"
+    elif failure in {"sequence-prepare", "prepared-stop"}:
+        original = e.slm.prepare_phase_sequence
+        def prepare_then_end(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if failure == "sequence-prepare":
+                raise RuntimeError("injected sequence binding failure")
+            e.context.cancelled = True
+            return result
+        monkeypatch.setattr(e.slm, "prepare_phase_sequence", prepare_then_end)
+        error_type, message = RuntimeError, "sequence binding failure" if failure == "sequence-prepare" else "cancelled"
     else:
         previous = {"played_frames": 7, "play_ms": 321., "cancelled": False}
         e.slm.receipt_overrides["sequence"] = previous
@@ -657,6 +673,9 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
     assert "partial_data" in e.context.artifacts
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["playback"] is None
+    if failure in {"sequence-prepare", "prepared-stop"}:
+        assert e.slm.releases == 1 and e.slm.frames is None
+        assert summary["status"] == ("stopped" if failure == "prepared-stop" else "failed")
     if failure == "gpu-prepare":
         assert summary["device_snapshots"]["slm"]["command_receipt"]["sequence"] == previous
         assert e.slm.commands == [], "early failure must retain the preceding device command"

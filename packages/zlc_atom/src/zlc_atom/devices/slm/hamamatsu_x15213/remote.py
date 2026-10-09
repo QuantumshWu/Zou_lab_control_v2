@@ -38,7 +38,7 @@ from ..device import SlmAdapter, _same_phase_codes, _shape, _validated_state, ca
 #: records in its bench window, where a dedicated console used to scroll.
 _LOG = logging.getLogger(__name__)
 
-_REMOTE_VERSION = 2
+_REMOTE_VERSION = 3
 _REMOTE_HEADER = struct.Struct("!II")
 _MAX_REMOTE_METADATA_BYTES = 1024 * 1024
 _MAX_REMOTE_PHASE_BYTES = 16 * 1024 * 1024
@@ -145,7 +145,9 @@ def _open_slm_server(
             type(request.get("version")) is not int
             or request["version"] != _REMOTE_VERSION
         ):
-            reply = response(False, "unsupported SLM remote protocol", include_phase=True)
+            reply = response(False,
+                f"unsupported SLM remote protocol version {request.get('version')!r}; expected {_REMOTE_VERSION}",
+                include_phase=True)
         elif (
             request.get("method") == "describe"
             and fields == {"version", "method"}
@@ -518,10 +520,12 @@ class _RemoteSlmAdapter:
             phase = np.frombuffer(payload, dtype="<f4").reshape(shape)
         else:
             phase = commanded
+        encoded = commanded is not None and commanded.dtype == np.uint8
         identity, shape, phase, command_revision, mapping_revision, receipt = (
             _validated_state(
                 identity, shape, phase, command_revision, mapping_revision, receipt,
-                commanded_phase=commanded,
+                commanded_phase=None if encoded else commanded,
+                commanded_codes=commanded if encoded else None,
             )
         )
         if self._identity and (identity != self._identity or shape != self._shape_yx):
@@ -556,7 +560,9 @@ class _RemoteSlmAdapter:
                 or value["version"] != _REMOTE_VERSION
                 or type(value["ok"]) is not bool
             ):
-                raise ValueError("SLM remote response has an invalid protocol version")
+                raise ValueError(
+                    f"SLM remote response has an invalid protocol version {value.get('version')!r}; "
+                    f"expected {_REMOTE_VERSION}; update the client and server together")
             if method == "play_sequence" and value["ok"]:
                 state = value["state"]
                 receipt = state.get("receipt") if isinstance(state, dict) else None
@@ -577,7 +583,10 @@ class _RemoteSlmAdapter:
                     or type(playback.get("frame_count")) is not int
                     or playback["frame_count"] != len(self._sequence_codes)
                     or type(playback.get("cancelled")) is not bool
-                    or (not playback["cancelled"] and playback["played_frames"] != len(self._sequence_codes))):
+                    or type(playback.get("authored_timing_completed")) is not bool
+                    or (not playback["cancelled"] and (
+                        playback["played_frames"] != len(self._sequence_codes)
+                        or not playback["authored_timing_completed"]))):
                     raise ValueError("SLM playback returned an invalid confirmation receipt")
                 if playback["played_frames"]:
                     if receipt.get("outcome") != "known-new":
@@ -585,9 +594,11 @@ class _RemoteSlmAdapter:
                     confirmed = self._sequence_codes[playback["played_frames"] - 1]
                     if confirmed is None:
                         raise ValueError("SLM playback confirmed an unsubmitted frame")
-                    commanded = phase_from_codes(confirmed, self._shape_yx)
+                    # Retain only the confirmed frame, not its whole movie.
+                    commanded = np.frombuffer(confirmed.tobytes(), dtype=np.uint8).reshape(self._shape_yx)
                 else:
-                    commanded = self.last_commanded_phase
+                    with self._state_lock:
+                        commanded = self._phase
             self._accept_state(
                 value["state"], payload, commanded=commanded if value["ok"] else None
             )
@@ -639,6 +650,8 @@ class _RemoteSlmAdapter:
     @property
     def last_commanded_phase(self) -> np.ndarray | None:
         with self._state_lock:
+            if self._phase is not None and self._phase.dtype == np.uint8:
+                self._phase = phase_from_codes(self._phase, self._shape_yx)
             return self._phase
 
     @property
@@ -725,7 +738,9 @@ class _RemoteSlmAdapter:
                 self._command_revision, self._mapping_revision, list(self._shape_yx),
                 len(intervals), intervals.tolist(), payload,
             )
-            error = self._request("prepare_sequence", arguments + ((True,) if frames is None else ()), sequence=prepared, commanded=self.last_commanded_phase)
+            with self._state_lock:
+                commanded = self._phase
+            error = self._request("prepare_sequence", arguments + ((True,) if frames is None else ()), sequence=prepared, commanded=commanded)
             if error is not None:
                 raise RuntimeError(error)
             token = prepared.pop("sequence_token", None)
@@ -872,7 +887,9 @@ class _RemoteSlmAdapter:
             self._sequence_intervals = []
             if token is None:
                 return
-            error = self._request("release_sequence", (token,), commanded=self.last_commanded_phase)
+            with self._state_lock:
+                commanded = self._phase
+            error = self._request("release_sequence", (token,), commanded=commanded)
             if error is not None:
                 raise RuntimeError(error)
 

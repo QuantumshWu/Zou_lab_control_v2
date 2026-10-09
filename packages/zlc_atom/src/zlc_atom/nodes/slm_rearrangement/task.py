@@ -23,7 +23,6 @@ from zlc_pulse.schedule import trigger_edge_ticks
 from zlc_pulse.wire import STATUS_DONE, STATUS_RUNNING, STATUS_ERROR, STATUS_UNDERFLOW
 
 from zlc_atom.data import snapshot_from_array
-from zlc_atom.devices.slm.device import phase_from_codes
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.devices.slm.solver import (
     prepare_rearrangement, plan_rearrangement, compute_rearrangement,
@@ -620,7 +619,7 @@ class SlmRearrangementTask:
                    "new_presentations": playback.get("newly_presented_frames"),
                    "held_steps": playback.get("held_frames"),
                    "online_ms": self._timings.get("online_rearrangement"),
-                   "playback_ms": self._timings.get("sequence_play_and_final_settle")}
+                   "playback_ms": self._timings.get("sequence_play")}
         for key, output in (("actual_step_intervals_ms", "command_interval_median_ms"),
                             ("actual_frame_intervals_ms", "new_phase_interval_median_ms")):
             values = playback.get(key) or ()
@@ -785,10 +784,23 @@ class SlmRearrangementTask:
             self._pulse_timing = (pulse_timing(loaded.source, loaded.program, loaded.rows, self.before_period, self.after_period)
                                   if self.recording_frames is None else {})
             self._frame_interval = 1/self.frame_rate_hz
-            settle = float(self.slm.last_command_receipt.get("settle_seconds", 0.))
-            nominal = self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
+            nominal = self._frame_count*self._frame_interval
             if self.frame_mode == "fixed":
                 self._timings["estimated_nominal_playback"] = nominal*1000
+
+            def prepare_sequence():
+                nonlocal sequence_prepared
+                check_cancelled(context)
+                if recording_failed.is_set():
+                    raise InterruptedError("Camera recording failed")
+                began = perf_counter()
+                sequence_prepared = True  # Failed binding may already own a server token.
+                try:
+                    self.slm.prepare_phase_sequence(None, self._frame_interval, frame_count=self._frame_count)
+                finally:
+                    self._timings["sequence_prepare"] = (perf_counter()-began)*1000
+                check_cancelled(context)
+
             photoelectron = reads_photoelectrons(self.calibration)
             node = CameraMeasurementNode(camera=self.camera,
                 request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
@@ -800,6 +812,9 @@ class SlmRearrangementTask:
             actual = node.actual_working_point
             self._prepare_outputs(context, node)
             self._publish_phase(context, applied_source)
+            if self.frame_mode == "fixed":
+                prepare_sequence()
+            check_cancelled(context)
             context.report_progress("Acquiring before photograph from the authored Pulse", current=0, total=2)
             firing_started = monotonic()
             fire_wall = time_ns()
@@ -855,8 +870,9 @@ class SlmRearrangementTask:
                             maximum_step=self.max_camera_step, step_path=camera_path)
                         self._frame_count = sampled["motion_frames"]
                     self._prepare_motion_outputs(context)
-                nominal = (self._frame_count*self._frame_interval + max(0., settle-self._frame_interval)
-                           if self._frame_count else 0.)
+                    if self._frame_count:
+                        prepare_sequence()
+                nominal = self._frame_count*self._frame_interval
                 self._timings["estimated_nominal_playback"] = nominal*1000
                 context.report_progress(f"Computing {self._frame_count} maps using {self.phase_method}")
                 playback = None
@@ -873,20 +889,15 @@ class SlmRearrangementTask:
                         finally:
                             playback_finished_wall = time_ns()
                             playback_finished_at = monotonic()
-                            self._timings["sequence_play_and_final_settle"] = (perf_counter()-began)*1000
+                            self._timings["sequence_play"] = (perf_counter()-began)*1000
 
                     def frame_ready(index, codes):
-                        nonlocal playback, playback_attempted, sequence_prepared
+                        nonlocal playback, playback_attempted
                         check_cancelled(context)
                         if recording_failed.is_set():
                             raise InterruptedError("Camera recording failed")
                         if playback is None:
                             self._timings["first_verified_frame_ready"] = (perf_counter()-online_started)*1000
-                            began = perf_counter()
-                            sequence_prepared = True  # Failed binding may already own a server token.
-                            self.slm.prepare_phase_sequence(None, self._frame_interval, frame_count=self._frame_count)
-                            self._timings["sequence_prepare"] = (perf_counter()-began)*1000
-                            check_cancelled(context)
                             remaining = None if deadline is None else deadline-monotonic()
                             if remaining is not None and remaining < nominal:
                                 raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
@@ -958,7 +969,8 @@ class SlmRearrangementTask:
                         self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000
                 if not len(self._result["phase_codes"]):
                     self._playback = {"frame_count": 0, "played_frames": 0, "cancelled": False,
-                                      "noop": True, "acknowledgment": "No new phase commanded"}
+                                      "noop": True, "authored_timing_completed": True,
+                                      "acknowledgment": "No new phase commanded"}
                     playback_finished_wall = time_ns()
                     if self.recording_frames is not None:
                         return
@@ -966,8 +978,9 @@ class SlmRearrangementTask:
                     capture.timeout = max(camera_timeout,
                         firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
                     return
-                if self._playback["cancelled"] or self._playback["played_frames"] != len(self._result["phase_codes"]):
-                    raise RuntimeError("SLM sequence stopped before its target frame")
+                if (self._playback["cancelled"] or self._playback["played_frames"] != len(self._result["phase_codes"])
+                        or not self._playback["authored_timing_completed"]):
+                    raise RuntimeError("SLM sequence did not complete all authored frames and time slots")
                 if self.recording_frames is not None:
                     return
                 self._timings["verification_deadline_margin"] = (deadline-playback_finished_at)*1000
@@ -1044,10 +1057,8 @@ class SlmRearrangementTask:
                 self._publish(context, ((TRAJECTORY_OUTPUT, trajectory), (QUALITY_OUTPUT, quality)))
             else:
                 self._publish(context, ((TRAJECTORY_OUTPUT, trajectory),))
-            expected_final = (phase_from_codes(self._result["phase_codes"][-1], self.slm.shape_yx)
-                              if len(self._result["phase_codes"]) else prepared["initial_phase"])
             confirmed = self.slm.last_commanded_phase
-            if self.slm.last_command_receipt.get("outcome") != "known-new" or confirmed is None or not np.array_equal(confirmed, expected_final):
+            if self.slm.last_command_receipt.get("outcome") != "known-new" or confirmed is None:
                 raise RuntimeError("The SLM did not confirm the final target phase")
             self._publish_phase(context, confirmed)
             context.seal_terminal()

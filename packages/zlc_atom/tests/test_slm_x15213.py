@@ -783,6 +783,42 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
         remote.apply_phase(expected)
         assert sdk.write_count == remote.command_revision == 6
         assert calls[-1] == "apply"
+        materializations = []
+        original_decode = device_module.phase_from_codes
+
+        def decoded_on_read(values, shape):
+            materializations.append(True)
+            return original_decode(values, shape)
+
+        monkeypatch.setattr(device_module, "phase_from_codes", decoded_on_read)
+        movie = np.stack((codes, codes))
+        remote.prepare_phase_sequence(movie, .001)
+        playback = remote.play_phase_sequence()
+        assert playback["played_frames"] == 2 and playback["authored_timing_completed"]
+        assert materializations == [], "playback completion needs confirmed codes, not radians"
+        retained_codes = remote._phase
+        assert retained_codes.dtype == np.uint8 and not retained_codes.flags.writeable
+        assert len(retained_codes.base.base) == codes.nbytes, "do not retain the whole movie"
+        movie[:] = 0
+        np.testing.assert_array_equal(retained_codes, codes)
+        from zlc_atom.devices.slm.device import _validated_state
+        for invalid in (retained_codes.copy(), retained_codes[:, :-1], retained_codes.astype(np.float32)):
+            with pytest.raises(ValueError, match="readonly uint8"):
+                _validated_state(remote.identity, remote.shape_yx, invalid,
+                    remote.command_revision, remote.mapping_revision, remote.last_command_receipt,
+                    commanded_codes=invalid)
+        remote.prepare_phase_sequence(None, .001, frame_count=1)
+        remote.release_phase_sequence()
+        remote.prepare_phase_sequence(None, .001, frame_count=1)
+        cancelled = remote.play_phase_sequence(stop_requested=lambda: True)
+        assert cancelled["cancelled"] and cancelled["played_frames"] == 0
+        assert materializations == [], "metadata-only state transitions must not expand codes"
+        confirmed = remote.last_commanded_phase
+        assert materializations == [True]
+        assert remote.last_commanded_phase is confirmed and materializations == [True]
+        np.testing.assert_array_equal(confirmed, expected_phase)
+        with pytest.raises(ValueError):
+            confirmed.flags.writeable = True
         server.shutdown()
         server.server_close()
         worker.join(timeout=2.0)
@@ -799,7 +835,9 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
     assert sdk.close_count == 1
     assert handle.close_count == 1
     assert all(connection.fileno() == -1 for connection in connections)
-    expected_calls = ["describe", "apply", "apply", "apply_codes", "describe", "apply_codes", "apply_codes", "apply"]
+    expected_calls = ["describe", "apply", "apply", "apply_codes", "describe", "apply_codes", "apply_codes", "apply",
+                      "prepare_sequence", "play_sequence", "prepare_sequence", "bind_sequence_upload", "release_sequence",
+                      "prepare_sequence", "bind_sequence_upload", "cancel_sequence", "play_sequence"]
     assert calls == expected_calls
     with pytest.raises(RuntimeError, match="closed"):
         remote.apply_phase(expected)
@@ -1309,6 +1347,8 @@ def test_remote_sequence_preloads_bulk_codes_and_paces_every_acknowledged_frame(
         assert calls == ["describe", "prepare_sequence", "play_sequence"]
         assert result["played_frames"] == 16
         assert result["cancelled"] is False
+        assert result["authored_timing_completed"]
+        assert "final_settle_ms" not in result
         assert result["physical_vblank_observed"] is False
         assert result["acknowledgment"] == "native-gdi-flush-and-exact-raster-check"
         assert len(result["dispatch_ms"]) == len(result["acknowledged_ms"]) == 16
@@ -1484,7 +1524,7 @@ def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(
         physical.close()
 
 
-@pytest.mark.parametrize("wrong", ["token", "mapping", "revision", "played_frames"])
+@pytest.mark.parametrize("wrong", ["token", "mapping", "revision", "played_frames", "timing-type", "timing-incomplete"])
 def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(monkeypatch, wrong):
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as module
     from zlc_atom.devices.simulation.slm.device import VirtualSLM
@@ -1504,8 +1544,11 @@ def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(
                 metadata["state"]["mapping_revision"] += 1
             elif wrong == "revision":
                 metadata["state"]["command_revision"] += 1
-            else:
+            elif wrong == "played_frames":
                 metadata["state"]["receipt"]["sequence"]["played_frames"] = 0
+            else:
+                metadata["state"]["receipt"]["sequence"]["authored_timing_completed"] = (
+                    1 if wrong == "timing-type" else False)
         return metadata, payload
 
     monkeypatch.setattr(module, "_rpc_call", altered)
@@ -1610,7 +1653,7 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
             assert playback[0]["repeat_packet_count"] == playback[0]["repeated_frames"] == 8
             assert playback[0]["acknowledged_upload_payload_bytes"] == 4 * frames[0].nbytes
             assert playback[0]["mapped_frame_count"] == 4
-            assert playback[0]["final_settle_completed"]
+            assert playback[0]["authored_timing_completed"]
         elif ending == "stop":
             assert playback[0]["cancelled"] and playback[0]["played_frames"] == 1
             assert any("cancelled" in str(error) for error in errors)
@@ -1710,7 +1753,7 @@ def test_remote_stream_upload_eof_stops_only_an_unfinished_current_prefix(monkey
         assert receipt["cancelled"] is (admitted < 3)
         assert receipt["played_frames"] <= admitted
         if admitted == 3:
-            assert receipt["played_frames"] == 3 and receipt["final_settle_completed"]
+            assert receipt["played_frames"] == 3 and receipt["authored_timing_completed"]
         # EOF released the actual command owner; a new ordinary handshake
         # must work and return the retained confirmed phase, not queued pixels.
         newcomer = _RemoteSlmAdapter(*endpoint, 2)
@@ -1773,8 +1816,8 @@ def test_exact_repeated_frames_hold_without_fresh_display_ack_or_extra_settle(mo
             np.testing.assert_array_equal(remote.last_commanded_phase, codes[count - 1].astype(np.float32) * np.float32(2 * np.pi / 256))
             if ending == "complete":
                 assert result["play_ms"] >= 239.5
-                assert result["final_settle_ms"] < 5, "the already-held final phase has satisfied its optical profile dwell"
-                assert result["final_settle_completed"]
+                assert result["authored_timing_completed"]
+                assert "final_settle_ms" not in result, "sequence timing must not add an implicit optical dwell"
                 np.testing.assert_array_equal(delivered[-1], physical._phase_to_gray[codes[2]])
     finally:
         remote.close()

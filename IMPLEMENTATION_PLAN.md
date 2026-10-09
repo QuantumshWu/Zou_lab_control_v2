@@ -467,6 +467,9 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- 用户指定N帧/帧率定义完整播放时间槽，sequence不追加未实测的profile尾等待；普通单图apply的profile等待保留。软件命令确认、authored timing完成与液晶光学稳定明确分开，复拍余量仍由用户Pulse负责。物理SLM与proxy内部仅保留同一已确认命令的一种表示，uint8在公共弧度消费者首次读取时才展开，不为播放完成回执作全幅浮点物化。
+- 同步SLM remote协议v3；拒绝不同版本，错误指明两端需一起更新。Task不再次重建末态浮点相位去比较设备已经确认的同一图，保留完整played_frames/known-new/非None事实检查并从owner取真实相位发布。
+
 - 常暖按同进程GPU共享，既有prepared/close持有生命周期；独立scratch不污染相位求解，正式GPU活动期间暂停，不复制Task级保温worker，不改用户光学帧率或全局驱动设置。
 
 - LPI删除在线目标子集预解，原修正能力移至实际子集终点的公共循环；末态记录真正输出。编码与测量打包共享数学并融合，避免整幅复场的立即写读。未获稳定收益的分组迭代和固定次数唤醒原型不保留。
@@ -486,14 +489,14 @@
 - 同等最长路按并行移动行程、再按结点数择优，所有候选均有冲突修复机会；预算耗尽显式记录。公共时间参数按实际段长重建，分帧不再逐N循环，绕行不会继承近零时间比例导致帧数爆炸。Auto传递同一次只读采样结果，空占据零帧且不创建零长度质量轴。同位置改权重在LPI和Iterative均执行真实光学变化，Iterative不能仅因位置不变就复用旧权重结果；空计划和真正不变计划由统一函数判定，闭合运动不误判no-op。
 - 拥挤调度改为连续相对起步延迟，包含出发前与到达后的停留，不再只允许整段先后。新增时间差从父候选增量传播，支持负/零差值，正环拒绝；只重算受影响原子对的三段精确相对运动，并在接受完整路径后重验间距。相同指派只修复一次，不合并不同约束节点；静止阻挡跳过无效等待，绕路按行增量统计、只写入获胜矩阵。不新增通用规划器、类或生产文件，也不以搜索预算耗尽证明物理无解。
 - 最终胜出路径的冗余结点仅在替代线段严格满足公共间距检查时删除，不用容差跳过真实运动；重算最长路径、并行行程、时间参数及删点数。采样继续按该唯一计划工作，避免近乎同时的事件无意义占用额外相位图。数值根向安全侧舍入，不降低作者设定的间距；分数时刻的结束点按到达事件固定为真实终点。
-- Task更改最小间距复用原GPU光学工作区；统一no-op跳过采样及设备准备。提前并行Sequence准备的原型未证明端到端收益，已删除该调度分支，继续验证首图后才准备和播放；准备失败及时释放可能已分配的token。Recording先调度独占首帧的重排再发布私有相机数据。LPI编码/测量使用已有CUDA Graph，保持输出数学及质量门；相位变化与相位误差分开命名，未加入无法由当前设备响应数据证实的光学安全保证。逐张标准Figure导出仍在实验后，未另建跨进程导出缓存或私有图片编码路径。
+- Task更改最小间距复用原GPU光学工作区；固定N在源相位、相机与输出准备完成后、Fire前准备现有sequence和上传连接，自动N在非空规划/采样后调用同一入口。首次合格图才启动播放；固定空计划只释放准备，不提交或改变相位，自动空计划零准备。沿用原sequence_prepared/finally，不恢复无收益的拍照后并行prepare原型。Recording先调度独占首帧的重排再发布私有相机数据。LPI编码/测量使用已有CUDA Graph，保持输出数学及质量门；相位变化与相位误差分开命名，未加入无法由当前设备响应数据证实的光学安全保证。逐张标准Figure导出仍在实验后，未另建跨进程导出缓存或私有图片编码路径。
 - motion_frames=N是实际显示的总图数，包含终点、不含已经显示的起点；淡出合入这N图，不额外生成R帧。空占据是零匹配且不播放新图。公开输入删除独立ramp/dark/radius参数；有界GPU及pinned host资源按N准备。沿已有phase projection/幅度更新求解，不重发明算法；连续帧间间距检查允许空间路径错时交叉，但不允许同一时刻越界。
 - UI的intensity_error_percent默认1%，转换为weighted max/min ratio门限1.01；准备与生成消费同一门限。丢弃占据站点在淡出后另须通过5×5原生Fourier像素区域最大光强/该站点初始中心光强≤0.01；同一稀疏算子的自适应复场投影最多64次，携带前帧校正，已验证不变图直接复用。其它背景仅诊断；相对初始阱亮度、焦面站点相位步长、pupil加权像素相位步长RMS、最大单帧位移与参考帧数分别保存，不能把数值均匀度或消光门当作原子释放/存活保证。
-- GPU/端点准备与source phase建立在Fire之前。Task只Fire一次原Pulse，稳定Period ID对应显示Name；共同compiler walker读取实际Config及嵌套loop。相机只arm一次并接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。曝光独立于Period时长，不比较、不自动调整；operator负责实际曝光/照明及相应Calibration有效性。保守after deadline仍检查完整计算、上传、播放与最终等待，host receive不冒充曝光时间。
+- GPU/端点准备与source phase建立在Fire之前。Task只Fire一次原Pulse，稳定Period ID对应显示Name；共同compiler walker读取实际Config及嵌套loop。相机只arm一次并接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。曝光独立于Period时长，不比较、不自动调整；operator负责实际曝光/照明及相应Calibration有效性。保守after deadline仍检查完整计算、上传、显示确认与authored时间槽，host receive不冒充曝光时间。
 - 同一compute按frame-major求解/校验/host复制，frame_ready(index, readonly_frame)只提交连续已通过bright/discard门的图。未变化的合格帧在baseline及候选修正前复用，不执行马上丢弃的计算；hold→resume仍重新核对光场与相位，不保留冗余迭代造成的warm-start轨迹作为第二真相。整部私有只读host影片仍供归档。
-- 既有sequence增加prepare_phase_sequence(None, interval, frame_count=N)和submit_phase_frame(index, frame)：proxy上传队列及设备队列各容量2，第一张已验证图启动本地paced播放，后续计算/上传/mapping/显示重叠。空/no-change结果跳过sequence；逐图确认不跳帧，缺帧与慢ack延长真实cadence。默认16图/60Hz名义266.7ms，startup/背压/最终settle另列，profile settle仅在终点补一次；上传/admission ACK不等于display ACK，DVI ACK仍不冒充vblank或液晶响应。USB容量与真实光学响应待实验机验收。
+- 既有sequence增加prepare_phase_sequence(None, interval, frame_count=N)和submit_phase_frame(index, frame)：proxy上传队列及设备队列各容量2，第一张已验证图启动本地paced播放，后续计算/上传/mapping/显示重叠。空/no-change结果不播放；逐图确认不跳帧，缺帧与慢ack延长真实cadence。默认16图/60Hz名义266.7ms，startup/背压另列，不追加profile尾等待；上传/admission ACK不等于display ACK，DVI ACK仍不冒充vblank或液晶响应。USB容量与真实光学响应待实验机验收。
 - 参数使用四组既有FluentParameterForm（Target grid、Imaging、Movement、Quality and output）。后续质量失败不得提交越过该帧的图；Task取消并等待播放，保存已经确认的前缀、partial和原错误，不再宣称失败时整部影片未播放。首帧host可用/显示确认、copy、callback含背压用时及total分别记录，total包含callback时间。
-- 相邻完全相同相位图发送前帧引用，复用mapping及已确认像素，通过HOLD保留每个authored时间槽，不重复DVI/USB/world apply。dispatch/ACK只列实际presentation，step/confirmation列全部逻辑步骤；最终settle从最后真实ACK起算。未知状态不HOLD，上传连接早断、旧token、Stop与错误主因均有定向验证。
+- 相邻完全相同相位图发送前帧引用，复用mapping及已确认像素，通过HOLD保留每个authored时间槽，不重复DVI/USB/world apply。dispatch/ACK只列实际presentation，step/confirmation列全部逻辑步骤；最后时间槽完成即返回，不声称光学响应已完成。未知状态不HOLD，上传连接早断、旧token、Stop与错误主因均有定向验证。
 - 自动preview仍只有前图+占据、后图+占据、源/最终phase三张；相机geometry不污染phase。trajectory_2d改用真实before照片与同一完整SiteMap，将已有Fourier轨迹经已有Target→camera注册及公共图像坐标入口转换，保存原始Fourier数据和相机路径，不生成第二条科学轨迹。before/after/path共用相机坐标和图像显示，尺寸按完整站点间距；删除image-span/cell-pitch半径上限，不改公共颜色/线宽。路径仍只有末端单箭头，同色site/path/head并集单次alpha，未参与路径者保持静止图标。
 - 报告记录算法、帧数政策、实际N和sensor像素最大位移；逐指派的移动/原地分类、末态有效/占据及主动舍弃仍共用。采用已有camera timestamp及播放回执列出实际间隔/新presentation/online耗时，与请求60Hz及名义时长分开；不冒充原子身份跟踪或物理方向标定。
 - before/path的站点编号完全复用公共定位/字号，删除路径专属的站点编号重排；仅额外时序注释避让。绘制末段在真实终点前留空并去掉终点圆帽小点，短段不反向，原始坐标与照片/SiteMap图标保持不变。
