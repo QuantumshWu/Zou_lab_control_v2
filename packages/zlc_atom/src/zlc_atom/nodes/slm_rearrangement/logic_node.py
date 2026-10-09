@@ -91,11 +91,16 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
             ),
         ),
         AuthoringField("phase_method", "choice", "Phase method", "lpi",
-                       choices=(AuthoringChoice("iterative", "Iterative"), AuthoringChoice("lpi", "LPI (phase interpolation)")),
-                       description="LPI interpolates site phases, holds each frame's phases fixed during amplitude balancing, and records the iteration count. Both methods enforce the intensity tolerance."),
+                       choices=(AuthoringChoice("iterative", "Iterative"), AuthoringChoice("lpi", "LPI (phase interpolation)"),
+                                AuthoringChoice("transport", "Bridge transport")),
+                       description="LPI and Iterative enforce the intensity tolerance. Bridge transport shapes the intermediate potential and inherits the realized field phase; it keeps the same frame count and cadence. Computed optical diagnostics do not guarantee atom survival."),
+        AuthoringField("response_time_seconds", "float", "Assumed SLM response time", 0., minimum=0., unit="s",
+                       enabled_when=("phase_method", ("transport",)),
+                       description="Optional exponential time constant for Bridge transport; 0 disables response compensation. This is a model input, not the device's settle time. It changes phase computation only, never frame count, display cadence or hold time."),
         AuthoringField("minimum_separation", "float", "Minimum trap distance (Fourier)", 15., minimum=0., unit="pixel",
                        description="Hard continuous separation of moving and stationary traps, including surplus atoms while they fade. Uses the same units as SLM Target grid spacing (for example, 25 gap); not camera pixels."),
         AuthoringField("intensity_error_percent", "float", "Intensity tolerance (%)", 1., minimum=0.,
+                       enabled_when=("phase_method", ("iterative", "lpi")),
                        description="Maximum/minimum intensity after division by requested site weights, minus one. This is not a bound on absolute trap-depth change or atom loss."),
         AuthoringField("save_phase_sequence", "bool", "Save phase sequence", True),
     ),
@@ -204,7 +209,7 @@ def _rearrangement_editor_factory(parent=None, *, schema=SLM_REARRANGEMENT_SCHEM
                 ("Target grid", ("target_rows","target_columns")),
                 ("Imaging", ("before_period","after_period","recording_frames","exposure_seconds")),
                 ("Movement", ("frame_mode","motion_frames","max_camera_step","frame_rate_hz","nominal_playback_seconds")),
-                ("Quality and output", ("phase_method","minimum_separation","intensity_error_percent","save_phase_sequence")),
+                ("Quality and output", ("phase_method","response_time_seconds","minimum_separation","intensity_error_percent","save_phase_sequence")),
             )
             self._forms = {}
             for title, keys in self._groups:

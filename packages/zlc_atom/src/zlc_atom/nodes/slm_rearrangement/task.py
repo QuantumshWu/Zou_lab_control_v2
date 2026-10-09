@@ -23,7 +23,7 @@ from zlc_pulse.schedule import trigger_edge_ticks
 from zlc_pulse.wire import STATUS_DONE, STATUS_RUNNING, STATUS_ERROR, STATUS_UNDERFLOW
 
 from zlc_atom.data import snapshot_from_array
-from zlc_atom.devices.slm.device import phase_from_codes
+from zlc_atom.devices.slm.device import phase_from_codes, phase_to_codes
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.devices.slm.solver import (
     prepare_rearrangement, plan_rearrangement, compute_rearrangement,
@@ -165,7 +165,7 @@ class SlmRearrangementTask:
                  target_intensity=None, target_path=None,
                  pulse_sequence, pulse_path, before_period, after_period="",
                  exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
-                 phase_method="lpi", frame_mode="fixed", max_camera_step=1.,
+                 phase_method="lpi", frame_mode="fixed", max_camera_step=1., response_time_seconds=0.,
                  minimum_separation=15., intensity_tolerance=1.01,
                  save_phase_sequence=True, save_figure_artifact=None, recording_frames=None):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
@@ -181,7 +181,10 @@ class SlmRearrangementTask:
         self.motion_frames = int(motion_frames)
         self.phase_method, self.frame_mode = str(phase_method), str(frame_mode)
         self.max_camera_step = float(max_camera_step)
-        if self.phase_method not in {"iterative", "lpi"} or self.frame_mode not in {"fixed", "camera_step"}:
+        self.response_time_seconds = float(response_time_seconds)
+        if not np.isfinite(self.response_time_seconds) or self.response_time_seconds < 0:
+            raise ValueError("SLM response time must be finite and nonnegative")
+        if self.phase_method not in {"iterative", "lpi", "transport"} or self.frame_mode not in {"fixed", "camera_step"}:
             raise ValueError("Unknown phase method or frame policy")
         if not np.isfinite(self.max_camera_step) or self.max_camera_step <= 0:
             raise ValueError("Maximum camera displacement must be finite and positive")
@@ -243,7 +246,7 @@ class SlmRearrangementTask:
             return False
         if self._prepared is not None:
             if (self.phase_method != fresh.phase_method
-                    or self.intensity_tolerance != fresh.intensity_tolerance
+                    or (self.phase_method != "transport" and self.intensity_tolerance != fresh.intensity_tolerance)
                     or tuple(self.slm.shape_yx) != tuple(fresh.slm.shape_yx)
                     or self.science_context["pupil"] != fresh.science_context["pupil"]):
                 return False
@@ -276,13 +279,14 @@ class SlmRearrangementTask:
                 "exposure_seconds": self.exposure_seconds,
                 "motion_frames": self.motion_frames if self.frame_mode == "fixed" else None,
                 "phase_method": self.phase_method, "frame_mode": self.frame_mode,
+                "response_time_seconds": self.response_time_seconds if self.phase_method == "transport" else None,
                 "recording_frames": self.recording_frames,
                 "requested_motion_frames": self.motion_frames,
                 "max_camera_step": self.max_camera_step, "camera_step_unit": "sensor pixel",
                 "gpu_preparation_reused": self._gpu_reused,
                 "frame_rate_hz": self.frame_rate_hz,
                 "minimum_separation": self.minimum_separation,
-                "intensity_tolerance": self.intensity_tolerance,
+                "intensity_tolerance": self.intensity_tolerance if self.phase_method != "transport" else None,
                 "target_registration": {
                     "affine_target_xy_to_calibration_image_xy": self._target_to_calibration_xy.tolist(),
                     "basis": "Geometric registration; camera/SLM handedness is not independently measured",
@@ -491,7 +495,7 @@ class SlmRearrangementTask:
                         "pupil_phase_step_rms_rad", "discard_intensity_ratios", "field_projection_updates",
                         "frame_solve_ms", "frame_copy_ms", "frame_ready_ms",
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
-                        "actual_fields", "active_sites", "movement_fraction", "phase_center_yx",
+                        "actual_fields", "predicted_response_fields", "bridge_halfwidths", "active_sites", "movement_fraction", "phase_center_yx",
                         "desired_spectrum_coefficients", "target_synthesis_coefficients",
                         "endpoint_synthesis_coefficients", "endpoint_field", "endpoint_phase",
                         "source_field", "target_field", "target_requested_intensities",
@@ -574,6 +578,8 @@ class SlmRearrangementTask:
                  "discard_reference_limit", "discard_converged", "converged",
                  "noop", "fade_frames", "emitted_frame_count", "quality_evaluated",
                  "quality_scope", "quality_accepted", "phase_interpolation", "field_phase_reference",
+                 "response_fraction", "response_model", "predicted_field_basis",
+                 "bridge_halfwidth_limit", "profile_interpolation_absolute_error_bound",
                  "source_coefficient_basis", "target_coefficient_basis", "phase_locked_amplitude_updates",
                  "endpoint_support_intensity_ratio", "endpoint_iterations", "endpoint_balance_ms") if key in self._result}
             minimum = np.asarray(self._result["brightness_minimum_to_initial"])
@@ -767,7 +773,7 @@ class SlmRearrangementTask:
                     minimum_separation=self.minimum_separation,
                     support_tolerance=self.intensity_tolerance,
                     maximum_motion_frames=self.motion_frames if self.frame_mode == "fixed" else 16,
-                    endpoint_data={"source_phase": self.science_context["phase"]},
+                    endpoint_data={"source_phase_codes": phase_to_codes(self.science_context["phase"])},
                     stop_requested=context.cancel_requested)
             prepared = self._prepared
             self._timings["gpu_prepare"] = (perf_counter()-start)*1000
@@ -924,11 +930,13 @@ class SlmRearrangementTask:
                             motion_frames=self._frame_count, sampled=sampled,
                             support_tolerance=self.intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
+                            response_fraction=(-np.expm1(-1. / (self.frame_rate_hz * self.response_time_seconds))
+                                               if self.phase_method == "transport" and self.response_time_seconds > 0 else 1.),
                             stop_requested=stopped)
                         self._timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
                         for name, value in self._result["timing_ms"].items():
                             self._timings["compute_"+name] = float(value)
-                        if not self._result.get("quality_accepted", self._result["converged"]):
+                        if self.phase_method != "transport" and not self._result.get("quality_accepted", self._result["converged"]):
                             raise RuntimeError("The phase sequence did not pass its encoded-field quality checks; playback is stopped at its verified prefix. See the partial numeric report.")
                         if playback is not None:
                             self._playback = playback.result()
@@ -1016,7 +1024,7 @@ class SlmRearrangementTask:
             self._timings["pulse_elapsed"] = report.elapsed_seconds*1000
             self._timings["pulse_report_retrieval_delay"] = report.report_delay_seconds*1000
             self._timings["experiment_before_save"] = (perf_counter()-run_started)*1000
-            if self.phase_method == "lpi":
+            if self.phase_method in {"lpi", "transport"}:
                 diagnostics = rearrangement_diagnostics(prepared, self._result, stop_requested=context.cancel_requested)
                 self._timings["optical_diagnostics"] = float(diagnostics.pop("diagnostics_ms"))
                 self._result.update(diagnostics)
