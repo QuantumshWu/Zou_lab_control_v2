@@ -98,8 +98,8 @@ class PulseComponentView(QtWidgets.QWidget):
             ("digital", "digital_committed"), ("analog", "analog_committed"),
             ("binding", "binding_committed"), ("insert_period", "insert_period_requested"),
             ("insert_spacer", "insert_spacer_requested"), ("reorder_items", "reorder_items_requested"),
-            ("remove_period", "remove_period_requested"), ("bracket", "bracket_committed"),
-            ("bracket_add", "bracket_add_requested"), ("bracket_remove", "bracket_remove_requested"),
+            ("remove_items", "remove_items_requested"), ("bracket", "bracket_committed"),
+            ("bracket_add", "bracket_add_requested"),
             ("visible_ports", "visible_ports_committed"),
         ):
             getattr(schedule, signal).connect(lambda *args, a=action: self.edit_requested.emit(a, args))

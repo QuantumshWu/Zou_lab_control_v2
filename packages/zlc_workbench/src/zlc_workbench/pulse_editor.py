@@ -1386,14 +1386,23 @@ class PulseEditorPresenter:
                 self._component_context = next(c.component_id for c in candidate.components if c.component_id not in old)
                 self._apply(candidate)
             elif action == "group":
-                start, end, name = payload
                 if self.sequence is None:
                     raise ValueError("open a Pulse before grouping its periods")
-                ids = tuple(self.sequence.period_by_id)
-                first, last = ids.index(start), ids.index(end)
-                if first > last:
-                    raise ValueError("component end must not precede its start")
-                self._apply(group_component(self.sequence, ids[first:last + 1], str(name)))
+                selected = set(tuple(item) for item in payload)
+                if any(kind == "component" for kind, _key in selected):
+                    raise ValueError("ungroup existing components before making a new group")
+                ids = tuple(key for key in self.sequence.period_by_id if ("period", key) in selected)
+                if not ids:
+                    raise ValueError("select the periods to group; Shift-click adds or removes individual items")
+                name = _unique_id(tuple(c.name for c in self.sequence.components), "Component ")
+                before = {c.component_id for c in self.sequence.components}
+                candidate = group_component(self.sequence, ids, name)
+                created = next(c.component_id for c in candidate.components if c.component_id not in before)
+                included = {b.bracket_id for b in extract_subpulse(candidate, created).brackets}
+                if any(key.rpartition(":")[0] not in included for kind, key in selected if kind == "bracket"):
+                    raise ValueError("select the complete contents of each selected bracket; no unselected periods will be added")
+                self._apply(candidate)
+                self.view.focus_component_name(created)
             elif action in {"ungroup", "remove"}:
                 operation = ungroup_component if action == "ungroup" else remove_component
                 self._apply(operation(self.sequence, str(payload)))
@@ -1479,10 +1488,9 @@ class PulseEditorPresenter:
         view.insert_period_requested.connect(self._guarded(self.insert_period))
         view.insert_spacer_requested.connect(self._guarded(self.insert_spacer))
         view.reorder_items_requested.connect(self._guarded(self.reorder_items))
-        view.remove_period_requested.connect(self._guarded(self.remove_period))
+        view.remove_items_requested.connect(self._guarded(self.remove_items))
         view.bracket_committed.connect(self._guarded(self.set_bracket))
         view.bracket_add_requested.connect(self._guarded(self.add_bracket))
-        view.bracket_remove_requested.connect(self._guarded(self.remove_bracket))
         view.run_repeats_committed.connect(self._guarded(self.set_run_repeats))
         view.visible_ports_committed.connect(self._guarded(self.set_visible_ports))
         view.fill_port_requested.connect(self._guarded(self.fill_port))
@@ -1983,7 +1991,10 @@ class PulseEditorPresenter:
         self._apply(self._edited_candidate("reorder_items", (order,)))
 
     def remove_period(self, period_id: str) -> None:
-        self._apply(self._edited_candidate("remove_period", (period_id,)))
+        self.remove_items((("period", period_id),))
+
+    def remove_items(self, items: object) -> None:
+        self._apply(self._edited_candidate("remove_items", (tuple(items),)))
 
     def set_bracket(self, bracket_id: str, start: object, end: object, count: int) -> None:
         """Move one bracket's inclusive anchors, or recount it.
@@ -2000,7 +2011,7 @@ class PulseEditorPresenter:
         self._apply(self._edited_candidate("bracket_add", (start, end, count)))
 
     def remove_bracket(self, bracket_id: str) -> None:
-        self._apply(self._edited_candidate("bracket_remove", (bracket_id,)))
+        self.remove_items((("bracket", bracket_post_key(bracket_id, "start")),))
 
     def set_run_repeats(self, repeats: int) -> None:
         """Persist complete-Pulse runs per scan point; zero means infinite."""
@@ -5268,11 +5279,21 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
         return _reordered_sequence(sequence, order, {p.period_id: p for p in (*periods, added)})
     if action == "reorder_items":
         return _reordered_sequence(sequence, args[0])
-    if action == "remove_period":
-        key = str(args[0])
+    if action == "remove_items":
+        selected = tuple(args[0])
+        if not selected:
+            raise ValueError("select the timeline items to remove")
+        periods = {key for kind, key in selected if kind == "period"}
+        brackets = {key.rpartition(":")[0] for kind, key in selected if kind == "bracket"}
+        for kind, key in selected:
+            if kind == "component":
+                fragment = extract_subpulse(sequence, key)
+                periods.update(p.period_id for p in fragment.periods)
+                brackets.update(b.bracket_id for b in fragment.brackets)
+        retained = replace(sequence, brackets=tuple(b for b in sequence.brackets if b.bracket_id not in brackets))
         return _reordered_sequence(
-            sequence, tuple(item for item in _sequence_item_order(sequence) if item != ("period", key)),
-            {p.period_id: p for p in sequence.periods if p.period_id != key},
+            retained, tuple(item for item in _sequence_item_order(retained) if item[0] != "period" or item[1] not in periods),
+            {p.period_id: p for p in retained.periods if p.period_id not in periods},
         )
     if action in {"bracket", "bracket_add"}:
         if action == "bracket_add":
@@ -5286,8 +5307,6 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
             changed if b.bracket_id == key else b for b in sequence.brackets
         ))
         return replace(sequence, brackets=brackets)
-    if action == "bracket_remove":
-        return replace(sequence, brackets=tuple(b for b in sequence.brackets if b.bracket_id != str(args[0])))
     raise ValueError(f"unknown Pulse edit {action!r}")
 
 

@@ -68,10 +68,9 @@ class PulseEditorHandle(QtCore.QObject):
     insert_period_requested = QtCore.pyqtSignal(object)
     insert_spacer_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
-    remove_period_requested = QtCore.pyqtSignal(str)
+    remove_items_requested = QtCore.pyqtSignal(object)
     bracket_committed = QtCore.pyqtSignal(str, object, object, int)
     bracket_add_requested = QtCore.pyqtSignal(object, object, int)
-    bracket_remove_requested = QtCore.pyqtSignal(str)
     run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
     fill_port_requested = QtCore.pyqtSignal(str)
@@ -125,8 +124,8 @@ class PulseEditorHandle(QtCore.QObject):
             "period_name_committed", "duration_committed", "digital_committed",
             "analog_committed", "delay_committed", "binding_committed",
             "insert_period_requested", "insert_spacer_requested", "reorder_items_requested",
-            "remove_period_requested", "bracket_committed",
-            "bracket_add_requested", "bracket_remove_requested",
+            "remove_items_requested", "bracket_committed",
+            "bracket_add_requested",
             "run_repeats_committed",
             "visible_ports_committed", "fill_port_requested", "clear_port_requested",
             "feedback_requested", "connection_requested", "stop_requested",
@@ -280,6 +279,9 @@ class PulseEditorHandle(QtCore.QObject):
             schedule, contexts=contexts, context_id=context_id, path=path,
             dirty=dirty, bindings=bindings, config_names=config_names, busy=busy,
         )
+
+    def focus_component_name(self, component_id: str) -> None:
+        self._view.schedule_view.focus_component_name(component_id)
 
     def confirm_component_discard(self) -> bool:
         return self._view.confirm("Unsaved Subpulse", "Discard unsaved Subpulse edits?", "Discard", "Cancel")

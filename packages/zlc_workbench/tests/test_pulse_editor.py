@@ -300,8 +300,8 @@ class _EditorView:
         "period_name_committed", "duration_committed", "digital_committed",
         "analog_committed", "delay_committed", "binding_committed",
         "insert_period_requested", "insert_spacer_requested", "reorder_items_requested",
-        "remove_period_requested", "bracket_committed",
-        "bracket_add_requested", "bracket_remove_requested",
+        "remove_items_requested", "bracket_committed",
+        "bracket_add_requested",
         "run_repeats_committed",
         "visible_ports_committed", "fill_port_requested", "clear_port_requested",
         "feedback_requested", "connection_requested", "device_label_changed", "fire_requested",
@@ -451,6 +451,9 @@ class _EditorView:
 
     def confirm_component_discard(self) -> bool:
         return getattr(self, "discard_component_answer", True)
+
+    def focus_component_name(self, component_id: str) -> None:
+        self.focused_component_name = component_id
 
     # -- the preview -----------------------------------------------------
 
@@ -624,10 +627,10 @@ def test_an_analog_level_outside_the_dac_range_is_refused(presenter, sequence) -
 
 def test_removing_the_last_period_is_refused_with_a_reason(presenter) -> None:
     for period in list(presenter.sequence.periods)[:-1]:
-        presenter.view.remove_period_requested.emit(period.period_id)
+        presenter.view.remove_items_requested.emit((("period", period.period_id),))
     remaining = presenter.sequence.periods[0].period_id
 
-    presenter.view.remove_period_requested.emit(remaining)
+    presenter.view.remove_items_requested.emit((("period", remaining),))
 
     assert len(presenter.sequence.periods) == 1
     assert any("at least one period" in text for text in presenter.view.warnings)
@@ -1307,7 +1310,22 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         duration_field = presenter.sequence.config_bindings[0].field_id
         view.config_binding_committed.emit(duration_field, "imaging_time")
         baseline = compile_sequence(presenter.sequence, *presenter._compiler_target())
-        view.component_action_requested.emit("group", (first.period_id, last.period_id, "MOT"))
+        parent = presenter.sequence
+        view.component_action_requested.emit("group", (
+            ("period", first.period_id), ("period", sequence.periods[-1].period_id),
+        ))
+        assert presenter.sequence is parent
+        assert view.warnings
+        view.warnings.clear()
+        bracket, = presenter.sequence.brackets
+        view.component_action_requested.emit("group", (
+            ("bracket", bracket.bracket_id + ":start"), ("period", first.period_id),
+            ("period", last.period_id), ("bracket", bracket.bracket_id + ":end"),
+        ))
+        original, = presenter.sequence.components
+        assert original.name == "Component 1"
+        assert view.focused_component_name == original.component_id
+        view.component_action_requested.emit("rename", (original.component_id, "MOT"))
         original, = presenter.sequence.components
         assert original.period_ids == (first.period_id, last.period_id)
         assert compile_sequence(presenter.sequence, *presenter._compiler_target()) == baseline
@@ -1377,7 +1395,7 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert outer in presenter.sequence.brackets
         assert presenter.sequence.api_bindings == (api,)
         for key in (members[0], members[-1]):
-            view.component_edit_requested.emit("remove_period", (key,))
+            view.component_edit_requested.emit("remove_items", ((("period", key),),))
         assert presenter.sequence.components == topology.components
         assert presenter.sequence.periods == topology.periods
         view.component_edit_requested.emit("bracket", (inner.bracket_id, first.period_id, last.period_id, 4))
@@ -1414,6 +1432,12 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert presenter.sequence == saved
         assert compile_sequence(presenter.sequence, *presenter._compiler_target()) == compiled
         assert len(presenter.sequence.components) == 3
+        removed_ids = set(copies[0].period_ids + copies[1].period_ids)
+        kept_periods = tuple(period for period in saved.periods if period.period_id not in removed_ids)
+        view.remove_items_requested.emit(tuple(("component", copy.component_id) for copy in copies))
+        assert presenter.sequence.periods == kept_periods
+        assert tuple(component.component_id for component in presenter.sequence.components) == (original.component_id,)
+        assert outer in presenter.sequence.brackets
         assert not view.warnings, view.warnings
     finally:
         presenter.close()

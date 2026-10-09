@@ -18,7 +18,7 @@ from zlc_ui.fluent import (
     retire_widget,
     ACCENT, BG, GREEN, GREY, ORANGE, RED, TEXT, YELLOW, FluentButton, FluentCheckBox,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
-    FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes, FluentDialogWindow,
+    FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingsPopupAnchor,
     show_fluent_popup_for_anchor, signals_blocked,
 )
@@ -40,6 +40,7 @@ from .models import (
     PeriodVM,
     PortRowVM,
     BracketVM,
+    bracket_gap_bounds,
     bracket_post_key,
     ScheduleVM,
 )
@@ -822,27 +823,39 @@ class ComponentCard(FluentGroupBox):
 
     action_requested = QtCore.pyqtSignal(str, object)
 
-    def __init__(self, component: ComponentVM, parent=None) -> None:
-        super().__init__("Component", parent, title_color=ACCENT)
+    def __init__(self, component: ComponentVM, parent=None, *, mode: str = "closed") -> None:
+        super().__init__("Component" if mode == "closed" else "Start" if mode == "start" else "End", parent, title_color=ACCENT)
         self.component_id = component.component_id
-        self.setFixedWidth(period_card_width())
+        self.mode = mode
+        self.key = ("component" if mode == "closed" else f"component-{mode}", component.component_id)
+        self._component = component
+        self.setFixedWidth(period_card_width() if mode == "closed" else spacer_card_width())
+        self.set_surface(edge=ACCENT)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(px(7), px(7), px(7), px(7))
         column.setSpacing(px(4, minimum=3))
         name_row = QtWidgets.QHBoxLayout()
         name_row.setSpacing(px(4, minimum=3))
-        self.name_label = ElidedLabel("")
-        font = self.name_label.font()
-        font.setBold(True)
-        self.name_label.setFont(font)
-        name_row.addWidget(self.name_label, 1)
+        self.name_edit = FluentLineEdit(component.name)
+        self.name_edit.setMinimumWidth(0)
+        self.name_edit.setPlaceholderText("Name")
+        self.name_edit.editingFinished.connect(self._commit_name)
+        self.end_label = ElidedLabel(component.name)
+        name_row.addWidget(self.end_label if mode == "end" else self.name_edit, 1)
+        if mode == "end":
+            self.name_edit.setParent(self)
+            self.name_edit.hide()
+        else:
+            self.end_label.setParent(self)
+            self.end_label.hide()
         self.more_button = FluentButton("⋯", color=GREY)
         self.more_button.setFixedSize(row_height(), row_height())
         self.more_button.setAccessibleName("Component actions")
-        self.more_button.setToolTip("Rename, export or ungroup this component")
+        self.more_button.setToolTip("Export or ungroup this component")
         self.more_button.clicked.connect(self._toggle_actions)
-        name_row.addWidget(self.more_button)
+        if mode == "closed":
+            name_row.addWidget(self.more_button)
         column.addLayout(name_row)
         self.summary_label = FluentLabel("")
         column.addWidget(self.summary_label)
@@ -851,15 +864,33 @@ class ComponentCard(FluentGroupBox):
         self.edit_button = FluentButton("Edit", color=GREY)
         self.edit_button.setToolTip("Open this instance in the Component tab")
         self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
-        actions = QtWidgets.QHBoxLayout()
+        actions = QtWidgets.QHBoxLayout() if mode == "closed" else QtWidgets.QVBoxLayout()
         actions.setSpacing(px(4, minimum=3))
         actions.addWidget(self.expand_button)
-        actions.addWidget(self.edit_button)
-        actions.addStretch(1)
+        if mode != "end":
+            actions.addWidget(self.edit_button)
+        else:
+            self.edit_button.setParent(self)
+            self.edit_button.hide()
+        if mode == "start":
+            actions.addWidget(self.more_button)
+        elif mode == "end":
+            self.more_button.setParent(self)
+            self.more_button.hide()
         column.addLayout(actions)
         column.addStretch(1)
+        if mode != "closed":
+            self.setFixedWidth(max(spacer_card_width(), self.expand_button.sizeHint().width() + 2 * px(7)))
         self._actions_popup = None
-        self.set_component(component, expanded=False)
+        self.set_component(component)
+
+    def _commit_name(self) -> None:
+        name = self.name_edit.text().strip()
+        if name != self._component.name:
+            self.action_requested.emit("rename", (self.component_id, name))
+            # The synchronous authoring owner either projected the accepted
+            # name or retained this VM. Never leave a refused draft on the card.
+            self.name_edit.setText(self._component.name)
 
     def _toggle_actions(self) -> None:
         if self._actions_popup is None:
@@ -868,7 +899,7 @@ class ComponentCard(FluentGroupBox):
             layout = QtWidgets.QVBoxLayout(self._actions_popup)
             layout.setContentsMargins(px(7), px(7), px(7), px(7))
             layout.setSpacing(px(4, minimum=3))
-            for action, text in (("rename", "Rename"), ("export", "Export Subpulse"), ("ungroup", "Ungroup")):
+            for action, text in (("export", "Export Subpulse"), ("ungroup", "Ungroup")):
                 button = FluentButton(text, color=GREY)
                 button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
                 button.clicked.connect(lambda _checked=False, a=action: self._choose_action(a))
@@ -886,28 +917,28 @@ class ComponentCard(FluentGroupBox):
         self._actions_popup.hide()
         self.action_requested.emit(action, self.component_id)
 
-    def set_component(self, component: ComponentVM, *, expanded: bool) -> None:
-        self.name_label.setText(component.name)
-        self.name_label.setToolTip(component.name)
+    def set_component(self, component: ComponentVM) -> None:
+        self._component = component
+        self.name_edit.setText(component.name)
+        self.name_edit.setToolTip(component.name)
+        self.end_label.setText(component.name)
+        self.end_label.setToolTip(component.name)
         periods = len(component.period_ids) - component.spacer_count
         brackets = component.bracket_count
         counts = [f"{periods} period{'s' if periods != 1 else ''}"]
         if component.spacer_count:
             counts.append(f"{component.spacer_count} spacer{'s' if component.spacer_count != 1 else ''}")
         counts.append(f"{brackets} bracket{'s' if brackets != 1 else ''}")
-        self.summary_label.setText("\n".join((component.total_text, *counts)))
-        self.expand_button.setText("Collapse" if expanded else "Expand")
+        self.summary_label.setText("\n".join((component.total_text, *counts)) if self.mode == "closed" else component.total_text)
+        self.summary_label.setVisible(self.mode != "end")
+        self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
 
 
 class PulseDragContainer(QtWidgets.QWidget):
     """Horizontal card strip whose drag releases are proposal-only."""
 
-    period_clicked = QtCore.pyqtSignal(str)
-    component_clicked = QtCore.pyqtSignal(str)
-    #: The clicked post's key (``"<bracket id>:start"`` / ``":end"``).
-    bracket_clicked = QtCore.pyqtSignal(str)
-    gap_clicked = QtCore.pyqtSignal(int)
     reorder_items_requested = QtCore.pyqtSignal(object)
+    remove_items_requested = QtCore.pyqtSignal(object)
     #: (bracket id, count) from that bracket's end post.
     bracket_count_committed = QtCore.pyqtSignal(str, int)
 
@@ -924,22 +955,16 @@ class PulseDragContainer(QtWidgets.QWidget):
         self._cards: tuple[PeriodCard, ...] = ()
         self._components: tuple[ComponentCard, ...] = ()
         self._item_blocks: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
-        self._expanded_component: str | None = None
         self._posts: tuple["BracketPost", ...] = ()
-        self._pressed: tuple[tuple[str, str], QtCore.QPoint] | None = None
+        self._pressed: tuple[tuple[str, str], QtCore.QPoint, bool] | None = None
         self._dragging = False
         # The insertion caret: a rounded accent bar the height of the cards,
         # centred in the gap it marks.
         self._indicator = QtWidgets.QFrame(self)
         self._indicator_width = 0
         self._indicator.hide()
-        self._picked_on_press = False
-        # WHERE the next Add lands and WHICH period Remove takes: a card, a gap,
-        # or neither.  The two are mutually exclusive because they answer the
-        # same question, and clicking the current one again clears it.
-        self._selected_card: str | None = None
-        self._selected_post: str | None = None
-        self._selected_gap: int | None = None
+        self._selection: tuple[tuple[str, str], ...] | int | None = None
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
     def set_items(
         self,
@@ -950,15 +975,13 @@ class PulseDragContainer(QtWidgets.QWidget):
         minimum_bracket: int = 1,
         components: tuple[ComponentCard, ...] = (),
         item_blocks: dict[tuple[str, str], tuple[tuple[str, str], ...]] | None = None,
-        expanded_component: str | None = None,
     ) -> None:
         previous = self.items()
         self._cards = tuple(cards)
         self._components = tuple(components)
         self._item_blocks = item_blocks or {}
-        self._expanded_component = expanded_component
         widgets = {("period", card.period_id): card for card in cards}
-        widgets.update({("component", card.component_id): card for card in components})
+        widgets.update({card.key: card for card in components})
         # One start and one end post per bracket, kept across re-projections
         # by their key so a post being dragged or edited is the same widget.
         existing = {post.key: post for post in self._posts}
@@ -1003,27 +1026,16 @@ class PulseDragContainer(QtWidgets.QWidget):
         if desired == previous:
             return
         self._pressed = None
-        # Only a changed timeline can retire the currently selected item/gap.
-        card = self._selected_card
-        if card is not None and not any(self._item_key(item)[1] == card for item in self._cards + self._components):
-            card = None
-        post = self._selected_post
-        if post is not None and not any(item.key == post for item in self._posts):
-            post = None
-        gap = self._selected_gap
-        if gap is not None and gap > len(order):
-            gap = None
-        if card is not None:
-            self.show_selection(card=card)
-        elif post is not None:
-            self.show_selection(post=post)
-        else:
-            self.show_selection(gap=gap)
+        gap = self.selected_gap
+        self.show_selection(
+            tuple(key for key in self.selected_items() if key in order),
+            gap=gap if gap is not None and gap <= len(order) else None,
+        )
 
     def event(self, event):
         handled = super().event(event)
-        if event.type() == QtCore.QEvent.LayoutRequest and self._selected_gap is not None:
-            self._show_indicator_at_gap(self._selected_gap)
+        if event.type() == QtCore.QEvent.LayoutRequest and self.selected_gap is not None:
+            self._show_indicator_at_gap(self.selected_gap)
         return handled
 
     #: Widgets that need their own clicks: typing in them, ticking them and
@@ -1048,22 +1060,18 @@ class PulseDragContainer(QtWidgets.QWidget):
 
         item.installEventFilter(self)
         for child in item.findChildren(QtWidgets.QWidget):
-            ancestor = child
-            while ancestor is not item and not isinstance(ancestor, self._INTERACTIVE):
-                ancestor = ancestor.parentWidget()
-            if ancestor is item:
-                child.installEventFilter(self)
+            child.installEventFilter(self)
 
     @staticmethod
     def _item_key(item: QtWidgets.QWidget) -> tuple[str, str]:
         if isinstance(item, ComponentCard):
-            return "component", item.component_id
+            return item.key
         return ("period", item.period_id) if isinstance(item, PeriodCard) else ("bracket", item.key)
 
     def flat_order(self, order=None) -> tuple[tuple[str, str], ...]:
         keys = tuple(self._item_key(item) for item in self.items()) if order is None else order
         return tuple(item for key in keys for item in (
-            () if key == ("component", self._expanded_component)
+            () if key[0] in ("component-start", "component-end")
             else self._item_blocks.get(key, (key,))
         ))
 
@@ -1081,54 +1089,60 @@ class PulseDragContainer(QtWidgets.QWidget):
         return self._cards
 
     # ------------------------------------------------------- where edits land
-    def selection(self) -> tuple[str | None, str | None, int | None]:
-        """(period id, bracket post key, gap position).  At most one is set."""
+    def selected_items(self) -> tuple[tuple[str, str], ...]:
+        """Exactly the selected visible items, in timeline order."""
+        return self._selection if isinstance(self._selection, tuple) else ()
 
-        return self._selected_card, self._selected_post, self._selected_gap
+    @property
+    def selected_gap(self) -> int | None:
+        return self._selection if isinstance(self._selection, int) else None
 
-    def show_selection(
-        self,
-        *,
-        card: str | None = None,
-        post: str | None = None,
-        gap: int | None = None,
-    ) -> None:
-        """Mark the period, the bracket post, or the gap an edit will act on.
+    def selection_payload(self) -> tuple[tuple[str, str], ...]:
+        """Keep component identity instead of silently promoting its contents."""
+        selected = self.selected_items()
+        components = {key for kind, key in selected if kind.startswith("component")}
+        covered = {item for key in components for item in self._item_blocks.get(("component", key), ())}
+        result = []
+        for kind, key in selected:
+            item = ("component", key) if kind.startswith("component") else (kind, key)
+            if item not in covered and item not in result:
+                result.append(item)
+        return tuple(result)
 
-        A post is filled exactly as a card is, by this same call: it is a
-        FluentGroupBox too, so the mechanism has been there since the day it
-        was written and simply never reached.  Clicking a card drew a border
-        and clicking a post drew nothing, which made the two look like
-        different kinds of thing when they are the same kind of thing --
-        something you pick, and then drag if you want to.
+    def show_selection(self, items=(), *, gap: int | None = None) -> None:
+        if gap is not None and items:
+            raise ValueError("select timeline items or a gap, not both")
+        if gap is not None:
+            self._selection = int(gap)
+        else:
+            chosen = set(items)
+            self._selection = tuple(self._item_key(item) for item in self.items() if self._item_key(item) in chosen)
+        self._paint_selection(self.selected_items())
 
-        The fill goes on the widget's own body through
-        FluentGroupBox.set_selected; a stylesheet set here would cascade
-        into everything inside it.
-        """
-
-        chosen = tuple(
-            name
-            for name, value in (("card", card), ("post", post), ("gap", gap))
-            if value is not None
-        )
-        if len(chosen) > 1:
-            raise ValueError(
-                f"only one of these can be selected: {', '.join(chosen)}"
-            )
-        self._selected_card = None if card is None else str(card)
-        self._selected_post = None if post is None else str(post)
-        self._selected_gap = None if gap is None else int(gap)
-        for widget in self._cards:
-            widget.set_selected(widget.period_id == self._selected_card)
-        for widget in self._components:
-            widget.set_selected(widget.component_id == self._selected_card)
-        for widget in self._posts:
-            widget.set_selected(widget.key == self._selected_post)
-        if self._selected_gap is None:
+    def _paint_selection(self, selected) -> None:
+        chosen = set(selected)
+        for kind, component_id in tuple(chosen):
+            if kind in ("component-start", "component-end"):
+                chosen.update(self._item_blocks[("component", component_id)])
+                chosen.update((("component-start", component_id), ("component-end", component_id)))
+        for widget in self.items():
+            key = self._item_key(widget)
+            selected_here = key in chosen
+            if key[0] in ("component-start", "component-end"):
+                block = self._item_blocks[("component", key[1])]
+                selected_here = selected_here or bool(block) and set(block).issubset(chosen)
+            widget.set_selected(selected_here)
+        if self.selected_gap is None:
             self._indicator.hide()
         else:
-            self._show_indicator_at_gap(self._selected_gap)
+            self._show_indicator_at_gap(self.selected_gap)
+
+    def _clicked(self, key: tuple[str, str], *, append: bool) -> None:
+        current = self.selected_items()
+        if append:
+            self.show_selection(tuple(item for item in current if item != key) if key in current else (*current, key))
+        else:
+            self.show_selection(()) if current == (key,) else self.show_selection((key,))
 
     def clear_selection(self) -> None:
         """Forget it.  Anything that changes the period LIST invalidates it."""
@@ -1192,7 +1206,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         could only ever append: the operator had no way to say "here".
         """
 
-        if event.button() == QtCore.Qt.LeftButton and not any(
+        if event.button() == QtCore.Qt.LeftButton and not event.modifiers() & QtCore.Qt.ShiftModifier and not any(
             widget.geometry().contains(event.pos())
             for widget in self._cards + self._posts + self._components
         ):
@@ -1201,10 +1215,20 @@ class PulseDragContainer(QtWidgets.QWidget):
             # them is a gap.  Cards were excluded and posts were not, so
             # clicking a post picked the gap underneath it -- the click landed
             # somewhere the operator had not clicked.
-            self.gap_clicked.emit(self._gap_at(event.pos().x()))
+            gap = self._gap_at(event.pos().x())
+            self.show_selection(gap=None if self.selected_gap == gap else gap)
         super().mouseReleaseEvent(event)
 
     ITEM_MIME = "application/x-zlc-pulse-item"
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+            selected = self.selection_payload()
+            if selected:
+                self.remove_items_requested.emit(selected)
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def dragEnterEvent(self, event):  # noqa: N802 - Qt name
         if event.mimeData().hasFormat(self.ITEM_MIME):
@@ -1213,7 +1237,7 @@ class PulseDragContainer(QtWidgets.QWidget):
             super().dragEnterEvent(event)
 
     def _proposal_at(self, data: QtCore.QMimeData, gap: int) -> object | None:
-        """Move one visible item; never mutate the accepted document locally."""
+        """Move the exact selection as one proposal; the document still owns it."""
         if not data.hasFormat(self.ITEM_MIME):
             return None
         try:
@@ -1223,21 +1247,27 @@ class PulseDragContainer(QtWidgets.QWidget):
         order = [self._item_key(item) for item in self.items()]
         if key not in order or not 0 <= gap <= len(order):
             return None
-        here = order.index(key)
-        count = 1 + len(self._item_blocks[key]) if key == ("component", self._expanded_component) else 1
-        if here <= gap <= here + count:
+        moving = self._drag_items(key)
+        destination = gap - sum(item in moving for item in order[:gap])
+        remaining = [item for item in order if item not in moving]
+        proposed = remaining[:destination] + list(moving) + remaining[destination:]
+        if proposed == order:
             return None
-        moving = order[here:here + count]
-        del order[here:here + count]
-        destination = gap - (count if here < gap else 0)
-        order[destination:destination] = moving
         # Empty brackets remain editable; only crossing a post's own partner or
         # making two brackets overlap without one inside the other is refused
         # while dragging.  Execution validates the content.
-        flat_order = self.flat_order(order)
+        flat_order = self.flat_order(proposed)
         if bracket_spans_of(flat_order) is None:
             return None
         return flat_order
+
+    def _drag_items(self, grabbed) -> tuple[tuple[str, str], ...]:
+        chosen = set(self.selected_items()) if grabbed in self.selected_items() else {grabbed}
+        for (_kind, component_id), block in self._item_blocks.items():
+            caps = (("component-start", component_id), ("component-end", component_id))
+            if any(cap in chosen for cap in caps) or block and set(block).issubset(chosen):
+                chosen.update((*caps, *block))
+        return tuple(self._item_key(item) for item in self.items() if self._item_key(item) in chosen)
 
     def dragMoveEvent(self, event):  # noqa: N802 - Qt name
         """The marker and drop consume exactly the same ordering proposal."""
@@ -1276,12 +1306,7 @@ class PulseDragContainer(QtWidgets.QWidget):
 
     def _restore_selection(self) -> None:
         """Put back whatever was picked before the drag moved the marker."""
-
-        self.show_selection(
-            card=self._selected_card,
-            post=self._selected_post,
-            gap=self._selected_gap,
-        )
+        self._paint_selection(self.selected_items())
 
     def _begin_drag(self, key: tuple[str, str]) -> None:
         item = next((item for item in self.items() if self._item_key(item) == key), None)
@@ -1302,43 +1327,37 @@ class PulseDragContainer(QtWidgets.QWidget):
         if item is None:
             return super().eventFilter(obj, event)
         key = self._item_key(item)
+        mouse_types = (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseMove, QtCore.QEvent.MouseButtonRelease)
+        if event.type() not in mouse_types:
+            return super().eventFilter(obj, event)
+        interactive = obj
+        while interactive is not item and not isinstance(interactive, self._INTERACTIVE):
+            interactive = interactive.parentWidget()
+        shift = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+        # Shift selects the containing item even over an editor or a checkbox.
+        # Normal editing is left completely to that control.
+        if interactive is not item and not shift and self._pressed is None:
+            return super().eventFilter(obj, event)
         if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-            # All descendants use one global frame; propagation through a
-            # label and its card must not turn a stationary click into drag.
-            self._pressed = (key, event.globalPos())
+            self._pressed = (key, event.globalPos(), shift)
             self._dragging = False
-            # The press already LOOKS like a pick: the one under the button
-            # fills, the rest empty, so what a drag is about to lift is the
-            # one lit.  Only the look changes here.  The pick itself is made
-            # by the click (the release, through the view's toggle) or by
-            # the drag's first movement, so that a press on the picked one
-            # still reads as the click that clears it.
-            current = self._selected_card if key[0] != "bracket" else self._selected_post
-            self._picked_on_press = current != key[1]
-            if self._picked_on_press:
-                for widget in self.items():
-                    widget.set_selected(widget is item)
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+            if not shift and key not in self.selected_items():
+                self._paint_selection((key,))
                 self._indicator.hide()
+            return True
         elif event.type() == QtCore.QEvent.MouseMove and self._pressed is not None:
             if not event.buttons() & QtCore.Qt.LeftButton:
-                # The button came up somewhere this filter did not see.
                 self._pressed = None
-                self._picked_on_press = False
                 self._restore_selection()
             elif not self._dragging and (
                 event.globalPos() - self._pressed[1]
             ).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
-                moving = self._pressed[0]
+                moving, _position, append = self._pressed
                 self._pressed = None
-                # Lifting it picks it: the drop restores this selection, and
-                # a reorder keeps a selected item that still exists, so the
-                # one that was dragged is the one lit afterwards.
-                if self._picked_on_press:
-                    if moving[0] != "bracket":
-                        self.show_selection(card=moving[1])
-                    else:
-                        self.show_selection(post=moving[1])
-                self._picked_on_press = False
+                if moving not in self.selected_items():
+                    self.show_selection((*self.selected_items(), moving) if append else (moving,))
+                self.show_selection(self._drag_items(moving))
                 self._dragging = True
                 try:
                     self._begin_drag(moving)
@@ -1346,18 +1365,15 @@ class PulseDragContainer(QtWidgets.QWidget):
                     self._dragging = False
                     self._restore_selection()
                 return True
+            return True
         elif event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
             pressed = self._pressed
             self._pressed = None
-            self._picked_on_press = False
-            # A press and release that never moved is a CLICK, which selects
-            # (or deselects, if it was the selected one).  A press that moved
-            # became a drag, whose selection was restored at the drop.
             if not self._dragging and pressed is not None and pressed[0] == key:
-                signal = {"period": self.period_clicked, "component": self.component_clicked, "bracket": self.bracket_clicked}[key[0]]
-                signal.emit(key[1])
+                self._clicked(key, append=pressed[2])
             else:
                 self._restore_selection()
+            return pressed is not None or shift
         return super().eventFilter(obj, event)
 
 
@@ -1374,12 +1390,11 @@ class PulseScheduleView(QtWidgets.QWidget):
     insert_period_requested = QtCore.pyqtSignal(object)
     insert_spacer_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
-    remove_period_requested = QtCore.pyqtSignal(str)
+    remove_items_requested = QtCore.pyqtSignal(object)
     #: (bracket id, start period id, end period id, count): move or recount one bracket.
     bracket_committed = QtCore.pyqtSignal(str, object, object, int)
     #: (start period id, end period id, count): a new bracket; the presenter names it.
     bracket_add_requested = QtCore.pyqtSignal(object, object, int)
-    bracket_remove_requested = QtCore.pyqtSignal(str)
     run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
     fill_port_requested = QtCore.pyqtSignal(str)
@@ -1401,8 +1416,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._version = (-1, -1)
         self._capabilities = {"can_sync": True, "can_hold": True, "can_step": True}
         self._cards: dict[str, PeriodCard] = {}
-        self._component_cards: dict[str, ComponentCard] = {}
-        self._expanded_component: str | None = None
+        self._component_cards: dict[tuple[str, str], ComponentCard] = {}
+        self._expanded_components: set[str] = set()
         # Set by Add; the next schedule that brings exactly one new card is
         # what that Add produced, and the new card is picked.
         self._expect_new_card = False
@@ -1486,10 +1501,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         )
         self.timeline_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.drag_container = PulseDragContainer()
-        self.drag_container.period_clicked.connect(self._period_clicked)
-        self.drag_container.component_clicked.connect(self._period_clicked)
-        self.drag_container.bracket_clicked.connect(self._bracket_clicked)
-        self.drag_container.gap_clicked.connect(self._gap_clicked)
         self.timeline_scroll.setWidget(self.drag_container)
         dataset_frame.add_pane(self.timeline_scroll, stretch=1)
         # THE PAGE OWNS ITS SURFACE.  Preview, Scan and Target each open with
@@ -1668,6 +1679,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.config_requested.connect(self.config_requested)
         self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
         self.drag_container.reorder_items_requested.connect(self.reorder_items_requested)
+        self.drag_container.remove_items_requested.connect(self.remove_items_requested)
         self.drag_container.bracket_count_committed.connect(self._commit_bracket_count)
         self.run_button.clicked.connect(self.run_requested)
         self.stop_button.clicked.connect(self.stop_requested)
@@ -1676,7 +1688,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.load_button.clicked.connect(self.load_requested)
         self.add_button.clicked.connect(lambda: self._request_insert("insert_period"))
         self.spacer_button.clicked.connect(lambda: self._request_insert("insert_spacer"))
-        self.remove_button.clicked.connect(self._request_remove_period)
+        self.remove_button.clicked.connect(self._request_remove_items)
         self.bracket_button.clicked.connect(self._request_add_bracket)
         self.collapse_button.clicked.connect(self._toggle_left_panels)
         self.group_button.clicked.connect(self._request_group)
@@ -1750,10 +1762,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.set_scan_summary(vm.scan_summary_text)
         previous = set(self._cards)
         desired: dict[str, PeriodCard] = {}
-        if self._expanded_component not in {item.component_id for item in vm.components}:
-            self._expanded_component = None
-        grouped = {period_id for component in vm.components if component.component_id != self._expanded_component for period_id in component.period_ids}
-        internal_brackets = {key for component in vm.components if component.component_id != self._expanded_component for key in component.bracket_ids}
+        self._expanded_components.intersection_update(item.component_id for item in vm.components)
+        grouped = {period_id for component in vm.components if component.component_id not in self._expanded_components for period_id in component.period_ids}
+        internal_brackets = {key for component in vm.components if component.component_id not in self._expanded_components for key in component.bracket_ids}
         authored = [period for period in vm.periods if period.kind != PERIOD_KIND_SPACER]
         authored_indices = {period.period_id: index for index, period in enumerate(authored)}
         flat_items = vm.item_order
@@ -1785,12 +1796,15 @@ class PulseScheduleView(QtWidgets.QWidget):
         item_blocks = {}
         item_owner = {}
         for component in vm.components:
-            card = self._component_cards.get(component.component_id)
-            if card is None:
-                card = ComponentCard(component)
-                card.action_requested.connect(self._component_action)
-            card.set_component(component, expanded=component.component_id == self._expanded_component)
-            component_cards[component.component_id] = card
+            modes = ("start", "end") if component.component_id in self._expanded_components else ("closed",)
+            for mode in modes:
+                card_key = ("component" if mode == "closed" else f"component-{mode}", component.component_id)
+                card = self._component_cards.get(card_key)
+                if card is None:
+                    card = ComponentCard(component, mode=mode)
+                    card.action_requested.connect(self._component_action)
+                card.set_component(component)
+                component_cards[card_key] = card
             key = ("component", component.component_id)
             members = set(component.period_ids)
             bracket_ids = set(component.bracket_ids)
@@ -1806,11 +1820,14 @@ class PulseScheduleView(QtWidgets.QWidget):
         for item in flat_items:
             key = item_owner.get(item, item)
             if key[0] == "component":
+                expanded = key[1] in self._expanded_components
                 if key not in seen:
-                    order.append(key)
+                    order.append(("component-start", key[1]) if expanded else key)
                     seen.add(key)
-                if key[1] == self._expanded_component:
+                if expanded:
                     order.append(item)
+                    if item == item_blocks[key][-1]:
+                        order.append(("component-end", key[1]))
             else:
                 order.append(key)
         self.drag_container.set_items(
@@ -1820,11 +1837,10 @@ class PulseScheduleView(QtWidgets.QWidget):
             minimum_bracket=vm.min_bracket_count,
             components=tuple(component_cards.values()),
             item_blocks=item_blocks,
-            expanded_component=self._expanded_component,
         )
         arrived = set(desired) - previous
         if self._expect_new_card and len(arrived) == 1:
-            self.drag_container.show_selection(card=next(iter(arrived)))
+            self.drag_container.show_selection((("period", next(iter(arrived))),))
         self._expect_new_card = False
         if not being_edited(self.channel_panel.run_repeats_spin):
             with signals_blocked(self.channel_panel.run_repeats_spin):
@@ -1845,64 +1861,35 @@ class PulseScheduleView(QtWidgets.QWidget):
         card.feedback_requested.connect(self.feedback_requested)
 
     def _component_action(self, action: str, component_id: object) -> None:
-        key = str(component_id)
         if action == "expand":
-            self._expanded_component = None if self._expanded_component == key else key
+            key = str(component_id)
+            opening = key not in self._expanded_components
+            if opening:
+                self._expanded_components.add(key)
+            else:
+                self._expanded_components.remove(key)
             if self._schedule is not None:
                 self._reconcile(self._schedule)
-        elif action == "rename":
-            self._request_group(rename=key)
+            self.drag_container.show_selection(
+                self.drag_container._item_blocks[("component", key)] if opening else (("component", key),)
+            )
         else:
-            self.component_action_requested.emit(action, key)
+            self.component_action_requested.emit(action, component_id)
 
-    def _request_group(self, _checked=False, *, rename: str | None = None) -> None:
-        vm = self._schedule
-        if vm is None or not vm.periods:
-            return
-        component = next((item for item in vm.components if item.component_id == rename), None)
-        body = FluentFrame(bordered=False)
-        layout = QtWidgets.QVBoxLayout(body)
-        layout.setContentsMargins(px(18), px(12), px(18), px(18))
-        layout.setSpacing(px(10))
-        layout.addWidget(FluentLabel("Component name"))
-        name = FluentLineEdit(component.name if component else "")
-        name.setObjectName("componentName")
-        name.setPlaceholderText("e.g. MOT loading")
-        layout.addWidget(name)
-        starts, ends = FluentComboBox(), FluentComboBox()
-        starts.setObjectName("componentStart")
-        ends.setObjectName("componentEnd")
-        if component is None:
-            grouped = {key for item in vm.components for key in item.period_ids}
-            for period in vm.periods:
-                if period.period_id not in grouped:
-                    starts.addItem(period.name, period.period_id)
-                    ends.addItem(period.name, period.period_id)
-            ends.setCurrentIndex(ends.count() - 1)
-            layout.addWidget(FluentLabel("From period"))
-            layout.addWidget(starts)
-            layout.addWidget(FluentLabel("Through period"))
-            layout.addWidget(ends)
-        layout.addStretch(1)
-        actions = QtWidgets.QHBoxLayout()
-        cancel = FluentButton("Cancel", color=GREY)
-        accept = FluentButton("Rename" if component else "Group", color=ACCENT)
-        accept.setObjectName("componentConfirm")
-        actions.addStretch(1)
-        actions.addWidget(cancel)
-        actions.addWidget(accept)
-        layout.addLayout(actions)
-        dialog = FluentDialogWindow(widget=body, title="Rename Component" if component else "Group Component", anchor=self, window_ratio=0.32)
-        cancel.clicked.connect(dialog.reject)
-        accept.clicked.connect(dialog.accept)
-        def update_enabled():
-            accept.setEnabled(bool(name.text().strip()) and (component is not None or starts.count() > 0))
-        name.textChanged.connect(update_enabled)
-        update_enabled()
-        if dialog.exec_() == dialog.Accepted:
-            payload = (component.component_id, name.text().strip()) if component else (str(starts.currentData()), str(ends.currentData()), name.text().strip())
-            self.component_action_requested.emit("rename" if component else "group", payload)
-        dialog.deleteLater()
+    def _request_group(self, _checked=False) -> None:
+        selected = self.drag_container.selection_payload()
+        if selected:
+            self.component_action_requested.emit("group", selected)
+        else:
+            self.feedback_requested.emit("Select the timeline items to group; Shift-click adds or removes one item.")
+
+    def focus_component_name(self, component_id: str) -> None:
+        card = next((card for card in self._component_cards.values() if card.component_id == component_id and card.mode != "end"), None)
+        if card is not None:
+            self.timeline_scroll.ensureWidgetVisible(card)
+            self.drag_container.show_selection((card.key,))
+            card.name_edit.setFocus(QtCore.Qt.OtherFocusReason)
+            card.name_edit.selectAll()
 
     def _rebuild_hidden_ports(self, vm: ScheduleVM) -> None:
         visible = {port.key for port in vm.ports if port.visible}
@@ -2095,77 +2082,46 @@ class PulseScheduleView(QtWidgets.QWidget):
         # is exactly the case where reading one back is worth doing.
         self.sync_button.setEnabled(bool(can_sync))
 
-    def _period_clicked(self, period_id: str) -> None:
-        """Select it, or clear it if it was already the selected one."""
-
-        current, _post, _gap = self.drag_container.selection()
-        self.drag_container.show_selection(
-            card=None if current == str(period_id) else str(period_id)
-        )
-
-    def _bracket_clicked(self, key: str) -> None:
-        """Same rule as a period's, because it is the same kind of act."""
-
-        _card, current, _gap = self.drag_container.selection()
-        self.drag_container.show_selection(
-            post=None if current == str(key) else str(key)
-        )
-
-    def _gap_clicked(self, position: int) -> None:
-        _card, _post, current = self.drag_container.selection()
-        self.drag_container.show_selection(
-            gap=None if current == int(position) else int(position)
-        )
-
     def _request_insert(self, action: str) -> None:
         """Add where the selection says, and pick what was added once it arrives."""
 
         self._expect_new_card = True
         before = self._selected_before_item()
-        if self._expanded_component is not None:
-            component = next(item for item in self._schedule.components if item.component_id == self._expanded_component)
-            card, post, gap = self.drag_container.selection()
-            block = self.drag_container._item_blocks[("component", component.component_id)]
-            visual = tuple(self.drag_container._item_key(item) for item in self.drag_container.items())
-            first = visual.index(("component", component.component_id))
-            in_group = card in component.period_ids or (post is not None and post.rpartition(":")[0] in component.bracket_ids)
-            if in_group or gap is not None and first < gap <= first + len(block):
-                self.component_action_requested.emit(action, (component.component_id, before if before in block else None))
+        selected = set(self.drag_container.selected_items())
+        gap = self.drag_container.selected_gap
+        visual = tuple(self.drag_container._item_key(item) for item in self.drag_container.items())
+        for key in self._expanded_components:
+            block = self.drag_container._item_blocks[("component", key)]
+            first, last = visual.index(("component-start", key)), visual.index(("component-end", key))
+            if selected and selected.issubset(block) or gap is not None and first < gap <= last:
+                self.component_action_requested.emit(action, (key, before if before in block else None))
                 return
         getattr(self, f"{action}_requested").emit(before)
 
     def _selected_before_item(self) -> tuple[str, str] | None:
         """Add in the selected visual gap, or immediately after the selection."""
         visual = tuple(self.drag_container._item_key(item) for item in self.drag_container.items())
-        card, post, gap = self.drag_container.selection()
+        gap = self.drag_container.selected_gap
         if gap is not None:
             after = gap
         else:
-            selected = (("component" if card in self._component_cards else "period"), card) if card is not None else ("bracket", post)
-            if selected not in visual:
+            selected = set(self.drag_container.selected_items())
+            if not selected:
                 return None
-            after = visual.index(selected) + 1
-            if selected == ("component", self._expanded_component):
-                after += len(self.drag_container._item_blocks[selected])
+            for kind, key in tuple(selected):
+                if kind in ("component-start", "component-end"):
+                    selected.add(("component-end", key))
+            after = max(visual.index(key) for key in selected) + 1
         if after < len(visual):
             following = self.drag_container.flat_order(visual[after:])
             return following[0] if following else None
         return None
 
-    def _request_remove_period(self) -> None:
-        """Remove the selected period, or the last one when none is selected."""
-
-        if not (self._schedule and self._schedule.periods):
-            return
-        card, post, _gap = self.drag_container.selection()
-        if card in self._component_cards:
-            self.component_action_requested.emit("remove", card)
-            return
-        if post is not None:
-            self.bracket_remove_requested.emit(post.rpartition(":")[0])
-            return
-        target = card if card is not None else self._schedule.periods[-1].period_id
-        self.remove_period_requested.emit(target)
+    def _request_remove_items(self) -> None:
+        """One atomic removal request; no intermediate broken bracket state."""
+        selected = self.drag_container.selection_payload()
+        if selected:
+            self.remove_items_requested.emit(selected)
 
     def _request_add_bracket(self) -> None:
         """A new bracket around whatever is picked: a period, a bracket, a gap, or all.
@@ -2178,22 +2134,33 @@ class PulseScheduleView(QtWidgets.QWidget):
         if self._schedule is None or not self._schedule.periods:
             return
         periods = self._schedule.periods
-        card, post, gap = self.drag_container.selection()
+        selected = self.drag_container.selection_payload()
+        gap = self.drag_container.selected_gap
         count = self._schedule.default_bracket_count
-        if card is not None:
-            component = next((item for item in self._schedule.components if item.component_id == card), None)
-            if component is not None:
-                self.bracket_add_requested.emit(component.period_ids[0], component.period_ids[-1], count)
-                return
-            self.bracket_add_requested.emit(card, card, count)
-            return
-        if post is not None:
-            bracket = self._bracket(post.rpartition(":")[0])
+        flat = self.drag_container.flat_order(selected)
+        if len(flat) == 1 and flat[0][0] == "bracket":
+            bracket = self._bracket(flat[0][1].rpartition(":")[0])
             if bracket is not None:
                 self.bracket_add_requested.emit(
                     bracket.start_period_id, bracket.end_period_id, count,
                 )
                 return
+        if selected:
+            ids = tuple(period.period_id for period in periods)
+            chosen = {key for kind, key in flat if kind == "period"}
+            positions = [index for index, key in enumerate(ids) if key in chosen]
+            if not positions or len(positions) != positions[-1] - positions[0] + 1:
+                self.feedback_requested.emit("Select a contiguous set of periods for the bracket; unselected periods are not added.")
+                return
+            for kind, key in flat:
+                if kind == "bracket":
+                    bracket = self._bracket(key.rpartition(":")[0])
+                    first, stop = bracket_gap_bounds(ids, bracket.start_period_id, bracket.end_period_id)
+                    if not set(ids[first:stop]).issubset(chosen):
+                        self.feedback_requested.emit("The selected bracket extends beyond the selected periods.")
+                        return
+            self.bracket_add_requested.emit(ids[positions[0]], ids[positions[-1]], count)
+            return
         if gap is not None:
             ids = tuple(period.period_id for period in periods)
             periods_before = sum(

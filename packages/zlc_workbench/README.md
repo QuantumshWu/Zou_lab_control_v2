@@ -143,11 +143,19 @@ intermediate shot.
 
 ## Save boundaries
 
-Pulse Editor's **Group Component** collects a named continuous range without
-changing its waveform. Component cards default to collapsed. **Expand** uses
-the same timeline, Period cards, Bracket posts and scroll area; dragging the
-component header moves the whole block. **Ungroup** restores individual cards;
-the ordinary **Remove** action deletes the selected component's content.
+In Pulse Editor, **Shift + left click** adds or removes exactly the clicked
+timeline item, including over a value editor or TTL control without changing
+that value. It does not fill a range between clicks. **Group Component** uses
+this selection directly: non-contiguous periods or incomplete selected bracket
+contents are refused without adding unselected items. A successful group gets
+a default name, focused for immediate typing; its name remains directly editable.
+
+Component cards default to collapsed. **Expand** opens matching left and right
+ends around the original Period cards and Bracket posts, selecting the interior
+to identify it. Components can be expanded independently. Either end moves the
+whole component; ordinary multi-selection drags/removes the selected items in
+one transaction. With no selection, Remove removes nothing. **Collapse** selects
+the closed component; **Ungroup** keeps all content and restores individual cards.
 
 The **Component** tab edits either an existing Pulse instance or a standalone
 Subpulse draft, using the same field and timeline operations. For an instance,

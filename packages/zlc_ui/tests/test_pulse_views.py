@@ -474,17 +474,16 @@ def test_clicking_a_period_or_a_gap_decides_where_the_next_one_lands(run_qt) -> 
     """Selection is what makes a sequence buildable at all.
 
     A selected gap inserts there, a selected card inserts AFTER it,
-    Remove takes the selected one, and clicking the current selection again
-    clears it.  Previously the insertion target was always None and
-    ``gap_clicked`` was declared but never emitted, so a period could only ever
-    be appended and Remove could only ever take the last -- an operator had no
-    way to say "here".
+    Remove takes the exact selected items and does nothing without a selection.
+    Clicking the current selection again clears it; a visible gap inserts at
+    that gap rather than silently appending.
     """
 
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseScheduleView, ScheduleVM
+from PyQt5 import QtCore, QtTest
 app = ensure_qt_app(["schedule-selection"])
 
 port = PortRowVM("d0", "digital", "Gate", "d0")
@@ -504,32 +503,32 @@ container = view.drag_container
 
 asked = []
 view.insert_period_requested.connect(lambda before: asked.append(("add", before)))
-view.remove_period_requested.connect(lambda pid: asked.append(("remove", pid)))
+view.remove_items_requested.connect(lambda payload: asked.append(("remove", payload)))
 
-# nothing selected -> append, and Remove takes the last
+# Nothing selected -> append, but Remove must not guess a deletion target.
 view.add_button.click(); view.remove_button.click()
-assert asked == [("add", None), ("remove", "p7")], asked
+assert asked == [("add", None)], asked
 
 # a selected CARD inserts after it, and Remove takes that one
 asked.clear()
-container.period_clicked.emit("p0"); app.processEvents()
-assert container.selection() == ("p0", None, None)
+QtTest.QTest.mouseClick(view._cards["p0"], QtCore.Qt.LeftButton, pos=QtCore.QPoint(5, 5)); app.processEvents()
+assert container.selected_items() == (("period", "p0"),) and container.selected_gap is None
 view.add_button.click(); view.remove_button.click()
-assert asked == [("add", ("period", "p1")), ("remove", "p0")], asked
+assert asked == [("add", ("period", "p1")), ("remove", (("period", "p0"),))], asked
 
 # a selected GAP inserts there, and the two selections are exclusive
 asked.clear()
-container.gap_clicked.emit(0); app.processEvents()
-assert container.selection() == (None, None, 0), container.selection()
+QtTest.QTest.mouseClick(container, QtCore.Qt.LeftButton, pos=QtCore.QPoint(1, 15)); app.processEvents()
+assert container.selected_items() == () and container.selected_gap == 0
 view.add_button.click()
 assert asked == [("add", ("period", "p0"))], asked
 
 # clicking the current selection again clears it
-container.gap_clicked.emit(0); app.processEvents()
-assert container.selection() == (None, None, None)
+QtTest.QTest.mouseClick(container, QtCore.Qt.LeftButton, pos=QtCore.QPoint(1, 15)); app.processEvents()
+assert container.selected_items() == () and container.selected_gap is None
 
 # a selection naming a period the strip no longer holds cannot survive a rebuild
-container.period_clicked.emit("p1"); app.processEvents()
+QtTest.QTest.mouseClick(view._cards["p1"], QtCore.Qt.LeftButton, pos=QtCore.QPoint(5, 5)); app.processEvents()
 before_width = container.width()
 before_scroll = view.timeline_scroll.horizontalScrollBar().maximum()
 view.set_schedule(ScheduleVM(
@@ -538,7 +537,7 @@ view.set_schedule(ScheduleVM(
     summary_text="x", ports=(port,), periods=periods[:1],
 ))
 app.processEvents()
-assert container.selection() == (None, None, None), container.selection()
+assert container.selected_items() == () and container.selected_gap is None
 print('removed period geometry', before_width, container.width(), before_scroll,
       view.timeline_scroll.horizontalScrollBar().maximum())
 assert container.width() < before_width
@@ -658,7 +657,7 @@ assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}
 strip = view.drag_container
 timeline = strip.items()
 posts = strip._posts
-strip.show_selection(post='b:end')
+strip.show_selection((("bracket", "b:end"),))
 layout_moves = []
 original_take = strip.layout_main.takeAt
 strip.layout_main.takeAt = lambda index: (layout_moves.append(index), original_take(index))[1]
@@ -669,7 +668,7 @@ assert retired_delay.isHidden(), "retired rows must disappear before deferred de
 app.processEvents()
 assert strip.items() == timeline and strip._posts == posts
 assert not layout_moves, 'hiding a port detached the unchanged timeline'
-assert strip.selection() == (None, 'b:end', None)
+assert strip.selected_items() == (("bracket", "b:end"),) and strip.selected_gap is None
 assert set(view.channel_panel._rows) == {"d0", "d2"}, "a hidden port keeps no delay row"
 assert set(view._cards["p0"].port_rows) == {"d0", "d2"}, "and the card agrees"
 
@@ -683,7 +682,7 @@ assert strip.height() < before_height
 assert strip.size() == strip.sizeHint()
 assert strip._indicator.height() == strip.pulse_cards()[0].height(), 'selected gap did not follow the real layout'
 assert strip.items() == timeline and strip._posts == posts
-assert strip.selection() == (None, None, 1)
+assert strip.selected_items() == () and strip.selected_gap == 1
 view.set_visible_ports(("d0", "d2"))
 for _ in range(4):
     app.processEvents()
@@ -1328,25 +1327,25 @@ def outlined():
     }
 
 click(cards[0])
-assert strip.selection() == ("p1", None, None), strip.selection()
+assert strip.selected_items() == (("period", "p1"),) and strip.selected_gap is None
 assert outlined() == {"p1"}, outlined()
 
 # Clicking a post marks the post -- and takes the mark off the card, because
 # at most one thing is what the next edit acts on.
 click(posts["end"])
-assert strip.selection() == (None, "b:end", None), strip.selection()
+assert strip.selected_items() == (("bracket", "b:end"),) and strip.selected_gap is None
 assert outlined() == {"post:end"}, outlined()
 
 # Clicking the marked one again clears it, exactly as a card does.
 click(posts["end"])
-assert strip.selection() == (None, None, None), strip.selection()
+assert strip.selected_items() == () and strip.selected_gap is None
 assert outlined() == set(), outlined()
 
 # And the other way round: a post, then a card.
 click(posts["start"])
 assert outlined() == {"post:start"}, outlined()
 click(cards[1])
-assert strip.selection() == ("p2", None, None), strip.selection()
+assert strip.selected_items() == (("period", "p2"),) and strip.selected_gap is None
 assert outlined() == {"p2"}, outlined()
 
 view.close(); view.deleteLater()
@@ -1526,10 +1525,8 @@ assert label.cursor().shape() == QtCore.Qt.ArrowCursor
 send(label, QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, at=local)
 send(label, QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton, at=local)
 assert starts == [], "no motion, no drag"
-clicked = []
-strip.period_clicked.connect(clicked.append)
 send(label, QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton, at=local)
-assert clicked == ["p1"], "a press that reaches release without moving is a click"
+assert strip.selected_items() == (("period", "p1"),), "a press that reaches release without moving is a click"
 
 # Real motion past the threshold, measured in the same global frame, drags.
 send(label, QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, at=local)
@@ -1644,28 +1641,28 @@ def lit():
 cards = {card.period_id: card for card in strip.pulse_cards()}
 # The press lights it before anything is picked.
 send(cards["p2"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
-assert lit() == {"p2"} and strip.selection() == (None, None, None), (lit(), strip.selection())
+assert lit() == {"p2"} and strip.selected_items() == () and strip.selected_gap is None
 # ...and the release is the click that picks it.
 send(cards["p2"], QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
-assert strip.selection() == ("p2", None, None) and lit() == {"p2"}
+assert strip.selected_items() == (("period", "p2"),) and lit() == {"p2"}
 # A press on the other card moves the light without moving the pick...
 send(cards["p1"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
-assert lit() == {"p1"} and strip.selection() == ("p2", None, None)
+assert lit() == {"p1"} and strip.selected_items() == (("period", "p2"),)
 # ...and lifting it (a press that moves) picks it for real.  The drag
 # (stubbed here) restores this selection when it ends, dropped or not.
 far = QtCore.QPoint(5 + QtWidgets.QApplication.startDragDistance() * 3, 5)
 send(cards["p1"], QtCore.QEvent.MouseMove, QtCore.Qt.NoButton, QtCore.Qt.LeftButton, at=far)
 assert starts == [("period", "p1")], starts
-assert strip.selection() == ("p1", None, None) and lit() == {"p1"}
+assert strip.selected_items() == (("period", "p1"),) and lit() == {"p1"}
 # The reorder the drop proposes keeps the picked one picked.
 assert view.set_schedule(replace(vm, revision=3, periods=(periods[1], periods[0])))
 assert tuple(card.period_id for card in strip.pulse_cards()) == ("p2", "p1")
-assert strip.selection() == ("p1", None, None) and lit() == {"p1"}
+assert strip.selected_items() == (("period", "p1"),) and lit() == {"p1"}
 # Clicking the picked one clears it: the press changes nothing it shows.
 send(cards["p1"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
 assert lit() == {"p1"}
 send(cards["p1"], QtCore.QEvent.MouseButtonRelease, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
-assert strip.selection() == (None, None, None) and lit() == set()
+assert strip.selected_items() == () and lit() == set()
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 '''
@@ -1777,7 +1774,7 @@ post.close(); post.deleteLater()
 def test_components_collapse_expand_and_move_existing_timeline_items(run_qt) -> None:
     run_qt(_schedule_source() + r'''
 from dataclasses import replace
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import BracketVM, ComponentVM, PulseEditorView, PulseEditorHandle
 from zlc_ui.pulse.schedule_view import PeriodCard
@@ -1787,32 +1784,80 @@ view = PulseEditorView()
 handle = PulseEditorHandle(None, view)
 third = replace(periods[0], period_id="p3", name="Three")
 component = ComponentVM("mot", "MOT", ("p1", "p2"), "16 us", 1, ("b",))
-vm = replace(vm, periods=(*periods, third), brackets=(BracketVM("b", "p1", "p2", 2),), components=(component,))
-handle.set_schedule(vm)
+plain = replace(vm, periods=(*periods, third))
+handle.set_schedule(plain)
 view.resize(1280, 820); view.show(); app.processEvents()
 main = view.schedule_view
+strip = main.drag_container
+actions, deletions, digital = [], [], []
+handle.component_action_requested.connect(lambda *args: actions.append(args))
+handle.remove_items_requested.connect(deletions.append)
+handle.digital_committed.connect(lambda *args: digital.append(args))
+for key in ("p1", "p3"):
+    QtTest.QTest.mouseClick(main._cards[key], QtCore.Qt.LeftButton,
+                           QtCore.Qt.ShiftModifier, QtCore.QPoint(5, 5))
+assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
+assert not main._cards["p2"].is_selected(), "Shift selection must never fill an unclicked range"
+QtTest.QTest.mouseClick(strip, QtCore.Qt.LeftButton, QtCore.Qt.ShiftModifier, QtCore.QPoint(1, 15))
+assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
+main.group_button.click()
+assert actions == [("group", (("period", "p1"), ("period", "p3")))], actions
+assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
+check = main._cards["p2"].port_rows["d0"]
+level = check.isChecked()
+for expected in (3, 2):
+    QtTest.QTest.mouseClick(check, QtCore.Qt.LeftButton, QtCore.Qt.ShiftModifier)
+    assert len(strip.selected_items()) == expected
+    assert check.isChecked() == level and not digital, "Shift selects the item, not its TTL state"
+data = QtCore.QMimeData()
+data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("period", "p1")).encode()))
+assert strip._proposal_at(data, len(strip.items())) == (("period", "p2"), ("period", "p1"), ("period", "p3"))
+main.remove_button.click()
+assert deletions == [(("period", "p1"), ("period", "p3"))]
+actions.clear()
+vm = replace(plain, revision=3, brackets=(BracketVM("b", "p1", "p2", 2),), components=(component,))
+handle.set_schedule(vm)
+app.processEvents()
 assert set(main._cards) == {"p3"}, "collapsed contents must not construct period widgets"
 assert len(main.drag_container.items()) == 2
 assert main.drag_container.flat_order() == vm.item_order
-card = main._component_cards["mot"]
+card = main._component_cards[("component", "mot")]
 assert card.width() == main._cards["p3"].width()
 assert card._actions_popup is None
 card.expand_button.click(); app.processEvents()
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
+visible = tuple(strip._item_key(item) for item in strip.items())
+assert visible[0] == ("component-start", "mot")
+assert visible[-2] == ("component-end", "mot")
+assert all(item.is_selected() for item in strip.items()[:-1])
+assert not main._cards["p3"].is_selected()
+assert strip.selected_items() == vm.item_order[:-1]
+start_cap = strip.items()[0]
+QtTest.QTest.mouseClick(start_cap, QtCore.Qt.LeftButton,
+                       QtCore.Qt.ShiftModifier, QtCore.QPoint(5, 5))
+assert strip.selection_payload() == (("component", "mot"),)
+QtTest.QTest.mouseClick(start_cap.name_edit, QtCore.Qt.LeftButton)
+start_cap.name_edit.selectAll()
+QtTest.QTest.keyClicks(start_cap.name_edit, "MOT revised")
+QtTest.QTest.keyClick(start_cap.name_edit, QtCore.Qt.Key_Return)
+assert actions[-1] == ("rename", ("mot", "MOT revised")), actions
+vm = replace(vm, revision=4, components=(replace(component, name="MOT revised"),))
+handle.set_schedule(vm)
+actions.clear()
 edits = []
 handle.duration_committed.connect(lambda *args: edits.append(args))
 main._cards["p1"].duration_edit.setText("5")
 main._cards["p1"].duration_edit.editingFinished.emit()
 assert edits == [("p1", 5.0, "us")], edits
 data = QtCore.QMimeData()
-data.setData(main.drag_container.ITEM_MIME, QtCore.QByteArray(json.dumps(("component", "mot")).encode()))
+data.setData(main.drag_container.ITEM_MIME, QtCore.QByteArray(json.dumps(("component-start", "mot")).encode()))
 assert main.drag_container._proposal_at(data, len(main.drag_container.items())) == (("period", "p3"), *vm.item_order[:-1])
-card.expand_button.click(); app.processEvents()
+start_cap.expand_button.click(); app.processEvents()
 assert set(main._cards) == {"p3"}
+data.setData(main.drag_container.ITEM_MIME, QtCore.QByteArray(json.dumps(("component", "mot")).encode()))
 assert main.drag_container._proposal_at(data, 2) == (("period", "p3"), *vm.item_order[:-1])
-actions = []
-handle.component_action_requested.connect(lambda *args: actions.append(args))
+card = main._component_cards[("component", "mot")]
 card.more_button.click(); app.processEvents()
 assert card._actions_popup.isVisible()
 export = next(button for button in card._actions_popup.findChildren(QtWidgets.QPushButton) if button.text() == "Export Subpulse")
@@ -1820,9 +1865,9 @@ export.click(); app.processEvents()
 assert not card._actions_popup.isVisible()
 assert actions == [("export", "mot")], actions
 actions.clear()
-main.drag_container.show_selection(card="mot")
+main.drag_container.show_selection((("component", "mot"),))
 main.remove_button.click()
-assert actions == [("remove", "mot")], actions
+assert deletions[-1] == (("component", "mot"),), deletions
 local = replace(vm, document_generation=2, periods=periods, components=())
 handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
 view.tabs.setCurrentWidget(view.component_view); app.processEvents()
