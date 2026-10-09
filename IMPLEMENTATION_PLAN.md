@@ -486,6 +486,7 @@
 - 删除首图前源子集的重复端点求解及无消费者全幅相位回传；真正输出的去阱图复用公共幅度求解和同一质量门。LPI预热补齐逆传播/编码，各运动帧延用接受振幅而不改变指定相位；阻塞host拷贝后不再额外同步计时。首张相位图不等于首张移动图，报告分别记录首照片至计算、首次移动图就绪和软件确认下界，不将软件确认当光学响应。单帧去阱的真实液晶瞬态和原子存活率仍需现场确认；测量、模拟流水线结果和示例图只保存在ignored research，不加入Git。
 - 同一配置Task/Host跨Start保留一个有界GPU工作区；每轮fresh输入及run数据重新建立，光学配置变化重备，Stop保留、退休/删除/shutdown后台释放。GPU容量不足只增长必要缓冲和重绑graph；pinned仅单帧staging，完整影片caller-owned。固定模式保留7 live输出；auto仅5相机/phase live，真实N轨迹/质量保存同一Figure/NPZ，避免冻结假轴。
 - Fourier正反传播复用同帧Y载频根：既有root入口在频率更新时生成float64正余弦，既有work按band容量持有complex128数组，删除每轮pack的重复三角计算。没有改变求解目标、数值精度、验收门限或播放节奏；独立传播和奇数尺寸直接用例通过，归档回放相位码、光场和迭代次数逐位一致。
+- 轨迹频率以(frame、X、Y小数)一次lexsort和相邻变化分组，消除逐帧unique开销，原排序/局部索引/offset逐位相同；不使用在400-site反而变慢的全量axis-unique原型。LPI不再先计算一份不用的Iterative系数，不新增kernel或缓存。
 - 有线批次20–29复核：普通相位/序列灰度映射、归档读出和Pulse重编译一致；网络已非主要等待，不能把现场丢原子认定为通信故障。第28次无位置移动仍有末态缺失，计算光场的保留阱强度约为初始3.3倍；简单同步相位插值未复现塌阱，尚不能确定实际损失原因。summary JSON/text现直接汇总已有光强比例和相位步长，明确它们是计算而非实测/播放保证；不改分类阈值、Pulse或设备等待。
 - Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
 - 第一张照片的valid occupied站点按源roster身份成为available_source_indices。共同planner按实际欧氏距离匹配min(可用源,目标数)：多余原子丢弃，其阱在序列内淡出；不足时正常部分填充，保存未填目标。无效分类仍为invalid，不改成empty。具体Task拥有相机分类和目标政策，solver只接收显式计划；不复制分类或新增编排框架。

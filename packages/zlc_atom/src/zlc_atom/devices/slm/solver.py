@@ -3065,16 +3065,21 @@ def _rearrangement_bind(gpu, points):
     # Each band has one X frequency and one fractional Y carrier. Its remaining
     # Y frequencies are native integer FFT bins, for any authored frame count.
     bands = np.stack((signed[..., 1], signed[..., 0] - integer_y), axis=-1)
-    selected, lookup, counts = [], [], []
-    for frame in bands:
-        frequencies, inverse = np.unique(frame, axis=0, return_inverse=True)
-        selected.append(frequencies)
-        lookup.append(inverse)
-        counts.append(len(frequencies))
-    counts = np.asarray(counts, np.int32)
+    # Group all frames once, retaining each frame's lexicographic band order
+    # and local inverse indices, rather than setting up one unique per frame.
+    frame_count, sites_per_frame = bands.shape[:2]
+    frame_ids = np.repeat(np.arange(frame_count), sites_per_frame)
+    flat = bands.reshape(-1, 2)
+    order = np.lexsort((flat[:, 1], flat[:, 0], frame_ids))
+    ordered_frames, ordered_bands = frame_ids[order], flat[order]
+    starts = np.r_[True, (ordered_frames[1:] != ordered_frames[:-1])
+                   | np.any(ordered_bands[1:] != ordered_bands[:-1], axis=1)]
+    inverse = np.empty_like(order)
+    inverse[order] = np.cumsum(starts) - 1
+    counts = np.bincount(ordered_frames[starts], minlength=frame_count).astype(np.int32)
     offsets = np.r_[0, np.cumsum(counts, dtype=np.int64)]
-    selected = np.concatenate(selected)
-    lookup = np.asarray(lookup)
+    selected = ordered_bands[starts]
+    lookup = inverse.reshape(frame_count, sites_per_frame) - offsets[:-1, None]
     indices = {}
     for factor, work in gpu["resources"].items():
         packed = lookup * work["ly"] + integer_y % work["ly"]
@@ -3663,9 +3668,6 @@ def compute_rearrangement(
     positive = desired > 0
     normalized = (desired / np.linalg.norm(desired, axis=1, keepdims=True)).astype(np.float32)
     phase = np.angle(initial)
-    coefficient_values = (abs(prepared["source_coefficients"])[None]
-                          * (desired / initial_amplitude[None]) * np.exp(1j * phase)[None]).astype(np.complex64)
-    coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
     if method == "lpi":
         endpoint_coefficient = prepared["target_synthesis_coefficients"][target_indices]
         # A subset keeps these prescribed phases. Its amplitudes are an
@@ -3703,6 +3705,10 @@ def compute_rearrangement(
         spectrum_phase[:, source_indices] = (phase[source_indices] + source_gauge
                                             + progress[:, None] * phase_delta - current_gauge)
         coefficient_values = (spectrum_amplitude * np.exp(1j * spectrum_phase)).astype(np.complex64)
+        coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
+    else:
+        coefficient_values = (abs(prepared["source_coefficients"])[None]
+                              * (desired / initial_amplitude[None]) * np.exp(1j * phase)[None]).astype(np.complex64)
         coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
     gpu = prepared["gpu"]
     cp, stream, number = gpu["cp"], gpu["stream"], gpu["number"]
