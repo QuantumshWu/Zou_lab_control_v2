@@ -7516,6 +7516,7 @@ class ConsolePresenter:
         source_options, source_labels, source_groups = self._source_choices(
             binding.descriptor, binding.node_id, compatible
         )
+        source_description = self._signal_projection()[1].get(binding.draft.source_signal)
         input_bundle = output_bundle = ()
         if source_specs and source_specs[0].select_bundle:
             # Immutable metadata/references only: the editor must not ask a
@@ -7587,6 +7588,7 @@ class ConsolePresenter:
             ),
             "source_bundle": bool(source_specs and source_specs[0].select_bundle),
             "source_signal": binding.draft.source_signal,
+            "source_schema": None if source_description is None else source_description.schema,
             "source_options": source_options,
             "source_labels": source_labels,
             "source_groups": source_groups,
