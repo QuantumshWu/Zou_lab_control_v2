@@ -2549,13 +2549,25 @@ extern "C" __global__ void pack_forward(const float* projected,const double2* y_
  for(int j=0;j<32;j+=8)if(yy<LY&&kk+j<K)
   spectrum[(kk+j)*LY+(yy-H/2+LY)%LY]=tile[threadIdx.x][threadIdx.y+j];
 }
+__device__ __forceinline__ float2 encoded_pixel(float2 field,const float* pupil,const float* incident,unsigned char* codes,int i){
+ float a=atan2f(field.y,field.x),s,c;
+ unsigned char code=phase_code((double)a-(double)incident[i],(unsigned int)i);codes[i]=code;
+ sincosf(code*.02454369260617025968f+incident[i],&s,&c);
+ return make_float2(__fmul_rn(pupil[i],c),__fmul_rn(pupil[i],s));
+}
 extern "C" __global__ void encode(const float* input,const float* pupil,const float* incident,float2* optical,
  unsigned char* codes,int H,int W,int P){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;
  float2 field=P?synthesis_pixel(input,i/W,i%W,H,W,P):((const float2*)input)[i];
- float a=atan2f(field.y,field.x),s,c;
- unsigned char code=phase_code((double)a-(double)incident[i],(unsigned int)i);codes[i]=code;
- sincosf(code*.02454369260617025968f+incident[i],&s,&c);optical[i]=make_float2(pupil[i]*c,pupil[i]*s);
+ optical[i]=encoded_pixel(field,pupil,incident,codes,i);
+}
+extern "C" __global__ void encode_pack(const float* image,const float* pupil,const float* incident,real_t* packed,
+ unsigned char* codes,int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*P)return;int d=i%P,y=i/P,xp=W/2+d,xm=W/2-d;
+ float2 plus=make_float2(0,0),minus=make_float2(0,0);
+ if(xp<W)plus=encoded_pixel(synthesis_pixel(image,y,xp,H,W,P),pupil,incident,codes,y*W+xp);
+ if(d>0&&xm>=0)minus=encoded_pixel(synthesis_pixel(image,y,xm,H,W,P),pupil,incident,codes,y*W+xm);
+ pack_pair(packed,plus,minus,y,d,H,P);
 }
 extern "C" __global__ void field_project(const unsigned char* input,float2* field,const float* delta,
  const float2* previous_base,const float2* previous_corrected,const float* pupil,const float* incident,
@@ -2688,7 +2700,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
     capacity = max(motion_bands, projection_bands if maximum_removed else motion_bands)
     module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
     names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
-             "pack_forward", "encode", "field_project", "anderson_begin", "anderson_update")
+             "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update")
     kernels = {name: module.get_function(name) for name in names}
     gpu = dict(cp=cp, cublas=cublas, cufft=cufft, stream=stream, module=module, kernels=kernels,
                library=library, gemm=gemm, shape=shape, number=number,
@@ -2845,9 +2857,16 @@ def _rearrangement_propagate(gpu, work, band, operation):
                               (work["image"], work["physical_pupil"], work["incident"], work["optical"],
                                work["codes"], *map(np.int32, (h, w, padded))))
             return
-        kernels["project"](((h * padded + 255) // 256,), (256,),
-                           (work["image"], work["pupil"], work["field_gemm"],
-                            np.int32(h), np.int32(w), np.int32(padded)))
+        if operation == "encode_forward":
+            # The encoded field is consumed immediately by measurement. Pack
+            # it directly instead of writing and rereading a full complex raster.
+            kernels["encode_pack"](((h * padded + 255) // 256,), (256,),
+                (work["image"], work["physical_pupil"], work["incident"], work["field_gemm"],
+                 work["codes"], *map(np.int32, (h, w, padded))))
+        else:
+            kernels["project"](((h * padded + 255) // 256,), (256,),
+                               (work["image"], work["pupil"], work["field_gemm"],
+                                np.int32(h), np.int32(w), np.int32(padded)))
     if operation == "forward":
         kernels["pack_field"](((h * padded + 255) // 256,), (256,),
                               (work["optical"], work["field_gemm"], np.int32(h), np.int32(w), np.int32(padded)))
@@ -3009,8 +3028,7 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                     raise InterruptedError("SLM rearrangement preparation stopped")
                 _rearrangement_select_roots(work, band)
                 stream.begin_capture()
-                _rearrangement_propagate(gpu, work, band, "encode")
-                _rearrangement_propagate(gpu, work, band, "forward")
+                _rearrangement_propagate(gpu, work, band, "encode_forward")
                 gpu["graphs"][band] = stream.end_capture()
                 gpu["graphs"][band].launch(stream)
         stream.synchronize()
@@ -3044,8 +3062,7 @@ def _rearrangement_balance_endpoint(gpu, points, intensities, coefficients, iter
             for updates in range(iterations + 1):
                 if stop_requested is not None and stop_requested():
                     raise InterruptedError("SLM endpoint preparation stopped")
-                _rearrangement_propagate(gpu, work, band, "encode")
-                _rearrangement_propagate(gpu, work, band, "forward")
+                _rearrangement_propagate(gpu, work, band, "encode_forward")
                 field = work["actual"][:count].get(stream=stream)
                 relative = abs(field.astype(np.complex128)) ** 2 / intensities
                 ratio = float(relative.max() / relative.min())
@@ -3508,19 +3525,9 @@ def compute_rearrangement(
     coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
     if method == "lpi":
         endpoint_coefficient = prepared["target_synthesis_coefficients"][target_indices]
-        endpoint_field, endpoint_phase = prepared["target_field"][target_indices], prepared["target_phase"]
-        endpoint_ratio, endpoint_updates, endpoint_ms = prepared["target_support_intensity_ratio"], 0, 0.
-        if selected_count < len(target):
-            endpoint = _rearrangement_balance_endpoint(
-                prepared["gpu"], target[target_indices], prepared["target_intensities"][target_indices],
-                endpoint_coefficient, 64, tolerance, stop_requested)
-            endpoint_coefficient, endpoint_field, endpoint_phase = endpoint["coefficients"], endpoint["field"], endpoint["phase"]
-            endpoint_ratio, endpoint_updates, endpoint_ms = endpoint["ratio"], endpoint["iterations"], endpoint["timing_ms"]
-        if endpoint_ratio > tolerance or not np.isfinite(endpoint_ratio):
-            raise RuntimeError(f"LPI target subset did not meet authored intensity ratio {tolerance:g}: {endpoint_ratio:.6g}")
-        metadata.update(endpoint_synthesis_coefficients=_frozen(endpoint_coefficient), endpoint_field=_frozen(endpoint_field),
-                        endpoint_phase=endpoint_phase, endpoint_support_intensity_ratio=endpoint_ratio,
-                        endpoint_iterations=endpoint_updates, endpoint_balance_ms=endpoint_ms)
+        # A subset keeps these prescribed phases. Its amplitudes are an
+        # initial guess, corrected by the same gate as every emitted map;
+        # do not block the first map on a separate, unplayed endpoint solve.
         source_amplitude = abs(prepared["source_synthesis_coefficients"]).astype(np.float64)
         start_coefficient = prepared["source_synthesis_coefficients"][source_indices]
         if fade_frames:
@@ -3622,7 +3629,12 @@ def compute_rearrangement(
                     work = gpu["measurement"]
                     gpu["kernels"]["anderson_begin"]((1,), (256,),
                         (gpu["coefficients"], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
-                    limit = 16 if iterations is None else int(iterations)
+                    # The old unplayed subset endpoint had a 64-update budget.
+                    # Keep that capability on the actual endpoint map, also
+                    # when a stationary subset reaches it in the first frame.
+                    subset_endpoint = (selected_count < len(target) and
+                                       np.array_equal(sites[index, source_indices], target[target_indices]))
+                    limit = (64 if subset_endpoint else 16) if iterations is None else int(iterations)
                     for updates in range(limit + 1):
                         gpu["graphs"][band].launch(stream)
                         field = work["actual"][:number].get(stream=stream)
@@ -3831,12 +3843,17 @@ def compute_rearrangement(
         all_relative = np.divide(abs(fields.astype(np.complex128)) ** 2, desired ** 2,
                                  out=np.zeros(desired.shape), where=positive)
         all_ratios = all_relative.max(axis=1) / np.min(np.where(positive, all_relative, np.inf), axis=1)
+        accepted_coefficients = coefficients.get(stream=stream)
+        metadata.update(endpoint_field=_frozen(fields[-1, source_indices]),
+                        endpoint_synthesis_coefficients=_frozen(accepted_coefficients[-1, source_indices]),
+                        endpoint_support_intensity_ratio=float(retained_ratios[-1]),
+                        endpoint_iterations=int(iteration_counts[-1]), endpoint_balance_ms=0.)
         return {
             **plan, **sampled, **metadata, "noop": False, "phase_codes": codes,
             "actual_fields": _frozen(fields),
             "desired_amplitudes": _frozen(desired), "active_sites": _frozen(positive),
             "desired_spectrum_coefficients": _frozen(coefficient_values),
-            "synthesis_coefficients": _frozen(coefficients.get(stream=stream)),
+            "synthesis_coefficients": _frozen(accepted_coefficients),
             "motion_frames": motion_frames, "iterations": tuple(map(int, iteration_counts)),
             "phase_locked_amplitude_updates": tuple(map(int, iteration_counts)),
             "emitted_frame_count": emitted_count, "verified_frame_reuses": verified_reuses,

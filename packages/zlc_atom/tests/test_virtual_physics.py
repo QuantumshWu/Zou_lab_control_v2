@@ -2475,6 +2475,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         assert shortage["target_filled"].sum() == 1
         assert shortage["endpoint_support_intensity_ratio"] <= 1.01
         assert shortage["endpoint_iterations"] <= 64
+        assert shortage["endpoint_balance_ms"] == 0  # no unplayed solve before first map
         np.testing.assert_array_equal(movie["phase_codes"], saved)
         empty_plan = slm_solver.plan_rearrangement(lpi, [])
         empty_sample = slm_solver.sample_rearrangement(lpi, empty_plan, maximum_step=1.)
@@ -2540,7 +2541,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             finally:
                 reweighted["close"]()
         # More authored destinations than sources use the same prepared owner;
-        # only the actually filled endpoint is balanced once after selection.
+        # The actual final map, not a separate unplayed subset, owns its gate.
         larger_target = np.concatenate((source, source + np.array([12, 0])))
         larger = slm_solver.prepare_rearrangement(
             source, larger_target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
@@ -2553,6 +2554,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             assert partial["target_filled"].sum() == 4
             assert partial["endpoint_support_intensity_ratio"] <= 1.01
             assert partial["endpoint_iterations"] <= 64
+            assert partial["endpoint_balance_ms"] == 0
             assert slm_solver.rearrangement_diagnostics(larger, partial)["support_intensity_ratios"][-1] <= 1.01
         finally:
             larger["close"]()

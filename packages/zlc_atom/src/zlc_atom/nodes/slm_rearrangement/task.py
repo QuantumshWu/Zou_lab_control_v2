@@ -491,7 +491,7 @@ class SlmRearrangementTask:
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
                         "actual_fields", "active_sites", "movement_fraction", "phase_center_yx",
                         "desired_spectrum_coefficients", "target_synthesis_coefficients",
-                        "endpoint_synthesis_coefficients", "endpoint_field", "endpoint_phase",
+                        "endpoint_synthesis_coefficients", "endpoint_field",
                         "source_field", "target_field", "target_requested_intensities",
                         "source_synthesis_coefficients", "source_reconstruction_field",
                         "start_synthesis_coefficients", "synthesis_coefficients",
