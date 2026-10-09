@@ -463,6 +463,8 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- 配准删除读出半宽依赖：重排不再套用Feedback的BOX窗口不重叠规则；Feedback独有的窗口检查移回自己的读出入口，Calibration、Occupancy及路径最小间距均不变。
+
 - Recording追加`imaging.gif`观看预览，复用已导出的PNG，顺序与采集一致，每帧200 ms并循环；在保存阶段生成，不影响重排关键路径，原PNG/NPZ不变。
 - 连续拍照Task `slm_rearrangement_recording`复用执行器/表单：初始imaging Period、默认50张，无复拍deadline/曝光比较；首帧启动后台重排，持续收图，调用原Plot存图API逐张保存PNG＋Figure NPZ到frames/。无独立图像编码和灰度处理，不加逐帧分析；原两张验证Task保持语义。
 - 同一Task默认LPI并保留Iterative，最小间距默认15 Fourier像素且可调（与SLM preset gap同单位）。fixed/camera_step只选择N，共用保留waypoint的采样、相位进度、先一张去阱图再立即移动的流水线；auto从最长实际相机sensor路径/步长求移动帧数，再计入这一张去阱图，不保留独立逐段motion_fractions。实际输出全过程满足硬间距和步距。LPI源/目标合成系数与实际光场分清；运动插值相位保持指定分支/光轴参考，只修幅度；整体深度变化允许，无恒功率或平滑启停约束。

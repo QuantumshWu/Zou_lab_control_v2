@@ -2025,7 +2025,7 @@ def test_sparse_geometry_refuses_a_calibration_that_is_not_the_targets_geometry(
         plane.close()
 
 
-def test_registration_refuses_colliding_predicted_site_boxes() -> None:
+def test_box_overlap_is_feedback_readout_policy_not_registration() -> None:
     target = np.zeros((16, 16), dtype=np.float32)
     target[(2, 2, 12, 2), (2, 12, 2, 7)] = 1.0
     detected = SiteMap(
@@ -2034,14 +2034,20 @@ def test_registration_refuses_colliding_predicted_site_boxes() -> None:
         np.ones(3, dtype=bool),
         np.ones(3),
     )
-    with pytest.raises(ValueError, match="collide|separation|overlap"):
-        _register_target_sites(
-            detected,
-            target,
-            {"science_context_path": "c", "command_receipt": {}},
-            frame_shape=(64, 64),
-            measurement_radius=6,
-        )
+    registered = _register_target_sites(
+        detected, target, {"science_context_path": "c", "command_receipt": {}},
+        frame_shape=(64, 64),
+    )
+    calibration = _calibration_at(registered.centers_xy)
+    calibration = replace(calibration, models=(replace(calibration.select_model(), integration_half_width=6),))
+    from zlc_atom.nodes.slm_rearrangement.task import _registration_order
+    points, _weights, order, _affine = _registration_order(
+        calibration, {"target_intensity": target, "command_receipt": {}}, "c")
+    np.testing.assert_array_equal(points, np.argwhere(target > 0))
+    np.testing.assert_array_equal(calibration.site_map.centers_xy[order], registered.centers_xy)
+    with pytest.raises(ValueError, match="overlap"):
+        feedback_module._support(target, calibration, box_half_width=6,
+                                 science_context_path="c", command_receipt={})
 
 
 def test_regular_nine_by_nine_grid_registers_directly_with_one_missing_site() -> None:
@@ -2063,12 +2069,10 @@ def test_regular_nine_by_nine_grid_registers_directly_with_one_missing_site() ->
         target,
         {"science_context_path": "c", "command_receipt": {}},
         frame_shape=(80, 80),
-        measurement_radius=0,
     )
     support, _provenance = validate_target_registration(
         registered,
         frame_shape=(80, 80),
-        box_half_width=0,
     )
 
     assert len(support) == 81

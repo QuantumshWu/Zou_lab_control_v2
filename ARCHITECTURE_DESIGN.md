@@ -594,6 +594,8 @@ Node new chunk
 
 ### 8.5 一次成像重排 Task
 
+- Target到相机的配准只核几何，不接收读出半宽或判断窗口重叠。重排复用Calibration原读出模型；Feedback自身的BOX窗口规则仅在Feedback读出入口执行，不作为重排准入条件。
+
 - Recording在实验结束后将公共Plot已保存的逐张PNG按采集顺序封装为`imaging.gif`，每张200 ms、循环播放；不重渲染、不改变色限，原PNG与Figure NPZ保留，GIF只作观看预览，不代表真实采集速度。
 - `slm_rearrangement_recording`复用同一Task执行器：用户Pulse、First imaging Period、录制张数（默认50）；首张收到的图对应标明的初始imaging，随后后台重排，采集不中断。不比较曝光/Period、重排预算或后续照片早晚，不拆Pulse。每张图片复用现有save_figure_artifact/ImagePlot保存到frames/，标准PNG及携带原始数据的Figure NPZ；不使用独立编码或灰度转换，不增加逐帧分析报告。最后一张不伪称重排后的验证；真实设备错误和Stop仍保存已收到的图片。
 - `slm_rearrangement`是具体Task plugin：输入source Science Context和Calibration，可选显式End Target JSON；留空时`target_rows/target_columns`（默认3×3）生成中央矩形。两者复用相同核心与源pupil/operator；目标位置未被当前Calibration覆盖时，照片照常保存但该位置的占据验证保持invalid，不复制邻居阈值或伪造标定。复用Camera Measurement、既有读出/分类、SLM solver、device sequence、TaskRun及公共Plot/Figure，不新增实验编排框架。

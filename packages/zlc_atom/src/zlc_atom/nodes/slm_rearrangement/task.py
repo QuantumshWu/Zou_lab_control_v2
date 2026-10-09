@@ -108,12 +108,10 @@ def _registration_order(calibration, context, context_path):
     points = np.column_stack(np.nonzero(target > 0)).astype(np.int32)
     if len(points) != calibration.n_sites:
         raise ValueError("Rearrangement needs one calibrated readout per authored source/target site")
-    model = calibration.select_model()
     registered = _register_target_sites(
         calibration.site_map, target,
         {"science_context_path": str(context_path), "command_receipt": dict(context["command_receipt"])},
-        frame_shape=calibration.frame_contract.image_shape,
-        measurement_radius=model.integration_half_width)
+        frame_shape=calibration.frame_contract.image_shape)
     # Registration retains the measured coordinates verbatim when every site
     # is observed. Convert that existing result to a readout permutation only.
     original = {tuple(center): i for i, center in enumerate(calibration.site_map.centers_xy)}

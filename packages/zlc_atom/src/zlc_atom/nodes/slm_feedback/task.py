@@ -966,7 +966,6 @@ def validate_target_registration(
     site_map: SiteMap,
     *,
     frame_shape: tuple[int, int],
-    box_half_width: int,
 ) -> tuple[np.ndarray, Mapping[str, Any]]:
     """Validate and return one registered Target roster in stable site order."""
 
@@ -985,7 +984,6 @@ def validate_target_registration(
     centers = np.asarray(site_map.centers_xy)
     provenance = topology["provenance"]
     shape = tuple(int(value) for value in frame_shape)
-    radius = int(box_half_width)
     if (
         support.ndim != 2
         or support.shape[1:] != (2,)
@@ -1011,7 +1009,6 @@ def validate_target_registration(
         or not np.all(np.isfinite(centers))
         or len(shape) != 2
         or any(value <= 0 for value in shape)
-        or radius < 0
     ):
         raise ValueError("Calibration target registration fields are invalid")
     if not isinstance(provenance, Mapping) or set(provenance) != {
@@ -1105,17 +1102,8 @@ def validate_target_registration(
             )
         ) <= 0.0:
             raise ValueError("Calibration differs from the trusted Target orientation")
-    if any(not box_fits(tuple(center), radius, shape) for center in centers):
-        raise ValueError("a registered Target BOX lies outside the camera frame")
-    rounded = np.rint(centers).astype(int)
-    if len({tuple(center) for center in rounded.tolist()}) != len(rounded):
-        raise ValueError("registered Target BOX centers collide in camera pixels")
-    if radius > 0 and len(rounded) > 1:
-        delta = np.abs(rounded[:, np.newaxis, :] - rounded[np.newaxis, :, :])
-        overlaps = np.all(delta <= 2 * radius, axis=2)
-        overlaps[np.diag_indices_from(overlaps)] = False
-        if np.any(overlaps):
-            raise ValueError("registered Target BOX windows overlap in camera pixels")
+    if any(not box_fits(tuple(center), 0, shape) for center in centers):
+        raise ValueError("a registered Target center lies outside the camera frame")
     frozen = np.array(support, dtype="<i8", copy=True)
     frozen.setflags(write=False)
     return frozen, provenance
@@ -1127,13 +1115,11 @@ def _register_target_sites(
     provenance: Mapping[str, Any] | None,
     *,
     frame_shape: tuple[int, int],
-    measurement_radius: int,
 ) -> SiteMap:
     """Fit the authored SLM roster to detected camera sites without deleting gaps.
 
-    Registration is the Feedback's own science, not the Calibration's:
-    the Calibration never sees a Target, and this roster, its provenance
-    and its receipt exist only for the run that measures it.
+    This maps geometry only. Readout models and their window policies belong
+    to the caller; registration does not revalidate a Calibration's readout.
     """
 
     # Reached from inside for the same reason as ``_bonferroni_z``: this
@@ -1258,7 +1244,6 @@ def _register_target_sites(
     validate_target_registration(
         result,
         frame_shape=frame_shape,
-        box_half_width=measurement_radius,
     )
     return result
 
@@ -1301,13 +1286,26 @@ def _support(
             "command_receipt": dict(command_receipt),
         },
         frame_shape=calibration.frame_contract.image_shape,
-        measurement_radius=int(box_half_width),
     )
     support, provenance = validate_target_registration(
         registered,
         frame_shape=calibration.frame_contract.image_shape,
-        box_half_width=int(box_half_width),
     )
+    # Feedback measures independent BOX totals. This readout-specific policy
+    # must not reject another task's already calibrated PSF/occupancy model.
+    radius = int(box_half_width)
+    centers = np.asarray(registered.centers_xy)
+    if any(not box_fits(tuple(center), radius, calibration.frame_contract.image_shape) for center in centers):
+        raise ValueError("a registered Target BOX lies outside the camera frame")
+    rounded = np.rint(centers).astype(int)
+    if len({tuple(center) for center in rounded.tolist()}) != len(rounded):
+        raise ValueError("registered Target BOX centers collide in camera pixels")
+    if radius > 0 and len(rounded) > 1:
+        delta = np.abs(rounded[:, np.newaxis, :] - rounded[np.newaxis, :, :])
+        overlaps = np.all(delta <= 2 * radius, axis=2)
+        overlaps[np.diag_indices_from(overlaps)] = False
+        if np.any(overlaps):
+            raise ValueError("registered Target BOX windows overlap in camera pixels")
     rows, columns = support.T
     if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
         raise ValueError("registered Calibration support differs from Science Context")
