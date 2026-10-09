@@ -225,6 +225,14 @@ def test_successful_usb_command_is_known_only_after_readback_and_settle(
     _patch_usb(monkeypatch, sdk)
     adapter = X15213Adapter(_config(flip_x=True, flip_y=True))
     try:
+        from zlc_atom.devices.slm.device import phase_from_codes, phase_to_codes
+
+        source_codes = np.arange(np.prod(adapter.shape_yx), dtype=np.uint32).astype(np.uint8).reshape(adapter.shape_yx)
+        source_phase = phase_from_codes(source_codes, adapter.shape_yx)
+        np.testing.assert_array_equal(phase_to_codes(source_phase), source_codes)
+        # Source references and the physical mapping consume the same logical
+        # bytes, including both wrap-boundary codes and all intermediate codes.
+        np.testing.assert_array_equal(adapter._gray(source_phase)[0], adapter._gray_codes(source_codes)[0])
         phase = np.full(adapter.shape_yx, np.pi, dtype=np.float32)
         commanded = adapter.apply_phase(phase)
         assert not commanded.flags.writeable
