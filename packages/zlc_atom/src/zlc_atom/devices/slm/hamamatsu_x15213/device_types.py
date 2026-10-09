@@ -941,9 +941,10 @@ class X15213Adapter:
     def _gray(self, canonical: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
         # Canonical phases give nonnegative rounded integers 0..256: integer
         # conversion supplies floor, and uint8 conversion wraps 256 to zero.
-        phase_code = (
-            canonical.astype(np.float64) * (128.0 / np.pi) + 0.5
-        ).astype(np.uint16).astype(np.uint8)
+        scaled = canonical.astype(np.float64)
+        np.multiply(scaled, 128.0 / np.pi, out=scaled)
+        np.add(scaled, 0.5, out=scaled)
+        phase_code = scaled.astype(np.uint16).astype(np.uint8)
         return self._gray_codes(phase_code)
 
     def _gray_codes(self, codes: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
