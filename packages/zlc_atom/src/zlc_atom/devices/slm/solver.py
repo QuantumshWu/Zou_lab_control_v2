@@ -3988,7 +3988,6 @@ def compute_rearrangement(
                 (movie, gpu["initial_phase"], native["physical_pupil"], gpu["phase_step_rms"],
                  np.int32(np.prod(shape)), np.float64(gpu["pupil_energy"])))
             pupil_phase_step = gpu["phase_step_rms"][:motion_frames].get()
-        stream.synchronize()
     if method == "lpi":
         total_ms = (time.perf_counter() - started) * 1000
         prepare_ms, copy_ms = (after_prepare - started) * 1000, float(frame_copy_ms.sum())
