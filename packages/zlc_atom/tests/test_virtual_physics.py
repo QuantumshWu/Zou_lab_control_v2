@@ -2213,6 +2213,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
         minimum_separation=2, endpoint_iterations=200, maximum_motion_frames=7,
     )
+    keeper = prepared["gpu"]["keeper"]
+    assert keeper["thread"].is_alive() and keeper["users"] == 1
     plan = slm_solver.plan_rearrangement(prepared, np.arange(len(source)))
     sequence = slm_solver.compute_rearrangement(
         prepared, plan, iterations=0, require_converged=False, motion_frames=7,
@@ -2316,13 +2318,32 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         minimum_separation=2, maximum_motion_frames=7, endpoint_data={"source_phase": source_phase},
     )
     try:
+        assert phase_prepared["gpu"]["keeper"] is keeper and keeper["users"] == 2
         np.testing.assert_array_equal(phase_prepared["initial_phase"], source_phase)
         optical = pupil.astype(float) * np.exp(1j * (source_phase.astype(float) + aberration))
         spectrum = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(optical)))
         np.testing.assert_allclose(phase_prepared["source_field"], spectrum[tuple(source.T)], rtol=1e-6)
-        assert slm_solver.compute_rearrangement(phase_prepared, plan, motion_frames=7)["converged"]
+        phase_sequence = slm_solver.compute_rearrangement(phase_prepared, plan, motion_frames=7)
+        assert phase_sequence["converged"]
+        if shape == (64, 80):
+            from concurrent.futures import ThreadPoolExecutor
+            from threading import Barrier
+
+            barrier = Barrier(2)
+            def delivered_together(index, frame):
+                if index == 0:
+                    barrier.wait(timeout=5)
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                one = workers.submit(slm_solver.compute_rearrangement, prepared, plan, motion_frames=7,
+                                     frame_ready=delivered_together)
+                two = workers.submit(slm_solver.compute_rearrangement, phase_prepared, plan, motion_frames=7,
+                                     frame_ready=delivered_together)
+                np.testing.assert_array_equal(one.result()["phase_codes"], next_sequence["phase_codes"])
+                np.testing.assert_array_equal(two.result()["phase_codes"], phase_sequence["phase_codes"])
+            assert keeper["active"] == 0
     finally:
         phase_prepared["close"]()
+    assert keeper["users"] == 1 and keeper["thread"].is_alive()
     if shape == (64, 80):
         source_weights = np.ones(len(source), np.float32)
         source_weights[0] /= 1.02
@@ -2343,6 +2364,9 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         finally:
             looser["close"]()
     prepared["close"]()
+    assert not keeper["thread"].is_alive()
+    assert keeper["device"] not in slm_solver._REARRANGEMENT_KEEPERS
+    assert "scratch" not in keeper
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
 
     translated_prepared = slm_solver.prepare_rearrangement(
@@ -2350,6 +2374,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2,
         endpoint_iterations=200, maximum_motion_frames=5,
     )
+    assert translated_prepared["gpu"]["keeper"] is not keeper
     try:
         translated = slm_solver.compute_rearrangement(
             translated_prepared, slm_solver.plan_rearrangement(translated_prepared, np.arange(4)), motion_frames=5,
