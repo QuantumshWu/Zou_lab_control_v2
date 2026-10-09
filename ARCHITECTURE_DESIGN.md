@@ -531,6 +531,7 @@ Node new chunk
 - 同一sequence和mapping内，字节完全相同的相邻相位图只传前帧引用并复用映射；不以近似相等或画面相似代替。已确认且未改变的像素通过HOLD保留完整authored时间，不重复BitBlt/USB换槽/读回。receipt区分全部逻辑step与真正的新presentation/ACK；未知状态不能HOLD。最后时间槽完成即结束sequence，receipt只声明authored timing完成，不声明未经测量的光学稳定。缓存只持必要前帧，不增加跨run图像仓库或另一个hardware owner。
 - 物理SLM与remote proxy均可在内部以独立不可变uint8相位码持有同一已确认命令；公共last_commanded_phase首次读取时才转换为不可变float32弧度并替换原表示。回执验证明确区分可信命令相位码与canonical弧度，不把字节伪装成弧度；prepare/release只转交内部已确认表示，不为无消费者的状态检查展开全幅数组。
 - SLM remote v3明确sequence只完成authored时间槽，不带旧profile尾等待；客户端和SLM server必须一起更新，版本不匹配明确拒绝，不兼容降级。Task信任设备owner已验证的显示帧与回执，不再重建另一份末态相位作重复比较；需要发布/保存时读取同一已确认命令。
+- Windows sequence pacing使用已有高精度定时器等到截止前约1 ms，再检查同一单调时钟直到真正截止；不提前发帧、不追赶缩短迟到帧、不忙等整帧。此有界尾段以少量CPU换取较小累计调度超时；不调用timeBeginPeriod、不改全局电源/时钟设置，Stop在两段等待中均可结束。
 - Profile记录model、serial、wavelength、phase curve来源和settle语义；不新增hash。
 - Editor明确区分authoring draft与device command；external Task后旧Send不得静默覆盖。
 - Editor的device状态问句（100 ms轮询与每次草稿变化）在Editor自己的串行command executor上问、在Qt线程上显示：一次只有一问在途，command进行中不问——command的交付本身带回它留下的device状态；Qt线程从不等在remote proxy的apply锁后面：proxy缓存的状态有自己的短锁，任何状态读（含Editor构造时的第一次）都不等apply的网络往返；远端慢apply只推迟状态行，不冻结event loop。

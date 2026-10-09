@@ -1348,16 +1348,23 @@ class X15213Adapter:
                 return self._sequence_cancel.is_set()
             if timer is None:
                 return self._sequence_cancel.wait(remaining)
-            due = ctypes.c_longlong(-max(1, int(np.ceil(remaining * 10_000_000))))
-            if not kernel32.SetWaitableTimerEx(timer, ctypes.byref(due), 0, None, None, None, 0):
-                raise ctypes.WinError(ctypes.get_last_error())
-            while not self._sequence_cancel.is_set():
-                result = kernel32.WaitForSingleObject(timer, 10)
-                if result == 0:
-                    return self._sequence_cancel.is_set()
-                if result != 258:  # WAIT_TIMEOUT; check Stop between bounded waits.
+            # Waking exactly at the deadline accumulates Windows scheduling
+            # overshoot on every authored slot. Spin only the final 1 ms;
+            # never advance a frame early or shorten a late frame to catch up.
+            remaining -= .001
+            if remaining > 0:
+                due = ctypes.c_longlong(-max(1, int(np.ceil(remaining * 10_000_000))))
+                if not kernel32.SetWaitableTimerEx(timer, ctypes.byref(due), 0, None, None, None, 0):
                     raise ctypes.WinError(ctypes.get_last_error())
-            return True
+                while not self._sequence_cancel.is_set():
+                    status = kernel32.WaitForSingleObject(timer, 10)
+                    if status == 0:
+                        break
+                    if status != 258:  # WAIT_TIMEOUT; check Stop between bounded waits.
+                        raise ctypes.WinError(ctypes.get_last_error())
+            while time.perf_counter() < deadline and not self._sequence_cancel.is_set():
+                pass
+            return self._sequence_cancel.is_set()
 
         try:
             if os.name == "nt":
@@ -1374,7 +1381,7 @@ class X15213Adapter:
                 timer = kernel32.CreateWaitableTimerExW(None, None, 2, 0x001F0003)
                 if not timer:
                     raise ctypes.WinError(ctypes.get_last_error())
-                result["pacing"] = "win32-high-resolution-waitable-timer"
+                result["pacing"] = "win32-high-resolution-timer-with-1ms-tail-spin"
             else:
                 result["pacing"] = "threading-event-wait"
             for index, interval in enumerate(sequence["intervals"]):

@@ -469,6 +469,7 @@
 
 - 用户指定N帧/帧率定义完整播放时间槽，sequence不追加未实测的profile尾等待；普通单图apply的profile等待保留。软件命令确认、authored timing完成与液晶光学稳定明确分开，复拍余量仍由用户Pulse负责。物理SLM与proxy内部仅保留同一已确认命令的一种表示，uint8在公共弧度消费者首次读取时才展开，不为播放完成回执作全幅浮点物化。
 - 同步SLM remote协议v3；拒绝不同版本，错误指明两端需一起更新。Task不再次重建末态浮点相位去比较设备已经确认的同一图，保留完整played_frames/known-new/非None事实检查并从owner取真实相位发布。
+- Windows播放只在最后1 ms检查截止时钟，前段仍用高精度timer；保持完整authored间隔及取消，不做提前/追赶。此前额外timeBeginPeriod探针没有收益，未保留。尾段忙等的CPU代价与完整流水线收益分别量测，不能用局部节拍收益声称已消除上传长尾。
 
 - 常暖按同进程GPU共享，既有prepared/close持有生命周期；独立scratch不污染相位求解，正式GPU活动期间暂停，不复制Task级保温worker，不改用户光学帧率或全局驱动设置。
 
