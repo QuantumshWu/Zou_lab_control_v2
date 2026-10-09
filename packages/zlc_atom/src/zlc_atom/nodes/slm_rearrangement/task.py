@@ -543,7 +543,7 @@ class SlmRearrangementTask:
             summary["removed_atoms"] = len(self._plan["removed_source_indices"])
             summary["planning"] = {key:self._plan[key] for key in
                 ("maximum_path_length", "maximum_path_lower_bound", "optimality_gap",
-                 "parallel_travel_distance", "search_budget_exhausted", "total_distance",
+                 "parallel_travel_distance", "search_budget_exhausted", "shortcut_vertices_removed", "total_distance",
                  "assignment_candidates", "routing") if key in self._plan}
             summary["unfilled_target_indices"] = np.setdiff1d(
                 np.arange(len(self.points[1])), self._plan["assigned_target_indices"]).tolist()

@@ -2078,6 +2078,20 @@ def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> 
     assert len(scheduled["motion_yx"]) > 2
     assert slm_solver.rearrangement_clearance(scheduled["motion_yx"]) >= 20
     assert scheduled["maximum_path_length"] == scheduled["maximum_path_lower_bound"] == 25
+    # A right-angle relay needs only the forbidden-delay boundary, not a whole
+    # move of waiting. Use translated coordinates to cover endpoint and
+    # near-boundary arithmetic, then validate the actually sampled segments.
+    corner = slm_solver.prepare_rearrangement_geometry(
+        [[100, 100], [100, 125]], [[100, 125], [125, 125]],
+        shape_yx=(256, 320), minimum_separation=20,
+    )
+    relayed = slm_solver.plan_rearrangement(corner, [0, 1])
+    assert relayed["maximum_path_length"] == relayed["maximum_path_lower_bound"] == 25
+    assert relayed["parallel_travel_distance"] == pytest.approx(20 * np.sqrt(2))
+    np.testing.assert_array_equal(relayed["motion_yx"][-1], corner["target_yx"][relayed["target_indices"]])
+    emitted = slm_solver.sample_rearrangement(corner, relayed, maximum_step=1.)
+    assert emitted["clearance"] >= 20
+    assert emitted["maximum_step"] <= 1. + 1e-12
     for starts, ends, message in (
         ([[20, 20], [20, 25]], [[40, 20]], "initial occupied sources"),
         ([[20, 20], [20, 40]], [[40, 20], [40, 25]], "required target sites"),
@@ -2543,6 +2557,47 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         finally:
             larger["close"]()
 
+
+
+def test_rearrangement_fractional_delay_uses_full_continuous_clearance():
+    def interval(start, end, distance):
+        return slm_solver._rearrangement_unsafe_delay(start[0], end[0], start[1], end[1], distance)
+
+    start = np.array([[0., 0.], [25., 0.]])
+    end = np.array([[25., 0.], [25., 25.]])
+    lag = np.sqrt(2.) * 20 / 25 - 1
+    assert interval(start, end, 20) == pytest.approx((-lag, np.inf))
+    assert interval(start[::-1], end[::-1], 20) == pytest.approx((-np.inf, lag))
+    assert interval(start, end, 15)[0] > 0  # simultaneous motion is already safe
+    for delta in (-lag - 1e-6, -lag + 1e-6, -2., .7):
+        times = np.unique([min(0., delta), 0., delta, 1., delta + 1., max(1., delta + 1.)])
+        motion = start[None] + np.clip(times[:, None] - [0., delta], 0, 1)[..., None] * (end - start)
+        lo, hi = interval(start, end, 20)
+        assert (slm_solver.rearrangement_clearance(motion) < 20) == (lo < delta < hi)
+    # Fixed obstacles and swapped endpoints cannot be repaired by any delay.
+    assert interval(np.array([[0., 0.], [25., 0.]]),
+                    np.array([[50., 0.], [25., 0.]]), 15) == (-np.inf, np.inf)
+    assert interval(start, start[::-1], 15) == (-np.inf, np.inf)
+    assert interval(start, start, 15) is None
+    assert interval(start, start, 0) is None
+    # Parallel motion must include collisions with a not-yet-started endpoint.
+    assert interval(start, start + [25., 0.], 20) == pytest.approx((.2, np.inf))
+    crossing = np.array([[-25., 0.], [0., -25.]])
+    assert interval(crossing, -crossing, 15) == pytest.approx(
+        (-np.sqrt(2.) * 15 / 50, np.sqrt(2.) * 15 / 50))
+    rng = np.random.default_rng(1048)
+    for _ in range(100):
+        start, end = rng.uniform(-50, 50, (2, 2, 2))
+        distance = float(rng.uniform(.5, 30))
+        bounds = interval(start, end, distance)
+        probes = [-2., -.7, 0., .3, 2.]
+        if bounds is not None:
+            probes.extend(bound + step for bound in bounds if np.isfinite(bound) for step in (-1e-6, 1e-6))
+        for delta in probes:
+            times = np.unique([0., delta, 1., delta + 1.])
+            motion = start[None] + np.clip(times[:, None] - [0., delta], 0, 1)[..., None] * (end - start)
+            collides = slm_solver.rearrangement_clearance(motion) < distance
+            assert collides == (bounds is not None and bounds[0] < delta < bounds[1])
 
 
 def test_slm_solver_validates_authored_pupil_amplitude() -> None:
