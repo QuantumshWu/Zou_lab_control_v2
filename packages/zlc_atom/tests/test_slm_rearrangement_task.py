@@ -13,7 +13,7 @@ import pytest
 
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
-from zlc_atom.devices.slm.device import phase_from_codes, phase_to_codes
+from zlc_atom.devices.slm.device import phase_from_codes
 from zlc_atom.nodes._framework.descriptor import ResolvedWorkspaceResource
 from zlc_atom.nodes.slm_rearrangement import task as task_module
 from zlc_atom.nodes.slm_rearrangement.logic_node import LOGIC_NODE, SLM_REARRANGEMENT_SCHEMA
@@ -240,7 +240,7 @@ def experiment(tmp_path, monkeypatch, request):
         return {"source_yx": kwargs["source_yx"], "target_yx": kwargs["target_yx"],
                 "minimum_separation": kwargs["minimum_separation"],
                 "gpu_info": {"device_name": "test CUDA boundary"},
-                "initial_phase": phase_from_codes(kwargs["endpoint_data"]["source_phase_codes"], slm.shape_yx),
+                "initial_phase": source_context["phase"],
                 "close": lambda: state.closed.append(True)}
 
     def plan(prepared, available):
@@ -260,7 +260,6 @@ def experiment(tmp_path, monkeypatch, request):
 
     def compute(prepared, planned, **kwargs):
         trace.append("compute")
-        state.compute_arguments = kwargs
         assert planned["assigned_source_indices"].dtype.kind in "iu"
         if board.early_verification:
             deadline = time.monotonic() + 1
@@ -275,12 +274,11 @@ def experiment(tmp_path, monkeypatch, request):
         samples = kwargs.get("sampled")
         if samples is None:
             samples = task_module.sample_rearrangement(prepared, planned, motion_frames=kwargs["motion_frames"])
-        return {"phase_codes": codes, "converged": None if state.task.phase_method == "transport" else True,
+        return {"phase_codes": codes, "converged": True,
                 "target_synthesis_coefficients": None,
                 "motion_yx": samples["motion_yx"],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
                 "support_intensity_ratios": np.full(frames, 1.005),
-                "retained_intensity_ratios": np.full(frames, 1.005),
                 "brightness_minimum_to_initial": np.linspace(2.3, 3.3, frames),
                 "brightness_mean_to_initial": np.linspace(2.31, 3.31, frames),
                 "brightness_maximum_to_initial": np.linspace(2.32, 3.32, frames),
@@ -292,7 +290,6 @@ def experiment(tmp_path, monkeypatch, request):
     monkeypatch.setattr(task_module, "prepare_rearrangement", prepare)
     monkeypatch.setattr(task_module, "plan_rearrangement", plan)
     monkeypatch.setattr(task_module, "compute_rearrangement", compute)
-    monkeypatch.setattr(task_module, "rearrangement_diagnostics", lambda *args, **kwargs: {"diagnostics_ms": 0.})
     state.compute = compute
     state.task_arguments = dict(
         camera=camera, camera_key="camera", sequencer=board, sequencer_key="pulse",
@@ -305,8 +302,6 @@ def experiment(tmp_path, monkeypatch, request):
         minimum_separation=0., phase_method="iterative",
         save_figure_artifact=_stub_figures,
     )
-    if getattr(request, "param", None) == "transport":
-        state.task_arguments.update(phase_method="transport", response_time_seconds=.012)
     state.task = SlmRearrangementTask(**state.task_arguments)
     try:
         yield state
@@ -317,7 +312,7 @@ def experiment(tmp_path, monkeypatch, request):
         plane.close()
 
 
-@pytest.mark.parametrize("experiment", [4, "camera-affine-roi", "transport"], indirect=True)
+@pytest.mark.parametrize("experiment", [4, "camera-affine-roi"], indirect=True)
 def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment):
     e = experiment
     authored = sequence_to_tree(e.task.sequence)
@@ -328,10 +323,6 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     # focus on interruption and do not pay for rendering the same pictures.
     e.task._save_figure_artifact = None
     result = e.task.execute(e.context)
-    np.testing.assert_array_equal(e.prepare_arguments["endpoint_data"]["source_phase_codes"],
-                                  phase_to_codes(e.task.science_context["phase"]))
-    assert e.compute_arguments["response_fraction"] == pytest.approx(
-        -np.expm1(-1/(60*.012)) if e.task.phase_method == "transport" else 1.)
     assert e.board.fires == [(1, 1)] and len(e.board.loads) == 1
     assert sequence_to_tree(e.task.sequence) == authored
     assert e.board.loads[0][1].periods == e.task.sequence.periods
@@ -932,7 +923,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         resource = ResolvedWorkspaceResource(tmp_path / "pulse.json", "zlc.pulse/slm-rearrangement", sequence)
         values = SLM_REARRANGEMENT_SCHEMA.draft_values()
         camera_outputs = ("before_frame", "before_occupied", "after_frame", "after_occupied", "phase")
-        for phase_method in ("iterative", "lpi", "transport"):
+        for phase_method in ("iterative", "lpi"):
             assert tuple(output.name for output in LOGIC_NODE.outputs_for(
                 {**values, "phase_method": phase_method}, {})) == camera_outputs + ("trajectory", "intensity_ratio")
             assert tuple(output.name for output in LOGIC_NODE.outputs_for(
@@ -961,7 +952,6 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert form.widget_for("motion_frames").isEnabled()
         assert not form.widget_for("max_camera_step").isEnabled()
         assert form.widget_for("intensity_error_percent").isEnabled()
-        assert not form.widget_for("response_time_seconds").isEnabled()
         patches = []
         form.draft_changed.connect(patches.append)
         QtTest.QTest.keyClick(before, QtCore.Qt.Key_Down)
@@ -998,28 +988,12 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         values.update(patches[-1]["values"])
         project()
         assert form.widget_for("intensity_error_percent").isEnabled()
-        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
-        app.processEvents()
-        values.update(patches[-1]["values"])
-        project()
-        assert form.read_value("phase_method") == "lpi"
-        assert form.widget_for("intensity_error_percent").isEnabled()
-        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
-        app.processEvents()
-        values.update(patches[-1]["values"])
-        project()
-        assert form.read_value("phase_method") == "transport"
-        assert not form.widget_for("intensity_error_percent").isEnabled()
-        assert form.widget_for("response_time_seconds").isEnabled()
-        assert form.read_value("response_time_seconds") == 0.
-        assert form.read_value("motion_frames") == 32
-        assert form.read_value("frame_rate_hz") == 60.
-        values.update(phase_method="lpi", response_time_seconds=.012)
-        project()
-        assert not form.widget_for("response_time_seconds").isEnabled()
-        assert form.read_value("response_time_seconds") == .012
-        assert form.widget_for("intensity_error_percent").isEnabled()
         assert form.read_value("intensity_error_percent") == 1.
+        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
+        app.processEvents()
+        values.update(patches[-1]["values"])
+        project()
+        assert form.widget_for("intensity_error_percent").isEnabled()
         with pytest.raises(ValueError, match="max_camera_step"):
             SLM_REARRANGEMENT_SCHEMA.draft_values({**values, "max_camera_step": 0.})
         resource = replace(resource, value=replace(sequence, periods=tuple(
@@ -1053,15 +1027,6 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             assert tuple(recording_form._forms) == tuple(form._forms)
             assert all(type(recording_form._forms[key]) is type(form._forms[key]) for key in form._forms)
             assert recording_form.read_value("phase_method") == "lpi"
-            assert not recording_form.widget_for("response_time_seconds").isEnabled()
-            recording_values["phase_method"] = "transport"
-            recording_form.update_projection({
-                "form_spec": project_logic_schema(recording, workspace_root=str(tmp_path)),
-                "form_values": recording_values, "workspace_resources": {"pulse_template": resource},
-            })
-            app.processEvents()
-            assert recording_form.widget_for("response_time_seconds").isEnabled()
-            assert not recording_form.widget_for("intensity_error_percent").isEnabled()
             assert recording_form.read_value("frame_mode") == "fixed"
             assert tuple(output.name for output in recording.outputs_for(recording_values, {})) == camera_outputs
         finally:

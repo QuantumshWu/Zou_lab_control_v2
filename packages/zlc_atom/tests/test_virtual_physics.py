@@ -2180,7 +2180,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         pytest.skip(f"CUDA is unavailable: {error}")
     if not available:
         pytest.skip("no CUDA device")
-    from zlc_atom.devices.slm.device import phase_from_codes, phase_to_codes
+    from zlc_atom.devices.slm.device import phase_from_codes
 
     # Keep the complete shared-encoder boundary proof when replacing the solver.
     count = 65536 + 1024 * 1272
@@ -2556,85 +2556,6 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             assert slm_solver.rearrangement_diagnostics(larger, partial)["support_intensity_ratios"][-1] <= 1.01
         finally:
             larger["close"]()
-
-    # Transport shares the same native pupil and sampled trajectory, including
-    # the overlapping7x7 target ROIs, but does not promise a uniformity gate.
-    source_codes = phase_to_codes(source_phase)
-    transport = slm_solver.prepare_rearrangement(
-        source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-        minimum_separation=2, maximum_motion_frames=2, method="transport",
-        endpoint_data={"source_phase_codes": source_codes},
-    )
-    def transported_fields(phase, positions):
-        signed = positions-center
-        optical = pupil.astype(float)*np.exp(1j*(phase.astype(float)+aberration))
-        return np.einsum("jh,hw,jw->j", np.exp(-2j*np.pi*signed[:, 0, None]*y),
-                         optical, np.exp(-2j*np.pi*signed[:, 1, None]*x), optimize=True)
-    try:
-        np.testing.assert_array_equal(transport["initial_phase"], phase_from_codes(source_codes, shape))
-        np.testing.assert_allclose(transport["source_field"], transported_fields(transport["initial_phase"], source), rtol=2e-6)
-        transport_plan = slm_solver.plan_rearrangement(transport, np.arange(4))
-        for response in (1., 1.-np.exp(-1.)):
-            received = []
-            movie = slm_solver.compute_rearrangement(
-                transport, transport_plan, motion_frames=5, response_fraction=response,
-                frame_ready=lambda index, frame: received.append((index, frame)),
-            )
-            assert movie["motion_frames"] == len(received) == 5 and movie["fade_frames"] == 1
-            assert [index for index, _ in received] == list(range(5))
-            assert all(not frame.flags.writeable for _, frame in received)
-            with pytest.raises(ValueError):
-                movie["phase_codes"].setflags(write=True)
-            assert all(movie[key] is None for key in ("quality_accepted", "converged", "discard_converged", "support_tolerance"))
-            assert movie["quality_scope"] == "finite-field-transport-no-uniformity-gate"
-            state = transport["initial_phase"].copy()
-            for index, (code, positions) in enumerate(zip(movie["phase_codes"], movie["sites_yx"])):
-                command = phase_from_codes(code, shape)
-                expected = transported_fields(command, positions)
-                scale = np.min(abs(expected[movie["active_sites"][index]]))
-                np.testing.assert_allclose(movie["actual_fields"][index], expected, rtol=2e-5, atol=2e-5*scale)
-                if response < 1:
-                    # The declared response evolves once per displayed slot,
-                    # not once per projection iteration. FP32 phase wrapping
-                    # has the same tie convention as the command encoder.
-                    delta = command-state
-                    state += np.float32(response)*np.arctan2(np.sin(delta), np.cos(delta))
-                    expected_response = transported_fields(state, positions)
-                    np.testing.assert_allclose(movie["predicted_response_fields"][index], expected_response,
-                                               rtol=2e-5, atol=2e-5*scale)
-            if response == 1:
-                assert movie["predicted_response_fields"].shape == (0, len(source))
-            saved_transport = movie["phase_codes"].copy()
-            repeated = slm_solver.compute_rearrangement(transport, transport_plan, motion_frames=5, response_fraction=response)
-            np.testing.assert_array_equal(repeated["phase_codes"], saved_transport)
-            np.testing.assert_array_equal(repeated["predicted_response_fields"], movie["predicted_response_fields"])
-            np.testing.assert_array_equal(repeated["sites_yx"], movie["sites_yx"])
-            grown_transport = slm_solver.compute_rearrangement(transport, transport_plan, motion_frames=7, response_fraction=response)
-            assert grown_transport["motion_frames"] == 7
-            np.testing.assert_array_equal(movie["phase_codes"], saved_transport)
-    finally:
-        transport["close"]()
-    np.testing.assert_array_equal(movie["phase_codes"], saved_transport)
-    if shape == (64, 80):
-        static_transport = slm_solver.prepare_rearrangement(
-            source, source, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-            minimum_separation=2, maximum_motion_frames=2, method="transport",
-            endpoint_data={"source_phase_codes": source_codes}, target_intensities=changed_weights,
-        )
-        try:
-            static_plan = slm_solver.plan_rearrangement(static_transport, np.arange(4))
-            unchanged = {**static_transport, "target_intensities": static_transport["source_intensities"]}
-            assert slm_solver.compute_rearrangement(unchanged, static_plan, motion_frames=0)["noop"]
-            weighted = slm_solver.compute_rearrangement(static_transport, static_plan, motion_frames=3)
-            assert not weighted["noop"] and weighted["maximum_step"] == 0
-            assert not np.array_equal(weighted["phase_codes"][-1], source_codes)
-            one = slm_solver.compute_rearrangement(static_transport, slm_solver.plan_rearrangement(static_transport, [0, 1]), motion_frames=1)
-            assert one["motion_frames"] == one["fade_frames"] == 1 and one["maximum_step"] == 0
-            assert one["converged"] is None
-            np.testing.assert_allclose(one["actual_fields"][0], transported_fields(phase_from_codes(one["phase_codes"][0], shape), one["sites_yx"][0]),
-                                       rtol=2e-5, atol=2e-5*np.min(abs(one["actual_fields"][0, :2])))
-        finally:
-            static_transport["close"]()
 
 
 

@@ -26,7 +26,7 @@ from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse.endpoint import local_ipv4_addresses
 
 from .. import open_slm_control
-from ..device import _same_phase_codes, bind_slm, canonical_phase, phase_from_codes, phase_to_codes, phase_sequence_codes
+from ..device import _same_phase_codes, bind_slm, canonical_phase, phase_from_codes, phase_sequence_codes
 from .remote import _RemoteSlmAdapter, _open_slm_server
 
 
@@ -939,7 +939,10 @@ class X15213Adapter:
             return dict(self._last_receipt)
 
     def _gray(self, canonical: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
-        return self._gray_codes(phase_to_codes(canonical))
+        phase_code = np.mod(
+            _half_up(canonical.astype(np.float64) * (128.0 / np.pi)), 256.0
+        ).astype(np.uint8)
+        return self._gray_codes(phase_code)
 
     def _gray_codes(self, codes: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
         mapping = self._mapping_snapshot()

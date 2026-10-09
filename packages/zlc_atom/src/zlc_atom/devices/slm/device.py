@@ -63,16 +63,6 @@ def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
     return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
 
 
-def phase_to_codes(canonical: np.ndarray) -> np.ndarray:
-    """Encode an already validated canonical phase plane, not vendor gray.
-
-    Static source application and numerical source references use the same
-    nearest-code, half-up rule. Device orientation/correction/LUT stay downstream.
-    """
-    values = np.asarray(canonical, dtype=np.float64)
-    return np.remainder(np.floor(values * (256.0 / _TWO_PI) + .5), 256).astype(np.uint8)
-
-
 def _same_phase_codes(left: np.ndarray, right: np.ndarray) -> bool:
     """Compare validated uint8 snapshots exactly without a byte-sized mask."""
     if left is right and not left.flags.writeable:
@@ -225,4 +215,4 @@ def bind_slm(
     return bind_leaf(context, key, type_id, slm, identity, "slm.phase")
 
 
-__all__ = ["SlmAdapter", "bind_slm", "canonical_phase", "phase_from_codes", "phase_to_codes"]
+__all__ = ["SlmAdapter", "bind_slm", "canonical_phase"]
