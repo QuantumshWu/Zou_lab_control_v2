@@ -37,14 +37,19 @@ def canonical_phase(radians: object, shape_yx: tuple[int, int]) -> np.ndarray:
         )
     if source.dtype.kind not in "iuf":
         raise TypeError("SLM phase must contain real numeric values")
-    values = np.asarray(source, dtype=np.float64)
-    if not np.all(np.isfinite(values)):
-        raise ValueError("SLM phase must contain only finite values")
-    wrapped = np.asarray(np.remainder(values, _TWO_PI), dtype=np.float32)
-    # float32(2*pi) rounds above the mathematical upper bound.  Clamp that
-    # single rounding case so the public interval stays strictly [0, 2*pi)
-    # and canonicalizing an already-canonical snapshot is idempotent.
-    wrapped = np.minimum(wrapped, _MAX_WRAPPED_PHASE)
+    if (source.dtype == np.float32 and np.min(source) >= 0.0
+            and np.max(source) <= _MAX_WRAPPED_PHASE):
+        # Canonical float32 commands need no double-precision modulo. Taking
+        # abs only changes -0 to +0, matching remainder's exact bytes.
+        wrapped = np.abs(source)
+    else:
+        values = np.asarray(source, dtype=np.float64)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("SLM phase must contain only finite values")
+        wrapped = np.asarray(np.remainder(values, _TWO_PI), dtype=np.float32)
+        # float32(2*pi) rounds above the mathematical upper bound. Clamp that
+        # single rounding case so the public interval stays strictly [0, 2*pi).
+        wrapped = np.minimum(wrapped, _MAX_WRAPPED_PHASE)
     # An ndarray backed by immutable bytes cannot be made writable again by a
     # caller, unlike an owning array with only its WRITEABLE flag cleared.
     return np.frombuffer(

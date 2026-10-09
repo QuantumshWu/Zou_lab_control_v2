@@ -221,13 +221,47 @@ def test_the_slm_server_admits_peers_only_while_told_to(monkeypatch) -> None:
 def test_successful_usb_command_is_known_only_after_readback_and_settle(
     monkeypatch,
 ) -> None:
+    from zlc_atom.devices.slm.device import canonical_phase
+
+    upper = np.nextafter(np.float32(2 * np.pi), np.float32(0))
+    for source in (
+        np.array([[-0.0, 0.0], [np.pi, upper]], dtype=np.float32).T,
+        np.array([[-0.0, -np.finfo(np.float32).smallest_subnormal],
+                  [np.float32(2 * np.pi), 7 * np.pi]], dtype=np.float32),
+        np.array([[-0.0, -2 * np.pi],
+                  [np.nextafter(2 * np.pi, 0.0), 2 * np.pi]], dtype=np.float64),
+    ):
+        expected = np.minimum(
+            np.remainder(source.astype(np.float64), 2 * np.pi).astype(np.float32), upper,
+        )
+        frozen = canonical_phase(source, source.shape)
+        assert frozen.tobytes() == expected.tobytes()
+        assert canonical_phase(frozen, source.shape).tobytes() == expected.tobytes()
+        source[:] = 0
+        assert frozen.tobytes() == expected.tobytes()
+        with pytest.raises(ValueError):
+            frozen.flags.writeable = True
+    for nonfinite in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError, match="finite"):
+            canonical_phase(np.array([[nonfinite]], dtype=np.float32), (1, 1))
+
     sdk = _UsbSdk()
     _patch_usb(monkeypatch, sdk)
     adapter = X15213Adapter(_config(flip_x=True, flip_y=True))
     try:
-        phase = np.full(adapter.shape_yx, np.pi, dtype=np.float32)
+        boundaries = ((np.arange(256) + 0.5) * (2 * np.pi / 256)).astype(np.float32)
+        phase = np.resize(np.concatenate((
+            np.nextafter(boundaries, np.float32(-np.inf)), boundaries,
+            np.nextafter(boundaries, np.float32(np.inf)), [-0.0, upper],
+        )).astype(np.float32), adapter.shape_yx)
+        expected_codes = np.mod(
+            np.floor(phase.astype(np.float64) * (128 / np.pi) + 0.5), 256,
+        ).astype(np.uint8)
         commanded = adapter.apply_phase(phase)
         assert not commanded.flags.writeable
+        np.testing.assert_array_equal(
+            sdk.display, adapter._phase_to_gray[expected_codes[::-1, ::-1]],
+        )
         np.testing.assert_array_equal(adapter.last_commanded_phase, commanded)
         assert sdk.write_count == 1
         assert adapter.command_revision == 1
