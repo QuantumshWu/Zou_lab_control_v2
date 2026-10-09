@@ -920,6 +920,46 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
     assert retry is not None, "the superseded update did not release its slot"
     port.reject(retry, RuntimeError("a real render failure"))
     assert isinstance(port.last_error, RuntimeError)
+    assert port.last_error_publication is next_publication
+
+    # A waiting consumer receives this exact final-attempt failure through
+    # the existing owner queue; a previous revision is not failure evidence.
+    from concurrent.futures import ThreadPoolExecutor
+    from zlc_runtime import split_signal_key, stable_signal_key
+    from zlc_workbench.console import ConsolePresenter
+
+    console = object.__new__(ConsolePresenter)
+    generation = object()
+    wanted = stable_signal_key("panel-1", "frequency")
+    context = SimpleNamespace(instance_id="consumer", generation=generation, cancel_requested=lambda: False)
+    console.logic = {
+        "consumer": SimpleNamespace(host=SimpleNamespace(generation=generation, running=True), draft=SimpleNamespace(source_signal=wanted)),
+        split_signal_key(signal)[0]: SimpleNamespace(descriptor=SimpleNamespace(kind=SimpleNamespace(value="measurement")), host=None),
+    }
+    state = SimpleNamespace(signal=signal, fit={"model": "gaussian"}, published_outputs={})
+    console.panels = {"panel-1": SimpleNamespace(state=state, port=port, bridge=None)}
+    console.session = SimpleNamespace(signal_plane=SimpleNamespace(direct_parent_publications=lambda _pub: ()))
+    console._closing = False
+    queued = []
+    console._enqueue_panel_interaction = queued.append
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        def check(publication):
+            future = worker.submit(console._check_signal_input, wanted, context, expected_publications=(publication,))
+            deadline = time.monotonic() + 2
+            while not queued and time.monotonic() < deadline:
+                time.sleep(.001)
+            assert queued
+            queued.pop(0)()
+            return future.result(timeout=2)
+
+        with pytest.raises(RuntimeError, match="a real render failure"):
+            check(next_publication)
+        _later_value, later = _advanced(next_value, next_publication, signal)
+        assert later.event_ref.generation == next_publication.event_ref.generation
+        check(later)
+        state.published_outputs["frequency"] = False
+        with pytest.raises(RuntimeError, match="publication is disabled"):
+            check(later)
 
 
 def test_an_evicted_history_publication_keeps_the_last_panel_surface(

@@ -82,6 +82,7 @@ def project_logic_schema(
     field_availability: Mapping[str, str] | None = None,
     acquisition_options: Sequence[str] = (),
     acquisition_selected: str = "",
+    acquisition_enabled: bool = True,
 ) -> FormSpec:
     """Project a logic schema, rooting resource pickers in the workspace.
 
@@ -110,7 +111,10 @@ def project_logic_schema(
             choices.extend(FormChoice(name, name) for name in acquisition_options)
             if acquisition_selected and acquisition_selected not in acquisition_options:
                 choices.append(FormChoice(f"{acquisition_selected} (unavailable)", acquisition_selected))
-            fields.append(replace(_project_field(field), kind="choice", choices=tuple(choices)))
+            fields.append(replace(
+                _project_field(field), kind="choice", choices=tuple(choices),
+                unavailable_reason="" if acquisition_enabled else "Not used by the selected mode.",
+            ))
             continue
         # A derived field is the node's to fill: shown, with its description
         # as the reason it is not the operator's, and never edited.
@@ -118,7 +122,11 @@ def project_logic_schema(
             str(field.description) if getattr(field, "derived", False) else ""
         )
         if reason:
-            fields.append(replace(_project_field(field), unavailable_reason=reason))
+            projected = (
+                _project_resource_field(field, resources[field.name], workspace_root=workspace_root)
+                if field.value_type == "resource" else _project_field(field)
+            )
+            fields.append(replace(projected, unavailable_reason=reason))
             continue
         if field.value_type == "folder":
             # A folder is chosen from the workspace, so it OPENS there and is
@@ -294,7 +302,7 @@ def _project_resource_field(
         kind="path",
         label=field.label,
         default=default,
-        required=True,
+        required=bool(field.required),
         description=f"Choose a file from {directory}",
         file_filter=f"{field.label} ({patterns})",
         base_dir=str(directory),
@@ -302,6 +310,7 @@ def _project_resource_field(
         # in the Pulse Editor.  Offer Refresh rather than making the operator
         # re-pick the same file to see an edit.
         refreshable=True,
+        enabled_when=field.enabled_when,
     )
 
 

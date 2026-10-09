@@ -46,6 +46,7 @@ from zlc_plot.specs import GRID_CELL_KINDS, non_portable_display_names
 from zlc_runtime import (
     IndexedHistoryLease,
     OperatorInputRequest,
+    SignalPublication,
     SelectionChange,
     split_signal_key,
     stable_signal_key,
@@ -6977,6 +6978,45 @@ class ConsolePresenter:
         )
         return True
 
+    def _task_acquisition_nodes(self) -> frozenset[str]:
+        """The active Task's explicitly selected acquisition and source processors."""
+
+        active = self._active_task()
+        if active is None:
+            return frozenset()
+        pending = [active.node_id]
+        allowed: set[str] = set()
+        while pending:
+            node_id = pending.pop()
+            if node_id in allowed:
+                continue
+            binding = self.logic.get(node_id)
+            if binding is None:
+                continue
+            allowed.add(node_id)
+            descriptor = binding.descriptor
+            field = descriptor.acquisition_input
+            if field and descriptor.authoring_schema.is_enabled(field, binding.draft.values):
+                selected = str(binding.draft.values.get(field) or "")
+                if selected:
+                    pending.append(selected)
+            try:
+                source_chain = self._signal_input_chain(binding.draft.source_signal)
+            except ValueError:
+                # Invalid source wiring grants no extra Start permission;
+                # the requested acquisition/input check reports its error.
+                continue
+            for signal in source_chain:
+                parts = split_signal_key(signal)
+                if parts is None:
+                    continue
+                producer, _output = parts
+                upstream = self.logic.get(producer)
+                if upstream is not None and self._is_processor(upstream):
+                    pending.append(producer)
+        allowed.discard(active.node_id)
+        return frozenset(allowed)
+
     def _project_task_takeover(self) -> None:
         active = self._active_task()
         takeover = active is not None
@@ -7317,13 +7357,14 @@ class ConsolePresenter:
         options = device_key_options(
             descriptor,
             installation=self.session.installation,
+            values=drafted_values,
         )
         selected_devices = {
             requirement.argument_name: str(
                 dict(device_keys or {}).get(
                     requirement.argument_name,
                     options[requirement.argument_name][0]
-                    if options[requirement.argument_name]
+                    if options.get(requirement.argument_name)
                     else "",
                 )
             )
@@ -7463,6 +7504,7 @@ class ConsolePresenter:
         options = device_key_options(
             binding.descriptor,
             installation=self.session.installation,
+            values=binding.draft.values,
         )
         artifact_specs = artifact_input_specs(binding.descriptor)
         workspace = getattr(self.session, "workspace", None)
@@ -7512,7 +7554,10 @@ class ConsolePresenter:
             binding.following or binding.pending is not None
             or (binding.host is not None and binding.host.running)
         )
-        source_specs = dataset_inputs(binding.descriptor)
+        source_specs = dataset_inputs(binding.descriptor, binding.draft.values)
+        acquisition_enabled = bool(binding.descriptor.acquisition_input and
+            binding.descriptor.authoring_schema.is_enabled(
+                binding.descriptor.acquisition_input, binding.draft.values))
         source_options, source_labels, source_groups = self._source_choices(
             binding.descriptor, binding.node_id, compatible
         )
@@ -7563,9 +7608,11 @@ class ConsolePresenter:
                 field_availability=finalization.field_availability,
                 acquisition_options=self._acquisition_options(binding.node_id),
                 acquisition_selected=str(binding.draft.values.get(binding.descriptor.acquisition_input) or ""),
+                acquisition_enabled=acquisition_enabled,
             ),
             "form_values": form_values,
             "acquisition_input": binding.descriptor.acquisition_input,
+            "acquisition_enabled": acquisition_enabled,
             "artifact_form_spec": artifact_form_spec,
             # Exactly the form's keys: a frame row the draft has no path for
             # yet reads "", and the form refuses any other key set.
@@ -7579,7 +7626,7 @@ class ConsolePresenter:
             # and no switch at all where the node opens nothing.
             "auto_preview": binding.auto_preview,
             "preview_offered": binding.descriptor.offers_a_preview,
-            "source_required": bool(dataset_inputs(binding.descriptor)),
+            "source_required": bool(source_specs),
             "source_label": (
                 source_specs[0].name.replace("_", " ").title()
                 + (" · Signal bundle" if source_specs[0].select_bundle else "")
@@ -7704,8 +7751,8 @@ class ConsolePresenter:
             artifact_inputs=patch.get("artifact_inputs"),
         )
 
-    def start_logic(self, node_id: str) -> bool:
-        if self._task_command_blocked("starting another logic node"):
+    def start_logic(self, node_id: str, *, _acquisition: bool = False) -> bool:
+        if not (_acquisition and node_id in self._task_acquisition_nodes()) and self._task_command_blocked("starting another logic node"):
             return False
         binding = self.logic.get(str(node_id))
         if binding is None:
@@ -7818,16 +7865,13 @@ class ConsolePresenter:
     def _follow_processor_sources(self) -> None:
         """Complete standing processor Starts whose source is alive again."""
 
-        if self._active_task() is not None:
-            # A Task owns the bench; deferring the follow to a later beat is
-            # waiting, not giving up -- and start_logic would report the
-            # block on every beat.
-            return
+        allowed = self._task_acquisition_nodes() if self._active_task() is not None else None
         for binding in tuple(self.logic.values()):
             if (
                 not binding.following
                 or binding.removing
                 or binding.pending is not None
+                or (allowed is not None and binding.node_id not in allowed)
             ):
                 continue
             host = binding.host
@@ -7858,7 +7902,7 @@ class ConsolePresenter:
                 # to be followed -- the follower's own start may be what
                 # causes the first one.
                 continue
-            if not self.start_logic(binding.node_id):
+            if not self.start_logic(binding.node_id, _acquisition=True):
                 # Source admission failures belong to the new host and wait
                 # under the same generation rule. A rejected authoring/build
                 # never installed a host and requires an operator correction.
@@ -7870,6 +7914,7 @@ class ConsolePresenter:
         if binding is None:
             return False
         binding.following = False
+        self._stop_acquisition(binding)
         had_pending = binding.pending is not None
         self._discard_pending(binding)
         host = binding.host
@@ -7994,6 +8039,8 @@ class ConsolePresenter:
                         f"{binding.node_id}: {_error_text(error)}",
                         severity="error",
                     )
+                if binding.host.terminal or binding.host.cancel_requested:
+                    self._stop_acquisition(binding)
                 if not self._closing:
                     self._capture_artifact_results(binding)
                     self._ensure_node_previews(binding)
@@ -8243,7 +8290,8 @@ class ConsolePresenter:
         whole description list again.
         """
 
-        specs = dataset_inputs(descriptor)
+        consumer = self.logic.get(consumer_node_id)
+        specs = dataset_inputs(descriptor, None if consumer is None else consumer.draft.values)
         if not specs:
             return ()
 
@@ -8328,7 +8376,8 @@ class ConsolePresenter:
             parts = split_signal_key(key)
             if parts is not None:
                 groups.setdefault(key, parts[0])
-        specs = dataset_inputs(descriptor)
+        consumer = self.logic.get(consumer_node_id)
+        specs = dataset_inputs(descriptor, None if consumer is None else consumer.draft.values)
         if specs and specs[0].select_bundle:
             # Only one atomic producer's outputs form a bundle. A panel's
             # ROI and Fit may share a display heading but have different owners.
@@ -8382,7 +8431,7 @@ class ConsolePresenter:
                 arguments[requirement.argument_name],
                 requirement.fields_frozen_by(arguments[requirement.argument_name]),
             )
-            for requirement in binding.descriptor.device_requirements
+            for requirement in binding.descriptor.active_device_requirements(finalization.values)
         )
         resolve_claims = getattr(node, "resolved_device_claims", None)
         if callable(resolve_claims):
@@ -8542,6 +8591,10 @@ class ConsolePresenter:
                     run_root=candidate.run_root,
                     input_summary=candidate.input_summary,
                 )
+            for parent in self.logic.values():
+                owned = parent.acquisition_run
+                if owned is not None and owned[1] is candidate.host and owned[2] is None:
+                    parent.acquisition_run = (owned[0], candidate.host, candidate.host.generation)
         except Exception as error:
             lease.release()
             binding.lease = None
@@ -8616,20 +8669,142 @@ class ConsolePresenter:
         extras = self._bench_offer_extras()
         extras["save_figure_artifact"] = self._save_figure_artifact
         extras["restart_logic"] = self._restart_acquisition
+        extras["check_signal_input"] = self._check_signal_input
         if self._build_figure_host is not None:
             extras["build_figure_host"] = self._build_figure_host
         return extras
 
+    def _signal_input_chain(self, signal: str) -> tuple[str, ...]:
+        """The existing Panel/Processor inputs, without acquisition edges."""
+        names: list[str] = []
+        while signal:
+            if signal in names:
+                raise ValueError("signal input chain contains a cycle")
+            names.append(signal)
+            parts = split_signal_key(signal)
+            if parts is None:
+                break
+            producer, _output = parts
+            panel = self.panels.get(producer)
+            if panel is not None:
+                signal = panel.state.signal
+                continue
+            binding = self.logic.get(producer)
+            if binding is None or not self._is_processor(binding):
+                break
+            signal = binding.draft.source_signal
+        return tuple(names)
+
+    def _check_signal_input(
+        self, signal: str, context: object, *, expected_publications: Sequence[SignalPublication] = (),
+    ) -> None:
+        """Return current input failures to the waiting worker, not as Stop."""
+        expected = {pub.event_ref for pub in expected_publications}
+        answer: Future = Future()
+
+        def check() -> None:
+            if not answer.set_running_or_notify_cancel():
+                return
+            try:
+                if context.cancel_requested() or self._closing:
+                    raise InterruptedError("stopped while checking the input signal")
+                parent = self.logic.get(str(context.instance_id))
+                if parent is None or parent.host is None or parent.host.generation != context.generation or not parent.host.running:
+                    raise RuntimeError("the signal consumer's run is no longer active")
+                if signal != parent.draft.source_signal:
+                    raise ValueError("the Task did not select this input signal")
+                plane = self.session.signal_plane
+
+                def belongs(publication: SignalPublication | None) -> bool:
+                    pending = [] if publication is None else [publication]
+                    seen = set()
+                    while pending:
+                        item = pending.pop()
+                        ref = item.event_ref
+                        if ref in seen:
+                            continue
+                        seen.add(ref)
+                        if ref in expected:
+                            return True
+                        try:
+                            pending.extend(plane.direct_parent_publications(item))
+                        except (LookupError, ValueError):
+                            # An old, retired error cannot prove this run failed.
+                            continue
+                    return False
+
+                for name in self._signal_input_chain(signal):
+                    parts = split_signal_key(name)
+                    if parts is None:
+                        continue
+                    producer, output = parts
+                    panel = self.panels.get(producer)
+                    if panel is not None:
+                        if not panel.state.published_outputs.get(output, True):
+                            raise RuntimeError(f"{name}: output publication is disabled")
+                        if name == signal and not panel.state.fit.get("model"):
+                            raise RuntimeError(f"{name}: the Fit model is no longer enabled")
+                        if getattr(panel, "configuration", None) is None:
+                            refusal = getattr(panel, "vacancy", "") or getattr(panel, "unapplied_display", "")
+                            if refusal:
+                                raise RuntimeError(f"{name}: settings not applied -- {refusal}")
+                        for owner in (panel.port, panel.bridge):
+                            if owner is None:
+                                continue
+                            error = owner.last_error
+                            if error is not None and belongs(owner.last_error_publication):
+                                raise RuntimeError(f"{name}: {_error_text(error)}") from error
+                    else:
+                        source = self.logic.get(producer)
+                        if source is None:
+                            if not any(item.name == name for item in plane.describe_signals()):
+                                raise RuntimeError(f"{name}: the input producer was removed")
+                            continue
+                        host = source.host
+                        if host is not None and host.observation.error and belongs(host.source_publication):
+                            raise RuntimeError(f"{name}: {host.observation.error}")
+                answer.set_result(None)
+            except BaseException as error:
+                answer.set_exception(error)
+
+        self._enqueue_panel_interaction(check)
+        while True:
+            try:
+                return answer.result(timeout=0.05)
+            except _AnswerTimeout:
+                if context.cancel_requested() and answer.cancel():
+                    raise InterruptedError("stopped while checking the input signal")
+
     def _acquisition_options(self, consumer: str) -> tuple[str, ...]:
+        owner = self.logic.get(consumer)
+        completion = "ready" if owner is None else owner.descriptor.acquisition_completion
         return tuple(
             binding.node_id for binding in self.logic.values()
             if binding.node_id != consumer
             and binding.descriptor.kind.value == "measurement"
-            and binding.descriptor.reports_ready
+            and (completion == "terminal" or binding.descriptor.reports_ready)
         )
 
-    def _restart_acquisition(self, node_id: str, context: object) -> None:
-        """Ask the original Logic owner to restart, then wait off the UI thread."""
+    def _stop_acquisition(self, parent: LogicBinding) -> None:
+        """Release only the child run this parent actually started."""
+
+        owned, parent.acquisition_run = parent.acquisition_run, None
+        if owned is None:
+            return
+        node_id, host, generation = owned
+        binding = self.logic.get(node_id)
+        if binding is None:
+            return
+        if binding.pending is not None and binding.pending.host is host:
+            self._discard_pending(binding)
+        elif binding.host is host and (generation is None or host.generation == generation):
+            self._stop_acquisition(binding)
+            host.cancel(f"{parent.node_id} finished using this acquisition")
+
+    def _restart_acquisition(
+        self, node_id: str, context: object, *, completion: str = "ready",
+    ) -> Mapping[str, SignalPublication] | None:
+        """Restart through the original owner and wait for the requested boundary."""
 
         answer: Future = Future()
 
@@ -8638,38 +8813,75 @@ class ConsolePresenter:
                 return
             try:
                 if context.cancel_requested() or self._closing:
-                    raise InterruptedError("scan stopped before acquisition restart")
+                    raise InterruptedError("stopped before acquisition restart")
+                parent = self.logic[str(context.instance_id)]
+                parent_host = parent.host
+                if parent_host is None or parent_host.generation != context.generation or not parent_host.running:
+                    raise RuntimeError("the acquisition caller's run is no longer active")
+                descriptor = parent.descriptor
+                field = descriptor.acquisition_input
+                if completion != descriptor.acquisition_completion or not field:
+                    raise ValueError("acquisition must match this run's declared selection and completion")
+                if self._active_task() is not None and (
+                    not descriptor.authoring_schema.is_enabled(field, parent.draft.values)
+                    or str(parent.draft.values.get(field) or "") != node_id
+                ):
+                    raise ValueError("the Task did not select this acquisition")
                 if node_id not in self._acquisition_options(str(context.instance_id)):
                     raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
-                if not self.start_logic(node_id):
+                if completion == "terminal" and parent.draft.source_signal and not any(
+                    parts is not None and parts[0] == node_id
+                    for signal in self._signal_input_chain(parent.draft.source_signal)
+                    for parts in (split_signal_key(signal),)
+                ):
+                    raise ValueError(
+                        f"{parent.draft.source_signal!r} does not derive from "
+                        f"the selected acquisition {node_id!r}"
+                    )
+                if not self.start_logic(node_id, _acquisition=True):
                     raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
                 binding = self.logic[node_id]
-                answer.set_result(binding.pending.host if binding.pending is not None else binding.host)
+                host = binding.pending.host if binding.pending is not None else binding.host
+                parent.acquisition_run = (node_id, host, host.generation)
+                answer.set_result((host, parent_host, context.generation))
             except BaseException as error:
                 answer.set_exception(error)
 
         self._enqueue_panel_interaction(start)
         while True:
             try:
-                host = answer.result(timeout=0.05)
+                host, parent_host, parent_generation = answer.result(timeout=0.05)
                 break
             except _AnswerTimeout:
                 if context.cancel_requested() and answer.cancel():
-                    raise InterruptedError("scan stopped before acquisition restart")
+                    raise InterruptedError("stopped before acquisition restart")
         try:
             while not context.cancel_requested():
-                if host.wait_ready(0.05):
-                    return
-            raise InterruptedError("scan stopped while acquisition was preparing")
+                if completion == "ready":
+                    if host.wait_ready(0.05):
+                        return None
+                elif host.wait_terminal(0.05):
+                    observed = host.observation
+                    if observed.phase != "done" or observed.error:
+                        raise RuntimeError(observed.error or f"{node_id} ended as {observed.phase}")
+                    publications = {
+                        name: self.session.signal_plane.latest_publication(name)
+                        for name in host.published_signals()
+                    }
+                    if not publications or any(
+                        publication is None or publication.event_ref.generation != host.generation
+                        or publication.event_ref.stream_id.value != host.instance_id
+                        for publication in publications.values()
+                    ):
+                        raise RuntimeError(f"{node_id} finished without retained output from this run")
+                    return publications
+            raise InterruptedError("stopped while waiting for acquisition")
         finally:
             if context.cancel_requested():
                 def stop() -> None:
-                    binding = self.logic.get(node_id)
-                    if binding is not None and (
-                        binding.host is host or
-                        (binding.pending is not None and binding.pending.host is host)
-                    ):
-                        self.stop_logic(node_id)
+                    parent = self.logic.get(str(context.instance_id))
+                    if parent is not None and parent.host is parent_host and parent_host.generation == parent_generation:
+                        self._stop_acquisition(parent)
                 self._enqueue_panel_interaction(stop)
 
     def _artifact_results(

@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from zlc_atom.nodes import DatasetInputSpec
 from zlc_durable import strict_json_loads, write_readable_json
 from zlc_runtime import split_signal_key, stable_signal_key
 
@@ -234,7 +235,7 @@ def resolve_layout(
             values = replace(schema, validator=None).draft_values(
                 _current_authoring_values(schema.fields, entry.values)
             )
-            options = device_key_options(descriptor, installation=installation)
+            options = device_key_options(descriptor, installation=installation, values=values)
         except Exception as error:
             raise LayoutError(f"{entry.node_id}: {error}") from error
         required = tuple(
@@ -243,11 +244,11 @@ def resolve_layout(
         )
         selected: dict[str, str] = {}
         for name in required:
-            available = options[name]
+            available = options.get(name, ())
             key = entry.device_keys.get(name, available[0] if available else "")
             if not isinstance(key, str):
                 raise LayoutError(f"{entry.node_id}: device input {name!r} must be text")
-            if key in installed_keys and key not in available:
+            if name in options and key in installed_keys and key not in available:
                 raise LayoutError(
                     f"{entry.node_id}: {key!r} is incompatible with device input "
                     f"{name!r}"
@@ -295,14 +296,14 @@ def resolve_layout(
                 )
             output_contracts[signal] = contract
     for binding in bindings:
-        input_specs = dataset_inputs(binding.descriptor)
+        input_specs = dataset_inputs(binding.descriptor, binding.draft.values)
         source = binding.draft.source_signal
-        if source and not input_specs:
+        if source and not any(isinstance(spec, DatasetInputSpec) for spec in binding.descriptor.input_specs):
             raise LayoutError(
                 f"{binding.node_id}: {binding.descriptor.api_name} has no dataset input"
             )
         actual = output_contracts.get(source) if source else None
-        if actual is not None and not any(
+        if input_specs and actual is not None and not any(
             spec.accepts(actual) for spec in input_specs
         ):
             expected = sorted(

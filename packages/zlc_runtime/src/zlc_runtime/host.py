@@ -471,12 +471,14 @@ class NodeHost:
         self._close_future: Future | None = None
         self._active = False
         self._terminal = False
+        self._generation = None
         self._phase = "not started"
         self._error: str | None = None
         self._progress: NodeProgress | None = None
         self._result: object = _UNRESOLVED
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
+        self._terminal_event = threading.Event()
         self._start_lock = threading.Lock()
         self._worker_stop_sealed = False
         self._worker_stop_accepted = False
@@ -583,6 +585,13 @@ class NodeHost:
                 raise RuntimeError("only an active worker can report ready")
             self._ready_event.set()
         self._request_owner_wake()
+
+    def wait_terminal(self, timeout: float) -> bool:
+        """Wait for the owner to accept this run's completion, including seal."""
+
+        timeout = finite_real(timeout, "terminal timeout", minimum=0.0)
+        self._terminal_event.wait(timeout)
+        return self._terminal
 
     @property
     def worker_idle(self) -> bool:
@@ -772,6 +781,7 @@ class NodeHost:
         self._result = _UNRESOLVED
         self._stop_event.clear()
         self._ready_event.clear()
+        self._terminal_event.clear()
         self._worker_stop_sealed = False
         self._worker_stop_accepted = False
         self._worker_partial_seal = False
@@ -880,9 +890,9 @@ class NodeHost:
             # or the next Start would wait on work that never existed.
             self._owner.mark_owner_reaped()
             self._active = False
-            self._mark_terminal()
             self._phase = "failed"
             self._error = f"{type(error).__name__}: {error}"
+            self._mark_terminal()
             self._ready_event.set()
             self._mark_task_run_failed(error)
             self._retire_plane_state()
@@ -1006,7 +1016,6 @@ class NodeHost:
         self._error = terminal_error_text
         self._progress = None
         self._active = False
-        self._mark_terminal()
         if self._task_run is not None:
             try:
                 if terminal_phase == "cancelled":
@@ -1020,6 +1029,7 @@ class NodeHost:
                     "TaskRun terminal record failed: "
                     f"{type(record_error).__name__}: {record_error}"
                 )
+        self._mark_terminal()
 
     def _finish_worker_success(self, result: object) -> None:
         try:
@@ -1225,6 +1235,7 @@ class NodeHost:
         """
 
         self._terminal = True
+        self._terminal_event.set()
 
     def _retire_plane_state(self) -> None:
         self._release_input_history()
@@ -1324,13 +1335,13 @@ class NodeHost:
         operator's manual restart could cure.
         """
 
-        self._mark_terminal()
         if isinstance(error, _SOURCE_LIFECYCLE):
             self._phase = "cancelled"
             self._error = None
         else:
             self._phase = "failed"
             self._error = f"{type(error).__name__}: {error}"
+        self._mark_terminal()
 
     def _start_processor(self) -> None:
         assert self._source_signal is not None
@@ -1363,14 +1374,14 @@ class NodeHost:
                 self._refuse_start(error)
                 raise error
             self._phase = "failed"
-            self._mark_terminal()
             self._error = f"processor input signal {self._source_signal!r} is not active"
+            self._mark_terminal()
             raise LookupError(self._error)
         source = publication.value(self._source_signal)
         if not isinstance(source, SignalValue):
             self._phase = "failed"
-            self._mark_terminal()
             self._error = "processor publication lost its selected input signal"
+            self._mark_terminal()
             raise RuntimeError(self._error)
         if not self._data_plane.is_generation_live(self._source_signal):
             self._processor_path = "frozen"
@@ -1500,21 +1511,21 @@ class NodeHost:
                 self._finish_processor_cancelled()
             else:
                 self._active = False
-                self._mark_terminal()
                 self._phase = "done"
                 self._error = None
                 self._progress = None
                 self._release_input_history()
+                self._mark_terminal()
             owner.mark_owner_reaped()
 
     def _finish_processor_cancelled(self) -> None:
         self._retire_plane_state()
         self._result = _UNRESOLVED
         self._active = False
-        self._mark_terminal()
         self._phase = "cancelled"
         self._error = None
         self._progress = None
+        self._mark_terminal()
 
     def _finish_processor_failure(self, error: BaseException) -> None:
         if (
@@ -1708,10 +1719,10 @@ class NodeHost:
         self._release_input_history()
         self._plane_state = False
         self._active = False
-        self._mark_terminal()
         self._phase = "cancelled"
         self._error = None
         self._progress = None
+        self._mark_terminal()
 
     def accept_processor_ended(self, error: Exception | None) -> None:
         if not self._active:
@@ -1726,10 +1737,10 @@ class NodeHost:
             self.accept_processor_failure(failure)
             return
         self._active = False
-        self._mark_terminal()
         self._phase = "done"
         self._error = None
         self._progress = None
+        self._mark_terminal()
 
     def request_processor_owner_wake(self) -> None:
         self._request_owner_wake()

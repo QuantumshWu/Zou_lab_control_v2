@@ -213,6 +213,7 @@ class PlotPanelPort:
         #: on the card, because a panel that quietly stopped drawing looks
         #: exactly like a panel whose data stopped arriving.
         self.last_error: BaseException | None = None
+        self.last_error_publication: object | None = None
         #: The signal this panel is presenting WITHOUT, named -- an overlay
         #: whose producer has not published.  Read on the beat as a standing
         #: card condition, because a frame with no rings and no explanation
@@ -1134,6 +1135,7 @@ class PlotPanelPort:
             if present_error is not None:
                 with self._state_lock:
                     self.last_error = present_error
+                    self.last_error_publication = publication
             # A refusal WITHOUT an exception is the widget's documented
             # answer for a stale race -- the operator zoomed or dragged
             # while this front was in flight, and the host's own newer
@@ -1181,6 +1183,7 @@ class PlotPanelPort:
                 self._revision_value(_revision_of(prepared.plot_input)),
             )
             self.last_error = None
+            self.last_error_publication = None
             self.waiting_condition = ""
 
         callback_error: BaseException | None = None
@@ -1201,6 +1204,7 @@ class PlotPanelPort:
         if callback_error is not None:
             with self._state_lock:
                 self.last_error = callback_error
+                self.last_error_publication = accepted.publication
         return True
 
     def accept_configuration(
@@ -1252,6 +1256,7 @@ class PlotPanelPort:
             if error is not None:
                 with self._state_lock:
                     self.last_error = error
+                    self.last_error_publication = basis.publication
             # As above: refusal without an exception is stale-race flow
             # control, not a failure to report.
             self._request_invalidation()
@@ -1285,6 +1290,7 @@ class PlotPanelPort:
                     self._revision_value(_revision_of(accepted.plot_input)),
                 )
             self.last_error = None
+            self.last_error_publication = None
         if advanced and self._on_presented is not None:
             # The screen changed what it shows, exactly as an accept does.
             try:
@@ -1292,6 +1298,7 @@ class PlotPanelPort:
             except BaseException as error:
                 with self._state_lock:
                     self.last_error = error
+                    self.last_error_publication = accepted.publication
         return accepted
 
     def notify_presented(self, accepted: _Prepared) -> _Prepared:
@@ -1364,6 +1371,7 @@ class PlotPanelPort:
             with self._state_lock:
                 if self.last_error is None:
                     self.last_error = error
+                    self.last_error_publication = None if self._surface is None else self._surface.publication
 
     def reject(self, update: SurfaceUpdate, error: BaseException | None) -> None:
         """Abandon a prepared update, and remember why.
@@ -1397,6 +1405,7 @@ class PlotPanelPort:
                     )
             if error is not None and not isinstance(error, CancelledError):
                 self.last_error = error
+                self.last_error_publication = None if prepared is None else prepared.publication
                 if prepared is not None:
                     # The host answered this render with a failure: it
                     # holds nothing of it that a later front could show.

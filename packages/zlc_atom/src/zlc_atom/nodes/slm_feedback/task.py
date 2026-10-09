@@ -1,5 +1,4 @@
-"""Single-frame, multi-shot qCMOS feedback on one per-site observable: the
-bright-minus-dark contrast, or the loading rate."""
+"""SLM feedback from camera populations or external per-site fit parameters."""
 
 from __future__ import annotations
 
@@ -94,28 +93,13 @@ TARGET_SHARE_HISTORY_OUTPUT = DatasetOutputDeclaration(
 
 @dataclass(frozen=True)
 class FeedbackObservable:
-    """What the loop reads per site and per candidate, and how the trap answers.
+    """Observable vocabulary for the shared direction/share controller.
 
-    One record per feedback mode is the whole difference between the modes:
-    which reading of the shot batch is the observable, what to call it, how
-    it is written down, and the sign with which the plant answers a weight
-    step.  Everything else -- the pooled plant slope, the split-half
-    convergence, the share allocation, the probes and brackets -- reads the
-    observable through this record and does not know which one it is.
-
-    Both readings come from the same per-site two-population fit of the
-    batch (``_fit_contrasts``): the sites' geometry and readout come from
-    the calibration, the two populations from the batch itself.  Neither
-    uses a calibration threshold, which the trap light itself moves out
-    from under: as the weights change, so does the fluorescence.
-
-    ``plant_sign`` is the sign of d(log observable)/d(log weight).  A deeper
-    trap shifts the probe further to the red and the occupied site gets
-    DARKER: bright-minus-dark answers a weight step with -1.  Loading rises
-    with depth up to its ceiling: the loading rate answers with +1, and
-    with 0 once every site sits on the ceiling -- where the pooled slope is
-    then unusable and the controller falls back to the assumed slope, and
-    the split halves soon resolve no dispersion to correct.
+    Camera modes read their own batch's populations, not Calibration's
+    threshold. They additionally carry independent odd/even readings for
+    their noise test. External Fit supplies its actual value and sigma only;
+    no half-batch evidence is fabricated. plant_sign is the sign of
+    d(log observable)/d(log weight): fluorescence -1, loading/frequency +1.
     """
 
     mode: str
@@ -123,14 +107,19 @@ class FeedbackObservable:
     label: str
     key: str
     error_key: str
-    odd_key: str
-    even_key: str
-    history_keys: tuple[str, str, str, str]
+    odd_key: str | None
+    even_key: str | None
+    history_keys: tuple[str, ...]
     plant_sign: float
 
 
 FEEDBACK_OBSERVABLES: Mapping[str, FeedbackObservable] = MappingProxyType(
     {
+        "ramsey_frequency": FeedbackObservable(
+            "ramsey_frequency", "slm-feedback.ramsey-frequency",
+            "Ramsey frequency", "frequency", "standard_error", None, None,
+            ("frequency", "frequency_standard_error"), 1.0,
+        ),
         "qcmos_bright_dark": FeedbackObservable(
             "qcmos_bright_dark",
             "slm-feedback.qcmos-bright-dark",
@@ -768,6 +757,11 @@ def _write_npz(
 def _candidate_vector_fields(observable: FeedbackObservable) -> tuple[str, ...]:
     """The per-site vectors one candidate's measurement record carries."""
 
+    if observable.mode == "ramsey_frequency":
+        return (
+            "target_weight", "control_weight", "frequency", "frequency_standard_error",
+            "observable_valid", "decision", "requested_log_correction",
+        )
     observed, observed_error, odd, even = observable.history_keys
     return (
         "target_weight",
@@ -1109,18 +1103,188 @@ def validate_target_registration(
     return frozen, provenance
 
 
-def _register_target_sites(
+def _external_fit_parameters(
+    snapshot: object,
+    geometries: tuple[Mapping[str, object], ...],
+    *,
+    calibration: TrapCalibration,
+    target: np.ndarray,
+) -> dict[str, object]:
+    """Map one typed per-site parameter Dataset to the authored Target roster."""
+    from zlc_data import SITE
+
+    snapshot = snapshot.materialize()
+    schema = snapshot.block.schema
+    domains = (schema.repeat_domain, schema.point_domain, schema.cell_domain)
+    site_axes = [(domain, axis) for domain in domains for axis in domain.axes if axis.role == SITE]
+    if len(site_axes) != 1:
+        raise ValueError("external fit feedback requires exactly one typed SITE axis")
+    domain, axis = site_axes[0]
+    if any(other.size != 1 for part in domains for other in part.axes if other is not axis):
+        raise ValueError("external fit feedback requires one value per site; select the other axes explicitly")
+    values = np.asarray(snapshot.block.values, dtype=float).reshape(-1)
+    if len(values) != axis.size:
+        raise ValueError("external fit feedback requires exactly one value per SITE coordinate")
+    coordinates = tuple(axis.coordinate_at(int(code)) for code in domain.codes(axis.axis_id))
+    if len(coordinates) != len(values) or len(set(coordinates)) != len(coordinates):
+        raise ValueError("external fit SITE coordinates must identify one value each")
+    candidates = [
+        geometry for geometry in geometries
+        if geometry.get("status_axis_id") == axis.axis_id.value
+    ]
+    if not candidates:
+        raise ValueError("external fit ancestry has no geometry for its SITE axis")
+    geometry = candidates[0]
+    if any(candidate != geometry for candidate in candidates[1:]):
+        raise ValueError("external fit ancestry has conflicting SITE geometry")
+    point_ids = tuple(geometry["point_ids"])
+    status_coordinates = tuple(geometry["status_coordinates"])
+    centers = np.asarray(geometry["coordinates_xy"], dtype=float)
+    if (
+        len(point_ids) != len(status_coordinates)
+        or len(set(point_ids)) != len(point_ids)
+        or len(set(status_coordinates)) != len(status_coordinates)
+        or centers.shape != (len(point_ids), 2)
+        or not np.all(np.isfinite(centers))
+    ):
+        raise ValueError("external fit SITE geometry is not one-to-one")
+    calibration_map = calibration.site_map
+    calibrated = {name: index for index, name in enumerate(calibration_map.site_ids)}
+    if any(name not in calibrated for name in point_ids):
+        raise ValueError("external fit SITE identities differ from the selected Calibration")
+    expected = np.asarray(calibration_map.centers_xy, dtype=float)
+    frame = geometry.get("coordinate_frame")
+    if frame == "sensor_pixel_xy":
+        contract = calibration.frame_contract
+        origin = (0, 0) if contract.roi_xywh is None else contract.roi_xywh[:2]
+        expected = expected * np.asarray(contract.binning_yx[::-1]) + np.asarray(origin)
+    elif frame != calibration_map.coordinate_frame:
+        raise ValueError("external fit geometry and Calibration use different coordinate frames")
+    geometry_calibration_indices = [calibrated[name] for name in point_ids]
+    if not np.allclose(centers, expected[geometry_calibration_indices], rtol=0.0, atol=1e-9):
+        raise ValueError("external fit SITE centers differ from the selected Calibration")
+    by_coordinate = dict(zip(status_coordinates, point_ids, strict=True))
+    if any(coordinate not in by_coordinate for coordinate in coordinates):
+        raise ValueError("external fit SITE coordinates are absent from its geometry")
+    input_ids = tuple(by_coordinate[coordinate] for coordinate in coordinates)
+    usable = np.flatnonzero(calibration_map.valid_sites)
+    detected = SiteMap(
+        tuple(calibration_map.site_ids[index] for index in usable),
+        np.asarray(calibration_map.centers_xy)[usable], np.ones(len(usable), dtype=bool),
+        np.asarray(calibration_map.quality)[usable], calibration_map.coordinate_frame, {},
+    )
+    rows, columns, source_indices, _predicted, _affine = _target_site_assignment(detected, target)
+    input_positions = {name: index for index, name in enumerate(input_ids)}
+    frequency = np.full(len(rows), np.nan)
+    errors = np.full(len(rows), np.nan)
+    valid = np.zeros(len(rows), dtype=bool)
+    target_indices = np.full(len(values), -1, dtype=int)
+    value_validity = snapshot.expanded_validity().reshape(-1)
+    sigma = (
+        np.full(len(values), np.nan) if snapshot.block.sigma is None
+        else np.asarray(snapshot.block.sigma, dtype=float).reshape(-1)
+    )
+    for target_index, source_index in enumerate(source_indices):
+        if source_index < 0:
+            continue
+        point_id = detected.site_ids[int(source_index)]
+        index = input_positions.get(point_id)
+        if index is None:
+            continue
+        target_indices[index] = target_index
+        frequency[target_index] = values[index]
+        errors[target_index] = sigma[index]
+        valid[target_index] = bool(value_validity[index] and np.isfinite(values[index]) and values[index] > 0.0)
+    return {
+        "frequency": frequency, "standard_error": errors, "valid": valid,
+        "unit": schema.value_schema.value_unit or "", "rows": rows, "columns": columns,
+        "snapshot": snapshot,
+        "source": {
+            "site_axis_id": axis.axis_id.value,
+            "site_coordinates": list(coordinates), "point_ids": list(input_ids),
+            "target_indices": target_indices.tolist(), "geometry": dict(geometry),
+        },
+    }
+
+
+def _wait_for_external_fit(
+    context: object,
+    *,
+    signal_plane: object,
+    fit_signal: str,
+    final_publications: object,
+    calibration: TrapCalibration,
+    target: np.ndarray,
+    check_signal_input: object = None,
+) -> dict[str, object]:
+    """Wait for a parameter whose exact ancestry includes this completed scan."""
+    from threading import Event
+    from zlc_runtime.selection_bridge import FIT_PARAMETER_CONTRACT
+
+    finals = tuple(final_publications.values() if isinstance(final_publications, Mapping) else final_publications)
+    expected = {publication.event_ref for publication in finals}
+    if not expected:
+        raise ValueError("external feedback acquisition published no final output")
+    changed = Event()
+    unsubscribe = signal_plane.subscribe_publications(
+        lambda names: changed.set() if fit_signal in names else None,
+    )
+    previous = None
+    try:
+        while True:
+            check_cancelled(context)
+            changed.clear()
+            publication = signal_plane.latest_publication(fit_signal)
+            if publication is not None and publication is not previous:
+                previous = publication
+                ancestors = []
+                pending = [publication]
+                seen = set()
+                while pending:
+                    current = pending.pop()
+                    if current.event_ref in seen:
+                        continue
+                    seen.add(current.event_ref)
+                    ancestors.append(current)
+                    pending.extend(signal_plane.direct_parent_publications(current))
+                if expected.intersection(seen):
+                    description = next(
+                        (item for item in signal_plane.describe_signals() if item.name == fit_signal), None,
+                    )
+                    if description is None or description.contract_id != FIT_PARAMETER_CONTRACT:
+                        raise ValueError("external feedback requires a published Fit parameter signal")
+                    snapshot, _record = signal_plane.current_dataset_view(
+                        fit_signal, publication, indexed_history=False,
+                    )
+                    geometries = tuple(
+                        item.run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD]
+                        for item in ancestors
+                        if isinstance(item.run_record.get(IMAGE_POINT_OVERLAY_GEOMETRY_RECORD), Mapping)
+                    )
+                    result = _external_fit_parameters(
+                        snapshot, geometries, calibration=calibration, target=target,
+                    )
+                    def identity(ref: object) -> dict[str, object]:
+                        return {"stream_id": ref.stream_id.value, "generation": ref.generation.value,
+                                "sequence": ref.sequence}
+                    result["source"].update({
+                        "signal": fit_signal, "fit_publication": identity(publication.event_ref),
+                        "acquisition_publications": [identity(item.event_ref) for item in finals],
+                    })
+                    check_cancelled(context)
+                    return result
+            if check_signal_input is not None:
+                check_signal_input(fit_signal, context, expected_publications=finals)
+            changed.wait(0.1)
+    finally:
+        unsubscribe()
+
+
+def _target_site_assignment(
     detected: SiteMap,
     target_intensity: object,
-    provenance: Mapping[str, Any] | None,
-    *,
-    frame_shape: tuple[int, int],
-) -> SiteMap:
-    """Fit the authored SLM roster to detected camera sites without deleting gaps.
-
-    This maps geometry only. Readout models and their window policies belong
-    to the caller; registration does not revalidate a Calibration's readout.
-    """
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The one geometric assignment, including each Target site's source index."""
 
     # Reached from inside for the same reason as ``_bonferroni_z``: this
     # file is imported to read a descriptor, and the assignment is solved
@@ -1142,9 +1306,6 @@ def _register_target_sites(
         raise ValueError("registration Target support is empty")
     if measured_count > roster_count:
         raise ValueError("Calibration detected more sites than the authored Target roster")
-    if not isinstance(provenance, Mapping):
-        raise TypeError("registration provenance must be a mapping")
-
     target_xy = np.column_stack((columns, rows)).astype(float, copy=False)
     measured_xy = np.asarray(detected.centers_xy, dtype=float)
     target_rank = int(
@@ -1218,6 +1379,23 @@ def _register_target_sites(
 
     source_indices = np.full(roster_count, -1, dtype=int)
     source_indices[target_indices] = calibration_indices
+    return rows, columns, source_indices, predicted, affine
+
+
+def _register_target_sites(
+    detected: SiteMap,
+    target_intensity: object,
+    provenance: Mapping[str, Any] | None,
+    *,
+    frame_shape: tuple[int, int],
+) -> SiteMap:
+    """Fit the authored SLM roster to camera sites, retaining unobserved gaps."""
+    if not isinstance(provenance, Mapping):
+        raise TypeError("registration provenance must be a mapping")
+    target = np.asarray(target_intensity, dtype=np.float32)
+    rows, columns, source_indices, predicted, affine = _target_site_assignment(detected, target)
+    roster_count = len(rows)
+    measured_xy = np.asarray(detected.centers_xy, dtype=float)
     observed = source_indices >= 0
     centers = np.array(predicted, dtype="<f8", copy=True)
     centers[observed] = measured_xy[source_indices[observed]]
@@ -1248,22 +1426,14 @@ def _register_target_sites(
     return result
 
 
-def _support(
+def _registered_support(
     target: np.ndarray,
     calibration: TrapCalibration,
     *,
-    box_half_width: int,
     science_context_path: str | Path,
     command_receipt: Mapping[str, object],
 ) -> tuple[np.ndarray, np.ndarray, SiteMap]:
-    """Register the Calibration's sites to this Feedback Target.
-
-    Returns the Target rows and columns and the registered roster, whose
-    ``observed_sites`` topology says which roster sites the Calibration
-    measured and which have a predicted centre.  ``box_half_width`` is the
-    BOX every roster site must be able to carry inside the frame.
-    """
-
+    """Register Calibration geometry without imposing a camera readout method."""
     usable = np.asarray(calibration.site_map.valid_sites, dtype=bool)
     if not np.any(usable):
         raise ValueError("SLM Feedback requires at least one calibrated site")
@@ -1291,6 +1461,27 @@ def _support(
         registered,
         frame_shape=calibration.frame_contract.image_shape,
     )
+    if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
+        raise ValueError("registered Calibration support differs from Science Context")
+    if provenance["command_receipt"] != dict(command_receipt):
+        raise RuntimeError("Feedback registration lost its Science Context receipt")
+    rows, columns = support.T
+    return rows, columns, registered
+
+
+def _support(
+    target: np.ndarray,
+    calibration: TrapCalibration,
+    *,
+    box_half_width: int,
+    science_context_path: str | Path,
+    command_receipt: Mapping[str, object],
+) -> tuple[np.ndarray, np.ndarray, SiteMap]:
+    """Register sites and check the BOX windows used by camera feedback."""
+    rows, columns, registered = _registered_support(
+        target, calibration, science_context_path=science_context_path,
+        command_receipt=command_receipt,
+    )
     # Feedback measures independent BOX totals. This readout-specific policy
     # must not reject another task's already calibrated PSF/occupancy model.
     radius = int(box_half_width)
@@ -1306,11 +1497,6 @@ def _support(
         overlaps[np.diag_indices_from(overlaps)] = False
         if np.any(overlaps):
             raise ValueError("registered Target BOX windows overlap in camera pixels")
-    rows, columns = support.T
-    if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
-        raise ValueError("registered Calibration support differs from Science Context")
-    if provenance["command_receipt"] != dict(command_receipt):
-        raise RuntimeError("Feedback registration lost its Science Context receipt")
     return rows, columns, registered
 
 
@@ -1767,7 +1953,10 @@ def _updated_target(
         if control_valid[site] and np.isfinite(reference):
             residual = float(np.log(values[site] / reference))
             relative_error = max(float(errors[site]), 0.0) / values[site]
-            quality = float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
+            quality = (
+                float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
+                if np.isfinite(relative_error) else 0.1
+            )
             decision[site] = feedback_decision
             lends[site] = True
             log_correction[site] = float(
@@ -1833,7 +2022,7 @@ def _updated_target(
 
 
 class SlmFeedbackTask:
-    """Apply candidates, measure exact qCMOS cycles, and retain a valid phase."""
+    """Apply candidates, measure their observable, and retain a measured phase."""
 
     instance_id = "slm_feedback"
 
@@ -1851,21 +2040,33 @@ class SlmFeedbackTask:
         calibration_path: str | Path,
         science_context: Mapping[str, object],
         science_context_path: str | Path,
-        pulse_sequence: PulseSequence,
-        pulse_path: str | Path,
+        pulse_sequence: PulseSequence | None,
+        pulse_path: str | Path | None,
         feedback_mode: str,
-        exposure_seconds: float,
+        exposure_seconds: float | None,
         shots_per_candidate: int,
         probe_factors: tuple[float, ...],
         feedback_gain: float,
         maximum_weight_change: float,
         max_updates: int,
         save_figure_artifact: object = None,
+        acquisition_logic: str = "",
+        source_signal: str = "",
+        restart_logic: object = None,
+        check_signal_input: object = None,
     ) -> None:
         if not isinstance(slm, SlmAdapter):
             raise TypeError("slm must implement SlmAdapter")
-        if not isinstance(calibration, TrapCalibration) or not isinstance(pulse_sequence, PulseSequence):
+        external = feedback_mode == "ramsey_frequency"
+        if not isinstance(calibration, TrapCalibration) or (not external and not isinstance(pulse_sequence, PulseSequence)):
             raise TypeError("feedback requires TrapCalibration and PulseSequence")
+        if external and (not acquisition_logic or not source_signal or not callable(restart_logic)):
+            raise ValueError("Ramsey feedback requires an acquisition Logic and its per-site frequency Fit signal")
+        self.acquisition_logic = acquisition_logic
+        self.source_signal = source_signal
+        self._restart_logic = restart_logic
+        self._check_signal_input = check_signal_input
+        self._observable_unit: str | None = None
         if not isinstance(science_context, Mapping):
             raise TypeError("science_context must be a loaded Science Context mapping")
         if save_figure_artifact is not None and not callable(save_figure_artifact):
@@ -1906,21 +2107,25 @@ class SlmFeedbackTask:
         # number is a projection whose scale is the Calibration's, not the
         # frame's, and a predicted site the Calibration never saw has no
         # measured shape to project on; a box needs only a centre.
-        try:
-            model = calibration.select_model(ReadoutModelKind.BOX)
-        except KeyError:
-            raise ValueError(
-                "SLM feedback reads bright and dark counts with the "
-                "Calibration's BOX model, which this Calibration does not carry"
-            ) from None
         context_path = Path(science_context_path).expanduser().resolve()
-        self._rows, self._columns, self._registered_site_map = _support(
-            frozen_target,
-            calibration,
-            box_half_width=model.integration_half_width,
-            science_context_path=context_path,
-            command_receipt=receipt,
-        )
+        model = None
+        if external:
+            self._rows, self._columns, self._registered_site_map = _registered_support(
+                frozen_target, calibration, science_context_path=context_path,
+                command_receipt=receipt,
+            )
+        else:
+            try:
+                model = calibration.select_model(ReadoutModelKind.BOX)
+            except KeyError:
+                raise ValueError(
+                    "SLM feedback reads bright and dark counts with the "
+                    "Calibration's BOX model, which this Calibration does not carry"
+                ) from None
+            self._rows, self._columns, self._registered_site_map = _support(
+                frozen_target, calibration, box_half_width=model.integration_half_width,
+                science_context_path=context_path, command_receipt=receipt,
+            )
         self._site_count = len(self._rows)
         self._site_centers_xy = np.asarray(
             self._registered_site_map.centers_xy, dtype=float
@@ -1931,7 +2136,7 @@ class SlmFeedbackTask:
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
         self.target, self.sequence = frozen_target, pulse_sequence
         self.calibration_path = Path(calibration_path).expanduser().resolve()
-        self.pulse_path = Path(pulse_path).expanduser().resolve()
+        self.pulse_path = None if pulse_path is None else Path(pulse_path).expanduser().resolve()
         self.science_context_path = context_path
         self._incoming_phase = incoming
         self._pattern_phase = pattern
@@ -1972,8 +2177,8 @@ class SlmFeedbackTask:
                 f"the modes are {', '.join(FEEDBACK_OBSERVABLES)}"
             )
         self.observable = observable
-        self.exposure_seconds = float(exposure_seconds)
-        if not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0:
+        self.exposure_seconds = None if external else float(exposure_seconds)
+        if not external and (not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0):
             raise ValueError("feedback exposure_seconds must be finite and positive")
         self.shots = int(shots_per_candidate)
         self.feedback_gain = float(feedback_gain)
@@ -2001,6 +2206,8 @@ class SlmFeedbackTask:
             + self.max_updates
             + self.max_updates * len(factors)
         )
+        if external:
+            return
         contract = calibration.frame_contract
         height, width = contract.image_shape
         site_mask = np.zeros((height, width), dtype=bool)
@@ -2025,6 +2232,21 @@ class SlmFeedbackTask:
         )
 
     def _run_record(self) -> dict[str, object]:
+        if self.feedback_mode == "ramsey_frequency":
+            return {
+                "feedback_mode": self.feedback_mode,
+                "feedback_controller": self.observable.controller,
+                "calibration_path": str(self.calibration_path),
+                "science_context_path": str(self.science_context_path),
+                "named_devices": {"slm": self.slm_key},
+                "acquisition_logic": self.acquisition_logic,
+                "frequency_signal": self.source_signal,
+                "frequency_unit": self._observable_unit,
+                "plant_sign": self.observable.plant_sign,
+                "feedback_gain": self.feedback_gain,
+                "maximum_weight_change": self.maximum_weight_change,
+                "max_updates": self.max_updates,
+            }
         return {
             "calibration_path": str(self.calibration_path),
             "science_context_path": str(self.science_context_path),
@@ -2068,7 +2290,7 @@ class SlmFeedbackTask:
         if type(candidate) is not int or candidate < 1:
             raise ValueError("feedback device snapshot candidate must be positive")
         snapshots: dict[str, object] = {}
-        if include_measurement:
+        if include_measurement and self.model is not None:
             missing = {"camera", "sequencer"} - set(
                 self._actual_device_snapshots
             )
@@ -2111,39 +2333,25 @@ class SlmFeedbackTask:
         history: list[dict[str, object]],
         solver: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        return {
-            "calibration_path": str(self.calibration_path),
-            "science_context_path": str(self.science_context_path),
-            "pulse_path": str(self.pulse_path),
-            "program_digest": self._program_digest,
-            "named_devices": {
-                "camera": self.camera_key,
-                "sequencer": self.sequencer_key,
-                "slm": self.slm_key,
-            },
+        metadata = {
+            **self._run_record(),
             "candidate": int(candidate),
             "status": str(status),
-            "feedback_controller": self.observable.controller,
-            "feedback_mode": self.feedback_mode,
-            "exposure_seconds": self.exposure_seconds,
-            "shots_per_candidate": self.shots,
-            "probe_factors": list(self.probe_factors),
-            "feedback_gain": self.feedback_gain,
-            "maximum_weight_change": self.maximum_weight_change,
-            "actual_exposure_seconds": self._actual_exposure_seconds,
-            "effective_photoelectrons": self._effective_photoelectrons,
-            "effective_count_unit": self._effective_count_unit,
             "measurement": next(
-                (
-                    item
-                    for item in reversed(history)
-                    if item["iteration"] == candidate
-                ),
+                (item for item in reversed(history) if item["iteration"] == candidate),
                 None,
             ),
             "updates": len(history),
             "solver": None if solver is None else dict(solver),
         }
+        if self.model is not None:
+            metadata.update(
+                program_digest=self._program_digest,
+                actual_exposure_seconds=self._actual_exposure_seconds,
+                effective_photoelectrons=self._effective_photoelectrons,
+                effective_count_unit=self._effective_count_unit,
+            )
+        return metadata
 
     def _save_candidate(
         self,
@@ -2220,6 +2428,8 @@ class SlmFeedbackTask:
                     [np.nan if value is None else value for value in item[field]],
                     dtype=float,
                 )
+                if destination is site_signal:
+                    destination[index, ~np.asarray(item["observable_valid"], dtype=bool)] = np.nan
         point_axes = (
             AxisSpec(
                 coordinate_id,
@@ -2257,6 +2467,7 @@ class SlmFeedbackTask:
             signal=SITE_SIGNAL_HISTORY_OUTPUT.name,
             point_axes=point_axes,
             cell_axes=(site_axis,),
+            value_unit=self._observable_unit,
             generation=generation,
             revision=publication_revision,
             validity=np.isfinite(site_signal)[None],
@@ -2632,8 +2843,10 @@ class SlmFeedbackTask:
             },
             metadata={
                 "format": "zlc.slm.feedback-sites",
-                "readout_model_kind": self.model.kind.value,
-                "readout_half_width": int(self.model.integration_half_width),
+                **({} if self.model is None else {
+                    "readout_model_kind": self.model.kind.value,
+                    "readout_half_width": int(self.model.integration_half_width),
+                }),
                 "calibration_path": str(self.calibration_path),
                 "science_context_path": str(self.science_context_path),
             },
@@ -2647,7 +2860,7 @@ class SlmFeedbackTask:
         paths: Mapping[str, Path],
         *,
         candidate: int,
-        samples: np.ndarray,
+        samples: np.ndarray | None,
         measurement: Mapping[str, object],
         solver: Mapping[str, object] | None,
         phase: np.ndarray,
@@ -2655,9 +2868,9 @@ class SlmFeedbackTask:
         target: np.ndarray,
         history: list[dict[str, object]],
     ) -> Path:
-        arrays: dict[str, object] = {
-            "site_samples": np.asarray(samples, dtype="<f8"),
-        }
+        arrays: dict[str, object] = (
+            {} if samples is None else {"site_samples": np.asarray(samples, dtype="<f8")}
+        )
         bool_fields = {
             "fit_valid",
             "observable_valid",
@@ -2959,7 +3172,7 @@ class SlmFeedbackTask:
         history: list[dict[str, object]],
         selected: Mapping[str, object],
         initial_phase: np.ndarray,
-        initial_mean_frame: np.ndarray,
+        initial_mean_frame: np.ndarray | None,
     ) -> None:
         count = len(history)
         if count < 1:
@@ -2991,36 +3204,38 @@ class SlmFeedbackTask:
                 ],
                 dtype="<f8",
             )
+            if field == self.observable.history_keys[0]:
+                values[~np.asarray([item["observable_valid"] for item in history], dtype=bool)] = np.nan
             return snapshot_from_array(
                 values[None],
                 producer=self.instance_id,
                 signal=signal,
                 point_axes=(candidate_axis,),
                 cell_axes=(site_axis,),
+                value_unit=self._observable_unit if field == self.observable.history_keys[0] else None,
                 generation=generation,
                 revision=count,
                 validity=np.isfinite(values)[None],
             )
 
+        metric_fields = ("uniformity_ratio", "observable_uniformity_ratio")
+        metric_labels = ("all sites", "observable sites")
+        if self.model is not None:
+            metric_fields += ("expected_noise_ratio",)
+            metric_labels += ("expected noise floor",)
         uniformity_axis = AxisSpec(
             AxisId("slm_feedback.uniformity.metric"),
             "metric",
             COMPONENT,
-            3,
-            (0, 1, 2),
-            coordinate_labels=(
-                "all sites", "observable sites", "expected noise floor"
-            ),
+            len(metric_fields),
+            tuple(range(len(metric_fields))),
+            coordinate_labels=metric_labels,
         )
         uniformity = np.asarray(
             [
                 [
                     np.nan if item[field] is None else item[field]
-                    for field in (
-                        "uniformity_ratio",
-                        "observable_uniformity_ratio",
-                        "expected_noise_ratio",
-                    )
+                    for field in metric_fields
                 ]
                 for item in history
             ],
@@ -3089,41 +3304,42 @@ class SlmFeedbackTask:
             device_event_record=selected_device_record,
         )
 
-        selected_samples = np.asarray(selected["samples"], dtype="<f8")
-        shot_axis = AxisSpec(
-            AxisId("slm_feedback.shot"),
-            "shot",
-            COMPONENT,
-            selected_samples.shape[0],
-        )
-        histogram_snapshot = snapshot_from_array(
-            selected_samples.T[None],
-            producer=self.instance_id,
-            signal="selected_histogram_figure",
-            cell_axes=(site_axis, shot_axis),
-            generation=generation,
-            revision=count,
-        )
-        self._save_figure(
-            context,
-            paths,
-            "selected_site_histograms",
-            snapshot=histogram_snapshot,
-            spec=FacetGridPlot(
-                AxisRef.cell_data(str(site_axis.axis_id)),
-                HistogramPlot(
-                    labels=PlotLabels(
-                        title="Selected candidate site distributions",
-                        x="site signal",
-                        y="shots",
-                    )
+        if selected.get("samples") is not None:
+            selected_samples = np.asarray(selected["samples"], dtype="<f8")
+            shot_axis = AxisSpec(
+                AxisId("slm_feedback.shot"),
+                "shot",
+                COMPONENT,
+                selected_samples.shape[0],
+            )
+            histogram_snapshot = snapshot_from_array(
+                selected_samples.T[None],
+                producer=self.instance_id,
+                signal="selected_histogram_figure",
+                cell_axes=(site_axis, shot_axis),
+                generation=generation,
+                revision=count,
+            )
+            self._save_figure(
+                context,
+                paths,
+                "selected_site_histograms",
+                snapshot=histogram_snapshot,
+                spec=FacetGridPlot(
+                    AxisRef.cell_data(str(site_axis.axis_id)),
+                    HistogramPlot(
+                        labels=PlotLabels(
+                            title="Selected candidate site distributions",
+                            x="site signal",
+                            y="shots",
+                        )
+                    ),
                 ),
-            ),
-            parameters={"bin_count": min(60, max(10, self.shots // 2)),
-                        "threshold_classifier": True},
-            classifier_thresholds=self._candidate_fit_targets(selected_history),
-            device_event_record=selected_device_record,
-        )
+                parameters={"bin_count": min(60, max(10, self.shots // 2)),
+                            "threshold_classifier": True},
+                classifier_thresholds=self._candidate_fit_targets(selected_history),
+                device_event_record=selected_device_record,
+            )
 
         selected_number = int(selected["candidate"])
         comparison_id = AxisId("slm_feedback.comparison")
@@ -3174,45 +3390,46 @@ class SlmFeedbackTask:
                 y_axis,
             )
 
-        camera_snapshot, image_x, image_y = comparison_snapshot(
-            "camera", initial_mean_frame, selected["mean_frame"]
-        )
-        camera_overlay_geometry = image_point_overlay_geometry(
-            camera_snapshot,
-            self._registered_site_map.centers_xy,
-            self._registered_site_map.site_ids,
-            status_axis=site_axis,
-            labels=tuple(str(site) for site in range(1, self._site_count + 1)),
-            coordinates_are_indices=True,
-        )
-        self._save_figure(
-            context,
-            paths,
-            "camera_initial_selected",
-            snapshot=ImageFrame(
+        if initial_mean_frame is not None:
+            camera_snapshot, image_x, image_y = comparison_snapshot(
+                "camera", initial_mean_frame, selected["mean_frame"]
+            )
+            camera_overlay_geometry = image_point_overlay_geometry(
                 camera_snapshot,
-                ImagePointOverlay(
-                    revision=count,
-                    coordinates=np.asarray(
-                        camera_overlay_geometry["coordinates_xy"], dtype=float
-                    ),
-                    point_ids=tuple(camera_overlay_geometry["point_ids"]),
-                    labels=tuple(camera_overlay_geometry["labels"]),
-                    static_statuses=tuple(
-                        PointStatus.UNKNOWN for _ in range(self._site_count)
+                self._registered_site_map.centers_xy,
+                self._registered_site_map.site_ids,
+                status_axis=site_axis,
+                labels=tuple(str(site) for site in range(1, self._site_count + 1)),
+                coordinates_are_indices=True,
+            )
+            self._save_figure(
+                context,
+                paths,
+                "camera_initial_selected",
+                snapshot=ImageFrame(
+                    camera_snapshot,
+                    ImagePointOverlay(
+                        revision=count,
+                        coordinates=np.asarray(
+                            camera_overlay_geometry["coordinates_xy"], dtype=float
+                        ),
+                        point_ids=tuple(camera_overlay_geometry["point_ids"]),
+                        labels=tuple(camera_overlay_geometry["labels"]),
+                        static_statuses=tuple(
+                            PointStatus.UNKNOWN for _ in range(self._site_count)
+                        ),
                     ),
                 ),
-            ),
-            spec=FacetGridPlot(
-                AxisRef.point(str(comparison_id)),
-                ImagePlot(
-                    AxisRef.cell_data(str(image_x.axis_id)),
-                    AxisRef.cell_data(str(image_y.axis_id)),
+                spec=FacetGridPlot(
+                    AxisRef.point(str(comparison_id)),
+                    ImagePlot(
+                        AxisRef.cell_data(str(image_x.axis_id)),
+                        AxisRef.cell_data(str(image_y.axis_id)),
+                    ),
+                    labels=PlotLabels(title="Initial and selected camera mean"),
                 ),
-                labels=PlotLabels(title="Initial and selected camera mean"),
-            ),
-            device_event_record=selected_device_record,
-        )
+                device_event_record=selected_device_record,
+            )
 
         phase_snapshot, phase_x, phase_y = comparison_snapshot(
             "phase", initial_phase, selected["phase"], unit="rad"
@@ -3246,6 +3463,37 @@ class SlmFeedbackTask:
         rollback: Mapping[str, object] | None = None,
         figures_error: BaseException | None = None,
     ) -> None:
+        if self.feedback_mode == "ramsey_frequency":
+            selected = next((item for item in history if item["iteration"] == selected_candidate), None)
+            document = {
+                "format": "zlc.slm.feedback-summary", "status": status,
+                "settings": self._run_record(), "candidate_count": len(history),
+                "selected_candidate": selected_candidate, "outcome": outcome,
+                "selection_metric": "most valid sites, then smallest observed log-frequency dispersion; latest tie",
+                "initial": None if not history else history[0], "selected": selected,
+                "history": history, "rollback": rollback,
+                "error": None if error is None else f"{type(error).__name__}: {error}",
+                "figures_error": None if figures_error is None else str(figures_error),
+            }
+            json_path = write_readable_json(paths["root"] / "summary.json", _plain_json(document))
+            lines = [
+                f"SLM feedback: Ramsey frequency; status: {status}",
+                f"Acquisition: {self.acquisition_logic}; Fit: {self.source_signal}",
+                f"Candidates measured: {len(history)}; selected: {selected_candidate}",
+                "No split-half convergence estimate is made from external Fit data.",
+            ]
+            for item in history:
+                lines.append(
+                    f"Candidate {item['iteration']}: {item['observable_sites']}/{self._site_count} sites; "
+                    f"max/min={item['observable_uniformity_ratio']}; log dispersion={item['log_dispersion']}"
+                )
+            for key in ("error", "figures_error", "rollback"):
+                if document[key] is not None:
+                    lines.append(f"{key}: {document[key]}")
+            text_path = atomic_write_text(paths["root"] / "summary.txt", "\n".join(lines) + "\n")
+            context.register_artifact("summary_json", json_path, role="summary")
+            context.register_artifact("summary_text", text_path, role="summary")
+            return
         initial = None if not history else history[0]
         formal_history = [
             item for item in history if item["candidate_kind"] != "probe"
@@ -3605,9 +3853,6 @@ class SlmFeedbackTask:
             if (
                 history
                 and isinstance(retained_history, Mapping)
-                and candidate.get("samples") is not None
-                and candidate.get("mean_frame") is not None
-                and initial_mean_frame is not None
             ):
                 self._save_figures(
                     context,
@@ -3681,7 +3926,169 @@ class SlmFeedbackTask:
             "actual_exposure_seconds": self._actual_exposure_seconds,
         }
 
+    def _solve_target(
+        self, context: object, target: np.ndarray, pattern: np.ndarray,
+        optimizer_state: dict[str, object],
+    ) -> tuple[np.ndarray, Mapping[str, object]]:
+        pattern, metadata = solve_phase(
+            target, pupil_amplitude=self._pupil_amplitude, initial_phase=pattern,
+            objective_kind="spots", iterations=None,
+            stop_requested=context.cancel_requested,
+            spot_optimizer_state=optimizer_state,
+            support_tolerance=_FEEDBACK_SOLVE_SUPPORT_TOLERANCE,
+            minimum_iterations=_FEEDBACK_SOLVE_MINIMUM_ITERATIONS,
+        )
+        return freeze_pattern_phase(pattern, self.slm.shape_yx), metadata
+
+    def _execute_external_fit(self, context: object) -> dict[str, object]:
+        """One configured acquisition per phase; only its final Fit is evidence."""
+        self.instance_id = context.instance_id
+        paths = self._prepare_artifacts(context)
+        history: list[dict[str, object]] = []
+        incoming = self._incoming_phase
+        pattern = self._pattern_phase
+        phase, target = incoming, self.target
+        retained = self._incoming_candidate(phase=incoming, pattern=pattern)
+        best_score = None
+        solver = None
+        optimizer_state: dict[str, object] = {}
+        status = "completed"
+        reason = "all authored feedback updates completed"
+
+        def finish(error: BaseException | None = None) -> dict[str, object]:
+            retained["outcome"] = {
+                "status": status, "reason": reason,
+                "candidates_measured": len(history),
+                "formal_updates_completed": max(0, len(history) - 1),
+            }
+            return self._finish_candidate(
+                context, retained, history, paths=paths, initial_phase=incoming,
+                initial_mean_frame=None, candidate_reports=[], status=status,
+                republish=True, error=error,
+            )
+
+        try:
+            check_cancelled(context)
+            self._mapping_revision = int(self.slm.mapping_revision)
+            for candidate in range(1, self.max_updates + 2):
+                check_cancelled(context)
+                applied = self._apply_exact(phase)
+                device_record = self._device_event_record(
+                    include_measurement=False, candidate=candidate,
+                )
+                # First fit establishes the selected parameter's unit. Start
+                # the atomic output bundle then, rather than declaring an
+                # empty dimensionless history or committing a partial bundle.
+                if history:
+                    self._publish_candidate(
+                        context, phase=applied, candidate=candidate, history=history,
+                        device_event_record=device_record,
+                    )
+                context.report_progress(
+                    f"Ramsey candidate {candidate}: running {self.acquisition_logic}"
+                )
+                final_publications = self._restart_logic(
+                    self.acquisition_logic, context, completion="terminal",
+                )
+                context.report_progress(
+                    f"Ramsey candidate {candidate}: waiting for final {self.source_signal}"
+                )
+                measured = _wait_for_external_fit(
+                    context, signal_plane=self.signal_plane, fit_signal=self.source_signal,
+                    final_publications=tuple(final_publications.values()),
+                    calibration=self.calibration, target=self.target,
+                    check_signal_input=self._check_signal_input,
+                )
+                if history and measured["unit"] != self._observable_unit:
+                    raise ValueError("frequency Fit unit changed during feedback")
+                self._observable_unit = measured["unit"]
+                observed = measured["frequency"]
+                errors = measured["standard_error"]
+                valid = measured["valid"]
+                visible = observed[valid]
+                count = len(visible)
+                ratio = float(np.max(visible) / np.min(visible)) if count else None
+                dispersion = float(np.std(np.log(visible))) if count else None
+                next_target, corrections, decisions = _updated_target(
+                    target, observed, errors, valid, self._rows, self._columns,
+                    feedback_gain=self.feedback_gain, maximum_weight_change=self.maximum_weight_change,
+                    plant_slope=None, plant_sign=self.observable.plant_sign,
+                )
+                device_record = {
+                    **self._device_event_record(include_measurement=True, candidate=candidate),
+                    "fit_source": measured["source"],
+                }
+                item = {
+                    "iteration": candidate, "candidate_kind": "baseline" if candidate == 1 else "ordinary",
+                    "frequency": _json_floats(observed),
+                    "frequency_standard_error": _json_floats(errors),
+                    "frequency_unit": self._observable_unit,
+                    "observable_valid": valid.tolist(), "observable_sites": count,
+                    "uniformity_complete": count == self._site_count,
+                    "uniformity_ratio": ratio if count == self._site_count else None,
+                    "observable_uniformity_ratio": ratio, "log_dispersion": dispersion,
+                    "target_weight": _json_floats(target[self._rows, self._columns]),
+                    "control_weight": _json_floats(_control_weights(target[self._rows, self._columns])),
+                    "decision": decisions.tolist(), "requested_log_correction": _json_floats(corrections),
+                    "source": measured["source"], "device_event_record": device_record,
+                    "phase_changed_from_previous": candidate > 1,
+                }
+                history.append(item)
+                completed = {
+                    "candidate": candidate, "phase": applied.copy(), "pattern_phase": pattern.copy(),
+                    "target": target.copy(), "solver": solver, "history": item,
+                    "samples": None, "mean_frame": None,
+                }
+                score = (-count, float("inf") if dispersion is None else dispersion)
+                if best_score is None or score <= best_score:
+                    retained, best_score = completed, score
+                self._publish_candidate(
+                    context, phase=applied, candidate=candidate, history=history,
+                    device_event_record=device_record,
+                )
+                self._save_candidate_checkpoint(
+                    context, paths, candidate=candidate, samples=None, measurement=item,
+                    solver=solver, phase=applied, pattern=pattern, target=target, history=history,
+                )
+                context.report_progress(
+                    f"Ramsey candidate {candidate}: {count}/{self._site_count} sites; max/min={ratio}"
+                )
+                if candidate == self.max_updates + 1:
+                    break
+                if np.array_equal(next_target, target):
+                    status, reason = "stalled", "no supported weight change; no identical-phase scan repeated"
+                    break
+                next_pattern, next_solver = self._solve_target(context, next_target, pattern, optimizer_state)
+                next_phase = compose_science_phase(next_pattern, self._operator_wavefront)
+                if np.array_equal(next_phase, applied):
+                    status, reason = "stalled", "SLM solve produced no changed phase; no identical-phase scan repeated"
+                    break
+                target, pattern, phase, solver = next_target, next_pattern, next_phase, next_solver
+            context.seal_terminal()
+            return finish()
+        except BaseException as error:
+            stopped = context.cancel_requested()
+            status = "stopped" if stopped else "failed"
+            reason = "operator Stop" if stopped else f"{type(error).__name__}: {error}"
+            try:
+                if stopped:
+                    context.seal_terminal(accept_stop=True)
+                result = finish(None if stopped else error)
+            except BaseException as seal_error:
+                error.add_note(f"Could not seal selected candidate: {seal_error}")
+                self._apply_exact(incoming)
+                self._write_summary(
+                    context, paths, status="failed", history=history, selected_candidate=None,
+                    error=error, rollback={"status": "restored incoming phase"},
+                )
+                raise
+            if stopped:
+                return result
+            raise
+
     def execute(self, context: object) -> dict[str, object]:
+        if self.feedback_mode == "ramsey_frequency":
+            return self._execute_external_fit(context)
         # The host's Logic row names this run's outputs and Figures, not the
         # node type: a second Feedback row is a different Logic.
         self.instance_id = context.instance_id
@@ -4585,22 +4992,10 @@ class SlmFeedbackTask:
                             deepcopy(probe_baseline_optimizer_state or {})
                             if probe_solve else spot_optimizer_state
                         )
-                        next_pattern, solver_metadata = solve_phase(
-                            next_solved_target,
-                            pupil_amplitude=self._pupil_amplitude,
-                            initial_phase=(
-                                probe_baseline_pattern
-                                if probe_solve else current_pattern
-                            ),
-                            objective_kind="spots",
-                            iterations=None,
-                            stop_requested=context.cancel_requested,
-                            spot_optimizer_state=solve_state,
-                            support_tolerance=_FEEDBACK_SOLVE_SUPPORT_TOLERANCE,
-                            minimum_iterations=_FEEDBACK_SOLVE_MINIMUM_ITERATIONS,
-                        )
-                        next_pattern = freeze_pattern_phase(
-                            next_pattern, self.slm.shape_yx
+                        next_pattern, solver_metadata = self._solve_target(
+                            context, next_solved_target,
+                            probe_baseline_pattern if probe_solve else current_pattern,
+                            solve_state,
                         )
                     except BaseException:
                         history[-1]["next_phase_changed"] = None

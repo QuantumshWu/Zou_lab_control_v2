@@ -197,6 +197,7 @@ Node new chunk
 - Task必须发布progress与声明preview，或显式声明无preview。
 - 第一份真实publication前不显示live；terminal清除progress并seal/retire preview。
 - Measurement可显式声明`reports_ready`，并在worker真正完成设备准备后通过现有ExecutionContext报告本run ready；NodeHost独占该事实与等待，running、progress文字和首publication不能代替ready。Camera在完整arm返回后报告；未触发时仍可ready。
+- Acquisition调用沿同一原Logic owner，可声明等待`ready`或`terminal`：前者保持Seamless的arm流程，后者等待成功完成并返回本轮最终publications。父run只关联自己实际启动的子host/generation，Stop/终态取消该子run而不删sealed data。条件输入/设备使用AuthoringField同一`enabled_when`语义；inactive草稿保留供切换，但不验证、解析文件、传入build或claim设备，不由Workbench识别具体插件mode。
 - Descriptor outputs、runtime declarations和preview references只有一份typed vocabulary。
 - Concrete Logic Node不得要求Workbench识别其模块、output spelling或domain helper；通用显示/overlay/selection能力由中立层contract表达，Workbench只路由contract。
 - 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
@@ -538,11 +539,14 @@ Node new chunk
 
 ### 8.3 Solver与Feedback
 
+- Ramsey frequency第三模式复用operator配置好的有限Acquisition Logic和Panel发布的每site Fit parameter。Feedback只占SLM；采集Logic及其源链沿既有NodeHost/DeviceUse启动和停止，不重建Pulse、Camera或Fit。每次应用phase后启动一整轮采集，成功terminal后只接受因果祖先包含该轮最终publication的Fit；旧/live中途Fit不能冒充本轮最终值。Stop取消本次启动的精确子run，不误停后来替换的run。
+- Ramsey的频率随trap强度增加，plant sign固定+1；复用share allocator、gain和maximum change，有限正频率参与更新，invalid保持。sigma未知仍保存为unknown并使用最保守质量权重，不伪造零误差。Calibration仅用于site与Target几何注册；不读取阈值、不要求BOX，也不控制采集设置。运行完authored update数，不套用camera的single/probe或split-half早停；最佳candidate按有效site数优先、观测频率log-dispersion最小（并列最新）选取，明确不是noise-corrected收敛证据。每轮保存频率/误差/有效性、实际权重与来源身份、可载入Science Context；终态/Stop/failure复用既有best-phase封存，保存uniformity/site signal/weight/phase报告，不虚构camera或Histogram数据。
+
 - Feedback独占run期间只装载一次已解析Pulse，每个candidate只执行一次用户指定的shot batch；正常DONE不追加SAFE，异常/Stop才SAFE。任何board fault或无法证明DONE都不能用camera帧数代替完成证明，也不能同phase自动重拍一整批。已完成candidate仍按现有partial出口保存，不改变控制权重算法。
 
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
-- Feedback mode是leaf-owned显式字段，两个mode：`qcmos_bright_dark`（观测量=每site双高斯拟合的bright_mean−dark_mean，trap越深occupied越暗，plant sign −1）与`qcmos_loading_rate`（观测量=同一拟合阈值判为bright的shot份额及其二项误差，loading随depth上升直到ceiling，plant sign +1）。两个mode的差别只是一条`FeedbackObservable`记录（键名、标签、历史字段名、plant sign）；分半收敛、pooled plant slope、share分配、probe/bracket都通过这条记录读观测量，不知道自己在哪个mode。分类用的是本batch自己拟出的两个population，不用Calibration的阈值——trap光变了荧光就变了；loading到ceiling时plant slope趋零、估计不可信则回落到假定斜率半增益，分半随即判出无可分辨的dispersion而停。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
+- Feedback mode是leaf-owned显式字段，其中两个qCMOS mode：`qcmos_bright_dark`（观测量=每site双高斯拟合的bright_mean−dark_mean，trap越深occupied越暗，plant sign −1）与`qcmos_loading_rate`（观测量=同一拟合阈值判为bright的shot份额及其二项误差，loading随depth上升直到ceiling，plant sign +1）。两个mode的差别只是一条`FeedbackObservable`记录（键名、标签、历史字段名、plant sign）；分半收敛、pooled plant slope、share分配、probe/bracket都通过这条记录读观测量，不知道自己在哪个mode。分类用的是本batch自己拟出的两个population，不用Calibration的阈值——trap光变了荧光就变了；loading到ceiling时plant slope趋零、估计不可信则回落到假定斜率半增益，分半随即判出无可分辨的dispersion而停。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
 - 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；同一逐帧publication经mean reduction实时显示，Feedback只把完整registered Target SiteMap写入该次camera run geometry，不发布第二份camera数据或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽和frame坐标几何；Feedback每shot每site的bright/dark计数读出固定为BOX方法——在注册后的site centre按Calibration的BOX半宽对像素求和——因为只有BOX是真实光子计数；无论Calibration默认用哪种model读occupancy，其PSF/matched-filter权重都不进入Feedback frame，未观测site也不借用uniform PSF，没有BOX model的Calibration不能feedback。Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
 - 每个site仅使用本candidate完整一批authored shots经Calibration读出契约得到的site信号选择单高斯或双高斯；完整batch的受约束双高斯数值有效、满足基本分量/间距条件且full-data ΔBIC>10（决定性证据）时，`bright_mean-dark_mean`才是observable。这一判定是`fit_bimodal`自己的`decisive`（`ok`=两态分得开且都有人口，`decisive`=再加ΔBIC>10），校准给参考帧打标签用的是同一个`decisive`，而已知会load的site定读出阈值只要`ok`（六十发重叠的两个群体ΔBIC为负，它们的交点仍是最好的阈值）。候选对按似然减一项宽度比代价排序：代价2(ln r)²是一撮碰巧挤在一起的样本付不起、一个群体付得起的（它只防塌缩，不是边界，bright散粒噪声比dark读出噪声在qCMOS上就是十倍量级）；分量另有份额与宽度两个地板；拟合正常但不满足为single（未load），数值/采集失败为invalid。完全常量的样本没有任何合法切分，必须`ok=False/decisive=False`，不得以虚构的unit spread制造第二population；所有population width/separation先减各自真实样本作锚点，常量宽度严格为零、separation为未定义。ΔBIC>0曾把一个被拆成两半、相距1.7σ的单高斯当成loaded site（contrast 10.9，uniformity ratio读到116）。

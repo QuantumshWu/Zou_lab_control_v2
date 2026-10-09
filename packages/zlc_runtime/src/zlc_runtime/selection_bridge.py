@@ -816,6 +816,7 @@ class _BridgeProcessor:
         #: shot, and without it each shot re-cut all of them.  One per route,
         #: so it goes with the region and the run it cut.
         self._slice_memo: dict = {}
+        self.source_publication: SignalPublication | None = None
         self.dataset_output_declarations = tuple(
             DatasetOutputDeclaration(
                 name,
@@ -839,6 +840,7 @@ class _BridgeProcessor:
         source: SignalValue,
         source_publication: SignalPublication,
     ) -> Mapping[str, LiveDatasetOutput]:
+        self.source_publication = source_publication
         return self._bridge._evaluate_processor(
             self,
             source,
@@ -939,6 +941,7 @@ class SelectionBridge:
         self._block_revision = 0
         self._subscriptions: list[Callable[[], None]] = []
         self._last_error: Exception | None = None
+        self._last_error_publication: SignalPublication | None = None
         #: What this bridge cannot currently answer, as opposed to what
         #: went wrong in it.  A box that names no sample is the standing
         #: example: the instrument is fine, the question has no answer
@@ -951,6 +954,11 @@ class SelectionBridge:
     def last_error(self) -> Exception | None:
         with self._lock:
             return self._last_error
+
+    @property
+    def last_error_publication(self) -> SignalPublication | None:
+        with self._lock:
+            return self._last_error_publication
 
     @property
     def last_condition(self) -> str:
@@ -1199,7 +1207,7 @@ class SelectionBridge:
                 and event.batch_revision <= self._last_fit_batch_revision
             ):
                 self._record_error(
-                    ValueError("fit batch_revision must increase for every accepted batch")
+                    ValueError("fit batch_revision must increase for every accepted batch"), publication,
                 )
                 return
             schema_changed = previous_event is not None and self._fit_schema_key(
@@ -1324,7 +1332,7 @@ class SelectionBridge:
                 current = self._current_source_publication()
                 if current is None:
                     self._record_error(
-                        RuntimeError("fit route lost its source while attaching")
+                        RuntimeError("fit route lost its source while attaching"), publication,
                     )
                     return
                 self._plane.attach_latest_only_processor(
@@ -1795,7 +1803,7 @@ class SelectionBridge:
             return
         trigger = getattr(result, "trigger", None)
         if not isinstance(trigger, tuple) or len(trigger) != 2:
-            self._record_error(RuntimeError("SelectionBridge processor lost its trigger"))
+            self._record_error(RuntimeError("SelectionBridge processor lost its trigger"), source_publication)
             return
         with self._lock:
             current = self._selection
@@ -1855,7 +1863,7 @@ class SelectionBridge:
                         rearm=True,
                     )
                 except Exception as retry:
-                    self._record_error(retry)
+                    self._record_error(retry, publication)
             return
         # An EmptySelection reaches here too, and RELEASING is right for it:
         # a region that names no data names none on every publication -- it
@@ -1863,7 +1871,7 @@ class SelectionBridge:
         # what the PREVIOUS region derived has to be retired rather than left
         # standing as though it were still the answer.  The reason is
         # recorded either way, which is what the operator reads.
-        self._record_error(error)
+        self._record_error(error, processor.source_publication)
         self._release_processor(processor)
 
     def _accept_processor_cancelled(self, processor: _BridgeProcessor) -> None:
@@ -1883,7 +1891,7 @@ class SelectionBridge:
             # selector/fit over the retained stopped or failed source Dataset.
             self._plane.seal_committed(processor, cut_short=True, error=error)
         if error is not None:
-            self._record_error(error)
+            self._record_error(error, processor.source_publication)
         self._processor_wake()
 
     def _commit_processor(
@@ -1894,6 +1902,7 @@ class SelectionBridge:
         *,
         trigger: tuple[str, int],
     ) -> None:
+        processor.source_publication = publication
         self._plane.commit_processor(
             processor,
             outputs,
@@ -1974,9 +1983,10 @@ class SelectionBridge:
     def _current_source_publication(self) -> SignalPublication | None:
         return self._plane.latest_publication(self._source_signal)
 
-    def _record_error(self, error: Exception) -> None:
+    def _record_error(self, error: Exception, publication: SignalPublication | None = None) -> None:
         with self._lock:
             self._last_error = error
+            self._last_error_publication = publication
 
     def _record_condition(self, condition: str) -> None:
         """Say what cannot be answered right now.  Empty means nothing."""

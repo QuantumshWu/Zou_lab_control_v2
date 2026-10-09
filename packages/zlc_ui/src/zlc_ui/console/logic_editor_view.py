@@ -423,6 +423,7 @@ class LogicEditorView(QtWidgets.QWidget):
                 self._acquisition_combo = combo
                 self._selector_layout.addRow(field.label, combo)
             combo.setToolTip(field.description)
+            combo.setEnabled(bool(projection.get("acquisition_enabled", True)) and not field.unavailable)
             self._fill_combo(
                 combo, str(projection["form_values"][acquisition_key] or ""),
                 tuple(str(choice.value) for choice in field.choices), blank=False,

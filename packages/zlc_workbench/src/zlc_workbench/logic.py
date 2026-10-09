@@ -145,6 +145,8 @@ class LogicBinding:
     owner_token: object = field(default_factory=object, compare=False)
     lease: DeviceLease | None = field(default=None, compare=False)
     pending: LogicCandidate | None = None
+    #: The one acquisition this run started, never an unrelated newer run.
+    acquisition_run: tuple[str, NodeHost, object] | None = None
     draft_error: str = ""
     #: Successful declared artifact paths from the current host generation.
     artifact_results: tuple[Mapping[str, str], ...] = ()
@@ -208,14 +210,15 @@ def task_input_summary(
         if spec.field_name in finalization.resources
     }
     summary = {
-        "authored": dict(finalization.values),
+        "authored": {name: value for name, value in finalization.values.items()
+                     if descriptor.authoring_schema.is_enabled(name, finalization.values)},
         "source_signal": finalization.source_signal or None,
         "devices": {
             requirement.argument_name: {
                 "instance_id": finalization.device_keys[requirement.argument_name],
                 "capability": requirement.capability_token,
             }
-            for requirement in descriptor.device_requirements
+            for requirement in descriptor.active_device_requirements(finalization.values)
         },
         "artifacts": artifacts,
         "resources": resources,
@@ -223,7 +226,7 @@ def task_input_summary(
     return summary
 
 
-def dataset_inputs(descriptor: Any) -> tuple[Any, ...]:
+def dataset_inputs(descriptor: Any, values: Mapping[str, Any] | None = None) -> tuple[Any, ...]:
     """The live signals one node reads, as its descriptor declares them.
 
     A processor is built around a signal it consumes, and the runtime refuses
@@ -231,13 +234,7 @@ def dataset_inputs(descriptor: Any) -> tuple[Any, ...]:
     therefore the descriptor's answer, not a guess from the node's kind.
     """
 
-    from zlc_atom.nodes import DatasetInputSpec
-
-    return tuple(
-        spec
-        for spec in getattr(descriptor, "input_specs", ())
-        if isinstance(spec, DatasetInputSpec)
-    )
+    return descriptor.active_dataset_inputs(values or {})
 
 
 def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:
@@ -256,6 +253,7 @@ def device_key_options(
     descriptor: Any,
     *,
     installation: Any,
+    values: Mapping[str, Any] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Compatible installed keys for each declared build argument.
 
@@ -268,7 +266,7 @@ def device_key_options(
     if not isinstance(devices, Mapping):
         raise TypeError("installation.devices must be a mapping")
     options: dict[str, tuple[str, ...]] = {}
-    for requirement in descriptor.device_requirements:
+    for requirement in descriptor.active_device_requirements(values or {}):
         compatible = tuple(
             sorted(
                 str(key)
@@ -296,9 +294,9 @@ def draft_devices(
     without it, and finalization is where the reason is spelled out.
     """
 
-    options = device_key_options(descriptor, installation=installation)
+    options = device_key_options(descriptor, installation=installation, values=draft.values)
     devices: dict[str, object] = {}
-    for requirement in descriptor.device_requirements:
+    for requirement in descriptor.active_device_requirements(draft.values):
         argument = str(requirement.argument_name)
         selected = str(draft.device_keys.get(argument, "")).strip()
         if selected not in options[argument]:
@@ -355,11 +353,12 @@ def finalize_logic_draft(
         issues.append(str(error))
 
     acquisition_field = descriptor.acquisition_input
-    acquisition = str(draft.values.get(acquisition_field) or "") if acquisition_field else ""
+    acquisition = str(draft.values.get(acquisition_field) or "") if descriptor.authoring_schema.is_enabled(acquisition_field, raw_values) else ""
     if acquisition and acquisition not in acquisition_options:
         issues.append(f"{acquisition!r} is not an available acquisition Measurement")
 
-    options = device_key_options(descriptor, installation=installation)
+    active_requirements = descriptor.active_device_requirements(raw_values)
+    options = device_key_options(descriptor, installation=installation, values=raw_values)
     declared_device_arguments = {
         requirement.argument_name
         for requirement in descriptor.device_requirements
@@ -372,7 +371,7 @@ def finalize_logic_draft(
         )
     selected_devices: dict[str, str] = {}
     devices: dict[str, object] = {}
-    for requirement in descriptor.device_requirements:
+    for requirement in active_requirements:
         argument = str(requirement.argument_name)
         candidates = options[argument]
         selected = str(draft.device_keys.get(argument, "")).strip()
@@ -414,7 +413,7 @@ def finalize_logic_draft(
     resolve_availability = getattr(descriptor, "resolve_field_availability", None)
     if (
         resolve_availability is not None
-        and len(devices) == len(declared_device_arguments)
+        and len(devices) == len(active_requirements)
     ):
         field_availability = {
             str(name): str(reason)
@@ -433,12 +432,14 @@ def finalize_logic_draft(
             field.name: field for field in descriptor.authoring_schema.fields
         }
         for name, reason in field_availability.items():
+            if not descriptor.authoring_schema.is_enabled(name, raw_values):
+                continue
             if fields[name].value_type == "bool":
                 values[name] = False
             elif values.get(name):
                 issues.append(reason)
 
-    wants_source = dataset_inputs(descriptor)
+    wants_source = dataset_inputs(descriptor, raw_values)
     source = str(draft.source_signal).strip()
     compatible_sources = tuple(str(value) for value in source_options)
     source_absent = False
@@ -476,7 +477,10 @@ def finalize_logic_draft(
         # Its source waits for real publications; admission does not start the
         # camera or invent data. Undeclared/incompatible names were refused above.
     elif source:
-        issues.append(f"{descriptor.api_name} has no Dataset source input")
+        from zlc_atom.nodes import DatasetInputSpec
+        if not any(isinstance(spec, DatasetInputSpec) for spec in descriptor.input_specs):
+            issues.append(f"{descriptor.api_name} has no Dataset source input")
+        source = ""
 
     offered_artifacts = dict(draft.artifact_inputs)
     artifact_specs = artifact_input_specs(descriptor)
@@ -580,6 +584,8 @@ def _resolve_workspace_resources(
     issues: list[str] = []
     workspace_root = Path(getattr(workspace, "root", Path.cwd())).resolve()
     for spec in descriptor.workspace_resources:
+        if not descriptor.authoring_schema.is_enabled(spec.field_name, draft.values):
+            continue
         directory = (workspace_root / spec.directory).resolve()
         if directory.parent != workspace_root:
             raise ValueError("workspace resource directory escaped workspace root")
@@ -688,7 +694,7 @@ def build_arguments(
         for parameter in parameters.values()
     )
     available: dict[str, Any] = {"signal_plane": signal_plane}
-    for requirement in descriptor.device_requirements:
+    for requirement in descriptor.active_device_requirements(finalization.values):
         selected = str(finalization.device_keys[requirement.argument_name])
         available[requirement.argument_name] = finalization.devices[
             requirement.argument_name
@@ -730,6 +736,8 @@ def build_arguments(
         name: value for name, value in available.items() if name in parameters
     }
     for name, value in finalization.values.items():
+        if not descriptor.authoring_schema.is_enabled(name, finalization.values):
+            continue
         if takes_anything or name in parameters:
             arguments[name] = value
 
@@ -804,7 +812,7 @@ def make_host(
     own declarations differ.
     """
 
-    inputs = dataset_inputs(descriptor)
+    inputs = dataset_inputs(descriptor, values)
     if len(inputs) > 1:
         raise ValueError("NodeHost supports exactly one declared Dataset input")
     kind = str(getattr(descriptor.kind, "value", descriptor.kind))

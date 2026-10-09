@@ -14,6 +14,17 @@ def _typed_equal(left: object, right: object) -> bool:
     return type(left) is type(right) and bool(left == right)
 
 
+def condition_enabled(
+    enabled_when: tuple[str, tuple[Any, ...]] | None,
+    values: Mapping[str, Any],
+) -> bool:
+    """One condition for editable fields and their active run dependencies."""
+    if enabled_when is None:
+        return True
+    controller, offered = enabled_when
+    return any(_typed_equal(values.get(controller), value) for value in offered)
+
+
 @dataclass(frozen=True, slots=True)
 class AuthoringChoice:
     """One owner-declared value and the human label that explains it."""
@@ -41,7 +52,8 @@ class AuthoringField:
     maximum: float | None = None
     choices: tuple[AuthoringChoice, ...] = ()
     #: ``(field name, values)``: this field is editable only while that field
-    #: holds one of those values.  It is still SHOWN -- an option that appears
+    #: holds one of those values; otherwise it does not participate in run
+    #: validation or build arguments. It is still SHOWN -- an option that appears
     #: and disappears as another is touched is a moving target, and an
     #: operator cannot see what a setting would offer before choosing it.
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
@@ -359,6 +371,15 @@ class AuthoringSchema:
     def field_names(self) -> tuple[str, ...]:
         return tuple(field.name for field in self.fields)
 
+    def is_enabled(self, name: str, values: Mapping[str, Any]) -> bool:
+        field = next((field for field in self.fields if field.name == name), None)
+        if field is None:
+            return False
+        if field.enabled_when is None:
+            return True
+        effective = {field.name: values.get(field.name, field.default) for field in self.fields}
+        return condition_enabled(field.enabled_when, effective)
+
     def project_values(
         self,
         values: Mapping[str, Any] | None = None,
@@ -396,7 +417,11 @@ class AuthoringSchema:
             raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
         result: dict[str, Any] = {}
         complete = True
+        effective = {field.name: supplied.get(field.name, field.default) for field in self.fields}
         for field in self.fields:
+            if not condition_enabled(field.enabled_when, effective):
+                result[field.name] = effective[field.name]
+                continue
             value = _project_value(
                 field,
                 supplied.get(field.name, field.default),
@@ -430,6 +455,7 @@ class AuthoringSchema:
                 if field.maximum is not None and value > field.maximum:
                     raise ValueError(f"{field.name!r} is above its maximum")
             result[field.name] = value
+            effective[field.name] = value
         if self.validator is not None and complete:
             self.validator(result)
         return result
@@ -539,4 +565,4 @@ def _project_integer(value: object, *, label: str) -> int:
 
 __all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",
            "TuneRefused", "is_tunable", "refresh_tunable_fields", "read_tunable_in_unit",
-           "tune_in_unit", "convert_tunable_value"]
+           "tune_in_unit", "convert_tunable_value", "condition_enabled"]

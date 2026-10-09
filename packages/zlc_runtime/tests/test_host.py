@@ -197,12 +197,14 @@ def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str, monkey
     try:
         # A queued candidate is a valid wait target before activation.
         assert host.wait_ready(0) is False
+        assert host.wait_terminal(0) is False
         for _run in range(2 if ending == "done" else 1):
             entered.clear()
             arm.clear()
             finish.clear()
             host.start()
             assert entered.wait(1)
+            assert host.wait_terminal(0) is False
             assert host.running
             assert host.wait_ready(.01) is False
             if ending == "cancel-before-ready":
@@ -225,6 +227,7 @@ def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str, monkey
             finish.set()
             expected = "cancelled" if ending.startswith("cancel") else ending
             assert _wait(host, wake).phase == expected
+            assert host.wait_terminal(0) is True
             with pytest.raises((RuntimeError, InterruptedError)):
                 host.wait_ready(0)
             assert closed == [], "Stop or terminal completion released reusable resources"

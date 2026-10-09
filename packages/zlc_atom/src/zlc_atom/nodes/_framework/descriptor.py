@@ -9,7 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable
 
-from zlc_atom.authoring import AuthoringSchema, is_tunable
+from zlc_atom.authoring import AuthoringSchema, condition_enabled, is_tunable
 from zlc_atom.install.descriptors import CAPABILITY_TYPES
 from zlc_runtime import DatasetOutputDeclaration, SelectionState
 
@@ -30,6 +30,7 @@ class DatasetInputSpec:
     #: The operator selects a producer's atomic output bundle; one member
     #: remains the existing Runtime subscription anchor, not a second input.
     select_bundle: bool = False
+    enabled_when: tuple[str, tuple[Any, ...]] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or (self.contract_id is not None and not self.contract_id):
@@ -297,6 +298,7 @@ class DeviceRequirement:
     #: capture takes the whole instrument as it stands, whatever knobs that
     #: instrument happens to have.
     protected_fields: tuple[str, ...] | None = ()
+    enabled_when: tuple[str, tuple[Any, ...]] | None = None
 
     def __post_init__(self) -> None:
         token = str(self.capability_token).strip()
@@ -402,9 +404,8 @@ class LogicNodeDescriptor:
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     node_previews: tuple[NodePreviewSpec, ...] | None = None
-    #: The previews of one authored draft, for a node whose outputs are
-    #: declared by draft: which of them an operator came to watch, and how,
-    #: is then also the draft's answer.  Called like ``declare_outputs``.
+    #: The previews of one authored draft; a mode can change which declared
+    #: outputs it presents without changing the outputs themselves.
     declare_previews: (
         Callable[
             [Mapping[str, Any], Mapping[str, object]],
@@ -437,6 +438,8 @@ class LogicNodeDescriptor:
     ) = None
     #: Optional text authoring field naming a readiness-reporting Logic instance.
     acquisition_input: str = ""
+    #: The caller either waits for arm-ready or one successful finite run.
+    acquisition_completion: str = "ready"
     #: The node reports acquisition readiness through its host execution context.
     reports_ready: bool = False
     build_argument_names: tuple[str, ...] = field(
@@ -450,6 +453,14 @@ class LogicNodeDescriptor:
         """Whether Start can put a declared output on screen."""
 
         return bool(self.node_previews) or self.declare_previews is not None
+
+    def active_device_requirements(self, values: Mapping[str, Any]) -> tuple[DeviceRequirement, ...]:
+        effective = {field.name: values.get(field.name, field.default) for field in self.authoring_schema.fields}
+        return tuple(item for item in self.device_requirements if condition_enabled(item.enabled_when, effective))
+
+    def active_dataset_inputs(self, values: Mapping[str, Any]) -> tuple[DatasetInputSpec, ...]:
+        effective = {field.name: values.get(field.name, field.default) for field in self.authoring_schema.fields}
+        return tuple(item for item in self.input_specs if isinstance(item, DatasetInputSpec) and condition_enabled(item.enabled_when, effective))
 
     def outputs_for(
         self, values: Mapping[str, Any], devices: Mapping[str, object]
@@ -494,6 +505,8 @@ class LogicNodeDescriptor:
             raise TypeError("authoring_schema must be AuthoringSchema")
         if not isinstance(self.acquisition_input, str):
             raise TypeError("acquisition_input must be a field name string")
+        if self.acquisition_completion not in ("ready", "terminal"):
+            raise ValueError("acquisition_completion must be 'ready' or 'terminal'")
         if type(self.reports_ready) is not bool:
             raise TypeError("reports_ready must be bool")
         if self.acquisition_input:
@@ -530,6 +543,11 @@ class LogicNodeDescriptor:
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):
             raise TypeError("device_requirements must contain DeviceRequirement values")
+        for item in (*requirements, *(item for item in inputs if isinstance(item, DatasetInputSpec))):
+            if item.enabled_when is not None:
+                controller, offered = item.enabled_when
+                if controller not in self.authoring_schema.field_names or not offered:
+                    raise ValueError("input enabled_when must name an authoring field and enabling values")
         if any(not isinstance(value, SelectionMapping) for value in selection_mappings):
             raise TypeError("selection_mappings must contain SelectionMapping values")
         if any(
@@ -557,10 +575,9 @@ class LogicNodeDescriptor:
         if self.declare_previews is not None:
             if not callable(self.declare_previews):
                 raise TypeError("declare_previews must be callable or None")
-            if self.declare_outputs is None or node_previews:
+            if node_previews:
                 raise ValueError(
-                    "a node declares its previews once, and by draft only "
-                    "when its outputs are"
+                    "a node declares its previews once, statically or by draft"
                 )
         preview_keys = tuple(
             (value.producer, value.output.name) for value in node_previews

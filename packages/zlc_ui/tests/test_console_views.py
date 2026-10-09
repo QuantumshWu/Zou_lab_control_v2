@@ -1032,6 +1032,29 @@ assert not patches, patches
 assert editor.start_button.text() == 'Restart'
 assert editor.start_button.isEnabled()
 assert editor.stop_button.isEnabled()
+# Mode-dependent inputs use this same editor and its ordinary Fluent forms.
+from zlc_atom.nodes.slm_feedback.logic_node import LOGIC_NODE as feedback
+from zlc_workbench.authoring_form import project_logic_schema, display_value
+values = {field.name: display_value(field.default) for field in feedback.authoring_schema.fields}
+mode_projection = dict(running,
+    form_spec=project_logic_schema(feedback, workspace_root='C:/data', acquisition_enabled=False),
+    form_values=values, acquisition_input='acquisition_logic', acquisition_enabled=False,
+    source_required=False, device_options={'camera': ('camera',), 'sequencer': ('pulse',), 'slm': ('slm',)},
+)
+handle.update_logic_editor('camera-1', mode_projection)
+assert editor.form.widget_for('pulse_template').isEnabled()
+assert editor.form.widget_for('exposure_seconds').isEnabled()
+assert not editor._acquisition_combo.isEnabled() and editor.source_combo is None
+mode_projection = dict(mode_projection,
+    form_spec=project_logic_schema(feedback, workspace_root='C:/data', acquisition_options=('scan',)),
+    form_values=dict(values, feedback_mode='ramsey_frequency'),
+    acquisition_enabled=True, source_required=True, device_options={'slm': ('slm',)},
+)
+handle.update_logic_editor('camera-1', mode_projection)
+assert not editor.form.widget_for('pulse_template').isEnabled()
+assert not editor.form.widget_for('exposure_seconds').isEnabled()
+assert editor._acquisition_combo.isEnabled() and editor.source_combo is not None
+assert set(editor._device_combos) == {'slm'}
 view.editor_close_requested.emit(editor)
 app.processEvents()
 assert view.tabs.indexOf(editor) < 0

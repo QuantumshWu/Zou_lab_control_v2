@@ -695,10 +695,12 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     calibration_inputs = descriptors["calibration"].input_specs
     assert calibration_inputs == ()
     assert tuple(item.name for item in descriptor.input_specs) == (
+        "frequency",
         "calibration_path",
         "science_context_path",
     )
     assert tuple(item.contract_id for item in descriptor.input_specs) == (
+        "zlc.selection.fit.parameter",
         "calibration.readout",
         "zlc.slm.science-context",
     )
@@ -720,14 +722,14 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     )
     assert tuple(
         (item.output.name, item.plot_kind, item.producer)
-        for item in descriptor.node_previews
+        for item in descriptor.previews_for(authored, {})
     ) == (
         ("frames", "image", "camera"),
         ("observable_uniformity_history", "curve", ""),
         ("site_signal_history", "curve", ""),
         ("target_share_history", "curve", ""),
     )
-    camera_preview = descriptor.node_previews[0]
+    camera_preview = descriptor.previews_for(authored, {})[0]
     assert camera_preview.semantic == {
         "reduction": Reduction.MEAN,
     }
@@ -797,6 +799,76 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert lower <= estimate <= upper
     assert estimate == pytest.approx(1.4 / 0.6)
     assert max_relative_sem == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("ending", ("completed", "stopped", "failed"))
+def test_external_feedback_updates_frequency_and_seals_real_partial_artifacts(tmp_path, monkeypatch, ending):
+    slm = _Slm((17, 23), incoming=0.125)
+    plane = SignalDataPlane()
+    target = _grid_target(slm.shape_yx)
+    wake = Event()
+    acquisitions = []
+
+    def restart(node_id, ctx, *, completion):
+        assert node_id == "ramsey_scan" and completion == "terminal"
+        acquisitions.append(slm.last_commanded_phase.copy())
+        if len(acquisitions) == 2 and ending != "completed":
+            if ending == "stopped":
+                host.cancel("operator Stop")
+            raise RuntimeError("operator Stop" if ending == "stopped" else "acquisition failed")
+        return {"scan": object()}
+
+    def fit(*args, **kwargs):
+        frequency = np.linspace(0.8, 1.2, 35) if len(acquisitions) == 1 else np.linspace(0.9, 1.1, 35)
+        error = np.full(35, 0.001)
+        error[5] = np.nan
+        valid = np.ones(35, dtype=bool)
+        valid[10] = False
+        frequency[10] = np.nan
+        return {"frequency": frequency, "standard_error": error, "valid": valid,
+                "unit": "kHz", "source": {"signal": "fit/f", "candidate": len(acquisitions)}}
+
+    monkeypatch.setattr(feedback_module, "_wait_for_external_fit", fit)
+    task = SlmFeedbackTask(
+        camera=None, camera_key="", sequencer=None, sequencer_key="",
+        slm=slm, slm_key="slm", signal_plane=plane, calibration=_calibration(),
+        calibration_path=tmp_path / "calibration.json",
+        science_context=_science_context(slm, target=target), science_context_path=tmp_path / "science.npz",
+        pulse_sequence=None, pulse_path=None, feedback_mode="ramsey_frequency",
+        exposure_seconds=None, shots_per_candidate=0, probe_factors=(),
+        feedback_gain=0.3, maximum_weight_change=0.5, max_updates=1,
+        acquisition_logic="ramsey_scan", source_signal="fit/f", restart_logic=restart,
+    )
+    host = _task_host(task, plane, wake)
+    try:
+        host.start(run_root=tmp_path, input_summary={})
+        observation = _wait_host(host, wake)
+        assert observation.phase == ("failed" if ending == "failed" else "done"), observation
+        run_root = host.run_directory
+        assert run_root is not None
+        assert len(acquisitions) == 2
+        assert not np.array_equal(acquisitions[0], acquisitions[1])
+        summary = json.loads((run_root / "summary.json").read_text())
+        assert summary["status"] == ending
+        assert summary["candidate_count"] == (2 if ending == "completed" else 1)
+        selected = load_science_context(run_root / "final/science-context.npz")
+        np.testing.assert_array_equal(selected["phase"], slm.last_commanded_phase)
+        assert len(list((run_root / "figures").glob("*.npz"))) == 4
+        for path in (run_root / "figures").glob("*.npz"):
+            info, arrays, datasets = read_archive(path)
+            read_figure_plot(info, arrays, datasets, "data")
+        with np.load(run_root / "data/measurements/measurement-0001.npz") as saved:
+            assert "site_samples" not in saved
+            assert np.isnan(saved["frequency_standard_error"][5])
+            assert saved["requested_log_correction"][0] > 0
+            assert saved["requested_log_correction"][-1] < 0
+            assert saved["requested_log_correction"][10] == 0
+        if ending == "completed":
+            signal = plane.current_dataset("@logic/slm_feedback/site_signal_history")
+            assert signal.block.schema.value_schema.value_unit == "kHz"
+    finally:
+        host.shutdown()
+        plane.close()
 
 
 def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -> None:
@@ -4090,6 +4162,141 @@ def test_the_batch_fit_also_reads_the_loading_rate_with_its_binomial_error() -> 
         field for field in feedback_node.authoring_schema.fields if field.name == "feedback_mode"
     )
     assert {choice.value for choice in mode_field.choices} == set(FEEDBACK_OBSERVABLES)
+
+
+def test_external_fit_waits_for_the_final_scan_and_maps_typed_sites() -> None:
+    from threading import Thread
+    from zlc_atom.data import snapshot_from_array
+    from zlc_data import AxisId, AxisSpec, SCAN_POINT, SITE, DomainSpec, SCALAR_DOMAIN, ValueSchema, DatasetSchema, owned_snapshot_from_arrays
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
+    from zlc_runtime.selection_bridge import FitEventValue, SelectionBridge
+
+    target = np.zeros((16, 16), dtype=np.float32)
+    target[np.ix_((2, 12), (2, 12))] = 1.0
+    calibration = _calibration_at(np.asarray(((20, 40), (20, 20), (40, 40), (40, 20))))
+    calibration = replace(calibration, frame_contract=FrameContract(
+        (64, 64), sensor_shape=(160, 180), roi_xywh=(10, 12, 128, 128), binning_yx=(2, 2),
+    ))
+    site_axis = calibration.site_map.site_axis
+    geometry = {
+        "coordinate_frame": "sensor_pixel_xy", "status_axis_id": site_axis.axis_id.value,
+        "status_coordinates": [1, 2, 3, 4], "point_ids": list(calibration.site_map.site_ids),
+        "coordinates_xy": (calibration.site_map.centers_xy * 2 + (10, 12)).tolist(),
+    }
+    plane = SignalDataPlane()
+    declaration = DatasetOutputDeclaration("result", "test.scan.result")
+    source = SimpleNamespace(instance_id="scan", dataset_output_declarations=(declaration,),
+                             signal_key=lambda name: f"scan/{name}")
+    plane.begin_generation(source)
+    plane.set_run_record(source, {"image_point_overlay_geometry": geometry})
+    scan_axis = AxisSpec(AxisId("scan.x"), "x", SCAN_POINT, 3, (0, 1, 2))
+
+    def commit(revision):
+        snapshot = snapshot_from_array(
+            np.ones((1, 3, 4)), producer="scan", signal="result", point_axes=(scan_axis,),
+            cell_axes=(site_axis,), generation="scan-test", revision=revision,
+        )
+        plane.commit_live(source, {"result": LiveDatasetOutput(declaration, snapshot, MonitorCoverage(3, 3))})
+        return plane.latest_publication("scan/result")
+
+    first = commit(1)
+    callbacks = []
+    def subscribe_fit(callback):
+        callbacks.append(callback)
+        return lambda: callbacks.remove(callback)
+    events = SimpleNamespace(subscribe_fit=subscribe_fit)
+    bridge = SelectionBridge(plane, "scan/result", events, bridge_id="ramsey")
+    bridge.start()
+    fit_axis = replace(site_axis, coordinates=(3, 1, 4, 2))
+
+    def fit(publication, batch):
+        ref = publication.value("scan/result").snapshot.ref
+        event = FitEventValue(
+            parameter_names=("frequency",), parameter_units={"frequency": "kHz"},
+            parameter_values={"frequency": np.asarray((400.0, 300.0, np.nan, 100.0))},
+            parameter_errors={"frequency": np.asarray((0.4, np.nan, np.nan, 0.1))},
+            success=np.asarray((True, True, False, True)), sample_axes=(("cell_data", fit_axis),),
+            source_generation=ref.stream_generation.value, source_revision=ref.revision.value,
+            batch_revision=batch,
+        )
+        for callback in tuple(callbacks):
+            callback(event)
+
+    context = _Context()
+    result = {}
+    completed = Event()
+    started = Event()
+    def consume(final):
+        started.set()
+        try:
+            result.update(feedback_module._wait_for_external_fit(
+                context, signal_plane=plane, fit_signal="@logic/ramsey/frequency",
+                final_publications={"scan/result": final}, calibration=calibration, target=target,
+            ))
+        except BaseException as error:
+            result["error"] = error
+        finally:
+            completed.set()
+
+    thread = None
+    try:
+        fit(first, 1)
+        final = commit(2)
+        plane.seal_committed(source)
+        thread = Thread(target=consume, args=(final,), daemon=True)
+        thread.start()
+        assert started.wait(1.0)
+        assert not completed.wait(0.05), "the earlier fit was mistaken for the final Scan"
+        fit(final, 2)
+        assert completed.wait(2.0)
+        if "error" in result:
+            raise result["error"]
+        np.testing.assert_allclose(result["frequency"], (100, np.nan, 300, 400), equal_nan=True)
+        np.testing.assert_allclose(result["standard_error"], (0.1, np.nan, np.nan, 0.4), equal_nan=True)
+        np.testing.assert_array_equal(result["valid"], (True, False, True, True))
+        assert result["unit"] == "kHz"
+        assert result["source"]["target_indices"] == [3, 2, 1, 0]
+        assert result["source"]["acquisition_publications"][0]["sequence"] == final.event_ref.sequence
+        assert result["snapshot"].block.schema.point_domain.axes[0].role == SITE
+
+        # SITE may be Point or Cell-data (Repeat axes have the REPEAT role).
+        # Its codes, not the last physical dimension, bind values to geometry.
+        for domain_name in ("point", "cell_data"):
+            site_domain = DomainSpec((4,), (fit_axis,), None if domain_name == "cell_data" else ((0, 1, 2, 3),))
+            domains = [site_domain if name == domain_name else (
+                SCALAR_DOMAIN if name == "cell_data" else DomainSpec((1,), (), ())
+            ) for name in ("repeat", "point", "cell_data")]
+            schema = DatasetSchema(*domains, ValueSchema.scalar(np.dtype("float64"), "kHz"))
+            snapshot = owned_snapshot_from_arrays(
+                schema, np.asarray((400.0, 300.0, 200.0, 100.0)).reshape(schema.physical_shape),
+                revision=1, block_id="site-domains", stream_generation="site-domains",
+            )
+            mapped = feedback_module._external_fit_parameters(snapshot, (geometry,), calibration=calibration, target=target)
+            np.testing.assert_array_equal(mapped["frequency"], (100, 200, 300, 400))
+            assert np.all(np.isnan(mapped["standard_error"])) and np.all(mapped["valid"])
+        with pytest.raises(ValueError, match="centers differ"):
+            feedback_module._external_fit_parameters(
+                snapshot, ({**geometry, "coordinates_xy": (np.asarray(geometry["coordinates_xy"]) + 1).tolist()},),
+                calibration=calibration, target=target,
+            )
+        extra = snapshot_from_array(
+            np.ones((1, 3, 4)), producer="fit", signal="frequency", point_axes=(scan_axis,),
+            cell_axes=(site_axis,), generation="extra", revision=1,
+        )
+        with pytest.raises(ValueError, match="select the other axes"):
+            feedback_module._external_fit_parameters(extra, (geometry,), calibration=calibration, target=target)
+        context.cancelled = True
+        with pytest.raises(RuntimeError, match="cancelled"):
+            feedback_module._wait_for_external_fit(
+                context, signal_plane=plane, fit_signal="@logic/ramsey/frequency",
+                final_publications=(final,), calibration=calibration, target=target,
+            )
+    finally:
+        context.cancelled = True
+        if thread is not None:
+            thread.join(2.0)
+        bridge.close()
+        plane.close()
 
 
 def test_the_plant_sign_decides_the_trusted_slopes_and_the_way_a_site_moves() -> None:

@@ -455,6 +455,62 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
             finalization=invalid,
         )
 
+    # A mode that delegates acquisition must not resolve or claim the
+    # inactive camera/pulse, nor pass their unfinished draft values to build.
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+    from zlc_atom.nodes import DatasetInputSpec, WorkspaceResourceSpec, LogicNodeDescriptor, NodeKind
+    from zlc_runtime import FIT_PARAMETER_CONTRACT
+    from zlc_workbench.authoring_form import project_logic_schema
+
+    camera_mode = ("mode", ("camera",))
+    external_mode = ("mode", ("external",))
+    conditional = LogicNodeDescriptor(
+        "conditional", NodeKind.MEASUREMENT,
+        authoring_schema=AuthoringSchema((
+            AuthoringField("mode", "str", "Mode", "camera"),
+            AuthoringField("pulse", "resource", "Pulse", "", required=True, enabled_when=camera_mode),
+            AuthoringField("exposure", "float", "Exposure", 0.1, minimum=0.0, enabled_when=camera_mode),
+            AuthoringField("acquisition_logic", "str", "Acquisition logic", "", required=True, enabled_when=external_mode),
+        )),
+        device_requirements=(replace(descriptor.device_requirements[0], enabled_when=camera_mode),),
+        input_specs=(DatasetInputSpec("signal", FIT_PARAMETER_CONTRACT, "latest", enabled_when=external_mode),),
+        workspace_resources=(WorkspaceResourceSpec(
+            "pulse", "test.pulse", "pulses", (".json",),
+            lambda _path: pytest.fail("inactive Pulse was decoded"),
+            argument_name="pulse_resource",
+        ),),
+        acquisition_input="acquisition_logic",
+        acquisition_completion="terminal",
+        build=lambda *, signal_plane, source_signal="", **values: values,
+    )
+    draft = LogicDraft(
+        values={"mode": "external", "exposure": "unfinished", "pulse": "missing.json", "acquisition_logic": "scan"},
+        source_signal="@logic/panel-1/frequency",
+        device_keys={"camera": "sequencer"},
+    )
+    final = finalize_logic_draft(
+        conditional, draft, installation=_BenchInstallation(), signal_plane=plane,
+        workspace=workspace, source_options=(draft.source_signal,), acquisition_options=("scan",),
+    )
+    assert final.can_start, final.issues
+    assert not final.devices and not final.resources
+    assert conditional.active_dataset_inputs(final.values)
+    assert not conditional.active_device_requirements(final.values)
+    args = build_arguments(conditional, signal_plane=plane, finalization=final)
+    assert args == {"mode": "external", "acquisition_logic": "scan", "signal_plane": plane, "source_signal": draft.source_signal}
+    form = project_logic_schema(conditional, workspace_root=str(Path.cwd()), acquisition_options=("scan",))
+    pulse_field = next(field for field in form.fields if field.key == "pulse")
+    assert pulse_field.enabled_when == camera_mode
+    draft.values["mode"] = "camera"
+    final = finalize_logic_draft(
+        conditional, draft, installation=_BenchInstallation(), signal_plane=plane,
+        workspace=workspace, source_options=(draft.source_signal,),
+    )
+    assert not final.can_start
+    assert not final.source_signal
+    assert any("exposure" in issue.lower() or "could not convert" in issue for issue in final.issues)
+    assert draft.values["exposure"] == "unfinished"
+
 
 def _claim_descriptor(
     api_name: str,
@@ -824,22 +880,106 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert replacement.signal_key("frames") == old_key
     assert replacement.generation != old_generation
 
-    from concurrent.futures import ThreadPoolExecutor
+@pytest.mark.parametrize("ending", ("done", "cancelled", "failed", "wrong-source"))
+def test_task_acquisition_waits_for_its_own_scan_and_stops_nested_ready_source(presenter, ending) -> None:
+    from threading import Event
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+    from zlc_atom.data import snapshot_from_array
+    from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
+    from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
 
-    context = SimpleNamespace(instance_id="scan", cancel_requested=lambda: False)
-    with ThreadPoolExecutor(max_workers=1) as worker:
-        restart = worker.submit(presenter._restart_acquisition, node_id, context)
-        deadline = time.monotonic() + 5.0
-        while not restart.done() and time.monotonic() < deadline:
+    declaration = DatasetOutputDeclaration("result", "test.scan")
+    entered, releases, completed, camera_stops = [], [], [], []
+
+    def camera_build():
+        def execute(context):
+            context.report_ready()
+            while not context.cancel_requested():
+                time.sleep(.001)
+            camera_stops.append(context.generation)
+        return SimpleNamespace(execute=execute)
+
+    def scan_build(*, acquisition_logic, restart_logic):
+        def execute(context):
+            restart_logic(acquisition_logic, context)
+            gate = Event()
+            releases.append(gate)
+            entered.append(context.generation)
+            while not gate.wait(.005):
+                if context.cancel_requested():
+                    raise InterruptedError("scan stopped")
+            if ending == "failed":
+                raise RuntimeError("scan hardware failed")
+            snapshot = snapshot_from_array([float(len(entered))], producer=context.instance_id,
+                signal="result", generation=context.generation.value, revision=1)
+            context.commit_live({"result": LiveDatasetOutput(declaration, snapshot, MonitorCoverage(1, 1))})
+        return SimpleNamespace(execute=execute)
+
+    def task_build(*, acquisition_logic, restart_logic, source_signal):
+        def execute(context):
+            context.report_progress("Acquiring complete scans")
+            for _ in range(2):
+                completed.append(restart_logic(acquisition_logic, context, completion="terminal"))
+        return SimpleNamespace(execute=execute)
+
+    acquisition = AuthoringSchema((AuthoringField("acquisition_logic", "str", "Acquisition", ""),))
+    camera = LogicNodeDescriptor("ready_source", NodeKind.MEASUREMENT, AuthoringSchema(),
+        build=camera_build, reports_ready=True)
+    scan = LogicNodeDescriptor("finite_scan", NodeKind.MEASUREMENT, acquisition,
+        build=scan_build, acquisition_input="acquisition_logic", outputs=(declaration,))
+    task = LogicNodeDescriptor("feedback", NodeKind.TASK, acquisition, build=task_build,
+        acquisition_input="acquisition_logic", acquisition_completion="terminal", node_previews=(),
+        input_specs=(DatasetInputSpec("signal", "test.scan", "exact"),))
+    presenter.catalog = LogicCatalog((camera, scan, task))
+    camera_id = presenter.add_logic("ready_source")
+    other_id = presenter.add_logic("ready_source", node_id="unrelated")
+    scan_id = presenter.add_logic("finite_scan", values={"acquisition_logic": camera_id})
+    source_id = (presenter.add_logic("finite_scan", node_id="another_scan",
+                 values={"acquisition_logic": camera_id}) if ending == "wrong-source" else scan_id)
+    task_id = presenter.add_logic("feedback", values={"acquisition_logic": scan_id},
+                                  source_signal=stable_signal_key(source_id, "result"))
+
+    def advance_until(predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
             presenter.beat()
-            time.sleep(0.002)
-        assert restart.done(), "acquisition restart did not finish arming"
-        restart.result()
-    acquisition = presenter.logic[node_id].host
-    assert acquisition is not replacement
-    assert acquisition.wait_ready(0.0)
-    assert acquisition.generation != replacement.generation
-    assert session.signal_plane.latest_publication(old_key) is None
+            time.sleep(.002)
+        assert predicate(), {key: None if row.host is None else row.host.observation for key, row in presenter.logic.items()}
+
+    assert presenter.start_logic(camera_id)
+    old_camera = presenter.logic[camera_id].host
+    assert presenter.start_logic(task_id)
+    if ending == "wrong-source":
+        advance_until(lambda: presenter.logic[task_id].host.terminal)
+        observation = presenter.logic[task_id].host.observation
+        assert observation.phase == "failed" and "does not derive from" in observation.error
+        assert presenter.logic[scan_id].host is None
+        assert presenter.logic[camera_id].host is old_camera and old_camera.running
+        assert not completed and not entered
+        return
+    advance_until(lambda: bool(entered))
+    assert presenter.logic[camera_id].host is not old_camera
+    assert not completed and presenter.logic[task_id].host.running
+    assert not presenter.start_logic(other_id), "Task admission must not allow unrelated nodes"
+    if ending == "cancelled":
+        presenter.stop_logic(task_id)
+    else:
+        releases[0].set()
+        if ending == "done":
+            advance_until(lambda: len(entered) == 2)
+            assert len(completed) == 1 and entered[0] != entered[1]
+            first = completed[0][stable_signal_key(scan_id, "result")]
+            assert first.event_ref.generation == entered[0]
+            releases[1].set()
+    advance_until(lambda: all(row.host is None or row.host.terminal for row in presenter.logic.values()))
+    assert presenter.logic[task_id].host.observation.phase == ending
+    assert presenter.logic[camera_id].acquisition_run is None
+    assert presenter.logic[scan_id].acquisition_run is None
+    assert presenter.logic[task_id].acquisition_run is None
+    assert len(completed) == (2 if ending == "done" else 0)
+    assert camera_stops
+    if ending == "failed":
+        assert "scan hardware failed" in presenter.logic[task_id].host.observation.error
 
 
 def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
@@ -1336,6 +1476,16 @@ def test_slm_feedback_form_has_a_visible_numeric_exposure_default(presenter) -> 
     assert pulse.kind == "path"
     assert projection["form_values"]["pulse_template"] == ""
     assert projection["can_start"] is False
+    presenter.update_logic_draft(node_id, values={"feedback_mode": "ramsey_frequency"})
+    external = presenter.logic_editor_projection(node_id)
+    assert set(external["device_options"]) == {"slm"}
+    assert external["source_required"] and external["acquisition_enabled"]
+    assert not any("pulse_template" in issue or "camera.adapter" in issue or "sequencer.streamer" in issue for issue in external["issues"])
+    assert external["artifact_form_spec"].keys == projection["artifact_form_spec"].keys
+    presenter.update_logic_draft(node_id, values={"feedback_mode": "qcmos_loading_rate"})
+    camera = presenter.logic_editor_projection(node_id)
+    assert set(camera["device_options"]) == {"camera", "sequencer", "slm"}
+    assert not camera["source_required"] and not camera["acquisition_enabled"]
 
 
 
