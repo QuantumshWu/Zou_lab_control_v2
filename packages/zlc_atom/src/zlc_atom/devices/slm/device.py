@@ -75,6 +75,8 @@ def _same_phase_codes(left: np.ndarray, right: np.ndarray) -> bool:
     if left.flags.c_contiguous and right.flags.c_contiguous:
         first, second = left.reshape(-1), right.reshape(-1)
         words = first.size // 8 * 8
+        if words and first[:8].view(np.uint64)[0] != second[:8].view(np.uint64)[0]:
+            return False
         return (np.array_equal(first[:words].view(np.uint64), second[:words].view(np.uint64))
                 and np.array_equal(first[words:], second[words:]))
     return np.array_equal(left, right)

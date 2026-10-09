@@ -958,9 +958,16 @@ class X15213Adapter:
             phase_code = (
                 phase_code.astype(np.uint16) + np.asarray(mapping["correction"], dtype=np.uint16)
             ) % 256
+        phase_code = np.asarray(phase_code, dtype=np.uint8)
+        storage = phase_code.base
+        if isinstance(storage, np.ndarray):
+            storage = storage.base
+        if not (phase_code.flags.c_contiguous and isinstance(storage, bytes)
+                and len(storage) == phase_code.nbytes):
+            storage = phase_code.tobytes()
         return (
             np.frombuffer(
-                np.asarray(phase_code, dtype=np.uint8).tobytes().translate(self._phase_to_gray.tobytes()),
+                storage.translate(self._phase_to_gray.tobytes()),
                 dtype=np.uint8,
             ).reshape(_SHAPE_YX),
             mapping,
