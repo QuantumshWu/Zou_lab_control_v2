@@ -38,7 +38,7 @@ from zlc_atom.devices.camera.contract import (
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
-from zlc_atom.nodes.camera_measurement.measurement import (
+from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )

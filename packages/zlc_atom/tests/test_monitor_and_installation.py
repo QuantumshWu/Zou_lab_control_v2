@@ -17,7 +17,7 @@ from zlc_atom.install import (
 )
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera import CameraFrameRecord
-from zlc_atom.nodes.camera_measurement import (
+from zlc_atom.nodes.camera import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
     MonitorCapture,

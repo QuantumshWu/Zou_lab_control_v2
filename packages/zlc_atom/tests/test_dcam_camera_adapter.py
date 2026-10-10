@@ -343,7 +343,7 @@ def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata(
 
 
 def test_finite_target_and_receive_capacity_are_independent() -> None:
-    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
+    from zlc_atom.nodes.camera import CameraMeasurementNode, CameraMeasurementRequest
     from zlc_runtime import SignalDataPlane
 
     driver = _FakeDcamDriver()

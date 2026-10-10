@@ -662,13 +662,13 @@ def test_pending_logic_reserves_every_device_before_old_logic_stops(presenter) -
     replacement_id = presenter.add_logic("replacement")
     assert presenter.start_logic(old_id) is True
     old_host = presenter.logic[old_id].host
-    presenter.logic[old_id].node.restart_from = lambda _fresh: True
     assert presenter.start_logic(old_id)
     deadline = time.monotonic() + 2.0
     while presenter.logic[old_id].pending is not None and time.monotonic() < deadline:
         presenter.poll_logic()
         time.sleep(.001)
-    assert presenter.logic[old_id].host is old_host
+    assert presenter.logic[old_id].host is not old_host
+    old_host = presenter.logic[old_id].host
     assert old_host.running
     assert presenter.start_logic(replacement_id) is True
     assert presenter.logic[replacement_id].pending is not None
@@ -1531,12 +1531,6 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
                          context.run_directory))
             context.report_progress("inputs accepted")
 
-        def restart_from(fresh):
-            if node.artifact.value.get("optical") != fresh.artifact.value.get("optical"):
-                return False
-            node.artifact, node.pulse = fresh.artifact, fresh.pulse
-            return True
-
         def close():
             assert current_thread() is not main_thread()
             if node.prepared is not None:
@@ -1547,7 +1541,7 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
                 if node.close_failure:
                     raise RuntimeError("discard resource close failed")
 
-        node.execute, node.restart_from, node.close = execute, restart_from, close
+        node.execute, node.close = execute, close
         return node
 
     descriptor = LogicNodeDescriptor(
@@ -1615,28 +1609,31 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
     while (binding.pending is not None or binding.host.running) and time.monotonic() < deadline:
         presenter.poll_logic()
         time.sleep(.001)
-    assert binding.host is original_host and binding.node is original_node
+    assert binding.host is not original_host and binding.node is not original_node
     assert decodes == [selected.resolve()]
-    assert runs[1][:3] == ({"format": "probe", "revision": 2}, {"period": 2}, original_prepared)
+    assert runs[1][:2] == ({"format": "probe", "revision": 2}, {"period": 2})
+    assert runs[1][2] is not original_prepared
     assert runs[1][3] != runs[0][3]
-    assert closed == []
+    assert closed == [original_node]
 
-    # The plugin rejects optical reuse; replacement waits for its old owner
-    # to release off the UI thread, rather than requiring another Start.
+    # Every replacement waits for its old owner to release off the UI
+    # thread, rather than requiring another Start.
+    second_host, second_node = binding.host, binding.node
+    closing.clear()
     selected.write_text('{"format":"probe","optical":1}', encoding="utf-8")
     release.clear()
     assert presenter.start_logic(node_id)
     assert closing.wait(1)
-    assert binding.pending is not None and binding.host is original_host
+    assert binding.pending is not None and binding.host is second_host
     release.set()
     deadline = time.monotonic() + 2
     while (binding.pending is not None or binding.host.running) and time.monotonic() < deadline:
         presenter.poll_logic()
         time.sleep(.001)
-    assert binding.host is not original_host
+    assert binding.host is not second_host
     assert binding.host.observation.phase == "done"
     assert runs[2][2] is not original_prepared
-    assert closed == [original_node]
+    assert closed == [original_node, second_node]
     if retire == "remove":
         discarded = presenter._build_logic_candidate(
             binding, presenter._finalize_logic_binding(binding, force=True))
@@ -1678,8 +1675,8 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
         presenter.beat() if retire == "window" else presenter.poll_logic()
         time.sleep(.001)
     assert node_id not in presenter.logic
-    assert closed == ([original_node, discarded.node, final_node]
-                      if retire == "remove" else [original_node, final_node])
+    assert closed == ([original_node, second_node, discarded.node, final_node]
+                      if retire == "remove" else [original_node, second_node, final_node])
     if retire == "window":
         assert presenter._closed
         assert close_requests == [True], "resource release needed a second Close click"

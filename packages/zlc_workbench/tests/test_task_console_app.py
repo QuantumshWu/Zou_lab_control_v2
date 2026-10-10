@@ -126,7 +126,7 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
 
     import time
 
-    from zlc_atom.nodes.camera_measurement.measurement import (
+    from zlc_atom.nodes.camera.measurement import (
         CameraMeasurementNode,
         CameraMeasurementRequest,
     )

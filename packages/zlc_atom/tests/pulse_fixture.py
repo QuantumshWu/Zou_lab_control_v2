@@ -21,11 +21,11 @@ from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration import (
     CalibrationRequest,
     CalibrationTask,
-    LOGIC_NODE as CALIBRATION_LOGIC_NODE,
     ReadoutModelKind,
 )
 from zlc_atom.devices.simulation.sequencer import CAMERA_TRIGGER_CHANNEL
 from zlc_atom.nodes.calibration.pulse import resolve_pulse
+from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_pulse import PulseSequence, sequence_from_tree
 from zlc_runtime import SignalDataPlane
 

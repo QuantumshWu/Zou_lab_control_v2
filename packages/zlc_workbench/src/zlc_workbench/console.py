@@ -8488,13 +8488,12 @@ class ConsolePresenter:
             candidate.reservation.abort()
             candidate.reservation = None
         try:
-            if candidate.host is not binding.host:
-                if candidate.host.shutdown() is False:
-                    candidate.host.close_future.add_done_callback(
-                        lambda _future: self._enqueue_panel_interaction(
-                            lambda: self._discard_candidate(binding, candidate)
-                        )
+            if candidate.host.shutdown() is False:
+                candidate.host.close_future.add_done_callback(
+                    lambda _future: self._enqueue_panel_interaction(
+                        lambda: self._discard_candidate(binding, candidate)
                     )
+                )
         except Exception as error:
             self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
 
@@ -8526,24 +8525,7 @@ class ConsolePresenter:
                 self._refresh_console_projection()
                 return True
             try:
-                restart = getattr(binding.node, "restart_from", None)
-                reusable = (
-                    candidate.host is old_host
-                    or (
-                        callable(restart) and not old_host.closed
-                        and not old_host.closing and old_host.worker_idle
-                        and old_host.dataset_output_declarations
-                        == candidate.host.dataset_output_declarations
-                        and restart(candidate.node)
-                    )
-                )
-                if reusable:
-                    if candidate.host is not old_host:
-                        if candidate.host.shutdown() is False:
-                            binding.pending = candidate
-                            return True
-                        candidate.node, candidate.host = binding.node, old_host
-                elif old_host.shutdown() is False:
+                if old_host.shutdown() is False:
                     binding.pending = candidate
                     self._refresh_console_projection()
                     return True

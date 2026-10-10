@@ -1,6 +1,7 @@
 """The one-Pulse camera/SLM flow and its operator-visible timing controls."""
 
 from dataclasses import replace
+from contextlib import contextmanager
 import json
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -16,6 +17,7 @@ from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.devices.slm.device import phase_from_codes
 from zlc_atom.nodes._framework.descriptor import ResolvedWorkspaceResource
 from zlc_atom.nodes.slm_rearrangement import task as task_module
+from zlc_atom.devices.slm import rearrangement as rearrangement_module
 from zlc_atom.nodes.slm_rearrangement.logic_node import LOGIC_NODE, SLM_REARRANGEMENT_SCHEMA
 from zlc_atom.nodes.slm_rearrangement.task import SlmRearrangementTask, pulse_timing
 from zlc_data.figure_archive import read_archive
@@ -231,17 +233,26 @@ def experiment(tmp_path, monkeypatch, request):
     plane = SignalDataPlane()
     context = _RunContext(tmp_path / "run", camera, board, trace)
     state = SimpleNamespace(trace=trace, camera=camera, board=board, slm=slm,
-                            context=context, plane=plane, available_indices=[], closed=[], images=images,
-                            affine_crop=affine_crop, calibrated_centers=centers)
+                            context=context, plane=plane, available_indices=[], images=images,
+                            affine_crop=affine_crop, calibrated_centers=centers, leases=[], active_leases=0,
+                            prepared=None)
 
-    def prepare(**kwargs):
-        trace.append("prepare_gpu")
+    @contextmanager
+    def acquire(**kwargs):
+        state.leases.append(kwargs)
         state.prepare_arguments = kwargs
-        return {"source_yx": kwargs["source_yx"], "target_yx": kwargs["target_yx"],
-                "minimum_separation": kwargs["minimum_separation"],
+        reused = state.prepared is not None
+        if not reused:
+            trace.append("prepare_gpu")
+            state.prepared = {"source_yx": kwargs["source_yx"], "target_yx": kwargs["target_yx"],
                 "gpu_info": {"device_name": "test CUDA boundary"},
-                "initial_phase": source_context["phase"],
-                "close": lambda: state.closed.append(True)}
+                "initial_phase": source_context["phase"]}
+        state.prepared["minimum_separation"] = kwargs["minimum_separation"]
+        state.active_leases += 1
+        try:
+            yield state.prepared, reused
+        finally:
+            state.active_leases -= 1
 
     def plan(prepared, available):
         trace.append("plan")
@@ -288,9 +299,9 @@ def experiment(tmp_path, monkeypatch, request):
                 "pupil_phase_step_rms_rad": np.full(frames, 1.1),
                 "background_intensity_ratios": np.zeros(frames), "timing_ms": {"total": .2}}
 
-    monkeypatch.setattr(task_module, "prepare_rearrangement", prepare)
+    monkeypatch.setattr(task_module, "acquire_rearrangement", acquire)
     monkeypatch.setattr(task_module, "plan_rearrangement", plan)
-    monkeypatch.setattr(task_module, "compute_rearrangement", compute)
+    monkeypatch.setattr(rearrangement_module, "compute_rearrangement", compute)
     state.compute = compute
     state.task_arguments = dict(
         camera=camera, camera_key="camera", sequencer=board, sequencer_key="pulse",
@@ -307,16 +318,108 @@ def experiment(tmp_path, monkeypatch, request):
     try:
         yield state
     finally:
-        state.task.close()
+        assert state.active_leases == 0
         camera.close()
         board.close()
         plane.close()
 
 
+@pytest.mark.parametrize("repeat", [0, 2, "early", "stop"])
+def test_rearrangement_measurement_first_frame_actions_and_camera_cycle_output(experiment, monkeypatch, repeat):
+    from zlc_atom.nodes._framework.descriptor import ResolvedArtifact
+    from zlc_atom.nodes.camera_measurement.logic_node import LOGIC_NODE as camera_descriptor
+    from zlc_atom.nodes.rearrangement_measurement import measurement as measurement_module
+    from zlc_atom.nodes.rearrangement_measurement.logic_node import LOGIC_NODE as descriptor
+
+    e = experiment
+    monkeypatch.setattr(measurement_module, "acquire_rearrangement", task_module.acquire_rearrangement)
+    monkeypatch.setattr(measurement_module, "plan_rearrangement", task_module.plan_rearrangement)
+    calibration = e.task_arguments["calibration"]
+    source = e.task_arguments["science_context"]
+    node = descriptor.build(camera=e.camera, camera_key="camera", slm=e.slm, slm_key="slm", signal_plane=e.plane,
+        calibration=ResolvedArtifact(Path("calibration.json"), "calibration", calibration),
+        science_context=ResolvedArtifact(Path("science.npz"), "science", source),
+        repeat=1 if isinstance(repeat, str) else repeat, frames_per_cycle=2, target_rows=2, target_columns=2, motion_frames=4,
+        minimum_separation=0., exposure_seconds=.001, photoelectrons=False)
+    assert node.dataset_output_declarations == camera_descriptor.outputs
+    assert descriptor.reports_ready and {item.argument_name for item in descriptor.device_requirements} == {"camera", "slm"}
+    originals = [image.copy() for image in e.images]
+    e.images.extend(image.copy() for image in originals)
+    entered = Event()
+    if isinstance(repeat, str):
+        def delayed_compute(prepared, planned, **kwargs):
+            entered.set()
+            end = time.monotonic() + 5
+            while not kwargs["stop_requested"]() and time.monotonic() < end:
+                time.sleep(.001)
+            assert kwargs["stop_requested"](), "movement was never cancelled"
+            raise InterruptedError("SLM rearrangement stopped")
+        monkeypatch.setattr(rearrangement_module, "compute_rearrangement", delayed_compute)
+    host = NodeHost(node, e.plane, lambda: None, instance_id="rearrangement_measurement", kind="measurement",
+                    dataset_output_declarations=node.dataset_output_declarations)
+    cycles = []
+    def received(signals):
+        key = host.signal_key("frames")
+        if key in signals:
+            publication = e.plane.latest_publication(key)
+            snap = e.plane.current_dataset(key, publication)
+            cycles.append(snap)
+    unsubscribe = e.plane.subscribe_publications(received)
+    def wait(predicate):
+        end = time.monotonic() + 5
+        while not predicate() and time.monotonic() < end:
+            host.poll()
+            time.sleep(.001)
+        assert predicate(), host.poll()
+    try:
+        host.start()
+        assert host.wait_ready(5)
+        assert e.trace.count("prepare_gpu") == 1 and not e.board.fires
+        if isinstance(repeat, str):
+            e.camera.trigger(1)
+            assert entered.wait(5)
+            if repeat == "early":
+                e.camera.trigger(1)
+            else:
+                host.cancel()
+            wait(lambda: host.terminal)
+            observation = host.poll()
+            assert observation.phase == ("failed" if repeat == "early" else "cancelled"), observation
+            if repeat == "early":
+                assert "cycle ended before rearrangement" in str(observation.error)
+            np.testing.assert_array_equal(e.slm.last_commanded_phase, source["phase"])
+            assert e.active_leases == 0 and not cycles and not e.board.fires
+            return
+        for cycle in range(2):
+            e.camera.trigger(1)
+            wait(lambda: node._movement is not None and node._movement.done()
+                 and node._cycle_evidence.get("cycle") == cycle)
+            node._movement.result()
+            assert len(cycles) == cycle  # no first-frame/partial-cycle publication
+            assert e.slm.plays == cycle + 1
+            e.camera.trigger(1)
+            wait(lambda: len(cycles) == cycle + 1)
+            np.testing.assert_array_equal(e.slm.last_commanded_phase, source["phase"])
+            np.testing.assert_array_equal(cycles[-1].materialize().block.values[cycle if repeat else 0], np.stack(originals))
+        if repeat == 0:
+            host.cancel()
+        wait(lambda: host.terminal)
+        assert host.poll().phase in {"done", "cancelled"}
+        assert node._outcome.get("result") is None  # no retained movies in continuous acquisition
+        assert e.trace.count("prepare_gpu") == 1 and not e.board.fires
+        assert len(e.slm.commands) == 1 + 2 * (4 + 1)  # source once, maps, restore; no duplicate cleanup apply
+        assert e.active_leases == 0
+    finally:
+        host.cancel()
+        wait(lambda: host.terminal)
+        host.shutdown()
+        unsubscribe()
+
+
 @pytest.mark.parametrize("experiment", [4, "camera-affine-roi"], indirect=True)
 def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment, monkeypatch):
     e = experiment
-    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+    from zlc_atom.nodes.camera import CameraMeasurementNode
 
     def private_commit(*args, **kwargs):
         pytest.fail("Rearrangement must not publish a duplicate private Camera signal")
@@ -341,7 +444,7 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     np.testing.assert_array_equal(e.available_indices[0], [0, 1, 3, 4, 5])
     np.testing.assert_array_equal(e.task.target_indices, [1, 2, 4, 5])
     assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path", "end_target_path"}
-    assert e.slm.plays == 1 and e.closed == []
+    assert e.slm.plays == 1 and e.active_leases == 0
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["intensity_tolerance"] == e.prepare_arguments["support_tolerance"] == 1.01
@@ -488,7 +591,7 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
 
 
 @pytest.mark.parametrize("experiment", ["camera-step"], indirect=True)
-def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation(experiment, monkeypatch):
+def test_camera_step_uses_sensor_geometry_and_fresh_tasks_lease_gpu_preparation(experiment, monkeypatch):
     e = experiment
     sample = task_module.sample_rearrangement
     sampled_calls = []
@@ -513,16 +616,14 @@ def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation
     with np.load(result["artifact_path"], allow_pickle=False) as data:
         assert data["phase_codes"].shape[0] == 14
         assert np.max(np.linalg.norm(np.diff(data["motion_camera_xy"],axis=0),axis=-1)) <= .6 + 1e-12
-    prepared = e.task._prepared
-    changed_spacing = SlmRearrangementTask(**(e.task_arguments | {"minimum_separation": .5}))
-    assert e.task.restart_from(changed_spacing)
-    assert e.task._prepared is prepared and prepared["minimum_separation"] == .5
+    previous = e.task
+    assert e.active_leases == 0 and not hasattr(previous, "_prepared")
     fresh = SlmRearrangementTask(**(e.task_arguments | {
         "frame_mode": "camera_step", "max_camera_step": .6, "exposure_seconds": .03,
         "motion_intensity_tolerance": 1.08}))
-    assert e.task.restart_from(fresh)
-    assert e.task._prepared is prepared and e.task.exposure_seconds == .03
-    assert not e.task._detections and not e.task._records
+    e.task = fresh
+    assert e.task is not previous and e.task.exposure_seconds == .03
+    assert not e.task._detections and not e.task._records and not hasattr(e.task, "restart_from")
     again = _RunContext(e.context.run_directory.parent / "again", e.camera, e.board, e.trace)
     e.images.extend(photos)
     e.task.execute(again)
@@ -530,14 +631,11 @@ def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation
     assert repeated["gpu_preparation_reused"]
     assert repeated["motion_intensity_tolerance"] == e.compute_arguments["motion_support_tolerance"] == 1.08
     assert repeated["intensity_tolerance"] == e.compute_arguments["support_tolerance"] == 1.01
-    assert e.trace.count("prepare_gpu") == 1 and e.closed == []
-    changed_context = dict(e.task_arguments["science_context"])
-    changed_context["phase"] = np.remainder(changed_context["phase"] + .1, 2*np.pi)
-    changed = SlmRearrangementTask(**(e.task_arguments | {"science_context": changed_context}))
-    assert not e.task.restart_from(changed), "same file path cannot hide changed optical data"
-    assert e.task._prepared is prepared
-    e.task.close()
-    assert e.closed == [True]
+    assert e.trace.count("prepare_gpu") == 1
+    assert len(e.leases) == 2 and e.active_leases == 0
+    assert e.leases[-1]["minimum_separation"] == fresh.minimum_separation
+    assert e.leases[-1]["support_tolerance"] == 1.01
+    np.testing.assert_array_equal(e.leases[-1]["endpoint_data"]["source_phase"], fresh.science_context["phase"])
 
 
 def test_explicit_end_target_does_not_invent_calibration_for_a_new_position(experiment):
@@ -606,7 +704,7 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert observation.terminal and observation.phase == "done", observation
         assert observation.error is None and observation.progress is None
         assert e.board.fires == [(1, 1)] and e.slm.plays == 1
-        assert e.closed == []
+        assert e.active_leases == 0
         assert len(publications) >= 4
         first, initial = publications[0]
         frozen = {name: snapshot.block.schema for name, snapshot in initial.items()}
@@ -692,7 +790,7 @@ def test_preplay_failures_keep_pulse_unchanged_and_release_resources(experiment,
         def unavailable(**_kwargs):
             raise RuntimeError("GPU preparation failed")
 
-        monkeypatch.setattr(task_module, "prepare_rearrangement", unavailable)
+        monkeypatch.setattr(task_module, "acquire_rearrangement", unavailable)
         error_type, message = RuntimeError, "GPU preparation failed"
     authored = sequence_to_tree(e.task.sequence)
     with pytest.raises(error_type, match=message):
@@ -737,7 +835,7 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
     experiment, monkeypatch, stop_after_first,
 ):
     from zlc_atom.devices.simulation.camera import adapter as camera_module
-    from zlc_atom.nodes.camera_measurement.measurement import FiniteCapture
+    from zlc_atom.nodes.camera.measurement import FiniteCapture
 
     e = experiment
     expected = []
@@ -828,7 +926,7 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
         finally:
             play_finished.set()
 
-    monkeypatch.setattr(task_module, "compute_rearrangement", compute)
+    monkeypatch.setattr(rearrangement_module, "compute_rearrangement", compute)
     monkeypatch.setattr(e.slm, "play_phase_sequence", delayed_play)
     e.task.execute(e.context)
     assert collected.is_set() and compute_finished.is_set() and play_finished.is_set()
@@ -877,7 +975,7 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
         e.context.cancelled = False
         e.slm.play_error = None
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(task_module, "compute_rearrangement", compute)
+            patch.setattr(rearrangement_module, "compute_rearrangement", compute)
             with pytest.raises(RuntimeError, match="cancelled"):
                 e.task.execute(e.context)
     elif ending == "device":
@@ -919,7 +1017,7 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
             result["converged"] = False
             return result
 
-        monkeypatch.setattr(task_module, "compute_rearrangement", rejected)
+        monkeypatch.setattr(rearrangement_module, "compute_rearrangement", rejected)
         with pytest.raises(RuntimeError, match="encoded-field quality checks"):
             e.task.execute(e.context)
     summary = json.loads((e.context.run_directory / "summary.json").read_text())

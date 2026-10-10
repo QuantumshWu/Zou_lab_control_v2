@@ -308,24 +308,42 @@ uses **Movement frames** (default 16); camera-step mode uses the maximum 2D
 Euclidean movement in **original sensor pixels**, not Fourier bins or binned
 image indices. It uses the existing Calibration/ROI/binning conversion, retains
 each path waypoint, and computes the actual count after occupancy is known.
-The inactive input retains its value. Both policies include up to two initial
-source-fade maps before moving; these are not hidden additional frames. Automatic
+The inactive input retains its value. Both policies include one initial
+source-removal map when needed before moving; it is not an additional frame. Automatic
 duration is therefore pending until matching. An infeasible Pulse budget is
 reported, not repaired by skipping frames or enlarging the requested step.
 
 At the fixed defaults, 16 maps / 60 Hz is about 267 ms nominal. Computation,
-upload and playback overlap; startup stalls and remaining final optical settle
-extend the measured window. **Intensity tolerance (%)** (default 1%) is the
+upload and playback overlap; startup stalls extend the measured window. Authored
+time slots do not add a profile tail wait. **Motion intensity tolerance (%)**
+(default 10%) applies to all but the last map; **Final intensity tolerance (%)**
+(default 1%) applies to the last map and offline endpoints. These are the
 weighted maximum/minimum ratio minus one. LPI accepts retained-site uniformity;
 Iterative additionally enforces its removed-neighborhood criterion. The report
 distinguishes retained, fading and all-active fields and reports background after
 the photographs. Common trap-depth changes due to redistribution are allowed;
 uniformity is not an atom-survival guarantee.
 
+**Rearrangement Measurement** (`rearrangement_measurement`) integrates the same
+solver/playback into ordinary camera acquisition. Select Camera, SLM, Calibration,
+initial SLM Science Context and optionally an End Target. Each cycle's first
+frame starts internal classification/rearrangement; its last frame restores the
+initial Context. Use at least two frames per cycle; the last frame need not be a
+verification image. Only the normal `frames` signal is published, after each full
+cycle. Repeat 0 monitors continuously; finite Repeat works like Camera Measurement.
+The node does not load or fire a Pulse. It can be selected as an Acquisition logic;
+the operator's Pulse must leave room for movement before the last frame and for
+restoring the initial SLM state before the next cycle. Source restoration uses
+the device's ordinary single-image apply, including its configured settling time.
+A too-early cycle boundary cancels the move, restores source and reports the error,
+instead of applying stale occupancy in the next cycle.
+
 Repeated Start reuses compatible GPU preparation, not old occupancy or results.
 Files and Pulse inputs are reread each time; changed optical inputs rebuild the
-working point. Stop keeps numeric resources; removing the node or closing the
-console releases them. The source phase is still re-established and the camera
+working point. The solver retains one exclusively borrowed working point until
+process exit, an optical-input change, or a CUDA failure; Stop and removing a
+node do not discard healthy preparation. Task and Recording start fresh runs and
+can reuse the same working point. The source phase is still re-established and the camera
 armed for every experiment. Minimum total distance is not minimum longest move or minimum playback time.
 Passing geometric clearance does not validate atomic transport. Pupil center
 and illumination must match the real beam, and phase

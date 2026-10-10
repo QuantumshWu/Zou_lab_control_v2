@@ -24,7 +24,7 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC, TrapCalibration
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
-from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
+from zlc_atom.nodes.camera.measurement import CAMERA_FRAMES_OUTPUT
 from zlc_runtime.selection_bridge import FIT_PARAMETER_CONTRACT
 
 from .task import (

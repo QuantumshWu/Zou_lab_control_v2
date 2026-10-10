@@ -8,6 +8,7 @@ import sys
 from dataclasses import replace
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from threading import Event
 
 import numpy as np
@@ -25,17 +26,18 @@ from zlc_pulse.wire import STATUS_DONE, STATUS_RUNNING, STATUS_ERROR, STATUS_UND
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 from zlc_atom.devices.slm.solver import (
-    prepare_rearrangement, plan_rearrangement, compute_rearrangement,
+    acquire_rearrangement, plan_rearrangement,
     rearrangement_diagnostics, sample_rearrangement, rearrangement_is_noop,
 )
+from zlc_atom.devices.slm.rearrangement import compact_target, run_rearrangement
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes.calibration import TrapCalibration
-from zlc_atom.nodes.calibration.calibration import reads_photoelectrons
+from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, registration_order as _registration_order
 from zlc_atom.nodes.calibration.pulse import resolve_pulse, arm_sequencer
-from zlc_atom.nodes.camera_measurement.measurement import (
+from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode, CameraMeasurementRequest, frames_snapshot)
 from zlc_atom.nodes.scan.source import check_cancelled, wait_for_report
-from zlc_atom.nodes.slm_feedback.task import _register_target_sites, _plain_json
+from zlc_atom.nodes.slm_feedback.task import _plain_json
 
 REARRANGEMENT_ARTIFACT_CONTRACT = "zlc.slm.rearrangement"
 BEFORE_FRAME_OUTPUT = DatasetOutputDeclaration("before_frame", "slm-rearrangement.before-frame")
@@ -102,56 +104,6 @@ def pulse_timing(sequence, program, rows, before_period, after_period):
     return result
 
 
-def _registration_order(calibration, context, context_path):
-    target = np.asarray(context["target_intensity"])
-    points = np.column_stack(np.nonzero(target > 0)).astype(np.int32)
-    if len(points) != calibration.n_sites:
-        raise ValueError("Rearrangement needs one calibrated readout per authored source/target site")
-    registered = _register_target_sites(
-        calibration.site_map, target,
-        {"science_context_path": str(context_path), "command_receipt": dict(context["command_receipt"])},
-        frame_shape=calibration.frame_contract.image_shape)
-    # Registration retains the measured coordinates verbatim when every site
-    # is observed. Convert that existing result to a readout permutation only.
-    original = {tuple(center): i for i, center in enumerate(calibration.site_map.centers_xy)}
-    order = np.asarray([original[tuple(center)] for center in registered.centers_xy], dtype=np.intp)
-    if len(set(order)) != len(points):
-        raise ValueError("The calibrated readout does not map one-to-one to SLM sites")
-    affine = np.asarray(registered.topology["affine_target_xy_to_image_xy"], dtype=float)
-    return points, target[points[:, 0], points[:, 1]], order, affine
-
-
-def compact_target(initial_target, rows, columns):
-    """Generate a central complete rectangular subset of the calibrated roster.
-
-    This is the atom Task's target policy. The optical transition solver accepts
-    arbitrary explicit endpoints and knows nothing about camera occupancy.
-    """
-    initial = np.asarray(initial_target)
-    source = np.column_stack(np.nonzero(initial > 0))
-    ys, xs = np.unique(source[:, 0]), np.unique(source[:, 1])
-    if not 1 <= rows <= len(ys) or not 1 <= columns <= len(xs):
-        raise ValueError(f"Target {rows} x {columns} does not fit the source roster")
-    center = np.mean(source, axis=0)
-    best = None
-    for iy in range(len(ys)-rows+1):
-        for ix in range(len(xs)-columns+1):
-            yy, xx = np.meshgrid(ys[iy:iy+rows], xs[ix:ix+columns], indexing='ij')
-            points = np.column_stack((yy.ravel(), xx.ravel()))
-            if np.any(initial[points[:, 0], points[:, 1]] <= 0):
-                continue
-            score = float(np.sum((points.mean(axis=0)-center)**2))
-            if best is None or score < best[0]:
-                best = (score, points)
-    if best is None:
-        raise ValueError(f"The source has no complete {rows} x {columns} target rectangle")
-    target = np.zeros_like(initial)
-    points = best[1]
-    target[points[:, 0], points[:, 1]] = initial[points[:, 0], points[:, 1]]
-    indices = {tuple(point): i for i, point in enumerate(source)}
-    return target, np.asarray([indices[tuple(point)] for point in points], dtype=np.intp)
-
-
 class SlmRearrangementTask:
     """The concrete experiment owner; devices retain acquisition and playback."""
     instance_id = "slm_rearrangement"
@@ -183,7 +135,6 @@ class SlmRearrangementTask:
         if not np.isfinite(self.max_camera_step) or self.max_camera_step <= 0:
             raise ValueError("Maximum camera displacement must be finite and positive")
         self._frame_count = self.motion_frames
-        self._prepared = None
         self._gpu_reused = False
         self._camera_maximum_step = None
         self.recording_frames = None if recording_frames is None else int(recording_frames)
@@ -234,34 +185,6 @@ class SlmRearrangementTask:
     @property
     def dataset_output_declarations(self):
         return rearrangement_outputs("camera_step" if self.recording_frames is not None else self.frame_mode)
-
-    def restart_from(self, fresh):
-        """Adopt fresh run inputs, retaining only compatible numeric resources."""
-        if type(fresh) is not type(self):
-            return False
-        if self._prepared is not None:
-            if (self.phase_method != fresh.phase_method
-                    or self.intensity_tolerance != fresh.intensity_tolerance
-                    or tuple(self.slm.shape_yx) != tuple(fresh.slm.shape_yx)
-                    or self.science_context["pupil"] != fresh.science_context["pupil"]):
-                return False
-            pairs = (*zip(self.points, fresh.points), *zip(self.weights, fresh.weights),
-                     *((self.science_context[key], fresh.science_context[key])
-                       for key in ("phase", "pupil_amplitude", "operator_wavefront")))
-            if any(not np.array_equal(old, new) for old, new in pairs):
-                return False
-        prepared = self._prepared
-        self.__dict__.update(fresh.__dict__)
-        self._prepared = prepared
-        if prepared is not None:
-            prepared["minimum_separation"] = self.minimum_separation
-        return True
-
-    def close(self):
-        """Host retirement, not the end of one experiment, owns GPU release."""
-        if self._prepared is not None:
-            self._prepared["close"]()
-            self._prepared = None
 
     def _record(self):
         return {"named_devices": {"camera": self.camera_key, "sequencer": self.sequencer_key, "slm": self.slm_key},
@@ -761,17 +684,14 @@ class SlmRearrangementTask:
         self._device_snapshots, self._overlay_geometry = {}, None
         self._camera_site_indices = self._camera_path_affine = None
         self._playback, self._result, self._plan = None, None, None
-        playback_attempted = False
         sequence_prepared = False
+        workpoint = ExitStack()
         run_started = perf_counter()
         try:
             check_cancelled(context)
-            self._gpu_reused = self._prepared is not None
-            context.report_progress("Reusing prepared GPU working point" if self._gpu_reused
-                                    else "Detecting GPU and preparing the source optical working point")
+            context.report_progress("Acquiring the GPU optical working point")
             start = perf_counter()
-            if self._prepared is None:
-                self._prepared = prepare_rearrangement(shape_yx=self.slm.shape_yx,
+            prepared, self._gpu_reused = workpoint.enter_context(acquire_rearrangement(shape_yx=self.slm.shape_yx,
                     source_yx=self.points[0], target_yx=self.points[1], method=self.phase_method,
                     pupil_amplitude=self.science_context["pupil_amplitude"],
                     pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
@@ -781,8 +701,7 @@ class SlmRearrangementTask:
                     support_tolerance=self.intensity_tolerance,
                     maximum_motion_frames=self.motion_frames if self.frame_mode == "fixed" else 16,
                     endpoint_data={"source_phase": self.science_context["phase"]},
-                    stop_requested=context.cancel_requested)
-            prepared = self._prepared
+                    stop_requested=context.cancel_requested))
             self._timings["gpu_prepare"] = (perf_counter()-start)*1000
             self._gpu_info = prepared["gpu_info"]
             context.report_progress(f"GPU ready: {self._gpu_info.get('device_name','CUDA')}; establishing source phase")
@@ -855,7 +774,7 @@ class SlmRearrangementTask:
             playback_finished_at = None
 
             def photograph(cycle, index):
-                nonlocal playback_finished_wall, playback_finished_at, playback_attempted, nominal, sequence_prepared
+                nonlocal playback_finished_wall, playback_finished_at, nominal
                 # Camera receive is independent: callback dispatch time is not
                 # the exposure timestamp of a queued second photograph.
                 if index == 0:
@@ -889,114 +808,36 @@ class SlmRearrangementTask:
                 nominal = self._frame_count*self._frame_interval
                 self._timings["estimated_nominal_playback"] = nominal*1000
                 context.report_progress(f"Computing {self._frame_count} maps using {self.phase_method}")
-                playback = None
-                # The existing Task worker computes; one worker waits on the
-                # device's existing play operation. Mapping/display ownership
-                # remains in the SLM server, including on the same machine.
-                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="slm-play") as player:
-                    def play():
-                        nonlocal playback_finished_wall, playback_finished_at
-                        began = perf_counter()
-                        self._timings["sequence_call_after_before_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
-                        try:
-                            return self.slm.play_phase_sequence(stop_requested=stopped)
-                        finally:
-                            playback_finished_wall = time_ns()
-                            playback_finished_at = monotonic()
-                            self._timings["sequence_play"] = (perf_counter()-began)*1000
-                            self._timings["camera_frame_to_sequence_return"] = (playback_finished_wall-cycle[0].host_received_at_ns)/1e6
-
-                    def frame_ready(index, codes):
-                        nonlocal playback, playback_attempted
-                        check_cancelled(context)
-                        if recording_failed.is_set():
-                            raise InterruptedError("Camera recording failed")
-                        if playback is None:
-                            self._timings["first_verified_frame_ready"] = (perf_counter()-online_started)*1000
-                            remaining = None if deadline is None else deadline-monotonic()
-                            if remaining is not None and remaining < nominal:
-                                raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
-                            playback_attempted = True
-                            playback = player.submit(play)
-                            context.report_progress(f"Computing and playing {self.phase_method} SLM frames")
-                        if playback.done():
-                            playback.result()  # Preserve an actual device error.
-                            raise RuntimeError("SLM playback ended before all frames were submitted")
-                        try:
-                            self.slm.submit_phase_frame(index, codes)
-                        except BaseException as admission_error:
-                            # A real display/upload failure can wake a blocked
-                            # queue producer as "cancelled". The play result,
-                            # not that wake-up symptom, owns the device error.
-                            if not playback.done():
-                                try:
-                                    self.slm.cancel_phase_sequence()
-                                except BaseException as cleanup:
-                                    admission_error.add_note(f"SLM cancellation also failed: {cleanup}")
-                            try:
-                                playback.result()
-                            except BaseException as device_error:
-                                if device_error is not admission_error:
-                                    device_error.add_note(f"Frame submission also failed: {admission_error}")
-                                raise
-                            raise
-
-                    try:
-                        compute_started = perf_counter()
-                        self._timings["compute_started_after_before_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
-                        self._result = compute_rearrangement(prepared, plan,
-                            motion_frames=self._frame_count, sampled=sampled,
-                            support_tolerance=self.intensity_tolerance,
-                            motion_support_tolerance=self.motion_intensity_tolerance,
-                            require_converged=False, frame_ready=frame_ready,
-                            stop_requested=stopped)
-                        self._timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
-                        for name, value in self._result["timing_ms"].items():
-                            self._timings["compute_"+name] = float(value)
-                        if not self._result.get("quality_accepted", self._result["converged"]):
-                            raise RuntimeError("The phase sequence did not pass its encoded-field quality checks; playback is stopped at its verified prefix. See the partial numeric report.")
-                        if playback is not None:
-                            self._playback = playback.result()
-                        camera_path = self._camera_paths(self._result["motion_yx"], plan["source_indices"])
-                        self._camera_maximum_step = float(np.max(np.linalg.norm(np.diff(camera_path,axis=0),axis=-1),initial=0.))
-                        rounding = 32*np.finfo(float).eps*max(1.,float(np.max(abs(camera_path))))
-                        if self.frame_mode == "camera_step" and self._camera_maximum_step > self.max_camera_step+rounding:
-                            raise RuntimeError("Emitted trajectory exceeded the requested camera-pixel step")
-                    except BaseException as error:
-                        if sequence_prepared and playback is None:
-                            try:
-                                self.slm.release_phase_sequence()
-                                sequence_prepared = False
-                            except BaseException as cleanup:
-                                error.add_note(f"SLM preparation cleanup also failed: {cleanup}")
-                        if playback is not None:
-                            if not playback.done():
-                                try:
-                                    self.slm.cancel_phase_sequence()
-                                except BaseException as cleanup:
-                                    error.add_note(f"SLM cancellation also failed: {cleanup}")
-                            try:
-                                self._playback = playback.result()
-                            except BaseException as cleanup:
-                                if cleanup is not error:
-                                    error.add_note(f"SLM playback also failed: {cleanup}")
-                        raise
-                    finally:
-                        self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000
+                def before_play():
+                    remaining = None if deadline is None else deadline-monotonic()
+                    if remaining is not None and remaining < nominal:
+                        raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
+                outcome = {}
+                solving_started = perf_counter()
+                try:
+                    run_rearrangement(prepared, plan, slm=self.slm,
+                        motion_frames=self._frame_count, frame_interval=self._frame_interval, sampled=sampled,
+                        support_tolerance=self.intensity_tolerance, motion_support_tolerance=self.motion_intensity_tolerance,
+                        stop_requested=stopped, before_play=before_play, timings=self._timings,
+                        received_at_ns=cycle[0].host_received_at_ns, outcome=outcome)
+                finally:
+                    self._result, self._playback = outcome.get("result"), outcome.get("playback")
+                    playback_finished_wall, playback_finished_at = outcome.get("finished_wall_ns"), outcome.get("finished_at")
+                    self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000
+                    if "first_verified_frame_ready" in self._timings:
+                        self._timings["first_verified_frame_ready"] += (solving_started-online_started)*1000
+                camera_path = self._camera_paths(self._result["motion_yx"], plan["source_indices"])
+                self._camera_maximum_step = float(np.max(np.linalg.norm(np.diff(camera_path,axis=0),axis=-1),initial=0.))
+                rounding = 32*np.finfo(float).eps*max(1.,float(np.max(abs(camera_path))))
+                if self.frame_mode == "camera_step" and self._camera_maximum_step > self.max_camera_step+rounding:
+                    raise RuntimeError("Emitted trajectory exceeded the requested camera-pixel step")
                 if not len(self._result["phase_codes"]):
-                    self._playback = {"frame_count": 0, "played_frames": 0, "cancelled": False,
-                                      "noop": True, "authored_timing_completed": True,
-                                      "acknowledgment": "No new phase commanded"}
-                    playback_finished_wall = time_ns()
                     if self.recording_frames is not None:
                         return
                     context.report_progress("SLM target held; acquiring verification photograph", current=1, total=2)
                     capture.timeout = max(camera_timeout,
                         firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
                     return
-                if (self._playback["cancelled"] or self._playback["played_frames"] != len(self._result["phase_codes"])
-                        or not self._playback["authored_timing_completed"]):
-                    raise RuntimeError("SLM sequence did not complete all authored frames and time slots")
                 if self.recording_frames is not None:
                     return
                 self._timings["verification_deadline_margin"] = (deadline-playback_finished_at)*1000
@@ -1083,8 +924,6 @@ class SlmRearrangementTask:
             return {"artifact_path": str(archive), "target_filling_fraction":
                     float(verification["occupied"].mean()) if verification["valid"].all() else None}
         except BaseException as error:
-            if playback_attempted and self._playback is None:
-                self._playback = self.slm.last_command_receipt.get("sequence")
             try:
                 self.sequencer.safe()
             except BaseException as cleanup: error.add_note(f"Pulse SAFE also failed: {cleanup}")
@@ -1107,6 +946,11 @@ class SlmRearrangementTask:
             # The durable archive and preview snapshots now own the results;
             # a stopped/completed node must not retain a whole pinned movie.
             self._result = None
+            try:
+                workpoint.__exit__(type(active_error) if active_error is not None else None,
+                                   active_error, None if active_error is None else active_error.__traceback__)
+            except BaseException as cleanup:
+                cleanup_errors.append(cleanup)
             if active_error is not None:
                 for error in cleanup_errors: active_error.add_note(f"Cleanup also failed: {error}")
             elif cleanup_errors:

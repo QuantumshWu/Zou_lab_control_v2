@@ -205,7 +205,7 @@ def test_a_live_monitor_publishes_the_effective_camera_unit() -> None:
 
     import time
 
-    from zlc_atom.nodes.camera_measurement.measurement import (
+    from zlc_atom.nodes.camera.measurement import (
         CameraMeasurementNode,
         CameraMeasurementRequest,
     )

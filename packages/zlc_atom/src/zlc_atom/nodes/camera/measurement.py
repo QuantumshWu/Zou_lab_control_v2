@@ -763,12 +763,14 @@ class CameraMeasurementNode:
         request: CameraMeasurementRequest,
         signal_plane: object,
         producer: str = "camera_measurement",
+        record_received: Callable[[CameraFrameRecord], None] | None = None,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
         if not isinstance(request, CameraMeasurementRequest):
             raise TypeError("request must be CameraMeasurementRequest")
         self.camera = camera
+        self._record_received = record_received
         self._request = request
         self._actual_working_point: CameraWorkingPoint | None = None
         self._run_record: dict[str, object] | None = None
@@ -938,8 +940,11 @@ class CameraMeasurementNode:
         numbers a physicist can read.
         """
 
+        # An acquisition with first-frame actions must not wait for the rest of
+        # its cycle. Ordinary Camera Measurement retains its existing batching.
+        read_count = 1 if self._record_received is not None and not exact else int(count)
         records = tuple(
-            self.camera.read_frame_records(int(count), timeout=timeout, exact=exact)
+            self.camera.read_frame_records(read_count, timeout=timeout, exact=exact)
         )
         for record in records:
             if record.source_ordinal != self._next_record_ordinal:
@@ -948,6 +953,8 @@ class CameraMeasurementNode:
                     f"received {record.source_ordinal}"
                 )
             self._next_record_ordinal += 1
+            if self._record_received is not None:
+                self._record_received(record)
         if not self.reads_photoelectrons:
             return records
         point = self._actual_working_point

@@ -21,7 +21,7 @@ def _camera_frames(*, cycles: int, frames: int):
     """(cycles, F, y, x) exactly as camera_measurement publishes it."""
 
     from zlc_atom.data import snapshot_from_array
-    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_axis
+    from zlc_atom.nodes.camera.measurement import _frame_point_axis
     from zlc_data import READOUT_EVENT
 
     values = np.zeros((cycles, frames, 6, 8), dtype=np.uint16)
@@ -44,7 +44,7 @@ def _occupancy_counts(*, frames: int, sites: int):
     """(repeat, frames, sites) exactly as the occupancy processor publishes."""
 
     from zlc_atom.data import snapshot_from_array
-    from zlc_atom.nodes.camera_measurement.measurement import _frame_point_axis
+    from zlc_atom.nodes.camera.measurement import _frame_point_axis
 
     return snapshot_from_array(
         np.zeros((1, frames, sites), dtype=float),

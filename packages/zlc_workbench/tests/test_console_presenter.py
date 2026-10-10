@@ -25,7 +25,7 @@ import pytest
 from zlc_ui import STATUS_SEVERITIES
 from zlc_plot import SelectorKind
 
-from zlc_atom.nodes.camera_measurement.measurement import (
+from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
@@ -4556,7 +4556,7 @@ def test_incompatible_preview_reports_once_and_is_never_marked_successful(
 ) -> None:
     from types import SimpleNamespace
     from zlc_atom.nodes import NodePreviewSpec
-    from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
+    from zlc_atom.nodes.camera.measurement import CAMERA_FRAMES_OUTPUT
 
     node_id = "preview-task"
     presenter.add_logic(

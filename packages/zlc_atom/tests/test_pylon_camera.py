@@ -32,7 +32,7 @@ import pytest
 from fakes import FakePlane
 from zlc_atom.devices.camera import CameraAcquisitionMode, CameraAdapter
 from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
-from zlc_atom.nodes.camera_measurement import (
+from zlc_atom.nodes.camera import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )

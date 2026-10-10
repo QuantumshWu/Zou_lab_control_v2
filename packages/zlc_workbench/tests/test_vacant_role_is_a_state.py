@@ -39,7 +39,7 @@ def _fate_rows(binding) -> dict[str, object]:
 def test_vacating_a_required_role_keeps_the_fate_and_the_console(workspace) -> None:
     """The real console, the real gesture: vacate x on a mounted image."""
 
-    from zlc_atom.nodes.camera_measurement.measurement import (
+    from zlc_atom.nodes.camera.measurement import (
         CameraMeasurementNode,
         CameraMeasurementRequest,
     )

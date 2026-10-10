@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import atexit
 import json
 import os
 from pathlib import Path
@@ -3489,6 +3490,101 @@ def prepare_rearrangement(
         except BaseException as cleanup_error:
             error.add_note(f"GPU preparation cleanup failed: {cleanup_error}")
         raise
+
+
+_REARRANGEMENT_RESIDENT = None
+_REARRANGEMENT_RESIDENT_LOCK = Lock()
+
+
+def _rearrangement_inputs_equal(left, right):
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(
+            _rearrangement_inputs_equal(left[key], right[key]) for key in left)
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return np.array_equal(left, right)
+    return left == right
+
+
+def _close_resident_rearrangement():
+    """Release the idle process-owned workspace, never an active daemon run."""
+    global _REARRANGEMENT_RESIDENT
+    if not _REARRANGEMENT_RESIDENT_LOCK.acquire(blocking=False):
+        return
+    try:
+        previous, _REARRANGEMENT_RESIDENT = _REARRANGEMENT_RESIDENT, None
+        if previous is not None:
+            previous[1]["close"]()
+    finally:
+        _REARRANGEMENT_RESIDENT_LOCK.release()
+
+
+@contextmanager
+def acquire_rearrangement(source_yx, target_yx, **kwargs):
+    """Exclusively borrow the one resident optical workspace for a whole run.
+
+    Unlike explicit prepare_rearrangement, leaving this context keeps a healthy
+    workspace warm. The caller must finish its workers and diagnostics before
+    leaving; returned movies remain independently owned by that caller.
+    """
+    from copy import deepcopy  # noqa: PLC0415
+    from inspect import signature  # noqa: PLC0415
+
+    global _REARRANGEMENT_RESIDENT
+    if not _REARRANGEMENT_RESIDENT_LOCK.acquire(blocking=False):
+        raise RuntimeError("The resident SLM rearrangement workspace is already in use")
+    prepared = None
+    try:
+        bound = signature(prepare_rearrangement).bind(source_yx, target_yx, **kwargs)
+        bound.apply_defaults()
+        inputs = dict(bound.arguments)
+        stop = inputs.pop("stop_requested")
+        capacity = inputs.pop("maximum_motion_frames")
+        separation = _scalar(inputs.pop("minimum_separation"), "minimum_separation", nonnegative=True)
+        if isinstance(capacity, bool) or int(capacity) != capacity or capacity < 1:
+            raise ValueError("maximum_motion_frames must be a positive integer")
+        if stop is not None and stop():
+            raise InterruptedError("SLM rearrangement preparation stopped")
+        reused = False
+        if _REARRANGEMENT_RESIDENT is not None:
+            previous_inputs, prepared, device = _REARRANGEMENT_RESIDENT
+            gpu = prepared["gpu"]
+            if gpu["keeper"]["error"] is not None:
+                raise RuntimeError("SLM GPU warming failed") from gpu["keeper"]["error"]
+            reused = (device == gpu["cp"].cuda.Device().id
+                      and _rearrangement_inputs_equal(previous_inputs, inputs))
+            if not reused:
+                _REARRANGEMENT_RESIDENT = None
+                prepared["close"]()
+                prepared = None
+        if not reused:
+            # Keep only independent optical inputs, never a run/plan/callback.
+            saved_inputs = deepcopy(inputs)
+            prepared = prepare_rearrangement(*bound.args, **bound.kwargs)
+            _REARRANGEMENT_RESIDENT = (saved_inputs, prepared, prepared["gpu"]["keeper"]["device"])
+            # Register after CUDA imports, before their exit-time teardown.
+            atexit.unregister(_close_resident_rearrangement)
+            atexit.register(_close_resident_rearrangement)
+        else:
+            prepared["minimum_separation"] = separation
+            _rearrangement_motion_capacity(prepared["gpu"], int(capacity), stop)
+            prepared["maximum_motion_frames"] = prepared["gpu"]["motion_capacity"]
+        yield prepared, reused
+        if prepared["gpu"]["keeper"]["error"] is not None:
+            raise RuntimeError("SLM GPU warming failed") from prepared["gpu"]["keeper"]["error"]
+    except BaseException as error:
+        # SDK, classification, quality and Stop failures do not poison optics.
+        # These are the existing CUDA-library errors and our own checked calls.
+        gpu_fault = (type(error).__module__.startswith(("cupy_backends.cuda.", "cupy.cuda.", "cuda.bindings."))
+                     or str(error).startswith(("SLM CUDA graph operation failed:", "SLM cuBLAS ")))
+        if prepared is not None and (gpu_fault or prepared["gpu"].get("keeper", {}).get("error") is not None):
+            _REARRANGEMENT_RESIDENT = None
+            try:
+                prepared["close"]()
+            except BaseException as cleanup:
+                error.add_note(f"Resident SLM GPU cleanup failed: {cleanup}")
+        raise
+    finally:
+        _REARRANGEMENT_RESIDENT_LOCK.release()
 
 
 def sample_rearrangement(

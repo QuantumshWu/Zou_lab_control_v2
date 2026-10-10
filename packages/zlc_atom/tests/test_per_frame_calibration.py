@@ -20,7 +20,7 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
 )
 from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_NODE
-from zlc_atom.nodes.camera_measurement.measurement import frames_snapshot
+from zlc_atom.nodes.camera.measurement import frames_snapshot
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_NODE
 from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
 from zlc_atom.nodes.scan.dataset import scan_dataset_schema

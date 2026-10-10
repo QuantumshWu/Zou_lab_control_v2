@@ -23,7 +23,7 @@ import pytest
 from zlc_data import StreamGenerationId, owned_snapshot_from_arrays
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.camera_measurement.measurement import (
+from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )

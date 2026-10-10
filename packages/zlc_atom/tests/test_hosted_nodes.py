@@ -14,7 +14,7 @@ from zlc_atom.nodes._framework import SelectionMapping
 from zlc_atom.nodes._framework.descriptor import NodeKind
 from zlc_atom.nodes._framework.discovery import discover_logic_nodes
 from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
-from zlc_atom.nodes.camera_measurement.measurement import (
+from zlc_atom.nodes.camera.measurement import (
     CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,

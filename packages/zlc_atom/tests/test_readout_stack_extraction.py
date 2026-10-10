@@ -16,7 +16,7 @@ from zlc_atom.nodes.calibration import (
     extract_psf_signals,
 )
 from zlc_atom.nodes.calibration.calibration import extract_psf_window
-from zlc_atom.nodes.camera_measurement.measurement import frames_snapshot
+from zlc_atom.nodes.camera.measurement import frames_snapshot
 from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from zlc_runtime import SignalDataPlane
 
 from zlc_atom.install import create_installation
-from zlc_atom.nodes.camera_measurement import (
+from zlc_atom.nodes.camera import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
     MonitorCapture,

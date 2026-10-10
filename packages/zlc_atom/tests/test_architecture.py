@@ -26,10 +26,10 @@ from zlc_atom.nodes import (
 )
 from zlc_atom.nodes.calibration import (
     CalibrationTask,
-    LOGIC_NODE as CALIBRATION_LOGIC_NODE,
     ReadoutModelKind,
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
+from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from fakes import FakePlane, camera_cycle_snapshot, imported_modules, module_name
 from pulse_fixture import (
     IMAGING_PULSE_RESOURCE,
@@ -251,10 +251,12 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
                 edges.add((source_owner, target_owner))
     node_edges = {edge for edge in edges if edge[1] in node_owners}
     assert node_edges == {
-        ("calibration", "camera_measurement"),
         ("occupancy", "calibration"),
         ("slm_feedback", "calibration"),
-        ("slm_feedback", "camera_measurement"),
+        ("rearrangement_measurement", "calibration"),
+        ("slm_rearrangement", "calibration"),
+        ("slm_rearrangement", "slm_feedback"),
+        ("slm_rearrangement_recording", "slm_rearrangement"),
     }
     kinds = {
         path.parent.name: _descriptor_kind(path)
@@ -272,6 +274,12 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     assert {edge for edge in edges if edge[1] not in node_owners} == {
         ("seamless_scan", "scan"),
         ("slm_feedback", "scan"),
+        ("slm_rearrangement", "scan"),
+        ("camera_measurement", "camera"),
+        ("calibration", "camera"),
+        ("slm_feedback", "camera"),
+        ("slm_rearrangement", "camera"),
+        ("rearrangement_measurement", "camera"),
     }
 
 

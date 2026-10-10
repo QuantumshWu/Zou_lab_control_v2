@@ -36,7 +36,7 @@ from zlc_atom.devices.slm.solver import (
 )
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
-from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
+from zlc_atom.nodes.camera import CameraMeasurementNode, CameraMeasurementRequest
 from zlc_atom.nodes.calibration.calibration import extract_box_signals
 from zlc_runtime import SignalDataPlane
 from zlc_pulse import (
@@ -2607,6 +2607,53 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             assert slm_solver.rearrangement_diagnostics(larger, partial)["support_intensity_ratios"][-1] <= 1.01
         finally:
             larger["close"]()
+
+        # New runs borrow one healthy optical working point, not an old Task.
+        resident_phase = np.array(source_phase, copy=True)
+        resident_inputs = dict(source_yx=source, target_yx=target, shape_yx=shape,
+            pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2,
+            maximum_motion_frames=5, endpoint_iterations=64, method="lpi",
+            endpoint_data={"source_phase": resident_phase})
+        try:
+            with slm_solver.acquire_rearrangement(**resident_inputs) as (resident, reused):
+                assert not reused
+                resident_keeper = resident["gpu"]["keeper"]
+                with pytest.raises(RuntimeError, match="already in use"):
+                    with slm_solver.acquire_rearrangement(**resident_inputs):
+                        pytest.fail("an occupied resident must not be leased twice")
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    resident_result = worker.submit(slm_solver.compute_rearrangement,
+                        resident, slm_solver.plan_rearrangement(resident, np.arange(4)), motion_frames=5).result()
+                resident_codes = resident_result["phase_codes"].copy()
+            assert resident_keeper["thread"].is_alive()
+            with pytest.raises(InterruptedError, match="ordinary stop"):
+                with slm_solver.acquire_rearrangement(**(resident_inputs | {
+                        "pupil_amplitude": pupil.copy(), "minimum_separation": 3,
+                        "maximum_motion_frames": 8})) as (same, reused):
+                    assert reused and same is resident
+                    assert same["minimum_separation"] == 3 and same["gpu"]["motion_capacity"] >= 8
+                    raise InterruptedError("ordinary stop")
+            with pytest.raises(RuntimeError, match="camera disconnected"):
+                with slm_solver.acquire_rearrangement(**resident_inputs) as (same, reused):
+                    assert reused and same is resident
+                    raise RuntimeError("camera disconnected")
+            resident_phase += .02
+            with slm_solver.acquire_rearrangement(**resident_inputs) as (changed, reused):
+                assert not reused and changed is not resident and not resident["gpu"]
+                np.testing.assert_array_equal(changed["initial_phase"], canonical_phase(resident_phase, shape))
+            with pytest.raises(cp.cuda.runtime.CUDARuntimeError):
+                with slm_solver.acquire_rearrangement(**resident_inputs) as (same, reused):
+                    assert reused and same is changed
+                    # Exercise invalidation without poisoning the real context.
+                    raise cp.cuda.runtime.CUDARuntimeError(700)
+            assert slm_solver._REARRANGEMENT_RESIDENT is None and not changed["gpu"]
+            np.testing.assert_array_equal(resident_result["phase_codes"], resident_codes)
+            with slm_solver.acquire_rearrangement(**resident_inputs) as (recovered, reused):
+                assert not reused and recovered is not changed
+        finally:
+            slm_solver._close_resident_rearrangement()
+        assert slm_solver._REARRANGEMENT_RESIDENT is None
+        assert not recovered["gpu"]
 
 
 

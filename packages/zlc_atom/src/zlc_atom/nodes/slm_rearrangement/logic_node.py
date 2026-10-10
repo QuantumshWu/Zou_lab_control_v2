@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from zlc_pulse import PulseSequence
 
-from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.slm.rearrangement import REARRANGEMENT_FIELDS, rearrangement_defaults as _resolve_defaults
 from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.slm.solver import (
     SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
@@ -65,58 +66,16 @@ def _validate_rearrangement(values):
 SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
     (
         AuthoringField("pulse_template", "resource", "Imaging pulse", "", required=True),
-        AuthoringField("target_rows", "int", "Target rows", 3, minimum=1),
-        AuthoringField("target_columns", "int", "Target columns", 3, minimum=1),
+        *REARRANGEMENT_FIELDS[:2],
         AuthoringField("before_period", "text", "Before imaging Period", "", required=True),
         AuthoringField("after_period", "text", "After imaging Period", "", required=True),
         AuthoringField("exposure_seconds", "float", "Camera exposure", .005, minimum=1e-9, unit="s",
                        description="Authored camera integration; the Task does not compare it with Pulse Period lengths."),
-        AuthoringField("frame_mode", "choice", "Frame count", "fixed",
-                       choices=(AuthoringChoice("fixed", "Fixed frames"),
-                                AuthoringChoice("camera_step", "Maximum camera step"))),
-        AuthoringField("motion_frames", "int", "Total frames", 16, minimum=1, maximum=256,
-                       enabled_when=("frame_mode", ("fixed",)),
-                       description="Total displayed maps, including one initial map removing unused traps (when needed) and the destination; excludes the already displayed source. Movement follows without an additional hold."),
-        AuthoringField("max_camera_step", "float", "Maximum camera step", 1., minimum=1e-9, unit="pixel",
-                       enabled_when=("frame_mode", ("camera_step",)),
-                       description="Maximum two-dimensional Euclidean movement per frame in original camera sensor pixels. The actual frame count is determined after occupancy and path planning."),
-        AuthoringField("frame_rate_hz", "float", "Display frame rate", 60., minimum=1e-9, unit="Hz",
-                       description="Requested display cadence, not a measured liquid-crystal response."),
-        AuthoringField(
-            "nominal_playback_seconds", "float", "Display duration", None,
-            derived=True, unit="s",
-            description=(
-                "Total frame count divided by the SLM frame rate. Automatic frame count remains pending until occupancy and path planning. "
-                "GPU computation, upload, preparation and any additional optical settling are excluded."
-            ),
-        ),
-        AuthoringField("phase_method", "choice", "Phase method", "lpi",
-                       choices=(AuthoringChoice("iterative", "Iterative"), AuthoringChoice("lpi", "LPI (phase interpolation)")),
-                       description="LPI interpolates site phases, holds each frame's phases fixed during amplitude balancing, and records the iteration count. Both methods enforce the motion and final intensity tolerances."),
-        AuthoringField("minimum_separation", "float", "Minimum trap distance (Fourier)", 15., minimum=0., unit="pixel",
-                       description="Hard continuous separation of moving and stationary traps, including surplus atoms while they fade. Uses the same units as SLM Target grid spacing (for example, 25 gap); not camera pixels."),
-        AuthoringField("motion_intensity_error_percent", "float", "Motion intensity tolerance (%)", 10., minimum=0.,
-                       description="Weighted maximum/minimum intensity minus one for the initial removal and other intermediate maps. This is not a bound on absolute trap-depth change or atom loss."),
-        AuthoringField("intensity_error_percent", "float", "Final intensity tolerance (%)", 1., minimum=0.,
-                       description="Weighted maximum/minimum intensity minus one for the actual last map and offline endpoints. A single-map sequence uses this final tolerance."),
+        *REARRANGEMENT_FIELDS[2:],
         AuthoringField("save_phase_sequence", "bool", "Save phase sequence", True),
     ),
     validator=_validate_rearrangement,
 )
-
-
-def _resolve_defaults(values, resources):
-    del resources
-    if values.get("frame_mode", "fixed") == "camera_step":
-        return {"nominal_playback_seconds": None}
-    try:
-        frames = int(values.get("motion_frames", 16))
-        rate = float(values.get("frame_rate_hz", 60.))
-    except (TypeError, ValueError):
-        return {}
-    if rate <= 0:
-        return {}
-    return {"nominal_playback_seconds": frames / rate}
 
 
 def _build(

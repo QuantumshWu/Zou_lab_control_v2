@@ -395,11 +395,11 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
         SiteMap,
         TrapCalibration,
     )
-    from zlc_atom.nodes.camera_measurement import (
+    from zlc_atom.nodes.camera import (
         CameraMeasurementNode,
         CameraMeasurementRequest,
     )
-    from zlc_atom.nodes.camera_measurement.measurement import (
+    from zlc_atom.nodes.camera.measurement import (
         CAMERA_FRAMES_OUTPUT,
     )
     from zlc_atom.nodes.occupancy import OccupancyProcessor

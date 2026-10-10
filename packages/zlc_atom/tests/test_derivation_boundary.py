@@ -33,7 +33,7 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
     site_map_image_overlay,
 )
-from zlc_atom.nodes.camera_measurement.measurement import (
+from zlc_atom.nodes.camera.measurement import (
     CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,

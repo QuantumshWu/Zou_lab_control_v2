@@ -26,7 +26,6 @@ from .calibration import (
     extract_psf_signals,
     readout_model_kind_from_choice,
 )
-from .logic_node import LOGIC_NODE
 from .outputs import site_map_image_overlay
 from .psf import gaussian_psf_kernel, normalized_psf_kernel
 from .task import (
@@ -48,7 +47,6 @@ __all__ = [
     "CALIBRATION_ARTIFACT_CODEC",
     "DEFAULT_READOUT_MODEL_CHOICE",
     "FrameContract",
-    "LOGIC_NODE",
     "READOUT_MODEL_CHOICES",
     "ReadoutModel",
     "ReadoutModelKind",
