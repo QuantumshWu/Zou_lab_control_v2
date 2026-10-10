@@ -426,6 +426,9 @@
 
 ### 2.4 Domain Task artifacts
 
+- Calibration密集站点整改：保留带通/相邻差分admission，原始reference均值在同一遍历中累加供亚像素定位；像素积分局部多峰模型显式包含邻居贡献。BOX仍是原真实窗口总和，PSF读出的邻居耦合单独核查，不以窗口重叠拒绝站点、不自动挪成理想网格或修改旧artifact阈值。
+- PSF生成改为reference图对自身占据的联合回归及局部最小范数去混；复用signed psf_weights合同，在线无新矩阵求解。原短曝光的阈值/fidelity仍使用同一稳定cycle标签，模板学习不要求所有邻居在前后均保持占据。保存可辨识性与数值条件事实，不静默重解释旧Calibration。
+
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
   NPZ与PNG。默认不保存全部raw frames。
 - Calibration threshold method默认Gaussian、可显式选Empirical。Gaussian模式对每site全部finite short-shot values做无标签双Gaussian mixture fit，并在两均值间解析求拟合population-weighted分量曲线交点；真实reference labels不参与Gaussian fit/weight/threshold。fit或交点无效site才用全部有效labelled samples上最大化overall correct fraction的Empirical fallback；Empirical模式全部使用该empirical路径。Histogram线是最终classifier threshold，Gaussian曲线直接携带Calibration同一组分量而不在Plot二次拟合；fallback只有最终线而无伪造理论曲线。`actual_fidelity`是最终threshold在全部有效真实Calibration数据上的overall正确率，`gaussian_fidelity`是Gaussian threshold按其拟合population weights积分的理论正确率。

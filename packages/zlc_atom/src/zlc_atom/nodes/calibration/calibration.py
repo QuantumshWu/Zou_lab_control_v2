@@ -731,11 +731,11 @@ def extract_psf_signals(
     radius: int = 2,
     padding: int = 3,
 ) -> np.ndarray:
-    """Extract one matched-filter statistic per site.
+    """Extract one calibrated linear PSF statistic per site.
 
     ``image`` is one ``(H, W)`` frame, answered as ``(N,)``, or a stack
     ``(F, H, W)``, answered as ``(F, N)``: the windows and annuli of every
-    frame are gathered in one indexing.  The matched-filter reduction of each
+    frame are gathered in one indexing.  The signed-kernel reduction of each
     window runs over that window's own contiguous pixels, so a stack answers
     exactly what the frames answer one at a time.
     """
@@ -749,8 +749,9 @@ def extract_psf_signals(
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     size = 2 * int(radius) + 1
     if kernels is None:
+        shape = gaussian_psf_kernel(1.0, radius)
         kernels = np.broadcast_to(
-            _amplitude_weights(gaussian_psf_kernel(1.0, radius)),
+            shape / np.sum(shape ** 2),
             (len(centers), size, size),
         )
     kernels = np.asarray(kernels, dtype=float)
@@ -767,7 +768,7 @@ def extract_psf_signals(
     # The normal calibrated path has equal, complete PSF boxes and complete
     # annuli.  Gather those windows once, for every frame, instead of
     # rebuilding 35 slices and annulus masks for every frame and site.  The
-    # matched-filter reduction of each window is a sum over that window's
+    # kernel reduction of each window is a sum over that window's
     # contiguous products, the same summation the scalar path performs.
     pad = int(padding)
     heights = boxes[:, 3]
@@ -1559,54 +1560,68 @@ def _background_scatter(
     )
 
 
-def _refine_center_subpixel(image: np.ndarray, x: float, y: float, half: int = 2) -> tuple[float, float]:
-    """Where the spot centred on this peak actually is, or the peak itself.
+def _refine_center_subpixel(image: np.ndarray, peaks_xy: np.ndarray, index: int, spot_sigma: float) -> tuple[float, float]:
+    """Fit one detected identity and its local neighbours on raw photon data.
 
-    A peak is an integer pixel; the trap is somewhere inside it.  A fit tells
-    you where -- WHEN it converges on the spot it was given, and a fit is only
-    worth its answer under both conditions:
-
-    * it succeeded.  The solver's own verdict used to be discarded, so a fit
-      that diverged handed back whatever it had reached and that became a
-      published site coordinate.
-    * it stayed home.  A trap cannot be more than a pixel from its own peak --
-      that is what being the peak means -- so a larger move means the fit
-      walked onto a neighbour.  On a lattice whose rows are five pixels apart,
-      a window that reaches two pixels already sees a neighbour's flank, and
-      the answer it gives is that neighbour's.
-
-    Failing either, the integer peak is the honest answer: it is accurate to
-    half a pixel and it is certainly this spot.
+    The band-pass locates candidates, not Gaussian centres: its neighbouring
+    positive lobes and negative rings are not the camera PSF. Neighbours here
+    are measured candidates, never an inferred lattice. Only this site's
+    centre is returned; local nuisance fits do not replace other identities.
     """
+    from scipy.optimize import least_squares
+    from scipy.special import erf
 
     height, width = image.shape
-    x_int, y_int = int(round(x)), int(round(y))
-    half = max(1, int(half))
+    x_int, y_int = map(int, peaks_xy[index])
+    half = max(4, int(np.ceil(4.0 * spot_sigma)))
     x0, x1 = max(0, x_int - half), min(width, x_int + half + 1)
     y0, y1 = max(0, y_int - half), min(height, y_int + half + 1)
-    cut = image[y0:y1, x0:x1]
-    if cut.size < 9 or not np.isfinite(cut).any():
-        return float(x_int), float(y_int)
+    cut = np.asarray(image[y0:y1, x0:x1], dtype=float)
+    local = np.flatnonzero(np.all(abs(peaks_xy - peaks_xy[index]) <= half + 2 * spot_sigma, axis=1))
+    anchors = peaks_xy[local].astype(float)
+    count = len(local)
+    if cut.size <= 3 * count + 3 or not np.isfinite(cut).all():
+        return _core_centroid(image, x_int, y_int)
     yy, xx = np.mgrid[y0:y1, x0:x1]
-    background = float(np.nanmedian(cut))
-    amplitude = float(np.nanmax(cut) - background)
-    x_fit, y_fit, _sigma_x, _sigma_y, ok = _fit_gaussian_spot_2d(
-        cut,
-        yy,
-        xx,
-        x0=float(x_int),
-        y0=float(y_int),
-        offset0=background,
-        amplitude=amplitude,
-    )
-    if (
-        ok
-        and np.isfinite(x_fit)
-        and np.isfinite(y_fit)
-        and abs(x_fit - x_int) <= 1.0
-        and abs(y_fit - y_int) <= 1.0
-    ):
-        return float(x_fit), float(y_fit)
+    background = float(np.median(cut))
+    sigma = float(np.clip(spot_sigma, .2, 4.))
+    amplitudes = np.maximum(image[anchors[:, 1].astype(int), anchors[:, 0].astype(int)] - background, 1e-6)
+    initial = np.r_[background, sigma, sigma, amplitudes * (2 * np.pi * sigma ** 2), anchors[:, 0], anchors[:, 1]]
+    lower = np.r_[-np.inf, .2, .2, np.zeros(count), anchors[:, 0] - 1, anchors[:, 1] - 1]
+    upper = np.r_[np.inf, 4., 4., np.full(count, np.inf), anchors[:, 0] + 1, anchors[:, 1] + 1]
+
+    def model(parameters):
+        offset, sx, sy = parameters[:3]
+        amplitude, cx, cy = np.split(parameters[3:], 3)
+        lx = (xx[None] - .5 - cx[:, None, None]) / sx
+        ux = lx + 1 / sx
+        ly = (yy[None] - .5 - cy[:, None, None]) / sy
+        uy = ly + 1 / sy
+        qx = .5 * (erf(ux / np.sqrt(2)) - erf(lx / np.sqrt(2)))
+        qy = .5 * (erf(uy / np.sqrt(2)) - erf(ly / np.sqrt(2)))
+        exl, exu = np.exp(-.5 * lx * lx) / np.sqrt(2 * np.pi), np.exp(-.5 * ux * ux) / np.sqrt(2 * np.pi)
+        eyl, eyu = np.exp(-.5 * ly * ly) / np.sqrt(2 * np.pi), np.exp(-.5 * uy * uy) / np.sqrt(2 * np.pi)
+        weighted = amplitude[:, None, None]
+        shape = qx * qy
+        jacobian = np.column_stack((np.ones(cut.size),
+            np.sum(weighted * qy * (lx * exl - ux * exu) / sx, axis=0).ravel(),
+            np.sum(weighted * qx * (ly * eyl - uy * eyu) / sy, axis=0).ravel(),
+            shape.reshape(count, -1).T,
+            (weighted * qy * (exl - exu) / sx).reshape(count, -1).T,
+            (weighted * qx * (eyl - eyu) / sy).reshape(count, -1).T))
+        return (offset + np.sum(weighted * shape, axis=0) - cut).ravel(), jacobian
+
+    try:
+        fit = least_squares(lambda p: model(p)[0], initial, jac=lambda p: model(p)[1],
+                            bounds=(lower, upper), x_scale="jac", max_nfev=100)
+        own = int(np.flatnonzero(local == index)[0])
+        columns = np.asarray((3 + count + own, 3 + 2 * count + own))
+        centre = fit.x[columns]
+        if (fit.success and np.all(np.isfinite(centre))
+                and not fit.active_mask[3 + own] and not np.any(fit.active_mask[columns])):
+            return float(centre[0]), float(centre[1])
+    except (ValueError, RuntimeError, np.linalg.LinAlgError):
+        pass
     return _core_centroid(image, x_int, y_int)
 
 
@@ -1684,6 +1699,7 @@ class _RunEvidence:
     #: own change peaks on, whatever its neighbours do around it.
     total_change: np.ndarray
     total_response: np.ndarray
+    total_image: np.ndarray
     transitions: int
     background_sigma: float
 
@@ -1712,6 +1728,7 @@ def _accumulate_run(
     #: Every frame added up: a highly loaded site may hardly change between
     #: neighbours, but it remains bright in the complete average.
     total_response = np.zeros(stack.shape[1:], dtype=float)
+    total_image = np.zeros(stack.shape[1:], dtype=float)
     transitions = 0
     previous_response: np.ndarray | None = None
     # Frames are filtered many at a time, in blocks sized by memory rather than
@@ -1722,6 +1739,7 @@ def _accumulate_run(
     block = max(1, min(int(stack.shape[0]), int(64_000_000 // per_frame_bytes)))
     for start in range(0, int(stack.shape[0]), block):
         frames = np.asarray(stack[start : start + block], dtype=float)
+        total_image += np.sum(frames, axis=0)
         response = ndimage.gaussian_filter(
             frames, sigma=(0.0, spot_sigma, spot_sigma)
         ) - ndimage.gaussian_filter(
@@ -1767,6 +1785,7 @@ def _accumulate_run(
         max_change_z,
         total_change,
         total_response,
+        total_image,
         transitions,
         background_sigma,
     )
@@ -1994,6 +2013,7 @@ def _place_candidates(
     ranked: list,
     *,
     average: np.ndarray,
+    image: np.ndarray,
     frame_shape: tuple,
     spot_sigma: float,
     measurement_radius: int,
@@ -2007,23 +2027,14 @@ def _place_candidates(
     """
 
 
-    refine_half = max(2, int(np.ceil(2.0 * spot_sigma)))
+    peaks = list(dict.fromkeys(_brightest_within(average, int(row), int(column))
+                               for row, column in ranked))
+    peaks_xy = np.asarray(peaks).reshape(-1, 2)[:, ::-1]
     selected: list[tuple[int, int]] = []
     centers_list: list[np.ndarray] = []
     dropped_at_border = 0
-    for row, column in ranked:
-        # Refined on the AVERAGE, whichever statistic admitted the place.
-        # Loading scales a spot; it does not move it, so the map that uses
-        # every photon is the one that says where the trap is.  Conditional
-        # change magnitude is deliberately only an admission statistic.
-        # Starting from the average's OWN maximum: admission says a trap is
-        # here, and where it is is answered on one map from end to end.  A
-        # change count saturates, so its argmax can sit a pixel off the
-        # light, and a fit windowed there sees a lopsided, truncated spot.
-        row, column = _brightest_within(average, int(row), int(column))
-        centre = _refine_center_subpixel(
-            average, float(column), float(row), half=refine_half
-        )
+    for index, (row, column) in enumerate(peaks):
+        centre = _refine_center_subpixel(image, peaks_xy, index, spot_sigma)
         # Checked on the PUBLISHED centre: refinement moves it by up to a
         # pixel, so the margin its integer peak passed is not the margin it
         # keeps.  What cannot be measured is not a site.
@@ -2033,8 +2044,6 @@ def _place_candidates(
             dropped_at_border += 1
             continue
         peak = (int(row), int(column))
-        if peak in selected:
-            continue
         selected.append(peak)
         centers_list.append(centre)
     if not selected:
@@ -2126,6 +2135,7 @@ def detect_sites(
     selected, centers_list = _place_candidates(
         ranked,
         average=admission.average,
+        image=evidence.total_image / float(stack.shape[0]),
         frame_shape=evidence.change_hits.shape,
         spot_sigma=spot_sigma,
         measurement_radius=int(measurement_radius),
@@ -2163,8 +2173,9 @@ class _MeasuredSpots:
 
     #: The weighting each site's readout applies, over its own box.
     weights: np.ndarray
-    #: The one weighting shared by every site, for the uniform model.
+    #: Site-specific demixing weights built from one shared measured shape.
     uniform: np.ndarray
+    uniform_shape: np.ndarray
     boxes: np.ndarray
     #: The difference an atom makes, over the box AND the ring around it.
     templates: np.ndarray
@@ -2173,26 +2184,11 @@ class _MeasuredSpots:
     fit_centers: np.ndarray
     fit_sigmas: np.ndarray
     fit_ok: np.ndarray
-
-
-def _amplitude_weights(shape: np.ndarray) -> np.ndarray:
-    """A matched filter scaled to answer in the site's own total counts.
-
-    ``shape`` is the site's normalized light distribution p (sum 1).  The
-    least-squares amplitude of that pattern in a frame I is
-    sum(p * I) / sum(p^2), so the stored kernel is w = p / sum(p^2): the
-    readout sum(w * I) then estimates the TOTAL counts the site's pattern
-    contributed -- the same currency the box sum answers in, exactly (a
-    flat p over N pixels gives w = 1 everywhere, which IS the box sum).
-    Scaling does not turn the filter: the SNR of a matched filter is
-    invariant under a positive scale, so nothing optimal is given up.
-    """
-
-    shape = np.asarray(shape, dtype="<f8")
-    power = float(np.sum(np.square(shape)))
-    if not np.isfinite(power) or power <= 0.0:
-        return shape
-    return np.asarray(shape / power, dtype="<f8")
+    template_valid: np.ndarray
+    template_rank: int
+    template_condition: float
+    readout_condition: np.ndarray
+    noise_gain: np.ndarray
 
 
 def _measure_readout_weights(
@@ -2203,34 +2199,14 @@ def _measure_readout_weights(
     *,
     radius: int,
     padding: int,
-    fallback_sigma: float,
 ) -> _MeasuredSpots:
-    """The weighting a readout should apply, MEASURED on this run.
+    """Learn each atom's pixel response jointly, then separate overlapping PSFs.
 
-    What a readout has to detect is the difference an atom makes: the average
-    frame where the site was loaded, minus the average frame where it was
-    not.  That difference is the atom's own image and nothing else -- the
-    pedestal, the fixed pattern, the neighbours' skirts, every fixed thing in
-    the picture cancels -- and weighting each pixel by it is the matched
-    filter, which is the best any linear readout can do against white noise.
-
-    Measured on every valid LONG frame, where an atom is unmistakable and there
-    are two per cycle.  The same complete Calibration run owns the measured
-    readout weights, the threshold and the reported fidelity.
-
-    What this replaces was a shape ASSUMED rather than measured: a Gaussian
-    fitted to the reference AVERAGE -- loaded and empty shots together, over
-    a pedestal, with the neighbours' skirts in it -- smoothed, clipped at
-    zero, and normalised.  Measured on the bench's own 35-trap run:
-    6.46 separations for the box, 7.27 for that kernel, 7.53 for this one.
-
-    There is also no per-shot background subtraction here, and that is not an
-    omission.  An annulus in a DENSE lattice is not background: it holds the
-    neighbouring traps, whose loading changes shot to shot, so subtracting it
-    injects their noise into this site's answer.  Measured on the same run:
-    6.45 without it, 6.29 subtracting the ring's median, 5.97 its mean.  A
-    background level common to the whole frame is absorbed by the threshold,
-    which is measured in the same counts as the signal.
+    Conditional bright-minus-dark averages contain neighbors whenever loading
+    is correlated. Regress the actual reference pixels against all identified
+    reference occupancies and a constant instead. The local readout is the
+    minimum-norm signed filter with unit own response and zero response to
+    measured overlapping neighbors. It still reads the same pixels at runtime.
     """
 
     radius = int(radius)
@@ -2239,62 +2215,94 @@ def _measure_readout_weights(
         raise ValueError("PSF radius must be non-negative and padding must be positive")
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     frames = references.reshape(-1, *references.shape[2:])
-    per_cycle = int(references.shape[1])
-    picked = np.asarray(labels_valid, dtype=bool)
-    occupied = np.asarray(labels_occupied, dtype=bool)
+    picked = np.asarray(labels_valid, dtype=bool).reshape(-1, len(centers))
+    occupied = np.asarray(labels_occupied, dtype=bool).reshape(-1, len(centers))
 
     outer = radius + padding
     size = 2 * radius + 1
     core = slice(padding, padding + size)
-    boxes: list[tuple[int, int, int, int]] = []
-    templates: list[np.ndarray] = []
-    measured: list[bool] = []
-    for index, center in enumerate(centers):
-        boxes.append(_box_bounds(tuple(center), radius, frames.shape[-2:]))
-        window = _box_bounds(tuple(center), outer, frames.shape[-2:])
-        x, y, width, height = window
-        lit = np.repeat(picked[:, index] & occupied[:, index], per_cycle)
-        dark = np.repeat(picked[:, index] & ~occupied[:, index], per_cycle)
-        if (
-            int(lit.sum()) < 2
-            or int(dark.sum()) < 2
-            or (height, width) != (2 * outer + 1, 2 * outer + 1)
-        ):
-            templates.append(np.zeros((2 * outer + 1, 2 * outer + 1)))
-            measured.append(False)
-            continue
-        cut = frames[:, y : y + height, x : x + width]
-        templates.append(
-            np.asarray(cut[lit], dtype=float).mean(axis=0)
-            - np.asarray(cut[dark], dtype=float).mean(axis=0)
-        )
-        measured.append(True)
-
-    template_stack = np.stack(templates, axis=0)
-    weights = np.array(template_stack[:, core, core], dtype="<f8")
-    totals = weights.sum(axis=(1, 2))
-    usable = np.asarray(measured, dtype=bool) & (totals > 0.0)
-    # A site whose own atoms were never seen enough to measure a shape gets
-    # the shape the OTHER sites agreed on -- one optic images them all -- and
-    # a run where no site could be measured falls back to the spot size
-    # detection was told to look for.
-    shapes = np.zeros_like(weights)
-    shapes[usable] = weights[usable] / totals[usable, np.newaxis, np.newaxis]
-    if np.any(usable):
-        uniform_shape = shapes[usable].mean(axis=0)
-        uniform_shape = uniform_shape / float(np.sum(uniform_shape))
-    else:
-        uniform_shape = np.asarray(
-            gaussian_psf_kernel(float(fallback_sigma), radius)
-        )
-    # From shape to answer: each kernel is scaled so the matched filter
-    # reports the site's total counts (see _amplitude_weights) -- box and
-    # PSF models then speak one currency.
-    normalised = np.zeros_like(shapes)
-    for index in np.flatnonzero(usable):
-        normalised[index] = _amplitude_weights(shapes[index])
-    uniform = _amplitude_weights(uniform_shape)
-    normalised[~usable] = uniform
+    boxes = np.asarray([_box_bounds(tuple(center), radius, frames.shape[-2:]) for center in centers], dtype=np.int64)
+    outer_boxes = np.asarray([_box_bounds(tuple(center), outer, frames.shape[-2:]) for center in centers], dtype=np.int64)
+    complete = np.all(outer_boxes[:, 2:] == 2 * outer + 1, axis=1)
+    eligible = complete & ((picked & occupied).sum(axis=0) >= 2) & ((picked & ~occupied).sum(axis=0) >= 2)
+    selected = np.flatnonzero(eligible)
+    template_stack = np.zeros((len(centers), 2 * outer + 1, 2 * outer + 1))
+    usable = np.zeros(len(centers), bool)
+    rank, condition = 0, float("inf")
+    if len(selected):
+        yy = outer_boxes[selected, 1, None, None] + np.arange(2 * outer + 1)[None, :, None]
+        xx = outer_boxes[selected, 0, None, None] + np.arange(2 * outer + 1)[None, None, :]
+        pixels, inverse = np.unique((yy * frames.shape[-1] + xx).ravel(), return_inverse=True)
+        inverse = inverse.reshape(len(selected), 2 * outer + 1, 2 * outer + 1)
+        cuts = np.asarray(frames.reshape(len(frames), -1)[:, pixels], dtype=float)
+        valid_rows = picked[:, selected].all(axis=1) & np.isfinite(cuts).all(axis=1)
+        design = occupied[valid_rows][:, selected].astype(float)
+        if len(design):
+            # Centering removes the constant pixel pedestal before asking
+            # which changing occupancy combinations the run actually observed.
+            design -= design.mean(axis=0)
+            observed = cuts[valid_rows]
+            observed -= observed.mean(axis=0)
+            u, singular, vt = np.linalg.svd(design, full_matrices=False)
+            tolerance = np.finfo(float).eps * max(design.shape)
+            changing_rank = int(np.sum(singular > tolerance * singular[0]))
+            rank = changing_rank + 1  # Include the separately fitted pedestal.
+            condition = float(singular[0] / singular[-1]) if changing_rank == design.shape[1] else float("inf")
+            basis = vt[:changing_rank]
+            # A rank-deficient design may still identify some unrelated sites.
+            # Never turn an arbitrary pseudoinverse split into an observed PSF.
+            identifiable = np.linalg.norm(np.eye(design.shape[1]) - basis.T @ basis, axis=0) <= 8 * tolerance
+            coefficients = (basis.T / singular[:changing_rank]) @ (u[:, :changing_rank].T @ observed)
+            for row, site in enumerate(selected):
+                if identifiable[row]:
+                    template_stack[site] = coefficients[row, inverse[row]]
+                    usable[site] = True
+    totals = template_stack[:, core, core].sum(axis=(1, 2))
+    usable &= np.isfinite(totals) & (totals > 0)
+    profiles = np.zeros_like(template_stack)
+    profiles[usable] = template_stack[usable] / totals[usable, None, None]
+    uniform_shape = profiles[usable].mean(axis=0) if np.any(usable) else np.zeros(template_stack.shape[1:])
+    readout_weights = np.zeros((2, len(centers), size, size))
+    readout_condition = np.full((2, len(centers)), np.inf)
+    noise_gain = np.full((2, len(centers)), np.nan)
+    for mode, templates in enumerate((profiles, np.broadcast_to(uniform_shape, profiles.shape))):
+        for site in np.flatnonzero(usable):
+            x = boxes[site, 0] + np.arange(size)[None, :]
+            y = boxes[site, 1] + np.arange(size)[:, None]
+            local_x = np.broadcast_to(x - outer_boxes[:, 0, None, None], (len(centers), size, size))
+            local_y = np.broadcast_to(y - outer_boxes[:, 1, None, None], (len(centers), size, size))
+            inside = ((local_x >= 0) & (local_x < 2 * outer + 1) &
+                      (local_y >= 0) & (local_y < 2 * outer + 1))
+            # An unidentifiable pair still has an observable SUM (or contrast).
+            # Keep its joint pixel-response rows as nuisance constraints, while
+            # never publishing them as two independently measured PSFs.
+            neighbors = selected[inside[selected].any(axis=(1, 2))]
+            pixel_indices = np.searchsorted(pixels, (y * frames.shape[-1] + x).ravel())
+            matrix = coefficients[np.searchsorted(selected, neighbors)][:, pixel_indices].T.copy()
+            for column, neighbor in enumerate(neighbors):
+                if usable[neighbor]:
+                    mask = inside[neighbor]
+                    matrix[:, column] = 0
+                    matrix[mask.ravel(), column] = (templates[neighbor, local_y[neighbor][mask], local_x[neighbor][mask]]
+                                                     * totals[neighbor])
+            column_norm = np.linalg.norm(matrix, axis=0)
+            nonzero = column_norm > 0
+            matrix[:, nonzero] /= column_norm[nonzero]
+            u, singular, vt = np.linalg.svd(matrix, full_matrices=False)
+            tolerance = np.finfo(float).eps * max(matrix.shape)
+            retained = singular > tolerance * singular[0]
+            target = np.zeros(len(neighbors))
+            own_column = int(np.flatnonzero(neighbors == site)[0])
+            target[own_column] = totals[site] / column_norm[own_column]
+            basis = vt[retained]
+            if np.linalg.norm(target - basis.T @ (basis @ target)) > 8 * tolerance:
+                continue
+            weights = u[:, retained] @ ((basis @ target) / singular[retained])
+            readout_weights[mode, site] = weights.reshape(size, size)
+            readout_condition[mode, site] = float(singular[0] / singular[retained][-1])
+            own = templates[site, core, core]
+            noise_gain[mode, site] = float(np.sum(weights ** 2) * np.sum(own ** 2))
+    normalised, uniform = readout_weights
 
     window_light = template_stack.sum(axis=(1, 2))
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -2307,7 +2315,7 @@ def _measure_readout_weights(
         template = template_stack[index]
         if not usable[index]:
             fit_centers.append((float(center[0]), float(center[1])))
-            fit_sigmas.append((float(fallback_sigma), float(fallback_sigma)))
+            fit_sigmas.append((float("nan"), float("nan")))
             fit_ok.append(False)
             continue
         half = (template.shape[0] - 1) // 2
@@ -2325,7 +2333,6 @@ def _measure_readout_weights(
             y0=float(center[1]),
             offset0=0.0,
             amplitude=float(np.nanmax(template)),
-            sigma0=float(fallback_sigma),
         )
         fit_centers.append((x_fit, y_fit))
         fit_sigmas.append((sigma_x, sigma_y))
@@ -2334,12 +2341,14 @@ def _measure_readout_weights(
     return _MeasuredSpots(
         np.ascontiguousarray(normalised, dtype="<f8"),
         np.ascontiguousarray(uniform, dtype="<f8"),
+        np.ascontiguousarray(uniform_shape, dtype="<f8"),
         np.asarray(boxes, dtype="<i8"),
         np.ascontiguousarray(template_stack, dtype="<f8"),
         np.asarray(fraction, dtype="<f8"),
         np.asarray(fit_centers, dtype="<f8"),
         np.asarray(fit_sigmas, dtype="<f8"),
         np.asarray(fit_ok, dtype=bool),
+        usable, rank, condition, readout_condition, noise_gain,
     )
 
 
@@ -2667,31 +2676,26 @@ def calibrate(
     spots = _measure_readout_weights(
         references,
         centers,
-        labels_occupied,
-        labels_valid,
+        bright,
+        reference_valid & fit_ok[None, None, :],
         radius=psf_half_width,
         padding=psf_padding,
-        fallback_sigma=detection_spot_sigma,
     )
     per_site_weights = spots.weights
     psf_boxes = spots.boxes
     psf_fit_centers = spots.fit_centers
     psf_fit_sigmas = spots.fit_sigmas
     psf_fit_ok = spots.fit_ok
-    uniform_weights = np.broadcast_to(
-        spots.uniform, per_site_weights.shape
-    ).copy()
+    uniform_weights = spots.uniform
 
-    def psf_extractor(weights: np.ndarray) -> Callable[[np.ndarray], np.ndarray]:
-        return lambda frame: extract_psf_signals(
-            frame,
-            centers,
-            kernels=weights,
-            boxes_xywh=psf_boxes,
-            background="none",
-            radius=psf_half_width,
-            padding=psf_padding,
-        )
+    def psf_extractor(weights: np.ndarray, valid: np.ndarray) -> Callable[[np.ndarray], np.ndarray]:
+        def extract(frame):
+            values = extract_psf_signals(
+                frame, centers, kernels=weights, boxes_xywh=psf_boxes,
+                background="none", radius=psf_half_width, padding=psf_padding)
+            values[..., ~valid] = np.nan
+            return values
+        return extract
 
     feature_specs: tuple[
         tuple[
@@ -2712,7 +2716,7 @@ def calibrate(
         ),
         (
             ReadoutModelKind.PER_SITE_PSF,
-            psf_extractor(per_site_weights),
+            psf_extractor(per_site_weights, np.isfinite(spots.readout_condition[0])),
             {
                 "integration_half_width": psf_half_width,
                 "psf_weights": per_site_weights,
@@ -2728,11 +2732,16 @@ def calibrate(
                 "psf_kernels": per_site_weights,
                 "psf_templates": spots.templates,
                 "psf_box_light_fraction": spots.box_light_fraction,
+                "psf_template_identifiable": spots.template_valid,
+                "psf_template_rank": spots.template_rank,
+                "psf_template_condition": spots.template_condition,
+                "psf_demixing_condition": spots.readout_condition[0],
+                "psf_noise_gain": spots.noise_gain[0],
             },
         ),
         (
             ReadoutModelKind.UNIFORM_PSF,
-            psf_extractor(uniform_weights),
+            psf_extractor(uniform_weights, np.isfinite(spots.readout_condition[1])),
             {
                 "integration_half_width": psf_half_width,
                 "psf_weights": uniform_weights,
@@ -2745,9 +2754,15 @@ def calibrate(
                 "psf_fit_sigma_xy": psf_fit_sigmas,
                 "psf_fit_ok": psf_fit_ok,
                 "psf_boxes_xywh": psf_boxes,
-                "uniform_kernel": spots.uniform,
+                "uniform_psf_shape": spots.uniform_shape,
+                "psf_kernels": uniform_weights,
                 "psf_templates": spots.templates,
                 "psf_box_light_fraction": spots.box_light_fraction,
+                "psf_template_identifiable": spots.template_valid,
+                "psf_template_rank": spots.template_rank,
+                "psf_template_condition": spots.template_condition,
+                "psf_demixing_condition": spots.readout_condition[1],
+                "psf_noise_gain": spots.noise_gain[1],
             },
         ),
     )
@@ -2783,6 +2798,13 @@ def calibrate(
                     int(value)
                     for value in model_reports[model.kind.value]["site_n_bright"]
                 ],
+                **({
+                    "psf_template_identifiable": spots.template_valid.tolist(),
+                    "psf_template_rank": spots.template_rank,
+                    "psf_template_condition": spots.template_condition if np.isfinite(spots.template_condition) else None,
+                    "psf_demixing_condition": _nullable_floats(model_reports[model.kind.value]["psf_demixing_condition"]),
+                    "psf_noise_gain": _nullable_floats(model_reports[model.kind.value]["psf_noise_gain"]),
+                } if model.kind is not ReadoutModelKind.BOX else {}),
             }
             for model in models
         },

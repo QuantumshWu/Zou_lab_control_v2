@@ -642,6 +642,8 @@ Node new chunk
 ## 9. Calibration、Scan与Simulation
 
 - Calibration保持既有科学流程、当前artifact和三帧preview。
+- 密集站点的检测与定位输入分开：带通average/相邻差分只用于admission与身份，亚像素精定位使用同次流式累加的原始reference平均图，不能把带通负环当作Gaussian光斑。定位在实际像素积分模型中联合考虑已检测邻居的独立幅度和中心，不把阵列吸附到规则网格、不以读出窗口重叠拒绝小间距；稀疏站点自然退化为同一模型的单峰。邻居耦合和中心精度用真实数据证据及已知真值合成图分别核验，不能用拟合网格更整齐代替位置正确。
+- PSF模板从逐reference长曝光图及其自身有效占据标签联合回归得到，分离相关加载邻居与常数背景；不能把条件bright−dark均值里仍含的邻居贡献当作单阱PSF。新Calibration用这些实测模板在既有每site局部窗口中求最小噪声范数的线性去混权重，本site单位响应、可辨识邻居零响应；权重允许为负，在线仍沿原gather/点积，不逐帧重做求解。不能辨识的模板沿现有usable/valid事实保持不可用，不以伪Gaussian补齐。Uniform PSF共用实测光斑形状而非强制各site最终去混权重相同。BOX仍为实际窗口总和；新权重经过原阈值拟合流程，读取旧Calibration不重算权重或更改旧阈值。
 - Calibration site detection只有两条并列证据：相邻reference frames的空间带通差值，以及全部reference frames的空间带通average。一个明显相邻帧变化即可保留single-loading possible site；steady/high-loading site由average保留。两条路径使用同一个authored `detection_sigma`下限并按全图/transition数量提高family-wise bar；site identity始终取完整average的局部峰。不得按奇偶/half分帧，不得用split consistency、全局saddle heuristic或单帧亮度bar（「该处是否曾在某一帧亮过」）否决已经成立的证据：亮邻居带通暗环里的弱trap在任何单帧都不高于背景，它仍是trap。difference证据只在变化本身成峰处成立：按求和后的变化幅度与外一圈（spot尺度）比较，trap自己的变化在邻居暗环之上再叠一个峰，而未加载lattice cell的中心是邻居变化的凹底（变化向制造它的邻居方向增长），不是site。
 - Calibration可由operator显式开启detected-site review：采集与site detection都只执行一次；检测完成后由同一run的短期companion producer发布reference average与candidate SiteMap，TaskConsole允许单点或框选排除高阶衍射/ghost site。确认后只用保留站点构造最终SiteMap并执行一次全部下游拟合；不重新采集、不重新检测、不二次确认。窗口壳、搜索、site checkbox、scroll、status与buttons全部由`zlc_ui` Fluent view拥有，`zlc_plot`只拥有Image surface的point/rectangle gesture与overlay，Workbench只连接两者。最终报告同时保存candidate/excluded/final identity映射和可由FigureViewer重开的`site_review` Figure/PNG；不开启时外部行为与artifact集合不变。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。

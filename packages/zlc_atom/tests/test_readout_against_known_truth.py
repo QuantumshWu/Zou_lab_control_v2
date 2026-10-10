@@ -389,45 +389,108 @@ def test_no_model_is_recommended_when_none_read_a_site() -> None:
     assert np.isnan(constant_separation[0])
 
 
-def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
-    """Amplitude-scaled, peaked on the site, concentrated where the light is.
-
-    Not non-negative: the kernel is a MEASURED difference image, so its wings
-    carry the noise of the shots it was measured from, and a pixel where the
-    atom happened to subtract a little is worth what it is worth.  What must
-    be true is that the weight is where the atom is -- and that the filter
-    answers in the site's own total counts: applied to its own unit-total
-    shape it must report exactly 1, so sum(w * p) with p = w / sum(w) is 1
-    (equivalently w = p / sum(p^2), the least-squares amplitude of the
-    measured pattern; a flat pattern degenerates to the box sum).
-    """
+def test_a_psf_kernel_separates_the_spots_it_was_measured_from() -> None:
+    """Readout weights are not the PSF: they reject neighboring templates."""
+    from zlc_atom.nodes.calibration.calibration import extract_psf_signals
 
     result, _truth = _calibration()
     per_site = result.calibration.select_model(ReadoutModelKind.PER_SITE_PSF)
     uniform = result.calibration.select_model(ReadoutModelKind.UNIFORM_PSF)
 
-    for kernels in (np.asarray(per_site.psf_weights), np.asarray(uniform.psf_weights)):
+    for model in (per_site, uniform):
+        kernels = np.asarray(model.psf_weights)
         assert kernels.ndim == 3
-        totals = kernels.sum(axis=(1, 2))
-        powers = np.square(kernels).sum(axis=(1, 2))
-        np.testing.assert_allclose(powers / totals, 1.0, atol=1e-9)
-        for kernel in kernels:
-            peak = np.unravel_index(int(np.argmax(kernel)), kernel.shape)
-            centre = (kernel.shape[0] // 2, kernel.shape[1] // 2)
-            assert abs(peak[0] - centre[0]) <= 1 and abs(peak[1] - centre[1]) <= 1
-            shape = kernel / float(kernel.sum())
-            core = shape[
-                centre[0] - 1 : centre[0] + 2, centre[1] - 1 : centre[1] + 2
-            ]
-            assert float(core.sum()) > 0.5, "most of the light sits on the spot"
-            edge = float(np.max(np.abs(kernel[0]))), float(np.max(np.abs(kernel[-1])))
-            assert max(edge) < float(kernel[centre]) / 5.0, "the wings are wings"
+        report = result.report['models'][model.kind.value]
+        templates = np.asarray(report['psf_templates'])
+        pad, width = model.psf_padding, kernels.shape[-1]
+        if model.kind is ReadoutModelKind.UNIFORM_PSF:
+            templates = np.broadcast_to(report['uniform_psf_shape'], templates.shape)
+        else:
+            templates = templates / templates[:, pad:pad+width, pad:pad+width].sum(axis=(1, 2))[:, None, None]
+        valid = np.asarray(report['psf_template_identifiable'])
+        for site in np.flatnonzero(valid):
+            image = np.zeros(result.calibration.frame_contract.image_shape)
+            x, y, _w, _h = model.psf_boxes[site]
+            h, w = templates.shape[1:]
+            image[y-pad:y-pad+h, x-pad:x-pad+w] = templates[site]
+            response = extract_psf_signals(image, result.calibration.site_map.centers_xy,
+                kernels=kernels, boxes_xywh=model.psf_boxes, background='none',
+                radius=model.integration_half_width, padding=pad)
+            expected = np.zeros(len(kernels)); expected[site] = 1
+            np.testing.assert_allclose(response[valid], expected[valid], atol=1e-9)
+        assert np.all(np.asarray(report['psf_noise_gain'])[valid] >= 1 - 1e-12)
 
     boxes = np.asarray(per_site.psf_boxes, dtype=int)
     centres = np.asarray(result.calibration.site_map.centers_xy, dtype=float)
     for (x, y, width, height), (centre_x, centre_y) in zip(boxes, centres):
         assert x <= centre_x <= x + width - 1
         assert y <= centre_y <= y + height - 1
+
+
+def test_correlated_loading_is_not_a_neighbor_psf_and_readout_stays_local() -> None:
+    from zlc_atom.nodes.calibration.calibration import _measure_readout_weights, extract_psf_signals
+
+    rng = np.random.default_rng(742)
+    centers = np.array([[10.2, 12.1], [14.4, 12.3], [18.1, 12.0]])
+    yy, xx = np.indices((30, 40))
+    profiles = np.asarray([np.exp(-((xx-x)**2+(yy-y)**2)/(2*1.25**2)) for x,y in centers])
+    profiles /= profiles.sum(axis=(1, 2))[:, None, None]
+    states = rng.random((120, 2, 3)) < .5
+    states[..., 1] = np.where(rng.random((120, 2)) < .9, states[..., 0], states[..., 1])
+    reference = 100 + 200 * np.einsum('fsi,iyx->fsyx', states, profiles)
+    measured = _measure_readout_weights(reference, centers, states, np.ones_like(states),
+        radius=3, padding=3)
+    assert measured.template_valid.all()
+    assert measured.template_rank == 4
+    image = 200 * profiles[1]
+    response = extract_psf_signals(image, centers, kernels=measured.weights,
+        boxes_xywh=measured.boxes, background='none', radius=3, padding=3)
+    expected = np.zeros(3)
+    x,y,w,h = measured.boxes[1]
+    expected[1] = image[y:y+h, x:x+w].sum()
+    np.testing.assert_allclose(response, expected, atol=1e-5)
+    # The old conditional difference confounds the deliberately correlated
+    # neighbor with this atom. Compare actual image response, not own code.
+    flat, loaded = reference.reshape(-1, 30, 40), states.reshape(-1, 3)
+    x,y,w,h = measured.boxes[0]
+    conditional = flat[loaded[:, 0]].mean(0)-flat[~loaded[:, 0]].mean(0)
+    shape = conditional[y:y+h, x:x+w]; shape /= shape.sum()
+    old_response = float(np.sum(shape / np.sum(shape ** 2) * image[y:y+h, x:x+w]))
+    assert old_response > .05 * expected[1]
+    assert measured.noise_gain[0, 0] >= 1
+    stack = extract_psf_signals(np.stack((image, image)), centers, kernels=measured.weights,
+        boxes_xywh=measured.boxes, background='none', radius=3, padding=3)
+    np.testing.assert_array_equal(stack, np.broadcast_to(response, stack.shape))
+    image[y, x] = np.nan
+    assert np.isnan(extract_psf_signals(image, centers, kernels=measured.weights,
+        boxes_xywh=measured.boxes, background='none', radius=3, padding=3)[0])
+    # Perfectly correlated populations cannot identify two individual PSFs.
+    # Their templates/weights remain unavailable, not arbitrary pinv answers.
+    states[..., 1] = states[..., 0]
+    reference = 100 + 200 * np.einsum('fsi,iyx->fsyx', states, profiles)
+    unresolved = _measure_readout_weights(reference, centers, states, np.ones_like(states),
+        radius=3, padding=3)
+    np.testing.assert_array_equal(unresolved.template_valid, [False, False, True])
+    assert not unresolved.weights[:2].any()
+    # The independent third site must reject the OBSERVABLE joint response
+    # of the pair, even though neither member has an identifiable own PSF.
+    pair_image = 200 * (profiles[0] + profiles[1])
+    for weights in (unresolved.weights, unresolved.uniform):
+        nuisance = extract_psf_signals(pair_image, centers, kernels=weights,
+            boxes_xywh=unresolved.boxes, background='none', radius=3, padding=3)
+        assert abs(nuisance[2]) < 1e-8
+        own = extract_psf_signals(200 * profiles[2], centers, kernels=weights,
+            boxes_xywh=unresolved.boxes, background='none', radius=3, padding=3)
+        x,y,w,h = unresolved.boxes[2]
+        assert own[2] == pytest.approx(200 * profiles[2, y:y+h, x:x+w].sum())
+        assert np.isfinite(unresolved.readout_condition[:, 2]).all()
+    isolated_frames = 100 + 200 * np.einsum('fsi,iyx->fsyx', states[..., :1], profiles[:1])
+    isolated = _measure_readout_weights(isolated_frames, centers[:1], states[..., :1],
+        np.ones_like(states[..., :1]), radius=3, padding=3)
+    own_shape = isolated.templates[0, 3:10, 3:10]
+    own_shape = own_shape / own_shape.sum()
+    np.testing.assert_allclose(isolated.weights[0], own_shape / np.sum(own_shape ** 2), atol=1e-12)
+    assert isolated.noise_gain[0, 0] == pytest.approx(1)
 
 
 def test_weighting_beats_a_box_when_the_spot_is_wider_than_the_box() -> None:

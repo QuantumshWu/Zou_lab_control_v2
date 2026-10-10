@@ -1044,7 +1044,7 @@ def _save_report_images(
                     x="x (pixel)", y="y (pixel)", value="Weight"
                 ),
             ),
-            labels=PlotLabels(title="Per-site PSF kernels"),
+            labels=PlotLabels(title="Per-site readout weights"),
         ),
     )
 

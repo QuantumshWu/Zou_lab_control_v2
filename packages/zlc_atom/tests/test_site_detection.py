@@ -263,27 +263,39 @@ def test_a_place_that_cannot_be_measured_is_not_published() -> None:
 
 
 def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> None:
-    """One average maximum is one candidate at both close and wide spacing."""
+    """Keep each admitted identity and locate its own pixel-integrated core."""
+    from scipy.special import erf
 
     def lattice(pitch: float) -> tuple[np.ndarray, list[tuple[float, float]]]:
         rng = np.random.default_rng(11)
         height = width = 70
-        centres = [
+        centres = np.asarray([
             (12.0 + pitch * column, 12.0 + pitch * row)
             for row in range(5)
             for column in range(5)
-        ]
+        ], dtype=float)
+        if pitch == 4.2:
+            centres += (.2, .3) + rng.uniform(-.15, .15, (25, 2))
         grid_y, grid_x = np.mgrid[0:height, 0:width]
         stack = rng.normal(120.0, 7.0, size=(150, height, width))
-        for x, y in centres:
-            spot = np.exp(-(((grid_x - x) ** 2 + (grid_y - y) ** 2) / 2.0))
-            stack[rng.random(150) < 0.5] += 1100.0 * spot
-        return stack, centres
+        for index, (x, y) in enumerate(centres):
+            if pitch == 4.2:
+                qx = .5 * (erf((grid_x + .5 - x) / (np.sqrt(2) * .8))
+                           - erf((grid_x - .5 - x) / (np.sqrt(2) * .8)))
+                qy = .5 * (erf((grid_y + .5 - y) / (np.sqrt(2) * .9))
+                           - erf((grid_y - .5 - y) / (np.sqrt(2) * .9)))
+                spot = (4500. + 700. * (index % 3)) * qx * qy
+            else:
+                spot = 1100. * np.exp(-(((grid_x - x) ** 2 + (grid_y - y) ** 2) / 2.))
+            stack[rng.random(150) < .5] += spot
+        return stack, centres.tolist()
 
-    for pitch in (5.0, 11.0):
+    for pitch in (4.2, 5.0, 11.0):
         stack, centres = lattice(pitch)
-        found, missed, spurious = _score(stack, centres)
-        assert (found, missed, spurious) == (len(centres), 0, 0), pitch
+        found = detect_sites(stack, spot_sigma=1.0 if pitch == 4.2 else 1.2)
+        assert found.n_sites == len(centres), pitch
+        distances = np.linalg.norm(found.centers_xy[:, None] - np.asarray(centres)[None], axis=2)
+        assert np.max(np.min(distances, axis=1)) < .05, pitch
 
     rng = np.random.default_rng(31)
     grid_y, grid_x = np.mgrid[:70, :70]
