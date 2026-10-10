@@ -416,8 +416,10 @@ def test_a_psf_kernel_separates_the_spots_it_was_measured_from() -> None:
             response = extract_psf_signals(image, result.calibration.site_map.centers_xy,
                 kernels=kernels, boxes_xywh=model.psf_boxes, background='none',
                 radius=model.integration_half_width, padding=pad)
-            expected = np.zeros(len(kernels)); expected[site] = 1
-            np.testing.assert_allclose(response[valid], expected[valid], atol=1e-9)
+            # Each window learns its own neighbor nuisance responses. Those
+            # are not another site's canonical PSF, especially with finite
+            # noisy references; the known-truth test below checks cross-talk.
+            assert response[site] == pytest.approx(1, abs=1e-9)
         assert np.all(np.asarray(report['psf_noise_gain'])[valid] >= 1 - 1e-12)
 
     boxes = np.asarray(per_site.psf_boxes, dtype=int)
@@ -441,7 +443,7 @@ def test_correlated_loading_is_not_a_neighbor_psf_and_readout_stays_local() -> N
     measured = _measure_readout_weights(reference, centers, states, np.ones_like(states),
         radius=3, padding=3)
     assert measured.template_valid.all()
-    assert measured.template_rank == 4
+    np.testing.assert_array_equal(measured.template_rank, [4, 4, 4])
     image = 200 * profiles[1]
     response = extract_psf_signals(image, centers, kernels=measured.weights,
         boxes_xywh=measured.boxes, background='none', radius=3, padding=3)
@@ -491,6 +493,33 @@ def test_correlated_loading_is_not_a_neighbor_psf_and_readout_stays_local() -> N
     own_shape = own_shape / own_shape.sum()
     np.testing.assert_allclose(isolated.weights[0], own_shape / np.sum(own_shape ** 2), atol=1e-12)
     assert isolated.noise_gain[0, 0] == pytest.approx(1)
+    # This chain is spatially connected, but each template sees at most three
+    # sites. A global or connected-component time regression has only rank 4
+    # and would incorrectly reject all 24 sites from these 16 reference frames.
+    chain_centers = np.column_stack((10 + 10*np.arange(24), np.full(24, 10)))
+    yy, xx = np.indices((21, 251))
+    chain_profiles = np.asarray([np.exp(-((xx-x)**2+(yy-y)**2)/(2*1.25**2))
+                                 for x, y in chain_centers])
+    chain_profiles /= chain_profiles.sum(axis=(1, 2))[:, None, None]
+    chain_states = ((np.arange(16)[:, None] >> (np.arange(24) % 3)) & 1).astype(bool).reshape(8, 2, 24)
+    chain_frames = 100 + 200*np.einsum('fsi,iyx->fsyx', chain_states, chain_profiles)
+    chain_valid = np.ones_like(chain_states)
+    local = _measure_readout_weights(chain_frames, chain_centers, chain_states, chain_valid,
+        radius=3, padding=3)
+    assert local.template_valid.all()
+    assert np.max(local.template_rank) == 4
+    np.testing.assert_array_equal(chain_states[..., 0], chain_states[..., 3])
+    # A distant site's missing labels must not remove any of site 0's frames.
+    far_valid = chain_valid.reshape(-1, 24)
+    far_valid[:, -1] = False
+    far_loaded = chain_states.reshape(-1, 24)[:, -1]
+    for state in (False, True):
+        far_valid[np.flatnonzero(far_loaded == state)[:2], -1] = True
+    partial = _measure_readout_weights(chain_frames, chain_centers, chain_states, chain_valid,
+        radius=3, padding=3)
+    assert partial.template_valid[0]
+    np.testing.assert_array_equal(partial.templates[0], local.templates[0])
+    np.testing.assert_array_equal(partial.weights[0], local.weights[0])
 
 
 def test_weighting_beats_a_box_when_the_spot_is_wider_than_the_box() -> None:

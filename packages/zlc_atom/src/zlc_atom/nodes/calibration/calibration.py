@@ -2185,8 +2185,8 @@ class _MeasuredSpots:
     fit_sigmas: np.ndarray
     fit_ok: np.ndarray
     template_valid: np.ndarray
-    template_rank: int
-    template_condition: float
+    template_rank: np.ndarray
+    template_condition: np.ndarray
     readout_condition: np.ndarray
     noise_gain: np.ndarray
 
@@ -2203,8 +2203,8 @@ def _measure_readout_weights(
     """Learn each atom's pixel response jointly, then separate overlapping PSFs.
 
     Conditional bright-minus-dark averages contain neighbors whenever loading
-    is correlated. Regress the actual reference pixels against all identified
-    reference occupancies and a constant instead. The local readout is the
+    is correlated. Regress each template's actual pixels against occupancies
+    whose spatial supports intersect that window and a constant. The readout is the
     minimum-norm signed filter with unit own response and zero response to
     measured overlapping neighbors. It still reads the same pixels at runtime.
     """
@@ -2225,16 +2225,23 @@ def _measure_readout_weights(
     outer_boxes = np.asarray([_box_bounds(tuple(center), outer, frames.shape[-2:]) for center in centers], dtype=np.int64)
     complete = np.all(outer_boxes[:, 2:] == 2 * outer + 1, axis=1)
     eligible = complete & ((picked & occupied).sum(axis=0) >= 2) & ((picked & ~occupied).sum(axis=0) >= 2)
-    selected = np.flatnonzero(eligible)
     template_stack = np.zeros((len(centers), 2 * outer + 1, 2 * outer + 1))
     usable = np.zeros(len(centers), bool)
-    rank, condition = 0, float("inf")
-    if len(selected):
-        yy = outer_boxes[selected, 1, None, None] + np.arange(2 * outer + 1)[None, :, None]
-        xx = outer_boxes[selected, 0, None, None] + np.arange(2 * outer + 1)[None, None, :]
-        pixels, inverse = np.unique((yy * frames.shape[-1] + xx).ravel(), return_inverse=True)
-        inverse = inverse.reshape(len(selected), 2 * outer + 1, 2 * outer + 1)
-        cuts = np.asarray(frames.reshape(len(frames), -1)[:, pixels], dtype=float)
+    rank = np.zeros(len(centers), dtype=np.int64)
+    condition = np.full(len(centers), np.inf)
+    regressions = [None] * len(centers)
+    # Correlated loading is only ambiguous where the measured spatial
+    # supports overlap. Disjoint supports have independent pixel evidence
+    # and must not discard each other's valid training frames.
+    lower = outer_boxes[:, :2]
+    upper = lower + outer_boxes[:, 2:]
+    overlap = (np.all(lower[:, None] < upper[None], axis=-1)
+               & np.all(lower[None] < upper[:, None], axis=-1))
+    for site in np.flatnonzero(eligible):
+        selected = np.flatnonzero(eligible & overlap[site])
+        own_column = int(np.flatnonzero(selected == site)[0])
+        x, y, width, height = outer_boxes[site]
+        cuts = np.asarray(frames[:, y:y+height, x:x+width], dtype=float).reshape(len(frames), -1)
         valid_rows = picked[:, selected].all(axis=1) & np.isfinite(cuts).all(axis=1)
         design = occupied[valid_rows][:, selected].astype(float)
         if len(design):
@@ -2246,17 +2253,20 @@ def _measure_readout_weights(
             u, singular, vt = np.linalg.svd(design, full_matrices=False)
             tolerance = np.finfo(float).eps * max(design.shape)
             changing_rank = int(np.sum(singular > tolerance * singular[0]))
-            rank = changing_rank + 1  # Include the separately fitted pedestal.
-            condition = float(singular[0] / singular[-1]) if changing_rank == design.shape[1] else float("inf")
+            rank[site] = changing_rank + 1  # Include this window's pedestal.
+            condition[site] = float(singular[0] / singular[-1]) if changing_rank == design.shape[1] else float("inf")
             basis = vt[:changing_rank]
             # A rank-deficient design may still identify some unrelated sites.
             # Never turn an arbitrary pseudoinverse split into an observed PSF.
             identifiable = np.linalg.norm(np.eye(design.shape[1]) - basis.T @ basis, axis=0) <= 8 * tolerance
             coefficients = (basis.T / singular[:changing_rank]) @ (u[:, :changing_rank].T @ observed)
-            for row, site in enumerate(selected):
-                if identifiable[row]:
-                    template_stack[site] = coefficients[row, inverse[row]]
-                    usable[site] = True
+            if identifiable[own_column]:
+                responses = coefficients.reshape(len(selected), height, width)
+                template_stack[site] = responses[own_column]
+                usable[site] = True
+                # Neighbors are nuisance rows for THIS window, not independently
+                # calibrated PSFs. Only retain the core that this readout uses.
+                regressions[site] = (selected, np.ascontiguousarray(responses[:, core, core]), identifiable)
     totals = template_stack[:, core, core].sum(axis=(1, 2))
     usable &= np.isfinite(totals) & (totals > 0)
     profiles = np.zeros_like(template_stack)
@@ -2265,26 +2275,24 @@ def _measure_readout_weights(
     readout_weights = np.zeros((2, len(centers), size, size))
     readout_condition = np.full((2, len(centers)), np.inf)
     noise_gain = np.full((2, len(centers)), np.nan)
-    for mode, templates in enumerate((profiles, np.broadcast_to(uniform_shape, profiles.shape))):
+    for mode in (0, 1):
         for site in np.flatnonzero(usable):
+            neighbors, responses, identifiable = regressions[site]
+            matrix = responses.reshape(len(neighbors), -1).T.copy()
             x = boxes[site, 0] + np.arange(size)[None, :]
             y = boxes[site, 1] + np.arange(size)[:, None]
-            local_x = np.broadcast_to(x - outer_boxes[:, 0, None, None], (len(centers), size, size))
-            local_y = np.broadcast_to(y - outer_boxes[:, 1, None, None], (len(centers), size, size))
-            inside = ((local_x >= 0) & (local_x < 2 * outer + 1) &
-                      (local_y >= 0) & (local_y < 2 * outer + 1))
             # An unidentifiable pair still has an observable SUM (or contrast).
-            # Keep its joint pixel-response rows as nuisance constraints, while
-            # never publishing them as two independently measured PSFs.
-            neighbors = selected[inside[selected].any(axis=(1, 2))]
-            pixel_indices = np.searchsorted(pixels, (y * frames.shape[-1] + x).ravel())
-            matrix = coefficients[np.searchsorted(selected, neighbors)][:, pixel_indices].T.copy()
-            for column, neighbor in enumerate(neighbors):
-                if usable[neighbor]:
-                    mask = inside[neighbor]
+            # Preserve that actual response in both models. Only identifiable
+            # columns can be replaced by the uniform model's shared shape.
+            if mode:
+                for column in np.flatnonzero(identifiable):
+                    neighbor = neighbors[column]
+                    local_x = np.broadcast_to(x - outer_boxes[neighbor, 0], (size, size))
+                    local_y = np.broadcast_to(y - outer_boxes[neighbor, 1], (size, size))
+                    inside = ((local_x >= 0) & (local_x < 2 * outer + 1) &
+                              (local_y >= 0) & (local_y < 2 * outer + 1))
                     matrix[:, column] = 0
-                    matrix[mask.ravel(), column] = (templates[neighbor, local_y[neighbor][mask], local_x[neighbor][mask]]
-                                                     * totals[neighbor])
+                    matrix[inside.ravel(), column] = uniform_shape[local_y[inside], local_x[inside]]
             column_norm = np.linalg.norm(matrix, axis=0)
             nonzero = column_norm > 0
             matrix[:, nonzero] /= column_norm[nonzero]
@@ -2293,14 +2301,14 @@ def _measure_readout_weights(
             retained = singular > tolerance * singular[0]
             target = np.zeros(len(neighbors))
             own_column = int(np.flatnonzero(neighbors == site)[0])
-            target[own_column] = totals[site] / column_norm[own_column]
+            target[own_column] = (1.0 if mode else totals[site]) / column_norm[own_column]
             basis = vt[retained]
             if np.linalg.norm(target - basis.T @ (basis @ target)) > 8 * tolerance:
                 continue
             weights = u[:, retained] @ ((basis @ target) / singular[retained])
             readout_weights[mode, site] = weights.reshape(size, size)
             readout_condition[mode, site] = float(singular[0] / singular[retained][-1])
-            own = templates[site, core, core]
+            own = uniform_shape[core, core] if mode else profiles[site, core, core]
             noise_gain[mode, site] = float(np.sum(weights ** 2) * np.sum(own ** 2))
     normalised, uniform = readout_weights
 
@@ -2800,8 +2808,8 @@ def calibrate(
                 ],
                 **({
                     "psf_template_identifiable": spots.template_valid.tolist(),
-                    "psf_template_rank": spots.template_rank,
-                    "psf_template_condition": spots.template_condition if np.isfinite(spots.template_condition) else None,
+                    "psf_template_rank": spots.template_rank.tolist(),
+                    "psf_template_condition": _nullable_floats(spots.template_condition),
                     "psf_demixing_condition": _nullable_floats(model_reports[model.kind.value]["psf_demixing_condition"]),
                     "psf_noise_gain": _nullable_floats(model_reports[model.kind.value]["psf_noise_gain"]),
                 } if model.kind is not ReadoutModelKind.BOX else {}),
