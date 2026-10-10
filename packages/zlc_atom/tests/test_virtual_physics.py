@@ -1868,63 +1868,36 @@ def _ideal_slm_intensity(
     return np.abs(far) ** 2
 
 
-def _shifted_wgs_kim_reference(
-    target: np.ndarray,
-    *,
-    iterations: int,
-    seed: int,
-) -> np.ndarray:
-    """The direct full-frame/shifted formulation used as a quality oracle."""
+def _full_focal_background(phase, target, pupil=None, sampling=1):
+    """Independent complex128 propagation outside the natural main lobes."""
+    from scipy.ndimage import label
 
-    desired = np.asarray(target, dtype=np.float32)
-    support = desired > 0.0
-    height, width = desired.shape
+    height, width = target.shape
     yy, xx = np.ogrid[-1.0:1.0:height * 1j, -1.0:1.0:width * 1j]
-    pupil = (xx * xx + yy * yy <= 0.9**2).astype(np.float32)
-    phase = np.random.default_rng(seed).uniform(
-        0.0, 2.0 * np.pi, desired.shape
-    ).astype(np.float32)
-    field = pupil.astype(np.complex64) * np.exp(1j * phase).astype(np.complex64)
-    target_amplitude = np.sqrt(desired[support]).astype(np.float32)
-    target_amplitude /= np.linalg.norm(target_amplitude)
-    weights = np.array(target_amplitude, copy=True)
-    fixed_phase: np.ndarray | None = None
-    epsilon = np.finfo(np.float32).eps
+    if pupil is None:
+        pupil = (xx * xx + yy * yy <= 0.9**2)
+    pupil = np.asarray(pupil, np.float64)
+    native_shape = np.array(target.shape)
+    focal_shape = sampling * native_shape
+    center = focal_shape // 2
+    start = center - native_shape // 2
 
-    for iteration in range(iterations):
-        far = fft.fftshift(fft.fft2(fft.ifftshift(field), norm="ortho"))
-        selected = far[support]
-        magnitude = np.abs(selected).astype(np.float32)
-        measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
-        weights *= np.clip(
-            target_amplitude / np.maximum(measured, epsilon), 0.2, 5.0
-        ) ** np.float32(0.8)
-        weights /= max(float(np.linalg.norm(weights)), epsilon)
-        current_phase = np.divide(
-            selected,
-            magnitude,
-            out=np.ones_like(selected),
-            where=magnitude > epsilon,
-        )
-        if fixed_phase is None:
-            selected_phase = current_phase
-            if iteration + 1 == 12:
-                fixed_phase = np.array(current_phase, copy=True)
-        else:
-            selected_phase = fixed_phase
-        constrained = np.zeros_like(far)
-        constrained[support] = weights * selected_phase
-        back = fft.fftshift(
-            fft.ifft2(fft.ifftshift(constrained), norm="ortho")
-        )
-        back_magnitude = np.abs(back).astype(np.float32)
-        field = pupil.astype(np.complex64) * np.divide(
-            back,
-            back_magnitude,
-            out=np.ones_like(back),
-            where=back_magnitude > epsilon,
-        )
-    return canonical_phase(np.angle(field), desired.shape)
+    def propagate(values):
+        # Independent centered embedding, not production's quadrant mapping.
+        padded = np.zeros(tuple(focal_shape), np.complex128)
+        padded[start[0]:start[0]+height, start[1]:start[1]+width] = values
+        return sampling * np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(padded), norm="ortho"))
+
+    psf = abs(propagate(pupil)) ** 2
+    components, _ = label(psf >= .01 * psf[tuple(center)], structure=np.ones((3, 3), bool))
+    offsets = np.argwhere(components == components[tuple(center)]) - center
+    allowed = np.zeros(tuple(focal_shape), bool)
+    for point in np.argwhere(target > 0):
+        indices = (center + sampling * (point-native_shape//2) + offsets) % focal_shape
+        allowed[tuple(indices.T)] = True
+    field = pupil * np.exp(1j * np.asarray(phase, np.float64))
+    power = abs(propagate(field)) ** 2
+    return float(np.max(power, where=~allowed, initial=0))
 
 
 def _support_quality(
@@ -1964,6 +1937,38 @@ def _full_fft_returned_quality(
         / np.sum(np.square(pupil_amplitude, dtype=np.float32))
     )
     return ratio, efficiency
+
+
+def test_rearrangement_background_counts_extra_peaks_inside_target_neighborhood() -> None:
+    shape = (32, 40)
+    yy, xx = np.indices(shape)
+    support = (yy - 16) ** 2 + (xx - 20) ** 2 <= 9
+    intensity = np.zeros(shape)
+    intensity[10, 10] = 100
+    intensity[10, 12] = 25  # Inside the same PSF support, but a second well.
+    intensity[22, 30] = 12  # Could be any vacated old coordinate, not an identity query.
+    maxima = (intensity > 0) & (intensity == maximum_filter(intensity, size=3, mode="wrap"))
+    points, values, extra, peak, region = slm_solver._rearrangement_focal_peaks(
+        intensity, maxima, np.array([[10, 10]]), support)
+    np.testing.assert_array_equal(points, [[10, 10]])
+    np.testing.assert_array_equal(values, [100])
+    np.testing.assert_array_equal(extra, [10, 12])
+    assert peak == 25 and region[10, 12]
+    # An inactive source identity at the legitimate target cannot change the
+    # answer: only the current spatial target roster is accepted by this helper.
+    intensity[10, 12] = 0
+    maxima = (intensity > 0) & (intensity == maximum_filter(intensity, size=3, mode="wrap"))
+    _, _, extra, peak, _ = slm_solver._rearrangement_focal_peaks(intensity, maxima, [[10, 10]], support)
+    np.testing.assert_array_equal(extra, [22, 30])
+    assert peak == 12
+    # Half-pixel main peaks and connected plateaus across the periodic edge
+    # are one peak, not a false second trap at the opposite FFT boundary.
+    intensity.fill(0)
+    intensity[0, 10] = intensity[-1, 10] = 100
+    maxima = (intensity > 0) & (intensity == maximum_filter(intensity, size=3, mode="wrap"))
+    points, values, extra, peak, _ = slm_solver._rearrangement_focal_peaks(intensity, maxima, [[31.5, 10]], support)
+    np.testing.assert_array_equal(points, [[31.5, 10]])
+    assert values[0] == 100 and peak == 0 and np.isnan(extra).all()
 
 
 def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> None:
@@ -2245,6 +2250,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     y = (np.arange(height) - height // 2) / height
     x = (np.arange(width) - width // 2) / width
     for candidate in (sequence, next_sequence):
+        candidate.update(slm_solver.rearrangement_diagnostics(prepared, candidate))
         previous_command = prepared["initial_phase"]
         for frame, (code, positions, values, actual) in enumerate(zip(
             candidate["phase_codes"], candidate["sites_yx"], candidate["desired_amplitudes"], candidate["actual_fields"],
@@ -2264,12 +2270,17 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                 power = abs(expected[values > 0]) ** 2 / values[values > 0] ** 2
                 assert power.max() / power.min() <= (1.01 if frame == 6 else 1.10)
                 if frame >= candidate["fade_frames"] - 1:
-                    spectrum = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(field)))
-                    references = abs(prepared["source_field"][discarded].astype(np.complex128)) ** 2
-                    ratio = max(float(np.max(abs(spectrum[y0-2:y0+3, x0-2:x0+3]) ** 2) / reference)
-                                for (y0, x0), reference in zip(source[discarded], references))
-                    assert ratio <= candidate["discard_reference_limit"]
-                    assert candidate["discard_intensity_ratios"][frame] == pytest.approx(ratio, rel=1e-3, abs=1e-7)
+                    fine_shape = 4 * np.asarray(shape)
+                    spectrum = np.fft.fftshift(np.fft.fft2(field, s=tuple(fine_shape)))
+                    peak = candidate["background_peak_yx"][frame]
+                    reference = candidate["background_initial_reference_intensity"]
+                    if np.isfinite(peak).all():
+                        # This peak was found over the whole plane, including
+                        # vacated and initially empty sites, not identity rows.
+                        fine_peak = np.rint(4 * (peak - center) + fine_shape // 2).astype(int)
+                        ratio = abs(spectrum[tuple(fine_peak)]) ** 2 / reference
+                        assert ratio <= slm_solver.SPOT_BACKGROUND_TOLERANCE
+                        assert candidate["background_peak_to_initial_ratios"][frame] == pytest.approx(ratio, rel=1e-3, abs=1e-7)
     assert not np.shares_memory(sequence["phase_codes"], next_sequence["phase_codes"])
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
     for bad_count in (0, True, 1.5, 1):
@@ -2425,7 +2436,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         translated_prepared["close"]()
 
     # The alternate method uses this same fractional geometry/encoder; its
-    # amplitude balancing cannot change the prescribed interpolation phase.
+    # actual bright fields follow the prescribed interpolation phase.
     lpi = slm_solver.prepare_rearrangement(
         source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
         minimum_separation=2, endpoint_iterations=40, maximum_motion_frames=3,
@@ -2441,9 +2452,12 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             frame_ready=lambda index, frame: delivered.append((index, frame)),
         )
         assert movie["quality_evaluated"] and movie["converged"]
-        assert max(movie["iterations"]) <= 16
+        assert max(movie["iterations"]) <= 128
         assert max(movie["iterations"]) > 0
-        assert movie["field_projection_updates"] == (0,) * 7
+        assert max(movie["field_projection_updates"]) > 0
+        assert max(movie["background_limit_ratios"]) <= .01
+        assert max(movie["focal_phase_error_max_rad"]) <= .01
+        assert max(movie["main_lobe_envelope_ratios"]) <= 1.05
         assert [index for index, _ in delivered] == list(range(7))
         assert lpi["maximum_motion_frames"] == 7
         np.testing.assert_array_equal(lpi["initial_phase"], source_phase)
@@ -2454,7 +2468,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         gauge = (lpi["phase_center_yx"] - center) / shape
         source_gauge = 2 * np.pi * np.sum((source[selected] - center) * gauge, axis=1)
         target_gauge = 2 * np.pi * np.sum((target[destinations] - center) * gauge, axis=1)
-        delta = np.angle(movie["endpoint_synthesis_coefficients"] * np.exp(1j * target_gauge)
+        delta = np.angle(lpi["target_field"][destinations] * np.exp(1j * target_gauge)
                          * (lpi["source_field"][selected] * np.exp(1j * source_gauge)).conj())
         current_gauge = 2 * np.pi * np.sum((movie["sites_yx"][:, selected] - center) * gauge, axis=-1)
         intended_phase = (np.angle(lpi["source_field"][selected]) + source_gauge
@@ -2464,17 +2478,11 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         corrected = movie["synthesis_coefficients"]
         np.testing.assert_allclose(np.angle(corrected[movie["active_sites"]]
                                           * coefficients[movie["active_sites"]].conj()), 0., atol=1e-6)
-        for index, (code, positions) in enumerate(zip(movie["phase_codes"], movie["sites_yx"])):
-            signed = positions - center
-            latent = np.einsum("j,jh,jw->hw", corrected[index].astype(np.complex128),
-                               np.exp(2j * np.pi * signed[:, 0, None] * y),
-                               np.exp(2j * np.pi * signed[:, 1, None] * x), optimize=True)
-            error = np.angle(np.exp(1j * (phase_from_codes(code, shape).astype(float)
-                                          + aberration - np.angle(latent))))
-            assert np.max(abs(error[pupil > 0])) < 2 * np.pi / 256 + 1e-4
         diagnostics = slm_solver.rearrangement_diagnostics(lpi, movie)
         assert diagnostics["quality_evaluated"]
         assert diagnostics["retained_intensity_ratios"][-1] <= 1.01
+        assert diagnostics["background_peak_tolerance"] == slm_solver.SPOT_BACKGROUND_TOLERANCE
+        assert max(diagnostics["background_peak_to_initial_ratios"]) <= slm_solver.SPOT_BACKGROUND_TOLERANCE
         np.testing.assert_allclose(diagnostics["actual_fields"][-1, selected], movie["endpoint_field"],
                                    rtol=2e-4, atol=2e-4 * np.min(abs(movie["endpoint_field"])))
         for index, (code, positions) in enumerate(zip(movie["phase_codes"], movie["sites_yx"])):
@@ -2489,6 +2497,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             assert relative.max() / relative.min() <= (1.01 if index == 6 else 1.10)
             source_change = np.angle(actual[selected] * lpi["source_field"][selected].conj())
             prescribed_error = np.angle(actual[selected] * coefficients[index, selected].conj())
+            assert np.max(abs(prescribed_error)) <= .01001
             assert diagnostics["phase_change_from_initial_rms_rad"][index] == pytest.approx(
                 np.sqrt(np.mean(source_change ** 2)), abs=2e-5)
             assert diagnostics["focal_phase_error_rms_rad"][index] == pytest.approx(
@@ -2500,7 +2509,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         shortage = slm_solver.compute_rearrangement(lpi, slm_solver.plan_rearrangement(lpi, [0]), motion_frames=7)
         assert shortage["target_filled"].sum() == 1
         assert shortage["endpoint_support_intensity_ratio"] <= 1.01
-        assert shortage["endpoint_iterations"] <= 64
+        assert shortage["endpoint_iterations"] <= 128
         assert shortage["endpoint_balance_ms"] == 0  # no unplayed solve before first map
         np.testing.assert_array_equal(movie["phase_codes"], saved)
         empty_plan = slm_solver.plan_rearrangement(lpi, [])
@@ -2518,7 +2527,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, frame_ready=reject_frame)
         assert calls == [0]
         calls.clear()
-        with pytest.raises(RuntimeError, match="did not meet authored intensity ratio"):
+        with pytest.raises(RuntimeError, match="did not meet optical constraints"):
             slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, iterations=0,
                 support_tolerance=1., motion_support_tolerance=1.,
                 frame_ready=lambda index, frame: calls.append(index))
@@ -2546,15 +2555,23 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=7,
         )
         assert static["maximum_step"] == 0
-        np.testing.assert_array_equal(static["phase_codes"][1:-1], np.broadcast_to(static["phase_codes"][1], (5, *shape)))
         assert np.max(static["retained_intensity_ratios"][:-1]) <= 1.10
         assert static["retained_intensity_ratios"][-1] <= 1.01
         single = slm_solver.compute_rearrangement(
             static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=1)
         assert single["retained_intensity_ratios"][0] <= 1.01
         selected = static["source_indices"]
+        destinations = static["target_indices"]
+        delta = np.angle(static_lpi["target_field"][destinations]
+                         * static_lpi["source_field"][selected].conj())
+        assert np.max(abs(delta)) > .01  # An independent endpoint, not copied source phases.
+        phase_progress = np.arange(7) / 6  # Remove unused traps first, then evolve even stationary traps.
+        expected = (np.angle(static_lpi["source_field"][selected])
+                    + phase_progress[:, None] * delta)
         np.testing.assert_allclose(np.angle(static["desired_spectrum_coefficients"][:, selected]
-                                          * static_lpi["source_field"][selected].conj()), 0., atol=1e-6)
+                                          * np.exp(-1j * expected)), 0., atol=1e-6)
+        np.testing.assert_allclose(np.angle(single["desired_spectrum_coefficients"][0, selected]
+                                          * static_lpi["target_field"][destinations].conj()), 0., atol=1e-6)
         assert slm_solver.rearrangement_diagnostics(static_lpi, static)["support_intensity_ratios"][-1] <= 1.01
     finally:
         static_lpi["close"]()
@@ -2572,6 +2589,9 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                 weighted_plan = slm_solver.plan_rearrangement(reweighted, np.arange(4))
                 unchanged = {**reweighted, "target_intensities": reweighted["source_intensities"]}
                 assert slm_solver.rearrangement_is_noop(unchanged, weighted_plan)
+                unchanged_movie = slm_solver.compute_rearrangement(unchanged, weighted_plan, motion_frames=5)
+                assert unchanged_movie["noop"] and len(unchanged_movie["phase_codes"]) == 0
+                np.testing.assert_array_equal(unchanged["initial_phase"], source_phase)
                 assert not slm_solver.rearrangement_is_noop(unchanged, {
                     **weighted_plan, "motion_yx": np.stack((source, source + [1, 0], source)),
                     "fraction": np.array([0., .5, 1.]),
@@ -2602,7 +2622,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                                                       motion_frames=5)
             assert partial["target_filled"].sum() == 4
             assert partial["endpoint_support_intensity_ratio"] <= 1.01
-            assert partial["endpoint_iterations"] <= 64
+            assert partial["endpoint_iterations"] <= 128
             assert partial["endpoint_balance_ms"] == 0
             assert slm_solver.rearrangement_diagnostics(larger, partial)["support_intensity_ratios"][-1] <= 1.01
         finally:
@@ -2854,6 +2874,7 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
         pupil_amplitude=pupil,
         objective_kind="spots",
         spot_optimizer_state=candidate_state,
+        initial_phase=_base_phase,
         iterations=1,
         seed=999,
     )
@@ -2863,6 +2884,7 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
         pupil_amplitude=pupil,
         objective_kind="spots",
         spot_optimizer_state=repeated_state,
+        initial_phase=_base_phase,
         iterations=1,
         seed=1,
     )
@@ -2888,29 +2910,15 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
     assert candidate_metadata["diffraction_efficiency"] == pytest.approx(
         candidate_efficiency, rel=2e-5
     )
-    old_amplitudes = np.asarray(
-        json.loads(encoded_state)["target_amplitudes"], dtype=np.float32
-    )
-    new_amplitudes = np.sqrt(
-        np.asarray(
-            [changed[tuple(yx)] for yx in candidate_state["support_yx"]],
-            dtype=np.float32,
-        )
-    )
-    new_amplitudes /= np.linalg.norm(new_amplitudes)
-    initialized_weights = np.asarray(
-        json.loads(encoded_state)["site_weights"], dtype=np.float32
-    ) * (new_amplitudes / old_amplitudes)
-    initialized_weights /= np.linalg.norm(initialized_weights)
-    assert not np.allclose(
-        candidate_state["site_weights"], initialized_weights, rtol=1e-6, atol=1e-7
-    )
+    assert candidate_state["background_reference_intensity"] == state["background_reference_intensity"]
+    assert not candidate_metadata["converged"]
     continued_state = json.loads(json.dumps(candidate_state, allow_nan=False))
     continued, continued_metadata = solve_phase(
         changed,
         pupil_amplitude=pupil,
         objective_kind="spots",
         spot_optimizer_state=continued_state,
+        initial_phase=candidate,
         iterations=1,
     )
     assert continued_metadata["iterations_run"] == 1
@@ -2922,6 +2930,7 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
         pupil_amplitude=pupil,
         objective_kind="spots",
         spot_optimizer_state=accepted_state,
+        initial_phase=_base_phase,
     )
     _normalized, ratio, _efficiency = _support_quality(accepted, changed, pupil)
     assert accepted_metadata["optimizer_state_status"] == "reused"
@@ -2950,6 +2959,7 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
         objective_kind="spots",
         iterations=accepted_iteration,
         spot_optimizer_state=json.loads(encoded_state),
+        initial_phase=_base_phase,
     )
     assert exact_metadata["iterations_run"] == accepted_iteration
     np.testing.assert_array_equal(exact, accepted)
@@ -2960,8 +2970,9 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
             objective_kind="spots",
             iterations=accepted_iteration - 1,
             spot_optimizer_state=json.loads(encoded_state),
+            initial_phase=_base_phase,
         )
-        assert _full_fft_returned_quality(previous, changed, pupil)[0] > 1.01
+        assert not _previous_metadata["converged"]
 
     # A caller may tighten the gate: no early stop before the minimum passes,
     # and none until the support ratio is inside the requested tolerance.
@@ -2971,6 +2982,7 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
         pupil_amplitude=pupil,
         objective_kind="spots",
         spot_optimizer_state=tightened_state,
+        initial_phase=_base_phase,
         support_tolerance=1.002,
         minimum_iterations=5,
     )
@@ -2999,6 +3011,7 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
             pupil_amplitude=pupil,
             objective_kind="spots",
             spot_optimizer_state=stopped_state,
+            initial_phase=_base_phase,
             stop_requested=stop_during_hot_update,
         )
     assert json.dumps(stopped_state, sort_keys=True) == unchanged
@@ -3060,7 +3073,7 @@ def test_slm_optimizer_state_explicitly_invalidates_on_changed_physics() -> None
 
 
 @pytest.mark.parametrize("cartesian", [True, False])
-def test_sparse_solver_matches_full_shifted_wgs_kim_quality(cartesian: bool) -> None:
+def test_sparse_solver_checks_full_focal_plane_not_only_bright_sites(cartesian: bool) -> None:
     target = np.array(
         preset_grid((64, 80), (3, 4), spacing_yx=(12, 13)), copy=True
     )
@@ -3070,24 +3083,22 @@ def test_sparse_solver_matches_full_shifted_wgs_kim_quality(cartesian: bool) -> 
     phase, metadata = solve_phase(
         target,
         objective_kind="spots",
-        iterations=30,
         seed=23,
     )
-    reference = _shifted_wgs_kim_reference(target, iterations=30, seed=23)
-    normalized, ratio, efficiency = _support_quality(phase, target)
-    reference_normalized, reference_ratio, reference_efficiency = _support_quality(
-        reference, target
-    )
+    _normalized, ratio, efficiency = _support_quality(phase, target)
 
     assert metadata["transform"] == "selected-dft"
-    np.testing.assert_allclose(
-        normalized,
-        reference_normalized,
-        rtol=0.01,
-        atol=1e-4,
-    )
-    assert ratio == pytest.approx(reference_ratio, rel=0.01)
-    assert efficiency == pytest.approx(reference_efficiency, rel=0.01)
+    assert metadata["converged"]
+    assert ratio <= 1.01
+    assert metadata["support_intensity_ratio"] == pytest.approx(ratio, rel=2e-5)
+    assert metadata["diffraction_efficiency"] == pytest.approx(efficiency, rel=2e-5)
+    background = _full_focal_background(phase, target) / metadata["background_reference_intensity"]
+    assert background <= .05
+    assert metadata["background_intensity_ratio"] == pytest.approx(background, rel=2e-5)
+    # Independently inspect between native bins under the user's five-percent
+    # acceptance; this is not another iterative stage or a tighter hard gate.
+    fine_background = _full_focal_background(phase, target, sampling=4) / metadata["background_reference_intensity"]
+    assert fine_background <= .05
 
 
 def test_selected_dft_active_mask_preserves_spot_order_and_hot_state() -> None:
@@ -3126,6 +3137,7 @@ def test_selected_dft_active_mask_preserves_spot_order_and_hot_state() -> None:
         objective_kind="spots",
         iterations=1,
         spot_optimizer_state=state,
+        initial_phase=_phase,
     )
     assert hot_metadata["transform"] == "selected-dft"
     assert hot_metadata["optimizer_state_status"] == "reused"
@@ -3162,16 +3174,17 @@ def test_sparse_solver_early_stops_only_after_exact_returned_phase_quality(
         seed=31,
         stop_requested=keep_running,
     )
-    assert calls == 24
-    assert exact_metadata["iterations"] == 24
-    assert exact_metadata["iterations_run"] == 24
-    assert exact_metadata["early_stopped"] is False
-    assert exact_metadata["stop_reason"] == "iteration-limit"
+    assert calls >= exact_metadata["iterations"]
+    assert exact_metadata["iterations"] <= 24
+    assert exact_metadata["iterations_run"] <= 24
+    if not exact_metadata["converged"]:
+        assert exact_metadata["iterations"] == 24
+        assert exact_metadata["stop_reason"] == "iteration-limit"
 
     phase, metadata = solve_phase(target, objective_kind="spots", seed=31)
     _normalized, ratio, _efficiency = _support_quality(phase, target)
     assert metadata["early_stopped"] is True
-    assert metadata["stop_reason"] == "support-ratio"
+    assert metadata["stop_reason"] == "full-field-optical-constraints"
     assert metadata["transform"] == "selected-dft"
     assert metadata["support_intensity_ratio"] <= 1.01
     assert ratio <= 1.01

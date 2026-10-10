@@ -553,7 +553,7 @@ Node new chunk
 
 - Feedback独占run期间只装载一次已解析Pulse，每个candidate只执行一次用户指定的shot batch；正常DONE不追加SAFE，异常/Stop才SAFE。任何board fault或无法证明DONE都不能用camera帧数代替完成证明，也不能同phase自动重拍一整批。已完成candidate仍按现有partial出口保存，不改变控制权重算法。
 
-- 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
+- 静态spots以WGS-Kim/selected DFT作高效率初值，再以同一加权反馈约束整个焦面的背景；数值光瞳主瓣包络只作投影软目标/诊断，不要求实际阱形精确等于理想单阱。只在目标点均匀不足以代表整幅合格。静态目标未指定光学相位，不额外冻结全域阶段的相位；最终按实际16-bit Pattern复验亮点和背景。默认预算未收敛通过原error出口拒绝；显式迭代预算只运行指定总数并如实返回converged。cold/warm复用同一全域更新，warm使用caller持有的实际initial_phase，不能从稀疏系数覆盖它；原小state只保存优化参考及固定背景强度基准，不另存一张相位图。未改输入且已验证合格时保持原相位，不作无意义迭代。完整FFT增加的冷/暖代价必须报告，不以降低暗区要求伪装成性能收益。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
 - Feedback mode是leaf-owned显式字段，其中两个qCMOS mode：`qcmos_bright_dark`（观测量=每site双高斯拟合的bright_mean−dark_mean，trap越深occupied越暗，plant sign −1）与`qcmos_loading_rate`（观测量=同一拟合阈值判为bright的shot份额及其二项误差，loading随depth上升直到ceiling，plant sign +1）。两个mode的差别只是一条`FeedbackObservable`记录（键名、标签、历史字段名、plant sign）；分半收敛、pooled plant slope、share分配、probe/bracket都通过这条记录读观测量，不知道自己在哪个mode。分类用的是本batch自己拟出的两个population，不用Calibration的阈值——trap光变了荧光就变了；loading到ceiling时plant slope趋零、估计不可信则回落到假定斜率半增益，分半随即判出无可分辨的dispersion而停。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
 - 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；同一逐帧publication经mean reduction实时显示，Feedback只把完整registered Target SiteMap写入该次camera run geometry，不发布第二份camera数据或三帧reference判据。
@@ -575,18 +575,18 @@ Node new chunk
 ### 8.4 GPU二维重排
 
 - 运输与实验末态使用两项显式均匀度参数：首张去阱图和中间帧默认weighted max/min≤1.10，实际最后一张图默认≤1.01；只有一张时必须按末态门。离线端点继续使用末态门，改变运输门不重备光学工作区。LPI和Iterative共用按实际输出帧选择门限的规则，不改变N、帧率、连续间距、相位或Iterative消光要求。已验证不变图只有满足当前帧的门才可复用，不能把10%的中间图直接作为1%的末图。
-- LPI在线收敛检查和幅度修正放在既有GPU工作区的CUDA条件循环内：每轮以float64累积强度比、判断当前门和原迭代上限，达标即退出，CPU每图只读取一次最终光场/状态。不用固定跑满迭代或CPU逐轮读取一个布尔值替代；有界完成后先处理Stop，再提交已通过当前门的图。沿用原Graph/工作区释放，不增加线程、通用执行器或另一套数学实现。
+- 两种GPU重排方法的全域校正、收敛检查放在既有工作区的CUDA条件循环内：float64归约质量指标，CPU每图只读一次最终光场/状态，不逐轮等布尔值，也不固定跑满。裁剪背景后必须重新测量分数坐标复场再形成亮点残差，不能把裁剪前的残差加到已经改变的场上。暖启动继承相位修正，并只在初值上恢复一次当前几何的信号尺度，不能逐帧把低效率变成新目标。完整循环有界，Stop后不交付新图；Graph/光学工作区沿原owner释放，固定光学图不随影片N变化重建。
 - 同一求解stream的cuBLAS handles共用准备时分配的4 MiB scratch，setStream后绑定，避免库在每次Graph执行内分配/释放。条件图用官方CUDA bindings创建，仍属于原gpu owner；扩容/关闭先销毁graph与exec再释放数组。预热明确零更新预算，不能继承上一帧的修正次数；零帧、逐帧报告和事后诊断使用同一frame_support_tolerances事实。
 
 - 用户要求已准备的SLM GPU持续保持低延迟：同进程同device共享一份独立显存读写保温资源，不为每个Task复制heater，也不动科学数组、SLM设备或系统全局锁频。资源仅属于已有prepared所有者；Stop保留，最后一个prepared关闭时停止线程并释放。正式准备、Graph捕获、计算与诊断通过同一个短活动计数让保温让出；不把多个正式求解整段串行。保温负载和暂停成本必须实测，不能把小于L2的无效轻触或一次短唤醒当成已解决冷启动。
 
-- LPI在线阶段不为未播放的目标子集另作端点求解；已准备的端点系数保留指定相位，只作实际输出的初值，实际终点与其它帧共用原幅度校正及质量门。子集到达目标时保留原64次修正能力，不削成普通帧16次；显式iterations仍优先。编码直接打包到测量输入，删除随后立即重读的整幅复光场；编码数学及实际场校验不变。保存的endpoint事实来自真正末图，不另存未播放endpoint_phase；作者帧数、帧率、相位轨迹及容差不变。
+- LPI在线阶段不为未播放的目标子集另作端点求解；已准备的端点系数只作实际输出的初值，实际终点与其它帧共用完整光场校正。默认总更新预算128，显式iterations优先；末图只收紧公开均匀度，不缩减求解能力。保存的endpoint事实来自真正末图，不另存未播放endpoint_phase；作者帧数、帧率及相位轨迹不变。
 
 - 同一Task提供`phase_method=iterative|lpi`，默认LPI、保留Iterative。只切换相位生成；占据、源/目标政策、指派、分数坐标路径、间距检查、逻辑相位码和设备mapping及流水线共用。整体光功率因去阱重新分配是允许的，不加恒功率约束；检查相对目标权重的均匀度及相位/过渡。最小trap间距是可调硬约束，默认15个原生Fourier像素，与SLM Target的25 gap同单位。
-- LPI从实际source和离线target站点复场，在相同光学轴参考下沿最短模2π分支插值；没有位移的identity保持源相位，零运动不追加突变的target相位帧。不额外发明像素相位混合算法，也不把稀疏场重建声称为原始完整hologram。端点参考和实际编码结果分开。
+- LPI目标端点独立WGS求解，不能从另一个源阵列复制重合位置的相位。所有保留阱（包括原地不动的阱）从实际source场相位沿同一光轴参考的最短模2π分支插值到实际target场相位；有去阱且N>1时首图保留源相位，其余图平滑到终态，纯no-op仍保持准确输入。稀疏合成系数只是初值，不等于实际焦面复场，也不能宣称能重建已作全域校正的完整hologram。
 - fixed与camera_step只决定总N，之后完全共用保留全部waypoint的采样、相位进度和去阱序列；相同计划与N不得因模式不同改变运动。camera_step由具体Task经既有注册及公共图像坐标转换提供原始sensor路径，公共采样器从ceil(最长实际路径/最大步长)选择N；多段让行所需的额外采样也由同一采样器计算，不保留Task专属motion_fractions。固定N不足以保留waypoint时明确拒绝；不隐藏增图、切角或改变路径。结果记录实际N/最大位移/名义时长，真实发出线段仍须通过同一连续间距检查。
 - 共同时间参数按各段最大实际位移重建，删除全体静止的冗余结点、保留单个原子的让行；不继承绕行前的极小时间比例。分帧采用有界整数分配与二分，不按候选N逐帧追加。Auto生成的只读采样结果直接交给同一次Compute，不重新分配和验证整条轨迹。空占据统一零帧且不检查不存在的去阱动作；同位置但目标权重变化不是no-op，光学振幅进度与位置进度独立。整条路径不动且权重相同才可保持原图，闭合但中途移动的路径不能被端点相同吞掉。
-- LPI复用既有固定系数相位的幅度均衡，准备阶段保存source/target的合成补偿系数和实际光场，不能把站点FFT幅度当作可重建hologram的补偿权重。运动帧插值后只更新幅度、不改变该帧指定的系数相位；按保留站点相对目标权重通过均匀度门后才提交，记录真实更新次数，不声称论文的一次IFFT。iterative继续原active/discard门；LPI不进入其自由相位暗区投影。背景、移除区域和pupil步长在复拍后由同一物理算子测量，未评估为unknown，不能伪报消光或液晶无闪烁。
+- LPI先作一次稀疏合成，随后与Iterative共用实际编码后的全焦面校正；LPI以本帧指定的实际焦面相位为目标，Iterative允许其随当前场延续。不能先为亮点反复均衡、随后在另一条独立暗区路线再次求解。完整焦面检查包含原来未占据和已经搬空的位置，不以source identity决定暗区；光瞳主瓣内外的残光、阱形与亮度效率分别核验，不把只有亮点均匀当作整个光场合格。迭代和代价如实记录，不声称论文的一次IFFT或液晶无闪烁。
 - 通用光学重排属于既有SLM solver：`plan_rearrangement(prepared, available_source_indices)`接收源roster的整数索引，`compute_rearrangement(prepared, plan)`只生成该明确计划的相位图；相机占据分类和自动目标生成由具体Task承担。固定源/目标、光瞳及GPU资源在采集前准备；第一张照片之后的选择、匹配、完整轨迹、全部全幅相位图、量化及回传共同计时。核心不扩展Runtime/Workbench，也不自行驱动设备。
 - 输入站点的数组顺序是身份。motion_frames默认16，为fixed政策实际发出总图数（包含终点、不含已显示的起点）。用户最终裁决：只用一张原地相位图移除不用的光阱，然后立即按共同plan.fraction路径移动；无多余光阱时不加此图。fixed总N包含该图且须留出移动帧，不另加等待或隐藏增图。返回真实分数格点，不把1280列FFT裁成1272列冒充同一坐标。共同采样保留waypoint，检查实际发出图之间的连续线段（包括起点）；空间路径可错时交叉。auto实际N在占据后确定，容量不足仅增长N相关缓冲/重绑graph，不重做固定光学准备或无界预留影片。
 - 重排核心输入初始Target、占据源索引及显式终点Target，匹配数为两者可用数量的较小值；主要目标为min(max_i L_i)，L_i是含绕行的实际欧氏路径长度，不是总路程、平方距离和或完成时间。瓶颈匹配同时选择源/目标子集；多余原子淡出，不足时保留全部可用原子并如实记录未填目标。已在目标位置的原子也允许重新指派和让位，不能固定不动。连续时间硬间距包含移动、静止和淡出期间尚未移除的原子；光学关阱不等于原子已离开。
@@ -598,7 +598,7 @@ Node new chunk
 - 连续最小距离计算先用初态距离及扣除公共平移后的残余位移构造保守pair下界；不可能比已知初态最小距离更小的pair不再逐段计算。候选仍使用同一精确线段最小距离公式，并计入浮点误差界；不能用采样距离、物理容差或特定阵列形状替代实际clearance。
 - 全幅相位约束校正、最终图的光阱强度与相位必须用同一个光学模型；紧凑频率支撑只减少严格为零的运算，不缩小物理孔径。Tensor Core数值误差须由独立全幅传播实测；未收敛如实返回失败，不放宽科学阈值凑时间。编译/初始化与在线计算分别报告。
 - 所有发出图共用同一分数Fourier合成、实际编码光场测量与幅度更新；不保留固定64轮全幅FFT的独立移除阶段，也不在阶段边界跳到重新求解的任意终点相位。相位从真实起始场沿原子身份连续延续，未占据光阱的淡出合入同一序列；明确报告保留光阱峰值光强比例与相邻帧相位变化，不把相对均匀度等同于绝对阱深或实验存活率。少量初始更新后只修正未达本次公开质量门的帧，不能默默放宽门限；没有通过的预测模型不作为依赖保留。
-- 丢弃占据源不仅是系数归零：淡出完成后，每个被丢弃占据站点的5×5原生Fourier像素区域最大光强须≤该站点初始中心光强的0.01。同一稀疏Fourier算子作自适应复光场投影（每帧最多64次，bright相位随当前场延续），携带前帧校正；位置/期望谱不变且已通过门限时复用同一已验证相位图。其它未占据位置背景仍为诊断。此数值消光门不是原子已离开或不会再装载的证明；焦面站点相位步长与pupil加权像素相位步长RMS分别命名、分别保存。
+- 丢弃占据源不仅是系数归零。移除旧的仅occupied-discard 5×5局部投影，改为同一数值光瞳下的完整原生焦面校正；全域背景与目标自然主瓣分开处理，强峰不能被转移到未检查区域。原生网格不能发现样点之间的全部峰，事后报告因此对实际相位码作4倍零填充传播，每个活跃目标只认领一个主峰，其余峰即使落在主瓣邻域也保留诊断；坐标仍保存原生Fourier像素单位。用户接受最强未认领峰≤最弱初始阱强度的5%，与目标阱均匀度是不同指标。保留已验证快版的原生1%迭代停止目标，不把2倍细网格迭代加回在线链；细采样验收不改变物理孔径、不阻塞播放，也不宣称连续光场上界或实验原子无损。
 - 本轮上机复用已验证的相位投影/幅度更新路径，不重新发明求解算法。科学验收仍基于实际发出的相位码、真实光瞳下的光强、峰位置、杂散光及刷新过程，不取消检查。规则频率格点可严格归并同周期的实际光瞳振幅，再恢复原生全幅；稀疏频率只删严格为零的运算，不改变孔径或另建光学真相源。
 - GPU重排的8-bit相位编码用固定物理像素位置决定的空间取整误差分散，避免周期相位图的取整误差在光阱处相干叠加；不逐帧换随机图样。所有质量指标来自编码后的完整相位及真实光瞳。它仍是`2π/256`逻辑相位码，不是设备灰度，普通静态Science Context/设备mapping不因此改变格式或另建映射。
 - Fourier核在正、负横坐标上的共轭关系可用于共享矩阵乘法：合成时分别重建两侧物理像素，分析时先施加每个像素自己的光瞳/入射场，再组合真实场的和与差。中心只计一次，偶数宽度的独立负边缘不能当作正边缘。这是同一完整孔径算子的代数化简，不要求光束对称，也不允许裁掉一半像素；粗计算和最终FP32验收共用此数学。
@@ -644,6 +644,7 @@ Node new chunk
 - Calibration保持既有科学流程、当前artifact和三帧preview。
 - 密集站点的检测与定位输入分开：带通average/相邻差分只用于admission与身份，亚像素精定位使用同次流式累加的原始reference平均图，不能把带通负环当作Gaussian光斑。定位在实际像素积分模型中联合考虑已检测邻居的独立幅度和中心，不把阵列吸附到规则网格、不以读出窗口重叠拒绝小间距；稀疏站点自然退化为同一模型的单峰。邻居耦合和中心精度用真实数据证据及已知真值合成图分别核验，不能用拟合网格更整齐代替位置正确。
 - PSF模板从逐reference长曝光图及其自身有效占据标签联合回归得到，分离相关加载邻居与常数背景；不能把条件bright−dark均值里仍含的邻居贡献当作单阱PSF。新Calibration用这些实测模板在既有每site局部窗口中求最小噪声范数的线性去混权重，本site单位响应、可辨识邻居零响应；权重允许为负，在线仍沿原gather/点积，不逐帧重做求解。不能辨识的模板沿现有usable/valid事实保持不可用，不以伪Gaussian补齐。Uniform PSF共用实测光斑形状而非强制各site最终去混权重相同。BOX仍为实际窗口总和；新权重经过原阈值拟合流程，读取旧Calibration不重算权重或更改旧阈值。
+- 模板回归只包含本窗口空间支持相交的站点，有效帧及可辨识性也只在该局部问题判断；不能让远端invalid剔除本地训练帧，或因全阵站点数多于拍照数就把可分辨的局部光斑判为无解。相关邻居无法分别辨识时，仍保留其可观测联合响应作为本窗口的去混干扰项，不假造单站PSF，也不将它们的光直接忽略。局部rank/condition按site报告，不把相互独立局部拟合的秩相加伪称全局秩。
 - Calibration site detection只有两条并列证据：相邻reference frames的空间带通差值，以及全部reference frames的空间带通average。一个明显相邻帧变化即可保留single-loading possible site；steady/high-loading site由average保留。两条路径使用同一个authored `detection_sigma`下限并按全图/transition数量提高family-wise bar；site identity始终取完整average的局部峰。不得按奇偶/half分帧，不得用split consistency、全局saddle heuristic或单帧亮度bar（「该处是否曾在某一帧亮过」）否决已经成立的证据：亮邻居带通暗环里的弱trap在任何单帧都不高于背景，它仍是trap。difference证据只在变化本身成峰处成立：按求和后的变化幅度与外一圈（spot尺度）比较，trap自己的变化在邻居暗环之上再叠一个峰，而未加载lattice cell的中心是邻居变化的凹底（变化向制造它的邻居方向增长），不是site。
 - Calibration可由operator显式开启detected-site review：采集与site detection都只执行一次；检测完成后由同一run的短期companion producer发布reference average与candidate SiteMap，TaskConsole允许单点或框选排除高阶衍射/ghost site。确认后只用保留站点构造最终SiteMap并执行一次全部下游拟合；不重新采集、不重新检测、不二次确认。窗口壳、搜索、site checkbox、scroll、status与buttons全部由`zlc_ui` Fluent view拥有，`zlc_plot`只拥有Image surface的point/rectangle gesture与overlay，Workbench只连接两者。最终报告同时保存candidate/excluded/final identity映射和可由FigureViewer重开的`site_review` Figure/PNG；不开启时外部行为与artifact集合不变。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。

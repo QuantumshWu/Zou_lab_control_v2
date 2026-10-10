@@ -423,8 +423,12 @@ class SlmRearrangementTask:
                         "brightness_minimum_to_initial", "brightness_maximum_to_initial",
                         "brightness_mean_to_initial", "phase_change_from_initial_rms_rad", "focal_phase_error_rms_rad", "phase_step_max_rad",
                         "pupil_phase_step_rms_rad", "discard_intensity_ratios", "field_projection_updates",
+                        "background_limit_ratios", "focal_phase_error_max_rad", "main_lobe_envelope_ratios",
                         "frame_solve_ms", "frame_copy_ms", "frame_ready_ms",
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
+                        "background_peak_yx", "background_peak_intensity", "background_peak_to_initial_ratios",
+                        "target_peak_yx", "target_peak_intensity", "source_site_intensities",
+                        "source_site_intensity_ratios", "source_site_is_active",
                         "actual_fields", "active_sites", "movement_fraction", "phase_center_yx",
                         "desired_spectrum_coefficients", "target_synthesis_coefficients",
                         "endpoint_synthesis_coefficients", "endpoint_field",
@@ -508,8 +512,21 @@ class SlmRearrangementTask:
                  "discard_reference_limit", "discard_converged", "converged",
                  "noop", "fade_frames", "emitted_frame_count", "quality_evaluated",
                  "quality_scope", "quality_accepted", "phase_interpolation", "field_phase_reference",
-                 "source_coefficient_basis", "target_coefficient_basis", "phase_locked_amplitude_updates",
+                 "source_coefficient_basis", "target_coefficient_basis", "background_reference_intensity",
                  "endpoint_support_intensity_ratio", "endpoint_iterations", "endpoint_balance_ms") if key in self._result}
+            if "background_scope" in self._result:
+                summary["focal_background_diagnostics"] = {
+                    key: self._result[key] for key in (
+                        "background_scope", "peak_position_basis", "peak_assignment",
+                        "background_initial_reference_intensity", "background_peak_tolerance")}
+                peaks = np.asarray(self._result["background_peak_to_initial_ratios"])
+                if len(peaks):
+                    summary["focal_background_diagnostics"].update(
+                        maximum_peak_to_initial_ratio=float(peaks.max()),
+                        final_peak_to_initial_ratio=float(peaks[-1]),
+                        final_peak_yx=(np.asarray(self._result["background_peak_yx"])[-1].tolist()
+                                       if self._result["background_peak_intensity"][-1] > 0 else None),
+                        final_peak_to_weakest_target_ratio=float(self._result["background_intensity_ratios"][-1]))
             minimum = np.asarray(self._result["brightness_minimum_to_initial"])
             maximum = np.asarray(self._result["brightness_maximum_to_initial"])
             if len(minimum):

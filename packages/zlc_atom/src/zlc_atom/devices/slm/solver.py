@@ -1031,6 +1031,7 @@ def _unit_phase(values: np.ndarray, epsilon: float) -> np.ndarray:
 #: canonical phase both read it, and a caller that needs a tighter answer
 #: passes ``support_tolerance`` to ``solve_phase`` instead of editing here.
 SPOT_SUPPORT_TOLERANCE = 1.01
+SPOT_BACKGROUND_TOLERANCE = .05
 
 
 def _support_intensity_ratio(
@@ -1251,11 +1252,6 @@ def _canonical_unshifted_phase(field: np.ndarray) -> np.ndarray:
     _stripes(stripe, field.shape[0], field.size)
     return phase
 
-def _phase_snapshot(field: np.ndarray) -> np.ndarray:
-    from scipy import fft  # noqa: PLC0415
-
-    return _readonly(fft.fftshift(_canonical_unshifted_phase(field)))
-
 def _cartesian_support(
     support: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -1271,6 +1267,97 @@ def _cartesian_support(
         return None
     active = support[np.ix_(rows, columns)]
     return rows, columns, active
+
+
+def _spot_background_projection(field, pupil, support, amplitude, weights, *,
+                                iterations, minimum_iterations, tolerance, reference,
+                                restore_scale, stop_requested):
+    """Weighted GS with full-field background and natural main-lobe bounds."""
+    from scipy import fft  # noqa: PLC0415
+
+    shape = np.asarray(field.shape)
+    psf = np.square(abs(fft.fft2(pupil, norm="ortho", workers=4)), dtype=np.float32)
+    psf /= psf[0, 0]
+    centered = fft.fftshift(psf)
+    offsets = np.argwhere(_psf_main_lobe(centered, tuple(shape // 2))) - shape // 2
+    psf_values = psf[tuple((offsets % shape).T)]
+    profile = np.zeros(field.shape, np.float32)
+    for point, weight in zip(np.argwhere(support), amplitude * amplitude, strict=True):
+        positions = (point + offsets) % shape
+        np.maximum.at(profile, tuple(positions.T), weight * psf_values)
+    inside, outside = profile > 0, profile == 0
+    magnitude = np.empty(field.shape, np.float32)
+    mask = np.empty(field.shape, bool)
+    cap = np.empty(field.shape, np.float32)
+    scratch = np.empty(field.shape, np.complex64)
+    candidate_field = np.empty(field.shape, np.complex64)
+    far = fft.fft2(field, norm="ortho", workers=4)
+    phase = _unit_phase(far[support], np.finfo(np.float32).eps)
+    if reference is None:
+        reference = float(np.min(abs(far[support].astype(np.complex128)) ** 2))
+    updates = 0
+    if restore_scale is not None and iterations:
+        far[support] = restore_scale * weights * phase
+        field = _project_field(fft.ifft2(far, norm="ortho", workers=4), pupil, magnitude, mask, scratch)
+        far = fft.fft2(field, norm="ortho", workers=4)
+        updates = 1
+
+    def measure(spectrum):
+        nonlocal phase
+        bright = spectrum[support].astype(np.complex128)
+        # A static target prescribes intensity, not a transport phase path.
+        # Preserve this iterate's actual phase while correcting its amplitude.
+        phase = _unit_phase(bright, np.finfo(np.float32).eps).astype(np.complex64)
+        scale = float(np.sum(abs(bright) * amplitude) / np.sum(amplitude.astype(float) ** 2))
+        np.multiply(profile, np.float32(scale * scale), out=cap)
+        np.maximum(cap, np.float32(.005 * reference), out=cap)
+        np.absolute(spectrum, out=magnitude)
+        np.square(magnitude, out=magnitude)
+        relative = abs(bright) ** 2 / amplitude.astype(float) ** 2
+        background = float(np.max(magnitude, where=outside, initial=0) / reference)
+        np.divide(magnitude, cap, out=magnitude)
+        envelope = float(np.max(magnitude, where=inside, initial=0))
+        ratio = float(relative.max() / relative.min())
+        return ratio, background, envelope, scale
+
+    while True:
+        if stop_requested is not None and stop_requested():
+            raise InterruptedError("SLM phase solve stopped")
+        ratio, background, envelope, scale = measure(far)
+        converged = ratio <= tolerance and background <= .01
+        if (converged and updates >= minimum_iterations) or updates == iterations:
+            result = freeze_pattern_phase(fft.fftshift(_canonical_unshifted_phase(field)), tuple(shape))
+            np.multiply(fft.ifftshift(result), np.complex64(1j), out=candidate_field)
+            np.exp(candidate_field, out=candidate_field)
+            candidate_field *= pupil
+            candidate_far = fft.fft2(candidate_field, norm="ortho", workers=4)
+            ratio, background, envelope, scale = measure(candidate_far)
+            converged = ratio <= tolerance and background <= .01
+            if converged or updates == iterations:
+                return result, candidate_far[support], phase, updates, {
+                    "converged": bool(converged), "support_intensity_ratio": ratio,
+                    "background_intensity_ratio": background,
+                    "main_lobe_envelope_ratio": envelope,
+                    "background_reference_intensity": reference,
+                }
+            field, far = candidate_field, candidate_far
+        # Retain WGS compensation: desired trap weights and the spectrum
+        # amplitudes needed to produce them are not interchangeable.
+        measured = abs(far[support]).astype(np.float32)
+        measured /= max(float(np.linalg.norm(measured)), np.finfo(np.float32).eps)
+        weights *= np.clip(amplitude / np.maximum(measured, np.finfo(np.float32).eps), .2, 5) ** np.float32(.8)
+        weights /= np.linalg.norm(weights)
+        np.absolute(far, out=magnitude)
+        np.maximum(magnitude, np.float32(1e-20), out=magnitude)
+        np.sqrt(cap, out=cap)
+        np.divide(cap, magnitude, out=cap)
+        np.minimum(cap, np.float32(1), out=cap)
+        far *= cap
+        far[support] = scale * weights * phase
+        field = _project_field(fft.ifft2(far, norm="ortho", workers=4), pupil, magnitude, mask, scratch)
+        far = fft.fft2(field, norm="ortho", workers=4)
+        updates += 1
+
 
 def solve_phase(
     target: object,
@@ -1374,7 +1461,7 @@ def solve_phase(
         resolved_kind = objective_kind
     method = "wgs-kim" if resolved_kind == "spots" else "mraf"
     if iterations is None:
-        count = 80 if method == "wgs-kim" else 300
+        count = 128 if method == "wgs-kim" else 300
     else:
         if isinstance(iterations, bool) or int(iterations) <= 0:
             raise ValueError("iterations must be a positive integer or None")
@@ -1401,14 +1488,16 @@ def solve_phase(
     state_status = "not-requested" if not state_requested else "created"
     support_yx: list[list[int]] | None = None
     fixed_phase: np.ndarray | None = None
+    background_reference = None
+    restore_scale = None
+    spot_quality: dict[str, object] = {}
     weights: np.ndarray
     if method == "wgs-kim":
         cartesian = _cartesian_support(support_unshifted)
         if cartesian is None:
             desired_spots = desired_unshifted[support_unshifted]
             constrained = np.zeros(desired.shape, dtype=np.complex64)
-            if saved_state is not None:
-                state_status = "support-changed"
+            support_yx = ((np.argwhere(support_unshifted) + np.asarray(desired.shape) // 2) % desired.shape).tolist()
         else:
             rows, columns, active = cartesian
             desired_spots = desired_unshifted[np.ix_(rows, columns)][active]
@@ -1450,7 +1539,7 @@ def solve_phase(
         )
         amplitude_spots /= np.linalg.norm(amplitude_spots)
 
-        if saved_state is not None and transform == "selected-dft":
+        if saved_state is not None:
             if saved_state.get("objective_kind") != "spots":
                 state_status = "objective-changed"
             elif saved_state.get("pupil_source") != pupil_source:
@@ -1471,6 +1560,7 @@ def solve_phase(
                     saved_amplitudes = np.asarray(
                         saved_state["target_amplitudes"], dtype=np.float32
                     )
+                    background_reference = float(saved_state["background_reference_intensity"])
                 except (KeyError, TypeError, ValueError):
                     state_status = "invalid"
                 else:
@@ -1486,9 +1576,12 @@ def solve_phase(
                         or not np.all(np.isfinite(saved_amplitudes))
                         or np.any(saved_weights <= 0.0)
                         or np.any(saved_amplitudes <= 0.0)
+                        or not np.isfinite(background_reference) or background_reference <= 0
                     ):
                         state_status = "invalid"
                     else:
+                        if initial_phase is None:
+                            raise ValueError("reusing spot_optimizer_state requires the actual initial_phase")
                         fixed_phase = np.exp(
                             np.complex64(1j) * saved_fixed
                         ).astype(np.complex64, copy=False)
@@ -1497,40 +1590,54 @@ def solve_phase(
                         weights /= max(float(np.linalg.norm(weights)), epsilon)
                         if stop_requested is not None and stop_requested():
                             raise InterruptedError("SLM phase solve stopped")
-                        constrained_selected.fill(0.0)
-                        constrained_selected[active] = weights * fixed_phase
-                        np.matmul(
-                            row_backward @ constrained_selected,
-                            column_backward,
-                            out=plane_scratch,
-                        )
-                        field = _project_field(
-                            plane_scratch,
-                            pupil_unshifted,
-                            plane_magnitude,
-                            plane_mask,
-                            field_buffer,
-                        )
+                        if not np.array_equal(amplitude_spots, saved_amplitudes):
+                            if transform == "selected-dft":
+                                constrained_selected.fill(0)
+                                constrained_selected[active] = weights * fixed_phase
+                                np.matmul(row_backward @ constrained_selected, column_backward, out=plane_scratch)
+                            else:
+                                constrained.fill(0)
+                                constrained[support_unshifted] = weights * fixed_phase
+                                plane_scratch[:] = fft.ifft2(constrained, norm="ortho")
+                            baseline = _project_field(plane_scratch, pupil_unshifted, plane_magnitude, plane_mask, field_buffer)
+                            baseline_bright = fft.fft2(baseline, norm="ortho")[support_unshifted]
+                            restore_scale = float(np.sum((baseline_bright * fixed_phase.conj()).real * amplitude_spots))
+                        phase = fft.ifftshift(canonical_phase(initial_phase, desired.shape))
+                        np.multiply(phase, np.complex64(1j), out=field_buffer)
+                        np.exp(field_buffer, out=field_buffer)
+                        field_buffer *= pupil_unshifted
+                        field = field_buffer
                         hot_start_used = True
                         state_status = "reused"
 
         if not hot_start_used:
+            background_reference = None
+            weights = np.array(amplitude_spots, copy=True)
             if initial_phase is None:
-                phase = np.random.default_rng(seed_value).uniform(
-                    0.0, 2.0 * np.pi, desired.shape
-                ).astype(np.float32)
+                # Start from the desired virtual spots, as the GPU endpoint
+                # solver does, rather than a full plane of random speckle.
+                seed_phase = np.random.default_rng(seed_value).uniform(-np.pi, np.pi, len(weights)).astype(np.float32)
+                seed_values = weights * np.exp(np.complex64(1j) * seed_phase)
+                if transform == "selected-dft":
+                    constrained_selected.fill(0)
+                    constrained_selected[active] = seed_values
+                    np.matmul(row_backward @ constrained_selected, column_backward, out=plane_scratch)
+                else:
+                    constrained.fill(0)
+                    constrained[support_unshifted] = seed_values
+                    plane_scratch[:] = fft.ifft2(constrained, norm="ortho")
+                field = _project_field(plane_scratch, pupil_unshifted, plane_magnitude, plane_mask, field_buffer)
             else:
                 phase = np.array(
                     canonical_phase(initial_phase, desired.shape), copy=True
                 )
-            np.multiply(phase, np.complex64(1j), out=plane_scratch)
-            np.exp(plane_scratch, out=plane_scratch)
-            plane_scratch *= pupil
-            field = fft.ifftshift(plane_scratch)
-            weights = np.array(amplitude_spots, copy=True)
+                np.multiply(phase, np.complex64(1j), out=plane_scratch)
+                np.exp(plane_scratch, out=plane_scratch)
+                plane_scratch *= pupil
+                field = fft.ifftshift(plane_scratch)
 
         selected: np.ndarray | None = None
-        while iterations_run < count:
+        while not hot_start_used and iterations_run < count:
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM phase solve stopped")
             if selected is None:
@@ -1574,58 +1681,30 @@ def solve_phase(
             )
             iterations_run += 1
             selected = None
-
-            gate_start = max(1 if hot_start_used else 12, minimum_passes)
-            if iterations is None and iterations_run >= gate_start:
+            if iterations_run >= 12:
                 if transform == "selected-dft":
-                    selected_grid = (
-                        row_forward @ (field @ column_forward_transposed)
-                    )
-                    selected = selected_grid[active]
+                    selected = (row_forward @ (field @ column_forward_transposed))[active]
                 else:
-                    far = fft.fft2(field, norm="ortho")
-                    selected = far[support_unshifted]
-                magnitude = np.abs(selected).astype(np.float32, copy=False)
-                support_ratio = _support_intensity_ratio(
-                    magnitude, desired_spots, epsilon
-                )
-                checked_result = None
-                checked_selected = None
-                if support_ratio <= tolerance:
-                    candidate_phase = _canonical_unshifted_phase(field)
-                    candidate_field = np.empty(
-                        desired.shape, dtype=np.complex64
-                    )
-                    np.multiply(
-                        candidate_phase,
-                        np.complex64(1j),
-                        out=candidate_field,
-                    )
-                    np.exp(candidate_field, out=candidate_field)
-                    candidate_field *= pupil_unshifted
-                    if transform == "selected-dft":
-                        candidate_grid = (
-                            row_forward
-                            @ (candidate_field @ column_forward_transposed)
-                        )
-                        candidate_selected = candidate_grid[active]
-                    else:
-                        candidate_far = fft.fft2(candidate_field, norm="ortho")
-                        candidate_selected = candidate_far[support_unshifted]
-                    candidate_ratio = _support_intensity_ratio(
-                        np.abs(candidate_selected).astype(
-                            np.float32, copy=False
-                        ),
-                        desired_spots,
-                        epsilon,
-                    )
-                    if candidate_ratio <= tolerance:
-                        checked_result = _readonly(
-                            fft.fftshift(candidate_phase)
-                        )
-                        checked_selected = candidate_selected
-                        early_stopped = True
-                        break
+                    selected = fft.fft2(field, norm="ortho")[support_unshifted]
+                if _support_intensity_ratio(abs(selected), desired_spots, epsilon) <= tolerance:
+                    break
+
+        checked_result, checked_selected, fixed_phase, updates, spot_quality = _spot_background_projection(
+            field, pupil_unshifted, support_unshifted, amplitude_spots, weights,
+            iterations=count - iterations_run,
+            minimum_iterations=(0 if hot_start_used and minimum_passes == 1
+                                and np.array_equal(amplitude_spots, saved_amplitudes)
+                                else max(0, minimum_passes - iterations_run)),
+            tolerance=tolerance, reference=background_reference, restore_scale=restore_scale,
+            stop_requested=stop_requested)
+        iterations_run += updates
+        early_stopped = bool(spot_quality["converged"] and iterations_run < count)
+        background_reference = spot_quality["background_reference_intensity"]
+        if iterations is None and not spot_quality["converged"]:
+            raise RuntimeError("SLM phase solve did not meet full-field optical constraints: "
+                               f"bright ratio {spot_quality['support_intensity_ratio']:.6g} (limit {tolerance:g}), "
+                               f"background {spot_quality['background_intensity_ratio']:.6g}, "
+                               f"main-lobe envelope {spot_quality['main_lobe_envelope_ratio']:.6g} (diagnostic)")
     else:
         if saved_state is not None:
             state_status = "objective-changed"
@@ -1820,31 +1899,12 @@ def solve_phase(
             iterations_run += 1
 
     if method == "wgs-kim":
-        result = (
-            checked_result
-            if checked_result is not None
-            else _phase_snapshot(field)
-        )
+        result = checked_result
     else:
         result = canonical_phase(fft.fftshift(np.angle(field)), desired.shape)
 
-    if method == "wgs-kim" and transform == "selected-dft":
-        if checked_selected is None:
-            final_field = np.empty(desired.shape, dtype=np.complex64)
-            np.multiply(
-                fft.ifftshift(result),
-                np.complex64(1j),
-                out=final_field,
-            )
-            np.exp(final_field, out=final_field)
-            final_field *= pupil_unshifted
-            final_grid = (
-                row_forward @ (final_field @ column_forward_transposed)
-            )
-            final_selected = final_grid[active]
-        else:
-            final_selected = checked_selected
-        final_magnitude = np.abs(final_selected).astype(
+    if method == "wgs-kim":
+        final_magnitude = np.abs(checked_selected).astype(
             np.float32, copy=False
         )
         total_power = float(np.sum(np.square(pupil, dtype=np.float32)))
@@ -1857,13 +1917,7 @@ def solve_phase(
             np.float32, copy=False
         )
         total_power = float(np.sum(np.square(np.abs(final), dtype=np.float32)))
-    support_ratio = (
-        _support_intensity_ratio(
-            final_magnitude, desired_unshifted[support_unshifted], epsilon
-        )
-        if method == "wgs-kim"
-        else None
-    )
+    support_ratio = float(spot_quality["support_intensity_ratio"]) if method == "wgs-kim" else None
     measured = np.square(final_magnitude, dtype=np.float32)
     measured /= max(float(np.sum(measured)), epsilon)
     expected = desired_unshifted[support_unshifted]
@@ -1877,7 +1931,6 @@ def solve_phase(
     new_state: dict[str, object] = {}
     if (
         method == "wgs-kim"
-        and transform == "selected-dft"
         and fixed_phase is not None
         and support_yx is not None
     ):
@@ -1889,6 +1942,7 @@ def solve_phase(
             "fixed_farfield_phase": np.angle(fixed_phase).astype(float).tolist(),
             "site_weights": weights.astype(float).tolist(),
             "target_amplitudes": amplitude_spots.astype(float).tolist(),
+            "background_reference_intensity": background_reference,
         }
         if state_requested and saved_state is None:
             state_status = "created"
@@ -1914,7 +1968,7 @@ def solve_phase(
         "max_iterations": count,
         "early_stopped": early_stopped,
         "stop_reason": (
-            "support-ratio"
+            "full-field-optical-constraints"
             if early_stopped and method == "wgs-kim"
             else "interior-uniformity"
             if early_stopped and stop_was_interior
@@ -1930,6 +1984,10 @@ def solve_phase(
         metadata["image_seed"] = image_seed
         metadata["coarse_iterations"] = coarse_iterations
     if support_ratio is not None:
+        metadata.update(spot_quality)
+        metadata["quality_transform"] = "full-fft"
+        metadata["refinement"] = "weighted-gs-with-bounded-background"
+        metadata["phase_encoding"] = "uint16:2pi/65536"
         metadata["support_intensity_ratio"] = support_ratio
         metadata["support_tolerance"] = tolerance
         metadata["minimum_iterations"] = minimum_passes
@@ -2577,10 +2635,14 @@ extern "C" __global__ void field_project(const unsigned char* input,float2* fiel
  unsigned char* codes,int H,int W,int P,int mode){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;float re,im,s,c;unsigned char code;
  if(mode==0){code=input[i];}
+ else if(mode==1){
+  float2 e=field[i],a=previous_corrected[i],b=previous_base[i];
+  double correction=atan2((double)a.y*b.x-(double)a.x*b.y,(double)a.x*b.x+(double)a.y*b.y);
+  code=phase_code((double)atan2f(e.y,e.x)+correction-(double)incident[i],i);
+ }
  else{
   float2 e=field[i];re=e.x;im=e.y;
-  if(mode==1){re+=previous_corrected[i].x-previous_base[i].x;im+=previous_corrected[i].y-previous_base[i].y;}
-  else{float2 d=synthesis_pixel(delta,i/W,i%W,H,W,P);re+=d.x/(H*W);im+=d.y/(H*W);}
+  float2 d=synthesis_pixel(delta,i/W,i%W,H,W,P);re+=d.x/(H*W);im+=d.y/(H*W);
   code=phase_code((double)atan2f(im,re)-(double)incident[i],i);
  }
  codes[i]=code;sincosf(code*.02454369260617025968f+incident[i],&s,&c);
@@ -2660,27 +2722,70 @@ extern "C" __global__ void anderson_update(const float2* field,const float* targ
   float* gh,float* rh,double* candidate,int* state,int N,float exponent){
   anderson_apply(field,target,c,phase,gh,rh,candidate,state,N,exponent);
 }
-extern "C" __global__ void lpi_update(const float2* field,const float* target,float2* c,const float2* phase,
-  float* gh,float* rh,double* candidate,int* state,int N,float exponent,const double* control){
-  if(control[3]!=0)anderson_apply(field,target,c,phase,gh,rh,candidate,state,N,exponent);
-}
 extern "C" __device__ __cudart_builtin__ void cudaGraphSetConditional(unsigned long long,unsigned int);
-extern "C" __global__ void lpi_check(unsigned long long handle,const float2* field,const double* targets,
-  const int* frame,double* control,float2* result,int N){
-  __shared__ double lows[256],highs[256];__shared__ int bad;
-  int t=threadIdx.x;if(!t)bad=0;__syncthreads();
-  double infinity=__longlong_as_double(0x7ff0000000000000LL),lo=infinity,hi=0;
-  for(int j=t;j<N;j+=256){double target=targets[(*frame-1)*N+j];if(target<=0)continue;
-    float2 e=field[j];double magnitude=hypot((double)e.x/target,(double)e.y/target),v=magnitude*magnitude;
-    if(!isfinite(v))atomicExch(&bad,1);lo=fmin(lo,v);hi=fmax(hi,v);}
-  lows[t]=lo;highs[t]=hi;__syncthreads();
-  for(int k=128;k;k/=2){if(t<k){lows[t]=fmin(lows[t],lows[t+k]);highs[t]=fmax(highs[t],highs[t+k]);}__syncthreads();}
-  if(!t){double ratio=bad||lows[0]<=0?infinity:highs[0]/lows[0];
-    unsigned int more=!(ratio<=control[2])&&control[0]<control[1];control[3]=more;
-    if(more)control[0]+=1;else result[N]=make_float2((float)control[0],0);
-    cudaGraphSetConditional(handle,more);}
-  __syncthreads();
-  if(control[3]==0)for(int j=t;j<N;j+=256)result[j]=field[j];
+extern "C" __global__ void focal_profile(const long long* indices,const float* values,float* profile,int N){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N)atomicMax((unsigned int*)(profile+indices[i]),__float_as_uint(values[i]));
+}
+extern "C" __global__ void focal_cap(float2* spectrum,const float* profile,
+  double* maxima,const double* control,int area){
+  __shared__ double values[2][256];int t=threadIdx.x,i=blockIdx.x*256+t;double bg=0,excess=0;
+  if(i<area){float2 e=spectrum[i];double v=(double)e.x*e.x+(double)e.y*e.y;
+    float envelope=profile[i];
+    double cap=fmax(.005*control[4],control[6]*control[6]*envelope);
+    if(envelope>0)excess=v/fmax(cap,1e-30);else bg=v;
+    double gain=fmin(1.,sqrt(cap/fmax(v,1e-30)));
+    spectrum[i]=make_float2((float)(gain*e.x),(float)(gain*e.y));}
+  values[0][t]=bg;values[1][t]=excess;__syncthreads();
+  for(int k=128;k;k/=2){if(t<k){values[0][t]=fmax(values[0][t],values[0][t+k]);values[1][t]=fmax(values[1][t],values[1][t+k]);}__syncthreads();}
+  if(!t){maxima[blockIdx.x]=values[0][0];maxima[gridDim.x+blockIdx.x]=values[1][0];}
+}
+extern "C" __global__ void focal_prepare(const float2* field,const float* amplitude,
+ const float2* phase,double* control,float2* delta,double* result,int N){
+ __shared__ double sums[5][256],scale;__shared__ int bad;
+ int t=threadIdx.x;if(!t)bad=0;__syncthreads();
+ double inf=__longlong_as_double(0x7ff0000000000000LL),lo=inf,hi=0,error=0,sf=0,sa=0;
+ for(int j=t;j<N;j+=256){double a=amplitude[j];if(a<=0)continue;
+   float2 e=field[j],p=phase[j];double re=e.x,im=e.y,power=re*re+im*im,v=power/(a*a);
+   if(!isfinite(v))atomicExch(&bad,1);lo=fmin(lo,v);hi=fmax(hi,v);
+   if(control[5]){sf+=a*(re*p.x+im*p.y);error=fmax(error,fabs(atan2(im*p.x-re*p.y,re*p.x+im*p.y)));}
+   else sf+=a*sqrt(power);
+   sa+=a*a;}
+ sums[0][t]=lo;sums[1][t]=hi;sums[2][t]=error;sums[3][t]=sf;sums[4][t]=sa;__syncthreads();
+ for(int k=128;k;k/=2){if(t<k){sums[0][t]=fmin(sums[0][t],sums[0][t+k]);
+   sums[1][t]=fmax(sums[1][t],sums[1][t+k]);sums[2][t]=fmax(sums[2][t],sums[2][t+k]);
+   sums[3][t]+=sums[3][t+k];sums[4][t]+=sums[4][t+k];}__syncthreads();}
+ if(!t){result[0]=bad||sums[0][0]<=0?inf:sums[1][0]/sums[0][0];result[2]=sums[2][0];
+   scale=sums[3][0]/fmax(sums[4][0],1e-30);control[6]=scale;}
+ __syncthreads();
+ for(int j=t;j<N;j+=256){float2 e=field[j],p=phase[j];double a=amplitude[j];
+   result[5+2*j]=e.x;result[6+2*j]=e.y;
+   if(a<=0){delta[j]=make_float2(0,0);continue;}
+   if(!control[5]){double m=fmax(hypot((double)e.x,(double)e.y),1e-20);p=make_float2(e.x/m,e.y/m);}
+   delta[j]=make_float2((float)(scale*a*p.x),(float)(scale*a*p.y));}
+}
+extern "C" __global__ void focal_residual(const float2* field,const float* amplitude,float2* delta,int N,int area){
+ int j=blockIdx.x*blockDim.x+threadIdx.x;if(j<N&&amplitude[j]>0){
+   delta[j].x-=field[j].x/area;delta[j].y-=field[j].y/area;}
+}
+extern "C" __global__ void focal_check(unsigned long long handle,const double* maxima,double* control,
+ double* result,int blocks){
+ __shared__ double values[2][256];int t=threadIdx.x;double bg=0,excess=0;
+ for(int j=t;j<blocks;j+=256){bg=fmax(bg,maxima[j]);excess=fmax(excess,maxima[blocks+j]);}
+ values[0][t]=bg;values[1][t]=excess;__syncthreads();
+ for(int k=128;k;k/=2){if(t<k){values[0][t]=fmax(values[0][t],values[0][t+k]);values[1][t]=fmax(values[1][t],values[1][t+k]);}__syncthreads();}
+ if(!t){double background=values[0][0]/control[4];
+   unsigned int more=(!(result[0]<=control[2]&&background<=.01&&result[2]<=.01&&values[1][0]<=1.05)
+                       ||control[0]<control[7])&&control[0]<control[1];
+   control[3]=more;result[1]=background;result[3]=control[0];result[4]=values[1][0];
+   if(more)control[0]+=1;cudaGraphSetConditional(handle,more);}
+}
+extern "C" __global__ void focal_encode(const float2* background,const float* delta,
+ const float* pupil,const float* incident,float2* optical,unsigned char* codes,const double* control,
+ int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W||control[3]==0)return;
+ float2 e=background[i],d=synthesis_pixel(delta,i/W,i%W,H,W,P);
+ e.x=(e.x+d.x)/(H*W);e.y=(e.y+d.y)/(H*W);
+ optical[i]=encoded_pixel(e,pupil,incident,codes,i);
 }
 '''
 
@@ -2811,6 +2916,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
     try:
         import cupy as cp  # noqa: PLC0415
         from cupy.cuda import cublas, cufft  # noqa: PLC0415
+        from cupyx.scipy.fft import get_fft_plan  # noqa: PLC0415
         from cuda.pathfinder import load_nvidia_dynamic_lib  # noqa: PLC0415
         from cuda.bindings import runtime as cuda  # noqa: PLC0415
     except (ImportError, OSError) as error:
@@ -2844,7 +2950,6 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
             set_workspace.restype = integer
             number = len(geometry["source_yx"])
             maximum_selected = min(number, len(geometry["target_yx"]))
-            maximum_removed = max(0, number - len(geometry["target_yx"]))
             # Unselected integer sites share one band per source X. Each selected
             # trajectory can add at most one(X, fractional-Y) band per frame.
             source_columns = len(np.unique(geometry["source_yx"][:, 1]))
@@ -2852,19 +2957,33 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
             if method == "lpi":
                 target_columns = len(np.unique(geometry["target_yx"][:, 1]))
                 motion_bands = max(motion_bands, (target_columns + 15) // 16 * 16)
-            halo_columns = len(np.unique(geometry["source_yx"][:, 1, None] + np.arange(-2, 3))) if maximum_removed else 0
-            # The full halo-column superset includes every stationary source X.
-            projection_bands = (min(number + 25 * maximum_removed, maximum_selected + halo_columns) + 15) // 16 * 16
-            capacity = max(motion_bands, projection_bands if maximum_removed else motion_bands)
+            capacity = motion_bands
             module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
             names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
-                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update", "lpi_check", "lpi_update")
+                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update", "focal_profile", "focal_prepare", "focal_cap", "focal_check", "focal_residual", "focal_encode")
             kernels = {name: module.get_function(name) for name in names}
-            gpu = dict(cp=cp, cublas=cublas, cufft=cufft, cuda=cuda, stream=stream, module=module, kernels=kernels, graphs={},
+            from scipy.fft import fft2, fftshift, ifftshift  # noqa: PLC0415
+
+            psf = abs(fftshift(fft2(ifftshift(pupil)))) ** 2
+            gpu = dict(cp=cp, cublas=cublas, cufft=cufft, cuda=cuda, stream=stream, module=module, kernels=kernels, graphs={}, background_graphs={},
                        library=library, gemm=gemm, shape=shape, number=number,
                        pupil_cpu=pupil.copy(), incident_cpu=np.asarray(incident, np.float32).copy(),
+                       psf_support=_psf_main_lobe(psf, tuple(np.asarray(shape) // 2)),
                        pupil_energy=float(np.sum(pupil.astype(np.float64) ** 2)), pupil_scale=float(np.max(pupil)),
                        keeper=keeper, resources={}, output_pool=cp.cuda.PinnedMemoryPool(), weight_exponent=np.float32(.8), method=method)
+            offsets = np.argwhere(gpu["psf_support"]) - np.asarray(shape) // 2
+            lower, upper = offsets.min(axis=0) - 1, offsets.max(axis=0) + 1
+            oversampling = 4
+            oversampled = fftshift(fft2(pupil, s=tuple(oversampling * np.asarray(shape))))
+            center = oversampling * np.asarray(shape) // 2
+            slices = tuple(slice(int(a), int(b) + 1)
+                           for a, b in zip(center + oversampling * lower, center + oversampling * upper))
+            profile = np.asarray(abs(oversampled[slices]) ** 2 / abs(oversampled[tuple(center)]) ** 2, np.float32)
+            del oversampled
+            profile *= _psf_main_lobe(profile, tuple(-lower * oversampling))
+            yy, xx = np.mgrid[lower[0]:upper[0] + 1, lower[1]:upper[1] + 1]
+            gpu.update(psf_profile=profile, psf_profile_origin=lower, psf_oversampling=oversampling,
+                       psf_neighborhood=np.stack((yy.ravel(), xx.ravel()), axis=1))
             # Stride-two samples share the centered native coordinates only at these sizes.
             factors = (1, 2) if all(size % 4 == 0 for size in shape) else (1,)
             handles = []
@@ -2931,10 +3050,9 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                         # belong to the same native geometry; only packing is precise.
                         work["optical"] = gpu["resources"][1]["optical"]
                         gpu["measurement"] = work
-                        if maximum_removed or method == "lpi":
-                            work.update(backward=cp.empty((work_capacity, 2 * padded), cp.float32),
-                                        packed=cp.empty((2, h, work_capacity), cp.float32),
-                                        image=cp.empty((2, h, 2 * padded), cp.float32))
+                        work.update(backward=cp.empty((work_capacity, 2 * padded), cp.float32),
+                                    packed=cp.empty((2, h, work_capacity), cp.float32),
+                                    image=cp.empty((2, h, 2 * padded), cp.float32))
                         if method == "lpi":
                             work.update(physical_pupil=gpu["resources"][1]["physical_pupil"],
                                         incident=gpu["resources"][1]["incident"],
@@ -2961,26 +3079,31 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                             _rearrangement_propagate(gpu, work, band, "roundtrip")
                             if factor == 1:
                                 _rearrangement_propagate(gpu, work, band, "encode")
-                if maximum_removed:
-                    queries = number + 25 * maximum_removed
-                    gpu["projection"] = {
-                        **gpu["measurement"], "number": queries,
-                        "index": cp.empty(queries, cp.int32), "actual": cp.empty(queries, cp.complex64),
-                        "coefficients": cp.empty(queries, cp.complex64),
-                    }
-                    gpu["previous_base"] = cp.empty(shape, cp.complex64)
-                    gpu["previous_corrected"] = cp.empty(shape, cp.complex64)
-                    gpu["current_base"] = cp.empty(shape, cp.complex64)
+                gpu["previous_base"] = cp.empty(shape, cp.complex64)
+                gpu["previous_corrected"] = cp.empty(shape, cp.complex64)
+                gpu["current_base"] = cp.empty(shape, cp.complex64)
                 gpu["aa_phase"] = cp.empty(site_capacity, cp.complex64)
+                gpu["focal_profile"] = cp.zeros(shape, cp.float32)
+                profile_capacity = site_capacity * len(gpu["psf_neighborhood"])
+                gpu["focal_profile_indices"] = cp.empty(profile_capacity, cp.int64)
+                gpu["focal_profile_values"] = cp.empty(profile_capacity, cp.float32)
+                gpu["focal_delta"] = cp.empty(site_capacity, cp.complex64)
+                gpu["focal_amplitude"] = cp.zeros(site_capacity, cp.float32)
+                gpu["focal_phase"] = cp.ones(site_capacity, cp.complex64)
+                gpu["focal_spectrum"] = cp.empty(shape, cp.complex64)
+                gpu["focal_background"] = cp.empty(shape, cp.complex64)
+                gpu["focal_plan"] = get_fft_plan(gpu["focal_spectrum"], axes=(0, 1), value_type="C2C")
+                gpu["focal_maxima"] = cp.empty(2 * ((int(np.prod(shape)) + 255) // 256), cp.float64)
+                gpu["focal_control"] = cp.asarray([0., 0., 1., 0., 1., 0., 1., 0.])
+                gpu["focal_result"] = cp.empty(5 + 2 * site_capacity, cp.float64)
+                gpu["focal_work"] = {**gpu["measurement"], "number": site_capacity,
+                                     "coefficients": gpu["focal_delta"]}
                 gpu["aa_g"] = cp.empty((3, site_capacity), cp.float32)
                 gpu["aa_r"] = cp.empty((3, site_capacity), cp.float32)
                 gpu["aa_candidate"] = cp.empty(site_capacity, cp.float64)
                 gpu["aa_state"] = cp.zeros(2, cp.int32)
                 gpu["amplitude"] = cp.ones(site_capacity, cp.float32)
                 gpu["frame_index"] = cp.zeros(1, cp.int32)
-                if method == "lpi":
-                    gpu["loop_control"] = cp.zeros(4, cp.float64)
-                    gpu["loop_result"] = cp.empty(number + 1, cp.complex64)
                 staging = gpu["output_pool"].malloc(int(np.prod(shape)))
                 gpu["host_frame"] = np.frombuffer(staging, np.uint8, count=int(np.prod(shape))).reshape(shape)
                 gpu["motion_capacity"] = 0
@@ -3026,6 +3149,8 @@ def _rearrangement_propagate(gpu, work, band, operation):
                              cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT)
         if status:
             raise RuntimeError(f"SLM cuBLAS synthesis failed ({status})")
+        if operation == "backward":
+            return
         if operation == "correct":
             native = gpu["resources"][1]
             gpu["kernels"]["field_project"](((h * w + 255) // 256,), (256,),
@@ -3132,7 +3257,7 @@ def _rearrangement_bind(gpu, points):
 
 
 def _rearrangement_endpoint(cp, points, shape, pupil, intensity, iterations, seed, stop_requested):
-    """Prepare the existing source endpoint when no Context was supplied."""
+    """Prepare independent WGS-Kim coefficients for an endpoint geometry."""
     iy, ix = cp.asarray((points - np.asarray(shape) // 2).T % np.asarray(shape)[:, None])
     amplitude = cp.sqrt(cp.asarray(intensity, dtype=cp.float32))
     amplitude /= cp.linalg.norm(amplitude)
@@ -3153,7 +3278,7 @@ def _rearrangement_endpoint(cp, points, shape, pupil, intensity, iterations, see
         measured = magnitude / cp.maximum(cp.linalg.norm(magnitude), 1e-20)
         weight *= cp.clip(amplitude / cp.maximum(measured, 1e-20), .2, 5) ** cp.float32(.8)
         weight /= cp.linalg.norm(weight)
-        if iteration < min(50, iterations // 2):
+        if iteration < 12:
             phase = cp.angle(actual)
         coefficient = weight * cp.exp(cp.complex64(1j) * phase)
     spectrum.fill(0)
@@ -3169,10 +3294,10 @@ def _rearrangement_cuda_result(result):
 
 
 def _rearrangement_free_graphs(gpu):
-    if gpu["method"] == "lpi":
-        for graph, executable in gpu["graphs"].values():
-            _rearrangement_cuda_result(gpu["cuda"].cudaGraphExecDestroy(executable))
-            _rearrangement_cuda_result(gpu["cuda"].cudaGraphDestroy(graph))
+    for graph, executable in gpu["background_graphs"].values():
+        _rearrangement_cuda_result(gpu["cuda"].cudaGraphExecDestroy(executable))
+        _rearrangement_cuda_result(gpu["cuda"].cudaGraphDestroy(graph))
+    gpu["background_graphs"].clear()
     gpu["graphs"].clear()
 
 
@@ -3185,12 +3310,12 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
     with _rearrangement_gpu_active(gpu["keeper"]), stream:
         stream.synchronize()
         gpu["motion_capacity"] = 0
-        _rearrangement_free_graphs(gpu)
+        # Only the baseline graph addresses movie-sized arrays. The full-field
+        # loop uses fixed optical buffers and survives a change in authored N.
+        gpu["graphs"].clear()
         gpu["motion_codes"] = cp.empty((count, *gpu["shape"]), cp.uint8)
         gpu["motion_coefficients"] = cp.zeros((count, number), cp.complex64)
         gpu["motion_amplitudes"] = cp.ones((count, number), cp.float32)
-        if gpu["method"] == "lpi":
-            gpu["motion_desired"] = cp.ones((count, number), cp.float64)
         gpu["motion_actual"] = cp.empty((count, number), cp.complex64)
         gpu["motion_indices"] = {factor: cp.zeros((count, number), cp.int32) for factor in gpu["resources"]}
         gpu["motion_frequencies"] = cp.zeros((count * native["capacity"], 2), cp.float64)
@@ -3220,47 +3345,154 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                 gpu["graphs"][band] = stream.end_capture()
                 gpu["frame_index"].fill(0)
                 gpu["graphs"][band].launch(stream)
-        else:
-            # One host launch per frame, not one roundtrip per amplitude update.
-            # The parent owns the conditional body; CuPy must not instantiate it.
-            work, cuda = gpu["measurement"], gpu["cuda"]
-            gpu["loop_control"].fill(0)  # prewarm one evaluation, never an old solve budget
-            gpu["frame_index"].fill(1)  # load_motion_frame uses the next-row counter
-            for band in native["plans"]:
-                if stop_requested is not None and stop_requested():
-                    raise InterruptedError("SLM rearrangement preparation stopped")
-                _rearrangement_select_roots(work, band)
-                graph = _rearrangement_cuda_result(cuda.cudaGraphCreate(0))
+        if gpu["background_graphs"]:
+            stream.synchronize()
+            gpu["motion_capacity"] = count
+            return
+        # Both methods share one full-field constraint loop. All its buffers,
+        # FFT plans and launches are prepared before an acquisition can fire.
+        work, cuda, cufft = gpu["focal_work"], gpu["cuda"], gpu["cufft"]
+        area = int(np.prod(gpu["shape"]))
+        grid = ((area + 255) // 256,)
+        gpu["focal_control"].set(np.array([0., 0., 1., 0., 1., 0., 1., 0.]), stream=stream)
+        gpu["kernels"]["focal_profile"]((1,), (256,),
+            (gpu["focal_profile_indices"], gpu["focal_profile_values"], gpu["focal_profile"], np.int32(0)))
+        gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
+        gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
+        for band in work["plans"]:
+            if stop_requested is not None and stop_requested():
+                raise InterruptedError("SLM rearrangement preparation stopped")
+            _rearrangement_select_roots(work, band)
+            _rearrangement_propagate(gpu, work, band, "backward")
+            graph = _rearrangement_cuda_result(cuda.cudaGraphCreate(0))
+            try:
+                handle = _rearrangement_cuda_result(cuda.cudaGraphConditionalHandleCreate(graph, 1, 1))
+                node = cuda.cudaGraphNodeParams()
+                node.type = cuda.cudaGraphNodeType.cudaGraphNodeTypeConditional
+                node.conditional.handle = handle
+                node.conditional.type = cuda.cudaGraphConditionalNodeType.cudaGraphCondTypeWhile
+                node.conditional.size = 1
+                _rearrangement_cuda_result(cuda.cudaGraphAddNode(graph, None, 0, node))
+                _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
+                    stream.ptr, node.conditional.phGraph_out[0], None, None, 0,
+                    cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
                 try:
-                    handle = _rearrangement_cuda_result(cuda.cudaGraphConditionalHandleCreate(graph, 1, 1))
-                    node = cuda.cudaGraphNodeParams()
-                    node.type = cuda.cudaGraphNodeType.cudaGraphNodeTypeConditional
-                    node.conditional.handle = handle
-                    node.conditional.type = cuda.cudaGraphConditionalNodeType.cudaGraphCondTypeWhile
-                    node.conditional.size = 1
-                    _rearrangement_cuda_result(cuda.cudaGraphAddNode(graph, None, 0, node))
-                    _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
-                        stream.ptr, node.conditional.phGraph_out[0], None, None, 0,
-                        cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
-                    try:
-                        _rearrangement_propagate(gpu, work, band, "encode_forward")
-                        gpu["kernels"]["lpi_check"]((1,), (256,),
-                            (np.uint64(int(handle)), work["actual"], gpu["motion_desired"],
-                             gpu["frame_index"], gpu["loop_control"], gpu["loop_result"], np.int32(number)))
-                        gpu["kernels"]["lpi_update"]((1,), (256,),
-                            (work["actual"], gpu["amplitude"], gpu["coefficients"], gpu["aa_phase"],
-                             gpu["aa_g"], gpu["aa_r"], gpu["aa_candidate"], gpu["aa_state"],
-                             np.int32(number), gpu["weight_exponent"], gpu["loop_control"]))
-                    finally:
-                        _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
-                    executable = _rearrangement_cuda_result(cuda.cudaGraphInstantiate(graph, 0))
-                except BaseException:
-                    _rearrangement_cuda_result(cuda.cudaGraphDestroy(graph))
-                    raise
-                gpu["graphs"][band] = (graph, executable)
-                _rearrangement_cuda_result(cuda.cudaGraphLaunch(executable, stream.ptr))
+                    _rearrangement_propagate(gpu, work, band, "forward")
+                    gpu["kernels"]["focal_prepare"]((1,), (256,),
+                        (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
+                         gpu["focal_delta"], gpu["focal_result"], np.int32(work["number"])))
+                    gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
+                    gpu["kernels"]["focal_cap"](grid, (256,),
+                        (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"],
+                         gpu["focal_control"], np.int32(area)))
+                    gpu["kernels"]["focal_check"]((1,), (256,),
+                        (np.uint64(int(handle)), gpu["focal_maxima"], gpu["focal_control"],
+                         gpu["focal_result"], np.int32(grid[0])))
+                    gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
+                    # The background projection changed the field at bright
+                    # coordinates too. Measure that field before replacing it;
+                    # adding a residual from the pre-clipped field double-counts
+                    # the amplitude change and progressively loses bright power.
+                    _rearrangement_propagate(gpu, {**work, "optical": gpu["focal_background"]}, band, "forward")
+                    gpu["kernels"]["focal_residual"](((work["number"] + 255) // 256,), (256,),
+                        (work["actual"], gpu["focal_amplitude"], gpu["focal_delta"],
+                         np.int32(work["number"]), np.int32(area)))
+                    _rearrangement_propagate(gpu, work, band, "backward")
+                    gpu["kernels"]["focal_encode"](grid, (256,),
+                        (gpu["focal_background"], work["image"], native["physical_pupil"], native["incident"],
+                         native["optical"], native["codes"], gpu["focal_control"],
+                         *map(np.int32, (*gpu["shape"], work["padded"]))))
+                finally:
+                    _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
+                executable = _rearrangement_cuda_result(cuda.cudaGraphInstantiate(graph, 0))
+            except BaseException:
+                _rearrangement_cuda_result(cuda.cudaGraphDestroy(graph))
+                raise
+            gpu["background_graphs"][band] = (graph, executable)
+            _rearrangement_cuda_result(cuda.cudaGraphLaunch(executable, stream.ptr))
         stream.synchronize()
         gpu["motion_capacity"] = count
+
+
+def _rearrangement_background_projection(
+    gpu, points, desired, codes, reference_intensity, tolerance, *,
+    prescribed_phase=None, iterations=128, stop_requested=None, warm_start=False,
+):
+    """Native-grid correction; denser full-field audit remains independent.
+
+    Keep low background free, bound each main lobe by the actual pupil's PSF,
+    and impose bright complex fields with the exact fractional operator.
+    This is an additional optical constraint, not a claim that ordinary WGS or
+    LPI guarantees no ghosts. Every decision is made after logical encoding.
+    """
+    cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
+    shape = np.asarray(gpu["shape"])
+    number, area = len(points), int(np.prod(shape))
+    active = np.asarray(desired) > 0
+    from scipy.ndimage import map_coordinates  # noqa: PLC0415
+
+    profile_pixels, profile_values = [], []
+    for point, amplitude in zip(np.asarray(points)[active], np.asarray(desired)[active]):
+        pixels = np.floor(point).astype(np.int64) + gpu["psf_neighborhood"]
+        coordinates = (pixels - point - gpu["psf_profile_origin"]) * gpu["psf_oversampling"]
+        values = map_coordinates(gpu["psf_profile"], coordinates.T, order=1, mode="constant", cval=0., prefilter=False)
+        positive = values > 0
+        pixels = (pixels[positive] - shape // 2) % shape
+        profile_pixels.append(pixels[:, 0] * shape[1] + pixels[:, 1])
+        profile_values.append(np.asarray(amplitude * amplitude * values[positive], np.float32))
+    profile_pixels = np.concatenate(profile_pixels)
+    profile_values = np.concatenate(profile_values)
+    gpu["focal_profile"].fill(0)
+    gpu["focal_profile_indices"][:len(profile_pixels)].set(profile_pixels, stream=stream)
+    gpu["focal_profile_values"][:len(profile_values)].set(profile_values, stream=stream)
+    gpu["kernels"]["focal_profile"](((len(profile_pixels) + 255) // 256,), (256,),
+        (gpu["focal_profile_indices"], gpu["focal_profile_values"], gpu["focal_profile"], np.int32(len(profile_pixels))))
+    indices, frequencies, counts, _ = _rearrangement_bind(gpu, np.asarray(points)[None])
+    work = gpu["focal_work"]
+    band = (int(counts[0]) + 15) // 16 * 16
+    work["index"].fill(0)
+    work["index"][:number].set(indices[1][0], stream=stream)
+    gpu["frequencies"][:len(frequencies)].set(frequencies, stream=stream)
+    _rearrangement_select_roots(work, band)
+    grid = ((area + 255) // 256,)
+    gpu["focal_amplitude"].fill(0)
+    gpu["focal_amplitude"][:number].set(np.asarray(desired, np.float32), stream=stream)
+    if prescribed_phase is not None:
+        gpu["focal_phase"][:number].set(np.exp(1j * np.asarray(prescribed_phase, np.float64)).astype(np.complex64), stream=stream)
+    gpu["focal_control"].set(np.array([0., iterations, tolerance, 0., reference_intensity,
+                                      float(prescribed_phase is not None), 1., float(warm_start)]), stream=stream)
+    gpu["kernels"]["field_project"](grid, (256,),
+        (codes, native["optical"], native["image"], native["optical"], native["optical"],
+         native["physical_pupil"], native["incident"], native["codes"],
+         *map(np.int32, (*shape, native["padded"], 0))))
+    gpu["current_base"][:] = native["optical"]
+    if warm_start:
+        # Restore the fresh geometry's bright scale once in the warm seed;
+        # this is not a fixed-power constraint on the ensuing iterations.
+        # Otherwise repeated warm starts inherit an ever dimmer signal subspace.
+        _rearrangement_propagate(gpu, work, band, "forward")
+        gpu["kernels"]["focal_prepare"]((1,), (256,),
+            (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
+             gpu["focal_delta"], gpu["focal_result"], np.int32(work["number"])))
+        gpu["kernels"]["field_project"](grid, (256,),
+            (native["codes"], native["optical"], native["image"], gpu["previous_base"], gpu["previous_corrected"],
+             native["physical_pupil"], native["incident"], native["codes"],
+             *map(np.int32, (*shape, native["padded"], 1))))
+        _rearrangement_propagate(gpu, work, band, "forward")
+        gpu["kernels"]["focal_residual"](((work["number"] + 255) // 256,), (256,),
+            (work["actual"], gpu["focal_amplitude"], gpu["focal_delta"], np.int32(work["number"]), np.int32(1)))
+        _rearrangement_propagate(gpu, work, band, "correct")
+    if stop_requested is not None and stop_requested():
+        raise InterruptedError("SLM rearrangement stopped")
+    executable = gpu["background_graphs"][band][1]
+    _rearrangement_cuda_result(gpu["cuda"].cudaGraphLaunch(executable, stream.ptr))
+    result = gpu["focal_result"].get(stream=stream)
+    if stop_requested is not None and stop_requested():
+        raise InterruptedError("SLM rearrangement stopped")
+    gpu["previous_base"][:] = gpu["current_base"]
+    gpu["previous_corrected"][:] = native["optical"]
+    field = (result[5:5 + 2 * number:2] + 1j * result[6:5 + 2 * number:2]).astype(np.complex64)
+    return field, float(result[1]), float(result[2]), int(result[3]), float(result[4])
 
 
 def _rearrangement_balance_endpoint(gpu, points, intensities, coefficients, iterations, tolerance, stop_requested):
@@ -3324,9 +3556,9 @@ def prepare_rearrangement(
 ) -> dict[str, object]:
     """Prepare one source optical state and explicit destination geometry.
 
-    A supplied source_phase stays exact for initial application. LPI also
-    balances one fixed-phase target with the shared encoded-field amplitude
-    update before occupancy is known, preserving overlapping source phases.
+    A supplied source_phase stays exact for initial application. LPI prepares
+    an independent WGS target, then balances its fixed coefficient phases with
+    the shared encoded-field amplitude update before occupancy is known.
     Both methods use the same fractional Fourier map and logical phase encoder.
     maximum_motion_frames is an initial capacity, not an online frame limit.
     The caller owns and closes this serial workspace.
@@ -3427,7 +3659,7 @@ def prepare_rearrangement(
             target_ratio = None
             target_endpoint_iterations, target_endpoint_ms = 0, 0.
             if method == "lpi":
-                from scipy.optimize import linear_sum_assignment  # noqa: PLC0415
+                import time  # noqa: PLC0415
 
                 auxiliary = _rearrangement_balance_endpoint(
                     gpu, source, intensities[0], actual, int(endpoint_iterations), tolerance, stop_requested)
@@ -3436,24 +3668,19 @@ def prepare_rearrangement(
                 source_endpoint_iterations, source_endpoint_ms = auxiliary["iterations"], auxiliary["timing_ms"]
                 if source_reconstruction_ratio > tolerance or not np.isfinite(source_reconstruction_ratio):
                     raise ValueError(f"fixed-phase source synthesis exceeds authored intensity ratio {tolerance:g}: {source_reconstruction_ratio:.6g}")
-                endpoint_phase = np.random.default_rng(int(seed) + 1).uniform(-np.pi, np.pi, len(geometry["target_yx"]))
-                endpoint_amplitude = np.sqrt(intensities[1]).astype(np.float64)
-                target_rows, source_rows = linear_sum_assignment(geometry["assignment_costs"])
-                gauge_offset = (phase_center - np.asarray(shape) // 2) / shape
-                endpoint_phase[target_rows] = (np.angle(actual[source_rows])
-                    + 2 * np.pi * np.sum((source[source_rows] - geometry["target_yx"][target_rows]) * gauge_offset, axis=1))
-                endpoint_amplitude[target_rows] = (abs(source_synthesis[source_rows])
-                    * np.sqrt(intensities[1][target_rows] / intensities[0][source_rows]))
-                source_phases = {tuple(point): value for point, value in zip(source, np.angle(actual))}
-                for index, point in enumerate(geometry["target_yx"]):
-                    endpoint_phase[index] = source_phases.get(tuple(point), endpoint_phase[index])
+                target_started = time.perf_counter()
+                phase_iterations = min(12, int(endpoint_iterations))
+                endpoint_coefficients, _ = _rearrangement_endpoint(
+                    cp, geometry["target_yx"], shape, gpu["pupil_cpu"], intensities[1],
+                    phase_iterations, int(seed) + 1, stop_requested)
                 endpoint = _rearrangement_balance_endpoint(
                     gpu, geometry["target_yx"], intensities[1],
-                    endpoint_amplitude * np.exp(1j * endpoint_phase),
+                    endpoint_coefficients,
                     int(endpoint_iterations), tolerance, stop_requested)
                 target_coefficient, target_field, target_phase = endpoint["coefficients"], endpoint["field"], endpoint["phase"]
                 target_ratio = endpoint["ratio"]
-                target_endpoint_iterations, target_endpoint_ms = endpoint["iterations"], endpoint["timing_ms"]
+                target_endpoint_iterations = phase_iterations + endpoint["iterations"]
+                target_endpoint_ms = (time.perf_counter() - target_started) * 1000
                 if target_ratio > tolerance or not np.isfinite(target_ratio):
                     raise ValueError(f"fixed-phase target endpoint exceeds authored intensity ratio {tolerance:g}: {target_ratio:.6g}")
                 gpu["coefficients"][:len(source)].set(coefficient, stream=stream)
@@ -3743,17 +3970,15 @@ def compute_rearrangement(
     """Emit N native maps with one continuous coefficient trajectory.
 
     Both methods remove unused beams in one source-position map, then follow the
-    same sampled fractional path, with N total maps. LPI holds the interpolated coefficient
-    phases during bounded encoded-field amplitude balancing; it never uses the
-    iterative method's free-phase removed-neighborhood projection. Pupil phase
-    steps and background are measured after playback by the shared diagnostics.
-    Empty/no-change plans hold
+    same sampled fractional path, with N total maps. Both use the same full
+    focal-plane projection and actual-code acceptance. LPI constrains actual
+    bright optical phases along the endpoint interpolation; Iterative lets
+    those phases follow the current field. Empty/no-change plans hold
     the exact input phase and return an empty sequence. frame_ready receives each
     immutable host map in order; its wait/error stays on this same solve path.
     Intermediate maps use motion_support_tolerance; the actual last map uses
-    support_tolerance, including a one-map sequence. Both verify retained
-    brightness before publication; only iterative also gates the removed
-    occupied neighborhood.
+    support_tolerance, including a one-map sequence. Neither an extinguished
+    synthesis coefficient nor uniform bright centers proves a dark background.
     The caller must stop playback on a later failure.
     """
     import time  # noqa: PLC0415
@@ -3793,9 +4018,9 @@ def compute_rearrangement(
         "source_synthesis_coefficients": prepared["source_synthesis_coefficients"],
         "source_reconstruction_field": prepared["source_reconstruction_field"],
         "source_coefficient_basis": "fixed-source-phase-synthesis" if method == "lpi" else "source-endpoint-coefficients",
-        "target_coefficient_basis": "fixed-source-phase-synthesis" if method == "lpi" else "authored-amplitude-source-phase",
+        "target_coefficient_basis": "independent-target-phase-synthesis" if method == "lpi" else "authored-amplitude-source-phase",
         "field_phase_reference": "fft-center", "phase_interpolation": "shortest-modulo-2pi" if method == "lpi" else "adaptive-field-phase",
-        "quality_scope": "retained-sites" if method == "lpi" else "active-sites-and-removed-neighborhood",
+        "quality_scope": "bright-sites-and-full-native-background-with-natural-main-lobe-envelope",
     }
     if rearrangement_is_noop(prepared, plan):
         return {
@@ -3821,7 +4046,7 @@ def compute_rearrangement(
             "converged": True, "quality_accepted": True, "quality_evaluated": True,
             "retained_intensity_ratios": np.empty(0),
             "support_tolerance": tolerance, "phase_encoding": "uint8:2pi/256",
-            "encoded_correction_proposals": 0, "release_verified": False, "recommended_release_hold_frames": 0,
+            "release_verified": False, "recommended_release_hold_frames": 0,
             "timing_ms": {"prepare_frame_state": 0., "solve": 0., "copy": 0.,
                           "callback": 0., "first_frame_ready": 0., "first_frame_solve": 0., "first_frame_copy": 0.,
                           "total": (time.perf_counter() - started) * 1000},
@@ -3885,14 +4110,21 @@ def compute_rearrangement(
         gauge_offset = (prepared["phase_center_yx"] - np.asarray(shape) // 2) / shape
         source_gauge = 2 * np.pi * np.sum((source[source_indices] - np.asarray(shape) // 2) * gauge_offset, axis=1)
         target_gauge = 2 * np.pi * np.sum((target[target_indices] - np.asarray(shape) // 2) * gauge_offset, axis=1)
-        phase_delta = np.angle(endpoint_coefficient * np.exp(1j * target_gauge)
+        # Interpolate measured focal phases, not the synthesis coefficient
+        # phases: phase-only projection makes those two quantities different.
+        phase_delta = np.angle(prepared["target_field"][target_indices] * np.exp(1j * target_gauge)
                                * (initial[source_indices] * np.exp(1j * source_gauge)).conj())
-        phase_delta[~np.any(path != path[:1], axis=(0, 2))] = 0
+        # A retained trap can stay in place while its phase changes to the
+        # independently optimized final array. The exact whole-array no-op
+        # already returned above; it must not suppress this optical transition.
+        phase_progress = amplitude_fraction
+        if not np.any(path != path[:1]) and fade_frames and motion_frames > fade_frames:
+            phase_progress = np.maximum(0., np.arange(1, motion_frames + 1) - fade_frames) / (motion_frames - fade_frames)
         spectrum_phase = np.broadcast_to(phase, desired.shape).copy()
         current_gauge = 2 * np.pi * np.sum(
             (sites[:, source_indices] - np.asarray(shape) // 2) * gauge_offset, axis=-1)
         spectrum_phase[:, source_indices] = (phase[source_indices] + source_gauge
-                                            + progress[:, None] * phase_delta - current_gauge)
+                                            + phase_progress[:, None] * phase_delta - current_gauge)
         coefficient_values = (spectrum_amplitude * np.exp(1j * spectrum_phase)).astype(np.complex64)
         coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
     else:
@@ -3917,8 +4149,6 @@ def compute_rearrangement(
         actual_gpu = gpu["motion_actual"][:motion_frames]
         coefficients.set(coefficient_values, stream=stream)
         gpu["motion_amplitudes"][:motion_frames].set(normalized, stream=stream)
-        if method == "lpi":
-            gpu["motion_desired"][:motion_frames].set(desired, stream=stream)
         for factor, values in indices.items():
             gpu["motion_indices"][factor][:motion_frames].set(values, stream=stream)
         gpu["motion_frequencies"][:len(frequencies)].set(frequencies, stream=stream)
@@ -3926,21 +4156,15 @@ def compute_rearrangement(
         host = np.empty((motion_frames, *shape), np.uint8)
         codes = np.frombuffer(memoryview(host).toreadonly(), np.uint8, count=pixels).reshape(host.shape)
         fields = np.empty((motion_frames, number), np.complex64)
-        baseline_codes = cp.empty(shape, cp.uint8) if method == "iterative" else None
-        baseline_fields = None
-        discard_ratio = np.zeros(motion_frames)
+        background_limits = np.zeros(motion_frames)
+        phase_errors = np.zeros(motion_frames)
+        envelope_ratios = np.zeros(motion_frames)
         projection_updates = np.zeros(motion_frames, np.int32)
+        baseline_updates = np.zeros(motion_frames, np.int32)
         frame_solve_ms, frame_copy_ms, frame_ready_ms = (np.zeros(motion_frames) for _ in range(3))
-        callback_ms, proposals_evaluated, emitted_count, verified_reuses = 0., 0, 0, 0
+        callback_ms, emitted_count, verified_reuses = 0., 0, 0
+        reference_intensity = float(np.min(abs(initial.astype(np.complex128)) ** 2))
         publication_open = True
-        if len(removed) and method == "iterative":
-            projection = gpu["projection"]
-            halo_offset = np.indices((5, 5)).reshape(2, -1).T - 2
-            halo_sites = (source[removed, None] + halo_offset[None]).reshape(-1, 2)
-            references = np.repeat(abs(initial[removed].astype(np.complex128)) ** 2, 25)
-            number_queries = source_count + len(halo_sites)
-            projection["number"] = number_queries
-            grid = ((int(np.prod(shape)) + 255) // 256,)
         after_prepare = time.perf_counter()
         for index in range(motion_frames):
             frame_started = time.perf_counter()
@@ -3953,69 +4177,36 @@ def compute_rearrangement(
                               and np.array_equal(positive[index], positive[index - 1]))
             mask = positive[index]
             reuse_verified = False
-            if method == "lpi":
-                if same_positions and np.array_equal(coefficient_values[index], coefficient_values[index - 1]):
-                    relative = abs(fields[index - 1, source_indices].astype(np.complex128)
-                                   / desired[index, source_indices]) ** 2
-                    reuse_verified = bool(relative.max() / relative.min() <= tolerance)
-                if reuse_verified:
-                    movie[index] = movie[index - 1]
-                    fields[index] = fields[index - 1]
-                    actual_gpu[index] = actual_gpu[index - 1]
-                    coefficients[index] = coefficients[index - 1]
-                    verified_reuses += 1
-                else:
-                    gpu["frame_index"].fill(index)
-                    # Carry only the previous accepted amplitude through motion;
-                    # the current LPI phase and exact endpoint remain authored.
-                    _rearrangement_load_frame(gpu, warm_previous=0 < progress[index] < 1,
-                                              preserve_phase=True)
-                    _rearrangement_select_roots(gpu["measurement"], band)
-                    work = gpu["measurement"]
-                    gpu["kernels"]["anderson_begin"]((1,), (256,),
-                        (gpu["coefficients"], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
-                    # The old unplayed subset endpoint had a 64-update budget.
-                    # Keep that capability on the actual endpoint map, also
-                    # when a stationary subset reaches it in the first frame.
-                    subset_endpoint = (selected_count < len(target) and
-                                       np.array_equal(sites[index, source_indices], target[target_indices]))
-                    limit = (64 if subset_endpoint else 16) if iterations is None else int(iterations)
-                    gpu["loop_control"].set(np.asarray((0, limit, tolerance, 0), np.float64), stream=stream)
-                    _rearrangement_cuda_result(gpu["cuda"].cudaGraphLaunch(gpu["graphs"][band][1], stream.ptr))
-                    checked = gpu["loop_result"].get(stream=stream)
-                    field, updates = checked[:number], int(checked[number].real)
-                    if stop_requested is not None and stop_requested():
-                        raise InterruptedError("SLM rearrangement stopped")
-                    movie[index] = native["codes"]
-                    fields[index] = field
-                    actual_gpu[index] = work["actual"][:number]
-                    coefficients[index] = gpu["coefficients"][:number]
-                    iteration_counts[index] = updates
-                # Every amplitude update keeps this frame's prescribed phase;
-                # LPI never enters the free-phase/dark-neighborhood projection.
-                reuse_verified = True
-            elif same_positions and discard_ratio[index - 1] <= .01:
-                values = abs(fields[index - 1, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
-                ratio = float(values.max() / values.min())
-                if np.isfinite(ratio) and ratio <= tolerance:
-                    movie[index] = movie[index - 1]
-                    fields[index] = fields[index - 1]
-                    actual_gpu[index] = actual_gpu[index - 1]
-                    coefficients[index] = coefficients[index - 1]
-                    discard_ratio[index] = discard_ratio[index - 1]
-                    iteration_counts[index] = 0
-                    verified_reuses += 1
-                    reuse_verified = True
-            if not reuse_verified:
+            if (same_positions and np.array_equal(coefficient_values[index], coefficient_values[index - 1])
+                    and background_limits[index - 1] <= .01 and phase_errors[index - 1] <= .01
+                    and envelope_ratios[index - 1] <= 1.05):
+                relative = abs(fields[index - 1, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
+                reuse_verified = bool(relative.max() / relative.min() <= tolerance)
+            if reuse_verified:
+                movie[index] = movie[index - 1]
+                fields[index] = fields[index - 1]
+                actual_gpu[index] = actual_gpu[index - 1]
+                coefficients[index] = coefficients[index - 1]
+                background_limits[index] = background_limits[index - 1]
+                phase_errors[index] = phase_errors[index - 1]
+                envelope_ratios[index] = envelope_ratios[index - 1]
+                iteration_counts[index] = 0
+                verified_reuses += 1
+            else:
                 gpu["frame_index"].fill(index)
-                if same_positions and np.array_equal(normalized[index], normalized[index - 1]):
-                    movie[index] = baseline_codes
-                    coefficients[index] = coefficients[index - 1]
-                    actual_gpu[index].set(baseline_fields, stream=stream)
-                    gpu["frame_index"].fill(index + 1)
-                    iteration_counts[index] = 0
+                if method == "lpi":
+                    # LPI supplies a single synthesis as the initial guess.
+                    # The common full-field solve owns brightness, actual phase
+                    # and background together; do not balance twice.
+                    _rearrangement_load_frame(gpu, preserve_phase=True)
+                    _rearrangement_select_roots(gpu["measurement"], band)
+                    _rearrangement_propagate(gpu, gpu["measurement"], band, "encode")
+                    movie[index] = native["codes"]
+                    coefficients[index] = gpu["coefficients"][:number]
+                    baseline_updates[index] = 0
                 elif iterations is None:
                     gpu["graphs"][band].launch(stream)
+                    baseline_updates[index] = total_updates
                 else:
                     _rearrangement_load_frame(gpu, warm_previous=True)
                     if coarse_updates:
@@ -4025,136 +4216,29 @@ def compute_rearrangement(
                     _rearrangement_select_roots(gpu["measurement"], band)
                     _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
                     _rearrangement_store_frame(gpu)
-                fields[index] = actual_gpu[index].get()
-                # The next baseline must warm from the same uncorrected state as
-                # the previous bulk solver, not from the published correction.
-                baseline_fields = fields[index].copy()
-                baseline_coefficient = coefficients[index].copy()
-                baseline_codes[:] = movie[index]
-                mask = positive[index]
-                values = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
-                ratio = float(values.max() / values.min())
-                if iterations is None and (not np.isfinite(ratio) or ratio > tolerance):
-                    gpu["kernels"]["anderson_begin"]((1,), (256,),
-                        (coefficients[index], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
-                    gain = float(gpu["weight_exponent"])
-                    residual = np.where(mask, np.log(np.maximum(abs(fields[index]), 1e-30)
-                                        / np.maximum(desired[index], 1e-30)), 0.)
-                    residual -= residual.sum() / mask.sum() * mask
-                    merit = float(np.sum(residual ** 2) / mask.sum())
-                    for _ in range(8):
-                        if stop_requested is not None and stop_requested():
-                            stream.synchronize()
-                            raise InterruptedError("SLM rearrangement stopped")
-                        if np.isfinite(ratio) and ratio <= tolerance:
-                            break
-                        gpu["frame_index"].fill(index)
-                        _rearrangement_load_frame(gpu)
-                        gpu["kernels"]["anderson_update"]((1,), (256,),
-                            (actual_gpu[index], gpu["amplitude"], gpu["coefficients"], gpu["aa_phase"],
-                             gpu["aa_g"], gpu["aa_r"], gpu["aa_candidate"], gpu["aa_state"],
-                             np.int32(number), np.float32(gain)))
-                        _rearrangement_select_roots(native, band)
-                        _rearrangement_propagate(gpu, native, band, "encode")
-                        _rearrangement_select_roots(gpu["measurement"], band)
-                        _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
-                        field = gpu["measurement"]["actual"].get()
-                        values = abs(field[mask] / desired[index, mask]) ** 2
-                        proposed_ratio = float(values.max() / values.min())
-                        update = np.zeros(number)
-                        update[mask] = np.log(np.maximum(abs(field[mask]), 1e-30) / desired[index, mask])
-                        update[mask] -= update[mask].mean()
-                        proposed_merit = float(np.sum(update ** 2) / mask.sum())
-                        accepted = np.isfinite(proposed_ratio) and (proposed_merit < merit or proposed_ratio <= tolerance)
-                        dot = float(update @ residual)
-                        if accepted:
-                            coefficients[index] = gpu["coefficients"]
-                            movie[index] = native["codes"]
-                            actual_gpu[index] = gpu["measurement"]["actual"]
-                            fields[index] = field
-                            residual, merit, ratio = update, proposed_merit, proposed_ratio
-                        if not accepted or dot < 0:
-                            gain *= .5
-                            gpu["aa_state"].fill(0)
-                        proposals_evaluated += 1
-                        iteration_counts[index] += 1
-                if len(removed):
-                    # The same Fourier model verifies and suppresses the removed
-                    # occupied trapping neighborhoods before publishing this map.
-                    gpu["kernels"]["field_project"](grid, (256,),
-                        (movie[index], native["optical"], native["image"], gpu["previous_base"],
-                         gpu["previous_corrected"], native["physical_pupil"], native["incident"],
-                         native["codes"], *map(np.int32, (*shape, native["padded"], 0))))
-                    gpu["current_base"][:] = native["optical"]
-                    if same_positions:
-                        movie[index] = movie[index - 1]
-                        fields[index] = fields[index - 1]
-                        actual_gpu[index] = actual_gpu[index - 1]
-                        gpu["kernels"]["field_project"](grid, (256,),
-                            (movie[index], native["optical"], native["image"], gpu["previous_base"],
-                             gpu["previous_corrected"], native["physical_pupil"], native["incident"],
-                             native["codes"], *map(np.int32, (*shape, native["padded"], 0))))
-                    elif index:
-                        gpu["kernels"]["field_project"](grid, (256,),
-                            (native["codes"], native["optical"], native["image"], gpu["previous_base"],
-                             gpu["previous_corrected"], native["physical_pupil"], native["incident"],
-                             native["codes"], *map(np.int32, (*shape, native["padded"], 1))))
-                    query_sites = np.concatenate((sites[index], halo_sites))
-                    query_indices, query_frequencies, query_counts, _ = _rearrangement_bind(gpu, query_sites[None])
-                    projection_band = (int(query_counts[0]) + 15) // 16 * 16
-                    projection["index"][:number_queries].set(query_indices[1][0], stream=stream)
-                    gpu["frequencies"][:len(query_frequencies)].set(query_frequencies, stream=stream)
-                    _rearrangement_select_roots(projection, projection_band)
-                    _rearrangement_propagate(gpu, projection, projection_band, "forward")
-                    measured = projection["actual"][:number_queries].get()
-                    for count in range(65):
-                        current = measured[:source_count]
-                        values = abs(current[mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
-                        bright_ratio = float(values.max() / values.min())
-                        discarded = float(np.max(abs(measured[source_count:].astype(np.complex128)) ** 2 / references))
-                        after_fade = index >= fade_frames - 1
-                        if bright_ratio <= tolerance and (not after_fade or discarded <= .01):
-                            break
-                        if count == 64:
-                            break
-                        if stop_requested is not None and stop_requested():
-                            stream.synchronize()
-                            raise InterruptedError("SLM rearrangement stopped")
-                        scale = float(np.sum(desired[index, mask] * abs(current[mask]))
-                                      / np.sum(desired[index, mask] ** 2))
-                        delta = np.zeros(number_queries, np.complex64)
-                        delta[:source_count][mask] = (scale * desired[index, mask] * np.exp(1j * np.angle(current[mask]))
-                                                     - current[mask])
-                        if after_fade:
-                            delta[source_count:] = -measured[source_count:]
-                        projection["coefficients"][:number_queries].set(delta, stream=stream)
-                        _rearrangement_propagate(gpu, projection, projection_band, "correct")
-                        _rearrangement_propagate(gpu, projection, projection_band, "forward")
-                        measured = projection["actual"][:number_queries].get()
-                        projection_updates[index] += 1
-                        iteration_counts[index] += 1
-                    fields[index] = measured[:source_count]
-                    actual_gpu[index] = projection["actual"][:source_count]
-                    movie[index] = native["codes"]
-                    discard_ratio[index] = discarded
-                    gpu["previous_base"][:] = gpu["current_base"]
-                    gpu["previous_corrected"][:] = native["optical"]
-                coefficients[index] = baseline_coefficient
-            valid = True
-            if method == "iterative":
-                values = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
-                bright_ratio = float(values.max() / values.min())
-                valid = (np.isfinite(bright_ratio) and bright_ratio <= tolerance and
-                         (index < fade_frames - 1 or discard_ratio[index] <= .01))
-            else:
-                relative = abs(fields[index, source_indices].astype(np.complex128) / desired[index, source_indices]) ** 2
-                bright_ratio = float(relative.max() / relative.min())
-                valid = np.isfinite(bright_ratio) and bright_ratio <= tolerance
+                    baseline_updates[index] = total_updates
+                field, background_limits[index], phase_errors[index], updates, envelope_ratios[index] = _rearrangement_background_projection(
+                    gpu, sites[index], desired[index], movie[index], reference_intensity, tolerance,
+                    prescribed_phase=np.angle(coefficient_values[index]) if method == "lpi" else None,
+                    iterations=128 if iterations is None else int(iterations),
+                    stop_requested=stop_requested, warm_start=index > 0)
+                fields[index] = field
+                actual_gpu[index].set(field, stream=stream)
+                movie[index] = native["codes"]
+                projection_updates[index] = updates
+                iteration_counts[index] = baseline_updates[index] + updates
+            relative = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
+            bright_ratio = float(relative.max() / relative.min())
+            valid = (np.isfinite(bright_ratio) and bright_ratio <= tolerance
+                     and background_limits[index] <= .01 and phase_errors[index] <= .01
+                     and envelope_ratios[index] <= 1.05)
             publication_open = publication_open and valid
             if require_converged and not valid:
-                detail = f", removed {discard_ratio[index]:.6g}" if method == "iterative" else ""
-                raise RuntimeError(f"SLM {method} frame {index} did not meet authored intensity ratio {tolerance:g}; "
-                                   f"bright {bright_ratio:.6g}{detail}")
+                raise RuntimeError(f"SLM {method} frame {index} did not meet optical constraints; "
+                                   f"bright {bright_ratio:.6g} (limit {tolerance:g}), "
+                                   f"background/initial {background_limits[index]:.6g} (limit 0.01), "
+                                   f"focal phase error {phase_errors[index]:.6g} rad (limit 0.01), "
+                                   f"main-lobe envelope {envelope_ratios[index]:.6g} (limit 1.05)")
             frame_solve_ms[index] = (time.perf_counter() - frame_started) * 1000
             copy_started = time.perf_counter()
             movie[index].get(out=gpu["host_frame"], stream=stream, blocking=True)
@@ -4179,123 +4263,144 @@ def compute_rearrangement(
                 if keeper["error"] is not None:
                     raise RuntimeError("SLM GPU warming failed") from keeper["error"]
                 emitted_count += 1
-        pupil_phase_step = np.empty(0)
-        if method == "iterative":
-            gpu["kernels"]["phase_step_rms"]((motion_frames,), (256,),
-                (movie, gpu["initial_phase"], native["physical_pupil"], gpu["phase_step_rms"],
-                 np.int32(np.prod(shape)), np.float64(gpu["pupil_energy"])))
-            pupil_phase_step = gpu["phase_step_rms"][:motion_frames].get()
-    if method == "lpi":
-        total_ms = (time.perf_counter() - started) * 1000
-        prepare_ms, copy_ms = (after_prepare - started) * 1000, float(frame_copy_ms.sum())
-        relative = abs(fields[:, source_indices].astype(np.complex128) / desired[:, source_indices]) ** 2
-        retained_ratios = relative.max(axis=1) / relative.min(axis=1)
-        all_relative = np.divide(abs(fields.astype(np.complex128)) ** 2, desired ** 2,
-                                 out=np.zeros(desired.shape), where=positive)
-        all_ratios = all_relative.max(axis=1) / np.min(np.where(positive, all_relative, np.inf), axis=1)
-        with _rearrangement_gpu_active(gpu["keeper"]):
-            accepted_coefficients = coefficients.get(stream=stream)
-        metadata.update(endpoint_field=_frozen(fields[-1, source_indices]),
-                        endpoint_synthesis_coefficients=_frozen(accepted_coefficients[-1, source_indices]),
-                        endpoint_support_intensity_ratio=float(retained_ratios[-1]),
-                        endpoint_iterations=int(iteration_counts[-1]), endpoint_balance_ms=0.)
-        return {
-            **plan, **sampled, **metadata, "noop": False, "phase_codes": codes,
-            "actual_fields": _frozen(fields),
-            "desired_amplitudes": _frozen(desired), "active_sites": _frozen(positive),
-            "desired_spectrum_coefficients": _frozen(coefficient_values),
-            "synthesis_coefficients": _frozen(accepted_coefficients),
-            "motion_frames": motion_frames, "iterations": tuple(map(int, iteration_counts)),
-            "phase_locked_amplitude_updates": tuple(map(int, iteration_counts)),
-            "emitted_frame_count": emitted_count, "verified_frame_reuses": verified_reuses,
-            "frame_solve_ms": frame_solve_ms, "frame_copy_ms": frame_copy_ms, "frame_ready_ms": frame_ready_ms,
-            "quality_evaluated": True, "quality_accepted": bool(publication_open),
-            "converged": bool(publication_open), "discard_converged": None,
-            "support_tolerance": tolerance, "discard_reference_limit": .01,
-            "support_intensity_ratios": _frozen(all_ratios), "retained_intensity_ratios": _frozen(retained_ratios),
-            "quality_scope": "retained-sites", "background_intensity_ratios": np.empty(0),
-            "discard_intensity_ratios": np.empty(0), "field_projection_updates": tuple(map(int, projection_updates)),
-            "brightness_minimum_to_initial": np.empty(0), "brightness_maximum_to_initial": np.empty(0),
-            "brightness_mean_to_initial": np.empty(0), "phase_change_from_initial_rms_rad": np.empty(0),
-            "focal_phase_error_rms_rad": np.empty(0),
-            "phase_step_max_rad": np.empty(0), "pupil_phase_step_rms_rad": np.empty(0),
-            "center_sample_power_proxy": np.empty(0), "phase_encoding": "uint8:2pi/256",
-            "encoded_correction_proposals": 0, "release_verified": False,
-            "recommended_release_hold_frames": 1 if len(removed) else 0,
-            "timing_ms": {"prepare_frame_state": prepare_ms, "solve": total_ms - prepare_ms - copy_ms - callback_ms,
-                          "copy": copy_ms, "callback": callback_ms, "first_frame_ready": float(frame_ready_ms[0]),
-                          "first_frame_solve": float(frame_solve_ms[0]), "first_frame_copy": float(frame_copy_ms[0]),
-                          "total": total_ms},
-        }
     intensity = abs(fields.astype(np.complex128)) ** 2
     relative = np.divide(intensity, desired ** 2, out=np.zeros(desired.shape), where=positive)
-    low = np.min(np.where(positive, relative, np.inf), axis=1)
-    ratios = np.divide(relative.max(axis=1), low, out=np.full(motion_frames, np.inf), where=low > 0)
-    discard_converged = bool(np.all(discard_ratio[max(0, fade_frames - 1):] <= .01))
-    converged = bool(np.all(np.isfinite(ratios) & (ratios <= frame_tolerances)) and discard_converged)
-    if require_converged and not converged:
-        raise RuntimeError(f"SLM sequence did not meet authored intensity ratio {tolerance:g} and "
-                           "removed-neighborhood initial-power ratio 0.01; "
-                           f"worst bright {np.max(ratios):.6g}, removed {np.max(discard_ratio[max(0, fade_frames - 1):]):.6g}")
+    ratios = relative.max(axis=1) / np.min(np.where(positive, relative, np.inf), axis=1)
     selected_fields = fields[:, source_indices]
-    brightness = abs(selected_fields / initial[source_indices][None]) ** 2
-    selected_intensity = intensity[:, source_indices]
-    background = np.max(np.where(~positive, intensity, 0), axis=1)
-    background_ratio = background / np.min(selected_intensity, axis=1)
     retained_relative = relative[:, source_indices]
     retained_ratios = retained_relative.max(axis=1) / retained_relative.min(axis=1)
+    brightness = abs(selected_fields / initial[source_indices][None]) ** 2
     phase_change = np.angle(selected_fields * initial[source_indices].conj()[None])
     phase_step = np.angle(selected_fields * np.concatenate((initial[source_indices][None], selected_fields[:-1])).conj())
+    with _rearrangement_gpu_active(gpu["keeper"]):
+        accepted_coefficients = coefficients.get(stream=stream)
+    metadata.update(endpoint_field=_frozen(fields[-1, source_indices]),
+                    endpoint_synthesis_coefficients=_frozen(accepted_coefficients[-1, source_indices]),
+                    endpoint_support_intensity_ratio=float(retained_ratios[-1]),
+                    endpoint_iterations=int(iteration_counts[-1]), endpoint_balance_ms=0.)
     total_ms = (time.perf_counter() - started) * 1000
-    prepare_ms = (after_prepare - started) * 1000
-    copy_ms = float(frame_copy_ms.sum())
+    prepare_ms, copy_ms = (after_prepare - started) * 1000, float(frame_copy_ms.sum())
     return {
-        **plan, **metadata, "noop": False, "motion_yx": _frozen(actual_path), "fraction": sampled["fraction"],
-        "phase_codes": codes, "sites_yx": sites, "actual_fields": fields,
-        "movement_fraction": sampled["movement_fraction"],
-        "desired_amplitudes": desired, "active_sites": positive,
-        "motion_frames": motion_frames, "fade_frames": fade_frames, "iterations": tuple(map(int, iteration_counts)),
+        **plan, **sampled, **metadata, "noop": False, "phase_codes": codes,
+        "actual_fields": _frozen(fields), "desired_amplitudes": _frozen(desired), "active_sites": _frozen(positive),
+        "desired_spectrum_coefficients": _frozen(coefficient_values),
+        # These are the sparse synthesis initial guesses, not a reconstruction
+        # of the full-field corrected hologram.
+        "synthesis_coefficients": _frozen(accepted_coefficients),
+        "motion_frames": motion_frames, "iterations": tuple(map(int, iteration_counts)),
         "emitted_frame_count": emitted_count, "verified_frame_reuses": verified_reuses,
-        "frame_solve_ms": frame_solve_ms,
-        "frame_copy_ms": frame_copy_ms, "frame_ready_ms": frame_ready_ms,
-        "clearance": clearance, "fade_clearance": fade_clearance,
-        "surplus_stationary_clearance": stationary_clearance,
-        "maximum_step": maximum_step, "recommended_motion_frames": recommended,
-        "support_intensity_ratios": ratios, "retained_intensity_ratios": _frozen(retained_ratios),
-        "converged": converged, "quality_accepted": converged,
-        "quality_evaluated": True, "support_tolerance": tolerance,
-        "background_intensity_ratios": background_ratio,
-        "discard_intensity_ratios": discard_ratio, "discard_reference_limit": .01,
-        "discard_converged": discard_converged, "field_projection_updates": tuple(map(int, projection_updates)),
-        "brightness_minimum_to_initial": brightness.min(axis=1),
-        "brightness_maximum_to_initial": brightness.max(axis=1),
-        "brightness_mean_to_initial": brightness.mean(axis=1),
-        "center_sample_power_proxy": selected_intensity.sum(axis=1) / (np.prod(shape) * gpu["pupil_energy"]),
-        "phase_change_from_initial_rms_rad": np.sqrt(np.mean(phase_change ** 2, axis=1)),
+        "frame_solve_ms": frame_solve_ms, "frame_copy_ms": frame_copy_ms, "frame_ready_ms": frame_ready_ms,
+        "quality_evaluated": True, "quality_accepted": bool(publication_open), "converged": bool(publication_open),
+        "support_tolerance": tolerance, "discard_reference_limit": .01, "discard_converged": None,
+        "support_intensity_ratios": _frozen(ratios), "retained_intensity_ratios": _frozen(retained_ratios),
+        "quality_scope": "bright-sites-and-full-native-background-with-natural-main-lobe-envelope",
+        "background_limit_ratios": _frozen(background_limits), "background_reference_intensity": reference_intensity,
+        "focal_phase_error_max_rad": _frozen(phase_errors),
+        "main_lobe_envelope_ratios": _frozen(envelope_ratios),
+        "background_intensity_ratios": np.empty(0), "discard_intensity_ratios": np.empty(0),
+        "field_projection_updates": tuple(map(int, projection_updates)),
+        "brightness_minimum_to_initial": _frozen(brightness.min(axis=1)),
+        "brightness_maximum_to_initial": _frozen(brightness.max(axis=1)),
+        "brightness_mean_to_initial": _frozen(brightness.mean(axis=1)),
+        "center_sample_power_proxy": _frozen(intensity[:, source_indices].sum(axis=1)
+            / (np.prod(shape) * gpu["pupil_energy"])),
+        "phase_change_from_initial_rms_rad": _frozen(np.sqrt(np.mean(phase_change ** 2, axis=1))),
         "focal_phase_error_rms_rad": np.empty(0),
-        "phase_step_max_rad": np.max(abs(phase_step), axis=1),
-        "pupil_phase_step_rms_rad": pupil_phase_step,
-        "encoded_correction_proposals": proposals_evaluated, "phase_encoding": "uint8:2pi/256",
+        "phase_step_max_rad": _frozen(np.max(abs(phase_step), axis=1)),
+        "pupil_phase_step_rms_rad": np.empty(0), "phase_encoding": "uint8:2pi/256",
         "release_verified": False, "recommended_release_hold_frames": 1 if len(removed) else 0,
         "timing_ms": {"prepare_frame_state": prepare_ms, "solve": total_ms - prepare_ms - copy_ms - callback_ms,
-                      "copy": copy_ms, "callback": callback_ms,
-                      "first_frame_ready": float(frame_ready_ms[0]),
+                      "copy": copy_ms, "callback": callback_ms, "first_frame_ready": float(frame_ready_ms[0]),
                       "first_frame_solve": float(frame_solve_ms[0]), "first_frame_copy": float(frame_copy_ms[0]),
                       "total": total_ms},
     }
+
+
+def _psf_main_lobe(psf, center):
+    """Connected one-percent main lobe of this numeric pupil's single trap."""
+    from scipy.ndimage import label  # noqa: PLC0415
+
+    components, _ = label(psf >= .01 * psf[center], structure=np.ones((3, 3), bool))
+    return components == components[center]
+
+
+def _rearrangement_focal_peaks(intensity, maxima, sites, psf_support):
+    """Recognize one main peak per target, never an entire bright rectangle.
+
+    The FFT plane is periodic. Equal neighboring samples form one plateau;
+    every other local maximum remains eligible as unwanted light, including
+    a second peak inside a target's natural-PSF neighborhood.
+    """
+    sites = np.asarray(sites, np.float64)
+    shape = np.asarray(intensity.shape)
+    offsets = np.argwhere(psf_support) - shape // 2
+    # Include the two neighboring integer samples of a fractional center.
+    lower, upper = offsets.min(axis=0) - 1, offsets.max(axis=0) + 1
+    yy, xx = np.mgrid[lower[0]:upper[0] + 1, lower[1]:upper[1] + 1]
+    neighborhood = np.stack((yy.ravel(), xx.ravel()), axis=1)
+    peak_yx = np.full((len(sites), 2), np.nan)
+    peak_intensity = np.full(len(sites), np.nan)
+    target_region = np.zeros(intensity.shape, bool)
+    for index, site in enumerate(sites):
+        points = np.floor(site).astype(np.int64) + neighborhood
+        delta = points - site
+        support_index = (np.rint(delta).astype(np.int64) + shape // 2) % shape
+        supported = psf_support[tuple(support_index.T)]
+        points = points[supported] % shape
+        target_region[tuple(points.T)] = True
+        # A candidate belongs to its closest authored target, not whichever
+        # target happens to be visited first.
+        distance = points[:, None] - sites[None]
+        distance -= np.rint(distance / shape) * shape
+        nearest = np.argmin(np.sum(distance ** 2, axis=-1), axis=1)
+        points = points[nearest == index]
+        allowed = maxima[tuple(points.T)]
+        if not np.any(allowed):
+            continue
+        candidates = points[allowed]
+        distance = candidates - site
+        distance -= np.rint(distance / shape) * shape
+        chosen = int(np.argmin(np.sum(distance ** 2, axis=1)))
+        point = candidates[chosen]
+        value = intensity[tuple(point)]
+        # Only recognized main peaks need plateau identities. Do not label
+        # every tiny noise peak across the million-pixel focal plane.
+        pending, members = [tuple(point)], []
+        while pending:
+            y, x = pending.pop()
+            if not maxima[y, x] or intensity[y, x] != value:
+                continue
+            maxima[y, x] = False
+            members.append((y, x))
+            pending.extend(((y + dy) % shape[0], (x + dx) % shape[1])
+                           for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx)
+        # Exact half-pixel peaks straddling the FFT edge are one plateau.
+        members = np.asarray(members)
+        relative = (members - point).astype(np.float64)
+        relative -= np.rint(relative / shape) * shape
+        peak_yx[index] = (point + relative.mean(axis=0)) % shape
+        peak_intensity[index] = intensity[tuple(point)]
+    if np.any(maxima):
+        flat = int(np.argmax(np.where(maxima, intensity, -np.inf)))
+        unwanted_yx = np.asarray(np.unravel_index(flat, intensity.shape), np.float64)
+        unwanted_intensity = float(intensity.flat[flat])
+    else:
+        unwanted_yx, unwanted_intensity = np.full(2, np.nan), 0.0
+    return peak_yx, peak_intensity, unwanted_yx, unwanted_intensity, target_region
 
 
 def rearrangement_diagnostics(
     prepared: Mapping[str, object], result: Mapping[str, object], *,
     stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Measure delivered maps with the shared native fractional Fourier model.
+    """Measure delivered maps with the shared physical-pupil Fourier model.
 
     Called after playback/second photo, not a hidden LPI publication gate.
     Fields use the FFT-center phase reference; phase_center_yx only specifies
     the LPI interpolation gauge. Phase change from the initial field is distinct
     from LPI focal-field error relative to its prescribed synthesis phase.
-    No optical response or atom survival is inferred.
+    Fourfold zero padding resolves peaks between native Fourier samples; it
+    does not resize the SLM pupil. No optical response or survival is inferred.
     """
     import time  # noqa: PLC0415
 
@@ -4307,19 +4412,15 @@ def rearrangement_diagnostics(
     source_indices = np.asarray(result["source_indices"], np.intp)
     removed = np.asarray(result["removed_source_indices"], np.intp)
     fields = np.asarray(result["actual_fields"])
-    discard = np.asarray(result["discard_intensity_ratios"])
+    discard = np.array(result["discard_intensity_ratios"], copy=True)
     pupil_steps = np.asarray(result["pupil_phase_step_rms_rad"])
-    if fields.shape != (count, source_count) or discard.shape != (count,):
+    if discard.shape != (count,):
+        discard = np.zeros(count)
+    if fields.shape != (count, source_count):
         cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
         _rearrangement_motion_capacity(gpu, count, stop_requested)
         fields = np.empty((count, source_count), np.complex64)
-        discard = np.zeros(count)
-        work = gpu["projection"] if len(removed) else gpu["measurement"]
-        halo = ((prepared["source_yx"][removed, None] + np.indices((5, 5)).reshape(2, -1).T - 2)
-                .reshape(-1, 2))
-        references = np.repeat(abs(prepared["source_field"][removed].astype(np.complex128)) ** 2, 25)
-        number_queries = source_count + len(halo)
-        query = {**work, "number": number_queries}
+        query = {**gpu["measurement"], "number": source_count}
         area = int(np.prod(prepared["shape_yx"]))
         with _rearrangement_gpu_active(gpu["keeper"]), stream:
             gpu["motion_codes"][:count].set(np.asarray(result["phase_codes"]), stream=stream)
@@ -4330,17 +4431,19 @@ def rearrangement_diagnostics(
                     (gpu["motion_codes"][index], native["optical"], native["image"],
                      native["optical"], native["optical"], native["physical_pupil"], native["incident"],
                      native["codes"], *map(np.int32, (*prepared["shape_yx"], native["padded"], 0))))
-                points = np.concatenate((sites, halo))
-                indices, frequencies, counts, _ = _rearrangement_bind(gpu, points[None])
+                indices, frequencies, counts, _ = _rearrangement_bind(gpu, np.asarray(sites)[None])
                 band = (int(counts[0]) + 15) // 16 * 16
-                query["index"][:number_queries].set(indices[1][0], stream=stream)
+                query["index"][:source_count].set(indices[1][0], stream=stream)
                 gpu["frequencies"][:len(frequencies)].set(frequencies, stream=stream)
                 _rearrangement_select_roots(query, band)
                 _rearrangement_propagate(gpu, query, band, "forward")
-                measured = query["actual"][:number_queries].get(stream=stream)
-                fields[index] = measured[:source_count]
-                if len(removed):
-                    discard[index] = float(np.max(abs(measured[source_count:].astype(np.complex128)) ** 2 / references))
+                fields[index] = query["actual"][:source_count].get(stream=stream)
+    if pupil_steps.shape != (count,):
+        cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
+        _rearrangement_motion_capacity(gpu, count, stop_requested)
+        area = int(np.prod(prepared["shape_yx"]))
+        with _rearrangement_gpu_active(gpu["keeper"]), stream:
+            gpu["motion_codes"][:count].set(np.asarray(result["phase_codes"]), stream=stream)
             gpu["kernels"]["phase_step_rms"]((count,), (256,),
                 (gpu["motion_codes"], gpu["initial_phase"], native["physical_pupil"], gpu["phase_step_rms"],
                  np.int32(area), np.float64(gpu["pupil_energy"])))
@@ -4355,7 +4458,66 @@ def rearrangement_diagnostics(
     initial = prepared["source_field"][source_indices]
     brightness = abs(selected_fields / initial[None]) ** 2
     selected_intensity = intensity[:, source_indices]
-    background = np.max(np.where(~positive, intensity, 0), axis=1) / np.min(selected_intensity, axis=1) if count else np.empty(0)
+    # Identity-indexed samples cannot describe background: a moved identity
+    # loses its old coordinate, while an inactive identity can coincide with a
+    # legitimate new target. Inspect the actual complete focal plane instead.
+    peak_intensity = np.zeros(count)
+    peak_yx = np.full((count, 2), np.nan)
+    target_peak_yx = np.full((count, source_count, 2), np.nan)
+    target_peak_intensity = np.full((count, source_count), np.nan)
+    source_site_intensity = np.empty((count, source_count))
+    source_site_is_active = np.zeros((count, source_count), bool)
+    source_reference = abs(np.asarray(prepared["source_field"], np.complex128)) ** 2
+    initial_reference = float(np.min(source_reference))
+    if count:
+        from cupyx.scipy.ndimage import maximum_filter  # noqa: PLC0415
+
+        cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
+        shape = np.asarray(prepared["shape_yx"])
+        source_sites = np.asarray(prepared["source_yx"], np.int64)
+        area = int(np.prod(shape))
+        sampling = int(gpu["psf_oversampling"])
+        focal_shape = sampling * shape
+        focal_center = focal_shape // 2
+        psf_support = np.zeros(tuple(focal_shape), bool)
+        profile = gpu["psf_profile"]
+        start = focal_center + sampling * gpu["psf_profile_origin"]
+        psf_support[tuple(slice(int(a), int(a + n)) for a, n in zip(start, profile.shape))] = profile > 0
+        source_pixels = (source_sites - shape // 2) * sampling + focal_center
+        halo_offsets = np.indices((4 * sampling + 1,) * 2).reshape(2, -1).T - 2 * sampling
+        for index, codes in enumerate(result["phase_codes"]):
+            if stop_requested is not None and stop_requested():
+                raise InterruptedError("SLM rearrangement diagnostics stopped")
+            with _rearrangement_gpu_active(gpu["keeper"]), stream:
+                native["codes"].set(np.asarray(codes), stream=stream)
+                gpu["kernels"]["field_project"](((area + 255) // 256,), (256,),
+                    (native["codes"], native["optical"], native["image"], native["optical"], native["optical"],
+                     native["physical_pupil"], native["incident"], native["codes"],
+                     *map(np.int32, (*shape, native["padded"], 0))))
+                # The centered physical pupil is embedded contiguously. Moving
+                # that block only adds a common Fourier phase ramp, not power.
+                focal = cp.fft.fftshift(cp.fft.fft2(native["optical"], s=tuple(focal_shape)))
+                power = cp.abs(focal) ** 2
+                maxima = ((power > 0) & (power == maximum_filter(power, size=3, mode="wrap"))).get(stream=stream)
+                focal_intensity = power.get(stream=stream)
+            active_points = np.asarray(result["sites_yx"])[index, positive[index]]
+            active_pixels = (active_points - shape // 2) * sampling + focal_center
+            recognized, values, peak_yx[index], peak_intensity[index], target_region = _rearrangement_focal_peaks(
+                focal_intensity, maxima, active_pixels, psf_support)
+            peak_yx[index] = (peak_yx[index] - focal_center) / sampling + shape // 2
+            target_peak_yx[index, positive[index]] = (recognized - focal_center) / sampling + shape // 2
+            target_peak_intensity[index, positive[index]] = values
+            source_site_intensity[index] = focal_intensity[tuple(source_pixels.T)]
+            source_site_is_active[index] = np.any(np.all(source_sites[:, None] == active_points[None], axis=-1), axis=1)
+            if len(removed):
+                halo = (source_pixels[removed, None] + halo_offsets[None]) % focal_shape
+                halo_ratios = focal_intensity[tuple(halo.reshape(-1, 2).T)].reshape(len(removed), -1) / source_reference[removed, None]
+                # An old identity landing under a current main lobe is not a
+                # dark-region violation. Additional peaks there remain visible
+                # in the independent whole-plane peak diagnosis above.
+                excluded = target_region[tuple(halo.reshape(-1, 2).T)].reshape(len(removed), -1)
+                discard[index] = float(np.max(np.where(excluded, 0, halo_ratios)))
+    background = peak_intensity / np.min(selected_intensity, axis=1) if count else np.empty(0)
     phase_change = np.angle(selected_fields * initial.conj()[None])
     phase_step = np.angle(selected_fields * np.concatenate((initial[None], selected_fields[:-1])).conj())
     focal_phase_error = np.empty(0)
@@ -4371,7 +4533,7 @@ def rearrangement_diagnostics(
         if np.any(fading_active):
             values = relative[index, fading_active]
             fading_ratios[index] = values.max() / values.min()
-    discarded_ok = bool(np.all(discard[max(0, result["fade_frames"] - 1):] <= .01))
+    discarded_ok = bool(np.all(discard[max(0, result["fade_frames"] - 1):] <= SPOT_BACKGROUND_TOLERANCE))
     return {
         "actual_fields": _frozen(fields),
         "support_intensity_ratios": _frozen(ratios),
@@ -4379,6 +4541,17 @@ def rearrangement_diagnostics(
         "retained_intensity_ratios": _frozen(retained_ratios),
         "fading_intensity_ratios": _frozen(fading_ratios),
         "background_intensity_ratios": _frozen(background), "discard_intensity_ratios": _frozen(discard),
+        "background_peak_yx": _frozen(peak_yx), "background_peak_intensity": _frozen(peak_intensity),
+        "background_peak_to_initial_ratios": _frozen(peak_intensity / initial_reference),
+        "background_initial_reference_intensity": initial_reference,
+        "background_peak_tolerance": SPOT_BACKGROUND_TOLERANCE,
+        "target_peak_yx": _frozen(target_peak_yx), "target_peak_intensity": _frozen(target_peak_intensity),
+        "source_site_intensities": _frozen(source_site_intensity),
+        "source_site_intensity_ratios": _frozen(source_site_intensity / source_reference[None]),
+        "source_site_is_active": _frozen(source_site_is_active),
+        "background_scope": "unclaimed-local-peaks-full-focal-plane; 4x-zero-padded",
+        "peak_position_basis": "native-Fourier-pixels; quarter-pixel-samples; equal-plateau-centroid",
+        "peak_assignment": "one-per-current-target; natural-pupil-PSF-center-component-at-1pct; nearest-target",
         "brightness_minimum_to_initial": _frozen(brightness.min(axis=1) if count else np.empty(0)),
         "brightness_maximum_to_initial": _frozen(brightness.max(axis=1) if count else np.empty(0)),
         "brightness_mean_to_initial": _frozen(brightness.mean(axis=1) if count else np.empty(0)),
@@ -4388,8 +4561,10 @@ def rearrangement_diagnostics(
         "phase_step_max_rad": _frozen(np.max(abs(phase_step), axis=1) if count else np.empty(0)),
         "pupil_phase_step_rms_rad": _frozen(pupil_steps),
         "quality_evaluated": True, "discard_converged": discarded_ok,
-        "converged": bool(np.all(np.isfinite(retained_ratios) & (retained_ratios <= result["frame_support_tolerances"])))
-                     if result["method"] == "lpi" else bool(np.all(np.isfinite(ratios) & (ratios <= result["frame_support_tolerances"])) and discarded_ok),
+        "converged": bool(result["converged"] and np.all(np.isfinite(retained_ratios)
+                          & (retained_ratios <= result["frame_support_tolerances"]))
+                          and np.all(peak_intensity <= SPOT_BACKGROUND_TOLERANCE * initial_reference)
+                          and np.all(np.isfinite(target_peak_intensity[positive]))),
         "field_phase_reference": "fft-center", "publication_gate": False, "propagation": "native-fp32-fractional-fourier",
         "diagnostics_ms": (time.perf_counter() - started) * 1000,
     }
