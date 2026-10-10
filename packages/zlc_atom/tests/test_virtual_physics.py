@@ -2240,7 +2240,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     assert next_sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 6)
     assert next_sequence["recommended_motion_frames"] == 4
     assert next_sequence["converged"]
-    assert np.max(next_sequence["support_intensity_ratios"]) <= 1.01
+    assert np.max(next_sequence["support_intensity_ratios"][:-1]) <= 1.10
+    assert next_sequence["support_intensity_ratios"][-1] <= 1.01
     y = (np.arange(height) - height // 2) / height
     x = (np.arange(width) - width // 2) / width
     for candidate in (sequence, next_sequence):
@@ -2261,7 +2262,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             previous_command = command
             if candidate is next_sequence:
                 power = abs(expected[values > 0]) ** 2 / values[values > 0] ** 2
-                assert power.max() / power.min() <= 1.01
+                assert power.max() / power.min() <= (1.01 if frame == 6 else 1.10)
                 if frame >= candidate["fade_frames"] - 1:
                     spectrum = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(field)))
                     references = abs(prepared["source_field"][discarded].astype(np.complex128)) ** 2
@@ -2401,7 +2402,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             np.testing.assert_allclose(held["actual_fields"][frame], actual, rtol=2e-5,
                                        atol=2e-5 * np.min(abs(actual)))
             relative = abs(actual / held["desired_amplitudes"][frame]) ** 2
-            assert relative.max() / relative.min() <= 1.01
+            assert relative.max() / relative.min() <= (1.01 if frame == 4 else 1.10)
         for frame, residue in ((0, 1), (1, 2), (3, 4)):
             positions = translated["sites_yx"][frame]
             signed = positions - center
@@ -2485,7 +2486,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                                        atol=2e-5 * np.min(abs(actual[movie["active_sites"][index]])))
             relative = abs(actual[selected] / movie["desired_amplitudes"][index, selected]) ** 2
             assert diagnostics["retained_intensity_ratios"][index] == pytest.approx(relative.max() / relative.min(), rel=2e-5)
-            assert relative.max() / relative.min() <= 1.01
+            assert relative.max() / relative.min() <= (1.01 if index == 6 else 1.10)
             source_change = np.angle(actual[selected] * lpi["source_field"][selected].conj())
             prescribed_error = np.angle(actual[selected] * coefficients[index, selected].conj())
             assert diagnostics["phase_change_from_initial_rms_rad"][index] == pytest.approx(
@@ -2507,6 +2508,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         empty = slm_solver.compute_rearrangement(lpi, empty_plan, motion_frames=empty_sample["motion_frames"],
                                                  sampled=empty_sample)
         assert empty["noop"] and not len(empty["phase_codes"])
+        assert not len(empty["frame_support_tolerances"])
+        assert slm_solver.rearrangement_diagnostics(lpi, empty)["converged"]
         calls = []
         def reject_frame(index, frame):
             calls.append(index)
@@ -2514,6 +2517,22 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         with pytest.raises(RuntimeError, match="consumer rejected map"):
             slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, frame_ready=reject_frame)
         assert calls == [0]
+        calls.clear()
+        with pytest.raises(RuntimeError, match="did not meet authored intensity ratio"):
+            slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, iterations=0,
+                support_tolerance=1., motion_support_tolerance=1.,
+                frame_ready=lambda index, frame: calls.append(index))
+        assert calls == []
+        failed = slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, iterations=0,
+            support_tolerance=1., motion_support_tolerance=1., require_converged=False,
+            frame_ready=lambda index, frame: calls.append(index))
+        assert not failed["quality_accepted"] and failed["iterations"] == (0,) * 7 and not calls
+        stopped = iter((False, False, True))
+        with pytest.raises(InterruptedError, match="SLM rearrangement stopped"):
+            slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7,
+                stop_requested=lambda: next(stopped, True),
+                frame_ready=lambda index, frame: calls.append(index))
+        assert calls == []
     finally:
         lpi["close"]()
     np.testing.assert_array_equal(movie["phase_codes"], saved)
@@ -2527,7 +2546,12 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=7,
         )
         assert static["maximum_step"] == 0
-        np.testing.assert_array_equal(static["phase_codes"][1:], np.broadcast_to(static["phase_codes"][1], (6, *shape)))
+        np.testing.assert_array_equal(static["phase_codes"][1:-1], np.broadcast_to(static["phase_codes"][1], (5, *shape)))
+        assert np.max(static["retained_intensity_ratios"][:-1]) <= 1.10
+        assert static["retained_intensity_ratios"][-1] <= 1.01
+        single = slm_solver.compute_rearrangement(
+            static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=1)
+        assert single["retained_intensity_ratios"][0] <= 1.01
         selected = static["source_indices"]
         np.testing.assert_allclose(np.angle(static["desired_spectrum_coefficients"][:, selected]
                                           * static_lpi["source_field"][selected].conj()), 0., atol=1e-6)

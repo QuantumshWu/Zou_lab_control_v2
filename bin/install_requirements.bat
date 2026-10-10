@@ -73,7 +73,7 @@ exit /b %ZLC_STATUS%
 :zlc_gpu_check
 echo [GPU] Checking imports, the selected device, and a real dot product and FFT...
 pushd "%TEMP%"
-set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -c "import zou_lab_control; from zlc_atom.devices.slm import solver; import sys; print('Interpreter:', sys.executable); print('Root:', zou_lab_control.__file__); print('SLM:', solver.__file__); import cupy as cp; print('CuPy:', cp.__version__, cp.__file__); info=cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id); print('GPU:', info['name']); x=cp.arange(4, dtype=cp.float32); value=float(cp.dot(x, x).item()); spectrum=cp.asnumpy(cp.fft.fft(x)); assert value == 14.0 and float(spectrum[0].real) == 6.0; print('GPU dot + FFT: PASS', value, spectrum)""
+set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -c "import zou_lab_control; from zlc_atom.devices.slm import solver; import sys; print('Interpreter:', sys.executable); print('Root:', zou_lab_control.__file__); print('SLM:', solver.__file__); import cupy as cp; from cuda.bindings import runtime; print('CuPy:', cp.__version__, cp.__file__); print('CUDA bindings:', runtime.__file__); info=cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id); print('GPU:', info['name']); x=cp.arange(4, dtype=cp.float32); value=float(cp.dot(x, x).item()); spectrum=cp.asnumpy(cp.fft.fft(x)); assert value == 14.0 and float(spectrum[0].real) == 6.0; print('GPU dot + FFT: PASS', value, spectrum)""
 call :zlc_run_step
 set "ZLC_STATUS=%ERRORLEVEL%"
 popd

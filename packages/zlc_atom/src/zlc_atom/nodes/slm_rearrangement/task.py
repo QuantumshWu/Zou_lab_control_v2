@@ -163,7 +163,7 @@ class SlmRearrangementTask:
                  pulse_sequence, pulse_path, before_period, after_period="",
                  exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
                  phase_method="lpi", frame_mode="fixed", max_camera_step=1.,
-                 minimum_separation=15., intensity_tolerance=1.01,
+                 minimum_separation=15., intensity_tolerance=1.01, motion_intensity_tolerance=1.10,
                  save_phase_sequence=True, save_figure_artifact=None, recording_frames=None):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
@@ -193,6 +193,7 @@ class SlmRearrangementTask:
         self.frame_rate_hz = float(frame_rate_hz)
         self.minimum_separation = float(minimum_separation)
         self.intensity_tolerance = float(intensity_tolerance)
+        self.motion_intensity_tolerance = float(motion_intensity_tolerance)
         self.save_phase_sequence = bool(save_phase_sequence)
         self._save_figure_artifact = save_figure_artifact
         if not isinstance(pulse_sequence, PulseSequence):
@@ -280,6 +281,7 @@ class SlmRearrangementTask:
                 "frame_rate_hz": self.frame_rate_hz,
                 "minimum_separation": self.minimum_separation,
                 "intensity_tolerance": self.intensity_tolerance,
+                "motion_intensity_tolerance": self.motion_intensity_tolerance,
                 "target_registration": {
                     "affine_target_xy_to_calibration_image_xy": self._target_to_calibration_xy.tolist(),
                     "basis": "Geometric registration; camera/SLM handedness is not independently measured",
@@ -706,6 +708,7 @@ class SlmRearrangementTask:
         context.register_artifact("summary", write_readable_json(directory/"summary.json", _plain_json(summary)), role="summary")
         lines = ["SLM Rearrangement", f"Status: {status}", f"Pulse: {self.pulse_path}",
                  f"Method: {self.phase_method}; frame policy: {self.frame_mode}",
+                 f"Weighted intensity ratio limits: motion {self.motion_intensity_tolerance:g}; final {self.intensity_tolerance:g}",
                  f"Computed maps: {summary['actual_motion_frames']}; nominal rate: {self.frame_rate_hz:g} Hz",
                  f"Maximum camera displacement: {self._camera_maximum_step} sensor pixel per frame",
                  f"GPU preparation reused: {self._gpu_reused}"]
@@ -944,6 +947,7 @@ class SlmRearrangementTask:
                         self._result = compute_rearrangement(prepared, plan,
                             motion_frames=self._frame_count, sampled=sampled,
                             support_tolerance=self.intensity_tolerance,
+                            motion_support_tolerance=self.motion_intensity_tolerance,
                             require_converged=False, frame_ready=frame_ready,
                             stop_requested=stopped)
                         self._timings["compute_and_feed"] = (perf_counter()-compute_started)*1000

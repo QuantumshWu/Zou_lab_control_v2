@@ -260,6 +260,7 @@ def experiment(tmp_path, monkeypatch, request):
 
     def compute(prepared, planned, **kwargs):
         trace.append("compute")
+        state.compute_arguments = kwargs
         assert planned["assigned_source_indices"].dtype.kind in "iu"
         if board.early_verification:
             deadline = time.monotonic() + 1
@@ -343,6 +344,11 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert e.slm.plays == 1 and e.closed == []
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["intensity_tolerance"] == e.prepare_arguments["support_tolerance"] == 1.01
+    assert summary["motion_intensity_tolerance"] == e.compute_arguments["motion_support_tolerance"] == 1.10
+    assert e.compute_arguments["support_tolerance"] == 1.01
+    assert "motion_support_tolerance" not in e.prepare_arguments
+    assert "Weighted intensity ratio limits: motion 1.1; final 1.01" in (e.context.run_directory / "summary.txt").read_text()
     assert not any("camera_source" in event for event in summary["capture_events"].values())
     assert all("/camera/" not in item.name for item in e.plane.describe_signals())
     assert summary["target_sites"] == 4 and summary["judged_target_sites"] == 3
@@ -512,7 +518,8 @@ def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation
     assert e.task.restart_from(changed_spacing)
     assert e.task._prepared is prepared and prepared["minimum_separation"] == .5
     fresh = SlmRearrangementTask(**(e.task_arguments | {
-        "frame_mode": "camera_step", "max_camera_step": .6, "exposure_seconds": .03}))
+        "frame_mode": "camera_step", "max_camera_step": .6, "exposure_seconds": .03,
+        "motion_intensity_tolerance": 1.08}))
     assert e.task.restart_from(fresh)
     assert e.task._prepared is prepared and e.task.exposure_seconds == .03
     assert not e.task._detections and not e.task._records
@@ -521,6 +528,8 @@ def test_camera_step_uses_sensor_geometry_and_restarts_keep_only_gpu_preparation
     e.task.execute(again)
     repeated = json.loads((again.run_directory / "summary.json").read_text())
     assert repeated["gpu_preparation_reused"]
+    assert repeated["motion_intensity_tolerance"] == e.compute_arguments["motion_support_tolerance"] == 1.08
+    assert repeated["intensity_tolerance"] == e.compute_arguments["support_tolerance"] == 1.01
     assert e.trace.count("prepare_gpu") == 1 and e.closed == []
     changed_context = dict(e.task_arguments["science_context"])
     changed_context["phase"] = np.remainder(changed_context["phase"] + .1, 2*np.pi)
@@ -1002,6 +1011,10 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert form.widget_for("motion_frames").isEnabled()
         assert not form.widget_for("max_camera_step").isEnabled()
         assert form.widget_for("intensity_error_percent").isEnabled()
+        assert form.widget_for("motion_intensity_error_percent").isEnabled()
+        assert form.read_value("motion_intensity_error_percent") == 10.
+        assert fields["intensity_error_percent"].label == "Final intensity tolerance (%)"
+        assert fields["motion_intensity_error_percent"].label == "Motion intensity tolerance (%)"
         patches = []
         form.draft_changed.connect(patches.append)
         QtTest.QTest.keyClick(before, QtCore.Qt.Key_Down)
@@ -1039,13 +1052,15 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         project()
         assert form.widget_for("intensity_error_percent").isEnabled()
         assert form.read_value("intensity_error_percent") == 1.
+        assert form.widget_for("motion_intensity_error_percent").isEnabled()
+        assert form.read_value("motion_intensity_error_percent") == 10.
         QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
         app.processEvents()
         values.update(patches[-1]["values"])
         project()
         assert form.widget_for("intensity_error_percent").isEnabled()
         with pytest.raises(ValueError, match="max_camera_step"):
-            SLM_REARRANGEMENT_SCHEMA.draft_values({**values, "max_camera_step": 0.})
+            SLM_REARRANGEMENT_SCHEMA.draft_values({**values, "frame_mode": "camera_step", "max_camera_step": 0.})
         resource = replace(resource, value=replace(sequence, periods=tuple(
             replace(period, name="Renamed first image") if period.period_id == "before" else period
             for period in sequence.periods)))
@@ -1077,6 +1092,10 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             assert tuple(recording_form._forms) == tuple(form._forms)
             assert all(type(recording_form._forms[key]) is type(form._forms[key]) for key in form._forms)
             assert recording_form.read_value("phase_method") == "lpi"
+            assert recording_form.read_value("motion_intensity_error_percent") == 10.
+            assert recording_form.read_value("intensity_error_percent") == 1.
+            assert recording_fields["motion_intensity_error_percent"].label == "Motion intensity tolerance (%)"
+            assert recording_fields["intensity_error_percent"].label == "Final intensity tolerance (%)"
             assert recording_form.read_value("frame_mode") == "fixed"
             assert tuple(output.name for output in recording.outputs_for(recording_values, {})) == camera_outputs
         finally:
