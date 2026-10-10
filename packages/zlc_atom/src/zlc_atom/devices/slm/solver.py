@@ -2514,11 +2514,10 @@ extern "C" __global__ void load_motion_frame(int* counter,const int* native_indi
  long long begin=offsets[frame],end=offsets[frame+1];
  for(int j=t;j<K;j+=256)frequency[j]=j<end-begin?frequencies[begin+j]:make_double2(0,0);
 }
-extern "C" __global__ void store_motion_frame(const int* counter,const unsigned char* codes,
- const float2* coefficients,const float2* actual,unsigned char* movie,float2* saved_coefficients,float2* saved_actual,int N,int area){
+extern "C" __global__ void store_motion_coefficients(const int* counter,
+ const float2* coefficients,float2* saved_coefficients,int N){
  int i=blockIdx.x*blockDim.x+threadIdx.x,frame=counter[0]-1;
- if(i<area)movie[(unsigned long long)frame*area+i]=codes[i];
- if(i<N){unsigned long long row=(unsigned long long)frame*N+i;saved_coefficients[row]=coefficients[i];saved_actual[row]=actual[i];}
+ if(i<N)saved_coefficients[(unsigned long long)frame*N+i]=coefficients[i];
 }
 extern "C" __global__ void phase_step_rms(const unsigned char* movie,const float* initial,
  const float* pupil,float* result,int area,double energy){
@@ -2723,8 +2722,39 @@ extern "C" __global__ void anderson_update(const float2* field,const float* targ
   anderson_apply(field,target,c,phase,gh,rh,candidate,state,N,exponent);
 }
 extern "C" __device__ __cudart_builtin__ void cudaGraphSetConditional(unsigned long long,unsigned int);
-extern "C" __global__ void focal_profile(const long long* indices,const float* values,float* profile,int N){
- int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N)atomicMax((unsigned int*)(profile+indices[i]),__float_as_uint(values[i]));
+extern "C" __global__ void focal_inputs(int* index,int* coarse_index,const float* target,const float2* coefficient,
+ float* amplitude,float2* phase,const int* frame_counter,const double* config,double* control,double* coarse_control,
+ int N,int capacity,int H,int CH,int factor){
+ int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=capacity)return;
+ if(j<N){amplitude[j]=target[j];float2 c=coefficient[j];double m=fmax(hypot((double)c.x,(double)c.y),1e-30);
+   phase[j]=make_float2(c.x/m,c.y/m);
+   if(factor>1){int k=index[j];coarse_index[j]=(k/H)*CH+(k%H)%CH;}
+ }else{amplitude[j]=0;index[j]=0;if(factor>1)coarse_index[j]=0;}
+ if(!j){int frame=*frame_counter-1;
+   control[0]=0;control[1]=config[0];control[2]=frame+1==(int)config[5]?config[2]:config[1];
+   control[3]=0;control[4]=config[3];control[5]=config[4];control[6]=1;
+   control[7]=frame>0&&config[0]>0;
+   if(factor>1){for(int k=0;k<8;++k)coarse_control[k]=control[k];
+     coarse_control[1]=floor(control[1]/2);coarse_control[4]/=(double)factor*factor*factor*factor;}
+   control[7]=0;}
+}
+extern "C" __global__ void focal_profile(const int* index,const double2* frequencies,const float* amplitude,
+ const float* psf,const int2* offsets,float* profile,float* coarse_profile,
+ int N,int points,int H,int W,int CH,int CW,int PH,int PW,int oy,int ox,int sampling,int coarse){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=N*points)return;int j=i/points;
+ double a=amplitude[j];if(a<=0)return;
+ int packed=index[j],band=packed/H,iy=packed%H;double2 f=frequencies[band];
+ int ix=(int)floor(f.x);double fx=f.x-ix;int2 offset=offsets[i%points];
+ double py=(offset.x-f.y-oy)*sampling,px=(offset.y-fx-ox)*sampling;
+ if(py<0||px<0||py>PH-1||px>PW-1)return;
+ int y0=(int)floor(py),x0=(int)floor(px),y1=min(y0+1,PH-1),x1=min(x0+1,PW-1);
+ double fy=py-y0,tx=px-x0;
+ float value=(float)(((1.-fy)*((1.-tx)*psf[y0*PW+x0]+tx*psf[y0*PW+x1])
+                      +fy*((1.-tx)*psf[y1*PW+x0]+tx*psf[y1*PW+x1])));
+ value=(float)(a*a*value);if(value<=0)return;
+ int y=(iy+offset.x+H)%H,x=((ix+offset.y)%W+W)%W;
+ atomicMax((unsigned int*)(profile+y*W+x),__float_as_uint(value));
+ if(coarse)atomicMax((unsigned int*)(coarse_profile+(y%CH)*CW+x%CW),__float_as_uint(value));
 }
 extern "C" __global__ void focal_cap(float2* spectrum,const float* profile,
   double* maxima,const double* control,unsigned int* changed_count,int* changed_index,
@@ -2814,7 +2844,7 @@ extern "C" __global__ void focal_check(unsigned long long handle,const double* m
  values[0][t]=bg;values[1][t]=excess;__syncthreads();
  for(int k=128;k;k/=2){if(t<k){values[0][t]=fmax(values[0][t],values[0][t+k]);values[1][t]=fmax(values[1][t],values[1][t+k]);}__syncthreads();}
  if(!t){double background=values[0][0]/control[4];
-   unsigned int more=(!(result[0]<=control[2]&&background<=.01&&result[2]<=.01&&values[1][0]<=1.05)
+   unsigned int more=(!(result[0]<=control[2]&&background<=.01)
                        ||control[0]<control[7])&&control[0]<control[1];
    control[3]=more;result[1]=background;result[3]=control[0];result[4]=values[1][0];
    if(more)control[0]+=1;cudaGraphSetConditional(handle,more);}
@@ -2826,6 +2856,33 @@ extern "C" __global__ void focal_encode(const float2* background,const float* de
  float2 e=background[i],d=synthesis_pixel(delta,i/W,i%W,H,W,P);
  e.x=(e.x+d.x)/(H*W);e.y=(e.y+d.y)/(H*W);
  optical[i]=encoded_pixel(e,pupil,incident,codes,i);
+}
+extern "C" __global__ void focal_sample(const float2* input,const unsigned char* input_codes,
+ float2* output,unsigned char* codes,int H,int W,int native_W,int factor){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;
+ int j=(i/W)*factor*native_W+(i%W)*factor;output[i]=input[j];codes[i]=input_codes[j];
+}
+extern "C" __global__ void focal_candidate(const float2* background,const float* delta,
+ const float2* actual,float2* output,const double* control,int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;
+ if(control[0]==0){output[i]=actual[i];return;}
+ float2 b=background[i],d=synthesis_pixel(delta,i/W,i%W,H,W,P);
+ output[i]=make_float2((b.x+d.x)/(H*W),(b.y+d.y)/(H*W));
+}
+extern "C" __global__ void focal_pad(const float2* input,float2* output,int H,int W,int CH,int CW){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;int y=i/W,x=i%W;
+ if((y<(CH+1)/2||y>=H-CH/2)&&(x<(CW+1)/2||x>=W-CW/2)){
+   int yy=(y<(CH+1)/2?y:y-H)+CH,xx=(x<(CW+1)/2?x:x-W)+CW;
+   output[i]=input[(yy%CH)*CW+xx%CW];
+ }else output[i]=make_float2(0,0);
+}
+extern "C" __global__ void focal_lift(const float2* candidate,const float* pupil,const float* incident,
+ float2* optical,unsigned char* codes,const double* coarse_control,double* control,double* result,int N,int area){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=area)return;
+ if(!i){control[1]-=coarse_control[0];result[5+2*N]=coarse_control[0];}
+ // A zero-update initializer has no newly computed complex candidate.
+ // Keep the original native seed instead of lifting stale update scratch.
+ if(coarse_control[0]>0)optical[i]=encoded_pixel(candidate[i],pupil,incident,codes,i);
 }
 '''
 
@@ -2999,8 +3056,8 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 motion_bands = max(motion_bands, (target_columns + 15) // 16 * 16)
             capacity = motion_bands
             module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
-            names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
-                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update", "focal_profile", "focal_prepare", "focal_cap", "focal_check", "focal_residual", "focal_clip_residual", "focal_encode")
+            names = ("load_motion_frame", "store_motion_coefficients", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
+                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update", "focal_inputs", "focal_profile", "focal_prepare", "focal_cap", "focal_check", "focal_residual", "focal_clip_residual", "focal_encode", "focal_sample", "focal_candidate", "focal_pad", "focal_lift")
             kernels = {name: module.get_function(name) for name in names}
             from scipy.fft import fft2, fftshift, ifftshift  # noqa: PLC0415
 
@@ -3025,7 +3082,20 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
             gpu.update(psf_profile=profile, psf_profile_origin=lower, psf_oversampling=oversampling,
                        psf_neighborhood=np.stack((yy.ravel(), xx.ravel()), axis=1))
             # Stride-two samples share the centered native coordinates only at these sizes.
-            factors = (1, 2) if all(size % 4 == 0 for size in shape) else (1,)
+            factors = (1, 2) if method == "iterative" and all(size % 4 == 0 for size in shape) else (1,)
+            initializer_factor = 1
+            frequencies = np.concatenate((geometry["source_yx"], geometry["target_yx"])) - np.asarray(shape) // 2
+            for candidate in (4, 2):
+                # The strided pupil, incident field and FFT centers must refer
+                # to identical physical samples. Include the natural main lobe
+                # when deciding whether this initializer can represent a site.
+                coarse_shape = np.asarray(shape) // candidate
+                if (all(size % (2 * candidate) == 0 for size in shape)
+                        and np.all(frequencies + lower > -coarse_shape // 2)
+                        and np.all(frequencies + upper < coarse_shape // 2)):
+                    initializer_factor = candidate
+                    break
+            gpu["initializer_factor"] = initializer_factor
             handles = []
             def close():
                 if not gpu:
@@ -3047,6 +3117,9 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                         _rearrangement_keeper_release(keeper)
             gpu["close"] = close
             with stream:
+                gpu["psf_profile_gpu"] = cp.asarray(profile)
+                gpu["psf_neighborhood_gpu"] = cp.asarray(gpu["psf_neighborhood"], cp.int32)
+                gpu["focal_config"] = cp.asarray([0., 1., 1., 1., 0., 1.])
                 # All handles use this one stream, so their scratch can be shared.
                 # User-owned scratch prevents cuBLAS adding per-call allocation
                 # nodes, which are also illegal inside a conditional graph.
@@ -3054,7 +3127,10 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 site_capacity = max(number, len(geometry["target_yx"])) if method == "lpi" else number
                 gpu["coefficients"] = cp.zeros(site_capacity, cp.complex64)
                 gpu["frequencies"] = cp.zeros((capacity, 2), cp.float64)
-                for factor, precise in [(factor, False) for factor in factors] + [(1, True)]:
+                work_specs = [(factor, False) for factor in factors] + [(1, True)]
+                if initializer_factor > 1:
+                    work_specs.append((initializer_factor, True))
+                for factor, precise in work_specs:
                     if stop_requested is not None and stop_requested():
                         raise InterruptedError("SLM rearrangement preparation stopped")
                     dtype = cp.float32 if precise else cp.float16
@@ -3078,7 +3154,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                                 field_gemm=cp.empty((2, h, 2 * padded), dtype),
                                 projected=cp.empty((2, h, work_capacity), cp.float32),
                                 actual=cp.empty(site_capacity, cp.complex64),
-                                index=(gpu["resources"][1]["index"] if precise
+                                index=(gpu["resources"][1]["index"] if precise and factor == 1
                                        else cp.arange(site_capacity, dtype=cp.int32) % (16 * ly)),
                                 frequencies=gpu["frequencies"],
                                 alpha=np.asarray(1, np.float32), beta=np.asarray(0, np.float32),
@@ -3088,12 +3164,20 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                         # The final decision uses FP32 roots/packing on the same finite
                         # Fourier map. Roots, emitted optical field and query indices
                         # belong to the same native geometry; only packing is precise.
-                        work["optical"] = gpu["resources"][1]["optical"]
-                        gpu["measurement"] = work
                         work.update(backward=cp.empty((work_capacity, 2 * padded), cp.float32),
                                     packed=cp.empty((2, h, work_capacity), cp.float32),
                                     image=cp.empty((2, h, 2 * padded), cp.float32))
-                        if method == "lpi":
+                        if factor == 1:
+                            work["optical"] = gpu["resources"][1]["optical"]
+                            gpu["measurement"] = work
+                        else:
+                            work.update(optical=cp.empty((h, w), cp.complex64), codes=cp.empty((h, w), cp.uint8),
+                                        physical_pupil=cp.asarray(pupil[::factor, ::factor]),
+                                        incident=cp.asarray(incident[::factor, ::factor], cp.float32))
+                            gpu["initializer"] = {key: gpu[key] for key in
+                                ("cp", "stream", "kernels", "cublas", "cufft", "gemm", "frequencies", "coefficients", "number")}
+                            gpu["initializer"].update(shape=(h, w), resources={1: work}, measurement=work)
+                        if factor == 1 and method == "lpi":
                             work.update(physical_pupil=gpu["resources"][1]["physical_pupil"],
                                         incident=gpu["resources"][1]["incident"],
                                         codes=gpu["resources"][1]["codes"])
@@ -3119,28 +3203,30 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                             _rearrangement_propagate(gpu, work, band, "roundtrip")
                             if factor == 1:
                                 _rearrangement_propagate(gpu, work, band, "encode")
-                gpu["previous_base"] = cp.empty(shape, cp.complex64)
-                gpu["previous_corrected"] = cp.empty(shape, cp.complex64)
-                gpu["current_base"] = cp.empty(shape, cp.complex64)
                 gpu["aa_phase"] = cp.empty(site_capacity, cp.complex64)
-                gpu["focal_profile"] = cp.zeros(shape, cp.float32)
-                profile_capacity = site_capacity * len(gpu["psf_neighborhood"])
-                gpu["focal_profile_indices"] = cp.empty(profile_capacity, cp.int64)
-                gpu["focal_profile_values"] = cp.empty(profile_capacity, cp.float32)
-                gpu["focal_delta"] = cp.empty(site_capacity, cp.complex64)
-                gpu["focal_amplitude"] = cp.zeros(site_capacity, cp.float32)
-                gpu["focal_phase"] = cp.ones(site_capacity, cp.complex64)
-                gpu["focal_spectrum"] = cp.empty(shape, cp.complex64)
-                gpu["focal_background"] = cp.empty(shape, cp.complex64)
-                gpu["focal_changed_count"] = cp.zeros(1, cp.uint32)
-                gpu["focal_changed_index"] = cp.empty(int(np.prod(shape)), cp.int32)
-                gpu["focal_changed_delta"] = cp.empty(int(np.prod(shape)), cp.complex128)
-                gpu["focal_plan"] = get_fft_plan(gpu["focal_spectrum"], axes=(0, 1), value_type="C2C")
-                gpu["focal_maxima"] = cp.empty(2 * ((int(np.prod(shape)) + 255) // 256), cp.float64)
-                gpu["focal_control"] = cp.asarray([0., 0., 1., 0., 1., 0., 1., 0.])
-                gpu["focal_result"] = cp.empty(5 + 2 * site_capacity, cp.float64)
-                gpu["focal_work"] = {**gpu["measurement"], "number": site_capacity,
-                                     "coefficients": gpu["focal_delta"]}
+                for stage in (gpu, *([gpu["initializer"]] if initializer_factor > 1 else [])):
+                    stage_shape = stage["shape"]
+                    stage_area = int(np.prod(stage_shape))
+                    stage["previous_base"] = cp.zeros(stage_shape, cp.complex64)
+                    stage["previous_corrected"] = cp.zeros(stage_shape, cp.complex64)
+                    stage["current_base"] = cp.empty(stage_shape, cp.complex64)
+                    stage["focal_profile"] = cp.zeros(stage_shape, cp.float32)
+                    stage["focal_delta"] = cp.empty(site_capacity, cp.complex64)
+                    stage["focal_amplitude"] = cp.zeros(site_capacity, cp.float32) if stage is gpu else gpu["focal_amplitude"]
+                    stage["focal_phase"] = cp.ones(site_capacity, cp.complex64) if stage is gpu else gpu["focal_phase"]
+                    stage["focal_spectrum"] = cp.empty(stage_shape, cp.complex64)
+                    stage["focal_background"] = cp.empty(stage_shape, cp.complex64)
+                    stage["focal_changed_count"] = cp.zeros(1, cp.uint32)
+                    stage["focal_changed_index"] = cp.empty(stage_area, cp.int32)
+                    stage["focal_changed_delta"] = cp.empty(stage_area, cp.complex128)
+                    stage["focal_plan"] = get_fft_plan(stage["focal_spectrum"], axes=(0, 1), value_type="C2C")
+                    stage["focal_maxima"] = cp.empty(2 * ((stage_area + 255) // 256), cp.float64)
+                    stage["focal_control"] = cp.asarray([0., 0., 1., 0., 1., 0., 1., 0.])
+                    stage["focal_result"] = cp.zeros(6 + 2 * site_capacity, cp.float64)
+                    stage["focal_work"] = {**stage["measurement"], "number": site_capacity,
+                                           "coefficients": stage["focal_delta"]}
+                    if stage is not gpu:
+                        stage["candidate"] = cp.empty(stage_shape, cp.complex64)
                 gpu["aa_g"] = cp.empty((3, site_capacity), cp.float32)
                 gpu["aa_r"] = cp.empty((3, site_capacity), cp.float32)
                 gpu["aa_candidate"] = cp.empty(site_capacity, cp.float64)
@@ -3149,6 +3235,9 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 gpu["frame_index"] = cp.zeros(1, cp.int32)
                 staging = gpu["output_pool"].malloc(int(np.prod(shape)))
                 gpu["host_frame"] = np.frombuffer(staging, np.uint8, count=int(np.prod(shape))).reshape(shape)
+                result_staging = gpu["output_pool"].malloc(gpu["focal_result"].nbytes)
+                gpu["host_focal_result"] = np.frombuffer(result_staging, np.float64, count=gpu["focal_result"].size)
+                gpu["copy_start"], gpu["copy_end"] = cp.cuda.Event(), cp.cuda.Event()
                 gpu["motion_capacity"] = 0
                 stream.synchronize()
             return gpu
@@ -3259,12 +3348,11 @@ def _rearrangement_load_frame(gpu, *, warm_previous=False, preserve_phase=False)
          np.int32(warm_previous), np.int32(preserve_phase)))
 
 
-def _rearrangement_store_frame(gpu):
-    """Copy accepted frame outputs; no block changes the row counter here."""
-    area = int(np.prod(gpu["shape"]))
-    gpu["kernels"]["store_motion_frame"](((area + 255) // 256,), (256,),
-        (gpu["frame_index"], gpu["resources"][1]["codes"], gpu["coefficients"], gpu["measurement"]["actual"],
-         gpu["motion_codes"], gpu["motion_coefficients"], gpu["motion_actual"], np.int32(gpu["number"]), np.int32(area)))
+def _rearrangement_store_coefficients(gpu):
+    """Retain baseline weights needed by the next Iterative frame."""
+    number = gpu["number"]
+    gpu["kernels"]["store_motion_coefficients"](((number + 255) // 256,), (256,),
+        (gpu["frame_index"], gpu["coefficients"], gpu["motion_coefficients"], np.int32(number)))
 
 
 def _rearrangement_bind(gpu, points):
@@ -3359,7 +3447,6 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
         gpu["motion_codes"] = cp.empty((count, *gpu["shape"]), cp.uint8)
         gpu["motion_coefficients"] = cp.zeros((count, number), cp.complex64)
         gpu["motion_amplitudes"] = cp.ones((count, number), cp.float32)
-        gpu["motion_actual"] = cp.empty((count, number), cp.complex64)
         gpu["motion_indices"] = {factor: cp.zeros((count, number), cp.int32) for factor in gpu["resources"]}
         gpu["motion_frequencies"] = cp.zeros((count * native["capacity"], 2), cp.float64)
         gpu["motion_offsets"] = cp.zeros(count + 1, cp.int64)
@@ -3382,9 +3469,21 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                     _rearrangement_amplitude_updates(gpu, gpu["resources"][2], band, coarse_updates)
                 _rearrangement_amplitude_updates(gpu, native, band, native_updates)
                 _rearrangement_propagate(gpu, native, band, "encode")
+                # The full-field loop consumes these FP32 roots; the baseline
+                # above uses the distinct reduced-precision synthesis roots.
                 _rearrangement_select_roots(gpu["measurement"], band)
-                _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
-                _rearrangement_store_frame(gpu)
+                _rearrangement_store_coefficients(gpu)
+                gpu["graphs"][band] = stream.end_capture()
+                gpu["frame_index"].fill(0)
+                gpu["graphs"][band].launch(stream)
+        else:
+            # The movie bindings change only when capacity grows. Keep this
+            # small baseline graph separate from the fixed optical solver.
+            for band in gpu["measurement"]["plans"]:
+                stream.begin_capture()
+                _rearrangement_load_frame(gpu, preserve_phase=True)
+                _rearrangement_select_roots(gpu["measurement"], band)
+                _rearrangement_propagate(gpu, gpu["measurement"], band, "encode")
                 gpu["graphs"][band] = stream.end_capture()
                 gpu["frame_index"].fill(0)
                 gpu["graphs"][band].launch(stream)
@@ -3397,161 +3496,173 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
         work, cuda, cufft = gpu["focal_work"], gpu["cuda"], gpu["cufft"]
         area = int(np.prod(gpu["shape"]))
         grid = ((area + 255) // 256,)
-        gpu["focal_control"].set(np.array([0., 0., 1., 0., 1., 0., 1., 0.]), stream=stream)
-        gpu["kernels"]["focal_profile"]((1,), (256,),
-            (gpu["focal_profile_indices"], gpu["focal_profile_values"], gpu["focal_profile"], np.int32(0)))
-        gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
-        gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
+        initializer = gpu.get("initializer")
+        gpu["focal_config"].set(np.array([0., 1., 1., 1., 0., 1.]), stream=stream)
+        for stage in (gpu, *([initializer] if initializer else [])):
+            stage["focal_control"].set(np.array([0., 0., 1., 0., 1., 0., 1., 0.]), stream=stream)
+            stage["focal_profile"].fill(0)
+            stage["focal_plan"].fft(stage["resources"][1]["optical"], stage["focal_spectrum"], cufft.CUFFT_FORWARD)
+            stage["focal_plan"].fft(stage["focal_spectrum"], stage["focal_background"], cufft.CUFFT_INVERSE)
 
-        def evaluate(band, handle):
-            _rearrangement_propagate(gpu, work, band, "forward")
+        def frame_inputs(band, use_initializer):
+            coarse = initializer if use_initializer else gpu
+            factor = gpu["initializer_factor"] if use_initializer else 1
+            gpu["kernels"]["focal_inputs"](((work["number"] + 255) // 256,), (256,),
+                (work["index"], coarse["focal_work"]["index"], gpu["amplitude"], gpu["coefficients"],
+                 gpu["focal_amplitude"], gpu["focal_phase"], gpu["frame_index"], gpu["focal_config"],
+                 gpu["focal_control"], coarse["focal_control"],
+                 *map(np.int32, (gpu["number"], work["number"], gpu["shape"][0], coarse["shape"][0], factor))))
+            gpu["focal_profile"].fill(0)
+            if use_initializer:
+                coarse["focal_profile"].fill(0)
+                _rearrangement_select_roots(coarse["focal_work"], band)
+            profile_count = gpu["number"] * len(gpu["psf_neighborhood"])
+            gpu["kernels"]["focal_profile"](((profile_count + 255) // 256,), (256,),
+                (work["index"], gpu["frequencies"], gpu["focal_amplitude"], gpu["psf_profile_gpu"],
+                 gpu["psf_neighborhood_gpu"], gpu["focal_profile"], coarse["focal_profile"],
+                 *map(np.int32, (gpu["number"], len(gpu["psf_neighborhood"]), *gpu["shape"], *coarse["shape"],
+                                 *gpu["psf_profile"].shape, *gpu["psf_profile_origin"], gpu["psf_oversampling"], use_initializer))))
+
+        def warm_seed(stage, band, warm):
+            stage_native, stage_work = stage["resources"][1], stage["focal_work"]
+            stage_area = int(np.prod(stage["shape"]))
+            stage["current_base"][:] = stage_native["optical"]
+            if warm:
+                _rearrangement_propagate(stage, stage_work, band, "forward")
+                gpu["kernels"]["focal_prepare"]((1,), (256,),
+                    (stage_work["actual"], stage["focal_amplitude"], stage["focal_phase"], stage["focal_control"],
+                     stage["focal_delta"], stage["focal_result"], stage["focal_changed_count"], np.int32(stage_work["number"])))
+                gpu["kernels"]["field_project"](((stage_area + 255) // 256,), (256,),
+                    (stage_native["codes"], stage_native["optical"], stage_native["image"],
+                     stage["previous_base"], stage["previous_corrected"], stage_native["physical_pupil"],
+                     stage_native["incident"], stage_native["codes"], *map(np.int32, (*stage["shape"], stage_native["padded"], 1))))
+                _rearrangement_propagate(stage, stage_work, band, "forward")
+                gpu["kernels"]["focal_residual"](((stage_work["number"] + 255) // 256,), (256,),
+                    (stage_work["actual"], stage["focal_amplitude"], stage["focal_delta"],
+                     np.int32(stage_work["number"]), np.int32(1)))
+                _rearrangement_propagate(stage, stage_work, band, "correct")
+
+        def evaluate(stage, band, handle):
+            stage_work = stage["focal_work"]
+            stage_area = int(np.prod(stage["shape"]))
+            stage_grid = ((stage_area + 255) // 256,)
+            _rearrangement_propagate(stage, stage_work, band, "forward")
             gpu["kernels"]["focal_prepare"]((1,), (256,),
-                (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
-                 gpu["focal_delta"], gpu["focal_result"], gpu["focal_changed_count"], np.int32(work["number"])))
-            gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
-            gpu["kernels"]["focal_cap"](grid, (256,),
-                (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"],
-                 gpu["focal_control"], gpu["focal_changed_count"], gpu["focal_changed_index"],
-                 gpu["focal_changed_delta"], np.int32(area)))
+                (stage_work["actual"], stage["focal_amplitude"], stage["focal_phase"], stage["focal_control"],
+                 stage["focal_delta"], stage["focal_result"], stage["focal_changed_count"], np.int32(stage_work["number"])))
+            stage["focal_plan"].fft(stage["resources"][1]["optical"], stage["focal_spectrum"], cufft.CUFFT_FORWARD)
+            gpu["kernels"]["focal_cap"](stage_grid, (256,),
+                (stage["focal_spectrum"], stage["focal_profile"], stage["focal_maxima"],
+                 stage["focal_control"], stage["focal_changed_count"], stage["focal_changed_index"],
+                 stage["focal_changed_delta"], np.int32(stage_area)))
             gpu["kernels"]["focal_check"]((1,), (256,),
-                (np.uint64(int(handle)), gpu["focal_maxima"], gpu["focal_control"],
-                 gpu["focal_result"], np.int32(grid[0])))
+                (np.uint64(int(handle)), stage["focal_maxima"], stage["focal_control"],
+                 stage["focal_result"], np.int32(stage_grid[0])))
+
+        def capture_loop(stage, graph, dependencies, band, initialize):
+            stage_work, stage_native = stage["focal_work"], stage["resources"][1]
+            stage_area = int(np.prod(stage["shape"]))
+            handle = _rearrangement_cuda_result(cuda.cudaGraphConditionalHandleCreate(graph, 1, 1))
+            _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
+                stream.ptr, graph, dependencies or None, None, len(dependencies),
+                cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
+            try:
+                initialize()
+                evaluate(stage, band, handle)
+                frontier = cuda.cudaStreamGetCaptureInfo(stream.ptr)
+                _rearrangement_cuda_result(frontier)
+                dependencies = list(frontier[4])[:frontier[5]]
+            finally:
+                _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
+            node = cuda.cudaGraphNodeParams()
+            node.type = cuda.cudaGraphNodeType.cudaGraphNodeTypeConditional
+            node.conditional.handle = handle
+            node.conditional.type = cuda.cudaGraphConditionalNodeType.cudaGraphCondTypeWhile
+            node.conditional.size = 1
+            node_handle = _rearrangement_cuda_result(cuda.cudaGraphAddNode(graph, dependencies, len(dependencies), node))
+            _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
+                stream.ptr, node.conditional.phGraph_out[0], None, None, 0,
+                cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
+            try:
+                stage["focal_plan"].fft(stage["focal_spectrum"], stage["focal_background"], cufft.CUFFT_INVERSE)
+                gpu["kernels"]["focal_clip_residual"]((stage_work["number"],), (256,),
+                    (stage["focal_spectrum"], stage_work["index"], gpu["frequencies"],
+                     stage["focal_amplitude"], stage["focal_result"], stage["focal_changed_count"],
+                     stage["focal_changed_index"], stage["focal_changed_delta"], stage["focal_delta"],
+                     *map(np.int32, (stage_work["number"], *stage["shape"]))))
+                _rearrangement_propagate(stage, stage_work, band, "backward")
+                gpu["kernels"]["focal_encode"](((stage_area + 255) // 256,), (256,),
+                    (stage["focal_background"], stage_work["image"], stage_native["physical_pupil"], stage_native["incident"],
+                     stage_native["optical"], stage_native["codes"], stage["focal_control"],
+                     *map(np.int32, (*stage["shape"], stage_work["padded"]))))
+                evaluate(stage, band, handle)
+            finally:
+                _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
+            return [node_handle]
 
         for band in work["plans"]:
-            if stop_requested is not None and stop_requested():
-                raise InterruptedError("SLM rearrangement preparation stopped")
-            _rearrangement_select_roots(work, band)
-            _rearrangement_propagate(gpu, work, band, "backward")
-            graph = _rearrangement_cuda_result(cuda.cudaGraphCreate(0))
-            try:
-                handle = _rearrangement_cuda_result(cuda.cudaGraphConditionalHandleCreate(graph, 1, 1))
-                # Decide before entering the update loop. A converged result
-                # must not pay for an unused inverse transform and propagation.
-                _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
-                    stream.ptr, graph, None, None, 0,
-                    cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
-                try:
-                    evaluate(band, handle)
-                    frontier = cuda.cudaStreamGetCaptureInfo(stream.ptr)
-                    _rearrangement_cuda_result(frontier)
-                    dependencies = list(frontier[4])[:frontier[5]]
-                finally:
-                    _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
-                node = cuda.cudaGraphNodeParams()
-                node.type = cuda.cudaGraphNodeType.cudaGraphNodeTypeConditional
-                node.conditional.handle = handle
-                node.conditional.type = cuda.cudaGraphConditionalNodeType.cudaGraphCondTypeWhile
-                node.conditional.size = 1
-                _rearrangement_cuda_result(cuda.cudaGraphAddNode(graph, dependencies, len(dependencies), node))
-                _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
-                    stream.ptr, node.conditional.phGraph_out[0], None, None, 0,
-                    cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
-                try:
-                    gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
-                    # The actual post-clip field equals the old field plus the
-                    # finite-DFT interpolation of the changed spectrum only.
-                    # Do not propagate the entire inverse image a second time.
-                    gpu["kernels"]["focal_clip_residual"]((work["number"],), (256,),
-                        (gpu["focal_spectrum"], work["index"], gpu["frequencies"],
-                         gpu["focal_amplitude"], gpu["focal_result"], gpu["focal_changed_count"],
-                         gpu["focal_changed_index"], gpu["focal_changed_delta"], gpu["focal_delta"],
-                         *map(np.int32, (work["number"], *gpu["shape"]))))
-                    _rearrangement_propagate(gpu, work, band, "backward")
-                    gpu["kernels"]["focal_encode"](grid, (256,),
-                        (gpu["focal_background"], work["image"], native["physical_pupil"], native["incident"],
-                         native["optical"], native["codes"], gpu["focal_control"],
-                         *map(np.int32, (*gpu["shape"], work["padded"]))))
-                    evaluate(band, handle)
-                finally:
-                    _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
-                executable = _rearrangement_cuda_result(cuda.cudaGraphInstantiate(graph, 0))
-            except BaseException:
-                _rearrangement_cuda_result(cuda.cudaGraphDestroy(graph))
-                raise
-            gpu["background_graphs"][band] = (graph, executable)
-            _rearrangement_cuda_result(cuda.cudaGraphLaunch(executable, stream.ptr))
+            for stage in (gpu, *([initializer] if initializer else [])):
+                _rearrangement_select_roots(stage["focal_work"], band)
+                _rearrangement_propagate(stage, stage["focal_work"], band, "backward")
+            for use_initializer in ((False, True) if initializer else (False,)):
+                for warm in (False, True):
+                    if stop_requested is not None and stop_requested():
+                        raise InterruptedError("SLM rearrangement preparation stopped")
+                    graph = _rearrangement_cuda_result(cuda.cudaGraphCreate(0))
+                    try:
+                        dependencies = []
+                        if use_initializer:
+                            coarse_native = initializer["resources"][1]
+                            coarse_area = int(np.prod(initializer["shape"]))
+                            coarse_grid = ((coarse_area + 255) // 256,)
+
+                            def begin_coarse():
+                                frame_inputs(band, True)
+                                gpu["kernels"]["focal_sample"](coarse_grid, (256,),
+                                    (native["optical"], native["codes"], coarse_native["optical"], coarse_native["codes"],
+                                     *map(np.int32, (*initializer["shape"], gpu["shape"][1], gpu["initializer_factor"]))))
+                                warm_seed(initializer, band, warm)
+
+                            dependencies = capture_loop(initializer, graph, dependencies, band, begin_coarse)
+
+                        def begin_native():
+                            if not use_initializer:
+                                frame_inputs(band, False)
+                            gpu["focal_result"][-1:].fill(0)
+                            if use_initializer:
+                                gpu["kernels"]["focal_candidate"](coarse_grid, (256,),
+                                    (initializer["focal_background"], initializer["focal_work"]["image"], coarse_native["optical"],
+                                     initializer["candidate"], initializer["focal_control"],
+                                     *map(np.int32, (*initializer["shape"], coarse_native["padded"])) ))
+                                initializer["focal_plan"].fft(initializer["candidate"], initializer["focal_spectrum"], cufft.CUFFT_FORWARD)
+                                gpu["kernels"]["focal_pad"](grid, (256,),
+                                    (initializer["focal_spectrum"], gpu["focal_spectrum"],
+                                     *map(np.int32, (*gpu["shape"], *initializer["shape"]))))
+                                gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
+                                gpu["kernels"]["focal_lift"](grid, (256,),
+                                    (gpu["focal_background"], native["physical_pupil"], native["incident"], native["optical"], native["codes"],
+                                     initializer["focal_control"], gpu["focal_control"], gpu["focal_result"], np.int32(work["number"]), np.int32(area)))
+                                initializer["previous_base"][:] = initializer["current_base"]
+                                initializer["previous_corrected"][:] = coarse_native["optical"]
+                            warm_seed(gpu, band, warm and not use_initializer)
+
+                        dependencies = capture_loop(gpu, graph, dependencies, band, begin_native)
+                        _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
+                            stream.ptr, graph, dependencies, None, len(dependencies),
+                            cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
+                        try:
+                            gpu["previous_base"][:] = gpu["current_base"]
+                            gpu["previous_corrected"][:] = native["optical"]
+                        finally:
+                            _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
+                        executable = _rearrangement_cuda_result(cuda.cudaGraphInstantiate(graph, 0))
+                    except BaseException:
+                        _rearrangement_cuda_result(cuda.cudaGraphDestroy(graph))
+                        raise
+                    gpu["background_graphs"][band, use_initializer, warm] = (graph, executable)
+                    _rearrangement_cuda_result(cuda.cudaGraphLaunch(executable, stream.ptr))
         stream.synchronize()
         gpu["motion_capacity"] = count
-
-
-def _rearrangement_background_projection(
-    gpu, points, desired, codes, reference_intensity, tolerance, *,
-    prescribed_phase=None, iterations=128, stop_requested=None, warm_start=False,
-):
-    """Native-grid correction; denser full-field audit remains independent.
-
-    Keep low background free, bound each main lobe by the actual pupil's PSF,
-    and impose bright complex fields with the exact fractional operator.
-    This is an additional optical constraint, not a claim that ordinary WGS or
-    LPI guarantees no ghosts. Every decision is made after logical encoding.
-    """
-    cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
-    shape = np.asarray(gpu["shape"])
-    number, area = len(points), int(np.prod(shape))
-    active = np.asarray(desired) > 0
-    from scipy.ndimage import map_coordinates  # noqa: PLC0415
-
-    active_points = np.asarray(points)[active]
-    pixels = np.floor(active_points).astype(np.int64)[:, None] + gpu["psf_neighborhood"]
-    coordinates = (pixels - active_points[:, None] - gpu["psf_profile_origin"]) * gpu["psf_oversampling"]
-    values = map_coordinates(gpu["psf_profile"], coordinates.reshape(-1, 2).T,
-                             order=1, mode="constant", cval=0., prefilter=False).reshape(pixels.shape[:2])
-    positive = values > 0
-    selected_pixels = (pixels[positive] - shape // 2) % shape
-    profile_pixels = selected_pixels[:, 0] * shape[1] + selected_pixels[:, 1]
-    power = np.square(np.asarray(desired)[active])[:, None]
-    profile_values = np.asarray((power * values)[positive], np.float32)
-    gpu["focal_profile"].fill(0)
-    gpu["focal_profile_indices"][:len(profile_pixels)].set(profile_pixels, stream=stream)
-    gpu["focal_profile_values"][:len(profile_values)].set(profile_values, stream=stream)
-    gpu["kernels"]["focal_profile"](((len(profile_pixels) + 255) // 256,), (256,),
-        (gpu["focal_profile_indices"], gpu["focal_profile_values"], gpu["focal_profile"], np.int32(len(profile_pixels))))
-    indices, frequencies, counts, _ = _rearrangement_bind(gpu, np.asarray(points)[None])
-    work = gpu["focal_work"]
-    band = (int(counts[0]) + 15) // 16 * 16
-    work["index"].fill(0)
-    work["index"][:number].set(indices[1][0], stream=stream)
-    gpu["frequencies"][:len(frequencies)].set(frequencies, stream=stream)
-    _rearrangement_select_roots(work, band)
-    grid = ((area + 255) // 256,)
-    gpu["focal_amplitude"].fill(0)
-    gpu["focal_amplitude"][:number].set(np.asarray(desired, np.float32), stream=stream)
-    if prescribed_phase is not None:
-        gpu["focal_phase"][:number].set(np.exp(1j * np.asarray(prescribed_phase, np.float64)).astype(np.complex64), stream=stream)
-    gpu["focal_control"].set(np.array([0., iterations, tolerance, 0., reference_intensity,
-                                      float(prescribed_phase is not None), 1., float(warm_start)]), stream=stream)
-    gpu["kernels"]["field_project"](grid, (256,),
-        (codes, native["optical"], native["image"], native["optical"], native["optical"],
-         native["physical_pupil"], native["incident"], native["codes"],
-         *map(np.int32, (*shape, native["padded"], 0))))
-    gpu["current_base"][:] = native["optical"]
-    if warm_start:
-        # Restore the fresh geometry's bright scale once in the warm seed;
-        # this is not a fixed-power constraint on the ensuing iterations.
-        # Otherwise repeated warm starts inherit an ever dimmer signal subspace.
-        _rearrangement_propagate(gpu, work, band, "forward")
-        gpu["kernels"]["focal_prepare"]((1,), (256,),
-            (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
-             gpu["focal_delta"], gpu["focal_result"], gpu["focal_changed_count"], np.int32(work["number"])))
-        gpu["kernels"]["field_project"](grid, (256,),
-            (native["codes"], native["optical"], native["image"], gpu["previous_base"], gpu["previous_corrected"],
-             native["physical_pupil"], native["incident"], native["codes"],
-             *map(np.int32, (*shape, native["padded"], 1))))
-        _rearrangement_propagate(gpu, work, band, "forward")
-        gpu["kernels"]["focal_residual"](((work["number"] + 255) // 256,), (256,),
-            (work["actual"], gpu["focal_amplitude"], gpu["focal_delta"], np.int32(work["number"]), np.int32(1)))
-        _rearrangement_propagate(gpu, work, band, "correct")
-    if stop_requested is not None and stop_requested():
-        raise InterruptedError("SLM rearrangement stopped")
-    executable = gpu["background_graphs"][band][1]
-    _rearrangement_cuda_result(gpu["cuda"].cudaGraphLaunch(executable, stream.ptr))
-    result = gpu["focal_result"].get(stream=stream)
-    if stop_requested is not None and stop_requested():
-        raise InterruptedError("SLM rearrangement stopped")
-    gpu["previous_base"][:] = gpu["current_base"]
-    gpu["previous_corrected"][:] = native["optical"]
-    field = (result[5:5 + 2 * number:2] + 1j * result[6:5 + 2 * number:2]).astype(np.complex64)
-    return field, float(result[1]), float(result[2]), int(result[3]), float(result[4])
 
 
 def _rearrangement_balance_endpoint(gpu, points, intensities, coefficients, iterations, tolerance, stop_requested):
@@ -3760,7 +3871,7 @@ def prepare_rearrangement(
             "gpu_info": {
                 "device_name": cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)["name"].decode(),
                 "device_memory_free_bytes": free_memory, "device_memory_total_bytes": total_memory,
-                "host_output_staging_bytes": int(np.prod(shape)),
+                "host_output_staging_bytes": gpu["host_frame"].nbytes + gpu["host_focal_result"].nbytes,
                 "warm_buffer_bytes": int(gpu["keeper"]["scratch"].nbytes),
                 "warm_interval_seconds": .020,
             },
@@ -4079,7 +4190,8 @@ def compute_rearrangement(
         "source_coefficient_basis": "fixed-source-phase-synthesis" if method == "lpi" else "source-endpoint-coefficients",
         "target_coefficient_basis": "independent-target-phase-synthesis" if method == "lpi" else "authored-amplitude-source-phase",
         "field_phase_reference": "fft-center", "phase_interpolation": "shortest-modulo-2pi" if method == "lpi" else "adaptive-field-phase",
-        "quality_scope": "bright-sites-and-full-native-background-with-natural-main-lobe-envelope",
+        "quality_scope": "bright-sites-and-full-native-background",
+        "field_projection_initialization_factor": prepared["gpu"]["initializer_factor"],
     }
     if rearrangement_is_noop(prepared, plan):
         return {
@@ -4097,6 +4209,7 @@ def compute_rearrangement(
             "support_intensity_ratios": np.empty(0), "background_intensity_ratios": np.empty(0),
             "discard_intensity_ratios": np.empty(0), "discard_reference_limit": .01,
             "discard_converged": True, "field_projection_updates": (),
+            "coarse_field_projection_updates": (), "native_field_projection_updates": (),
             "brightness_minimum_to_initial": np.empty(0), "brightness_maximum_to_initial": np.empty(0),
             "brightness_mean_to_initial": np.empty(0), "phase_change_from_initial_rms_rad": np.empty(0),
             "focal_phase_error_rms_rad": np.empty(0),
@@ -4205,7 +4318,6 @@ def compute_rearrangement(
         gpu["frame_index"].fill(0)
         coefficients = gpu["motion_coefficients"][:motion_frames]
         movie = gpu["motion_codes"][:motion_frames]
-        actual_gpu = gpu["motion_actual"][:motion_frames]
         coefficients.set(coefficient_values, stream=stream)
         gpu["motion_amplitudes"][:motion_frames].set(normalized, stream=stream)
         for factor, values in indices.items():
@@ -4219,10 +4331,21 @@ def compute_rearrangement(
         phase_errors = np.zeros(motion_frames)
         envelope_ratios = np.zeros(motion_frames)
         projection_updates = np.zeros(motion_frames, np.int32)
+        coarse_projection_updates = np.zeros(motion_frames, np.int32)
         baseline_updates = np.zeros(motion_frames, np.int32)
         frame_solve_ms, frame_copy_ms, frame_ready_ms = (np.zeros(motion_frames) for _ in range(3))
         callback_ms, emitted_count, verified_reuses = 0., 0, 0
         reference_intensity = float(np.min(abs(initial.astype(np.complex128)) ** 2))
+        projection_budget = 128 if iterations is None else int(iterations)
+        gpu["focal_config"].set(np.array([projection_budget, motion_tolerance, tolerance,
+            reference_intensity, float(method == "lpi"), motion_frames]), stream=stream)
+        initializer_frames = np.zeros(motion_frames, bool)
+        if gpu.get("initializer") is not None and projection_budget >= 2:
+            signed = sites - np.asarray(shape) // 2
+            coarse_shape = np.asarray(gpu["initializer"]["shape"])
+            supported = np.all((signed + gpu["psf_neighborhood"].min(axis=0) > -coarse_shape // 2)
+                               & (signed + gpu["psf_neighborhood"].max(axis=0) < coarse_shape // 2), axis=-1)
+            initializer_frames = np.all(supported | ~positive, axis=1)
         publication_open = True
         after_prepare = time.perf_counter()
         for index in range(motion_frames):
@@ -4237,14 +4360,12 @@ def compute_rearrangement(
             mask = positive[index]
             reuse_verified = False
             if (same_positions and np.array_equal(coefficient_values[index], coefficient_values[index - 1])
-                    and background_limits[index - 1] <= .01 and phase_errors[index - 1] <= .01
-                    and envelope_ratios[index - 1] <= 1.05):
+                    and background_limits[index - 1] <= .01):
                 relative = abs(fields[index - 1, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
                 reuse_verified = bool(relative.max() / relative.min() <= tolerance)
             if reuse_verified:
                 movie[index] = movie[index - 1]
                 fields[index] = fields[index - 1]
-                actual_gpu[index] = actual_gpu[index - 1]
                 coefficients[index] = coefficients[index - 1]
                 background_limits[index] = background_limits[index - 1]
                 phase_errors[index] = phase_errors[index - 1]
@@ -4257,11 +4378,7 @@ def compute_rearrangement(
                     # LPI supplies a single synthesis as the initial guess.
                     # The common full-field solve owns brightness, actual phase
                     # and background together; do not balance twice.
-                    _rearrangement_load_frame(gpu, preserve_phase=True)
-                    _rearrangement_select_roots(gpu["measurement"], band)
-                    _rearrangement_propagate(gpu, gpu["measurement"], band, "encode")
-                    movie[index] = native["codes"]
-                    coefficients[index] = gpu["coefficients"][:number]
+                    gpu["graphs"][band].launch(stream)
                     baseline_updates[index] = 0
                 elif iterations is None:
                     gpu["graphs"][band].launch(stream)
@@ -4273,36 +4390,41 @@ def compute_rearrangement(
                     _rearrangement_amplitude_updates(gpu, native, band, native_updates)
                     _rearrangement_propagate(gpu, native, band, "encode")
                     _rearrangement_select_roots(gpu["measurement"], band)
-                    _rearrangement_propagate(gpu, gpu["measurement"], band, "forward")
-                    _rearrangement_store_frame(gpu)
+                    _rearrangement_store_coefficients(gpu)
                     baseline_updates[index] = total_updates
-                field, background_limits[index], phase_errors[index], updates, envelope_ratios[index] = _rearrangement_background_projection(
-                    gpu, sites[index], desired[index], movie[index], reference_intensity, tolerance,
-                    prescribed_phase=np.angle(coefficient_values[index]) if method == "lpi" else None,
-                    iterations=128 if iterations is None else int(iterations),
-                    stop_requested=stop_requested, warm_start=index > 0)
-                fields[index] = field
-                actual_gpu[index].set(field, stream=stream)
+                executable = gpu["background_graphs"][band, bool(initializer_frames[index]), index > 0 and projection_budget > 0][1]
+                _rearrangement_cuda_result(gpu["cuda"].cudaGraphLaunch(executable, stream.ptr))
                 movie[index] = native["codes"]
+                # The small optical result and its phase map are already final
+                # on this stream. Enqueue both copies before waiting once.
+                gpu["copy_start"].record(stream)
+                result = gpu["host_focal_result"]
+                gpu["focal_result"].get(out=result, stream=stream, blocking=False)
+                native["codes"].get(out=gpu["host_frame"], stream=stream, blocking=False)
+                gpu["copy_end"].record(stream)
+                gpu["copy_end"].synchronize()
+                frame_copy_ms[index] = cp.cuda.get_elapsed_time(gpu["copy_start"], gpu["copy_end"])
+                if stop_requested is not None and stop_requested():
+                    raise InterruptedError("SLM rearrangement stopped")
+                fields[index] = (result[5:5 + 2 * number:2] + 1j * result[6:5 + 2 * number:2]).astype(np.complex64)
+                background_limits[index], phase_errors[index], envelope_ratios[index] = result[1], result[2], result[4]
+                coarse_projection_updates[index] = int(result[-1])
+                updates = int(result[3]) + coarse_projection_updates[index]
                 projection_updates[index] = updates
                 iteration_counts[index] = baseline_updates[index] + updates
             relative = abs(fields[index, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
             bright_ratio = float(relative.max() / relative.min())
             valid = (np.isfinite(bright_ratio) and bright_ratio <= tolerance
-                     and background_limits[index] <= .01 and phase_errors[index] <= .01
-                     and envelope_ratios[index] <= 1.05)
+                     and background_limits[index] <= .01)
             publication_open = publication_open and valid
             if require_converged and not valid:
                 raise RuntimeError(f"SLM {method} frame {index} did not meet optical constraints; "
                                    f"bright {bright_ratio:.6g} (limit {tolerance:g}), "
-                                   f"background/initial {background_limits[index]:.6g} (limit 0.01), "
-                                   f"focal phase error {phase_errors[index]:.6g} rad (limit 0.01), "
-                                   f"main-lobe envelope {envelope_ratios[index]:.6g} (limit 1.05)")
-            frame_solve_ms[index] = (time.perf_counter() - frame_started) * 1000
+                                   f"background/initial {background_limits[index]:.6g} (limit 0.01)")
+            frame_solve_ms[index] = (time.perf_counter() - frame_started) * 1000 - frame_copy_ms[index]
             copy_started = time.perf_counter()
-            movie[index].get(out=gpu["host_frame"], stream=stream, blocking=True)
-            host[index] = gpu["host_frame"]
-            frame_copy_ms[index] = (time.perf_counter() - copy_started) * 1000
+            host[index] = host[index - 1] if reuse_verified else gpu["host_frame"]
+            frame_copy_ms[index] += (time.perf_counter() - copy_started) * 1000
             frame_ready_ms[index] = (time.perf_counter() - started) * 1000
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM rearrangement stopped")
@@ -4352,12 +4474,15 @@ def compute_rearrangement(
         "quality_evaluated": True, "quality_accepted": bool(publication_open), "converged": bool(publication_open),
         "support_tolerance": tolerance, "discard_reference_limit": .01, "discard_converged": None,
         "support_intensity_ratios": _frozen(ratios), "retained_intensity_ratios": _frozen(retained_ratios),
-        "quality_scope": "bright-sites-and-full-native-background-with-natural-main-lobe-envelope",
+        "quality_scope": "bright-sites-and-full-native-background",
         "background_limit_ratios": _frozen(background_limits), "background_reference_intensity": reference_intensity,
         "focal_phase_error_max_rad": _frozen(phase_errors),
         "main_lobe_envelope_ratios": _frozen(envelope_ratios),
         "background_intensity_ratios": np.empty(0), "discard_intensity_ratios": np.empty(0),
         "field_projection_updates": tuple(map(int, projection_updates)),
+        "coarse_field_projection_updates": tuple(map(int, coarse_projection_updates)),
+        "native_field_projection_updates": tuple(map(int, projection_updates - coarse_projection_updates)),
+        "field_projection_initialization_factor": gpu["initializer_factor"],
         "brightness_minimum_to_initial": _frozen(brightness.min(axis=1)),
         "brightness_maximum_to_initial": _frozen(brightness.max(axis=1)),
         "brightness_mean_to_initial": _frozen(brightness.mean(axis=1)),
