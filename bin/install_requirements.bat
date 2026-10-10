@@ -1,5 +1,5 @@
 @echo off
-rem Install one editable root distribution under the single constraints file.
+rem Install the product, or only its GPU dependency group, using one manifest.
 setlocal EnableExtensions DisableDelayedExpansion
 
 set "ZLC_INSTALL_EXTRAS=notebook"
@@ -33,10 +33,7 @@ echo Product:     %ZLC_HOME%
 echo Extras:      %ZLC_INSTALL_EXTRAS%
 if defined ZLC_INSTALL_LOG echo Log:         %ZLC_INSTALL_LOG%
 echo ============================================================
-if defined ZLC_INSTALL_LOG (
-  echo Installing the manifest's pinned CuPy and CUDA runtime packages.
-  echo This does not install or update the NVIDIA display driver.
-)
+if /I "%ZLC_INSTALL_EXTRAS%"=="slm-gpu" goto zlc_gpu_install
 echo [1/3] Installing product dependencies...
 set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -m pip install --constraint "%ZLC_HOME%\constraints.txt" --editable "%ZLC_HOME%[%ZLC_INSTALL_EXTRAS%]""
 call :zlc_run_step
@@ -54,7 +51,6 @@ call :zlc_run_step
 set "ZLC_STATUS=%ERRORLEVEL%"
 popd
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
-if /I "%ZLC_INSTALL_EXTRAS%"=="slm-gpu" goto zlc_gpu_check
 
 :zlc_installed
 echo.
@@ -65,12 +61,19 @@ exit /b 0
 
 :zlc_failed
 echo.
-echo Product installation failed with code %ZLC_STATUS%.
+echo Installation failed with code %ZLC_STATUS%.
 if defined ZLC_INSTALL_LOG echo Original error and progress log: %ZLC_INSTALL_LOG%
 if "%ZLC_NO_PAUSE%"=="" pause
 exit /b %ZLC_STATUS%
 
-:zlc_gpu_check
+:zlc_gpu_install
+echo [GPU] Installing only the manifest's GPU dependencies and their requirements...
+echo This does not reinstall the product or change Notebook/JupyterLab.
+echo This does not install or update the NVIDIA display driver.
+set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -c "import pathlib,subprocess,sys,tomllib; root=pathlib.Path(sys.argv[1]); deps=tomllib.loads((root/'pyproject.toml').read_text(encoding='utf-8'))['project']['optional-dependencies']['slm-gpu']; raise SystemExit(subprocess.call([sys.executable,'-m','pip','install','--constraint',str(root/'constraints.txt'),*deps]))" "%ZLC_HOME%""
+call :zlc_run_step
+set "ZLC_STATUS=%ERRORLEVEL%"
+if not "%ZLC_STATUS%"=="0" goto zlc_failed
 echo [GPU] Checking imports, the selected device, and a real dot product and FFT...
 pushd "%TEMP%"
 set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -c "import zou_lab_control; from zlc_atom.devices.slm import solver; import sys; print('Interpreter:', sys.executable); print('Root:', zou_lab_control.__file__); print('SLM:', solver.__file__); import cupy as cp; from cuda.bindings import runtime; print('CuPy:', cp.__version__, cp.__file__); print('CUDA bindings:', runtime.__file__); info=cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id); print('GPU:', info['name']); x=cp.arange(4, dtype=cp.float32); value=float(cp.dot(x, x).item()); spectrum=cp.asnumpy(cp.fft.fft(x)); assert value == 14.0 and float(spectrum[0].real) == 6.0; print('GPU dot + FFT: PASS', value, spectrum)""

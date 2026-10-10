@@ -73,7 +73,7 @@ def _run_batch(*args: str, cwd: Path, python_path: Path) -> subprocess.Completed
     return _run_cmd(command, cwd=cwd, env=env)
 
 
-def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path) -> None:
+def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path, monkeypatch) -> None:
     fake = _fake_python(tmp_path / "fake-python.bat")
     no_args = _run_batch(cwd=ROOT, python_path=fake)
     assert no_args.returncode == 0, no_args.stdout + no_args.stderr
@@ -156,10 +156,29 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     gpu_environment = dict(estimate_environment, ZLC_FPGA_PYTHON=str(fake), TEMP=str(tmp_path))
     gpu = _run_cmd(["cmd.exe", "/d", "/c", str(GPU_INSTALL_LAUNCHER)], cwd=ROOT, env=gpu_environment)
     assert gpu.returncode == 0, gpu.stdout + gpu.stderr
-    assert f'{ROOT.parents[1]}[slm-gpu]' in gpu.stdout
+    assert "['optional-dependencies']['slm-gpu']" in gpu.stdout
+    assert "--editable" not in gpu.stdout
     assert "GPU dot + FFT: PASS" in gpu.stdout
-    assert "-m pip check" in gpu.stdout and "-m zou_lab_control check" in gpu.stdout
+    assert "-m pip check" not in gpu.stdout and "-m zou_lab_control check" not in gpu.stdout
     assert (tmp_path / "zlc-slm-gpu-install.log").is_file()
+    # Execute the actual manifest-reading payload, intercepting only pip itself.
+    # The installer's GPU entry must never request the root/notebook extra.
+    import tomllib
+    line = next(line for line in installer.splitlines() if "import pathlib,subprocess,sys,tomllib" in line)
+    payload = line.split(' -c "', 1)[1].split('"', 1)[0]
+    pip_calls = []
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "argv", ["-c", str(ROOT.parents[1])])
+        patch.setattr(subprocess, "call", lambda args: pip_calls.append(args) or 0)
+        try:
+            exec(payload, {})
+        except SystemExit as error:
+            assert error.code == 0
+    manifest = tomllib.loads((ROOT.parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pip_calls == [[sys.executable, "-m", "pip", "install", "--constraint",
+                          str(ROOT.parents[1] / "constraints.txt"),
+                          *manifest["project"]["optional-dependencies"]["slm-gpu"]]]
+    failing.write_text('@echo off\nif "%~2"=="import sys" exit /b 0\nexit /b 7\n', encoding="utf-8")
     gpu_environment["ZLC_FPGA_PYTHON"] = str(failing)
     gpu_failed = _run_cmd(["cmd.exe", "/d", "/c", str(GPU_INSTALL_LAUNCHER)], cwd=ROOT, env=gpu_environment)
     assert gpu_failed.returncode == 7, gpu_failed.stdout + gpu_failed.stderr

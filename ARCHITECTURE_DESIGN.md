@@ -669,6 +669,7 @@ Node new chunk
   环境owner激活当前tree的bootstrap；安装器是唯一installed-only路径。installed wheel在
   checkout外从distribution metadata解析同一组commands/layers，不保留第二入口名。
 - 根`pyproject.toml`是唯一product manifest，`constraints.txt`是唯一resolved dependency surface，`zlc`是唯一console entry并从manifest加载commands/layers/evidence。
+- GPU专项安装只读取manifest的slm-gpu依赖组并安装其必要依赖，不重装editable product、不安装Notebook组、不以全环境pip check或完整product check作为成功条件；复用既有解释器解析、日志、错误码及真实GPU计算检查。完整产品安装仍执行原依赖一致性与installed product检查。
 - Wheel必须包含bootstrap、八层、Calibration/Scan templates、SLM profile、Plot font及完整有效FPGA RTL/XDC/Tcl assets；installed environment check按distribution RECORD验证归属。
 - 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。
 - Evidence使用每个既有文件/层的普通pytest进程；TaskConsole用例中明确需要的fresh-process场景由用例自身隔离，不在外层再collect并给每个item各开一层Python。
