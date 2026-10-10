@@ -3233,8 +3233,10 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 gpu["aa_state"] = cp.zeros(2, cp.int32)
                 gpu["amplitude"] = cp.ones(site_capacity, cp.float32)
                 gpu["frame_index"] = cp.zeros(1, cp.int32)
+                # Warm one output allocation without keeping a writable frame.
+                # A frame remains owned by its numpy references while queued.
                 staging = gpu["output_pool"].malloc(int(np.prod(shape)))
-                gpu["host_frame"] = np.frombuffer(staging, np.uint8, count=int(np.prod(shape))).reshape(shape)
+                del staging
                 result_staging = gpu["output_pool"].malloc(gpu["focal_result"].nbytes)
                 gpu["host_focal_result"] = np.frombuffer(result_staging, np.float64, count=gpu["focal_result"].size)
                 gpu["copy_start"], gpu["copy_end"] = cp.cuda.Event(), cp.cuda.Event()
@@ -3444,13 +3446,11 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
         # Only the baseline graph addresses movie-sized arrays. The full-field
         # loop uses fixed optical buffers and survives a change in authored N.
         gpu["graphs"].clear()
-        gpu["motion_codes"] = cp.empty((count, *gpu["shape"]), cp.uint8)
         gpu["motion_coefficients"] = cp.zeros((count, number), cp.complex64)
         gpu["motion_amplitudes"] = cp.ones((count, number), cp.float32)
         gpu["motion_indices"] = {factor: cp.zeros((count, number), cp.int32) for factor in gpu["resources"]}
         gpu["motion_frequencies"] = cp.zeros((count * native["capacity"], 2), cp.float64)
         gpu["motion_offsets"] = cp.zeros(count + 1, cp.int64)
-        gpu["phase_step_rms"] = cp.empty(count, cp.float32)
         gpu["motion_coefficients"][:] = gpu["coefficients"][:number][None]
         gpu["motion_amplitudes"][:] = gpu["amplitude"][:number][None]
         if gpu["method"] == "iterative":
@@ -3871,7 +3871,8 @@ def prepare_rearrangement(
             "gpu_info": {
                 "device_name": cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)["name"].decode(),
                 "device_memory_free_bytes": free_memory, "device_memory_total_bytes": total_memory,
-                "host_output_staging_bytes": gpu["host_frame"].nbytes + gpu["host_focal_result"].nbytes,
+                "host_output_frame_bytes": int(np.prod(shape)),
+                "host_quality_staging_bytes": gpu["host_focal_result"].nbytes,
                 "warm_buffer_bytes": int(gpu["keeper"]["scratch"].nbytes),
                 "warm_interval_seconds": .020,
             },
@@ -4136,6 +4137,7 @@ def compute_rearrangement(
     require_converged: bool = True, stop_requested: Callable[[], bool] | None = None,
     frame_ready: Callable[[int, np.ndarray], None] | None = None,
     sampled: Mapping[str, object] | None = None,
+    retain_phase_sequence: bool = True,
 ) -> dict[str, object]:
     """Emit N native maps with one continuous coefficient trajectory.
 
@@ -4146,6 +4148,8 @@ def compute_rearrangement(
     those phases follow the current field. Empty/no-change plans hold
     the exact input phase and return an empty sequence. frame_ready receives each
     immutable host map in order; its wait/error stays on this same solve path.
+    Maps are retained only when requested. Streaming consumers own each frame
+    through normal numpy references; no sequence-sized GPU or host copy is made.
     Intermediate maps use motion_support_tolerance; the actual last map uses
     support_tolerance, including a one-map sequence. Neither an extinguished
     synthesis coefficient nor uniform bright centers proves a dark background.
@@ -4195,7 +4199,7 @@ def compute_rearrangement(
     }
     if rearrangement_is_noop(prepared, plan):
         return {
-            **plan, **metadata, "noop": True, "phase_codes": _frozen(np.empty((0, *shape), np.uint8)),
+            **plan, **metadata, "noop": True, "phase_codes": () if retain_phase_sequence else None,
             "motion_yx": _frozen(path[:1]), "fraction": _frozen(np.zeros(1)),
             "movement_fraction": np.empty(0),
             "frame_support_tolerances": np.empty(0),
@@ -4312,20 +4316,20 @@ def compute_rearrangement(
     coarse_updates = min(3, max(0, total_updates - 2)) if 2 in gpu["resources"] else 0
     native_updates = total_updates - coarse_updates
     iteration_counts = np.full(motion_frames, total_updates if method == "iterative" else 0, np.int32)
-    pixels = motion_frames * int(np.prod(shape))
+    area = int(np.prod(shape))
     indices, frequencies, counts, offsets = _rearrangement_bind(gpu, sites)
     with _rearrangement_gpu_active(gpu["keeper"]), stream:
         gpu["frame_index"].fill(0)
         coefficients = gpu["motion_coefficients"][:motion_frames]
-        movie = gpu["motion_codes"][:motion_frames]
         coefficients.set(coefficient_values, stream=stream)
         gpu["motion_amplitudes"][:motion_frames].set(normalized, stream=stream)
         for factor, values in indices.items():
             gpu["motion_indices"][factor][:motion_frames].set(values, stream=stream)
         gpu["motion_frequencies"][:len(frequencies)].set(frequencies, stream=stream)
         gpu["motion_offsets"][:motion_frames + 1].set(offsets, stream=stream)
-        host = np.empty((motion_frames, *shape), np.uint8)
-        codes = np.frombuffer(memoryview(host).toreadonly(), np.uint8, count=pixels).reshape(host.shape)
+        retained_frames = [] if retain_phase_sequence else None
+        transfer_frames = retain_phase_sequence or frame_ready is not None
+        frame = None
         fields = np.empty((motion_frames, number), np.complex64)
         background_limits = np.zeros(motion_frames)
         phase_errors = np.zeros(motion_frames)
@@ -4364,7 +4368,6 @@ def compute_rearrangement(
                 relative = abs(fields[index - 1, mask].astype(np.complex128)) ** 2 / desired[index, mask] ** 2
                 reuse_verified = bool(relative.max() / relative.min() <= tolerance)
             if reuse_verified:
-                movie[index] = movie[index - 1]
                 fields[index] = fields[index - 1]
                 coefficients[index] = coefficients[index - 1]
                 background_limits[index] = background_limits[index - 1]
@@ -4394,16 +4397,23 @@ def compute_rearrangement(
                     baseline_updates[index] = total_updates
                 executable = gpu["background_graphs"][band, bool(initializer_frames[index]), index > 0 and projection_budget > 0][1]
                 _rearrangement_cuda_result(gpu["cuda"].cudaGraphLaunch(executable, stream.ptr))
-                movie[index] = native["codes"]
                 # The small optical result and its phase map are already final
                 # on this stream. Enqueue both copies before waiting once.
                 gpu["copy_start"].record(stream)
                 result = gpu["host_focal_result"]
                 gpu["focal_result"].get(out=result, stream=stream, blocking=False)
-                native["codes"].get(out=gpu["host_frame"], stream=stream, blocking=False)
+                if transfer_frames:
+                    # Drop only this solver's previous-frame reference. Any
+                    # callback or queue still owning it prevents pool reuse.
+                    frame = None
+                    output = np.frombuffer(gpu["output_pool"].malloc(area), np.uint8, count=area).reshape(shape)
+                    native["codes"].get(out=output, stream=stream, blocking=False)
                 gpu["copy_end"].record(stream)
                 gpu["copy_end"].synchronize()
                 frame_copy_ms[index] = cp.cuda.get_elapsed_time(gpu["copy_start"], gpu["copy_end"])
+                if transfer_frames:
+                    frame = np.frombuffer(memoryview(output).toreadonly(), np.uint8, count=area).reshape(shape)
+                    del output
                 if stop_requested is not None and stop_requested():
                     raise InterruptedError("SLM rearrangement stopped")
                 fields[index] = (result[5:5 + 2 * number:2] + 1j * result[6:5 + 2 * number:2]).astype(np.complex64)
@@ -4422,9 +4432,8 @@ def compute_rearrangement(
                                    f"bright {bright_ratio:.6g} (limit {tolerance:g}), "
                                    f"background/initial {background_limits[index]:.6g} (limit 0.01)")
             frame_solve_ms[index] = (time.perf_counter() - frame_started) * 1000 - frame_copy_ms[index]
-            copy_started = time.perf_counter()
-            host[index] = host[index - 1] if reuse_verified else gpu["host_frame"]
-            frame_copy_ms[index] += (time.perf_counter() - copy_started) * 1000
+            if retained_frames is not None:
+                retained_frames.append(frame)
             frame_ready_ms[index] = (time.perf_counter() - started) * 1000
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM rearrangement stopped")
@@ -4436,7 +4445,7 @@ def compute_rearrangement(
                     keeper["active"] -= 1
                 callback_started = time.perf_counter()
                 try:
-                    frame_ready(index, codes[index])
+                    frame_ready(index, frame)
                 finally:
                     with keeper["lock"]:
                         keeper["active"] += 1
@@ -4462,7 +4471,8 @@ def compute_rearrangement(
     total_ms = (time.perf_counter() - started) * 1000
     prepare_ms, copy_ms = (after_prepare - started) * 1000, float(frame_copy_ms.sum())
     return {
-        **plan, **sampled, **metadata, "noop": False, "phase_codes": codes,
+        **plan, **sampled, **metadata, "noop": False,
+        "phase_codes": tuple(retained_frames) if retained_frames is not None else None,
         "actual_fields": _frozen(fields), "desired_amplitudes": _frozen(desired), "active_sites": _frozen(positive),
         "desired_spectrum_coefficients": _frozen(coefficient_values),
         # These are the sparse synthesis initial guesses, not a reconstruction
@@ -4592,27 +4602,35 @@ def rearrangement_diagnostics(
     gpu = prepared["gpu"]
     if not gpu:
         raise RuntimeError("SLM rearrangement workspace is closed")
-    count, source_count = len(result["phase_codes"]), len(prepared["source_yx"])
+    phase_codes = result["phase_codes"]
+    if phase_codes is None:
+        raise ValueError("SLM phase diagnostics require a retained phase sequence")
+    count, source_count = len(phase_codes), len(prepared["source_yx"])
     source_indices = np.asarray(result["source_indices"], np.intp)
     removed = np.asarray(result["removed_source_indices"], np.intp)
     fields = np.asarray(result["actual_fields"])
     discard = np.array(result["discard_intensity_ratios"], copy=True)
     pupil_steps = np.asarray(result["pupil_phase_step_rms_rad"])
+    device_codes = None
+    if count and (fields.shape != (count, source_count) or pupil_steps.shape != (count,)):
+        cp, stream = gpu["cp"], gpu["stream"]
+        with _rearrangement_gpu_active(gpu["keeper"]), stream:
+            device_codes = cp.empty((count, *prepared["shape_yx"]), cp.uint8)
+            for index, codes in enumerate(phase_codes):
+                device_codes[index].set(np.asarray(codes), stream=stream)
     if discard.shape != (count,):
         discard = np.zeros(count)
     if fields.shape != (count, source_count):
         cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
-        _rearrangement_motion_capacity(gpu, count, stop_requested)
         fields = np.empty((count, source_count), np.complex64)
         query = {**gpu["measurement"], "number": source_count}
         area = int(np.prod(prepared["shape_yx"]))
         with _rearrangement_gpu_active(gpu["keeper"]), stream:
-            gpu["motion_codes"][:count].set(np.asarray(result["phase_codes"]), stream=stream)
             for index, sites in enumerate(result["sites_yx"]):
                 if stop_requested is not None and stop_requested():
                     raise InterruptedError("SLM rearrangement diagnostics stopped")
                 gpu["kernels"]["field_project"](((area + 255) // 256,), (256,),
-                    (gpu["motion_codes"][index], native["optical"], native["image"],
+                    (device_codes[index], native["optical"], native["image"],
                      native["optical"], native["optical"], native["physical_pupil"], native["incident"],
                      native["codes"], *map(np.int32, (*prepared["shape_yx"], native["padded"], 0))))
                 indices, frequencies, counts, _ = _rearrangement_bind(gpu, np.asarray(sites)[None])
@@ -4624,14 +4642,13 @@ def rearrangement_diagnostics(
                 fields[index] = query["actual"][:source_count].get(stream=stream)
     if pupil_steps.shape != (count,):
         cp, stream, native = gpu["cp"], gpu["stream"], gpu["resources"][1]
-        _rearrangement_motion_capacity(gpu, count, stop_requested)
         area = int(np.prod(prepared["shape_yx"]))
         with _rearrangement_gpu_active(gpu["keeper"]), stream:
-            gpu["motion_codes"][:count].set(np.asarray(result["phase_codes"]), stream=stream)
+            phase_steps = cp.empty(count, cp.float32)
             gpu["kernels"]["phase_step_rms"]((count,), (256,),
-                (gpu["motion_codes"], gpu["initial_phase"], native["physical_pupil"], gpu["phase_step_rms"],
+                (device_codes, gpu["initial_phase"], native["physical_pupil"], phase_steps,
                  np.int32(area), np.float64(gpu["pupil_energy"])))
-            pupil_steps = gpu["phase_step_rms"][:count].get(stream=stream)
+            pupil_steps = phase_steps.get(stream=stream)
             stream.synchronize()
     desired, positive = np.asarray(result["desired_amplitudes"]), np.asarray(result["active_sites"])
     intensity = abs(fields.astype(np.complex128)) ** 2

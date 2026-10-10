@@ -93,7 +93,7 @@ def run_rearrangement(
     prepared, plan, *, slm, motion_frames, frame_interval, sampled=None,
     support_tolerance=1.01, motion_support_tolerance=1.10,
     stop_requested=None, before_play=None, timings=None, received_at_ns=None,
-    player=None, outcome=None,
+    player=None, outcome=None, retain_phase_sequence=True,
 ):
     """Compute and feed one prepared device sequence; the caller owns its lease.
 
@@ -168,7 +168,8 @@ def run_rearrangement(
             result = outcome["result"] = compute_rearrangement(
                 prepared, plan, motion_frames=motion_frames, sampled=sampled,
                 support_tolerance=support_tolerance, motion_support_tolerance=motion_support_tolerance,
-                require_converged=False, frame_ready=frame_ready, stop_requested=stop_requested)
+                require_converged=False, frame_ready=frame_ready, stop_requested=stop_requested,
+                retain_phase_sequence=retain_phase_sequence)
             timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
             timings.update(("compute_"+name, float(value)) for name, value in result["timing_ms"].items())
             if not result.get("quality_accepted", result["converged"]):
@@ -181,7 +182,7 @@ def run_rearrangement(
             else:
                 receipt = playback.result()
             outcome["playback"] = receipt
-            if (receipt["cancelled"] or receipt["played_frames"] != len(result["phase_codes"])
+            if (receipt["cancelled"] or receipt["played_frames"] != result["motion_frames"]
                     or not receipt["authored_timing_completed"]):
                 raise RuntimeError("SLM sequence did not complete all authored frames and time slots")
             check_stop()

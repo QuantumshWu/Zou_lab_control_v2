@@ -439,7 +439,9 @@ class SlmRearrangementTask:
                         "retained_intensity_ratios", "all_active_support_intensity_ratios", "fading_intensity_ratios"):
                 if self._result.get(key) is not None:
                     arrays[key] = self._result[key]
-            if self.save_phase_sequence: arrays["phase_codes"] = self._result["phase_codes"]
+            if self.save_phase_sequence:
+                arrays["phase_codes"] = np.asarray(self._result["phase_codes"], dtype=np.uint8).reshape(
+                    (self._result["motion_frames"], *self.slm.shape_yx))
             if BEFORE_FRAME_OUTPUT.name in overlays:
                 before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
                 motion = self._result["motion_yx"]
@@ -457,7 +459,7 @@ class SlmRearrangementTask:
                 arrays["planned_motion_yx"] = self._plan["motion_yx"]
         summary = {**self._record(), "status": status, "error": None if error is None else str(error),
                    "recorded_frames": len(self._camera_recordings),
-                   "actual_motion_frames": None if self._result is None else len(self._result["phase_codes"]),
+                   "actual_motion_frames": None if self._result is None else self._result["motion_frames"],
                    "planned_motion_frames": self._frame_count if self._plan is not None else None,
                    "actual_maximum_camera_step": self._camera_maximum_step,
                    "timing_ms": self._timings, "gpu": getattr(self, "_gpu_info", None),
@@ -704,6 +706,7 @@ class SlmRearrangementTask:
         self._camera_site_indices = self._camera_path_affine = None
         self._playback, self._result, self._plan = None, None, None
         sequence_prepared = False
+        diagnose_phase = self.phase_method == "lpi"
         workpoint = ExitStack()
         run_started = perf_counter()
         try:
@@ -838,7 +841,8 @@ class SlmRearrangementTask:
                         motion_frames=self._frame_count, frame_interval=self._frame_interval, sampled=sampled,
                         support_tolerance=self.intensity_tolerance, motion_support_tolerance=self.motion_intensity_tolerance,
                         stop_requested=stopped, before_play=before_play, timings=self._timings,
-                        received_at_ns=cycle[0].host_received_at_ns, outcome=outcome)
+                        received_at_ns=cycle[0].host_received_at_ns, outcome=outcome,
+                        retain_phase_sequence=self.save_phase_sequence or diagnose_phase)
                 finally:
                     self._result, self._playback = outcome.get("result"), outcome.get("playback")
                     playback_finished_wall, playback_finished_at = outcome.get("finished_wall_ns"), outcome.get("finished_at")
@@ -850,7 +854,7 @@ class SlmRearrangementTask:
                 rounding = 32*np.finfo(float).eps*max(1.,float(np.max(abs(camera_path))))
                 if self.frame_mode == "camera_step" and self._camera_maximum_step > self.max_camera_step+rounding:
                     raise RuntimeError("Emitted trajectory exceeded the requested camera-pixel step")
-                if not len(self._result["phase_codes"]):
+                if not self._result["motion_frames"]:
                     if self.recording_frames is not None:
                         return
                     context.report_progress("SLM target held; acquiring verification photograph", current=1, total=2)
@@ -902,7 +906,7 @@ class SlmRearrangementTask:
             self._timings["pulse_elapsed"] = report.elapsed_seconds*1000
             self._timings["pulse_report_retrieval_delay"] = report.report_delay_seconds*1000
             self._timings["experiment_before_save"] = (perf_counter()-run_started)*1000
-            if self.phase_method == "lpi":
+            if diagnose_phase:
                 diagnostics = rearrangement_diagnostics(prepared, self._result, stop_requested=context.cancel_requested)
                 self._timings["optical_diagnostics"] = float(diagnostics.pop("diagnostics_ms"))
                 self._result.update(diagnostics)

@@ -933,6 +933,7 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
     try:
         for request in (
             {"version": True, "method": "describe"},
+            {"version": 4, "method": "describe"},
             {
                 "version": 1,
                 "method": "apply",
@@ -945,6 +946,9 @@ def test_remote_slm_preserves_declared_failures_and_marks_bad_replies_unknown(
                 device_module._send_packet(invalid, request)
                 reply, _payload = device_module._recv_packet(invalid)
             assert reply["ok"] is False
+            if request["version"] == 4:
+                assert reply["version"] == 5
+                assert "update the client and server together" in reply["error"]
         assert sdk.write_count == 0
         with socket.create_connection(server.server_address, timeout=2.0) as oversized:
             oversized.sendall(
@@ -1410,7 +1414,9 @@ def test_remote_sequence_stop_and_failures_preserve_truth_while_play_rpc_is_acti
         calls.append(method)
         reply = original_rpc(endpoint, method, arguments, timeout)
         if method == "play_sequence" and reply[0]["ok"]:
-            assert reply[0]["state"]["phase_bytes"] == 0 and reply[1] == b""
+            partial = reply[0]["state"]["receipt"]["sequence"]["cancelled"]
+            assert bool(reply[1]) is partial
+            assert reply[0]["state"]["phase_bytes"] == len(reply[1])
         if ending == "lost-reply" and method == "play_sequence" and calls.count("play_sequence") == 2:
             raise socket.timeout("lost final sequence reply")
         return reply
@@ -1524,7 +1530,7 @@ def test_usb_sequence_preloads_nonvisible_slots_then_only_changes_slots_locally(
         physical.close()
 
 
-@pytest.mark.parametrize("wrong", ["token", "mapping", "revision", "played_frames", "timing-type", "timing-incomplete"])
+@pytest.mark.parametrize("wrong", ["token", "mapping", "revision", "played_frames", "timing-type", "timing-incomplete", "partial-phase", "unsubmitted", "redundant-phase"])
 def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(monkeypatch, wrong):
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as module
     from zlc_atom.devices.simulation.slm.device import VirtualSLM
@@ -1546,6 +1552,14 @@ def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(
                 metadata["state"]["command_revision"] += 1
             elif wrong == "played_frames":
                 metadata["state"]["receipt"]["sequence"]["played_frames"] = 0
+            elif wrong == "partial-phase":
+                metadata["state"]["receipt"]["sequence"].update(played_frames=1, cancelled=True, authored_timing_completed=False)
+            elif wrong == "unsubmitted":
+                metadata["state"]["receipt"]["sequence"].update(played_frames=2, cancelled=False, authored_timing_completed=True)
+                metadata["state"]["receipt"]["outcome"] = "known-new"
+            elif wrong == "redundant-phase":
+                payload = np.asarray(physical.last_commanded_phase, dtype="<f4").tobytes()
+                metadata["state"]["phase_bytes"] = len(payload)
             else:
                 metadata["state"]["receipt"]["sequence"]["authored_timing_completed"] = (
                     1 if wrong == "timing-type" else False)
@@ -1555,13 +1569,21 @@ def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(
     remote = _RemoteSlmAdapter("127.0.0.1", server.server_address[1], 2.0)
     try:
         codes = np.full((2, *physical.shape_yx), 37, dtype=np.uint8)
-        remote.prepare_phase_sequence(codes, .001)
-        with pytest.raises(ValueError, match="confirmation receipt"):
-            remote.play_phase_sequence()
+        if wrong == "unsubmitted":
+            remote.prepare_phase_sequence(None, .001, frame_count=2)
+            remote.submit_phase_frame(0, codes[0])
+        else:
+            remote.prepare_phase_sequence(codes, .001)
+        expected = ("omitted its confirmed phase" if wrong == "partial-phase" else
+                    "unsubmitted frame" if wrong == "unsubmitted" else
+                    "redundant phase" if wrong == "redundant-phase" else "confirmation receipt")
+        with pytest.raises(ValueError, match=expected):
+            remote.play_phase_sequence((lambda: True) if wrong == "unsubmitted" else None)
         assert remote.last_commanded_phase is None
         assert remote.last_command_receipt["outcome"] == "unknown"
         assert remote._sequence_codes is None
-        assert physical.last_command_receipt["outcome"] == "known-new"
+        if wrong != "unsubmitted":
+            assert physical.last_command_receipt["outcome"] == "known-new"
     finally:
         remote.close()
         server.shutdown()
@@ -1572,10 +1594,11 @@ def test_remote_sequence_rejects_unconfirmed_metadata_instead_of_guessing_phase(
 
 @pytest.mark.parametrize("ending", ["complete", "stop", "upload-failure", "receiver-failure", "lost-reply"])
 def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypatch, ending):
+    import weakref
     import zlc_atom.devices.slm.hamamatsu_x15213.device_types as physical_module
     import zlc_atom.devices.slm.hamamatsu_x15213.remote as remote_module
 
-    delivered, errors, playback = [], [], []
+    delivered, errors, playback, submitted_frames = [], [], [], []
     first_display, blocked_producer, unblock_display, producer_done = (threading.Event() for _ in range(4))
     frames = np.frombuffer(bytes(np.asarray([0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3], np.uint8).repeat(1024 * 1272)), np.uint8).reshape(12, 1024, 1272)
 
@@ -1602,7 +1625,9 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
         assert method != "submit_sequence_frame", "frames must not wait for an application-layer ACK"
         reply = original_rpc(endpoint, method, arguments, timeout)
         if method == "play_sequence" and reply[0]["ok"]:
-            assert reply[1] == b"" and reply[0]["state"]["phase_bytes"] == 0
+            partial = reply[0]["state"]["receipt"]["sequence"]["cancelled"]
+            assert bool(reply[1]) is partial
+            assert reply[0]["state"]["phase_bytes"] == len(reply[1])
             if ending == "lost-reply":
                 raise socket.timeout("final stream reply lost")
         return reply
@@ -1631,9 +1656,14 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
     def produce():
         try:
             for index, frame in enumerate(frames):
+                frame = np.frombuffer(frame.tobytes(), np.uint8).reshape(frame.shape)
+                submitted_frames.append(weakref.ref(frame))
                 if index == 6:
                     blocked_producer.set()
                 remote.submit_phase_frame(index, frame)
+                assert remote._sequence_codes is None, "streaming must not retain a whole movie"
+                if ending == "complete" and index >= 8:
+                    assert submitted_frames[index - 8]() is None, "consumed frames must not accumulate in the proxy"
                 if index == 0:
                     assert first_display.wait(2), "first frame must display before the complete movie exists"
                 if ending != "stop":
@@ -1648,6 +1678,7 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
     try:
         prepared = remote.prepare_phase_sequence(None, 1 / 60, frame_count=12)
         assert prepared["streaming"] and prepared["queue_capacity"] == 2
+        assert remote._sequence_codes is None and remote._sequence_upload["last_submitted"] is None
         assert physical._sequence["codes"] is None and physical._sequence["queue"].maxsize == 2
         if ending == "stop":
             remote._sequence_upload["connection"].setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
@@ -1656,6 +1687,8 @@ def test_remote_stream_overlaps_verified_frames_and_wakes_bounded_waits(monkeypa
         if ending == "stop":
             assert blocked_producer.wait(2)
             assert not producer_done.wait(.04), "a full bounded stream must backpressure, never drop/overwrite"
+            assert remote._sequence_upload["last_submitted"][0] > 0
+            assert np.any(remote._sequence_upload["last_submitted"][1] != frames[0]), "last submitted is not last displayed"
             remote.cancel_phase_sequence()
             unblock_display.set()
         producer.join(3); player.join(3)

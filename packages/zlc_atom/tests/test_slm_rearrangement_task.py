@@ -286,7 +286,8 @@ def experiment(tmp_path, monkeypatch, request):
         samples = kwargs.get("sampled")
         if samples is None:
             samples = task_module.sample_rearrangement(prepared, planned, motion_frames=kwargs["motion_frames"])
-        return {"phase_codes": codes, "converged": True,
+        return {"phase_codes": tuple(codes) if kwargs["retain_phase_sequence"] else None,
+                "motion_frames": frames, "converged": True,
                 "target_synthesis_coefficients": None,
                 "motion_yx": samples["motion_yx"],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
@@ -395,6 +396,7 @@ def test_rearrangement_measurement_first_frame_actions_and_camera_cycle_output(e
             wait(lambda: node._movement is not None and node._movement.done()
                  and node._cycle_evidence.get("cycle") == cycle)
             node._movement.result()
+            assert e.compute_arguments["retain_phase_sequence"] is False
             assert len(cycles) == cycle  # no first-frame/partial-cycle publication
             assert e.slm.plays == cycle + 1
             e.camera.trigger(1)
@@ -573,6 +575,7 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
 def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occupied_count, frame_mode):
     e = experiment
     e.task.frame_mode = frame_mode
+    e.task.save_phase_sequence = False
     if not occupied_count:
         e.task.minimum_separation = 100.  # No unplayed removal action to validate.
     e.images[0][:] = 0
@@ -580,6 +583,9 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
         e.images[0][y, x] = 10
     result = e.task.execute(e.context)
     assert Path(result["artifact_path"]).is_file()
+    assert e.compute_arguments["retain_phase_sequence"] is False
+    with np.load(result["artifact_path"], allow_pickle=False) as saved:
+        assert "phase_codes" not in saved
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["status"] == "completed" and summary["assigned_atoms"] == occupied_count
     assert len(summary["unfilled_target_indices"]) == 4 - occupied_count

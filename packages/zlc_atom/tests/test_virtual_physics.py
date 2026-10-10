@@ -2278,10 +2278,11 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     )
     assert max(limited["field_projection_updates"]) <= 1
     assert not any(limited["coarse_field_projection_updates"])
-    saved_codes = sequence["phase_codes"].copy()
-    assert not sequence["phase_codes"].flags.writeable
+    saved_codes = tuple(frame.copy() for frame in sequence["phase_codes"])
+    assert isinstance(sequence["phase_codes"], tuple)
+    assert all(not frame.flags.writeable for frame in sequence["phase_codes"])
     with pytest.raises(ValueError):
-        sequence["phase_codes"].setflags(write=True)
+        sequence["phase_codes"][0].setflags(write=True)
     next_sequence = slm_solver.compute_rearrangement(prepared, plan, motion_frames=7)
     assert len(next_sequence["phase_codes"]) == 7
     assert next_sequence["fade_frames"] == 1
@@ -2335,8 +2336,27 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                         ratio = abs(spectrum[tuple(fine_peak)]) ** 2 / reference
                         assert ratio <= slm_solver.SPOT_BACKGROUND_TOLERANCE
                         assert candidate["background_peak_to_initial_ratios"][frame] == pytest.approx(ratio, rel=1e-3, abs=1e-7)
-    assert not np.shares_memory(sequence["phase_codes"], next_sequence["phase_codes"])
+    assert all(not np.shares_memory(old, new)
+               for old in sequence["phase_codes"] for new in next_sequence["phase_codes"])
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+    streamed_frames = []
+    streamed = slm_solver.compute_rearrangement(
+        prepared, plan, motion_frames=7, retain_phase_sequence=False,
+        frame_ready=lambda index, frame: streamed_frames.append(frame),
+    )
+    assert streamed["phase_codes"] is None
+    assert streamed["motion_frames"] == streamed["emitted_frame_count"] == 7
+    np.testing.assert_array_equal(streamed_frames, next_sequence["phase_codes"])
+    saved_streamed = tuple(frame.copy() for frame in streamed_frames)
+    with pytest.raises(ValueError):
+        streamed_frames[0].setflags(write=True)
+    discarded_output = slm_solver.compute_rearrangement(
+        prepared, plan, motion_frames=7, retain_phase_sequence=False,
+    )
+    assert discarded_output["phase_codes"] is None
+    np.testing.assert_array_equal(discarded_output["support_intensity_ratios"],
+                                  next_sequence["support_intensity_ratios"])
+    np.testing.assert_array_equal(streamed_frames, next_sequence["phase_codes"])
     for bad_count in (0, True, 1.5, 1):
         with pytest.raises(ValueError, match="motion_frames"):
             slm_solver.compute_rearrangement(prepared, plan, motion_frames=bad_count)
@@ -2366,7 +2386,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     np.testing.assert_array_equal(restarted["actual_fields"], next_sequence["actual_fields"])
     empty = slm_solver.compute_rearrangement(prepared, slm_solver.plan_rearrangement(prepared, []), motion_frames=7)
     assert empty["noop"]
-    assert empty["phase_codes"].shape == (0, *shape)
+    assert empty["phase_codes"] == ()
     shortage = slm_solver.compute_rearrangement(
         prepared, slm_solver.plan_rearrangement(prepared, [0]), motion_frames=7,
     )
@@ -2434,6 +2454,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     assert keeper["device"] not in slm_solver._REARRANGEMENT_KEEPERS
     assert "scratch" not in keeper
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+    np.testing.assert_array_equal(streamed_frames, saved_streamed)
 
     translated_prepared = slm_solver.prepare_rearrangement(
         source, source + np.array([1, 0], np.int32), shape_yx=shape,
@@ -2557,8 +2578,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                 np.sqrt(np.mean(prescribed_error ** 2)), abs=2e-5)
         assert movie["quality_evaluated"]  # diagnostics does not mutate the movie
         with pytest.raises(ValueError):
-            movie["phase_codes"].setflags(write=True)
-        saved = movie["phase_codes"].copy()
+            movie["phase_codes"][0].setflags(write=True)
+        saved = tuple(frame.copy() for frame in movie["phase_codes"])
         shortage = slm_solver.compute_rearrangement(lpi, slm_solver.plan_rearrangement(lpi, [0]), motion_frames=7)
         assert shortage["target_filled"].sum() == 1
         assert shortage["endpoint_support_intensity_ratio"] <= 1.01
@@ -2697,7 +2718,7 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                 with ThreadPoolExecutor(max_workers=1) as worker:
                     resident_result = worker.submit(slm_solver.compute_rearrangement,
                         resident, slm_solver.plan_rearrangement(resident, np.arange(4)), motion_frames=5).result()
-                resident_codes = resident_result["phase_codes"].copy()
+                resident_codes = tuple(frame.copy() for frame in resident_result["phase_codes"])
             assert resident_keeper["thread"].is_alive()
             with pytest.raises(InterruptedError, match="ordinary stop"):
                 with slm_solver.acquire_rearrangement(**(resident_inputs | {

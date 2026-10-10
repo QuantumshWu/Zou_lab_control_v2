@@ -120,12 +120,12 @@ class RearrangementMeasurement(CameraMeasurementNode):
             motion_frames=count, frame_interval=self.frame_interval, sampled=sampled,
             support_tolerance=self.intensity_tolerance, motion_support_tolerance=self.motion_intensity_tolerance,
             stop_requested=self._stopped, timings=timings, received_at_ns=record.host_received_at_ns,
-            player=self._workers, outcome=outcome, before_play=before_play)
+            player=self._workers, outcome=outcome, before_play=before_play, retain_phase_sequence=False)
         self._cycle_evidence = {"cycle": record.source_ordinal // self.frames_per_cycle,
             "source_indices": plan["source_indices"].tolist(), "target_indices": plan["target_indices"].tolist(),
-            "frames": len(result["phase_codes"]), "played_frames": playback["played_frames"],
+            "frames": result["motion_frames"], "played_frames": playback["played_frames"],
             "timing_ms": dict(timings), "initial_frame_ordinal": record.source_ordinal}
-        # A continuous measurement retains neither movies nor old-cycle arrays.
+        # Only scalar cycle evidence survives; no complete phase sequence was collected.
         outcome.pop("result", None)
 
     def _on_record(self, record):
