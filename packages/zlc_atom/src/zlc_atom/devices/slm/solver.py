@@ -2727,22 +2727,25 @@ extern "C" __global__ void focal_profile(const long long* indices,const float* v
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<N)atomicMax((unsigned int*)(profile+indices[i]),__float_as_uint(values[i]));
 }
 extern "C" __global__ void focal_cap(float2* spectrum,const float* profile,
-  double* maxima,const double* control,int area){
+  double* maxima,const double* control,unsigned int* changed_count,int* changed_index,
+  double2* changed_delta,int area){
   __shared__ double values[2][256];int t=threadIdx.x,i=blockIdx.x*256+t;double bg=0,excess=0;
   if(i<area){float2 e=spectrum[i];double v=(double)e.x*e.x+(double)e.y*e.y;
     float envelope=profile[i];
     double cap=fmax(.005*control[4],control[6]*control[6]*envelope);
     if(envelope>0)excess=v/fmax(cap,1e-30);else bg=v;
-    double gain=fmin(1.,sqrt(cap/fmax(v,1e-30)));
-    spectrum[i]=make_float2((float)(gain*e.x),(float)(gain*e.y));}
+    if(v>cap){double gain=sqrt(cap/fmax(v,1e-30));
+      float2 clipped=make_float2((float)(gain*e.x),(float)(gain*e.y));spectrum[i]=clipped;
+      if(clipped.x!=e.x||clipped.y!=e.y){unsigned int slot=atomicAdd(changed_count,1u);
+        changed_index[slot]=i;changed_delta[slot]=make_double2((double)clipped.x-e.x,(double)clipped.y-e.y);}}}
   values[0][t]=bg;values[1][t]=excess;__syncthreads();
   for(int k=128;k;k/=2){if(t<k){values[0][t]=fmax(values[0][t],values[0][t+k]);values[1][t]=fmax(values[1][t],values[1][t+k]);}__syncthreads();}
   if(!t){maxima[blockIdx.x]=values[0][0];maxima[gridDim.x+blockIdx.x]=values[1][0];}
 }
 extern "C" __global__ void focal_prepare(const float2* field,const float* amplitude,
- const float2* phase,double* control,float2* delta,double* result,int N){
+ const float2* phase,double* control,float2* delta,double* result,unsigned int* changed_count,int N){
  __shared__ double sums[5][256],scale;__shared__ int bad;
- int t=threadIdx.x;if(!t)bad=0;__syncthreads();
+ int t=threadIdx.x;if(!t){bad=0;*changed_count=0;}__syncthreads();
  double inf=__longlong_as_double(0x7ff0000000000000LL),lo=inf,hi=0,error=0,sf=0,sa=0;
  for(int j=t;j<N;j+=256){double a=amplitude[j];if(a<=0)continue;
    float2 e=field[j],p=phase[j];double re=e.x,im=e.y,power=re*re+im*im,v=power/(a*a);
@@ -2766,6 +2769,43 @@ extern "C" __global__ void focal_prepare(const float2* field,const float* amplit
 extern "C" __global__ void focal_residual(const float2* field,const float* amplitude,float2* delta,int N,int area){
  int j=blockIdx.x*blockDim.x+threadIdx.x;if(j<N&&amplitude[j]>0){
    delta[j].x-=field[j].x/area;delta[j].y-=field[j].y/area;}
+}
+__device__ __forceinline__ double2 focal_dirichlet(double q,int k,int length){
+ // Sum exp(2*pi*i*(k-q)*n/length)/length, with the array-origin to
+ // FFT-center carrier exp(2*pi*i*q*floor(length/2)/length) included.
+ double integer=nearbyint(q),sn,cs;
+ if(q==integer){int bin=((int)integer%length+length)%length;
+   if(k!=bin)return make_double2(0,0);
+   if(!(length&1))return make_double2(((int)integer&1)?-1.:1.,0);
+   sincos(6.2831853071795864769*q*(length/2)/length,&sn,&cs);return make_double2(cs,sn);}
+ double gain=-sinpi(q)/(length*sinpi(((double)k-q)/length));
+ double angle=3.14159265358979323846*(((length&1)?0.:q)-k)/length;
+ sincos(angle,&sn,&cs);return make_double2(gain*cs,gain*sn);
+}
+extern "C" __global__ void focal_clip_residual(const float2* spectrum,const int* index,
+ const double2* frequencies,const float* amplitude,const double* before,
+ const unsigned int* changed_count,const int* changed_index,const double2* changed_delta,
+ float2* delta,int N,int H,int W){
+ int j=blockIdx.x,t=threadIdx.x;if(j>=N||amplitude[j]<=0)return;
+ int packed=index[j],band=packed/H,iy=packed%H;
+ double qy=iy+frequencies[band].y,qx=frequencies[band].x;
+ if(qy==nearbyint(qy)&&qx==nearbyint(qx)){
+   if(!t){int ky=((int)qy%H+H)%H,kx=((int)qx%W+W)%W;
+     double2 y=focal_dirichlet(qy,ky,H),x=focal_dirichlet(qx,kx,W);
+     double re=y.x*x.x-y.y*x.y,im=y.x*x.y+y.y*x.x;float2 e=spectrum[ky*W+kx];
+     delta[j].x=(float)((double)delta[j].x-((double)e.x*re-(double)e.y*im));
+     delta[j].y=(float)((double)delta[j].y-((double)e.x*im+(double)e.y*re));}
+   return;}
+ __shared__ double sums[2][256];double re=0,im=0;
+ for(unsigned int p=t;p<*changed_count;p+=256){int k=changed_index[p];
+   double2 x=focal_dirichlet(qx,k%W,W);if(x.x==0&&x.y==0)continue;
+   double2 y=focal_dirichlet(qy,k/W,H);if(y.x==0&&y.y==0)continue;
+   double kr=x.x*y.x-x.y*y.y,ki=x.x*y.y+x.y*y.x;double2 d=changed_delta[p];
+   re+=d.x*kr-d.y*ki;im+=d.x*ki+d.y*kr;}
+ sums[0][t]=re;sums[1][t]=im;__syncthreads();
+ for(int k=128;k;k/=2){if(t<k){sums[0][t]+=sums[0][t+k];sums[1][t]+=sums[1][t+k];}__syncthreads();}
+ if(!t){delta[j].x=(float)((double)delta[j].x-before[5+2*j]-sums[0][0]);
+        delta[j].y=(float)((double)delta[j].y-before[6+2*j]-sums[1][0]);}
 }
 extern "C" __global__ void focal_check(unsigned long long handle,const double* maxima,double* control,
  double* result,int blocks){
@@ -2960,7 +3000,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
             capacity = motion_bands
             module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
             names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
-                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update", "focal_profile", "focal_prepare", "focal_cap", "focal_check", "focal_residual", "focal_encode")
+                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update", "focal_profile", "focal_prepare", "focal_cap", "focal_check", "focal_residual", "focal_clip_residual", "focal_encode")
             kernels = {name: module.get_function(name) for name in names}
             from scipy.fft import fft2, fftshift, ifftshift  # noqa: PLC0415
 
@@ -3092,6 +3132,9 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 gpu["focal_phase"] = cp.ones(site_capacity, cp.complex64)
                 gpu["focal_spectrum"] = cp.empty(shape, cp.complex64)
                 gpu["focal_background"] = cp.empty(shape, cp.complex64)
+                gpu["focal_changed_count"] = cp.zeros(1, cp.uint32)
+                gpu["focal_changed_index"] = cp.empty(int(np.prod(shape)), cp.int32)
+                gpu["focal_changed_delta"] = cp.empty(int(np.prod(shape)), cp.complex128)
                 gpu["focal_plan"] = get_fft_plan(gpu["focal_spectrum"], axes=(0, 1), value_type="C2C")
                 gpu["focal_maxima"] = cp.empty(2 * ((int(np.prod(shape)) + 255) // 256), cp.float64)
                 gpu["focal_control"] = cp.asarray([0., 0., 1., 0., 1., 0., 1., 0.])
@@ -3364,11 +3407,12 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
             _rearrangement_propagate(gpu, work, band, "forward")
             gpu["kernels"]["focal_prepare"]((1,), (256,),
                 (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
-                 gpu["focal_delta"], gpu["focal_result"], np.int32(work["number"])))
+                 gpu["focal_delta"], gpu["focal_result"], gpu["focal_changed_count"], np.int32(work["number"])))
             gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
             gpu["kernels"]["focal_cap"](grid, (256,),
                 (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"],
-                 gpu["focal_control"], np.int32(area)))
+                 gpu["focal_control"], gpu["focal_changed_count"], gpu["focal_changed_index"],
+                 gpu["focal_changed_delta"], np.int32(area)))
             gpu["kernels"]["focal_check"]((1,), (256,),
                 (np.uint64(int(handle)), gpu["focal_maxima"], gpu["focal_control"],
                  gpu["focal_result"], np.int32(grid[0])))
@@ -3404,14 +3448,14 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                     cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
                 try:
                     gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
-                    # The background projection changed the field at bright
-                    # coordinates too. Measure that field before replacing it;
-                    # adding a residual from the pre-clipped field double-counts
-                    # the amplitude change and progressively loses bright power.
-                    _rearrangement_propagate(gpu, {**work, "optical": gpu["focal_background"]}, band, "forward")
-                    gpu["kernels"]["focal_residual"](((work["number"] + 255) // 256,), (256,),
-                        (work["actual"], gpu["focal_amplitude"], gpu["focal_delta"],
-                         np.int32(work["number"]), np.int32(area)))
+                    # The actual post-clip field equals the old field plus the
+                    # finite-DFT interpolation of the changed spectrum only.
+                    # Do not propagate the entire inverse image a second time.
+                    gpu["kernels"]["focal_clip_residual"]((work["number"],), (256,),
+                        (gpu["focal_spectrum"], work["index"], gpu["frequencies"],
+                         gpu["focal_amplitude"], gpu["focal_result"], gpu["focal_changed_count"],
+                         gpu["focal_changed_index"], gpu["focal_changed_delta"], gpu["focal_delta"],
+                         *map(np.int32, (work["number"], *gpu["shape"]))))
                     _rearrangement_propagate(gpu, work, band, "backward")
                     gpu["kernels"]["focal_encode"](grid, (256,),
                         (gpu["focal_background"], work["image"], native["physical_pupil"], native["incident"],
@@ -3489,7 +3533,7 @@ def _rearrangement_background_projection(
         _rearrangement_propagate(gpu, work, band, "forward")
         gpu["kernels"]["focal_prepare"]((1,), (256,),
             (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
-             gpu["focal_delta"], gpu["focal_result"], np.int32(work["number"])))
+             gpu["focal_delta"], gpu["focal_result"], gpu["focal_changed_count"], np.int32(work["number"])))
         gpu["kernels"]["field_project"](grid, (256,),
             (native["codes"], native["optical"], native["image"], gpu["previous_base"], gpu["previous_corrected"],
              native["physical_pupil"], native["incident"], native["codes"],

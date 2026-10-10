@@ -2218,6 +2218,48 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
         minimum_separation=2, endpoint_iterations=200, maximum_motion_frames=7,
     )
+    # A clipped native FFT changes fractional bright samples by a finite-DFT
+    # interpolation, not by the pupil PSF. Check the actual compacted change
+    # against independent complex128 inverse propagation, for odd/even origin
+    # conventions, integer axes, an empty change and the full-raster capacity.
+    gpu, signed = prepared["gpu"], np.array([[0., 0.], [-.375, .25], [3.2, -2.], [4., 2.4]])
+    points = center + signed
+    packed, frequencies, _counts, _offsets = slm_solver._rearrangement_bind(gpu, points[None])
+    rng = np.random.default_rng(802)
+    spectrum = (rng.normal(size=shape) + 1j*rng.normal(size=shape)).astype(np.complex64)
+    ry, rx = np.arange(height)-center[0], np.arange(width)-center[1]
+    operator = np.exp(-2j*np.pi*(signed[:, 0, None, None]*ry[None, :, None]/height
+                               + signed[:, 1, None, None]*rx[None, None, :]/width))
+    before_field = np.sum(operator*np.fft.ifft2(spectrum.astype(np.complex128))[None], axis=(1, 2))
+    before = np.zeros(5+2*len(source)); before[5::2] = before_field.real; before[6::2] = before_field.imag
+    wanted = np.array([2+.2j, 3-.7j, 4+.4j, 5-.8j], np.complex64)
+    with slm_solver._rearrangement_gpu_active(gpu["keeper"]), gpu["stream"]:
+        stream = gpu["stream"]
+        gpu["focal_work"]["index"].set(packed[1][0], stream=stream)
+        gpu["frequencies"][:len(frequencies)].set(frequencies, stream=stream)
+        gpu["focal_amplitude"].fill(1)
+        gpu["focal_profile"].fill(0)
+        gpu["focal_result"].set(before, stream=stream)
+        for limit in (0., .5, 100.):
+            gpu["focal_spectrum"].set(spectrum, stream=stream)
+            gpu["focal_control"].set(np.array([0., 0., 1., 0., limit/.005, 0., 1., 0.]), stream=stream)
+            gpu["focal_delta"].set(wanted, stream=stream)
+            gpu["focal_changed_count"].fill(0)
+            gpu["kernels"]["focal_cap"](((height*width+255)//256,), (256,),
+                (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"], gpu["focal_control"],
+                 gpu["focal_changed_count"], gpu["focal_changed_index"], gpu["focal_changed_delta"], np.int32(height*width)))
+            gpu["kernels"]["focal_clip_residual"]((len(source),), (256,),
+                (gpu["focal_spectrum"], gpu["focal_work"]["index"], gpu["frequencies"], gpu["focal_amplitude"],
+                 gpu["focal_result"], gpu["focal_changed_count"], gpu["focal_changed_index"],
+                 gpu["focal_changed_delta"], gpu["focal_delta"], *map(np.int32, (len(source), height, width))))
+            clipped = gpu["focal_spectrum"].get(stream=stream)
+            actual = gpu["focal_delta"].get(stream=stream)
+            expected = wanted-np.sum(operator*np.fft.ifft2(clipped.astype(np.complex128))[None], axis=(1, 2))
+            np.testing.assert_allclose(actual, expected, rtol=2e-7, atol=2e-7)
+            changed = int(gpu["focal_changed_count"].get(stream=stream)[0])
+            assert changed == np.count_nonzero(clipped != spectrum)
+            if limit == 0: assert changed == height*width
+            if limit == 100: assert changed == 0
     keeper = prepared["gpu"]["keeper"]
     assert keeper["thread"].is_alive() and keeper["users"] == 1
     plan = slm_solver.plan_rearrangement(prepared, np.arange(len(source)))
