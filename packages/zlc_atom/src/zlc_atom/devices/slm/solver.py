@@ -3359,6 +3359,20 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
             (gpu["focal_profile_indices"], gpu["focal_profile_values"], gpu["focal_profile"], np.int32(0)))
         gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
         gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
+
+        def evaluate(band, handle):
+            _rearrangement_propagate(gpu, work, band, "forward")
+            gpu["kernels"]["focal_prepare"]((1,), (256,),
+                (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
+                 gpu["focal_delta"], gpu["focal_result"], np.int32(work["number"])))
+            gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
+            gpu["kernels"]["focal_cap"](grid, (256,),
+                (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"],
+                 gpu["focal_control"], np.int32(area)))
+            gpu["kernels"]["focal_check"]((1,), (256,),
+                (np.uint64(int(handle)), gpu["focal_maxima"], gpu["focal_control"],
+                 gpu["focal_result"], np.int32(grid[0])))
+
         for band in work["plans"]:
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM rearrangement preparation stopped")
@@ -3367,27 +3381,28 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
             graph = _rearrangement_cuda_result(cuda.cudaGraphCreate(0))
             try:
                 handle = _rearrangement_cuda_result(cuda.cudaGraphConditionalHandleCreate(graph, 1, 1))
+                # Decide before entering the update loop. A converged result
+                # must not pay for an unused inverse transform and propagation.
+                _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
+                    stream.ptr, graph, None, None, 0,
+                    cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
+                try:
+                    evaluate(band, handle)
+                    frontier = cuda.cudaStreamGetCaptureInfo(stream.ptr)
+                    _rearrangement_cuda_result(frontier)
+                    dependencies = list(frontier[4])[:frontier[5]]
+                finally:
+                    _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
                 node = cuda.cudaGraphNodeParams()
                 node.type = cuda.cudaGraphNodeType.cudaGraphNodeTypeConditional
                 node.conditional.handle = handle
                 node.conditional.type = cuda.cudaGraphConditionalNodeType.cudaGraphCondTypeWhile
                 node.conditional.size = 1
-                _rearrangement_cuda_result(cuda.cudaGraphAddNode(graph, None, 0, node))
+                _rearrangement_cuda_result(cuda.cudaGraphAddNode(graph, dependencies, len(dependencies), node))
                 _rearrangement_cuda_result(cuda.cudaStreamBeginCaptureToGraph(
                     stream.ptr, node.conditional.phGraph_out[0], None, None, 0,
                     cuda.cudaStreamCaptureMode.cudaStreamCaptureModeThreadLocal))
                 try:
-                    _rearrangement_propagate(gpu, work, band, "forward")
-                    gpu["kernels"]["focal_prepare"]((1,), (256,),
-                        (work["actual"], gpu["focal_amplitude"], gpu["focal_phase"], gpu["focal_control"],
-                         gpu["focal_delta"], gpu["focal_result"], np.int32(work["number"])))
-                    gpu["focal_plan"].fft(native["optical"], gpu["focal_spectrum"], cufft.CUFFT_FORWARD)
-                    gpu["kernels"]["focal_cap"](grid, (256,),
-                        (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"],
-                         gpu["focal_control"], np.int32(area)))
-                    gpu["kernels"]["focal_check"]((1,), (256,),
-                        (np.uint64(int(handle)), gpu["focal_maxima"], gpu["focal_control"],
-                         gpu["focal_result"], np.int32(grid[0])))
                     gpu["focal_plan"].fft(gpu["focal_spectrum"], gpu["focal_background"], cufft.CUFFT_INVERSE)
                     # The background projection changed the field at bright
                     # coordinates too. Measure that field before replacing it;
@@ -3402,6 +3417,7 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                         (gpu["focal_background"], work["image"], native["physical_pupil"], native["incident"],
                          native["optical"], native["codes"], gpu["focal_control"],
                          *map(np.int32, (*gpu["shape"], work["padded"]))))
+                    evaluate(band, handle)
                 finally:
                     _rearrangement_cuda_result(cuda.cudaStreamEndCapture(stream.ptr))
                 executable = _rearrangement_cuda_result(cuda.cudaGraphInstantiate(graph, 0))
