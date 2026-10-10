@@ -84,6 +84,7 @@
 - Layout的Logic authoring容器由Layout codec递归编码：内存中的rows/numeric tuple写成JSON array，mapping写成object；标量不被猜测或字符串化，未知类型仍由strict writer拒绝。不是Derive专属的保存分支。
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
 - Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport、selectors、facet focus、classifier、fit和exact causal lineage graph；PNG只是同stem preview。
+- PNG导出默认使用无损Deflate level 1以降低报告等待，像素、DPI、metadata及绘制路径不变；显式调用方编码参数优先，PDF/SVG不进入PNG编码选项。
 - Figure archive保持标准NPZ，但compression由唯一writer逐member决定：小member及采样后至少节省20%的结构化数组使用Deflate；大而低收益的camera-noise member使用ZIP Stored。不得为不同Task/Viewer复制压缩策略，也不得花秒级CPU只换取少量体积。
 - FigureViewer把archive内每个typed Dataset作为sealed Runtime signal发布，再与TaskConsole Live/Frozen复用同一个Panel/SelectionBridge/Plot host/configure与accepted `DisplayDescription.spec` contract；不得按array shape重新猜plot kind，也不得保留第二套static panel owner。默认panel恢复exact recipe，且保存的`kind + cell_kind`必须在第一次semantic vocabulary投影前一起进入Panel identity；不得先按schema默认cell kind建立表单，再把另一cell kind的accepted fates写回。Add Panel只创建空的fixed-kind `panel-N`，operator随后在Setting选择任意archive或由ROI/Fit产生的派生signal。SelectionBridge晚于静态host挂载时必须显式replay当前accepted FitEvent，使Fit参数进入Runtime，但不得重跑solver或重画。每个panel的Setting、可关闭Edit tab、Frozen snapshot/Refresh、Interaction、Direct producer和Save figure均复用TaskConsole现有owner；`panel_only`只隔离Task lifecycle chrome，绝不删减Panel Edit能力。没有真实producer时同一控件自然disabled，不建立Viewer特判。Viewer文件选择默认从当前workspace当天data目录开始。Lineage以root、event nodes和direct parent IDs保存；Viewer把内部event ID只用作引用，Logic页显示有意义的Logic run snapshot，Devices页按实际device聚合working point，Flow把每个exact Logic event和共享Device投影为唯一node及显式edge；Logic行与Flow node共用同一个label（重名时才带sequence与generation），Flow node据此指回Logic/Devices页的行。
 - FigureViewer的手工数据入口只编辑Dataset的数据结构和值，不编辑device、Logic run record、既有lineage、axis role/fate、coordinate labels或coordinate frame。Data tab固定按`Dataset -> Axes -> Data`三个全宽Fluent frame纵向排列。Axes只提供原子Add/Edit/Delete以及name、length、unit、domain（Repeat/Point/Cell-data）和该axis的typed coordinate values；axis values以一行横向virtual table显示，列号就是axis index，自有横向scroll，不再另设Coordinates/Label表或草稿，没有上下排序或第二套grid类型。Data顶部复用Panel title的三domain shape/axis摘要，operator显式选择一个Rows axis与一个Columns axis，其余每个axis使用与Setting一致的Scope模式并按真实coordinate value选择；二维虚拟table的行列header只读显示两个展开axis的coordinate values，cell只编辑Dataset data，Tab/Shift+Tab连续提交并进入下一/上一cell，非编辑态方向键移动current cell。两张table的模型长度只改变内部scroll range，绝不能撑大Data tab或外层window。大数组只按可见cell读取，绝不为每个value创建QWidget、展开大slice choice、每次编辑reset model或复制整张字符串表；axis length/coordinates一次批量调整并同步values/validity/sigma。Apply只用`zlc_data`唯一constructor生成canonical immutable Dataset并由Viewer现有私有producer发布为sealed Runtime signal；仅编辑data或axis metadata时必须保留已有Repeat/Point的物理carrier与`axis_codes`，只有Add/Delete、跨domain移动或length改变这种显式topology edit才生成新的dense authored map。已有archive编辑形成新working copy且不原位改变已加载snapshot，未Save前明确标脏。保存仍调用唯一Figure writer，并用真实manual publication event追加system-owned manual-create/manual-edit lineage node；旧lineage/device settings原样保留，用户只填写manual note。
@@ -460,6 +461,8 @@ Node new chunk
 
 ### 7.2 Camera
 
+- 接收内存预算是容量上限，不是必须分满的目标。有限采集的SDK环形缓存及应用FIFO不超过本次已知总帧数；持续采集继续按预算分配，不能按科学history缩小。只有确实可能产生的数据需要接收存储，不为两帧采集构造数万帧槽位。
+
 - Occupancy的每一帧可以用自己的calibration：`ArtifactInputSpec(per_frame=True)`让一个artifact输入除了给每帧兜底的那份路径外，再按`"<name>[<frame>]"`（帧从1数，操作员看到的编号）给某几帧各自一份；表单里只有源的一个周期多于一帧时才出现「· frame k」行（帧数先问源的生产者草稿`frames_per_cycle`，没有草稿再问plane最新publication里readout-event角色的Point轴；生产者的草稿一变，console重投影每个读它信号的节点的编辑器，所以行数跟着相机的frames_per_cycle立即变），空行表示该帧读兜底那份；投影给表单的值恰好是表单的键（每行都有值，表单拒绝多一个少一个键）；行就是周期的帧：周期缩短，超出的帧连同它的路径一起从草稿里删掉（不藏着——藏着会让Start因一个看不见的行被拒），周期变长，新帧从空开始，单帧周期没有逐帧行也就没有逐帧路径；每次finalization都先做这一步，所以Start和编辑器看到同一份草稿；finalization把同一文件只解码一次，build拿到`calibration`加`calibration_by_frame`。读出提取对整叠帧一次gather（`extract_box_signals`/`extract_psf_signals`收`(F,H,W)`答`(F,N)`，`TrapCalibration.signals_of_frames`），每个窗口仍按自己的连续像素求和，所以整叠答案与逐帧逐字相同；occupancy每份calibration只读一次它负责的那些cell。processor的规矩：每帧读的是同一组site（site_ids必须一致，否则拒绝），各帧用自己的阈值与usable集判定，ROI重定位对每份calibration一起做，帧号超过周期帧数或源没有帧轴却给了逐帧calibration都拒绝；run record只在有某帧自己的calibration时才写`calibration_paths_by_frame`，没有的run记录得和以前一模一样。
 - 节点可以给操作员留空的字段自己定默认值：`LogicNodeDescriptor.resolve_defaults(values, resources)`在workspace资源解析之后、草稿投影之前被问，只填空字段，每次finalization重算，草稿本身不写入（默认跟着资源走）。Calibration用它把reference before/readout/reference after三个API字段默认成所选pulse按period顺序的前三个API参数（`zlc_pulse.api_bindings_in_period_order`：按period位置、同period先duration后DAC、delay最后），所以用为此写的模板时默认就是对的；操作员选过的字段不动。字段还可以声明为**派生**（`AuthoringField(derived=True)`）：不论草稿里有什么都取同一个钩子的值、表单只显示不可编辑（字段的description就是禁用原因）、草稿从不持有它。Calibration的「Camera exposure seconds」就是派生的：它开的camera measurement武装相机用的曝光=三个窗里最长的（reference，`camera_exposure_seconds`一处规则），请求校验它不短于reference窗，run record照记相机实际积分的值。
 
@@ -472,6 +475,7 @@ Node new chunk
 - Stop保留已接收尾部与最终Close释放资源是不同边界：硬件/生产线程确已关闭后，共同queue释放未消费记录及失败引用；SDK拒绝Close时仍保留句柄和数据供重试。持续广播设备的本次capture完整性错误只结束该次采集，接收线程继续idle排流，普通Restart重置本次ordinal/clock；真实通信I/O故障仍结束接收并明确要求重开设备，不自动吞错或继续失败capture。
 - Pylon同样区分requested/actual；arm模式、restore及gain变化使工作点失效，不能复用旧mode/epoch。SDK frame在result仍有效时直接构造不可变CameraFrameRecord，再Release；不先复制一份随即丢弃的mutable整图。非连续输入直接打包C-order bytes，immutable ownership、frame ordinal及epoch事实不变。
 - CameraFrameRecord是每帧唯一一次整图拷贝（拷成bytes，下游zlc_data据此保留视图而不再复制）；已是连续小端、base链终于bytes的图像原样保留。从这里到Plane，counts帧不再有整图拷贝（多帧cycle组装时的一次join除外），光电子帧只多一次换算分配及其record拷贝（见第9节BOX/Camera条）。
+- FiniteCapture的读周期、Stop后已接收完整周期排空与terminal检查只有一份公共read_cycles流程；collect仅在其上组装Measurement发布/结果。已经拥有自己输出的Task使用owns_generation=False和同一记录消费入口，不为凑collect的结果而创建无人消费的私有Camera signal。错误不继续发布尾部，正常Stop保留已收到的完整周期，残缺周期不伪造。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
 - Scan绑定的是声明的Dataset输出，不以首个value或generation是否已出现判定contract兼容。已配置Panel Fit的参数由同一model词汇提供声明，禁用的输出不提供；无数据时可Start并在现有source owner等待首次真实publication，不创建假值；未显式选择Acquisition logic时不自动启动Camera。首次arrival接入现有有序tap，首绑后继续严格固定generation，停止时退订且不重放旧sealed值。
 - Seamless Scan可显式选择一个`Acquisition logic`，只提供声明ready的Measurement，不硬编码Camera。每次Scan Start仅一次`Pulse SAFE → 原Logic Start/Restart → 本次host ready`，其后复用采集运行；manual Continue、device点和repeat均不重启。Seamless没有settle参数、UI、默认值或隐藏等待；设备写入后读取实际值，不比较与设定值相等，不把读回宣称为物理稳定。正常段尾以板端DONE为安全完成事实，不再追加SAFE；Stop/错误才发SAFE。程序只编译/完整load一次，后续Fire直接复用驻留程序，只重置计数、cursor及运行FIFO，不重抄DAC表、不清clock配置；唯一例外是`api:`轴：API参数是程序里的数，某个点改了它，就为该点重新编译并重新load，再fire。源tap/shot写入和进度仍走既有owner。
@@ -519,13 +523,18 @@ Node new chunk
 
 ### 8.1 Server-owned device
 
+
 - server默认使用原本可用的DVI exact-raster presenter，不依赖vendor DLL；USB frame memory仅在显式`--transport usb`时使用。
 - 和Pulse一样，真实SLM有两个apparatus device type，物理adapter始终只归server process所有：`slm.hamamatsu_x15213`的init参数是server host/port，供另一台机器连接；`slm.hamamatsu_x15213_local`在插着SLM head的bench process内以server自己的表单（transport/profile/wavelength/correction/flips加serve port）启动server，bench自己的leaf再以loopback client接入，因此两种type装入的leaf都是同一remote proxy，DVI/USB输出与profile/correction只有server这一个hardware owner。客户端通过bounded length-prefix、strict-JSON metadata传送canonical `float32`相位或`uint8`均匀相位码（2π/256），后者不是厂商灰度。server解码后仍调用同一个physical apply，不形成第二个hardware owner。普通state读取使用握手cache；两种apply都携带expected command/mapping revision并拒绝stale writer，不确定transport outcome后必须采样真实hardware state再继续。
 - SLM proxy无authentication/TLS，只能部署在trusted laboratory LAN，不得暴露到public Internet。
-- Initial command state是unknown，只有成功write/display/readback/settle后才known。
+- Initial command state是unknown，只有成功write/display/readback后才known；known指软件已确认命令，不冒充液晶光学稳定。普通单图apply继续按profile等待，sequence只执行操作员指定的帧时间槽，不额外追加profile尾等待。
 - Side effect失败区分known-old、known-new和unknown outcome。
 - Vendor correction是server的Init字段（`correction_path`），启动时按表单加载，进入command receipt；运行中没有correction mutation入口。remote单帧与sequence共享同一physical mapping/command owner。sequence既可预装完整影片，也可声明总帧数后逐帧提交；两者共用映射与本地paced播放。流式提交仅接受连续编号的已验证uint8图，通过容量2的队列施加背压，不覆盖、不丢帧；proxy的唯一上传worker使用同一sequence token和持续连接，不接管hardware。Stop/失败唤醒上传及播放等待，释放缓存并保留最后已确认相位，不能把已入队当作已显示。
-- 同一sequence和mapping内，字节完全相同的相邻相位图只传前帧引用并复用映射；不以近似相等或画面相似代替。已确认且未改变的像素通过HOLD保留完整authored时间，不重复BitBlt/USB换槽/读回。receipt区分全部逻辑step与真正的新presentation/ACK；未知状态不能HOLD。最终profile稳定时间从最后一次真实presentation ACK计算，不能每个HOLD重新起算。缓存只持必要前帧，不增加跨run图像仓库或另一个hardware owner。
+- 同一sequence和mapping内，字节完全相同的相邻相位图只传前帧引用并复用映射；不以近似相等或画面相似代替。已确认且未改变的像素通过HOLD保留完整authored时间，不重复BitBlt/USB换槽/读回。receipt区分全部逻辑step与真正的新presentation/ACK；未知状态不能HOLD。最后时间槽完成即结束sequence，receipt只声明authored timing完成，不声明未经测量的光学稳定。缓存只持必要前帧，不增加跨run图像仓库或另一个hardware owner。
+- 物理SLM与remote proxy均可在内部以独立不可变uint8相位码持有同一已确认命令；公共last_commanded_phase首次读取时才转换为不可变float32弧度并替换原表示。回执验证明确区分可信命令相位码与canonical弧度，不把字节伪装成弧度；prepare/release只转交内部已确认表示，不为无消费者的状态检查展开全幅数组。
+- SLM remote v4明确sequence只完成authored时间槽，不带旧profile尾等待；客户端和SLM server必须一起更新，版本不匹配明确拒绝，不兼容降级。Task信任设备owner已验证的显示帧与回执，不再重建另一份末态相位作重复比较；需要发布/保存时读取同一已确认命令。
+- 流式上传只在绑定时确认连接归属，不为每帧再做应用层往返。TCP与server容量2 FIFO提供背压，实际显示仍由唯一play回执确认；客户端只报告sent帧/字节/时间，不伪称逐帧已接收。上传校验、入队、连接截断的首错由既有sequence_upload记录，立即取消播放并通过主play回执返回原错和真实partial状态；主动Stop与旧token的迟到EOF不能污染当前run。既有上传worker先记本地写错并取消，再关闭socket；play先完成原worker清理再读取其错误/统计，不增加错误线程或另一层owner。
+- Windows sequence pacing使用已有高精度定时器等到截止前约1 ms，再检查同一单调时钟直到真正截止；不提前发帧、不追赶缩短迟到帧、不忙等整帧。此有界尾段以少量CPU换取较小累计调度超时；不调用timeBeginPeriod、不改全局电源/时钟设置，Stop在两段等待中均可结束。
 - Profile记录model、serial、wavelength、phase curve来源和settle语义；不新增hash。
 - Editor明确区分authoring draft与device command；external Task后旧Send不得静默覆盖。
 - Editor的device状态问句（100 ms轮询与每次草稿变化）在Editor自己的串行command executor上问、在Qt线程上显示：一次只有一问在途，command进行中不问——command的交付本身带回它留下的device状态；Qt线程从不等在remote proxy的apply锁后面：proxy缓存的状态有自己的短锁，任何状态读（含Editor构造时的第一次）都不等apply的网络往返；远端慢apply只推迟状态行，不冻结event loop。
@@ -565,6 +574,10 @@ Node new chunk
 
 ### 8.4 GPU二维重排
 
+- 用户要求已准备的SLM GPU持续保持低延迟：同进程同device共享一份独立显存读写保温资源，不为每个Task复制heater，也不动科学数组、SLM设备或系统全局锁频。资源仅属于已有prepared所有者；Stop保留，最后一个prepared关闭时停止线程并释放。正式准备、Graph捕获、计算与诊断通过同一个短活动计数让保温让出；不把多个正式求解整段串行。保温负载和暂停成本必须实测，不能把小于L2的无效轻触或一次短唤醒当成已解决冷启动。
+
+- LPI在线阶段不为未播放的目标子集另作端点求解；已准备的端点系数保留指定相位，只作实际输出的初值，实际终点与其它帧共用原幅度校正及质量门。子集到达目标时保留原64次修正能力，不削成普通帧16次；显式iterations仍优先。编码直接打包到测量输入，删除随后立即重读的整幅复光场；编码数学及实际场校验不变。保存的endpoint事实来自真正末图，不另存未播放endpoint_phase；作者帧数、帧率、相位轨迹及容差不变。
+
 - 同一Task提供`phase_method=iterative|lpi`，默认LPI、保留Iterative。只切换相位生成；占据、源/目标政策、指派、分数坐标路径、间距检查、逻辑相位码和设备mapping及流水线共用。整体光功率因去阱重新分配是允许的，不加恒功率约束；检查相对目标权重的均匀度及相位/过渡。最小trap间距是可调硬约束，默认15个原生Fourier像素，与SLM Target的25 gap同单位。
 - LPI从实际source和离线target站点复场，在相同光学轴参考下沿最短模2π分支插值；没有位移的identity保持源相位，零运动不追加突变的target相位帧。不额外发明像素相位混合算法，也不把稀疏场重建声称为原始完整hologram。端点参考和实际编码结果分开。
 - fixed与camera_step只决定总N，之后完全共用保留全部waypoint的采样、相位进度和去阱序列；相同计划与N不得因模式不同改变运动。camera_step由具体Task经既有注册及公共图像坐标转换提供原始sensor路径，公共采样器从ceil(最长实际路径/最大步长)选择N；多段让行所需的额外采样也由同一采样器计算，不保留Task专属motion_fractions。固定N不足以保留waypoint时明确拒绝；不隐藏增图、切角或改变路径。结果记录实际N/最大位移/名义时长，真实发出线段仍须通过同一连续间距检查。
@@ -586,6 +599,7 @@ Node new chunk
 - GPU重排的8-bit相位编码用固定物理像素位置决定的空间取整误差分散，避免周期相位图的取整误差在光阱处相干叠加；不逐帧换随机图样。所有质量指标来自编码后的完整相位及真实光瞳。它仍是`2π/256`逻辑相位码，不是设备灰度，普通静态Science Context/设备mapping不因此改变格式或另建映射。
 - Fourier核在正、负横坐标上的共轭关系可用于共享矩阵乘法：合成时分别重建两侧物理像素，分析时先施加每个像素自己的光瞳/入射场，再组合真实场的和与差。中心只计一次，偶数宽度的独立负边缘不能当作正边缘。这是同一完整孔径算子的代数化简，不要求光束对称，也不允许裁掉一半像素；粗计算和最终FP32验收共用此数学。
 - 同一帧、同一Fourier频率的Y载频相位因子与X根一起生成，正反传播复用，不在每次幅度或暗位校正时重算三角函数。Y根保留原有float64精度并按现有band容量有界分配；换帧、换query或分辨率仍由同一root入口更新，不增设独立缓存生命周期。
+- 同一轨迹按(frame、X频率、Y小数载频)一次字典序分组，保持各帧原频率顺序、局部inverse和offset；单帧与多帧共用同一算法，不按size/model分路，不为每图分别调用unique或新增频率缓存。LPI不构造随后被覆盖的Iterative初始系数。
 - 相位码与设备灰度不是同一事实。方向、vendor correction及波长LUT继续由设备mapping owner负责；生成端不能复制另一份默认映射。软件传播、像素响应模拟及实际光学/原子存活验收分别报告，不以模拟代替实验结果。
 - 粗网格与实际编码光场反馈的对数幅度迭代共用深度2的Anderson残差混合；历史只属于当前帧的当前分辨率，换帧/分辨率或改变修正阻尼时重置，不在占据批次之间继承旧答案。小Gram系统使用float64，原生检查仍用FP32 Fourier计算并由独立complex128传播验证。拒绝候选时保留已接受的系数、相位码和光场，最终强度/暗位门不因加速而改变。
 - 工作区只持有一个有界的pinned单帧传输区，影片是每次调用独占的只读host结果；按实际N增长必要GPU中间数组，不为auto未知长度预留整部pinned影片。设备分配器的stream arena随自己的工作区释放或复用，不让重复Start积累闲置显存。关闭只清自己的闲置pool，调用者仍持有的输出保持有效；不得清全局allocator或覆盖旧输出。
@@ -605,13 +619,16 @@ Node new chunk
 - `slm_rearrangement`是具体Task plugin：输入source Science Context和Calibration，可选显式End Target JSON；留空时`target_rows/target_columns`（默认3×3）生成中央矩形。两者复用相同核心与源pupil/operator；目标位置未被当前Calibration覆盖时，照片照常保存但该位置的占据验证保持invalid，不复制邻居阈值或伪造标定。复用Camera Measurement、既有读出/分类、SLM solver、device sequence、TaskRun及公共Plot/Figure，不新增实验编排框架。
 - 参数界面直接复用四组FluentParameterForm：Target grid、Imaging、Movement、Quality and output；不另建参数控件或表单框架。
 - 同一配置Task/Host跨Start保留自己的GPU工作区；每轮仍fresh解析输入、重置运行数据并恢复/确认源相位和arm相机。光学配置或GPU几何改变时重备，Stop保留，退休/删除/shutdown后台释放。fixed声明原7个live输出；camera_step在占据前不知道真实N，只声明相同5个相机/phase输出，轨迹和质量按事后真实N保存公共Figure/NPZ，不猜测live轴，不改Runtime冻结词汇。
-- 只改规划最小间距时更新同一个prepared几何约束，不重建光学资源。统一no-op判断避免无用采样和设备prepare；只有首张已验证图就绪后才能准备和开始播放。提前并行prepare未证明端到端收益，不保留其额外调度与状态。准备失败可能已分配远端token，所有失败/Stop释放已取得资源，不把准备操作移到未知长度的Pulse等待之前。
+- 只改规划最小间距时更新同一个prepared几何约束，不重建光学资源。固定N的sequence队列与上传连接在源相位确认、相机和输出准备完成后、Fire前同步准备；它不播放或改变相位，服务端idle连接不会超时。自动N在规划和采样后、非空时复用同一准备入口。只有首张已验证图就绪后才启动播放；不新增拍照后并行prepare调度。固定N的空计划只释放准备，零提交零播放；自动N空计划不准备。准备失败可能已分配远端token，所有失败/Stop沿现有owner释放。
 - 初始化GPU、固定几何与有界缓存发生在Pulse之前，并建立输入Context的准确source phase。运行期间一次Pulse、两次照片；第一张照片的valid occupied站点交给共同planner；显式终点Target与按行列生成终点只是输入方式不同，之后同一路径。不够原子不报错，多余原子不保留，不在Task复制匹配或分类算法。
-- Pulse只由operator编辑。Task输入一个Pulse路径和两个稳定Period ID，界面显示Period Name；Task不生成、修改或拆分Pulse。共同loop walker只核选定事件身份/次序，曝光及照明安排由operator负责，不比较Period长度与请求或实际曝光、不擅自调整曝光。名义显示时间为总相位图数/frame_rate；额外最终光学等待、计算、上传和读出另列，物理播放预算不足仍明确报告。
-- camera只arm一次、接收两个有限one-frame cycles，独立接收线程在GPU/SLM期间继续收帧。Task不能把第二次callback执行时间当曝光时间；用Fire调用开始的单调时间和actual compiled after-Period边界给出保守deadline，播放及最终等待必须在此之前完成。host receive时间只额外检测明显早到，不假装物理触发时刻；无法证明本次时序就不接受验证结果。
+- Pulse只由operator编辑。Task输入一个Pulse路径和两个稳定Period ID，界面显示Period Name；Task不生成、修改或拆分Pulse。共同loop walker只核选定事件身份/次序，曝光及照明安排由operator负责，不比较Period长度与请求或实际曝光、不擅自调整曝光。名义显示时间为总相位图数/frame_rate，不自动加最终光学等待；计算、上传和读出另列，软件播放预算不足仍明确报告。光学稳定及复拍余量由operator的Pulse安排，不能由软件ACK宣称已测得。
+- camera只arm一次、接收两个有限one-frame cycles，独立接收线程在GPU/SLM期间继续收帧。Task不能把第二次callback执行时间当曝光时间；用Fire调用开始的单调时间和actual compiled after-Period边界给出保守deadline，全部显示确认及authored时间槽必须在此之前完成。host receive时间只额外检测明显早到，不假装物理触发时刻；无法证明本次软件时序就不接受验证结果。
+- 重排Task直接消费同一FiniteCapture记录并发布自己的before/after输出，不再创建/提交/封存/物化/退休无消费者的私有Camera generation。真实frame timestamps、source ordinal、camera working point及拍照当时冻结的SLM receipt仍保存；删除不再存在的camera_source命名引用。报告专用Overlay只在保存时从这些相同snapshot/status构造，不挡占据判定和规划。
+- 首图计时分开记录image snapshot、classification、publication；另记相机host record到sequence调用返回的完整窗口，不拿仅从planner/GPU起算的online窗口冒充全链路。SDK timestamp、host收到记录、回调开始是不同事实，未经SDK语义证明不把timestamp称为曝光或触发时刻。
+- live capture_events只投影每次照片的source ordinal与当时冻结的SLM snapshot，固定camera/本run sequencer仍完整保留在event顶层；不在每个capture里重复一份Pulse文档。Task私有采集证据和保存文件仍保留完整camera/sequencer/SLM快照，尤其不能用当前SLM状态替代before照片时的状态。
 - before使用源Calibration的注册站点，after使用生成目标所对应的同一Calibration子集及readout规则；invalid保持invalid。静态Target到camera注册复用既有注册数学，读取结果按站点映射重排，不复制threshold分类。自动preview仍为前图+占据、后图+占据、源/最终相位。trajectory_2d以真实before照片为Dataset，将已生成的Fourier轨迹经同一注册affine及公共图像坐标转换投到camera坐标，保留完整SiteMap/status/编号；未选中站点只保留静止图标。before、after和路径图共用图像坐标、尺寸规则与显示参数，不另做白底裁切图。原始Fourier轨迹/目标仍在科学数据中作诊断，命令预测与实际原子跟踪明确区分。Task不声明外部Dataset输入，不把内部相机publication伪装成此类输入parent。完整相位影片不在拍照关键路径上反复发布/渲染。
 - 报告按同一source→target指派列出移动/原地目标及末态已判定、占据、未判定数量，主动舍弃单列；未完成或时序未接受的复拍不冒充成功输运。实际相机时间间隔、逻辑step间隔、新相位presentation间隔及online总耗时从已有记录派生，与请求帧率分开，不新增时钟/回执机制。注册及传感器坐标事实写入报告，几何匹配不冒充已校验物理方向；本项只改展示/报告，保持现有求解、阈值、Pulse和播放算法。
-- Task把第一张已验证相位图交给既有sequence播放，并在同一计算路径继续生成后续图，实现计算/上传/显示重叠；不新增通用流水线框架。后续质量失败时必须取消并等待播放结束，保存真实已显示前缀及partial回执，不再宣称整部影片未播放。sequence在物理SLM owner本地逐frame确认且不跳帧；缺帧等待和慢确认会延长真实cadence并分别记录。DVI的软件presenter ack不冒充vblank/液晶响应；profile光学等待仅在最终帧补足一次。首帧可用、首帧确认、纯计算、队列背压及整段结束分别计时，重叠窗口不相加；成功RPC不反传已有影片。Stop保留最后已确认相位，unknown outcome明确保存。
+- Task把第一张已验证相位图交给既有sequence播放，并在同一计算路径继续生成后续图，实现计算/上传/显示重叠；不新增通用流水线框架。后续质量失败时必须取消并等待播放结束，保存真实已显示前缀及partial回执，不再宣称整部影片未播放。sequence在物理SLM owner本地逐frame确认且不跳帧；缺帧等待和慢确认会延长真实cadence并分别记录。DVI的软件presenter ack不冒充vblank/液晶响应；不附加profile光学等待。首帧可用、首帧确认、纯计算、队列背压及整段结束分别计时，重叠窗口不相加；成功RPC不反传已有影片。Stop保留最后已确认相位，unknown outcome明确保存。
 - report在复拍或真正失败之后写：保存两张不可替代照片、counts/occupied/validity/threshold、源与生成目标、matching/path、可选默认开启的精确uint8序列、冻结的source Context/Calibration事实、实际Pulse和device snapshots，以及GPU/接收/匹配/计算/上传/逐帧ack/最终等待与报告写入时间。重要图使用公共Figure NPZ+PNG，summary JSON/text用于比较帧数与填充率；同时直接汇总已有编码光场的保留阱相对初始光强范围、终点光强及相位步长，不把相对均匀度当作阱深不变。计算结果与实际已播放、实测光学响应分别命名，不增加在线传播。不另写final Science Context，也不把填充率伪装为逐原子身份跟踪存活率。Stop/failure保留partial与原始错误，清理失败只附注，不覆盖原因。
 
 ## 9. Calibration、Scan与Simulation

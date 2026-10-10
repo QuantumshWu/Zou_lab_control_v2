@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+from threading import Condition, Event, Lock, Thread
 from typing import Any
 
 import numpy as np
@@ -2549,13 +2551,25 @@ extern "C" __global__ void pack_forward(const float* projected,const double2* y_
  for(int j=0;j<32;j+=8)if(yy<LY&&kk+j<K)
   spectrum[(kk+j)*LY+(yy-H/2+LY)%LY]=tile[threadIdx.x][threadIdx.y+j];
 }
+__device__ __forceinline__ float2 encoded_pixel(float2 field,const float* pupil,const float* incident,unsigned char* codes,int i){
+ float a=atan2f(field.y,field.x),s,c;
+ unsigned char code=phase_code((double)a-(double)incident[i],(unsigned int)i);codes[i]=code;
+ sincosf(code*.02454369260617025968f+incident[i],&s,&c);
+ return make_float2(__fmul_rn(pupil[i],c),__fmul_rn(pupil[i],s));
+}
 extern "C" __global__ void encode(const float* input,const float* pupil,const float* incident,float2* optical,
  unsigned char* codes,int H,int W,int P){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*W)return;
  float2 field=P?synthesis_pixel(input,i/W,i%W,H,W,P):((const float2*)input)[i];
- float a=atan2f(field.y,field.x),s,c;
- unsigned char code=phase_code((double)a-(double)incident[i],(unsigned int)i);codes[i]=code;
- sincosf(code*.02454369260617025968f+incident[i],&s,&c);optical[i]=make_float2(pupil[i]*c,pupil[i]*s);
+ optical[i]=encoded_pixel(field,pupil,incident,codes,i);
+}
+extern "C" __global__ void encode_pack(const float* image,const float* pupil,const float* incident,real_t* packed,
+ unsigned char* codes,int H,int W,int P){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=H*P)return;int d=i%P,y=i/P,xp=W/2+d,xm=W/2-d;
+ float2 plus=make_float2(0,0),minus=make_float2(0,0);
+ if(xp<W)plus=encoded_pixel(synthesis_pixel(image,y,xp,H,W,P),pupil,incident,codes,y*W+xp);
+ if(d>0&&xm>=0)minus=encoded_pixel(synthesis_pixel(image,y,xm,H,W,P),pupil,incident,codes,y*W+xm);
+ pack_pair(packed,plus,minus,y,d,H,P);
 }
 extern "C" __global__ void field_project(const unsigned char* input,float2* field,const float* delta,
  const float2* previous_base,const float2* previous_corrected,const float* pupil,const float* incident,
@@ -2644,6 +2658,127 @@ extern "C" __global__ void anderson_update(const float2* field,const float* targ
 '''
 
 
+_REARRANGEMENT_KEEPERS: dict[int, dict[str, object]] = {}
+_REARRANGEMENT_KEEPERS_CHANGED = Condition()
+
+
+def _rearrangement_keeper_dispose(keeper):
+    keeper["stop"].set()
+    thread = keeper.get("thread")
+    if thread is not None and thread.ident is not None:
+        thread.join()
+    cp, stream = keeper["cp"], keeper.get("stream")
+    if stream is not None:
+        failure = None
+        try:
+            with cp.cuda.Device(keeper["device"]):
+                stream.synchronize()
+        except BaseException as error:
+            failure = error
+        finally:
+            keeper.pop("scratch", None)
+            keeper.pop("stream", None)
+        try:
+            with cp.cuda.Device(keeper["device"]):
+                cp.get_default_memory_pool().free_all_blocks(stream=stream)
+        except BaseException as error:
+            if failure is None:
+                failure = error
+            else:
+                failure.add_note(f"GPU warming arena cleanup failed: {error}")
+        if failure is not None:
+            raise failure
+
+
+def _rearrangement_keeper_acquire(cp):
+    """One bounded heater per device, retained only by prepared workspaces."""
+    device = cp.cuda.Device().id
+    with _REARRANGEMENT_KEEPERS_CHANGED:
+        while (keeper := _REARRANGEMENT_KEEPERS.get(device)) is not None:
+            # Creation and final disposal happen outside this registry lock.
+            if keeper["users"] and "thread" in keeper:
+                if keeper["error"] is not None:
+                    raise RuntimeError("SLM GPU warming failed") from keeper["error"]
+                keeper["users"] += 1
+                return keeper
+            _REARRANGEMENT_KEEPERS_CHANGED.wait()
+        keeper = dict(cp=cp, device=device, users=1, active=0, lock=Lock(), stop=Event(), error=None)
+        _REARRANGEMENT_KEEPERS[device] = keeper
+    try:
+        stream = keeper["stream"] = cp.cuda.Stream(non_blocking=True, priority=0)
+        size = max(64 * 1024 * 1024, 2 * int(cp.cuda.runtime.getDeviceProperties(device)["l2CacheSize"]))
+        with stream:
+            keeper["scratch"] = cp.zeros(size // 4, cp.float32)
+            kernel = cp.RawKernel(r'''extern "C" __global__ void keep(float* p,int n){
+                int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<n)p[i]+=.000001f;
+            }''', "keep")
+            kernel(((size // 4 + 255) // 256,), (256,), (keeper["scratch"], np.int32(size // 4)))
+            stream.synchronize()
+
+        def run():
+            try:
+                with cp.cuda.Device(device), stream:
+                    while not keeper["stop"].wait(.020):
+                        with keeper["lock"]:
+                            if keeper["active"] or keeper["stop"].is_set():
+                                continue
+                            kernel(((size // 4 + 255) // 256,), (256,), (keeper["scratch"], np.int32(size // 4)))
+                            stream.synchronize()
+            except BaseException as error:
+                import logging  # noqa: PLC0415
+
+                with keeper["lock"]:
+                    keeper["error"] = error
+                    keeper["stop"].set()
+                logging.getLogger(__name__).exception("SLM GPU warming stopped")
+                error.__traceback__ = None  # the logged traceback must not retain the scratch array
+
+        with _REARRANGEMENT_KEEPERS_CHANGED:
+            thread = Thread(target=run, name=f"slm-gpu-warm-{device}", daemon=True)
+            thread.start()
+            keeper["thread"] = thread
+            _REARRANGEMENT_KEEPERS_CHANGED.notify_all()
+        return keeper
+    except BaseException as error:
+        try:
+            _rearrangement_keeper_dispose(keeper)
+        except BaseException as cleanup_error:
+            error.add_note(f"GPU warming cleanup failed: {cleanup_error}")
+        finally:
+            with _REARRANGEMENT_KEEPERS_CHANGED:
+                del _REARRANGEMENT_KEEPERS[device]
+                _REARRANGEMENT_KEEPERS_CHANGED.notify_all()
+        raise
+
+
+def _rearrangement_keeper_release(keeper):
+    with _REARRANGEMENT_KEEPERS_CHANGED:
+        keeper["users"] -= 1
+        if keeper["users"]:
+            return
+    try:
+        _rearrangement_keeper_dispose(keeper)
+    finally:
+        with _REARRANGEMENT_KEEPERS_CHANGED:
+            del _REARRANGEMENT_KEEPERS[keeper["device"]]
+            _REARRANGEMENT_KEEPERS_CHANGED.notify_all()
+
+
+@contextmanager
+def _rearrangement_gpu_active(keeper, *, check_error=True):
+    """Pause shared warming without serializing independent scientific work."""
+    with keeper["lock"]:
+        if check_error and keeper["error"] is not None:
+            raise RuntimeError("SLM GPU warming failed") from keeper["error"]
+        keeper["active"] += 1
+    try:
+        with keeper["cp"].cuda.Device(keeper["device"]):
+            yield
+    finally:
+        with keeper["lock"]:
+            keeper["active"] -= 1
+
+
 def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requested, method):
     """Prepare the one native Fourier model and optional sampling quadrature."""
     try:
@@ -2664,145 +2799,160 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
             or np.any(pupil < 0) or not np.any(pupil > 0)):
         raise ValueError("pupil_amplitude must be finite, nonnegative and match the full SLM")
     incident = np.zeros(shape, np.float32) if pupil_phase is None else canonical_phase(pupil_phase, shape)
-    stream = cp.cuda.Stream(non_blocking=True)
-    library = (ctypes.WinDLL if os.name == "nt" else ctypes.CDLL)(load_nvidia_dynamic_lib("cublas").abs_path)
-    gemm = library.cublasGemmEx
-    pointer, integer = ctypes.c_void_p, ctypes.c_int
-    gemm.argtypes = [pointer, integer, integer, integer, integer, integer, pointer,
-                    pointer, integer, integer, pointer, integer, integer,
-                    pointer, pointer, integer, integer, integer, integer]
-    gemm.restype = integer
-    number = len(geometry["source_yx"])
-    maximum_selected = min(number, len(geometry["target_yx"]))
-    maximum_removed = max(0, number - len(geometry["target_yx"]))
-    # Unselected integer sites share one band per source X. Each selected
-    # trajectory can add at most one(X, fractional-Y) band per frame.
-    source_columns = len(np.unique(geometry["source_yx"][:, 1]))
-    motion_bands = (min(number, source_columns + maximum_selected) + 15) // 16 * 16
-    if method == "lpi":
-        target_columns = len(np.unique(geometry["target_yx"][:, 1]))
-        motion_bands = max(motion_bands, (target_columns + 15) // 16 * 16)
-    halo_columns = len(np.unique(geometry["source_yx"][:, 1, None] + np.arange(-2, 3))) if maximum_removed else 0
-    # The full halo-column superset includes every stationary source X.
-    projection_bands = (min(number + 25 * maximum_removed, maximum_selected + halo_columns) + 15) // 16 * 16
-    capacity = max(motion_bands, projection_bands if maximum_removed else motion_bands)
-    module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
-    names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
-             "pack_forward", "encode", "field_project", "anderson_begin", "anderson_update")
-    kernels = {name: module.get_function(name) for name in names}
-    gpu = dict(cp=cp, cublas=cublas, cufft=cufft, stream=stream, module=module, kernels=kernels,
-               library=library, gemm=gemm, shape=shape, number=number,
-               pupil_cpu=pupil.copy(), incident_cpu=np.asarray(incident, np.float32).copy(),
-               pupil_energy=float(np.sum(pupil.astype(np.float64) ** 2)), pupil_scale=float(np.max(pupil)),
-               resources={}, output_pool=cp.cuda.PinnedMemoryPool(), weight_exponent=np.float32(.8), method=method)
-    # Stride-two samples share the centered native coordinates only at these sizes.
-    factors = (1, 2) if all(size % 4 == 0 for size in shape) else (1,)
-    handles = []
-    def close():
-        stream.synchronize()
-        for handle in handles:
-            cublas.destroy(handle)
-        handles.clear()
-        if gpu:
-            gpu["output_pool"].free_all_blocks()
-        gpu.clear()
-        # These allocations belong to this workspace's private stream. Release
-        # its idle arena without touching other streams or live caller buffers.
-        cp.get_default_memory_pool().free_all_blocks(stream=stream)
-    gpu["close"] = close
+    keeper = _rearrangement_keeper_acquire(cp)
+    gpu = None
     try:
-        with stream:
-            site_capacity = max(number, len(geometry["target_yx"])) if method == "lpi" else number
-            gpu["coefficients"] = cp.zeros(site_capacity, cp.complex64)
-            gpu["frequencies"] = cp.zeros((capacity, 2), cp.float64)
-            for factor, precise in [(factor, False) for factor in factors] + [(1, True)]:
-                if stop_requested is not None and stop_requested():
-                    raise InterruptedError("SLM rearrangement preparation stopped")
-                dtype = cp.float32 if precise else cp.float16
-                work_capacity = capacity if precise else motion_bands
-                work_module = cp.RawModule(code="#define HALF 0\n" + _REARRANGEMENT_CUDA) if precise else module
-                work_kernels = {name: work_module.get_function(name) for name in names} if precise else kernels
-                h, w = (size // factor for size in shape)
-                padded, ly = (w // 2 + 16) // 16 * 16, h
-                handle = cublas.create()
-                handles.append(handle)
-                cublas.setStream(handle, stream.ptr)
-                work = dict(shape=(h, w), padded=padded, ly=ly, handle=handle,
-                            typecode=0 if precise else 2, module=work_module, kernels=work_kernels,
-                            forward=cp.empty((2 * padded, work_capacity), dtype),
-                            y_roots=cp.empty((work_capacity, h), cp.complex128),
-                            spectrum=cp.empty((work_capacity, ly), cp.complex64),
-                            transformed=cp.empty((work_capacity, ly), cp.complex64),
-                            field_gemm=cp.empty((2, h, 2 * padded), dtype),
-                            projected=cp.empty((2, h, work_capacity), cp.float32),
-                            actual=cp.empty(site_capacity, cp.complex64),
-                            index=(gpu["resources"][1]["index"] if precise
-                                   else cp.arange(site_capacity, dtype=cp.int32) % (16 * ly)),
-                            frequencies=gpu["frequencies"],
-                            alpha=np.asarray(1, np.float32), beta=np.asarray(0, np.float32),
-                            plans={band: cufft.Plan1d(ly, cufft.CUFFT_C2C, band)
-                                   for band in range(16, work_capacity + 1, 16)})
-                if precise:
-                    # The final decision uses FP32 roots/packing on the same finite
-                    # Fourier map. Roots, emitted optical field and query indices
-                    # belong to the same native geometry; only packing is precise.
-                    work["optical"] = gpu["resources"][1]["optical"]
-                    gpu["measurement"] = work
-                    if maximum_removed or method == "lpi":
-                        work.update(backward=cp.empty((work_capacity, 2 * padded), cp.float32),
-                                    packed=cp.empty((2, h, work_capacity), cp.float32),
-                                    image=cp.empty((2, h, 2 * padded), cp.float32))
-                    if method == "lpi":
-                        work.update(physical_pupil=gpu["resources"][1]["physical_pupil"],
-                                    incident=gpu["resources"][1]["incident"],
-                                    codes=gpu["resources"][1]["codes"])
-                else:
-                    work.update(backward=cp.empty((work_capacity, 2 * padded), dtype),
-                                packed=cp.empty((2, h, work_capacity), dtype),
-                                image=cp.empty((2, h, 2 * padded), cp.float32),
-                                pupil=cp.asarray(pupil[::factor, ::factor]
-                                                 / np.float32(gpu["pupil_scale"]) * factor ** 2))
-                    if factor == 1:
-                        work.update(capacity=work_capacity, optical=cp.empty((h, w), cp.complex64),
-                                    codes=cp.empty((h, w), cp.uint8),
-                                    physical_pupil=cp.asarray(pupil),
-                                    incident=cp.asarray(incident, cp.float32))
-                    gpu["resources"][factor] = work
-                for band in work["plans"]:
-                    _rearrangement_select_roots(work, band)
+        with _rearrangement_gpu_active(keeper):
+            stream = cp.cuda.Stream(non_blocking=True, priority=-1)
+            library = (ctypes.WinDLL if os.name == "nt" else ctypes.CDLL)(load_nvidia_dynamic_lib("cublas").abs_path)
+            gemm = library.cublasGemmEx
+            pointer, integer = ctypes.c_void_p, ctypes.c_int
+            gemm.argtypes = [pointer, integer, integer, integer, integer, integer, pointer,
+                            pointer, integer, integer, pointer, integer, integer,
+                            pointer, pointer, integer, integer, integer, integer]
+            gemm.restype = integer
+            number = len(geometry["source_yx"])
+            maximum_selected = min(number, len(geometry["target_yx"]))
+            maximum_removed = max(0, number - len(geometry["target_yx"]))
+            # Unselected integer sites share one band per source X. Each selected
+            # trajectory can add at most one(X, fractional-Y) band per frame.
+            source_columns = len(np.unique(geometry["source_yx"][:, 1]))
+            motion_bands = (min(number, source_columns + maximum_selected) + 15) // 16 * 16
+            if method == "lpi":
+                target_columns = len(np.unique(geometry["target_yx"][:, 1]))
+                motion_bands = max(motion_bands, (target_columns + 15) // 16 * 16)
+            halo_columns = len(np.unique(geometry["source_yx"][:, 1, None] + np.arange(-2, 3))) if maximum_removed else 0
+            # The full halo-column superset includes every stationary source X.
+            projection_bands = (min(number + 25 * maximum_removed, maximum_selected + halo_columns) + 15) // 16 * 16
+            capacity = max(motion_bands, projection_bands if maximum_removed else motion_bands)
+            module = cp.RawModule(code="#define HALF 1\n" + _REARRANGEMENT_CUDA)
+            names = ("load_motion_frame", "store_motion_frame", "phase_step_rms", "scatter", "gather", "pack_inverse", "project", "pack_field", "select_roots",
+                     "pack_forward", "encode", "encode_pack", "field_project", "anderson_begin", "anderson_update")
+            kernels = {name: module.get_function(name) for name in names}
+            gpu = dict(cp=cp, cublas=cublas, cufft=cufft, stream=stream, module=module, kernels=kernels,
+                       library=library, gemm=gemm, shape=shape, number=number,
+                       pupil_cpu=pupil.copy(), incident_cpu=np.asarray(incident, np.float32).copy(),
+                       pupil_energy=float(np.sum(pupil.astype(np.float64) ** 2)), pupil_scale=float(np.max(pupil)),
+                       keeper=keeper, resources={}, output_pool=cp.cuda.PinnedMemoryPool(), weight_exponent=np.float32(.8), method=method)
+            # Stride-two samples share the centered native coordinates only at these sizes.
+            factors = (1, 2) if all(size % 4 == 0 for size in shape) else (1,)
+            handles = []
+            def close():
+                if not gpu:
+                    return
+                try:
+                    with _rearrangement_gpu_active(keeper, check_error=False):
+                        stream.synchronize()
+                        for handle in handles:
+                            cublas.destroy(handle)
+                        handles.clear()
+                        gpu["output_pool"].free_all_blocks()
+                finally:
+                    gpu.clear()
+                    try:
+                        with cp.cuda.Device(keeper["device"]):
+                            cp.get_default_memory_pool().free_all_blocks(stream=stream)
+                    finally:
+                        _rearrangement_keeper_release(keeper)
+            gpu["close"] = close
+            with stream:
+                site_capacity = max(number, len(geometry["target_yx"])) if method == "lpi" else number
+                gpu["coefficients"] = cp.zeros(site_capacity, cp.complex64)
+                gpu["frequencies"] = cp.zeros((capacity, 2), cp.float64)
+                for factor, precise in [(factor, False) for factor in factors] + [(1, True)]:
+                    if stop_requested is not None and stop_requested():
+                        raise InterruptedError("SLM rearrangement preparation stopped")
+                    dtype = cp.float32 if precise else cp.float16
+                    work_capacity = capacity if precise else motion_bands
+                    work_module = cp.RawModule(code="#define HALF 0\n" + _REARRANGEMENT_CUDA) if precise else module
+                    work_kernels = {name: work_module.get_function(name) for name in names} if precise else kernels
+                    h, w = (size // factor for size in shape)
+                    padded, ly = (w // 2 + 16) // 16 * 16, h
+                    handle = cublas.create()
+                    handles.append(handle)
+                    cublas.setStream(handle, stream.ptr)
+                    work = dict(shape=(h, w), padded=padded, ly=ly, handle=handle,
+                                typecode=0 if precise else 2, module=work_module, kernels=work_kernels,
+                                forward=cp.empty((2 * padded, work_capacity), dtype),
+                                y_roots=cp.empty((work_capacity, h), cp.complex128),
+                                spectrum=cp.empty((work_capacity, ly), cp.complex64),
+                                transformed=cp.empty((work_capacity, ly), cp.complex64),
+                                field_gemm=cp.empty((2, h, 2 * padded), dtype),
+                                projected=cp.empty((2, h, work_capacity), cp.float32),
+                                actual=cp.empty(site_capacity, cp.complex64),
+                                index=(gpu["resources"][1]["index"] if precise
+                                       else cp.arange(site_capacity, dtype=cp.int32) % (16 * ly)),
+                                frequencies=gpu["frequencies"],
+                                alpha=np.asarray(1, np.float32), beta=np.asarray(0, np.float32),
+                                plans={band: cufft.Plan1d(ly, cufft.CUFFT_C2C, band)
+                                       for band in range(16, work_capacity + 1, 16)})
                     if precise:
+                        # The final decision uses FP32 roots/packing on the same finite
+                        # Fourier map. Roots, emitted optical field and query indices
+                        # belong to the same native geometry; only packing is precise.
+                        work["optical"] = gpu["resources"][1]["optical"]
+                        gpu["measurement"] = work
+                        if maximum_removed or method == "lpi":
+                            work.update(backward=cp.empty((work_capacity, 2 * padded), cp.float32),
+                                        packed=cp.empty((2, h, work_capacity), cp.float32),
+                                        image=cp.empty((2, h, 2 * padded), cp.float32))
                         if method == "lpi":
-                            _rearrangement_propagate(gpu, work, band, "encode")
-                        _rearrangement_propagate(gpu, work, band, "forward")
+                            work.update(physical_pupil=gpu["resources"][1]["physical_pupil"],
+                                        incident=gpu["resources"][1]["incident"],
+                                        codes=gpu["resources"][1]["codes"])
                     else:
-                        _rearrangement_propagate(gpu, work, band, "roundtrip")
+                        work.update(backward=cp.empty((work_capacity, 2 * padded), dtype),
+                                    packed=cp.empty((2, h, work_capacity), dtype),
+                                    image=cp.empty((2, h, 2 * padded), cp.float32),
+                                    pupil=cp.asarray(pupil[::factor, ::factor]
+                                                     / np.float32(gpu["pupil_scale"]) * factor ** 2))
                         if factor == 1:
-                            _rearrangement_propagate(gpu, work, band, "encode")
-            if maximum_removed:
-                queries = number + 25 * maximum_removed
-                gpu["projection"] = {
-                    **gpu["measurement"], "number": queries,
-                    "index": cp.empty(queries, cp.int32), "actual": cp.empty(queries, cp.complex64),
-                    "coefficients": cp.empty(queries, cp.complex64),
-                }
-                gpu["previous_base"] = cp.empty(shape, cp.complex64)
-                gpu["previous_corrected"] = cp.empty(shape, cp.complex64)
-                gpu["current_base"] = cp.empty(shape, cp.complex64)
-            gpu["aa_phase"] = cp.empty(site_capacity, cp.complex64)
-            gpu["aa_g"] = cp.empty((3, site_capacity), cp.float32)
-            gpu["aa_r"] = cp.empty((3, site_capacity), cp.float32)
-            gpu["aa_candidate"] = cp.empty(site_capacity, cp.float64)
-            gpu["aa_state"] = cp.zeros(2, cp.int32)
-            gpu["amplitude"] = cp.ones(site_capacity, cp.float32)
-            gpu["frame_index"] = cp.zeros(1, cp.int32)
-            staging = gpu["output_pool"].malloc(int(np.prod(shape)))
-            gpu["host_frame"] = np.frombuffer(staging, np.uint8, count=int(np.prod(shape))).reshape(shape)
-            gpu["motion_capacity"] = 0
-            stream.synchronize()
-    except BaseException:
-        close()
+                            work.update(capacity=work_capacity, optical=cp.empty((h, w), cp.complex64),
+                                        codes=cp.empty((h, w), cp.uint8),
+                                        physical_pupil=cp.asarray(pupil),
+                                        incident=cp.asarray(incident, cp.float32))
+                        gpu["resources"][factor] = work
+                    for band in work["plans"]:
+                        _rearrangement_select_roots(work, band)
+                        if precise:
+                            if method == "lpi":
+                                _rearrangement_propagate(gpu, work, band, "encode")
+                            _rearrangement_propagate(gpu, work, band, "forward")
+                        else:
+                            _rearrangement_propagate(gpu, work, band, "roundtrip")
+                            if factor == 1:
+                                _rearrangement_propagate(gpu, work, band, "encode")
+                if maximum_removed:
+                    queries = number + 25 * maximum_removed
+                    gpu["projection"] = {
+                        **gpu["measurement"], "number": queries,
+                        "index": cp.empty(queries, cp.int32), "actual": cp.empty(queries, cp.complex64),
+                        "coefficients": cp.empty(queries, cp.complex64),
+                    }
+                    gpu["previous_base"] = cp.empty(shape, cp.complex64)
+                    gpu["previous_corrected"] = cp.empty(shape, cp.complex64)
+                    gpu["current_base"] = cp.empty(shape, cp.complex64)
+                gpu["aa_phase"] = cp.empty(site_capacity, cp.complex64)
+                gpu["aa_g"] = cp.empty((3, site_capacity), cp.float32)
+                gpu["aa_r"] = cp.empty((3, site_capacity), cp.float32)
+                gpu["aa_candidate"] = cp.empty(site_capacity, cp.float64)
+                gpu["aa_state"] = cp.zeros(2, cp.int32)
+                gpu["amplitude"] = cp.ones(site_capacity, cp.float32)
+                gpu["frame_index"] = cp.zeros(1, cp.int32)
+                staging = gpu["output_pool"].malloc(int(np.prod(shape)))
+                gpu["host_frame"] = np.frombuffer(staging, np.uint8, count=int(np.prod(shape))).reshape(shape)
+                gpu["motion_capacity"] = 0
+                stream.synchronize()
+            return gpu
+    except BaseException as error:
+        try:
+            if gpu is not None and "close" in gpu:
+                gpu["close"]()
+            else:
+                _rearrangement_keeper_release(keeper)
+        except BaseException as cleanup_error:
+            error.add_note(f"GPU preparation cleanup failed: {cleanup_error}")
         raise
-    return gpu
 
 
 def _rearrangement_select_roots(work, band):
@@ -2845,9 +2995,16 @@ def _rearrangement_propagate(gpu, work, band, operation):
                               (work["image"], work["physical_pupil"], work["incident"], work["optical"],
                                work["codes"], *map(np.int32, (h, w, padded))))
             return
-        kernels["project"](((h * padded + 255) // 256,), (256,),
-                           (work["image"], work["pupil"], work["field_gemm"],
-                            np.int32(h), np.int32(w), np.int32(padded)))
+        if operation == "encode_forward":
+            # The encoded field is consumed immediately by measurement. Pack
+            # it directly instead of writing and rereading a full complex raster.
+            kernels["encode_pack"](((h * padded + 255) // 256,), (256,),
+                (work["image"], work["physical_pupil"], work["incident"], work["field_gemm"],
+                 work["codes"], *map(np.int32, (h, w, padded))))
+        else:
+            kernels["project"](((h * padded + 255) // 256,), (256,),
+                               (work["image"], work["pupil"], work["field_gemm"],
+                                np.int32(h), np.int32(w), np.int32(padded)))
     if operation == "forward":
         kernels["pack_field"](((h * padded + 255) // 256,), (256,),
                               (work["optical"], work["field_gemm"], np.int32(h), np.int32(w), np.int32(padded)))
@@ -2908,16 +3065,21 @@ def _rearrangement_bind(gpu, points):
     # Each band has one X frequency and one fractional Y carrier. Its remaining
     # Y frequencies are native integer FFT bins, for any authored frame count.
     bands = np.stack((signed[..., 1], signed[..., 0] - integer_y), axis=-1)
-    selected, lookup, counts = [], [], []
-    for frame in bands:
-        frequencies, inverse = np.unique(frame, axis=0, return_inverse=True)
-        selected.append(frequencies)
-        lookup.append(inverse)
-        counts.append(len(frequencies))
-    counts = np.asarray(counts, np.int32)
+    # Group all frames once, retaining each frame's lexicographic band order
+    # and local inverse indices, rather than setting up one unique per frame.
+    frame_count, sites_per_frame = bands.shape[:2]
+    frame_ids = np.repeat(np.arange(frame_count), sites_per_frame)
+    flat = bands.reshape(-1, 2)
+    order = np.lexsort((flat[:, 1], flat[:, 0], frame_ids))
+    ordered_frames, ordered_bands = frame_ids[order], flat[order]
+    starts = np.r_[True, (ordered_frames[1:] != ordered_frames[:-1])
+                   | np.any(ordered_bands[1:] != ordered_bands[:-1], axis=1)]
+    inverse = np.empty_like(order)
+    inverse[order] = np.cumsum(starts) - 1
+    counts = np.bincount(ordered_frames[starts], minlength=frame_count).astype(np.int32)
     offsets = np.r_[0, np.cumsum(counts, dtype=np.int64)]
-    selected = np.concatenate(selected)
-    lookup = np.asarray(lookup)
+    selected = ordered_bands[starts]
+    lookup = inverse.reshape(frame_count, sites_per_frame) - offsets[:-1, None]
     indices = {}
     for factor, work in gpu["resources"].items():
         packed = lookup * work["ly"] + integer_y % work["ly"]
@@ -2964,7 +3126,7 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
         return
     cp, stream, number = gpu["cp"], gpu["stream"], gpu["number"]
     native = gpu["resources"][1]
-    with stream:
+    with _rearrangement_gpu_active(gpu["keeper"]), stream:
         stream.synchronize()
         gpu["motion_capacity"] = 0
         gpu["graphs"] = {}
@@ -3009,8 +3171,7 @@ def _rearrangement_motion_capacity(gpu, count, stop_requested):
                     raise InterruptedError("SLM rearrangement preparation stopped")
                 _rearrangement_select_roots(work, band)
                 stream.begin_capture()
-                _rearrangement_propagate(gpu, work, band, "encode")
-                _rearrangement_propagate(gpu, work, band, "forward")
+                _rearrangement_propagate(gpu, work, band, "encode_forward")
                 gpu["graphs"][band] = stream.end_capture()
                 gpu["graphs"][band].launch(stream)
         stream.synchronize()
@@ -3032,7 +3193,7 @@ def _rearrangement_balance_endpoint(gpu, points, intensities, coefficients, iter
     amplitude = np.sqrt(np.asarray(intensities, np.float32))
     amplitude /= np.linalg.norm(amplitude)
     try:
-        with stream:
+        with _rearrangement_gpu_active(gpu["keeper"]), stream:
             gpu["number"] = count
             native["index"][:count].set(indices[1][0], stream=stream)
             gpu["frequencies"][:len(frequencies)].set(frequencies, stream=stream)
@@ -3044,8 +3205,7 @@ def _rearrangement_balance_endpoint(gpu, points, intensities, coefficients, iter
             for updates in range(iterations + 1):
                 if stop_requested is not None and stop_requested():
                     raise InterruptedError("SLM endpoint preparation stopped")
-                _rearrangement_propagate(gpu, work, band, "encode")
-                _rearrangement_propagate(gpu, work, band, "forward")
+                _rearrangement_propagate(gpu, work, band, "encode_forward")
                 field = work["actual"][:count].get(stream=stream)
                 relative = abs(field.astype(np.complex128)) ** 2 / intensities
                 ratio = float(relative.max() / relative.min())
@@ -3131,7 +3291,7 @@ def prepare_rearrangement(
     try:
         cp, stream = gpu["cp"], gpu["stream"]
         native = gpu["resources"][1]
-        with stream:
+        with _rearrangement_gpu_active(gpu["keeper"]), stream:
             coefficient = None
             if endpoint_data is None:
                 coefficient, pattern = _rearrangement_endpoint(
@@ -3230,6 +3390,8 @@ def prepare_rearrangement(
                 "device_name": cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)["name"].decode(),
                 "device_memory_free_bytes": free_memory, "device_memory_total_bytes": total_memory,
                 "host_output_staging_bytes": int(np.prod(shape)),
+                "warm_buffer_bytes": int(gpu["keeper"]["scratch"].nbytes),
+                "warm_interval_seconds": .020,
             },
             "source_intensities": intensities[0], "target_intensities": intensities[1],
             "source_coefficients": _frozen(coefficient), "source_field": _frozen(actual.astype(np.complex64)),
@@ -3237,8 +3399,11 @@ def prepare_rearrangement(
             "source_support_intensity_ratio": ratio,
             "initial_phase_codes": _frozen(codes), "initial_phase": _frozen(phase),
         }
-    except BaseException:
-        gpu["close"]()
+    except BaseException as error:
+        try:
+            gpu["close"]()
+        except BaseException as cleanup_error:
+            error.add_note(f"GPU preparation cleanup failed: {cleanup_error}")
         raise
 
 
@@ -3503,24 +3668,11 @@ def compute_rearrangement(
     positive = desired > 0
     normalized = (desired / np.linalg.norm(desired, axis=1, keepdims=True)).astype(np.float32)
     phase = np.angle(initial)
-    coefficient_values = (abs(prepared["source_coefficients"])[None]
-                          * (desired / initial_amplitude[None]) * np.exp(1j * phase)[None]).astype(np.complex64)
-    coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
     if method == "lpi":
         endpoint_coefficient = prepared["target_synthesis_coefficients"][target_indices]
-        endpoint_field, endpoint_phase = prepared["target_field"][target_indices], prepared["target_phase"]
-        endpoint_ratio, endpoint_updates, endpoint_ms = prepared["target_support_intensity_ratio"], 0, 0.
-        if selected_count < len(target):
-            endpoint = _rearrangement_balance_endpoint(
-                prepared["gpu"], target[target_indices], prepared["target_intensities"][target_indices],
-                endpoint_coefficient, 64, tolerance, stop_requested)
-            endpoint_coefficient, endpoint_field, endpoint_phase = endpoint["coefficients"], endpoint["field"], endpoint["phase"]
-            endpoint_ratio, endpoint_updates, endpoint_ms = endpoint["ratio"], endpoint["iterations"], endpoint["timing_ms"]
-        if endpoint_ratio > tolerance or not np.isfinite(endpoint_ratio):
-            raise RuntimeError(f"LPI target subset did not meet authored intensity ratio {tolerance:g}: {endpoint_ratio:.6g}")
-        metadata.update(endpoint_synthesis_coefficients=_frozen(endpoint_coefficient), endpoint_field=_frozen(endpoint_field),
-                        endpoint_phase=endpoint_phase, endpoint_support_intensity_ratio=endpoint_ratio,
-                        endpoint_iterations=endpoint_updates, endpoint_balance_ms=endpoint_ms)
+        # A subset keeps these prescribed phases. Its amplitudes are an
+        # initial guess, corrected by the same gate as every emitted map;
+        # do not block the first map on a separate, unplayed endpoint solve.
         source_amplitude = abs(prepared["source_synthesis_coefficients"]).astype(np.float64)
         start_coefficient = prepared["source_synthesis_coefficients"][source_indices]
         if fade_frames:
@@ -3554,6 +3706,10 @@ def compute_rearrangement(
                                             + progress[:, None] * phase_delta - current_gauge)
         coefficient_values = (spectrum_amplitude * np.exp(1j * spectrum_phase)).astype(np.complex64)
         coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
+    else:
+        coefficient_values = (abs(prepared["source_coefficients"])[None]
+                              * (desired / initial_amplitude[None]) * np.exp(1j * phase)[None]).astype(np.complex64)
+        coefficient_values /= np.linalg.norm(coefficient_values, axis=1, keepdims=True)
     gpu = prepared["gpu"]
     cp, stream, number = gpu["cp"], gpu["stream"], gpu["number"]
     native = gpu["resources"][1]
@@ -3565,7 +3721,7 @@ def compute_rearrangement(
     iteration_counts = np.full(motion_frames, total_updates if method == "iterative" else 0, np.int32)
     pixels = motion_frames * int(np.prod(shape))
     indices, frequencies, counts, offsets = _rearrangement_bind(gpu, sites)
-    with stream:
+    with _rearrangement_gpu_active(gpu["keeper"]), stream:
         gpu["frame_index"].fill(0)
         coefficients = gpu["motion_coefficients"][:motion_frames]
         movie = gpu["motion_codes"][:motion_frames]
@@ -3622,7 +3778,12 @@ def compute_rearrangement(
                     work = gpu["measurement"]
                     gpu["kernels"]["anderson_begin"]((1,), (256,),
                         (gpu["coefficients"], gpu["aa_phase"], gpu["aa_state"], np.int32(number)))
-                    limit = 16 if iterations is None else int(iterations)
+                    # The old unplayed subset endpoint had a 64-update budget.
+                    # Keep that capability on the actual endpoint map, also
+                    # when a stationary subset reaches it in the first frame.
+                    subset_endpoint = (selected_count < len(target) and
+                                       np.array_equal(sites[index, source_indices], target[target_indices]))
+                    limit = (64 if subset_endpoint else 16) if iterations is None else int(iterations)
                     for updates in range(limit + 1):
                         gpu["graphs"][band].launch(stream)
                         field = work["actual"][:number].get(stream=stream)
@@ -3812,9 +3973,20 @@ def compute_rearrangement(
             frame_copy_ms[index] = (time.perf_counter() - copy_started) * 1000
             frame_ready_ms[index] = (time.perf_counter() - started) * 1000
             if frame_ready is not None and publication_open:
+                # This callback consumes an already copied host map. Network
+                # backpressure/long holds are idle time for this GPU owner.
+                keeper = gpu["keeper"]
+                with keeper["lock"]:
+                    keeper["active"] -= 1
                 callback_started = time.perf_counter()
-                frame_ready(index, codes[index])
+                try:
+                    frame_ready(index, codes[index])
+                finally:
+                    with keeper["lock"]:
+                        keeper["active"] += 1
                 callback_ms += (time.perf_counter() - callback_started) * 1000
+                if keeper["error"] is not None:
+                    raise RuntimeError("SLM GPU warming failed") from keeper["error"]
                 emitted_count += 1
         pupil_phase_step = np.empty(0)
         if method == "iterative":
@@ -3822,7 +3994,6 @@ def compute_rearrangement(
                 (movie, gpu["initial_phase"], native["physical_pupil"], gpu["phase_step_rms"],
                  np.int32(np.prod(shape)), np.float64(gpu["pupil_energy"])))
             pupil_phase_step = gpu["phase_step_rms"][:motion_frames].get()
-        stream.synchronize()
     if method == "lpi":
         total_ms = (time.perf_counter() - started) * 1000
         prepare_ms, copy_ms = (after_prepare - started) * 1000, float(frame_copy_ms.sum())
@@ -3831,12 +4002,18 @@ def compute_rearrangement(
         all_relative = np.divide(abs(fields.astype(np.complex128)) ** 2, desired ** 2,
                                  out=np.zeros(desired.shape), where=positive)
         all_ratios = all_relative.max(axis=1) / np.min(np.where(positive, all_relative, np.inf), axis=1)
+        with _rearrangement_gpu_active(gpu["keeper"]):
+            accepted_coefficients = coefficients.get(stream=stream)
+        metadata.update(endpoint_field=_frozen(fields[-1, source_indices]),
+                        endpoint_synthesis_coefficients=_frozen(accepted_coefficients[-1, source_indices]),
+                        endpoint_support_intensity_ratio=float(retained_ratios[-1]),
+                        endpoint_iterations=int(iteration_counts[-1]), endpoint_balance_ms=0.)
         return {
             **plan, **sampled, **metadata, "noop": False, "phase_codes": codes,
             "actual_fields": _frozen(fields),
             "desired_amplitudes": _frozen(desired), "active_sites": _frozen(positive),
             "desired_spectrum_coefficients": _frozen(coefficient_values),
-            "synthesis_coefficients": _frozen(coefficients.get(stream=stream)),
+            "synthesis_coefficients": _frozen(accepted_coefficients),
             "motion_frames": motion_frames, "iterations": tuple(map(int, iteration_counts)),
             "phase_locked_amplitude_updates": tuple(map(int, iteration_counts)),
             "emitted_frame_count": emitted_count, "verified_frame_reuses": verified_reuses,
@@ -3953,7 +4130,7 @@ def rearrangement_diagnostics(
         number_queries = source_count + len(halo)
         query = {**work, "number": number_queries}
         area = int(np.prod(prepared["shape_yx"]))
-        with stream:
+        with _rearrangement_gpu_active(gpu["keeper"]), stream:
             gpu["motion_codes"][:count].set(np.asarray(result["phase_codes"]), stream=stream)
             for index, sites in enumerate(result["sites_yx"]):
                 if stop_requested is not None and stop_requested():

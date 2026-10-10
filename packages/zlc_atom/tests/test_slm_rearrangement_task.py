@@ -141,7 +141,7 @@ class _SequenceSlm(_Slm):
                 self.confirmed += 1
         finally:
             result = {"frame_count": len(codes), "played_frames": self.confirmed,
-                      "cancelled": self.cancel.is_set(), "final_settle_completed": self.confirmed == len(codes),
+                      "cancelled": self.cancel.is_set(), "authored_timing_completed": self.confirmed == len(codes),
                       "physical_vblank_observed": False, "acknowledgment": "test device"}
             self.receipt_overrides["sequence"] = result
             self.cancel.set()  # Wake a producer on a device failure too.
@@ -313,8 +313,14 @@ def experiment(tmp_path, monkeypatch, request):
 
 
 @pytest.mark.parametrize("experiment", [4, "camera-affine-roi"], indirect=True)
-def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment):
+def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figures(experiment, monkeypatch):
     e = experiment
+    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+
+    def private_commit(*args, **kwargs):
+        pytest.fail("Rearrangement must not publish a duplicate private Camera signal")
+
+    monkeypatch.setattr(CameraMeasurementNode, "_commit_direct_cycle", private_commit)
     authored = sequence_to_tree(e.task.sequence)
     # Integration is independent of the trigger Period's length, including
     # camera readback longer than the entire authored imaging Period.
@@ -327,13 +333,18 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert sequence_to_tree(e.task.sequence) == authored
     assert e.board.loads[0][1].periods == e.task.sequence.periods
     assert e.trace.index("fire") < e.trace.index("compute") < e.trace.index("play") < e.trace.index("after_trigger")
-    assert e.trace.index("fire") < e.trace.index("upload") < e.trace.index("play")
+    if e.task.frame_mode == "fixed":
+        assert e.trace.index("upload") < e.trace.index("fire")
+    else:
+        assert e.trace.index("fire") < e.trace.index("upload") < e.trace.index("compute")
     np.testing.assert_array_equal(e.available_indices[0], [0, 1, 3, 4, 5])
     np.testing.assert_array_equal(e.task.target_indices, [1, 2, 4, 5])
     assert {item.name for item in LOGIC_NODE.input_specs} == {"calibration_path", "science_context_path", "end_target_path"}
     assert e.slm.plays == 1 and e.closed == []
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert not any("camera_source" in event for event in summary["capture_events"].values())
+    assert all("/camera/" not in item.name for item in e.plane.describe_signals())
     assert summary["target_sites"] == 4 and summary["judged_target_sites"] == 3
     assert summary["filled_target_sites"] == 2
     assert summary["missing_target_indices"] == [0]
@@ -368,7 +379,12 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         summary["timing_ms"]["compute_started_after_before_frame"] + .4)
     assert observed["command_interval_median_ms"] is None, "no fabricated cadence when the receipt has none"
     assert observed["online_ms"] == summary["timing_ms"]["online_rearrangement"]
-    assert observed["playback_ms"] == summary["timing_ms"]["sequence_play_and_final_settle"]
+    assert observed["playback_ms"] == summary["timing_ms"]["sequence_play"]
+    assert observed["camera_frame_to_playback_return_ms"] >= summary["timing_ms"]["sequence_call_after_before_frame"]
+    assert 0 <= summary["timing_ms"]["before_classification"] <= summary["timing_ms"]["before_readout"]
+    assert 0 <= summary["timing_ms"]["before_publication"] <= summary["timing_ms"]["before_readout"]
+    assert summary["timing_ms"]["estimated_nominal_playback"] == pytest.approx(
+        summary["actual_motion_frames"] / e.task.frame_rate_hz * 1000)
     if e.affine_crop:
         assert observed["photo_camera_interval_ms"] == pytest.approx(4020.)
         assert e.task._records[0].image.dtype == np.dtype('uint16')
@@ -390,10 +406,14 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         assert loaded is not None and recipe["spec"] is not None
         if name == "before_frame":
             before_device_facts = info["sections"]["source"]["run_record"]["device_snapshots"]
+            assert set(before_device_facts) == {"camera", "sequencer", "slm"}
+            assert before_device_facts == summary["capture_events"]["before_frame"]["device_snapshots"]
+            assert before_device_facts["slm"]["command_revision"] < summary["device_snapshots"]["slm"]["command_revision"]
             before_parameters = recipe["parameters"]
         if name == "trajectory_2d":
             path_device_facts = info["sections"]["source"]["run_record"]["device_snapshots"]
             assert path_device_facts["camera"] == before_device_facts["camera"]
+            assert path_device_facts["sequencer"] == before_device_facts["sequencer"]
             assert path_device_facts["slm"] == before_device_facts["slm"]
             selected = e.task._plan["source_indices"]
             before = e.task._snapshots[task_module.BEFORE_FRAME_OUTPUT.name]
@@ -402,9 +422,9 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
             assert loaded.overlay.point_ids == tuple(e.task._overlay_geometry["point_ids"])
             assert loaded.overlay.labels == tuple(e.task._overlay_geometry["labels"])
             np.testing.assert_array_equal(loaded.overlay.status.block.values,
-                e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.block.values)
+                e.task._snapshots[task_module.BEFORE_OCCUPIED_OUTPUT.name].block.values)
             np.testing.assert_array_equal(loaded.overlay.status.expanded_validity(),
-                e.task._overlays[task_module.BEFORE_FRAME_OUTPUT.name].status.expanded_validity())
+                e.task._snapshots[task_module.BEFORE_OCCUPIED_OUTPUT.name].expanded_validity())
             assert loaded.overlay.paths_xy.shape == (6, 5, 2)
             unselected = np.setdiff1d(np.arange(6), selected)
             np.testing.assert_array_equal(loaded.overlay.paths_xy[unselected],
@@ -456,7 +476,8 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
     assert len(summary["unfilled_target_indices"]) == 4 - occupied_count
     assert e.slm.plays == int(occupied_count > 0)
     if not occupied_count:
-        assert not e.slm.preparations
+        assert len(e.slm.preparations) == int(frame_mode == "fixed")
+        assert e.slm.confirmed == 0 and e.slm.releases == int(frame_mode == "fixed")
     assert e.board.fires == [(1, 1)]
 
 
@@ -586,6 +607,8 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         for publication, snapshots in publications:
             assert set(publication.signals) == set(names.values())
             assert all(value.event_record == publication.event_record for value in publication.signals.values())
+            assert all(set(capture["device_snapshots"]) == {"slm"}
+                       for capture in publication.event_record["capture_events"].values())
             assert {name: snapshot.block.schema for name, snapshot in snapshots.items()} == frozen
             assert snapshots["before_occupied"].block.values.shape == (1, 1, 6)
             assert snapshots["after_occupied"].block.values.shape == (1, 1, 6)
@@ -598,6 +621,9 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert final["before_frame"].expanded_validity().all() and final["after_frame"].expanded_validity().all()
         assert terminal.event_record["capture_events"]["before_frame"]["source_ordinal"] == 0
         assert terminal.event_record["capture_events"]["after_frame"]["source_ordinal"] == 1
+        assert set(terminal.event_record["device_snapshots"]) == {"camera", "sequencer", "slm"}
+        before_slm = terminal.event_record["capture_events"]["before_frame"]["device_snapshots"]["slm"]
+        assert before_slm == first.event_record["device_snapshots"]["slm"]
         assert not e.plane.is_generation_live(names["phase"])
         np.testing.assert_array_equal(final["phase"].block.values[0, 0], e.slm.last_commanded_phase)
         directory = host.run_directory
@@ -628,8 +654,8 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert host.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "after-arm"])
-def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experiment, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["short-gap", "gpu-prepare", "after-arm", "sequence-prepare", "prepared-stop"])
+def test_preplay_failures_keep_pulse_unchanged_and_release_resources(experiment, monkeypatch, failure):
     e = experiment
     if failure == "short-gap":
         e.task.sequence = _sequence(.001)
@@ -640,6 +666,16 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
             raise RuntimeError("injected post-arm failure")
         monkeypatch.setattr(e.task, "_prepare_outputs", refused)
         error_type, message = RuntimeError, "post-arm failure"
+    elif failure in {"sequence-prepare", "prepared-stop"}:
+        original = e.slm.prepare_phase_sequence
+        def prepare_then_end(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if failure == "sequence-prepare":
+                raise RuntimeError("injected sequence binding failure")
+            e.context.cancelled = True
+            return result
+        monkeypatch.setattr(e.slm, "prepare_phase_sequence", prepare_then_end)
+        error_type, message = RuntimeError, "sequence binding failure" if failure == "sequence-prepare" else "cancelled"
     else:
         previous = {"played_frames": 7, "play_ms": 321., "cancelled": False}
         e.slm.receipt_overrides["sequence"] = previous
@@ -657,6 +693,9 @@ def test_short_authored_gap_rejects_before_fire_and_keeps_pulse_unchanged(experi
     assert "partial_data" in e.context.artifacts
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["playback"] is None
+    if failure in {"sequence-prepare", "prepared-stop"}:
+        assert e.slm.releases == 1 and e.slm.frames is None
+        assert summary["status"] == ("stopped" if failure == "prepared-stop" else "failed")
     if failure == "gpu-prepare":
         assert summary["device_snapshots"]["slm"]["command_receipt"]["sequence"] == previous
         assert e.slm.commands == [], "early failure must retain the preceding device command"
@@ -684,11 +723,12 @@ def test_buffered_second_frame_is_not_accepted_from_its_late_callback(experiment
     assert summary["judged_target_filling_fraction"] is None
 
 
+@pytest.mark.parametrize("stop_after_first", [False, True])
 def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_saves_them(
-    experiment, monkeypatch,
+    experiment, monkeypatch, stop_after_first,
 ):
     from zlc_atom.devices.simulation.camera import adapter as camera_module
-    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode
+    from zlc_atom.nodes.camera_measurement.measurement import FiniteCapture
 
     e = experiment
     expected = []
@@ -732,21 +772,31 @@ def test_recording_collects_fifty_frames_while_compute_and_play_are_active_and_s
     collected, compute_started, compute_finished = Event(), Event(), Event()
     play_started, play_finished = Event(), Event()
     consumed = []
-    commit = CameraMeasurementNode._commit_direct_cycle
+    read_cycles = FiniteCapture.read_cycles
 
-    def commit_cycle(node, cycle, index):
-        commit(node, cycle, index)
-        consumed.extend(cycle)
-        if index == 0:
-            # This test emits all fifty triggers at once. Synchronize the
-            # synthetic burst instead of assuming which Python thread wins.
-            assert compute_started.wait(2)
-        if index == 49:
-            assert compute_started.is_set()
-            assert not compute_finished.is_set() and not play_finished.is_set()
-            collected.set()
+    def read(capture, on_cycle):
+        def accept(cycle, index):
+            on_cycle(cycle, index)
+            consumed.extend(cycle)
+            if index == 0:
+                # All fifty frames are accepted before requesting intake Stop.
+                # The remaining complete cycles must still reach the recorder.
+                assert compute_started.wait(2)
+                if stop_after_first:
+                    with e.camera._records._condition:
+                        assert e.camera._records._condition.wait_for(
+                            lambda: e.camera._records.produced_count == 50, timeout=2)
+                    capture.should_stop = lambda: True
+            if index == 49:
+                assert compute_started.is_set()
+                assert not compute_finished.is_set() and not play_finished.is_set()
+                collected.set()
+        terminal = read_cycles(capture, accept)
+        assert capture.stopped == stop_after_first
+        assert terminal.produced_count == 50 and terminal.no_more_frames
+        return terminal
 
-    monkeypatch.setattr(CameraMeasurementNode, "_commit_direct_cycle", commit_cycle)
+    monkeypatch.setattr(FiniteCapture, "read_cycles", read)
 
     def compute(*args, **kwargs):
         compute_started.set()

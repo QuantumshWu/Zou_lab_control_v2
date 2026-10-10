@@ -37,14 +37,19 @@ def canonical_phase(radians: object, shape_yx: tuple[int, int]) -> np.ndarray:
         )
     if source.dtype.kind not in "iuf":
         raise TypeError("SLM phase must contain real numeric values")
-    values = np.asarray(source, dtype=np.float64)
-    if not np.all(np.isfinite(values)):
-        raise ValueError("SLM phase must contain only finite values")
-    wrapped = np.asarray(np.remainder(values, _TWO_PI), dtype=np.float32)
-    # float32(2*pi) rounds above the mathematical upper bound.  Clamp that
-    # single rounding case so the public interval stays strictly [0, 2*pi)
-    # and canonicalizing an already-canonical snapshot is idempotent.
-    wrapped = np.minimum(wrapped, _MAX_WRAPPED_PHASE)
+    if (source.dtype == np.float32 and np.min(source) >= 0.0
+            and np.max(source) <= _MAX_WRAPPED_PHASE):
+        # Canonical float32 commands need no double-precision modulo. Taking
+        # abs only changes -0 to +0, matching remainder's exact bytes.
+        wrapped = np.abs(source)
+    else:
+        values = np.asarray(source, dtype=np.float64)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("SLM phase must contain only finite values")
+        wrapped = np.asarray(np.remainder(values, _TWO_PI), dtype=np.float32)
+        # float32(2*pi) rounds above the mathematical upper bound. Clamp that
+        # single rounding case so the public interval stays strictly [0, 2*pi).
+        wrapped = np.minimum(wrapped, _MAX_WRAPPED_PHASE)
     # An ndarray backed by immutable bytes cannot be made writable again by a
     # caller, unlike an owning array with only its WRITEABLE flag cleared.
     return np.frombuffer(
@@ -59,7 +64,7 @@ def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
     source = np.asarray(codes)
     if source.shape != shape or source.dtype != np.uint8:
         raise ValueError("SLM phase codes must be a uint8 matrix matching the full device shape")
-    radians = source.astype(np.float32) * np.float32(_TWO_PI / 256)
+    radians = np.multiply(source, np.float32(_TWO_PI / 256), dtype=np.float32)
     return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
 
 
@@ -70,6 +75,8 @@ def _same_phase_codes(left: np.ndarray, right: np.ndarray) -> bool:
     if left.flags.c_contiguous and right.flags.c_contiguous:
         first, second = left.reshape(-1), right.reshape(-1)
         words = first.size // 8 * 8
+        if words and first[:8].view(np.uint64)[0] != second[:8].view(np.uint64)[0]:
+            return False
         return (np.array_equal(first[:words].view(np.uint64), second[:words].view(np.uint64))
                 and np.array_equal(first[words:], second[words:]))
     return np.array_equal(left, right)
@@ -139,6 +146,7 @@ def _validated_state(
     receipt: object,
     *,
     commanded_phase: np.ndarray | None = None,
+    commanded_codes: np.ndarray | None = None,
 ) -> tuple[str, tuple[int, int], np.ndarray | None, int, int, dict[str, object]]:
     if (
         not isinstance(identity, str)
@@ -175,17 +183,25 @@ def _validated_state(
         or frozen_receipt["mapping_revision"] > mapping_revision
     ):
         raise ValueError("SLM command receipt mapping is newer than device truth")
-    # A successful ACK returns metadata, not new phase pixels. Its local
-    # commanded snapshot was already canonicalized at the input boundary.
-    known_command = commanded_phase is not None and phase is commanded_phase
-    canonical = phase if known_command else None if phase is None else canonical_phase(phase, shape)
-    if phase is not None and not known_command and (
-        np.asarray(phase).flags.writeable or not np.array_equal(phase, canonical)
-    ):
-        raise ValueError("SLM last_commanded_phase must be an immutable canonical snapshot")
-    if (canonical is None) != (frozen_receipt["outcome"] == "unknown"):
+    if commanded_codes is not None:
+        # Internal confirmed codes are a distinct representation, not radians.
+        if (phase is not commanded_codes or commanded_phase is not None
+                or not isinstance(phase, np.ndarray) or phase.dtype != np.uint8
+                or phase.shape != shape or phase.flags.writeable):
+            raise ValueError("SLM confirmed phase codes must be a readonly uint8 matrix matching the full device shape")
+        snapshot = phase
+    else:
+        # A successful ACK returns metadata, not new phase pixels. Its local
+        # commanded snapshot was already canonicalized at the input boundary.
+        known_command = commanded_phase is not None and phase is commanded_phase
+        snapshot = phase if known_command else None if phase is None else canonical_phase(phase, shape)
+        if phase is not None and not known_command and (
+            np.asarray(phase).flags.writeable or not np.array_equal(phase, snapshot)
+        ):
+            raise ValueError("SLM last_commanded_phase must be an immutable canonical snapshot")
+    if (snapshot is None) != (frozen_receipt["outcome"] == "unknown"):
         raise ValueError("SLM phase knowledge differs from its command receipt")
-    return identity, shape, canonical, command_revision, mapping_revision, frozen_receipt
+    return identity, shape, snapshot, command_revision, mapping_revision, frozen_receipt
 
 
 

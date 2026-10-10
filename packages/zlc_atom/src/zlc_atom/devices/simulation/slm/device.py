@@ -156,7 +156,7 @@ class VirtualSLM:
         step_started, confirmations, frame_actions = [], [], []
         result = {**prepared, "played_frames": 0, "cancelled": False,
                   "acknowledgment": "simulation-state", "physical_vblank_observed": False,
-                  "final_settle_ms": 0.0, "final_settle_completed": False}
+                  "authored_timing_completed": False}
         self._command_revision += 1
         failed = False
         previous_frame, canonical = None, None
@@ -221,7 +221,8 @@ class VirtualSLM:
                           step_started_ms=step_started, confirmed_ms=confirmations, frame_actions=frame_actions,
                           actual_step_intervals_ms=np.diff(step_started).tolist(),
                           held_frames=frame_actions.count("held"), newly_presented_frames=len(acknowledgments))
-            result["final_settle_completed"] = result["played_frames"] == len(intervals) and not result["cancelled"]
+            result["authored_timing_completed"] = (not failed and result["played_frames"] == len(intervals)
+                                                    and not result["cancelled"])
             self._stage = "sequence-failed" if failed else "sequence-cancelled" if result["cancelled"] else "sequence-complete"
             self._sequence_receipt = result
             self.release_phase_sequence()

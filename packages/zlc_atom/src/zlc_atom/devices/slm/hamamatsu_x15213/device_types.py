@@ -939,9 +939,12 @@ class X15213Adapter:
             return dict(self._last_receipt)
 
     def _gray(self, canonical: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
-        phase_code = np.mod(
-            _half_up(canonical.astype(np.float64) * (128.0 / np.pi)), 256.0
-        ).astype(np.uint8)
+        # Canonical phases give nonnegative rounded integers 0..256: integer
+        # conversion supplies floor, and uint8 conversion wraps 256 to zero.
+        scaled = canonical.astype(np.float64)
+        np.multiply(scaled, 128.0 / np.pi, out=scaled)
+        np.add(scaled, 0.5, out=scaled)
+        phase_code = scaled.astype(np.uint16).astype(np.uint8)
         return self._gray_codes(phase_code)
 
     def _gray_codes(self, codes: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
@@ -955,9 +958,16 @@ class X15213Adapter:
             phase_code = (
                 phase_code.astype(np.uint16) + np.asarray(mapping["correction"], dtype=np.uint16)
             ) % 256
+        phase_code = np.asarray(phase_code, dtype=np.uint8)
+        storage = phase_code.base
+        if isinstance(storage, np.ndarray):
+            storage = storage.base
+        if not (phase_code.flags.c_contiguous and isinstance(storage, bytes)
+                and len(storage) == phase_code.nbytes):
+            storage = phase_code.tobytes()
         return (
             np.frombuffer(
-                np.asarray(phase_code, dtype=np.uint8).tobytes().translate(self._phase_to_gray.tobytes()),
+                storage.translate(self._phase_to_gray.tobytes()),
                 dtype=np.uint8,
             ).reshape(_SHAPE_YX),
             mapping,
@@ -1322,13 +1332,11 @@ class X15213Adapter:
         started = time.perf_counter()
         dispatch, acknowledgments, queue_wait = [], [], []
         step_started, confirmations, frame_actions = [], [], []
-        last_display_acknowledged = None
         result = {
             **sequence["prepared"], "played_frames": 0, "cancelled": False,
             "acknowledgment": ("native-gdi-flush-and-exact-raster-check" if self._transport == "dvi"
                                else "sdk-slot-change-and-frame-memory-readback"),
-            "physical_vblank_observed": False, "final_settle_ms": 0.0,
-            "final_settle_completed": False,
+            "physical_vblank_observed": False, "authored_timing_completed": False,
         }
         with self._state_lock:
             self._command_revision += 1
@@ -1340,16 +1348,23 @@ class X15213Adapter:
                 return self._sequence_cancel.is_set()
             if timer is None:
                 return self._sequence_cancel.wait(remaining)
-            due = ctypes.c_longlong(-max(1, int(np.ceil(remaining * 10_000_000))))
-            if not kernel32.SetWaitableTimerEx(timer, ctypes.byref(due), 0, None, None, None, 0):
-                raise ctypes.WinError(ctypes.get_last_error())
-            while not self._sequence_cancel.is_set():
-                result = kernel32.WaitForSingleObject(timer, 10)
-                if result == 0:
-                    return self._sequence_cancel.is_set()
-                if result != 258:  # WAIT_TIMEOUT; check Stop between bounded waits.
+            # Waking exactly at the deadline accumulates Windows scheduling
+            # overshoot on every authored slot. Spin only the final 1 ms;
+            # never advance a frame early or shorten a late frame to catch up.
+            remaining -= .001
+            if remaining > 0:
+                due = ctypes.c_longlong(-max(1, int(np.ceil(remaining * 10_000_000))))
+                if not kernel32.SetWaitableTimerEx(timer, ctypes.byref(due), 0, None, None, None, 0):
                     raise ctypes.WinError(ctypes.get_last_error())
-            return True
+                while not self._sequence_cancel.is_set():
+                    status = kernel32.WaitForSingleObject(timer, 10)
+                    if status == 0:
+                        break
+                    if status != 258:  # WAIT_TIMEOUT; check Stop between bounded waits.
+                        raise ctypes.WinError(ctypes.get_last_error())
+            while time.perf_counter() < deadline and not self._sequence_cancel.is_set():
+                pass
+            return self._sequence_cancel.is_set()
 
         try:
             if os.name == "nt":
@@ -1366,7 +1381,7 @@ class X15213Adapter:
                 timer = kernel32.CreateWaitableTimerExW(None, None, 2, 0x001F0003)
                 if not timer:
                     raise ctypes.WinError(ctypes.get_last_error())
-                result["pacing"] = "win32-high-resolution-waitable-timer"
+                result["pacing"] = "win32-high-resolution-timer-with-1ms-tail-spin"
             else:
                 result["pacing"] = "threading-event-wait"
             for index, interval in enumerate(sequence["intervals"]):
@@ -1429,7 +1444,7 @@ class X15213Adapter:
                                 previous_phase=previous_phase, previous_gray=previous_gray, previous_receipt=previous_receipt,
                             )
                         raise
-                    acknowledged = last_display_acknowledged = time.perf_counter()
+                    acknowledged = time.perf_counter()
                     acknowledgments.append((acknowledged - started) * 1000)
                     with self._state_lock:
                         self._phase, self._last_gray = canonical, gray
@@ -1440,10 +1455,7 @@ class X15213Adapter:
                 if wait_until(frame_started + float(interval)):
                     break
             if result["played_frames"] == result["frame_count"] and not self._sequence_cancel.is_set():
-                settle_started = time.perf_counter()
-                wait_until(last_display_acknowledged + self._settle)
-                result["final_settle_ms"] = (time.perf_counter() - settle_started) * 1000
-                result["final_settle_completed"] = not self._sequence_cancel.is_set()
+                result["authored_timing_completed"] = True
         finally:
             active_error = sys.exception()
             if timer is not None:

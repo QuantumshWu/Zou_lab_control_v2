@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 2026-10-09重排延迟整改：有限Camera接收容量以已知总帧数为额外上界，保留Monitor预算和完整周期要求；SLM优化以实际15帧/60Hz/原质量门为基准，区分GPU执行、主机同步、上传背压与播放，不能用不同GPU理论参数替代实验机延迟实测。
+
 - Frame Survival增加可编辑配对行及Publish all，保持一个survival输出和现有pair/site归属；只发布所选行，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。UI复用Fluent rows与原Logic贡献入口，源schema直接来自Runtime目录。
 
 - Component交互整改（2026-10-09，完成，worktree待人工验收）：Shift逐项追加/取消实际点击的item，不补范围；Group直接消费选区，非连续/选中Bracket未完整归入时拒绝并保留选区，成功聚焦默认名输入。名称卡内直接改，删除起止/命名窗口及Rename菜单。展开改为左右同色窄端包围内容、内部自动全选；多组件独立展开，任一端选择/拖动代表整体。PulseDragContainer只保留一份选区，删旧单卡/post状态和点击转发；多选拖动与remove_items一次提交，空选区Remove不再删最后一项，Shift点checkbox/输入框不改数据。现有UI相关7项、presenter 3项通过；正式launcher真实Qt点选验证第1/3项不补第2项、拒绝错误Group、完整选区分组直接改名、双端与全部内部高亮、Shift不改TTL、保存重开/编译，以及两个组件同时展开，zlc_ui截图留ignored research，窗口已关闭。不改model/文件格式/FPGA。
@@ -91,7 +93,7 @@
 
 - 同源复核收尾：RecordQueue区分Stop保留尾部与设备Close释放尾部/失败引用，所有Camera/Waveform adapter在实际关闭成功后使用同一清理入口，SDK拒绝关闭仍保留可重试状态。N100坏帧/序号/时间错误只终止当前capture，原接收线程继续idle drain以支持普通Restart；实际串口I/O故障仍终止接收并明确拒绝重新arm。原直接用例验证释放弱引用、拒绝关闭重试和坏包后恢复，未接实验硬件。
 - Runtime数值物化仍只有一条路径，数组消费者不再构建后丢弃event record；完整记录按需准备，同一atomic bundle的有限prefix及相同indexed窗口共享已准备记录，补记录不重建数组。记录合并、时间坐标填充移出公共锁，旧请求不能覆盖新缓存，Frozen记录不变。64条有限记录逐次取数组的时间条目遍历2080→0；四个同源完整视图8320→2080，合并均不持公共锁。新的平坦不可变完整记录仍需O(N)索引构建（首条带record_timing的记录一次整体复制，只有之后的记录逐条核冲突；finite记录合并在锁内只取append-only buffer的引用与范围），不声称全部完整读取为O(增量)，不引入链式记录容器或第二套缓存owner。并发新旧请求、不同窗口及原sigma/validity物化直接验证通过。
-- 持续采集与发布复用中立RecordQueue，SDK取数仍由具体adapter执行。Camera/Waveform的公开receive-buffer参数已从schema、Request、工厂和用户run参数删除，不隐藏到高级表单；内部保留Camera128MiB及Waveform2秒容量策略，有限目标数不决定缓冲。成功arm请求的应用接收容量记录在只读acquisition事实中，不冒称SDK ring实际相同。真实/Virtual禁止drop-oldest，序号、溢出、正常Stop尾部与history语义不变；原有限/持续采集、容量和Stop用例及正式表单截图通过，未操作实验硬件。旧Layout中的废弃字段由通用当前字段交集恢复忽略，不添加专属兼容或自动改写原文件。
+- 持续采集与发布复用中立RecordQueue，SDK取数仍由具体adapter执行。Camera/Waveform的公开receive-buffer参数已从schema、Request、工厂和用户run参数删除，不隐藏到高级表单；内部保留Camera128MiB及Waveform2秒容量策略，有限总帧数另作为接收容量上界，不能分配本次不可能用到的槽位。成功arm请求的应用接收容量记录在只读acquisition事实中，不冒称SDK ring实际相同。真实/Virtual禁止drop-oldest，序号、溢出、正常Stop尾部与history语义不变；原有限/持续采集、容量和Stop用例及正式表单截图通过，未操作实验硬件。旧Layout中的废弃字段由通用当前字段交集恢复忽略，不添加专属兼容或自动改写原文件。
 - Run metadata改为generation一次声明，删除LiveDatasetOutput的逐event run_record及重复整表比较；所有生产者、Processor describe_run、Viewer与Task companion已接同一入口。有限结果只持自身数据与祖先元数据，未消费exact输入和已连接same-shot/Frozen所需payload仍按真实所有权保留；exact live队列明确限额，finite replay按需读取，Monitor弃置replay树已删除。Latest/Exact终态均收尾，后续失败保留已验证partial prefix并传播失败；显式Remove/Clear退休被移除owner，不破坏独立Frozen值。
 - 绘图传输沿原input token一次安装静态结构并按真实依赖释放；Scope说明只持其AxisSpec。单次Freeze/Save复用同run记录转换。长期Rolling的tick缓存限定工作集，删除后台全局gc.freeze及回收阈值改写；共享segment退休沿既有进程消息通知，在最后读者释放后解除映射。接收/Runtime/Plot有界性、关闭与重开分别验证，长期时钟坐标与window2000短压测不冒充20小时真机运行。全部benchmark、诊断和截图只留ignored research，不入Git。
 - 同源资源收口补齐：共享映射最后读者晚于service关闭时，退休线程在最终映射关闭后正常退出；relayout同时清旧Axes量化几何缓存。32个退休segment不再留空闲映射，旧front跨pool/service关闭仍可读；12次尺寸切换缓存只含当前Axes。Overlay的Last/Scope在公共语义入口先限制Repeat/Point域，再解析坐标，避免拿image像素轴去解析site状态域；不增加overlay私有Last算法。
@@ -381,6 +383,8 @@
 
 ### 2.3 Figure与Viewer
 
+- PNG通过公共PlotSession.save默认无损level1，保持原像素及显式pil_kwargs覆盖；不为Task另建writer或绘图路径。
+
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。纯文件保存复用Session配置/投影/fit与renderer，在最终导出DPI准备，不创建临时screen Host、compose、capture或restore；交互Host保存先在该Host worker上核对settled recipe与数据，再由recipe新建同一种导出session写archive与图（面板自己的session带着Normal模式的历史limits，与从archive重开的画面可能差一个deadband），面板屏幕不受影响。Curve/Histogram/Image/3D实际导出均0 screen compose、0 capture、1 savefig，与同最终DPI的普通Host导出逐像素相同；相对旧默认screen DPR准备的PNG有像素变化，不宣称旧PNG exact。现有artifact/configuration与失败保留用例9项通过，证据不入Git。
@@ -464,6 +468,18 @@
 
 ### 2.7 SLM GPU重排（当前总N图实现，硬件待验收）
 
+- 用户指定N帧/帧率定义完整播放时间槽，sequence不追加未实测的profile尾等待；普通单图apply的profile等待保留。软件命令确认、authored timing完成与液晶光学稳定明确分开，复拍余量仍由用户Pulse负责。物理SLM与proxy内部仅保留同一已确认命令的一种表示，uint8在公共弧度消费者首次读取时才展开，不为播放完成回执作全幅浮点物化。
+- 同步SLM remote协议v4；拒绝不同版本，错误指明两端需一起更新。Task不再次重建末态浮点相位去比较设备已经确认的同一图，保留完整played_frames/known-new/非None事实检查并从owner取真实相位发布。
+- 删除每帧admission ACK往返，保留一次upload bind及完整play回执。TCP/server FIFO背压、连续编号、最终真实played prefix与相位确认不变；发送计数不冒充确认计数。既有上传记录转交首个真实错误并取消主播放，主动Stop/旧token EOF分清；本地worker先记录写错再取消/关闭，清理完成后汇总其结果，避免check-before-join遗漏错误。
+- 相机首图链复用FiniteCapture唯一read_cycles读周期/Stop排空/terminal路径；普通Measurement.collect在其上发布，重排Task直接消费记录，只发布自己的before/after，不再保留无消费者的私有Camera signal与伪camera_source引用。报告Overlay移到_save，拍照时的device receipt仍即时冻结，不能用末态代替初态证据。
+- 报告拆分首/后图snapshot、classification、publication，并单列camera_frame_to_sequence_return完整窗口。仅GPU/规划开始的计时不再代替相机record到播放返回；SDK/host时间戳不冒充硬件触发边沿。
+- live capture_events去掉嵌套重复camera/sequencer，仅保留照片ordinal与冻结SLM；event顶层及私有/保存证据仍完整。减少首图后递归冻结/序列化相同Pulse，不新增另一份缓存或修改Runtime记录合同。
+- Windows播放只在最后1 ms检查截止时钟，前段仍用高精度timer；保持完整authored间隔及取消，不做提前/追赶。此前额外timeBeginPeriod探针没有收益，未保留。尾段忙等的CPU代价与完整流水线收益分别量测，不能用局部节拍收益声称已消除上传长尾。
+
+- 常暖按同进程GPU共享，既有prepared/close持有生命周期；独立scratch不污染相位求解，正式GPU活动期间暂停，不复制Task级保温worker，不改用户光学帧率或全局驱动设置。
+
+- LPI删除在线目标子集预解，原修正能力移至实际子集终点的公共循环；末态记录真正输出。编码与测量打包共享数学并融合，避免整幅复场的立即写读。未获稳定收益的分组迭代和固定次数唤醒原型不保留。
+
 - 配准删除读出半宽依赖：重排不再套用Feedback的BOX窗口不重叠规则；Feedback独有的窗口检查移回自己的读出入口，Calibration、Occupancy及路径最小间距均不变。
 
 - Recording追加`imaging.gif`观看预览，复用已导出的PNG，顺序与采集一致，每帧200 ms并循环；在保存阶段生成，不影响重排关键路径，原PNG/NPZ不变。
@@ -472,6 +488,7 @@
 - 删除首图前源子集的重复端点求解及无消费者全幅相位回传；真正输出的去阱图复用公共幅度求解和同一质量门。LPI预热补齐逆传播/编码，各运动帧延用接受振幅而不改变指定相位；阻塞host拷贝后不再额外同步计时。首张相位图不等于首张移动图，报告分别记录首照片至计算、首次移动图就绪和软件确认下界，不将软件确认当光学响应。单帧去阱的真实液晶瞬态和原子存活率仍需现场确认；测量、模拟流水线结果和示例图只保存在ignored research，不加入Git。
 - 同一配置Task/Host跨Start保留一个有界GPU工作区；每轮fresh输入及run数据重新建立，光学配置变化重备，Stop保留、退休/删除/shutdown后台释放。GPU容量不足只增长必要缓冲和重绑graph；pinned仅单帧staging，完整影片caller-owned。固定模式保留7 live输出；auto仅5相机/phase live，真实N轨迹/质量保存同一Figure/NPZ，避免冻结假轴。
 - Fourier正反传播复用同帧Y载频根：既有root入口在频率更新时生成float64正余弦，既有work按band容量持有complex128数组，删除每轮pack的重复三角计算。没有改变求解目标、数值精度、验收门限或播放节奏；独立传播和奇数尺寸直接用例通过，归档回放相位码、光场和迭代次数逐位一致。
+- 轨迹频率以(frame、X、Y小数)一次lexsort和相邻变化分组，消除逐帧unique开销，原排序/局部索引/offset逐位相同；不使用在400-site反而变慢的全量axis-unique原型。LPI不再先计算一份不用的Iterative系数，不新增kernel或缓存。
 - 有线批次20–29复核：普通相位/序列灰度映射、归档读出和Pulse重编译一致；网络已非主要等待，不能把现场丢原子认定为通信故障。第28次无位置移动仍有末态缺失，计算光场的保留阱强度约为初始3.3倍；简单同步相位插值未复现塌阱，尚不能确定实际损失原因。summary JSON/text现直接汇总已有光强比例和相位步长，明确它们是计算而非实测/播放保证；不改分类阈值、Pulse或设备等待。
 - Task输入为一个source Calibration、一个source Science Context、一个operator-authored Pulse，以及可选End Target JSON。End Target留空时，target_rows/target_columns（默认3×3）生成源格点中最靠中央的完整矩形并保留权重；选择End Target时行列控件禁用。两种目标共用既有注册读出与光学模型，不要求final Context，不另写final Science Context。
 - 第一张照片的valid occupied站点按源roster身份成为available_source_indices。共同planner按实际欧氏距离匹配min(可用源,目标数)：多余原子丢弃，其阱在序列内淡出；不足时正常部分填充，保存未填目标。无效分类仍为invalid，不改成empty。具体Task拥有相机分类和目标政策，solver只接收显式计划；不复制分类或新增编排框架。
@@ -479,14 +496,14 @@
 - 同等最长路按并行移动行程、再按结点数择优，所有候选均有冲突修复机会；预算耗尽显式记录。公共时间参数按实际段长重建，分帧不再逐N循环，绕行不会继承近零时间比例导致帧数爆炸。Auto传递同一次只读采样结果，空占据零帧且不创建零长度质量轴。同位置改权重在LPI和Iterative均执行真实光学变化，Iterative不能仅因位置不变就复用旧权重结果；空计划和真正不变计划由统一函数判定，闭合运动不误判no-op。
 - 拥挤调度改为连续相对起步延迟，包含出发前与到达后的停留，不再只允许整段先后。新增时间差从父候选增量传播，支持负/零差值，正环拒绝；只重算受影响原子对的三段精确相对运动，并在接受完整路径后重验间距。相同指派只修复一次，不合并不同约束节点；静止阻挡跳过无效等待，绕路按行增量统计、只写入获胜矩阵。不新增通用规划器、类或生产文件，也不以搜索预算耗尽证明物理无解。
 - 最终胜出路径的冗余结点仅在替代线段严格满足公共间距检查时删除，不用容差跳过真实运动；重算最长路径、并行行程、时间参数及删点数。采样继续按该唯一计划工作，避免近乎同时的事件无意义占用额外相位图。数值根向安全侧舍入，不降低作者设定的间距；分数时刻的结束点按到达事件固定为真实终点。
-- Task更改最小间距复用原GPU光学工作区；统一no-op跳过采样及设备准备。提前并行Sequence准备的原型未证明端到端收益，已删除该调度分支，继续验证首图后才准备和播放；准备失败及时释放可能已分配的token。Recording先调度独占首帧的重排再发布私有相机数据。LPI编码/测量使用已有CUDA Graph，保持输出数学及质量门；相位变化与相位误差分开命名，未加入无法由当前设备响应数据证实的光学安全保证。逐张标准Figure导出仍在实验后，未另建跨进程导出缓存或私有图片编码路径。
+- Task更改最小间距复用原GPU光学工作区；固定N在源相位、相机与输出准备完成后、Fire前准备现有sequence和上传连接，自动N在非空规划/采样后调用同一入口。首次合格图才启动播放；固定空计划只释放准备，不提交或改变相位，自动空计划零准备。沿用原sequence_prepared/finally，不恢复无收益的拍照后并行prepare原型。Recording先调度独占首帧的重排再发布私有相机数据。LPI编码/测量使用已有CUDA Graph，保持输出数学及质量门；相位变化与相位误差分开命名，未加入无法由当前设备响应数据证实的光学安全保证。逐张标准Figure导出仍在实验后，未另建跨进程导出缓存或私有图片编码路径。
 - motion_frames=N是实际显示的总图数，包含终点、不含已经显示的起点；淡出合入这N图，不额外生成R帧。空占据是零匹配且不播放新图。公开输入删除独立ramp/dark/radius参数；有界GPU及pinned host资源按N准备。沿已有phase projection/幅度更新求解，不重发明算法；连续帧间间距检查允许空间路径错时交叉，但不允许同一时刻越界。
 - UI的intensity_error_percent默认1%，转换为weighted max/min ratio门限1.01；准备与生成消费同一门限。丢弃占据站点在淡出后另须通过5×5原生Fourier像素区域最大光强/该站点初始中心光强≤0.01；同一稀疏算子的自适应复场投影最多64次，携带前帧校正，已验证不变图直接复用。其它背景仅诊断；相对初始阱亮度、焦面站点相位步长、pupil加权像素相位步长RMS、最大单帧位移与参考帧数分别保存，不能把数值均匀度或消光门当作原子释放/存活保证。
-- GPU/端点准备与source phase建立在Fire之前。Task只Fire一次原Pulse，稳定Period ID对应显示Name；共同compiler walker读取实际Config及嵌套loop。相机只arm一次并接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。曝光独立于Period时长，不比较、不自动调整；operator负责实际曝光/照明及相应Calibration有效性。保守after deadline仍检查完整计算、上传、播放与最终等待，host receive不冒充曝光时间。
+- GPU/端点准备与source phase建立在Fire之前。Task只Fire一次原Pulse，稳定Period ID对应显示Name；共同compiler walker读取实际Config及嵌套loop。相机只arm一次并接收两个有限one-frame cycles，接收线程在GPU/SLM期间继续运行。曝光独立于Period时长，不比较、不自动调整；operator负责实际曝光/照明及相应Calibration有效性。保守after deadline仍检查完整计算、上传、显示确认与authored时间槽，host receive不冒充曝光时间。
 - 同一compute按frame-major求解/校验/host复制，frame_ready(index, readonly_frame)只提交连续已通过bright/discard门的图。未变化的合格帧在baseline及候选修正前复用，不执行马上丢弃的计算；hold→resume仍重新核对光场与相位，不保留冗余迭代造成的warm-start轨迹作为第二真相。整部私有只读host影片仍供归档。
-- 既有sequence增加prepare_phase_sequence(None, interval, frame_count=N)和submit_phase_frame(index, frame)：proxy上传队列及设备队列各容量2，第一张已验证图启动本地paced播放，后续计算/上传/mapping/显示重叠。空/no-change结果跳过sequence；逐图确认不跳帧，缺帧与慢ack延长真实cadence。默认16图/60Hz名义266.7ms，startup/背压/最终settle另列，profile settle仅在终点补一次；上传/admission ACK不等于display ACK，DVI ACK仍不冒充vblank或液晶响应。USB容量与真实光学响应待实验机验收。
+- 既有sequence增加prepare_phase_sequence(None, interval, frame_count=N)和submit_phase_frame(index, frame)：proxy上传队列及设备队列各容量2，第一张已验证图启动本地paced播放，后续计算/上传/mapping/显示重叠。空/no-change结果不播放；逐图确认不跳帧，缺帧与慢ack延长真实cadence。默认16图/60Hz名义266.7ms，startup/背压另列，不追加profile尾等待；上传/admission ACK不等于display ACK，DVI ACK仍不冒充vblank或液晶响应。USB容量与真实光学响应待实验机验收。
 - 参数使用四组既有FluentParameterForm（Target grid、Imaging、Movement、Quality and output）。后续质量失败不得提交越过该帧的图；Task取消并等待播放，保存已经确认的前缀、partial和原错误，不再宣称失败时整部影片未播放。首帧host可用/显示确认、copy、callback含背压用时及total分别记录，total包含callback时间。
-- 相邻完全相同相位图发送前帧引用，复用mapping及已确认像素，通过HOLD保留每个authored时间槽，不重复DVI/USB/world apply。dispatch/ACK只列实际presentation，step/confirmation列全部逻辑步骤；最终settle从最后真实ACK起算。未知状态不HOLD，上传连接早断、旧token、Stop与错误主因均有定向验证。
+- 相邻完全相同相位图发送前帧引用，复用mapping及已确认像素，通过HOLD保留每个authored时间槽，不重复DVI/USB/world apply。dispatch/ACK只列实际presentation，step/confirmation列全部逻辑步骤；最后时间槽完成即返回，不声称光学响应已完成。未知状态不HOLD，上传连接早断、旧token、Stop与错误主因均有定向验证。
 - 自动preview仍只有前图+占据、后图+占据、源/最终phase三张；相机geometry不污染phase。trajectory_2d改用真实before照片与同一完整SiteMap，将已有Fourier轨迹经已有Target→camera注册及公共图像坐标入口转换，保存原始Fourier数据和相机路径，不生成第二条科学轨迹。before/after/path共用相机坐标和图像显示，尺寸按完整站点间距；删除image-span/cell-pitch半径上限，不改公共颜色/线宽。路径仍只有末端单箭头，同色site/path/head并集单次alpha，未参与路径者保持静止图标。
 - 报告记录算法、帧数政策、实际N和sensor像素最大位移；逐指派的移动/原地分类、末态有效/占据及主动舍弃仍共用。采用已有camera timestamp及播放回执列出实际间隔/新presentation/online耗时，与请求60Hz及名义时长分开；不冒充原子身份跟踪或物理方向标定。
 - before/path的站点编号完全复用公共定位/字号，删除路径专属的站点编号重排；仅额外时序注释避让。绘制末段在真实终点前留空并去掉终点圆帽小点，短段不反向，原始坐标与照片/SiteMap图标保持不变。

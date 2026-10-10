@@ -343,8 +343,13 @@ def test_count_first_drain_uses_snapshot_newest_and_preserves_record_metadata(
 
 
 def test_finite_target_and_receive_capacity_are_independent() -> None:
+    from zlc_atom.nodes.camera_measurement import CameraMeasurementNode, CameraMeasurementRequest
+    from zlc_runtime import SignalDataPlane
+
     driver = _FakeDcamDriver()
-    adapter = DcamCameraAdapter(_config(), driver=driver)
+    driver.device.sensor_shape = (36, 40)  # Actual two-photo rearrangement ROI.
+    adapter = DcamCameraAdapter(_config(roi=None), driver=driver)
+    plane = SignalDataPlane()
     try:
         adapter.arm(6, source_group_sizes=(2, 2, 2), buffer_frame_count=2, timeout=1.0)
         assert driver.device.ring_size == 2
@@ -353,8 +358,31 @@ def test_finite_target_and_receive_capacity_are_independent() -> None:
             records = adapter.read_frame_records(2, timeout=1.0, exact=True)
             assert [record.source_ordinal for record in records] == [count - 2, count - 1]
         assert adapter.finish_record_capture().produced_count == 6
+        for repeat in (2, 0):
+            node = CameraMeasurementNode(
+                camera=adapter, signal_plane=plane,
+                request=CameraMeasurementRequest(camera_key="camera", exposure_seconds=0.01,
+                    roi_xywh=None, repeat=repeat, frames_per_cycle=1, photoelectrons=False),
+            )
+            driver.calls.clear()
+            capture = node.prepare() if repeat else node.monitor()
+            expected = 2 if repeat else (128 * 1024 * 1024 // (2 * 36 * 40 * 2))
+            assert driver.device.ring_size == expected
+            assert adapter._records.capacity == expected
+            assert node.run_record["acquisition"]["buffer_frame_count"] == expected
+            if repeat:
+                driver.device.publish((11, 22), newest=1)
+                result = capture.collect()
+                assert result.cycle_count == 2
+                assert [frame.source_ordinal for frame in result.frames] == [0, 1]
+            else:
+                capture.close()
+            calls = [name for name, _ in driver.calls]
+            assert [calls.count(name) for name in ("allocate", "start", "stop", "release")] == [1] * 4
+            assert not any(name.startswith("set:") for name in calls)
     finally:
         adapter.close()
+        plane.close()
 
 
 @pytest.mark.parametrize("exact", (False, True))

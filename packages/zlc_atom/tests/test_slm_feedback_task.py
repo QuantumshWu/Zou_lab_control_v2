@@ -2335,8 +2335,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         assert task._actual_exposure_seconds == pytest.approx(0.020)
         assert camera.working_point().exposure_seconds == pytest.approx(0.020)
         assert sequencer.fires == [10]
-        # Receiver capacity follows its byte budget, not the finite shot target.
-        assert armed_buffer_sizes == [(128 * 1024 * 1024 // 2) // fluorescence.nbytes]
+        # The byte budget is an upper bound: only ten frames can arrive here.
+        assert armed_buffer_sizes == [10]
         device_record = task._device_event_record(
             include_measurement=True,
             candidate=1,

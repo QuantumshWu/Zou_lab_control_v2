@@ -5086,6 +5086,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise ValueError("plot export target must have an image suffix")
         options = dict(kwargs)
         options["format"] = image_format
+        if image_format == "png":
+            options["pil_kwargs"] = {"compress_level": 1, **(options.get("pil_kwargs") or {})}
         with self._render_lock:
             with self._lock:
                 self._assert_open()
