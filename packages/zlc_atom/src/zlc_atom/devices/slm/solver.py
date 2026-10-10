@@ -3491,17 +3491,16 @@ def _rearrangement_background_projection(
     active = np.asarray(desired) > 0
     from scipy.ndimage import map_coordinates  # noqa: PLC0415
 
-    profile_pixels, profile_values = [], []
-    for point, amplitude in zip(np.asarray(points)[active], np.asarray(desired)[active]):
-        pixels = np.floor(point).astype(np.int64) + gpu["psf_neighborhood"]
-        coordinates = (pixels - point - gpu["psf_profile_origin"]) * gpu["psf_oversampling"]
-        values = map_coordinates(gpu["psf_profile"], coordinates.T, order=1, mode="constant", cval=0., prefilter=False)
-        positive = values > 0
-        pixels = (pixels[positive] - shape // 2) % shape
-        profile_pixels.append(pixels[:, 0] * shape[1] + pixels[:, 1])
-        profile_values.append(np.asarray(amplitude * amplitude * values[positive], np.float32))
-    profile_pixels = np.concatenate(profile_pixels)
-    profile_values = np.concatenate(profile_values)
+    active_points = np.asarray(points)[active]
+    pixels = np.floor(active_points).astype(np.int64)[:, None] + gpu["psf_neighborhood"]
+    coordinates = (pixels - active_points[:, None] - gpu["psf_profile_origin"]) * gpu["psf_oversampling"]
+    values = map_coordinates(gpu["psf_profile"], coordinates.reshape(-1, 2).T,
+                             order=1, mode="constant", cval=0., prefilter=False).reshape(pixels.shape[:2])
+    positive = values > 0
+    selected_pixels = (pixels[positive] - shape // 2) % shape
+    profile_pixels = selected_pixels[:, 0] * shape[1] + selected_pixels[:, 1]
+    power = np.square(np.asarray(desired)[active])[:, None]
+    profile_values = np.asarray((power * values)[positive], np.float32)
     gpu["focal_profile"].fill(0)
     gpu["focal_profile_indices"][:len(profile_pixels)].set(profile_pixels, stream=stream)
     gpu["focal_profile_values"][:len(profile_values)].set(profile_values, stream=stream)
