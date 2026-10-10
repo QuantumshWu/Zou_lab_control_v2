@@ -406,10 +406,14 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
         assert loaded is not None and recipe["spec"] is not None
         if name == "before_frame":
             before_device_facts = info["sections"]["source"]["run_record"]["device_snapshots"]
+            assert set(before_device_facts) == {"camera", "sequencer", "slm"}
+            assert before_device_facts == summary["capture_events"]["before_frame"]["device_snapshots"]
+            assert before_device_facts["slm"]["command_revision"] < summary["device_snapshots"]["slm"]["command_revision"]
             before_parameters = recipe["parameters"]
         if name == "trajectory_2d":
             path_device_facts = info["sections"]["source"]["run_record"]["device_snapshots"]
             assert path_device_facts["camera"] == before_device_facts["camera"]
+            assert path_device_facts["sequencer"] == before_device_facts["sequencer"]
             assert path_device_facts["slm"] == before_device_facts["slm"]
             selected = e.task._plan["source_indices"]
             before = e.task._snapshots[task_module.BEFORE_FRAME_OUTPUT.name]
@@ -603,6 +607,8 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         for publication, snapshots in publications:
             assert set(publication.signals) == set(names.values())
             assert all(value.event_record == publication.event_record for value in publication.signals.values())
+            assert all(set(capture["device_snapshots"]) == {"slm"}
+                       for capture in publication.event_record["capture_events"].values())
             assert {name: snapshot.block.schema for name, snapshot in snapshots.items()} == frozen
             assert snapshots["before_occupied"].block.values.shape == (1, 1, 6)
             assert snapshots["after_occupied"].block.values.shape == (1, 1, 6)
@@ -615,6 +621,9 @@ def test_hosted_rearrangement_keeps_frozen_vocabulary_shared_records_and_source_
         assert final["before_frame"].expanded_validity().all() and final["after_frame"].expanded_validity().all()
         assert terminal.event_record["capture_events"]["before_frame"]["source_ordinal"] == 0
         assert terminal.event_record["capture_events"]["after_frame"]["source_ordinal"] == 1
+        assert set(terminal.event_record["device_snapshots"]) == {"camera", "sequencer", "slm"}
+        before_slm = terminal.event_record["capture_events"]["before_frame"]["device_snapshots"]["slm"]
+        assert before_slm == first.event_record["device_snapshots"]["slm"]
         assert not e.plane.is_generation_live(names["phase"])
         np.testing.assert_array_equal(final["phase"].block.values[0, 0], e.slm.last_commanded_phase)
         directory = host.run_directory

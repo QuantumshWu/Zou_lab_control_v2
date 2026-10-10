@@ -291,7 +291,9 @@ class SlmRearrangementTask:
             revision=self._revision, **axes)
 
     def _publish(self, context, snapshots):
-        event = {"capture_events": dict(self._capture_evidence), "device_snapshots": {**self._device_snapshots, "slm": {
+        event = {"capture_events": {
+            name: {**capture, "device_snapshots": {"slm": capture["device_snapshots"]["slm"]}}
+            for name, capture in self._capture_evidence.items()}, "device_snapshots": {**self._device_snapshots, "slm": {
             "identity": str(self.slm.identity), "shape_yx": list(self.slm.shape_yx),
             "command_revision": int(self.slm.command_revision), "mapping_revision": int(self.slm.mapping_revision),
             "command_receipt": dict(self.slm.last_command_receipt)}}}
