@@ -1225,6 +1225,19 @@ assert form.is_empty('expressions') and form.read_draft() == {'expressions': Non
 form.populate({'expressions': (first,)})
 assert form.read_all() == {'expressions': (first,)}
 window.close()
+
+# A column's domain can arrive after the rows were built (Frame Survival's
+# frame choices come with its source): the rows land on the new columns.
+from dataclasses import replace
+from zlc_ui.form.form import FormChoice
+start = FormFieldProps('start', 'choice', 'Start frame', default=None, required=True, choices=(),
+                       unavailable_reason='Waiting for source frames')
+waiting = FormSpec((FormFieldProps('pairs', 'rows', 'Pairs', default=(), required=True, columns=(start,)),))
+pairs = FluentParameterForm(waiting, {'pairs': ()})
+filled = FormSpec((replace(waiting.fields[0], columns=(
+    replace(start, choices=(FormChoice('1', 0), FormChoice('2', 1)), unavailable_reason=''),)),))
+pairs.reconcile(filled, {'pairs': ({'start': 1},)})
+assert pairs.read_all() == {'pairs': ({'start': 1},)}, pairs.read_all()
 print('ok')
 """
     )

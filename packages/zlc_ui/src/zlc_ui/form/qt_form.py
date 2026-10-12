@@ -336,6 +336,22 @@ class _RowsEditor(QtWidgets.QWidget):
         for values in rows:
             self._append(values)
 
+    def reconfigure(self, field: FormFieldProps) -> None:
+        """Take the field's current columns.
+
+        A column's domain can change after the rows were built -- a choice
+        column whose values arrive with its source -- and cells built on the
+        old columns cannot hold the new values.  Those rows are dropped; the
+        form then writes its rows on the new columns.
+        """
+
+        if field.columns != self._field.columns:
+            for row, _cells, _remove in self._rows:
+                self._retire(row)
+            self._rows.clear()
+        self._field = field
+        self.add_button.setToolTip(field.description)
+
     def refresh(self) -> None:
         for _row, cells, _remove in self._rows:
             for column in self._field.columns:
@@ -445,7 +461,8 @@ class _RowsHandler(FormWidgetHandler):
         return not widget.rows()
 
     def refresh(self, field, widget, context=None):
-        del field, context
+        del context
+        widget.reconfigure(field)
         widget.refresh()
 
 
@@ -1060,6 +1077,8 @@ def _reconfigure_widget(
     elif isinstance(widget, FluentDoubleSpinBox):
         handler = _IntHandler if field.kind == "int" else _FloatHandler
         handler._configure_spin(field, widget, widget.decimalValue() if being_edited(widget) else value)
+    elif isinstance(widget, _RowsEditor):
+        widget.reconfigure(field)
     elif isinstance(widget, FluentComboBox):
         if old_field.choices != field.choices:
             _ChoiceHandler._fill(field, widget)
