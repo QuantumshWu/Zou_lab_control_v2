@@ -453,7 +453,7 @@
 
 ### 2.5 Device Control与settings provenance
 
-- 实验 MCP：可选 `.[mcp]` 与 `experiment --mcp-port` 薄接入当前 ExperimentGuiFlow/Console，默认只读，控制须显式启用；loopback/token/Origin 边界，复用 schema、设备占用、Start/Stop、精确发布身份、Pulse异步按钮路径和公共截图。状态默认摘要、目录按节点取schema，动作只回相关行，数据页保留三domain坐标/validity/sigma；SDK隐藏的错误通过同一工具错误边界返回具体原因。真实协议测试覆盖认证/异步Stop/错误文本及GUI卡住后超时排队命令不会延后执行。独立agent仅通过MCP完成Virtual相机三帧采集、10ms曝光及ROI变更后重启、精确像素坐标读取、Monitor截图、Figure PNG+NPZ保存及停止；暖态状态/目录中位13–14ms，SDK客户端首次tool另有约1–1.6s开销，不冒充硬实时上界。测试窗口/服务已退出，研究文件不入Git，未触碰真实设备。
+- 实验 MCP：可选 `.[mcp]` 与 `experiment --mcp-port` 薄接入当前 ExperimentGuiFlow/Console，启用后默认允许操作，仅 `--mcp-read-only` 限制为只读；loopback/token/Origin 边界，复用 schema、设备占用、Start/Stop、精确发布身份、Pulse异步按钮路径和公共截图。状态默认摘要、目录按节点取schema，动作只回相关行，数据页保留三domain坐标/validity/sigma；SDK隐藏的错误通过同一工具错误边界返回具体原因。真实协议测试覆盖认证/异步Stop/错误文本及GUI卡住后超时排队命令不会延后执行。独立agent仅通过MCP完成Virtual相机三帧采集、10ms曝光及ROI变更后重启、精确像素坐标读取、Monitor截图、Figure PNG+NPZ保存及停止；暖态状态/目录中位13–14ms，SDK客户端首次tool另有约1–1.6s开销，不冒充硬实时上界。测试窗口/服务已退出，研究文件不入Git，未触碰真实设备。
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
 - Generic Control的X复用现有Fluent隐藏机制，保留同一device session的窗口、Desired和单位；隐藏时停止Live debounce、撤回未执行字段写入并跳过周期UI投影，重开只读刷新current，卸载/重建或session结束真正销毁窗口。现有正式flow的单个Qt生命周期用例红/绿通过，验证ms单位与草稿保留、隐藏无周期投影、重开读回及session shutdown释放；未做硬件测试。

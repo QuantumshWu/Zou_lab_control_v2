@@ -50,8 +50,8 @@ def _parser() -> argparse.ArgumentParser:
         help="serve this GUI session's MCP endpoint on localhost; requires ZLC_MCP_TOKEN",
     )
     parser.add_argument(
-        "--mcp-control", action="store_true",
-        help="allow MCP to submit experiment actions (otherwise observation only)",
+        "--mcp-read-only", action="store_true",
+        help="restrict MCP to observation (enabled MCP otherwise allows experiment actions)",
     )
     return parser
 
@@ -1939,8 +1939,8 @@ def _open_saved_figure(
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
-    if arguments.mcp_control and arguments.mcp_port is None:
-        parser.error("--mcp-control requires --mcp-port")
+    if arguments.mcp_read_only and arguments.mcp_port is None:
+        parser.error("--mcp-read-only requires --mcp-port")
     token = os.environ.get("ZLC_MCP_TOKEN", "")
     if arguments.mcp_port is not None:
         if arguments.check:
@@ -2027,7 +2027,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 close_mcp = start_server(
                     flow, host="127.0.0.1", port=arguments.mcp_port,
-                    token=token, allow_control=arguments.mcp_control,
+                    token=token, allow_control=not arguments.mcp_read_only,
                 )
             except (ImportError, OSError, RuntimeError) as error:
                 print(f"error: MCP could not start: {error}", file=sys.stderr)
@@ -2035,7 +2035,7 @@ def main(argv: list[str] | None = None) -> int:
             application.aboutToQuit.connect(close_mcp)
             print(
                 f"MCP: http://127.0.0.1:{arguments.mcp_port}/mcp "
-                f"({'control enabled' if arguments.mcp_control else 'read only'})",
+                f"({'read only' if arguments.mcp_read_only else 'control enabled'})",
                 flush=True,
             )
         return int(application.exec_())

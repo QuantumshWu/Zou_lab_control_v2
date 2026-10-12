@@ -396,7 +396,7 @@ Node new chunk
 
 ## 6. UI与Lifecycle
 
-- 实验 AI 的 MCP 是可选、显式开启的本机接入，不是第二个实验执行器。它只连接当前 `ExperimentGuiFlow` 的 Session/Console；参数目录来自现有 descriptor，修改、Start/Stop、Panel 与保存走原 owner 准入和异步完成。请求在线程间交给 Qt owner，不从网络线程操作 Qt，不另开设备或绕过 DeviceUse。默认只读，写操作须由启动参数明确授权；loopback 服务还须验证本次配置的 token，拒绝浏览器跨源访问。协议沿官方 MCP SDK，不自造 JSON-RPC。
+- 实验 AI 的 MCP 是可选、显式开启的本机接入，不是第二个实验执行器。它只连接当前 `ExperimentGuiFlow` 的 Session/Console；参数目录来自现有 descriptor，修改、Start/Stop、Panel 与保存走原 owner 准入和异步完成。请求在线程间交给 Qt owner，不从网络线程操作 Qt，不另开设备或绕过 DeviceUse。启用 MCP 后默认允许 AI 操作，仅显式 `--mcp-read-only` 才限制为只读；loopback 服务还须验证本次配置的 token，拒绝浏览器跨源访问。协议沿官方 MCP SDK，不自造 JSON-RPC。
 - MCP 同时提供结构化状态、精确 generation/publication 身份、当前错误、有限条近期状态、数据切片和按需当前窗口 PNG；大数组不混入状态轮询。截图沿公共窗口捕获，不重建 Plot，不读取其它应用。提交/等待/ready/terminal、Stop 请求/停止完成、软件确认/物理安全必须区分。等待超时不重发副作用，尚未执行的 owner 请求超时后取消；已开始但未得到结果时明确 outcome unknown 并要求查状态。人工物理操作请求只呈现，不由 AI 冒充完成。MCP 断连不重启或接管实验，禁用/退出停止接纳新请求，不改变原实验关闭流程。
 
 - TaskConsole与FigureViewer工具栏的Save image均保存当前整个GUI窗口，复用ConsolePresenter的截图动作、workspace当天目录与公共窗口capture；不依赖已打开的archive或某个active Panel，不在archive旁另存单Plot PNG。Edit的Save figure仍是数据和科学Figure归档，与GUI截图分开。

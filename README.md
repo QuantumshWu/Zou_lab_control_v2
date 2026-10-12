@@ -92,7 +92,8 @@ Use a client tool/HTTP timeout of at least 40 seconds when using `lab_wait`
 (its bounded wait is at most 30 seconds); do not turn transport timeouts into
 automatic write retries. Keep the client connection/session for repeated use.
 With no flag there is no listener or MCP dependency loaded. The command above
-is read-only; add **`--mcp-control`** to authorize experiment mutations. This is
+allows AI to operate the experiment by default; add **`--mcp-read-only`** only
+when observation without control is wanted. This is
 trusted experiment access, not a Python sandbox: existing plugin expressions
 retain their ordinary capabilities. Hardware limits, ownership and normal
 manual confirmations still apply. The MCP client does not get an independent

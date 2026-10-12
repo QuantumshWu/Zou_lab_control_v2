@@ -1957,7 +1957,7 @@ with socket.socket() as held:
     held.bind(("127.0.0.1", 0))
     port = held.getsockname()[1]
 url = f"http://127.0.0.1:{port}/mcp"
-close_mcp = start_server(flow, port=port, token="virtual-test", allow_control=True)
+close_mcp = start_server(flow, port=port, token="virtual-test")
 block_owner, owner_blocked = Event(), Event()
 
 async def client():

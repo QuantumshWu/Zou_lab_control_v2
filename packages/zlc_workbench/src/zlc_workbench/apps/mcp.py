@@ -1,6 +1,6 @@
 """Optional MCP transport over the current experiment, never a device owner.
 
-Enabled by ``zlc task_console --mcp-port PORT [--mcp-control]``. The official
+Enabled by ``zlc task_console --mcp-port PORT [--mcp-read-only]``. The official
 SDK owns the protocol. Short intents/projections run on the existing Qt owner;
 scientific materialization and protocol waits do not run on that owner.
 """
@@ -26,7 +26,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 
-def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control=False):
+def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control=True):
     """Serve one explicitly enabled local endpoint; return its nonblocking close.
 
     The flow outlives this adapter. Disconnecting a client neither stops nor
