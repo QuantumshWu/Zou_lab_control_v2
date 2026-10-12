@@ -647,6 +647,11 @@ def test_shots_each_fire_the_pulse_survive_a_failed_shot_and_sum_destination_occ
     with np.load(data / "shot_001.npz", allow_pickle=False) as first, np.load(data / "shot_003.npz", allow_pickle=False) as third:
         assert "phase_codes" in first and "source_pattern_phase" in first
         assert "phase_codes" not in third and "source_pattern_phase" not in third
+        # The final phase is the sequence's last frame; the Target images are their lit pixels.
+        assert "last_confirmed_phase" not in first and "source_target_intensity" not in first
+        assert first["source_target_intensity_yx"].shape[1] == 2
+        with np.load(data / "shot_002.npz", allow_pickle=False) as failed:
+            assert not {"phase_codes", "last_confirmed_phase"} & set(failed.files)
         assert "before_occupied" in third and "after_occupied" in third and "assigned_source_indices" in third
         assert json.loads(str(third["metadata"]))["shot"] == 3
     summary = json.loads((e.context.run_directory / "summary.json").read_text())

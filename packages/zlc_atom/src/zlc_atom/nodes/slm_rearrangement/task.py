@@ -189,6 +189,7 @@ class SlmRearrangementTask:
         self.roi = contract.roi_xywh
         self._revision = 0
         self._snapshots, self._records, self._detections = {}, [], []
+        self._deferred_photo = None
         self._timings, self._playback, self._result, self._plan = {}, None, None, None
         self._device_snapshots = {}
         self._available_outputs, self._capture_evidence = set(), {}
@@ -324,7 +325,7 @@ class SlmRearrangementTask:
                 "command_receipt": dict(self.slm.last_command_receipt)}}}
         self._publish(context, ((PHASE_OUTPUT, snap),))
 
-    def _read_photo(self, context, node, cycle, index):
+    def _read_photo(self, context, node, cycle, index, *, publish=True):
         label = ("before", "after")[index]
         snapshot_started = perf_counter()
         self._revision += 1
@@ -357,16 +358,37 @@ class SlmRearrangementTask:
             "identity":str(self.slm.identity),"shape_yx":list(self.slm.shape_yx),
             "command_revision":self.slm.command_revision,"mapping_revision":self.slm.mapping_revision,
             "command_receipt":dict(self.slm.last_command_receipt)}},"source_ordinal":cycle[0].source_ordinal}
-        publication_started = perf_counter()
-        self._publish(context, ((frame_decl, snap), (occ_decl, status)))
-        self._timings[label+"_publication"] = (perf_counter()-publication_started)*1000
+        outputs = ((frame_decl, snap), (occ_decl, status))
+        if publish:
+            publication_started = perf_counter()
+            self._publish(context, outputs)
+            self._timings[label+"_publication"] = (perf_counter()-publication_started)*1000
+        else:
+            self._deferred_photo = outputs
         self._detections.append({"counts": detection.counts[order], "occupied": occupied,
                                   "valid": valid, "thresholds": detection.thresholds[order]})
         self._records.append(cycle[0])
         return occupied, valid
 
+    def _publish_deferred_photo(self, context):
+        """Show the before photograph once the SLM has stopped moving.
+
+        Published on arrival, it woke every live panel of the window in this
+        process while the plan and the first maps were being computed: in a
+        batch, whose panels are already open from the first shot, that took
+        the plan from 1-14 ms to 23-58 ms and the playback's end to within
+        0-20 ms of the verification image, where the moved atoms were lost.
+        """
+
+        outputs, self._deferred_photo = self._deferred_photo, None
+        if outputs is not None:
+            started = perf_counter()
+            self._publish(context, outputs)
+            self._timings["before_publication"] = (perf_counter()-started)*1000
+
     def _save(self, context, status, error=None):
         started = perf_counter()
+        self._publish_deferred_photo(context)
         directory = context.run_directory
         data, figures = directory / "data", directory / "figures"
         data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
@@ -425,12 +447,14 @@ class SlmRearrangementTask:
                 frames.close()
             context.register_artifact("imaging_gif", gif, role="preview")
         path_overlay = None
-        # Whole-SLM arrays are the same every shot (or only diagnostic): the shots
-        # up to the first completed one keep them, and an unfinished shot keeps
-        # its last confirmed phase and played prefix as evidence.
+        # Whole-SLM arrays are the same every shot (or only diagnostic): only the
+        # shots up to the first completed one keep them.  A completed shot's
+        # final phase is the last frame of its saved sequence, so it is kept
+        # only when that sequence is not.
         keep_whole = self._keep_whole
         confirmed_phase = self.slm.last_commanded_phase
-        if confirmed_phase is not None and (keep_whole or status != "completed"):
+        if confirmed_phase is not None and keep_whole and (
+                status != "completed" or not self.save_phase_sequence or self._result is None):
             arrays["last_confirmed_phase"] = confirmed_phase
         for index, value in enumerate(self._detections):
             prefix = ("before", "after")[index]
@@ -453,7 +477,7 @@ class SlmRearrangementTask:
                         "retained_intensity_ratios"):
                 if self._result.get(key) is not None:
                     arrays[key] = self._result[key]
-            if self.save_phase_sequence and (keep_whole or status != "completed"):
+            if self.save_phase_sequence and keep_whole:
                 arrays["phase_codes"] = np.asarray(self._result["phase_codes"], dtype=np.uint8).reshape(
                     (self._result["motion_frames"], *self.slm.shape_yx))
             if BEFORE_FRAME_OUTPUT.name in overlays:
@@ -495,8 +519,14 @@ class SlmRearrangementTask:
             summary["science_context"] = {key:self.science_context[key] for key in (
                 "objective_kind", "pupil", "operator_metadata", "system_correction", "pattern_metadata", "command_receipt")}
             arrays['source_pattern_phase']=self.science_context['pattern_phase']
-            arrays['source_target_intensity']=self.science_context['target_intensity']
-            arrays['generated_target_intensity']=self.target_intensity
+            # The target images are a few lit pixels on the whole SLM plane:
+            # saved as those pixels, (y, x) and value, not as 5 MB each.
+            for name, image in (('source_target_intensity', self.science_context['target_intensity']),
+                                ('generated_target_intensity', self.target_intensity)):
+                image = np.asarray(image)
+                lit = np.nonzero(image)
+                arrays[name+'_yx'] = np.stack(lit, axis=-1).astype(np.int32)
+                arrays[name+'_values'] = image[lit]
         if self._detections:
             summary["before_occupied"] = int(self._detections[0]["occupied"].sum())
         verification_accepted = (self.recording_frames is None and status == "completed"
@@ -715,6 +745,7 @@ class SlmRearrangementTask:
         self._timings = {}
         self._records, self._detections, self._camera_recordings = [], [], []
         self._capture_evidence = {}
+        self._deferred_photo = None
         self._playback, self._result, self._plan = None, None, None
         self._frame_count = self.motion_frames
         self._camera_maximum_step = None
@@ -943,7 +974,10 @@ class SlmRearrangementTask:
                         if index == 0:
                             self._timings["before_callback_after_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
                         start = perf_counter()
-                        mask, valid = self._read_photo(context, node, cycle, index)
+                        # Nothing is shown between the before photograph and the end of
+                        # playback: see _publish_deferred_photo.
+                        mask, valid = self._read_photo(context, node, cycle, index,
+                            publish=index == 1 or self.recording_frames is not None)
                         self._timings[("before", "after")[index]+"_readout"] = (perf_counter()-start)*1000
                         if index == 1:
                             self._timings["after_frame_available_after_fire"] = (cycle[0].host_received_at_ns-fire_wall)/1e6
@@ -985,6 +1019,7 @@ class SlmRearrangementTask:
                                 received_at_ns=cycle[0].host_received_at_ns, outcome=outcome,
                                 retain_phase_sequence=True)
                         finally:
+                            self._publish_deferred_photo(context)
                             self._result, self._playback = outcome.get("result"), outcome.get("playback")
                             playback_finished_wall, playback_finished_at = outcome.get("finished_wall_ns"), outcome.get("finished_at")
                             self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000

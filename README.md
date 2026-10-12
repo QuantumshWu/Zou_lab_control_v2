@@ -373,15 +373,18 @@ counts/occupied/validity/thresholds, source/end Target and frozen input facts,
 assignment and paths, actual Pulse/device receipts, and exact phase codes when
 **Save phase sequence** is enabled (default on). Important Figures are typed
 NPZ + PNG pairs. No extra final Science Context is written. Report rendering
-and movie archival stay out of the photo-to-playback critical path.
+and movie archival stay out of the photo-to-playback critical path, and so does
+the live display: the before photograph is published to the window only once
+playback has finished.
 
 **Shots** (default 1) fires the Pulse that many times in one Start, each shot
 photographing, rearranging and verifying on its own from a fresh source phase.
 With more than one, every shot keeps its atom-by-atom data in
 `data/shot_NNN.npz`; the first completed shot (and any unfinished shot before
 it) also keeps the phase sequence, the optical diagnostics, the figures and the
-whole-SLM arrays, and an unfinished shot keeps its last confirmed phase and
-played prefix. A failed shot (a missed deadline included) is recorded and the
+whole-SLM arrays; the other shots keep no whole-SLM array. The source and end
+Target images are saved as their lit pixels, and a completed shot's final phase
+only as the last frame of its saved sequence. A failed shot (a missed deadline included) is recorded and the
 next one fires; a board that cannot be made safe, or Stop, ends the batch.
 `summary.json`/`summary.txt` then sum the moving and stationary destinations
 judged and occupied over the shots whose verification was accepted, with
