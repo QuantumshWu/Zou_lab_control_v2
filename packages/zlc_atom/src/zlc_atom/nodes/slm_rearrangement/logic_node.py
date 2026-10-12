@@ -76,8 +76,6 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
                                    "Shots after the first completed one keep their atom-by-atom data, not the phase sequence, optical diagnostics or figures."),
         *REARRANGEMENT_FIELDS[2:],
         AuthoringField("save_phase_sequence", "bool", "Save phase sequence", True),
-        AuthoringField("trap_lifetime_seconds", "float", "Trap lifetime", None, required=False, minimum=1e-9, unit="s",
-                       description="Optional: a multi-shot summary also divides destination occupancy by exp(-image interval / lifetime)."),
     ),
     validator=_validate_rearrangement,
 )
@@ -171,7 +169,7 @@ def _rearrangement_editor_factory(parent=None, *, schema=SLM_REARRANGEMENT_SCHEM
                 ("Target grid", ("target_rows","target_columns")),
                 ("Imaging", ("before_period","after_period","recording_frames","exposure_seconds","shots")),
                 ("Movement", ("frame_mode","motion_frames","max_camera_step","frame_rate_hz","nominal_playback_seconds")),
-                ("Quality and output", ("minimum_separation","motion_intensity_error_percent","intensity_error_percent","save_phase_sequence","trap_lifetime_seconds")),
+                ("Quality and output", ("minimum_separation","motion_intensity_error_percent","intensity_error_percent","save_phase_sequence")),
             )
             self._forms = {}
             for title, keys in self._groups:

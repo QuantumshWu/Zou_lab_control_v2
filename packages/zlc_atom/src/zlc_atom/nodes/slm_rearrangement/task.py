@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from math import exp, sqrt
+from math import sqrt
 from pathlib import Path
 from time import perf_counter, monotonic, time_ns
 import sys
@@ -122,7 +122,7 @@ class SlmRearrangementTask:
                  frame_mode="fixed", max_camera_step=1.,
                  minimum_separation=15., intensity_tolerance=1.01, motion_intensity_tolerance=1.10,
                  save_phase_sequence=True, save_figure_artifact=None, recording_frames=None,
-                 shots=1, trap_lifetime_seconds=None):
+                 shots=1):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane = signal_plane
@@ -149,9 +149,6 @@ class SlmRearrangementTask:
         self.shots = int(shots)
         if self.shots < 1 or (self.recording_frames is not None and self.shots != 1):
             raise ValueError("A rearrangement fires at least one shot, and a recording exactly one")
-        self.trap_lifetime_seconds = None if trap_lifetime_seconds is None else float(trap_lifetime_seconds)
-        if self.trap_lifetime_seconds is not None and not (np.isfinite(self.trap_lifetime_seconds) and self.trap_lifetime_seconds > 0):
-            raise ValueError("Trap lifetime must be finite and positive")
         self._shot, self._shot_reports = 1, []
         self._camera_recordings = []
         self.frame_rate_hz = float(frame_rate_hz)
@@ -212,7 +209,7 @@ class SlmRearrangementTask:
                 "motion_frames": self.motion_frames if self.frame_mode == "fixed" else None,
                 "frame_mode": self.frame_mode,
                 "recording_frames": self.recording_frames,
-                "shots": self.shots, "trap_lifetime_seconds": self.trap_lifetime_seconds,
+                "shots": self.shots,
                 "requested_motion_frames": self.motion_frames,
                 "max_camera_step": self.max_camera_step, "camera_step_unit": "sensor pixel",
                 "gpu_preparation_reused": self._gpu_reused,
@@ -765,9 +762,6 @@ class SlmRearrangementTask:
         timing = next((report["pulse_timing"] for report in reports if report.get("pulse_timing")), {})
         interval = (timing["after_start_seconds"] - timing["before_start_seconds"]
                     if "after_start_seconds" in timing else None)
-        lifetime = (exp(-interval / self.trap_lifetime_seconds)
-                    if self.trap_lifetime_seconds is not None and interval is not None else None)
-        lifetime = lifetime or None  # an underflowed factor corrects nothing
         accepted = [report["transport_outcomes"] for report in reports
                     if (report.get("transport_outcomes") or {}).get("verification_accepted")]
         occupancy = {"basis": "Registered destination occupancy summed over the shots whose verification was accepted, "
@@ -782,9 +776,6 @@ class SlmRearrangementTask:
                 centre = (fraction + 1 / (2 * judged)) / (1 + 1 / judged)
                 half = sqrt(fraction * (1 - fraction) / judged + 1 / (4 * judged * judged)) / (1 + 1 / judged)
                 entry.update(fraction=fraction, fraction_1sigma=[centre - half, centre + half])
-                if lifetime is not None:
-                    entry.update(lifetime_corrected=fraction / lifetime,
-                                 lifetime_corrected_1sigma=[(centre - half) / lifetime, (centre + half) / lifetime])
             occupancy[name] = entry
         completed = [report for report in reports if report["status"] == "completed"]
         timings = {}
@@ -810,7 +801,7 @@ class SlmRearrangementTask:
         failed = [row["shot"] for row in per_shot if row["status"] != "completed"]
         summary = {**self._record(), "status": status, "error": None if error is None else _error_text(error),
                    "completed_shots": len(completed), "not_completed_shots": failed,
-                   "image_interval_seconds": interval, "lifetime_factor": lifetime,
+                   "image_interval_seconds": interval,
                    "destination_occupancy": occupancy, "timing_ms": timings, "per_shot": per_shot,
                    "gpu": getattr(self, "_gpu_info", None)}
         context.register_artifact("summary", write_readable_json(directory/"summary.json", _plain_json(summary)), role="summary")
@@ -820,17 +811,12 @@ class SlmRearrangementTask:
                  f"GPU preparation reused: {self._gpu_reused}"]
         if interval is not None:
             lines.append(f"Images {interval:.6f} s apart")
-        if lifetime is not None:
-            lines.append(f"Trap lifetime {self.trap_lifetime_seconds:g} s alone keeps {lifetime:.4f} of the atoms over that interval")
         for name in ("moving", "stationary", "all"):
             entry = occupancy[name]
             text = f"{entry['occupied']}/{entry['judged']} judged destinations occupied"
             if entry["fraction"] is not None:
                 low, high = entry["fraction_1sigma"]
                 text += f" = {entry['fraction']:.3f} (1 sigma {low:.3f}-{high:.3f})"
-                if "lifetime_corrected" in entry:
-                    low, high = entry["lifetime_corrected_1sigma"]
-                    text += f"; over the lifetime factor {entry['lifetime_corrected']:.3f} ({low:.3f}-{high:.3f})"
             lines.append(f"{name.title()}: {text}")
         for key, value in timings.items():
             lines.append(f"{key.replace('_', ' ')}: median {value['median']:.3f} ms (min {value['min']:.3f}, max {value['max']:.3f})")

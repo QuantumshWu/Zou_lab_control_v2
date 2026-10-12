@@ -388,8 +388,7 @@ only as the last frame of its saved sequence. A failed shot (a missed deadline i
 next one fires; a board that cannot be made safe, or Stop, ends the batch.
 `summary.json`/`summary.txt` then sum the moving and stationary destinations
 judged and occupied over the shots whose verification was accepted, with
-1-sigma Wilson intervals (divided by exp(-image interval / lifetime) as well
-when **Trap lifetime** is filled in), and give each timing's median and range.
+1-sigma Wilson intervals, and give each timing's median and range.
 
 Preparation, readout, matching, complete calculation/host transfer, upload,
 playback/final settle and saving are separate timing windows; nested or

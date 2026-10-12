@@ -614,8 +614,6 @@ def test_shots_each_fire_the_pulse_survive_a_failed_shot_and_sum_destination_occ
     whole-SLM arrays, and the run sums destination occupancy over the shots
     whose verification was accepted.
     """
-    import math
-
     e = experiment
     e.images[:] = e.images * 3
     rendered = []
@@ -624,7 +622,7 @@ def test_shots_each_fire_the_pulse_survive_a_failed_shot_and_sum_destination_occ
         rendered.append(Path(path).name)
         return _stub_figures(path, **kwargs)
 
-    task = SlmRearrangementTask(**{**e.task_arguments, "shots": 3, "trap_lifetime_seconds": 5.5,
+    task = SlmRearrangementTask(**{**e.task_arguments, "shots": 3,
                                    "save_figure_artifact": figures})
     reports = []
 
@@ -669,9 +667,6 @@ def test_shots_each_fire_the_pulse_survive_a_failed_shot_and_sum_destination_occ
     assert combined["judged"] == occupancy["moving"]["judged"] + occupancy["stationary"]["judged"]
     low, high = combined["fraction_1sigma"]
     assert low <= combined["fraction"] <= high
-    factor = math.exp(-summary["image_interval_seconds"] / 5.5)
-    assert summary["lifetime_factor"] == pytest.approx(factor)
-    assert combined["lifetime_corrected"] == pytest.approx(combined["fraction"] / factor)
     assert "matching" in summary["timing_ms"]
     text = (e.context.run_directory / "summary.txt").read_text()
     assert "Shots: 2 of 3 completed; not completed: [2]" in text
