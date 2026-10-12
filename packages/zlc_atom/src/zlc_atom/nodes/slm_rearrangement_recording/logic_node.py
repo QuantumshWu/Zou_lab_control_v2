@@ -18,7 +18,8 @@ SLM_REARRANGEMENT_RECORDING_SCHEMA = AuthoringSchema(tuple(
                    description="Number of camera frames to retain, starting with the first imaging Period. The authored Pulse supplies the triggers.")
     if field.name == "after_period" else
     replace(field, label="First imaging Period") if field.name == "before_period" else field
-    for field in SLM_REARRANGEMENT_SCHEMA.fields
+    # One recorded Pulse: shots and the multi-shot summary's lifetime do not apply.
+    for field in SLM_REARRANGEMENT_SCHEMA.fields if field.name not in {"shots", "trap_lifetime_seconds"}
 ))
 
 LOGIC_NODE = replace(

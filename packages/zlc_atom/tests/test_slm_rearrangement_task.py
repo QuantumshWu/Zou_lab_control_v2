@@ -26,7 +26,7 @@ from zlc_plot import read_figure_plot
 from zlc_plot.primitives import image_point_overlay_geometry
 from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef, PulsePeriod, PulseSequence, sequence_to_tree
 from zlc_pulse.device import DoneReport
-from zlc_pulse.wire import STATUS_DONE
+from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from pulse_fixture import IMAGING_PULSE_RESOURCE
@@ -169,7 +169,7 @@ class _RunContext(_Context):
 
     def report_progress(self, message, *args, **kwargs):
         super().report_progress(message, *args, **kwargs)
-        if message.startswith("SLM target held;") and not self.board.early_verification:
+        if "SLM target held;" in message and not self.board.early_verification:
             # Delivery of the authored second external trigger is controlled
             # here so a slow numeric test never relies on arbitrary sleeps.
             self.trace.append("after_trigger")
@@ -603,6 +603,89 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
         assert len(e.slm.preparations) == int(frame_mode == "fixed")
         assert e.slm.confirmed == 0 and e.slm.releases == int(frame_mode == "fixed")
     assert e.board.fires == [(1, 1)]
+
+
+def test_shots_each_fire_the_pulse_survive_a_failed_shot_and_sum_destination_occupancy(experiment, monkeypatch):
+    """One Start fires N shots; a failed one is reported and the batch goes on.
+
+    The operator asked for a shot count instead of pressing Start for every
+    shot.  Each shot photographs, rearranges and verifies on its own and keeps
+    its atom-by-atom data; only the first keeps the phase sequence and the
+    whole-SLM arrays, and the run sums destination occupancy over the shots
+    whose verification was accepted.
+    """
+    import math
+
+    e = experiment
+    e.images[:] = e.images * 3
+    rendered = []
+
+    def figures(path, **kwargs):
+        rendered.append(Path(path).name)
+        return _stub_figures(path, **kwargs)
+
+    task = SlmRearrangementTask(**{**e.task_arguments, "shots": 3, "trap_lifetime_seconds": 5.5,
+                                   "save_figure_artifact": figures})
+    reports = []
+
+    def wait_done(timeout=None):
+        reports.append(timeout)
+        status = STATUS_ERROR if len(reports) == 2 else STATUS_DONE
+        return DoneReport(status, 0, False, .1, report_delay_seconds=.001)
+
+    monkeypatch.setattr(e.board, "wait_done", wait_done)
+    result = task.execute(e.context)
+    data = e.context.run_directory / "data"
+    assert result["completed_shots"] == 2 and Path(result["artifact_path"]) == (data / "shot_001.npz").resolve()
+    assert e.board.fires == [(1, 1)] * 3 and e.board.safe_calls >= 1
+    assert len(e.slm.preparations) == 3 and e.slm.releases == 3
+    artifacts = e.context.artifacts
+    assert [artifacts[f"shot_{k:03d}"][1] for k in (1, 2, 3)] == ["final", "checkpoint", "final"]
+    assert artifacts["artifact_path"][0] == artifacts["shot_001"][0]
+    assert not (data / "rearrangement.npz").exists()
+    assert rendered and len(rendered) == len(set(rendered)), "only the first shot renders figures"
+    with np.load(data / "shot_001.npz", allow_pickle=False) as first, np.load(data / "shot_003.npz", allow_pickle=False) as third:
+        assert "phase_codes" in first and "source_pattern_phase" in first
+        assert "phase_codes" not in third and "source_pattern_phase" not in third
+        assert "before_occupied" in third and "after_occupied" in third and "assigned_source_indices" in third
+        assert json.loads(str(third["metadata"]))["shot"] == 3
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["status"] == "completed" and summary["shots"] == 3
+    assert summary["completed_shots"] == 2 and summary["not_completed_shots"] == [2]
+    assert [row["status"] for row in summary["per_shot"]] == ["completed", "failed", "completed"]
+    assert "Pulse did not complete successfully" in summary["per_shot"][1]["error"]
+    accepted = [row for row in summary["per_shot"] if row["verification_accepted"]]
+    occupancy = summary["destination_occupancy"]
+    assert occupancy["accepted_shots"] == len(accepted) == 2
+    for name in ("moving", "stationary"):
+        assert occupancy[name]["judged"] == sum(row[name]["judged"] for row in accepted)
+        assert occupancy[name]["occupied"] == sum(row[name]["occupied"] for row in accepted)
+    combined = occupancy["all"]
+    assert combined["judged"] == occupancy["moving"]["judged"] + occupancy["stationary"]["judged"]
+    low, high = combined["fraction_1sigma"]
+    assert low <= combined["fraction"] <= high
+    factor = math.exp(-summary["image_interval_seconds"] / 5.5)
+    assert summary["lifetime_factor"] == pytest.approx(factor)
+    assert combined["lifetime_corrected"] == pytest.approx(combined["fraction"] / factor)
+    assert "matching" in summary["timing_ms"]
+    text = (e.context.run_directory / "summary.txt").read_text()
+    assert "Shots: 2 of 3 completed; not completed: [2]" in text
+
+
+def test_stop_ends_a_batch_after_its_finished_shots_without_a_final_artifact(experiment, monkeypatch):
+    e = experiment
+    e.images[:] = e.images * 3
+    task = SlmRearrangementTask(**{**e.task_arguments, "shots": 3})
+    monkeypatch.setattr(e.context, "cancel_requested", lambda: len(e.board.fires) >= 1 and e.slm.releases >= 1)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        task.execute(e.context)
+    assert e.board.fires == [(1, 1)]
+    summary = json.loads((e.context.run_directory / "summary.json").read_text())
+    assert summary["status"] == "stopped" and summary["completed_shots"] == 1
+    # A Stop between shots fires nothing more and records no shot that never fired.
+    assert [row["status"] for row in summary["per_shot"]] == ["completed"]
+    assert not (e.context.run_directory / "data" / "shot_002.npz").exists()
+    assert e.context.artifacts["shot_001"][1] == "final" and "artifact_path" not in e.context.artifacts
 
 
 @pytest.mark.parametrize("experiment", ["camera-step"], indirect=True)

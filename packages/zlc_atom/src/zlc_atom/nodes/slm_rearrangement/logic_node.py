@@ -71,8 +71,13 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
         AuthoringField("after_period", "text", "After imaging Period", "", required=True),
         AuthoringField("exposure_seconds", "float", "Camera exposure", None, required=False, minimum=1e-9, unit="s",
                        description="Blank uses the camera's own exposure; the Task does not compare it with Pulse Period lengths."),
+        AuthoringField("shots", "int", "Shots", 1, minimum=1,
+                       description="Pulses fired one after another, each photographed, rearranged and verified on its own. "
+                                   "Shots after the first completed one keep their atom-by-atom data, not the phase sequence, optical diagnostics or figures."),
         *REARRANGEMENT_FIELDS[2:],
         AuthoringField("save_phase_sequence", "bool", "Save phase sequence", True),
+        AuthoringField("trap_lifetime_seconds", "float", "Trap lifetime", None, required=False, minimum=1e-9, unit="s",
+                       description="Optional: a multi-shot summary also divides destination occupancy by exp(-image interval / lifetime)."),
     ),
     validator=_validate_rearrangement,
 )
@@ -164,9 +169,9 @@ def _rearrangement_editor_factory(parent=None, *, schema=SLM_REARRANGEMENT_SCHEM
             layout.setSpacing(scaled_px(6,minimum=4))
             self._groups = (
                 ("Target grid", ("target_rows","target_columns")),
-                ("Imaging", ("before_period","after_period","recording_frames","exposure_seconds")),
+                ("Imaging", ("before_period","after_period","recording_frames","exposure_seconds","shots")),
                 ("Movement", ("frame_mode","motion_frames","max_camera_step","frame_rate_hz","nominal_playback_seconds")),
-                ("Quality and output", ("minimum_separation","motion_intensity_error_percent","intensity_error_percent","save_phase_sequence")),
+                ("Quality and output", ("minimum_separation","motion_intensity_error_percent","intensity_error_percent","save_phase_sequence","trap_lifetime_seconds")),
             )
             self._forms = {}
             for title, keys in self._groups:
