@@ -46,6 +46,7 @@ zlc fpga              FPGA geometry/resource tool
 zlc check             installed-product provenance check
 zlc evidence          formal evidence lanes
 zlc warm_numba        compile or verify every numba kernel's disk cache
+zlc warm_slm_gpu      compile the SLM rearrangement GPU code; choose its analysis product
 zlc capture           capture one window on the real screen for acceptance
 ```
 
@@ -64,6 +65,7 @@ bin\estimate_resources.bat     current checkout geometry/resource estimate
 bin\build_and_program.bat      build if needed, then program volatile FPGA;
                                build-only/flash remain explicit modes
 bin\warm_numba_cache.bat       zlc warm_numba from this checkout
+bin\warm_slm_gpu.bat           zlc warm_slm_gpu from this checkout (per GPU and driver)
 bin\install_slm_gpu.bat        install/check pinned CUDA dependencies; log progress
 bin\migrate_pulses.bat         one-shot offline migration of saved pulses and
                                Config files (originals kept beside them)

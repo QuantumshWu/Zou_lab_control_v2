@@ -29,6 +29,10 @@ packages/zlc_pulse/fpga/.Xil/
 # written where zlc_plot/_kernel_cache.py says (bin/warm_numba_cache.bat).
 /numba_cache/
 
+# SLM GPU analysis choices measured on this machine (bin/warm_slm_gpu.bat,
+# zlc_atom/devices/slm/solver.py): per GPU and driver, regenerable.
+/slm_gpu_cache/
+
 # Bench results are what a run PRODUCED, not what anyone authored: they
 # change on every run and nothing reads them back (bench/plot_perf/common.py
 # only writes).  Committing them made every measurement a diff.

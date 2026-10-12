@@ -1632,6 +1632,22 @@ DEVICE_TYPES = (
 )
 
 
+def warm_gpu() -> int:
+    """``warm_slm_gpu``: compile the rearrangement GPU code and choose its
+    analysis product for this panel on this machine's GPU (bin/warm_slm_gpu.bat)."""
+    from ..solver import warm_rearrangement_gpu  # noqa: PLC0415
+
+    try:
+        print(warm_rearrangement_gpu(_SHAPE_YX))
+    except Exception as error:  # noqa: BLE001 -- this is a command-line front
+        import traceback  # noqa: PLC0415
+
+        traceback.print_exc()
+        print(f"\nSLM GPU warmup failed: {type(error).__name__}: {error}")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Serve one local Hamamatsu SLM to local or LAN clients."

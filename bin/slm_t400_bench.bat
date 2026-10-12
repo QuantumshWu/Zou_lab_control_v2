@@ -20,7 +20,7 @@ echo ============================================================
 echo SLM rearrangement benchmark - close the SLM task console first
 echo Interpreter: %ZLC_PY_CMD%
 echo ============================================================
-%ZLC_PY_CMD% "%ZLC_HOME%\bench\slm_t400\run.py" %*
+%ZLC_PY_CMD% -c "import zou_lab_control, runpy; runpy.run_path(r'%ZLC_HOME%\bench\slm_t400\run.py', run_name='__main__')" %*
 set "ZLC_RC=%ERRORLEVEL%"
 if not "%ZLC_RC%"=="0" (
   echo.

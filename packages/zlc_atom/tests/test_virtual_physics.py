@@ -2563,6 +2563,47 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         assert not recovered["gpu"]
 
 
+@pytest.mark.parametrize("shape", ((64, 80), (127, 159)))
+def test_rearrangement_analysis_products_agree_and_are_chosen_once(shape, tmp_path, monkeypatch) -> None:
+    cp = pytest.importorskip("cupy")
+    try:
+        available = cp.cuda.runtime.getDeviceCount()
+    except cp.cuda.runtime.CUDARuntimeError as error:
+        if error.status not in (35, 100):
+            raise
+        pytest.skip(f"CUDA is unavailable: {error}")
+    if not available:
+        pytest.skip("no CUDA device")
+    rng = np.random.default_rng(3)
+    with slm_solver._rearrangement_analysis_workspace(shape, 40) as gpu:
+        h, padded = gpu["shape"][0], gpu["padded"]
+        field = rng.normal(size=(2 * h, 2 * padded)).astype(np.float16)
+        roots = rng.normal(size=(40, padded, 2)).astype(np.float16)
+        gpu["field"][...] = cp.asarray(field.reshape(2, h, 2 * padded))
+        gpu["roots"][...] = cp.asarray(roots)
+        # Every candidate whose rows per warp divide the 2H field rows, the odd panel's too.
+        names = ["cublas", *(f"analysis_{rows}_{bands}" for rows, bands in slm_solver._ANALYSIS_KERNELS
+                             if 2 * h % rows == 0)]
+        assert len(names) >= 3
+        for band in (8, 24, 40):
+            # cuBLAS reads the transposed cos then sin planes, band bands per x.
+            transposed = np.concatenate((roots[:band, :, 0].T, roots[:band, :, 1].T))
+            gpu["forward"].ravel()[:2 * padded * band] = cp.asarray(transposed.ravel())
+            expected = field.astype(np.float64) @ transposed.astype(np.float64)
+            for name in names:
+                gpu["projected"].fill(np.nan)
+                slm_solver._rearrangement_analysis_launcher(gpu, name, band)()
+                got = gpu["projected"].ravel()[:2 * h * band].reshape(band, 2 * h).get()
+                np.testing.assert_allclose(got.T, expected, rtol=0, atol=1e-5 * abs(expected).max(),
+                                           err_msg=f"{name} at {band} bands")
+        monkeypatch.setattr(slm_solver, "_analysis_cache_file", lambda: tmp_path / "analysis.json")
+        choices, measured = slm_solver._rearrangement_analysis_choices(gpu, range(8, 25, 8))
+        assert measured == [8, 16, 24] and set(choices) == {8, 16, 24}
+        assert all(entry["choice"] in names and set(entry["us"]) == set(names) for entry in choices.values())
+        again, measured = slm_solver._rearrangement_analysis_choices(gpu, range(8, 33, 8))
+        assert measured == [32] and {band: again[band] for band in choices} == choices
+
+
 def test_rearrangement_fractional_delay_uses_full_continuous_clearance():
     def interval(start, end, distance):
         return slm_solver._rearrangement_unsafe_delay(start[0], end[0], start[1], end[1], distance)

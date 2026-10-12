@@ -11,11 +11,13 @@ lands in bench/results/slm_t400_<host>_<time>/ and a .zip of that folder:
   nvidia_smi.txt  nvidia-smi -q before the run
 
 Sections:
+  warm     what bin/warm_slm_gpu.bat does: the analysis product chosen per band count on this GPU (cuBLAS or one
+           of the solver's warp kernels), measured now or read from slm_gpu_cache/
   calib    FP32 and FP64 FMA rates, device-memory copy bandwidth, pinned 1.3 MB host<->device copies
-  gemm     the analysis product through cuBLAS (the production call and its alternatives) and cuBLAS-free
-           kernels, K = 8 ... 64 bands
-  kernels  one evaluation (encode, correct, measure) and each of its kernels, the ghost watch, track kernels,
-           on run 14's removal, next and transport rosters
+  gemm     every analysis-product candidate (cuBLAS's production call, the solver's warp kernels) and cuBLAS on an
+           FP32 field for reference, K = 8 ... 64 bands
+  kernels  one evaluation (encode, correct, measure) and each of its kernels (the analysis product as chosen and
+           through cuBLAS), the ghost watch, track kernels, on run 14's removal, next and transport rosters
   maps     one map of every schedule kind as its captured graph(s), on run 14 and on the 3x3 target
   plane    the refined last map's capped full-plane iterations and the last map's stray measurement
   ramp     a transport map launched 60 times right after 2 s idle: per-launch device time against elapsed time
@@ -64,40 +66,6 @@ extern "C" __global__ void dfma_peak(double* out,int iters){
 }
 extern "C" __global__ void copy_u32(const unsigned int* __restrict__ a,unsigned int* __restrict__ b,int n){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<n)b[i]=a[i];
-}
-#ifndef AR
-#define AR 4
-#endif
-#ifndef KC
-#define KC 8
-#endif
-extern "C" __global__ void analysis_warp(const half* __restrict__ field,const float* __restrict__ forward,
- float* __restrict__ out,int rows,int C,int K){
- int lane=threadIdx.x&31,row0=((blockIdx.x*blockDim.x+threadIdx.x)>>5)*AR;if(row0>=rows)return;
- for(int k0=0;k0<K;k0+=KC){
-  float acc[AR][KC];
-  #pragma unroll
-  for(int r=0;r<AR;r++)
-   #pragma unroll
-   for(int k=0;k<KC;k++)acc[r][k]=0;
-  for(int c=lane;c<C;c+=32){
-   float v[AR];
-   #pragma unroll
-   for(int r=0;r<AR;r++)v[r]=__half2float(field[(row0+r)*C+c]);
-   const float4* f=(const float4*)(forward+c*K+k0);
-   #pragma unroll
-   for(int k=0;k<KC;k+=4)if(k0+k<K){float4 w=f[k/4];
-    #pragma unroll
-    for(int r=0;r<AR;r++){acc[r][k]+=v[r]*w.x;acc[r][k+1]+=v[r]*w.y;acc[r][k+2]+=v[r]*w.z;acc[r][k+3]+=v[r]*w.w;}}
-  }
-  #pragma unroll
-  for(int r=0;r<AR;r++)
-   #pragma unroll
-   for(int k=0;k<KC;k++)if(k0+k<K){float a=acc[r][k];
-    #pragma unroll
-    for(int o=16;o;o>>=1)a+=__shfl_xor_sync(0xffffffffu,a,o);
-    if(lane==((r*KC+k)&31))out[(row0+r)*K+k0+k]=a;}
- }
 }
 '''
 
@@ -294,10 +262,9 @@ def start_state(gpu, kept):
 
 def kernel_launches(m, gpu, band):
     """Name -> launch of one evaluation and of each of its kernels, with the solver's own arguments."""
-    K_, cb, gemm = gpu["kernels"], gpu["cublas"], gpu["gemm"]
+    K_ = gpu["kernels"]
     h, w = gpu["shape"]
     P, sites = gpu["padded"], gpu["actual"].size
-    alpha, beta = gpu["alpha"].ctypes.data, gpu["beta"].ctypes.data
     L = {f"evaluation_{op}": (lambda op=op: m._rearrangement_propagate(gpu, band, op)) for op in ("encode", "correct", "measure")}
     L[f"evaluation_correct(band+{m._TRACK_WATCH_BANDS})"] = lambda: m._rearrangement_propagate(gpu, band + m._TRACK_WATCH_BANDS, "correct")
     for mode, op in enumerate(("measure", "encode", "correct")):
@@ -306,9 +273,8 @@ def kernel_launches(m, gpu, band):
             (gpu["coefficients"], gpu["band_start"], gpu["band_point"], gpu["point_roots"], gpu["roots"], gpu["amplitude"],
              gpu["incident_turns"], gpu["codes"], gpu["field"], np.float32(2 / gpu["pupil_energy"]),
              *map(np.int32, (mode, sites, h, w, P, band))), shared_mem=8 * band * 8)
-    L["analysis_gemm(cuBLAS)"] = lambda: gemm(gpu["handle"], 1, 1, 2 * h, band, 2 * P, alpha, gpu["field"].data.ptr, 2, 2 * P,
-                                              gpu["forward"].data.ptr, 2, band, beta, gpu["projected"].data.ptr, 0, 2 * h,
-                                              cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT)
+    L["analysis(as chosen)"] = gpu["analysis"][band]
+    L["analysis(cuBLAS)"] = m._rearrangement_analysis_launcher(gpu, "cublas", band)
     L["project_points"] = lambda: K_["project_points"]((sites,), (256,), (gpu["projected"], gpu["point_band"],
                                                                          gpu["point_roots"], gpu["actual"], np.int32(h)))
     L["roots(per map)"] = lambda: m._rearrangement_roots(gpu, band)
@@ -329,6 +295,13 @@ def kernel_launches(m, gpu, band):
 
 
 # ---------------------------------------------------------------- sections
+def section_warm(m):
+    t0 = time.perf_counter()
+    report = m.warm_rearrangement_gpu(SHAPE)
+    log(report)
+    return dict(report=report, seconds=time.perf_counter() - t0)
+
+
 def section_calib(cp):
     stream = cp.cuda.Stream(non_blocking=True)
     mod = cp.RawModule(code=KERNELS)
@@ -369,30 +342,25 @@ def section_gemm(cp, m, prepared):
         rng = np.random.default_rng(0)
         field = cp.asarray(rng.normal(size=(2 * h, 2 * P)).astype(np.float16))
         field32 = field.astype(cp.float32)
-        warp = {(ar, kc): cp.RawModule(code=f"#define AR {ar}\n#define KC {kc}\n" + KERNELS).get_function("analysis_warp")
-                for ar, kc in ((2, 8), (4, 8), (8, 8))}
+        names = ["cublas", *(f"analysis_{rows}_{bands}" for rows, bands in m._ANALYSIS_KERNELS if 2 * h % rows == 0)]
         for K in (8, 16, 24, 32, 40, 48, 64):
-            fwd = cp.asarray(rng.normal(size=(2 * P, K)).astype(np.float16))
+            roots = cp.asarray(rng.normal(size=(K, P, 2)).astype(np.float16))
+            fwd = cp.ascontiguousarray(cp.concatenate((roots[:, :, 0].T, roots[:, :, 1].T)))
             fwd32 = fwd.astype(cp.float32)
             ref = field32 @ fwd32
             proj, projT = cp.zeros((2 * h, K), cp.float32), cp.zeros((K, 2 * h), cp.float32)
+            # The solver's own launches of each candidate, on these arrays.
+            local = dict(gpu, field=field, roots=roots, forward=fwd, projected=projT)
 
             def call(*args):
                 status = gemm(gpu["handle"], *args)
                 assert status == 0, f"cuBLAS status {status}"
             cases = {
-                "analysis_cublas_fp16_transposed(production)": lambda: call(
-                    1, 1, 2 * h, K, 2 * P, one.ctypes.data, field.data.ptr, 2, 2 * P, fwd.data.ptr, 2, K,
-                    zero.ctypes.data, projT.data.ptr, 0, 2 * h, cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT),
-                "analysis_cublas_fp16": lambda: call(
-                    0, 0, K, 2 * h, 2 * P, one.ctypes.data, fwd.data.ptr, 2, K, field.data.ptr, 2, 2 * P,
-                    zero.ctypes.data, proj.data.ptr, 0, K, cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT),
-                "analysis_cublas_fp32": lambda: call(
+                **{("analysis_cublas_fp16_transposed(production)" if name == "cublas" else name):
+                   m._rearrangement_analysis_launcher(local, name, K) for name in names},
+                "analysis_cublas_fp32(reference, FP32 field)": lambda: call(
                     0, 0, K, 2 * h, 2 * P, one.ctypes.data, fwd32.data.ptr, 0, K, field32.data.ptr, 0, 2 * P,
                     zero.ctypes.data, proj.data.ptr, 0, K, cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT),
-                **{f"analysis_warp_kernel_AR{ar}_KC{kc}": (lambda ar=ar, kc=kc: warp[ar, kc](
-                    ((2 * h // ar * 32 + 127) // 128,), (128,), (field, fwd32, proj, np.int32(2 * h), np.int32(2 * P), np.int32(K))))
-                   for ar, kc in warp},
             }
             row = {}
             for name, f in cases.items():
@@ -401,7 +369,7 @@ def section_gemm(cp, m, prepared):
                     projT[...] = 0
                     f()
                     stream.synchronize()
-                    got = projT.T if "transposed" in name else proj
+                    got = proj if "fp32" in name else projT.T
                     err = float(cp.max(cp.abs(got - ref)) / cp.max(cp.abs(ref)))
                     us = graph_timer(cp, stream, f, reps=10, trials=5)[0]
                     row[name] = dict(us=us, rel_err=err, gflops=2 * 2 * h * 2 * P * K / (us * 1e-6) / 1e9)
@@ -666,7 +634,7 @@ def section_gap(cp, mods, s, rounds):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--rounds", type=int, default=5)
-    ap.add_argument("--sections", default="calib,gemm,kernels,maps,plane,ramp,seq,gap")
+    ap.add_argument("--sections", default="warm,calib,gemm,kernels,maps,plane,ramp,seq,gap")
     args = ap.parse_args()
     sections = args.sections.split(",")
     stamp = f"slm_t400_{platform.node()}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -708,6 +676,7 @@ def main():
         result.update(cupy=cp.__version__, cuda_runtime=cp.cuda.runtime.runtimeGetVersion(),
                       driver=cp.cuda.runtime.driverGetVersion(), solvers={k: m.__file__ for k, m in mods.items()})
         new = mods["new"]
+        run("warm", lambda: section_warm(new))
         run("calib", lambda: section_calib(cp))
         for sname in ("real14", "real14c3"):
             if not any(x in sections for x in ("gemm", "kernels", "maps", "plane", "ramp")):

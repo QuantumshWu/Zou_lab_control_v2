@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from hashlib import sha256
 import atexit
 import json
 import os
@@ -2536,6 +2537,50 @@ extern "C" __global__ void project_points(const float* projected,const int* poin
  for(int s=128;s;s>>=1){if(t<s){sr[t]+=sr[t+s];si[t]+=si[t+s];}__syncthreads();}
  if(!t)actual[p]=make_float2(sr[0],si[0]);
 }
+// The analysis product without cuBLAS: row i of band k sums field[i][x]*cos_k(x)+field[i][P+x]*sin_k(x)
+// over x, cos and sin read from the synthesis roots. A warp sums TM rows for KC bands, each lane four x
+// per step, then halves its partial sums across the warp until each lane holds TM*KC/32 of them. The NB
+// warps of a block share their rows (one field read from memory, met again in L1) and take every NB-th
+// group of KC bands.
+__device__ __forceinline__ float2 half_pair(unsigned int bits){return __half22float2(*reinterpret_cast<half2*>(&bits));}
+template<int TM,int KC>
+__device__ __forceinline__ void analysis_rows(const half* __restrict__ field,const half2* __restrict__ roots,
+ float* __restrict__ projected,int rows,int P,int K,int NB){
+ constexpr int N=TM*KC;static_assert(N%32==0,"a warp's sums must fill its lanes");
+ int lane=threadIdx.x&31,warp=threadIdx.x>>5,row0=(blockIdx.x*(blockDim.x>>5)/NB+warp/NB)*TM;
+ if(row0>=rows)return;
+ for(int k0=warp%NB*KC;k0<K;k0+=NB*KC){
+  float v[N];
+  #pragma unroll
+  for(int j=0;j<N;j++)v[j]=0;
+  for(int c=lane*4;c<P;c+=128){
+   float a[TM][8];
+   #pragma unroll
+   for(int r=0;r<TM;r++){const half* f=field+(unsigned long long)(row0+r)*2*P+c;
+    uint2 u=*reinterpret_cast<const uint2*>(f),w=*reinterpret_cast<const uint2*>(f+P);
+    float2 p0=half_pair(u.x),p1=half_pair(u.y),q0=half_pair(w.x),q1=half_pair(w.y);
+    a[r][0]=p0.x;a[r][1]=q0.x;a[r][2]=p0.y;a[r][3]=q0.y;a[r][4]=p1.x;a[r][5]=q1.x;a[r][6]=p1.y;a[r][7]=q1.y;}
+   #pragma unroll
+   for(int k=0;k<KC;k++)if(k0+k<K){
+    uint4 b=*reinterpret_cast<const uint4*>(roots+(unsigned long long)(k0+k)*P+c);
+    float2 b0=half_pair(b.x),b1=half_pair(b.y),b2=half_pair(b.z),b3=half_pair(b.w);
+    #pragma unroll
+    for(int r=0;r<TM;r++){float s=v[r*KC+k];
+     s=fmaf(a[r][0],b0.x,s);s=fmaf(a[r][1],b0.y,s);s=fmaf(a[r][2],b1.x,s);s=fmaf(a[r][3],b1.y,s);
+     s=fmaf(a[r][4],b2.x,s);s=fmaf(a[r][5],b2.y,s);s=fmaf(a[r][6],b3.x,s);s=fmaf(a[r][7],b3.y,s);
+     v[r*KC+k]=s;}
+   }
+  }
+  // Lane bit m keeps the upper or lower half and adds its partner's: lane l ends with sums l*N/32 on.
+  #pragma unroll
+  for(int s=0;s<5;s++){const int m=16>>s,n=N>>(s+1);bool upper=lane&m;
+   #pragma unroll
+   for(int j=0;j<n;j++){float send=upper?v[j]:v[j+n],keep=upper?v[j+n]:v[j];
+    v[j]=keep+__shfl_xor_sync(0xffffffffu,send,m);}}
+  #pragma unroll
+  for(int j=0;j<N/32;j++){int o=j+N/32*lane,k=k0+o%KC;if(k<K)projected[(unsigned long long)k*rows+row0+o/KC]=v[j];}
+ }
+}
 __device__ __forceinline__ void pack_pair(half* packed,float2 plus,float2 minus,int y,int d,int H,int P){
  int r=y*2*P+d;
  packed[r]=__float2half_rn(plus.x+minus.x);packed[r+P]=__float2half_rn(plus.y-minus.y);
@@ -2934,6 +2979,17 @@ extern "C" __global__ void select_watch(const float2* F,const float* found,int H
   for(int o=0;o<p;o++)q+=point_band[o]==point_band[p];band_point[q]=p;}
 }
 '''
+# The analysis product's warp kernels (rows per warp, bands per pass), measured
+# against cuBLAS per GPU and band count (_rearrangement_analysis_choices).
+_ANALYSIS_KERNELS = ((4, 8), (8, 8), (2, 16), (4, 16), (2, 32))
+_REARRANGEMENT_CUDA += "".join(
+    f'extern "C" __global__ void analysis_{rows}_{bands}(const half* field,const half2* roots,float* projected,'
+    f'int R,int P,int K,int NB){{analysis_rows<{rows},{bands}>(field,roots,projected,R,P,K,NB);}}\n'
+    for rows, bands in _ANALYSIS_KERNELS)
+_REARRANGEMENT_KERNELS = ("phase_step_rms", "point_roots", "project_points", "select_roots", "evaluate",
+                          "display", "encode_phase", "plane_traps", "plane_cap", "plane_unit",
+                          "track_load", "track_sweep", "track_residual", "watch_display", "peaks", "select_watch",
+                          *(f"analysis_{rows}_{bands}" for rows, bands in _ANALYSIS_KERNELS))
 _EVALUATE_ROWS = 8  # focal rows per evaluate block (ROWS)
 
 
@@ -3217,8 +3273,8 @@ _ARRAY_STRAY = .01
 _ARRAY_STRAY_RADIUS = 3.      # native Fourier pixels around a trap that belong to it
 
 
-def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requested):
-    """Prepare the one native fractional-Fourier workspace and its band sizes."""
+def _rearrangement_cuda_imports():
+    """CuPy, its cuBLAS module and the loader of NVIDIA's libraries, or a message naming the GPU installer."""
     try:
         import cupy as cp  # noqa: PLC0415
         from cupy.cuda import cublas  # noqa: PLC0415
@@ -3229,8 +3285,36 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
         raise RuntimeError(f"Cannot import CuPy/CUDA libraries with Python {sys.executable}: "
                            f"{type(error).__name__}: {error}. Run bin\\install_slm_gpu.bat "
                            "for this product/interpreter, or install zou-lab-control[slm-gpu] using this interpreter.") from error
+    return cp, cublas, load_nvidia_dynamic_lib
+
+
+def _rearrangement_blas(load_library):
+    """cuBLAS and its GemmEx and SetWorkspace entry points."""
     import ctypes  # noqa: PLC0415
 
+    library = (ctypes.WinDLL if os.name == "nt" else ctypes.CDLL)(load_library("cublas").abs_path)
+    gemm = library.cublasGemmEx
+    pointer, integer = ctypes.c_void_p, ctypes.c_int
+    gemm.argtypes = [pointer, integer, integer, integer, integer, integer, pointer,
+                     pointer, integer, integer, pointer, integer, integer,
+                     pointer, pointer, integer, integer, integer, integer]
+    gemm.restype = integer
+    set_workspace = library.cublasSetWorkspace_v2
+    set_workspace.argtypes = [pointer, pointer, ctypes.c_size_t]
+    set_workspace.restype = integer
+    return library, gemm, set_workspace
+
+
+def _rearrangement_module(cp):
+    """The rearrangement CUDA module; CuPy keeps its compiled binary on disk."""
+    return cp.RawModule(code=_REARRANGEMENT_CUDA, options=tuple(f"-D{name}={value}" for name, value in (
+        ("ROWS", _EVALUATE_ROWS), ("MEMORY", _TRACK_ANDERSON), ("CANDIDATES", _TRACK_WATCH_CANDIDATES),
+        ("BINS", _TRACK_WATCH_BINS))))
+
+
+def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requested):
+    """Prepare the one native fractional-Fourier workspace and its band sizes."""
+    cp, cublas, load_library = _rearrangement_cuda_imports()
     shape = geometry["shape_yx"]
     pupil = np.asarray(pupil_amplitude, np.float32)
     if (pupil.shape != shape or not np.all(np.isfinite(pupil))
@@ -3249,16 +3333,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
     try:
         with _rearrangement_gpu_active(keeper):
             stream = cp.cuda.Stream(non_blocking=True, priority=-1)
-            library = (ctypes.WinDLL if os.name == "nt" else ctypes.CDLL)(load_nvidia_dynamic_lib("cublas").abs_path)
-            gemm = library.cublasGemmEx
-            pointer, integer = ctypes.c_void_p, ctypes.c_int
-            gemm.argtypes = [pointer, integer, integer, integer, integer, integer, pointer,
-                            pointer, integer, integer, pointer, integer, integer,
-                            pointer, pointer, integer, integer, integer, integer]
-            gemm.restype = integer
-            set_workspace = library.cublasSetWorkspace_v2
-            set_workspace.argtypes = [pointer, pointer, ctypes.c_size_t]
-            set_workspace.restype = integer
+            library, gemm, set_workspace = _rearrangement_blas(load_library)
             source, target = geometry["source_yx"], geometry["target_yx"]
             number = len(source)
             # A map roster is the selected traps plus at most every unselected
@@ -3276,12 +3351,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                 raise ValueError(f"SLM rearrangement needs {capacity} Fourier bands (distinct source and target "
                                  f"columns, {_TRACK_WATCH_BANDS} for the ghost watch); this GPU's shared memory holds "
                                  f"at most {shared // (8 * _EVALUATE_ROWS)}")
-            module = cp.RawModule(code=_REARRANGEMENT_CUDA, options=tuple(f"-D{name}={value}" for name, value in (
-                ("ROWS", _EVALUATE_ROWS), ("MEMORY", _TRACK_ANDERSON), ("CANDIDATES", _TRACK_WATCH_CANDIDATES),
-                ("BINS", _TRACK_WATCH_BINS))))
-            names = ("phase_step_rms", "point_roots", "project_points", "select_roots", "evaluate",
-                     "display", "encode_phase", "plane_traps", "plane_cap", "plane_unit",
-                     "track_load", "track_sweep", "track_residual", "watch_display", "peaks", "select_watch")
+            module = _rearrangement_module(cp)
             from cupyx.scipy.fft import get_fft_plan  # noqa: PLC0415
             from scipy.fft import fft2, fftshift, ifftshift  # noqa: PLC0415
 
@@ -3289,7 +3359,7 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
             h, w = shape
             padded = (w // 2 + 16) // 16 * 16
             gpu = dict(cp=cp, cublas=cublas, stream=stream, module=module,
-                       kernels={name: module.get_function(name) for name in names},
+                       kernels={name: module.get_function(name) for name in _REARRANGEMENT_KERNELS},
                        library=library, gemm=gemm, shape=shape, padded=padded,
                        capacity=capacity, pupil_cpu=pupil.copy(), incident_cpu=np.asarray(incident, np.float32).copy(),
                        psf_support=_psf_main_lobe(psf, tuple(np.asarray(shape) // 2)),
@@ -3374,6 +3444,9 @@ def _prepare_rearrangement_gpu(geometry, pupil_amplitude, pupil_phase, stop_requ
                     # A map's codes leave the device on their own stream from a
                     # snapshot while the next map computes: one slot per map in flight.
                     copy_stream=cp.cuda.Stream(non_blocking=True), frame_slots=cp.empty((2, h, w), cp.uint8))
+                choices, _ = _rearrangement_analysis_choices(gpu, range(8, capacity + 1, 8), stop_requested)
+                gpu["analysis"] = {band: _rearrangement_analysis_launcher(gpu, entry["choice"], band)
+                                   for band, entry in choices.items()}
                 # cuFFT plans of the workspace's own: a cached plan would keep its work area after close.
                 gpu["watch_plan"] = get_fft_plan(gpu["watch_plane"], axes=(0, 1), value_type="C2C")
                 gpu["plane_plan"] = get_fft_plan(gpu["optical"], axes=(0, 1), value_type="C2C")
@@ -3458,8 +3531,7 @@ def _rearrangement_propagate(gpu, band, operation):
     keeps the displayed codes. Each measures the actual encoded field."""
     h, w = gpu["shape"]
     padded, sites = gpu["padded"], gpu["actual"].size
-    kernels, cb, gemm = gpu["kernels"], gpu["cublas"], gpu["gemm"]
-    alpha, beta = gpu["alpha"].ctypes.data, gpu["beta"].ctypes.data
+    kernels = gpu["kernels"]
     rows = _EVALUATE_ROWS
     kernels["evaluate"](((padded + 127) // 128, (h + rows - 1) // rows), (128,),
                         (gpu["coefficients"], gpu["band_start"], gpu["band_point"], gpu["point_roots"], gpu["roots"],
@@ -3467,13 +3539,188 @@ def _rearrangement_propagate(gpu, band, operation):
                          np.float32(2 / gpu["pupil_energy"]),
                          *map(np.int32, (("measure", "encode", "correct").index(operation), sites, h, w, padded, band))),
                         shared_mem=rows * band * 8)
-    status = gemm(gpu["handle"], 1, 1, 2 * h, band, 2 * padded, alpha,
-                  gpu["field"].data.ptr, 2, 2 * padded, gpu["forward"].data.ptr, 2, band, beta,
-                  gpu["projected"].data.ptr, 0, 2 * h, cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT)
-    if status:
-        raise RuntimeError(f"SLM cuBLAS analysis failed ({status})")
+    gpu["analysis"][band]()
     kernels["project_points"]((sites,), (256,), (gpu["projected"], gpu["point_band"], gpu["point_roots"],
                                                   gpu["actual"], np.int32(h)))
+
+
+# The analysis product (the packed field against the X roots of each band) is
+# cuBLAS's or a warp kernel's, whichever is faster on this GPU for the band
+# count. cuBLAS multiplies the half field on tensor cores where the GPU has them;
+# the lab's T400 has none, and there it took 0.57 ms at 8 to 16 bands and 2.2 ms
+# from 40, more than the evaluate kernel, while a warp kernel reads the field
+# from memory once. A choice is measured once per GPU, driver, cuBLAS, CUDA
+# source and panel size and kept in _ANALYSIS_CACHE beside the checkout (in the
+# user's local cache when installed): bin\warm_slm_gpu.bat measures every band
+# count up to _ANALYSIS_WARM_BANDS, and a preparation measures any it still
+# lacks. A candidate whose single launch is 1.5 times the fastest one's is
+# dropped; the others are timed _ANALYSIS_TRIALS times in turn, about 1 ms each
+# in one CUDA graph like a map's, and the lowest median wins.
+_ANALYSIS_CACHE = "slm_gpu_cache"
+_ANALYSIS_TRIALS = 5
+_ANALYSIS_WARM_BANDS = 256
+
+
+def _rearrangement_analysis_launcher(gpu, name, band):
+    """A launch of one analysis product of band bands into gpu["projected"]."""
+    h, padded = gpu["shape"][0], gpu["padded"]
+    if name == "cublas":
+        cb, gemm = gpu["cublas"], gpu["gemm"]
+        arguments = (gpu["handle"], 1, 1, 2 * h, band, 2 * padded, gpu["alpha"].ctypes.data,
+                     gpu["field"].data.ptr, 2, 2 * padded, gpu["forward"].data.ptr, 2, band, gpu["beta"].ctypes.data,
+                     gpu["projected"].data.ptr, 0, 2 * h, cb.CUBLAS_COMPUTE_32F, cb.CUBLAS_GEMM_DEFAULT)
+
+        def launch():
+            status = gemm(*arguments)
+            if status:
+                raise RuntimeError(f"SLM cuBLAS analysis failed ({status})")
+        return launch
+    rows, bands = map(int, name.split("_")[1:])
+    # Up to four warps share a block's rows; with fewer band groups a block holds more rows.
+    warps = min(-(-band // bands), 4)
+    groups = max(1, 4 // warps)
+    kernel, grid, block = gpu["kernels"][name], (-(-(2 * h // rows) // groups),), (32 * warps * groups,)
+    arguments = (gpu["field"], gpu["roots"], gpu["projected"], *map(np.int32, (2 * h, padded, band, warps)))
+    return lambda: kernel(grid, block, arguments)
+
+
+def _analysis_cache_file():
+    here = Path(__file__).resolve()
+    root = here.parents[6]
+    if here.parent == root / "packages" / "zlc_atom" / "src" / "zlc_atom" / "devices" / "slm":
+        return root / _ANALYSIS_CACHE / "analysis.json"
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "zou_lab_control" / _ANALYSIS_CACHE / "analysis.json"
+
+
+def _analysis_cache_read(path, key):
+    try:
+        cache = strict_json_loads(path.read_text(encoding="utf-8"), "SLM analysis choices")
+    except (OSError, ValueError):
+        return {}
+    entry = cache.get(key) if isinstance(cache, dict) else None
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def _rearrangement_analysis_choices(gpu, bands, stop_requested=None):
+    """Each band count's analysis product {band: {"choice", "us"}} and the band counts measured now."""
+    cp, stream, h = gpu["cp"], gpu["stream"], gpu["shape"][0]
+    runtime = cp.cuda.runtime
+    properties = runtime.getDeviceProperties(cp.cuda.Device().id)
+    key = " | ".join((properties["name"].decode(), f"sm_{properties['major']}{properties['minor']}",
+                      f"{properties['multiProcessorCount']} SMs", f"driver {runtime.driverGetVersion()}",
+                      f"cuBLAS {gpu['cublas'].getVersion(gpu['handle'])}", f"field {2 * h}x{2 * gpu['padded']}",
+                      f"source {sha256(_REARRANGEMENT_CUDA.encode()).hexdigest()[:16]}"))
+    names = ["cublas", *(f"analysis_{rows}_{bands}" for rows, bands in _ANALYSIS_KERNELS if 2 * h % rows == 0)]
+    path = _analysis_cache_file()
+    known = _analysis_cache_read(path, key)
+    missing = [band for band in bands if not (isinstance(known.get(str(band)), dict)
+                                              and known[str(band)].get("choice") in names)]
+    if missing:
+        start, end = cp.cuda.Event(), cp.cuda.Event()
+
+        def captured(launch, repeats):
+            stream.begin_capture(runtime.streamCaptureModeThreadLocal)
+            try:
+                for _ in range(repeats):
+                    launch()
+            finally:
+                graph = stream.end_capture()
+            graph.upload(stream)
+            return graph
+
+        def timed(graph):
+            start.record(stream)
+            graph.launch(stream)
+            end.record(stream)
+            end.synchronize()
+            return cp.cuda.get_elapsed_time(start, end) * 1e3
+
+        # An idle GPU lowers its clock: keep it busy before the first candidate is timed.
+        busy = captured(_rearrangement_analysis_launcher(gpu, "cublas", missing[0]), 10)
+        for _ in range(20):
+            timed(busy)
+        for band in missing:
+            if stop_requested is not None and stop_requested():
+                raise InterruptedError("SLM rearrangement preparation stopped")
+            launches = {name: _rearrangement_analysis_launcher(gpu, name, band) for name in names}
+            single = {}
+            for name, launch in launches.items():
+                launch()  # loads the kernel and lets cuBLAS plan outside capture, as a preparation does
+                single[name] = timed(captured(launch, 1))
+            fastest = min(single.values())
+            graphs = {}
+            for name, launch in launches.items():
+                if single[name] <= 1.5 * fastest:
+                    repeats = max(1, min(20, round(1000 / max(single[name], 1))))
+                    graphs[name] = captured(launch, repeats), repeats
+            trials = {name: [] for name in graphs}
+            for _ in range(_ANALYSIS_TRIALS):
+                for name, (graph, repeats) in graphs.items():
+                    trials[name].append(timed(graph) / repeats)
+            us = {**single, **{name: float(np.median(times)) for name, times in trials.items()}}
+            known[str(band)] = {"choice": min(trials, key=us.__getitem__),
+                                "us": {name: round(us[name], 1) for name in names}}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                cache = strict_json_loads(path.read_text(encoding="utf-8"), "SLM analysis choices")
+            except (OSError, ValueError):
+                cache = {}
+            cache = cache if isinstance(cache, dict) else {}
+            cache[key] = {**_analysis_cache_read(path, key), **{str(band): known[str(band)] for band in missing}}
+            write_readable_json(path, cache)
+        except OSError:
+            pass  # a read-only location only measures again next time
+    return {band: known[str(band)] for band in bands}, missing
+
+
+@contextmanager
+def _rearrangement_analysis_workspace(shape_yx, capacity):
+    """The compiled module, a cuBLAS handle and the analysis buffers of one panel, without a preparation."""
+    cp, cublas, load_library = _rearrangement_cuda_imports()
+    library, gemm, set_workspace = _rearrangement_blas(load_library)
+    h, w = shape_yx
+    padded = (w // 2 + 16) // 16 * 16
+    pool = cp.cuda.MemoryPool()
+    stream = cp.cuda.Stream(non_blocking=True)
+    with cp.cuda.using_allocator(pool.malloc), stream:
+        module = _rearrangement_module(cp)
+        gpu = dict(cp=cp, cublas=cublas, library=library, gemm=gemm, stream=stream, shape=(h, w), padded=padded,
+                   kernels={name: module.get_function(name) for name in _REARRANGEMENT_KERNELS},
+                   blas_workspace=cp.empty(4 * 1024 * 1024, cp.uint8),
+                   field=cp.zeros((2, h, 2 * padded), cp.float16), roots=cp.zeros((capacity, padded, 2), cp.float16),
+                   forward=cp.zeros((2 * padded, capacity), cp.float16), projected=cp.zeros((capacity, 2, h), cp.float32),
+                   alpha=np.asarray(1, np.float32), beta=np.asarray(0, np.float32))
+        gpu["handle"] = cublas.create()
+        try:
+            cublas.setStream(gpu["handle"], stream.ptr)
+            status = set_workspace(gpu["handle"], gpu["blas_workspace"].data.ptr, gpu["blas_workspace"].nbytes)
+            if status:
+                raise RuntimeError(f"SLM cuBLAS workspace setup failed ({status})")
+            yield gpu
+            stream.synchronize()
+        finally:
+            cublas.destroy(gpu["handle"])
+            gpu.clear()
+            pool.free_all_blocks()
+
+
+def warm_rearrangement_gpu(shape_yx, maximum_bands=_ANALYSIS_WARM_BANDS):
+    """Compile the rearrangement CUDA module and choose the analysis product of
+    every band count up to maximum_bands for one panel, as a first preparation
+    would; the report names each choice. bin/warm_slm_gpu.bat runs it."""
+    bands = range(8, maximum_bands + 1, 8)
+    with _rearrangement_analysis_workspace(shape_yx, bands[-1]) as gpu:
+        choices, measured = _rearrangement_analysis_choices(gpu, bands)
+        cp = gpu["cp"]
+        name = cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)["name"].decode()
+    h, w = shape_yx
+    lines = [f"{name}: SLM rearrangement CUDA module compiled; analysis product of {h} x {w} panels "
+             f"for {len(choices)} band counts ({len(measured)} measured now) in {_analysis_cache_file()}",
+             f"{'bands':>6}  {'choice':<14}{'us':>9}{'cuBLAS us':>11}"]
+    for band, entry in choices.items():
+        lines.append(f"{band:>6}  {entry['choice']:<14}{entry['us'][entry['choice']]:>9.1f}{entry['us']['cublas']:>11.1f}")
+    return "\n".join(lines)
 
 
 def _rearrangement_record_views(buffer, sites, capacity):
