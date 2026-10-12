@@ -113,7 +113,7 @@ class SlmRearrangementTask:
                  science_context_path, target_rows=3, target_columns=3,
                  target_intensity=None, target_path=None,
                  pulse_sequence, pulse_path, before_period, after_period="",
-                 exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
+                 exposure_seconds=None, motion_frames=16, frame_rate_hz=60.,
                  frame_mode="fixed", max_camera_step=1.,
                  minimum_separation=15., intensity_tolerance=1.01, motion_intensity_tolerance=1.10,
                  save_phase_sequence=True, save_figure_artifact=None, recording_frames=None):
@@ -126,7 +126,7 @@ class SlmRearrangementTask:
         self.target_path = None if target_path is None else str(Path(target_path).resolve())
         self.sequence, self.pulse_path = pulse_sequence, Path(pulse_path).resolve()
         self.before_period, self.after_period = str(before_period), str(after_period)
-        self.exposure_seconds = float(exposure_seconds)
+        self.exposure_seconds = None if exposure_seconds is None else float(exposure_seconds)
         self.motion_frames = int(motion_frames)
         self.frame_mode = str(frame_mode)
         self.max_camera_step = float(max_camera_step)
@@ -172,8 +172,6 @@ class SlmRearrangementTask:
         self.points = (source, destination)
         self.weights = (weights, self.target_intensity[tuple(destination.T)])
         self.readout_order = order
-        contract = calibration.frame_contract
-        self.roi = contract.roi_xywh
         self._revision = 0
         self._snapshots, self._records, self._detections = {}, [], []
         self._timings, self._playback, self._result, self._plan = {}, None, None, None
@@ -749,7 +747,7 @@ class SlmRearrangementTask:
             photoelectron = reads_photoelectrons(self.calibration)
             node = CameraMeasurementNode(camera=self.camera,
                 request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
-                    roi_xywh=self.roi, repeat=self.recording_frames or 2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
+                    roi_xywh=None, repeat=self.recording_frames or 2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
                 signal_plane=self.signal_plane, producer=f"{self.instance_id}/camera")
             start = perf_counter(); capture = node.prepare(owns_generation=False, should_stop=stopped)
             self._timings["camera_arm"] = (perf_counter()-start)*1000

@@ -569,6 +569,8 @@ def _patch_numeric_run(monkeypatch, *, solve, fit, on_measure=None) -> None:
 
     def measure(task, context, iteration):
         del context, iteration
+        # The camera grants the requested exposure, as a real measurement records it.
+        task._actual_exposure_seconds = task.exposure_seconds
         if on_measure is not None:
             on_measure(task)
         return _zero_batch(task)
@@ -657,7 +659,8 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert defaults["maximum_weight_change"] == pytest.approx(0.5)
     assert defaults["max_updates"] == 12
     assert defaults["feedback_mode"] == "qcmos_bright_dark"
-    assert defaults["exposure_seconds"] == pytest.approx(0.1)
+    # Blank is the camera's own exposure (its Device Manager setting).
+    assert defaults["exposure_seconds"] is None
     assert defaults["pulse_template"] == ""
     template = next(
         f for f in descriptor.authoring_schema.fields if f.name == "pulse_template"
@@ -667,7 +670,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     pulse_only = descriptor.authoring_schema.project_values(
         {"pulse_template": "operator-selected.json"}
     )
-    assert pulse_only["exposure_seconds"] == pytest.approx(0.1)
+    assert pulse_only["exposure_seconds"] is None
     assert pulse_only["probe_factors"] == (0.5, 2.0)
     projected = descriptor.authoring_schema.project_values(
         {
@@ -2796,6 +2799,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         "pulse_path": str(Path(IMAGING_PULSE_RESOURCE.path).resolve()),
         "program_digest": _PROGRAM_DIGEST,
         "exposure_seconds": 0.020,
+        "actual_exposure_seconds": 0.020,
         "probe_factors": [0.5, 2.0],
         "feedback_gain": 0.25,
         "maximum_weight_change": 0.5,

@@ -44,7 +44,7 @@ def _build(
         camera=camera,  # type: ignore[arg-type]
         request=CameraMeasurementRequest(
             camera_key=camera_key,
-            exposure_seconds=float(authored["exposure_seconds"]),
+            exposure_seconds=authored["exposure_seconds"],
             roi_xywh=roi,  # type: ignore[arg-type]
             repeat=int(authored["repeat"]),
             frames_per_cycle=int(authored["frames_per_cycle"]),

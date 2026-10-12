@@ -5,12 +5,22 @@ from __future__ import annotations
 from dataclasses import replace
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera.roi_grid import authored_roi_xywh
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
 from ..authoring import simulation_world_config
 from ..world import DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX, SimulationWorld
 from .adapter import VirtualCamera, VirtualCameraConfig
 
+
+#: The configured ROI, as the real cameras configure theirs: four optional
+#: numbers, all blank for the whole sensor.
+_ROI_FIELDS = (
+    AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
+    AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
+    AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
+    AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
+)
 
 VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
     (
@@ -21,6 +31,7 @@ VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
             0.02,
             minimum=1e-9,
         ),
+        *_ROI_FIELDS,
     )
 )
 
@@ -39,6 +50,7 @@ VIRTUAL_MOT_CAMERA_SCHEMA = AuthoringSchema(
             0.1,
             minimum=1e-9,
         ),
+        *_ROI_FIELDS,
     )
 )
 
@@ -52,6 +64,7 @@ def _camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     config = VirtualCameraConfig(
         frame_shape_yx=geometry.image_shape_yx,
         exposure_seconds=float(authored["exposure_seconds"]),
+        roi_xywh=authored_roi_xywh(authored),
         # The world's own numbers, read from it rather than restated here:
         # it converts electrons to counts to make the frame, and this is the
         # same conversion said in the direction a reader needs it.
@@ -93,6 +106,7 @@ def _mot_camera_factory(context, key: str, values: dict) -> InstalledLeaf:
     config = VirtualCameraConfig(
         frame_shape_yx=tuple(authored["frame_shape_yx"]),
         exposure_seconds=float(authored["exposure_seconds"]),
+        roi_xywh=authored_roi_xywh(authored),
         frame_dtype="|u1",
     )
 

@@ -493,9 +493,14 @@ class PylonCameraAdapter:
         )
 
     @_serialized
-    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
-        """Integrate for this long on every trigger, leaving the geometry."""
+    def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
+        """Integrate for this long on every trigger, leaving the geometry.
 
+        ``None`` is the exposure this camera is configured with.
+        """
+
+        if seconds is None:
+            return self._reconfigure(self.config, "exposure_seconds")
         exposure = float(seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
@@ -507,10 +512,12 @@ class PylonCameraAdapter:
     ) -> CameraWorkingPoint:
         """Read this part of the sensor, leaving the exposure.
 
-        ``None`` is the whole sensor, which is what an operator means by no
-        ROI at all.
+        ``None`` is the ROI this camera is configured with; a configuration
+        without one reads the whole sensor.
         """
 
+        if roi_xywh is None:
+            return self._reconfigure(self.config, "roi_xywh")
         return self._reconfigure(
             replace(self.config, roi_xywh=roi_request(roi_xywh)), "roi_xywh"
         )
@@ -544,17 +551,10 @@ class PylonCameraAdapter:
         return point
 
     def _record_readback(self) -> CameraWorkingPoint:
-        """The sensor's own state, as the config.  The whole sensor is ``None``."""
+        """The sensor's own state.  The configuration keeps the configured
+        exposure and ROI, which is what a run that states none asks for."""
 
         point = self._read_working_point()
-        top, left = point.roi_origin_yx
-        height, width = point.roi_shape_yx
-        whole_sensor = (top, left) == (0, 0) and (height, width) == point.sensor_shape_yx
-        self.config = replace(
-            self.config,
-            exposure_seconds=point.exposure_seconds,
-            roi_xywh=None if whole_sensor else (left, top, width, height),
-        )
         self._working_point = point
         return point
 

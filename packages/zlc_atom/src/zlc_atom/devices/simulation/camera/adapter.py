@@ -36,6 +36,9 @@ class VirtualCameraConfig:
 
     frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
     exposure_seconds: float = 0.02
+    #: The configured ``(x, y, width, height)``, as the real cameras configure
+    #: theirs; None reads the whole sensor.
+    roi_xywh: tuple[int, int, int, int] | None = None
     frame_dtype: str = "<u2"
     #: What one count is worth, as this sensor's own world applies it going
     #: the other way.  ``None`` for a sensor that states no conversion, which
@@ -77,7 +80,7 @@ class VirtualCamera:
         self._settings_epoch = 0
         self._sensor_shape_yx = shape
         self._exposure_seconds = float(self.config.exposure_seconds)
-        self._roi_xywh = (0, 0, shape[1], shape[0])
+        self._roi_xywh = self._snapped_roi(self.config.roi_xywh)
         self._records = RecordQueue("virtual camera", join_timeout_seconds=2.0)
         self._trigger_queue: deque[
             tuple[
@@ -137,10 +140,13 @@ class VirtualCamera:
             self.config.electrons_per_count,
         )
 
-    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
-        """Integrate for this long on every trigger, leaving the geometry."""
+    def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
+        """Integrate for this long on every trigger, leaving the geometry.
 
-        exposure = float(seconds)
+        ``None`` is the exposure this camera is configured with.
+        """
+
+        exposure = float(self.config.exposure_seconds if seconds is None else seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
         with self._condition:
@@ -156,39 +162,29 @@ class VirtualCamera:
     ) -> CameraWorkingPoint:
         """Read this part of the sensor, leaving the exposure.
 
-        ``None`` is the whole sensor, which is what an operator means by no
-        ROI at all.
+        ``None`` is the ROI this camera is configured with; a configuration
+        without one reads the whole sensor.
         """
 
-        sensor_height, sensor_width = self._sensor_shape_yx
-        values = roi_request(roi_xywh)
-        if values is None:
-            roi = (0, 0, sensor_width, sensor_height)
-        else:
-            x, y, width, height = values
-            # Which way a requested region meets a sensor's grid is one rule
-            # for every sensor; this one's grid is single pixels, and the rule
-            # is not said a third time here.
-            x, width = snap_roi_axis(
-                x,
-                width,
-                origin_step=1,
-                extent_step=1,
-                sensor_extent=sensor_width,
-            )
-            y, height = snap_roi_axis(
-                y,
-                height,
-                origin_step=1,
-                extent_step=1,
-                sensor_extent=sensor_height,
-            )
-            roi = (x, y, width, height)
+        roi = self._snapped_roi(self.config.roi_xywh if roi_xywh is None else roi_xywh)
         with self._condition:
             if self._records.armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
             self._roi_xywh = roi
         return self.working_point()
+
+    def _snapped_roi(self, roi_xywh: tuple[int, int, int, int] | None) -> tuple[int, int, int, int]:
+        sensor_height, sensor_width = self._sensor_shape_yx
+        values = roi_request(roi_xywh)
+        if values is None:
+            return 0, 0, sensor_width, sensor_height
+        x, y, width, height = values
+        # Which way a requested region meets a sensor's grid is one rule for
+        # every sensor; this one's grid is single pixels, and the rule is not
+        # said a third time here.
+        x, width = snap_roi_axis(x, width, origin_step=1, extent_step=1, sensor_extent=sensor_width)
+        y, height = snap_roi_axis(y, height, origin_step=1, extent_step=1, sensor_extent=sensor_height)
+        return x, y, width, height
 
     def tunable_fields(self) -> tuple[TunableField, ...]:
         """The runtime knobs this camera volunteers to a scan (duck-typed).

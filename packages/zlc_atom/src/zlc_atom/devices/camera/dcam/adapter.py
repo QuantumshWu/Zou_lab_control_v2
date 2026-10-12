@@ -432,10 +432,13 @@ class DcamCameraAdapter:
             return self._working_point
         return self._lane.call(current)
 
-    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
-        """Integrate for this long on every trigger, leaving the geometry."""
+    def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
+        """Integrate for this long on every trigger, leaving the geometry.
 
-        requested = positive_real(seconds, "exposure_seconds")
+        ``None`` is the exposure this camera is configured with.
+        """
+
+        requested = self._config.exposure_seconds if seconds is None else positive_real(seconds, "exposure_seconds")
 
         def apply() -> CameraWorkingPoint:
             if self._armed:
@@ -462,11 +465,11 @@ class DcamCameraAdapter:
     ) -> CameraWorkingPoint:
         """Read this part of the sensor, leaving the exposure.
 
-        ``None`` is the whole sensor, which is what an operator means by no
-        ROI at all.
+        ``None`` is the ROI this camera is configured with; a configuration
+        without one reads the whole sensor.
         """
 
-        candidate = replace(self._config, roi_xywh=roi_xywh)
+        candidate = self._config if roi_xywh is None else replace(self._config, roi_xywh=roi_xywh)
 
         def apply() -> CameraWorkingPoint:
             if self._armed:

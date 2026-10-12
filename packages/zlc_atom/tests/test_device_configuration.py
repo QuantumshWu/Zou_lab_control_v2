@@ -85,7 +85,9 @@ def test_real_camera_authoring_contains_only_operator_owned_settings() -> None:
 
 
 def test_virtual_devices_and_shared_world_have_disjoint_strict_vocabularies() -> None:
-    assert _fields(VIRTUAL_CAMERA_SCHEMA) == {"exposure_seconds"}
+    # The configured ROI, as the real cameras configure theirs.
+    roi = {"roi_x", "roi_y", "roi_width", "roi_height"}
+    assert _fields(VIRTUAL_CAMERA_SCHEMA) == {"exposure_seconds"} | roi
     assert _fields(SIMULATION_WORLD_SCHEMA) == {
         "image_shape_yx",
         "grid_shape_yx",
@@ -95,7 +97,7 @@ def test_virtual_devices_and_shared_world_have_disjoint_strict_vocabularies() ->
     assert _fields(VIRTUAL_MOT_CAMERA_SCHEMA) == {
         "frame_shape_yx",
         "exposure_seconds",
-    }
+    } | roi
     with pytest.raises(ValueError, match="unknown authoring fields"):
         SIMULATION_WORLD_SCHEMA.project_values({"camera_seed": 3})
     with pytest.raises(TypeError, match="Seed must be an integer"):

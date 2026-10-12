@@ -371,7 +371,8 @@ class CameraMeasurementRequest:
     """One frozen camera selection and acquisition working point."""
 
     camera_key: str
-    exposure_seconds: float
+    #: None keeps the camera's own exposure and ROI (its device configuration).
+    exposure_seconds: float | None
     roi_xywh: tuple[int, int, int, int] | None
     repeat: int
     frames_per_cycle: int
@@ -385,8 +386,8 @@ class CameraMeasurementRequest:
         camera_key = str(self.camera_key).strip()
         if not camera_key:
             raise ValueError("camera_key must be non-empty")
-        exposure = float(self.exposure_seconds)
-        if not np.isfinite(exposure) or exposure <= 0:
+        exposure = None if self.exposure_seconds is None else float(self.exposure_seconds)
+        if exposure is not None and (not np.isfinite(exposure) or exposure <= 0):
             raise ValueError("exposure_seconds must be positive and finite")
         repeat = int(self.repeat)
         frames_per_cycle = int(self.frames_per_cycle)
@@ -822,7 +823,7 @@ class CameraMeasurementNode:
         return self.request.camera_key
 
     @property
-    def exposure_seconds(self) -> float:
+    def exposure_seconds(self) -> float | None:
         return self.request.exposure_seconds
 
     @property

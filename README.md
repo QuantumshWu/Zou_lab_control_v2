@@ -452,8 +452,9 @@ data-backed Figure plus PNG alongside the ordinary report.
 
 ### Camera and qCMOS
 
-Camera Measurement owns its exposure, ROI, frames-per-cycle and repeat; Pulse
-timing does not infer or validate camera exposure. Real and virtual adapters
+Camera Measurement owns its frames-per-cycle and repeat. Exposure and ROI left
+blank are the camera's own settings (Device Manager); a stated value applies to
+that run only. Pulse timing does not infer or validate camera exposure. Real and virtual adapters
 publish only frames actually acquired, with source ordinals contiguous from zero
 for each arm.
 

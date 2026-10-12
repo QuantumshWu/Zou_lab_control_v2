@@ -1891,8 +1891,9 @@ class SlmFeedbackTask:
                 f"the modes are {', '.join(FEEDBACK_OBSERVABLES)}"
             )
         self.observable = observable
-        self.exposure_seconds = None if external else float(exposure_seconds)
-        if not external and (not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0):
+        # None (and every external mode) keeps the camera's own exposure.
+        self.exposure_seconds = None if external or exposure_seconds is None else float(exposure_seconds)
+        if self.exposure_seconds is not None and (not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0):
             raise ValueError("feedback exposure_seconds must be finite and positive")
         self.shots = int(shots_per_candidate)
         self.feedback_gain = float(feedback_gain)
@@ -3975,10 +3976,10 @@ class SlmFeedbackTask:
                         == self.observable.controller
                         and self._prior_pattern_metadata.get("feedback_mode") == self.feedback_mode
                         and self._prior_pattern_metadata.get("program_digest") == self._program_digest
-                        and type(self._prior_pattern_metadata.get("exposure_seconds"))
+                        and type(self._prior_pattern_metadata.get("actual_exposure_seconds"))
                         in (int, float)
-                        and float(self._prior_pattern_metadata["exposure_seconds"])
-                        == self.exposure_seconds
+                        and float(self._prior_pattern_metadata["actual_exposure_seconds"])
+                        == self._actual_exposure_seconds
                         and isinstance(prior_probe_factors, (tuple, list))
                         and tuple(float(value) for value in prior_probe_factors)
                         == self.probe_factors

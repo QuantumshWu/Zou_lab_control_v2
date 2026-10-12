@@ -26,7 +26,7 @@ def _pair(value: object, field: str, *, positive: bool) -> tuple[int, int]:
 def roi_request(
     value: tuple[int, int, int, int] | None,
 ) -> tuple[int, int, int, int] | None:
-    """A requested ``(x, y, width, height)``, or None for the whole sensor.
+    """A requested ``(x, y, width, height)``, or None for the camera's own ROI.
 
     One reading for every camera -- a four-integer tuple, its origin
     non-negative and its size positive -- so an ROI the virtual camera
@@ -242,19 +242,24 @@ class CameraAdapter(Protocol):
     def photoelectron_conversion(self) -> tuple[float, float] | None: ...
 
     # A camera has a state: how long it integrates, and which part of the
-    # sensor it reads.  The two are owned by different people -- the geometry
-    # by the bench, which tunes an ROI around the traps and needs it to
-    # survive; the exposure by whatever run is playing, because it has to fit
-    # between that run's camera triggers -- and they are set separately for
-    # exactly that reason.  One call that demanded both is what let a task
-    # replace a tuned ROI with the full sensor because it only meant to state
-    # an exposure, and left an exposure so long that the third trigger of a
-    # cycle arrived while the sensor was still busy.
+    # sensor it reads.  Both are the bench's -- its device configuration, an
+    # ROI tuned around the traps and an exposure that fits the bench's camera
+    # triggers -- and a run may state either one for itself alone.  They are
+    # set separately: one call that demanded both is what let a task replace a
+    # tuned ROI with the full sensor because it only meant to state an
+    # exposure, and left an exposure so long that the third trigger of a cycle
+    # arrived while the sensor was still busy.
     #
     # Nothing here is named after a measurement.  A camera is a shared piece
     # of hardware in a state, not an accessory of whoever last called it.
+    #
+    # ``None`` asks for the camera's own setting: the exposure and ROI its
+    # device configuration states (an ROI configured blank is the whole
+    # sensor).  A run that states no value therefore takes the bench's
+    # setting, whatever an earlier run asked for; a stated value applies to
+    # its own run and never becomes the configuration.
 
-    def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint: ...
+    def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint: ...
 
     def set_roi(
         self, roi_xywh: tuple[int, int, int, int] | None
