@@ -1,6 +1,6 @@
 # ZLC — Current Implementation Status
 
-更新时间：2026-10-11
+更新时间：2026-10-12
 
 状态：`PLOT/RUNTIME/WORKBENCH CUT COMPLETE / OVERALL GOAL IN PROGRESS`
 
@@ -14,9 +14,8 @@
 
 - Frame Survival增加可编辑配对行及Publish all，保持一个survival输出和现有pair/site归属；只发布所选行，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。UI复用Fluent rows与原Logic贡献入口，源schema直接来自Runtime目录。
 
-- Component交互整改（2026-10-09，完成，worktree待人工验收）：Shift逐项追加/取消实际点击的item，不补范围；Group直接消费选区，非连续/选中Bracket未完整归入时拒绝并保留选区，成功聚焦默认名输入。名称卡内直接改，删除起止/命名窗口及Rename菜单。展开改为左右同色窄端包围内容、内部自动全选；多组件独立展开，任一端选择/拖动代表整体。PulseDragContainer只保留一份选区，删旧单卡/post状态和点击转发；多选拖动与remove_items一次提交，空选区Remove不再删最后一项，Shift点checkbox/输入框不改数据。现有UI相关7项、presenter 3项通过；正式launcher真实Qt点选验证第1/3项不补第2项、拒绝错误Group、完整选区分组直接改名、双端与全部内部高亮、Shift不改TTL、保存重开/编译，以及两个组件同时展开，zlc_ui截图留ignored research，窗口已关闭。不改model/文件格式/FPGA。
-- Component卡片密度修正（2026-10-08）：删除独立206/min180宽度，改用Period的158缩放规则并统一padding7/spacing4；本机正式窗口实宽由180变134逻辑px，与Period同宽。名称用公共ElidedLabel，常驻只Expand/Edit，低频操作移入懒建FluentPopup；菜单动作先收起再发既有intent。既有组件UI用例验证宽度一致、懒建菜单及Export路由，正式窗口截图核对折叠/展开与菜单，未改model/编译/参数或硬件。
-- Pulse Component（2026-10-08，完成，worktree待人工验收）：连续分组复用既有flat Period/Bracket/binding；独立`zlc.subpulse`只作编辑/插入，Pulse reader/compiler不直接执行它。公共组/解组/导出/插入/替换/删除维护稳定ID、父Bracket与Config共享key，保存/Remote往返保留组件。默认折叠且不构建内部PeriodCard；真屏迭代后删除挤压空间的上下双schedule，改为主timeline原位展开共用卡片/滚动；Component页区分当前实例与独立草稿，隐藏无效全局编辑入口，Config/Scan按显式实例身份分组。Pulse/Subpulse共用字段与结构编辑操作；字段集合变化清掉旧scan table，连接跨target/clock时也携components。领域23、Remote 1、presenter流程与对应共享编辑13项通过，UI组件/原拖动/控件复用/Config分组定向通过。正式`apps.pulse_editor.create_window`→真实Qt按钮/输入→zlc_ui.capture_window验收已走通4-period MOT分组、改时长、导出/读回、独立草稿与原实例隔离、重复插入、Save Pulse/重开及编译，截图与探针在ignored research，窗口已关闭。不改FPGA，无运行期文件引用或第二套编译器。
+- Pulse Component（2026-10-12，完成，worktree待人工验收）：继续复用单份flat Period/Bracket/binding，组件以`period_ids`和显式`bracket_ids`记录成员；Group只消费实际连续选区，半个Bracket或有洞选区拒绝且保留选区。仅选Bracket内所有Period不会吞入未选Bracket，同跨度外Bracket仍包住组件。导出/插入/替换/移动/删除与Pulse保存重开保持成员、父Bracket和字段引用，新reader不按旧几何补成员。Subpulse仍是独立编辑/插入文件，副本重映射内部ID、共享Config key，无运行期文件引用。闭卡与Period同宽同间距，Duration标签/时长/单位占位/Name四行纵向对齐且水平居中；名称卡内直接编辑，数量与操作沿Fluent居中，Export/Ungroup复用懒建popup。展开仍原位共用timeline并以双端包住内部；实际内部选区或gap Add Bracket走既有Component编辑通道，选整体则加外Bracket。现有领域Component 4项、presenter组件流程和Qt组件直接用例通过，覆盖同跨度内外、移动、空边界、独立副本及保存；正式launcher真实Qt按钮流程验证内部Period与组件整体Add Bracket的不同归属，无警告且窗口正常关闭。
+- Bracket Repeats绑定（2026-10-12，完成，worktree待人工验收）：沿现有字段popup提供Default/API/Config，`bracket_count:<id>`使用`count`单位，仅接受`1..2^32-1`整数；UI无可用Scan选项，模型拒绝hardware scan，不改FPGA/RTL/wire。API/已保存Config沿公共binding路径在执行前解析，作者默认值保留，组件成员的repeat引用随导出/插入/删除维护，Config/API列表按显式组件归属显示。Calibration三个默认API时间窗只选按Period顺序的前三个duration，Bracket count、DAC和delay不参与。相关直接用例通过；正式launcher真实Qt验收确认API count=8对应144 ms、Config count=7对应126 ms，Pulse与Subpulse保存重开后成员及绑定正确；截图与探针仅在ignored research，未连接真实硬件、未build/program FPGA。
 - Pulse通道改名兼容性（2026-10-08）：Task共用`resolve_pulse`与`ExperimentSession.load_pulse`删除完整target相等检查，改为与底层LOAD/Editor相同的既有ABI指纹比较；保留authored label，不改硬件、codec或对象相等语义。两处原有直接用例加入改名输入、applied source保留核对，并保持真实lane映射不兼容的拒绝验证。
 - 不带侧分布与colorbar的Image（2026-10-07，用户要求）：Image（含FacetGrid image cell的Focus）声明Rolling同一个`side_distribution`显示参数；关闭时`_split_image`只给出原位置原大小的图像框，侧分布与立在其轴上的colorbar一并不布局，渲染、手势、render子进程协议、Figure存档语法与kernel warm均不改，普通Image的色限/colorbar区域不动。SLM Editor的Target intensity、Science phase与Wavefront三张图都以`parameters={"side_distribution": False}`建host。验证：`test_compose_identity`关闭时图像框与开启时相同，来回切换后compose与完整重绘逐像素相同、开启后三条轴回来，`test_slm_editor`三张图的轴（改前为红）；正式入口截图核对Pattern/Wavefront两页。
 - finite run 读者只搬新到的行（2026-09-25）：`data_view` 的 `_packed_carry` 命中时同一个 run 的所有 view 共用一块 scratch、每发只写新行（不再有 `np.concatenate((old, tail))` 拷整个 run）；容量随已到行数几何增长，最多为已到行数的 2 倍、不超过 schema 声明的整个 run，提前停下的 run 不为没采的部分占内存（按声明大小一次分配时，42 点×100 repeat 的 1200×1920 uint8 扫描第二发就在每个面板子进程提交 9.7 GB）。每行在锁内只写一次：后继的段接着 scratch 已写的段时只写其后的行，更早的 view 持有永不再写的只读前缀，被取消或拒绝的预备帧写下的行由下一帧接着用，不再另拷一份整 run。Rolling 在 finite run 上按段身份携带已归约的 repeat 行、只重算新段落到的 repeat（与 indexed 窗口同一个 `_segment_history`）。

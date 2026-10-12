@@ -701,22 +701,20 @@ class BracketPost(FluentGroupBox):
     layout happened to give -- the thing marking a span lined up with nothing
     in the span it marked.
 
-    As wide as five digits of count, plus the card margins: the box
-    refuses a number it cannot show whole, and a post cut to a fixed 78 px
-    refused 10000 -- a count an experiment reaches -- while the box's own
-    generic hint, sized for a signed float in scientific notation, made
-    the post nearly a card.
+    Normally as wide as five count digits plus the source badge and actual
+    style margins. Longer authored counts grow the post without rounding.
     """
 
-    #: The widest count a post shows whole.  The board counts in 32 bits,
-    #: but a post sized for ten digits would be a card.
+    #: Common counts stay compact; larger values grow only as needed.
     COUNT_SAMPLE = "10000"
 
-    count_committed = QtCore.pyqtSignal(int)
+    count_committed = QtCore.pyqtSignal(object)
+    binding_committed = QtCore.pyqtSignal(bool, str)
+    feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(
         self, bracket_id: str, kind: str, *, count: int = 2, minimum: int = 2,
-        ordinal: int = 1, color: str = "", parent=None,
+        ordinal: int = 1, color: str = "", count_field: FieldVM | None = None, parent=None,
     ) -> None:
         super().__init__("", parent)
         self.bracket_id = str(bracket_id)
@@ -726,10 +724,9 @@ class BracketPost(FluentGroupBox):
         self.ordinal = 1
         self.color = ""
         self.set_bracket_style(ordinal, color)
-        self.count_spin = fluent_count_box(minimum=int(minimum))
-        box_width = self.count_spin.width_for(self.COUNT_SAMPLE)
-        width = box_width + 2 * px(7)
-        self.setFixedWidth(width)
+        self.count_edit = FluentScanLineEdit("", tooltip="Edit repeat value source")
+        self.count_edit.setAlignment(QtCore.Qt.AlignCenter)
+        self.count_edit.textChanged.connect(self._size_count_editor)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(px(7), px(7), px(7), px(7))
@@ -750,24 +747,50 @@ class BracketPost(FluentGroupBox):
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
-        self.count_spin.setValue(float(count))
-        self.count_spin.setFixedSize(box_width, row_height())
-        self.count_spin.valueChanged.connect(
-            lambda value: self.count_committed.emit(int(value))
-        )
+        self.count_edit.setFixedHeight(row_height())
+        self.set_count_field(count_field or FieldVM(
+            str(count), can_scan=False, validator_kind=VALIDATOR_INT,
+            validator_lo=minimum, validator_hi=(1 << 32) - 1,
+        ))
+        self.count_edit.editingFinished.connect(self._commit_count)
+        self.count_edit.valueNormalized.connect(self._commit_count)
+        self.count_edit.binding_committed.connect(self.binding_committed)
         if kind == "start":
-            self.count_spin.hide()
+            self.count_edit.hide()
             spacer = QtWidgets.QWidget()
             spacer.setStyleSheet("background: transparent;")
             spacer.setFixedHeight(row_height())
             top_layout.addWidget(spacer)
         else:
-            top_layout.addWidget(self.count_spin)
+            top_layout.addWidget(self.count_edit)
         top_layout.addStretch(1)
         column.addWidget(top)
         row_top, _row_gap = row_region_vmetrics()
         column.addSpacing(max(0, row_top - px(7)))
         column.addStretch(1)
+
+    def set_count_field(self, field: FieldVM) -> None:
+        self._count_field = field
+        self._size_count_editor(field.text)
+        _apply_field(self.count_edit, field)
+
+    def _size_count_editor(self, text: str) -> None:
+        width = max(self.count_edit.width_for(self.COUNT_SAMPLE),
+                    self.count_edit.width_for(text))
+        self.count_edit.setFixedWidth(width)
+        self.setFixedWidth(width + 2 * px(7))
+
+    def _commit_count(self) -> None:
+        error = self.count_edit.property("numericError")
+        if error:
+            self.feedback_requested.emit(str(error))
+            return
+        try:
+            value = int(self.count_edit.text())
+        except ValueError:
+            return
+        if value != int(self._count_field.text):
+            self.count_committed.emit(value)
 
     def set_bracket_style(self, ordinal: int, color: str) -> None:
         """Say which bracket this post frames.
@@ -837,59 +860,80 @@ class ComponentCard(FluentGroupBox):
         self.mode = mode
         self.key = ("component" if mode == "closed" else f"component-{mode}", component.component_id)
         self._component = component
-        self.setFixedWidth((card_width if card_width is not None else period_card_width())
-                           if mode == "closed" else spacer_card_width())
         self.set_surface(edge=ACCENT)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        self.expand_button = FluentButton("Expand" if mode == "closed" else "Collapse", color=ACCENT)
+        self.expand_button.clicked.connect(lambda: self.action_requested.emit("expand", self.component_id))
+        width = (card_width if card_width is not None else period_card_width()) if mode == "closed" else max(
+            spacer_card_width(), self.expand_button.sizeHint().width() + 2 * px(7),
+        )
+        self.setFixedWidth(width)
+        control_width = period_control_width(width) if mode == "closed" else spacer_control_width(width)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(px(7), px(7), px(7), px(7))
         column.setSpacing(px(4, minimum=3))
-        name_row = QtWidgets.QHBoxLayout()
-        name_row.setSpacing(px(4, minimum=3))
+        top = QtWidgets.QWidget()
+        top.setFixedHeight(panel_top_height())
+        top_layout = QtWidgets.QVBoxLayout(top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(px(6, minimum=4))
+        self.duration_label = FluentLabel("Duration")
+        self.total_label = ElidedLabel("", align=QtCore.Qt.AlignCenter)
+        for label in (self.duration_label, self.total_label):
+            label.setAlignment(QtCore.Qt.AlignCenter)
+            label.setFixedHeight(row_height())
+            top_layout.addWidget(label)
+        # Keep the unit row's place so every name shares the Period name row.
+        unit_row = QtWidgets.QWidget()
+        unit_row.setFixedHeight(row_height())
+        top_layout.addWidget(unit_row)
         self.name_edit = FluentLineEdit(component.name)
-        self.name_edit.setMinimumWidth(0)
+        self.name_edit.setFixedWidth(control_width)
+        self.name_edit.setAlignment(QtCore.Qt.AlignCenter)
         self.name_edit.setPlaceholderText("Name")
         self.name_edit.editingFinished.connect(self._commit_name)
-        self.end_label = ElidedLabel(component.name)
-        name_row.addWidget(self.end_label if mode == "end" else self.name_edit, 1)
+        self.end_label = ElidedLabel(component.name, align=QtCore.Qt.AlignCenter)
+        self.end_label.setFixedSize(control_width, row_height())
+        top_layout.addWidget(
+            self.end_label if mode == "end" else self.name_edit,
+            0, QtCore.Qt.AlignHCenter,
+        )
         if mode == "end":
             self.name_edit.setParent(self)
             self.name_edit.hide()
         else:
             self.end_label.setParent(self)
             self.end_label.hide()
+        top_layout.addStretch(1)
+        column.addWidget(top)
+        row_top, _row_gap = row_region_vmetrics()
+        column.addSpacing(max(0, row_top - px(7)))
         self.more_button = FluentButton("⋯", color=GREY)
         self.more_button.setFixedSize(row_height(), row_height())
         self.more_button.setAccessibleName("Component actions")
         self.more_button.setToolTip("Export or ungroup this component")
         self.more_button.clicked.connect(self._toggle_actions)
-        if mode == "closed":
-            name_row.addWidget(self.more_button)
-        column.addLayout(name_row)
         self.summary_label = FluentLabel("")
+        self.summary_label.setAlignment(QtCore.Qt.AlignCenter)
         column.addWidget(self.summary_label)
-        self.expand_button = FluentButton("Expand", color=ACCENT)
-        self.expand_button.clicked.connect(lambda: self.action_requested.emit("expand", self.component_id))
         self.edit_button = FluentButton("Edit", color=GREY)
         self.edit_button.setToolTip("Open this instance in the Component tab")
         self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
         actions = QtWidgets.QHBoxLayout() if mode == "closed" else QtWidgets.QVBoxLayout()
         actions.setSpacing(px(4, minimum=3))
-        actions.addWidget(self.expand_button)
+        actions.addWidget(self.expand_button, 0, QtCore.Qt.AlignHCenter)
         if mode != "end":
-            actions.addWidget(self.edit_button)
+            actions.addWidget(self.edit_button, 0, QtCore.Qt.AlignHCenter)
         else:
             self.edit_button.setParent(self)
             self.edit_button.hide()
-        if mode == "start":
-            actions.addWidget(self.more_button)
-        elif mode == "end":
+        column.addLayout(actions)
+        if mode == "end":
             self.more_button.setParent(self)
             self.more_button.hide()
-        column.addLayout(actions)
+        else:
+            column.addWidget(self.more_button, 0, QtCore.Qt.AlignHCenter)
         column.addStretch(1)
-        if mode != "closed":
-            self.setFixedWidth(max(spacer_card_width(), self.expand_button.sizeHint().width() + 2 * px(7)))
         self._actions_popup = None
         self.set_component(component)
 
@@ -938,8 +982,9 @@ class ComponentCard(FluentGroupBox):
         if component.spacer_count:
             counts.append(f"{component.spacer_count} spacer{'s' if component.spacer_count != 1 else ''}")
         counts.append(f"{brackets} bracket{'s' if brackets != 1 else ''}")
-        self.summary_label.setText("\n".join((component.total_text, *counts)) if self.mode == "closed" else component.total_text)
-        self.summary_label.setVisible(self.mode != "end")
+        self.total_label.setText(component.total_text)
+        self.summary_label.setText("\n".join(counts))
+        self.summary_label.setVisible(self.mode == "closed")
         self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
 
 
@@ -949,7 +994,9 @@ class PulseDragContainer(QtWidgets.QWidget):
     reorder_items_requested = QtCore.pyqtSignal(object)
     remove_items_requested = QtCore.pyqtSignal(object)
     #: (bracket id, count) from that bracket's end post.
-    bracket_count_committed = QtCore.pyqtSignal(str, int)
+    bracket_count_committed = QtCore.pyqtSignal(str, object)
+    bracket_binding_committed = QtCore.pyqtSignal(str, bool, str)
+    feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1003,22 +1050,28 @@ class PulseDragContainer(QtWidgets.QWidget):
                     post = BracketPost(
                         bracket.bracket_id, side, count=bracket.count, minimum=minimum_bracket,
                         ordinal=bracket.ordinal, color=bracket.color,
+                        count_field=bracket.count_field,
                     )
                     if side == "end":
                         post.count_committed.connect(
                             lambda count, bracket_id=bracket.bracket_id:
                                 self.bracket_count_committed.emit(bracket_id, int(count))
                         )
+                        post.binding_committed.connect(
+                            lambda scan, source, bid=bracket.bracket_id:
+                                self.bracket_binding_committed.emit(bid, scan, source)
+                        )
+                        post.feedback_requested.connect(self.feedback_requested)
                 else:
                     # A kept post may have become another number: a bracket
                     # added or removed before it renumbers the rest.
                     post.set_bracket_style(bracket.ordinal, bracket.color)
                 posts.append(post)
                 widgets[("bracket", key)] = post
-                with signals_blocked(post.count_spin):
-                    post.count_spin.setMinimum(minimum_bracket)
-                    if not being_edited(post.count_spin):
-                        post.count_spin.setValue(float(bracket.count))
+                post.set_count_field(bracket.count_field or FieldVM(
+                    str(bracket.count), can_scan=False, validator_kind=VALIDATOR_INT,
+                    validator_lo=minimum_bracket, validator_hi=(1 << 32) - 1,
+                ))
         self._posts = tuple(posts)
         desired = tuple(widgets[key] for key in order)
         for widget in previous:
@@ -1401,9 +1454,9 @@ class PulseScheduleView(QtWidgets.QWidget):
     reorder_items_requested = QtCore.pyqtSignal(object)
     remove_items_requested = QtCore.pyqtSignal(object)
     #: (bracket id, start period id, end period id, count): move or recount one bracket.
-    bracket_committed = QtCore.pyqtSignal(str, object, object, int)
+    bracket_committed = QtCore.pyqtSignal(str, object, object, object)
     #: (start period id, end period id, count): a new bracket; the presenter names it.
-    bracket_add_requested = QtCore.pyqtSignal(object, object, int)
+    bracket_add_requested = QtCore.pyqtSignal(object, object, object)
     run_repeats_committed = QtCore.pyqtSignal(int)
     visible_ports_committed = QtCore.pyqtSignal(object)
     fill_port_requested = QtCore.pyqtSignal(str)
@@ -1690,6 +1743,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.drag_container.reorder_items_requested.connect(self.reorder_items_requested)
         self.drag_container.remove_items_requested.connect(self.remove_items_requested)
         self.drag_container.bracket_count_committed.connect(self._commit_bracket_count)
+        self.drag_container.bracket_binding_committed.connect(
+            lambda bid, scan, source: self.binding_committed.emit("bracket_count", bid, None, scan, source)
+        )
+        self.drag_container.feedback_requested.connect(self.feedback_requested)
         self.run_button.clicked.connect(self.run_requested)
         self.stop_button.clicked.connect(self.stop_requested)
         self.sync_button.clicked.connect(self.sync_requested)
@@ -1817,6 +1874,7 @@ class PulseScheduleView(QtWidgets.QWidget):
                     card.action_requested.connect(self._component_action)
                 elif mode == "closed":
                     card.setFixedWidth(card_width)
+                    card.name_edit.setFixedWidth(period_control_width(card_width))
                 card.set_component(component)
                 component_cards[card_key] = card
             key = ("component", component.component_id)
@@ -2152,14 +2210,11 @@ class PulseScheduleView(QtWidgets.QWidget):
         gap = self.drag_container.selected_gap
         count = self._schedule.default_bracket_count
         flat = self.drag_container.flat_order(selected)
-        if len(flat) == 1 and flat[0][0] == "bracket":
-            bracket = self._bracket(flat[0][1].rpartition(":")[0])
-            if bracket is not None:
-                self.bracket_add_requested.emit(
-                    bracket.start_period_id, bracket.end_period_id, count,
-                )
-                return
-        if selected:
+        bracket = (self._bracket(flat[0][1].rpartition(":")[0])
+                   if len(flat) == 1 and flat[0][0] == "bracket" else None)
+        if bracket is not None:
+            start, end = bracket.start_period_id, bracket.end_period_id
+        elif selected:
             ids = tuple(period.period_id for period in periods)
             chosen = {key for kind, key in flat if kind == "period"}
             positions = [index for index, key in enumerate(ids) if key in chosen]
@@ -2173,24 +2228,32 @@ class PulseScheduleView(QtWidgets.QWidget):
                     if not set(ids[first:stop]).issubset(chosen):
                         self.feedback_requested.emit("The selected bracket extends beyond the selected periods.")
                         return
-            self.bracket_add_requested.emit(ids[positions[0]], ids[positions[-1]], count)
-            return
-        if gap is not None:
+            start, end = ids[positions[0]], ids[positions[-1]]
+        elif gap is not None:
             ids = tuple(period.period_id for period in periods)
             periods_before = sum(
                 kind == "period" for kind, _key in self.drag_container.flat_order(
                     tuple(self.drag_container._item_key(item) for item in self.drag_container.items())[:gap]
                 )
             )
-            self.bracket_add_requested.emit(
-                ids[periods_before] if periods_before < len(ids) else None,
-                ids[periods_before - 1] if periods_before > 0 else None,
-                count,
-            )
-            return
-        self.bracket_add_requested.emit(
-            periods[0].period_id, periods[-1].period_id, count,
-        )
+            start = ids[periods_before] if periods_before < len(ids) else None
+            end = ids[periods_before - 1] if periods_before > 0 else None
+        else:
+            start, end = periods[0].period_id, periods[-1].period_id
+        visual = tuple(self.drag_container._item_key(item) for item in self.drag_container.items())
+        for component in self._schedule.components:
+            key = component.component_id
+            if key not in self._expanded_components:
+                continue
+            block = self.drag_container._item_blocks[("component", key)]
+            first, last = visual.index(("component-start", key)), visual.index(("component-end", key))
+            if selected and set(selected).issubset(block) or gap is not None and first < gap <= last:
+                self.component_action_requested.emit("bracket_add", (key, (
+                    start if start in component.period_ids else None,
+                    end if end in component.period_ids else None, count,
+                )))
+                return
+        self.bracket_add_requested.emit(start, end, count)
 
     def _request_add_port(self) -> None:
         key = self.hidden_port_combo.currentData()

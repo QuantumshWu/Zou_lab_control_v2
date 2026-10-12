@@ -29,7 +29,8 @@ DAC_OFFSET_BINARY = "offset_binary"
 FIELD_DURATION = "duration"
 FIELD_DAC = "dac"
 FIELD_DELAY = "delay"
-FIELD_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY))
+FIELD_BRACKET_COUNT = "bracket_count"
+FIELD_KINDS = frozenset((FIELD_DURATION, FIELD_DAC, FIELD_DELAY, FIELD_BRACKET_COUNT))
 SLOT_KINDS = frozenset((FIELD_DURATION, FIELD_DAC))
 BINDING_SCAN = "scan"
 BINDING_API = "api"
@@ -133,7 +134,7 @@ def _nonnegative_int(value: Any, field_name: str) -> int:
 
 def _unit(value: Any, field_name: str) -> str:
     result = _text(value, field_name)
-    if result == "value":
+    if result in ("value", "count"):
         return result
     return canonical_time_unit(result, field_name)
 
@@ -357,12 +358,19 @@ class PulseFieldRef:
     kind: str
     period_id: str | None = None
     port: str | None = None
+    bracket_id: str | None = None
 
     def __post_init__(self) -> None:
         kind = _text(self.kind, "field kind")
         if kind not in FIELD_KINDS:
             raise ValueError(f"unsupported field kind {kind!r}")
-        if kind == FIELD_DURATION:
+        if kind != FIELD_BRACKET_COUNT and self.bracket_id is not None:
+            raise ValueError("only bracket count fields may name a bracket_id")
+        if kind == FIELD_BRACKET_COUNT:
+            if self.bracket_id is None or self.period_id is not None or self.port is not None:
+                raise ValueError("bracket count fields require bracket_id only")
+            object.__setattr__(self, "bracket_id", _identifier(self.bracket_id, "count bracket_id"))
+        elif kind == FIELD_DURATION:
             if self.period_id is None or self.port is not None:
                 raise ValueError("duration fields require period_id only")
             object.__setattr__(self, "period_id", _identifier(self.period_id, "duration period_id"))
@@ -381,6 +389,8 @@ class PulseFieldRef:
     @property
     def key(self) -> str:
         """Stable physical identity, independent of display names and bindings."""
+        if self.kind == FIELD_BRACKET_COUNT:
+            return f"bracket_count:{self.bracket_id}"
         if self.kind == FIELD_DELAY:
             return f"delay:{self.port}"
         if self.kind == FIELD_DURATION:
@@ -413,8 +423,11 @@ class PulseBinding:
         if self.source not in BINDING_SOURCES:
             raise ValueError("binding source must be default, api or config")
         unit = _unit(self.unit, "binding unit")
-        if (self.field_ref.kind == FIELD_DAC) != (unit == "value"):
-            raise ValueError("DAC bindings use 'value'; time bindings use a time unit")
+        numeric_unit = {FIELD_DAC: "value", FIELD_BRACKET_COUNT: "count"}.get(self.field_ref.kind)
+        if (numeric_unit is not None and unit != numeric_unit) or (
+            numeric_unit is None and unit in ("value", "count")
+        ):
+            raise ValueError("DAC bindings use 'value'; bracket counts use 'count'; time bindings use a time unit")
         key = _text(self.config_key, "Config key", empty=True)
         if key:
             config_parameter_key(key)
@@ -590,6 +603,7 @@ class PulseComponent:
     component_id: str
     name: str
     period_ids: tuple[str, ...]
+    bracket_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "component_id", _identifier(self.component_id, "component id"))
@@ -598,6 +612,10 @@ class PulseComponent:
         if not ids or len(ids) != len(set(ids)):
             raise ValueError("component period ids must be non-empty and unique")
         object.__setattr__(self, "period_ids", ids)
+        brackets = tuple(_identifier(value, "component bracket id") for value in self.bracket_ids)
+        if len(brackets) != len(set(brackets)):
+            raise ValueError("component bracket ids must be unique")
+        object.__setattr__(self, "bracket_ids", brackets)
 
 
 @dataclass(frozen=True, init=False)
@@ -721,6 +739,11 @@ class PulseSequence:
             raise TypeError("brackets must contain PulseBracket values")
         if len({bracket.bracket_id for bracket in bracket_values}) != len(bracket_values):
             raise ValueError("bracket ids must be unique")
+        for binding in binding_values:
+            if binding.kind == FIELD_BRACKET_COUNT and not any(
+                bracket.bracket_id == binding.field_ref.bracket_id for bracket in bracket_values
+            ):
+                raise ValueError(f"binding references missing bracket {binding.field_ref.bracket_id!r}")
         for bracket in bracket_values:
             if (
                 (bracket.start_period_id is not None and bracket.start_period_id not in by_period)
@@ -730,16 +753,24 @@ class PulseSequence:
         bounds = {
             bracket.bracket_id: _bracket_gap_bounds(bracket, ids) for bracket in bracket_values
         }
+        for component in component_values:
+            if any(key not in bounds for key in component.bracket_ids):
+                raise ValueError(f"component {component.name!r} references a missing bracket")
         for bracket in bracket_values:
             start, end = bounds[bracket.bracket_id]
             if start > end:
                 raise ValueError(f"bracket {bracket.bracket_id!r} end precedes its start")
             for component in component_values:
                 extent = component_bounds[component.component_id]
+                if bracket.bracket_id in component.bracket_ids:
+                    if not extent[0] <= start <= end <= extent[1]:
+                        raise ValueError(
+                            f"component {component.name!r} must contain its complete bracket {bracket.bracket_id!r}"
+                        )
+                    continue
                 if not (
                     brackets_disjoint((start, end), extent)
                     or bracket_contains((start, end), extent)
-                    or bracket_contains(extent, (start, end))
                 ):
                     raise ValueError(
                         f"bracket {bracket.bracket_id!r} partially crosses component {component.name!r}"
@@ -784,6 +815,12 @@ class PulseSequence:
 
     def component_for_period(self, period_id: str) -> PulseComponent | None:
         return next((component for component in self.components if period_id in component.period_ids), None)
+
+    def component_for_field(self, reference: PulseFieldRef) -> PulseComponent | None:
+        if reference.bracket_id is not None:
+            return next((component for component in self.components
+                         if reference.bracket_id in component.bracket_ids), None)
+        return self.component_for_period(reference.period_id) if reference.period_id is not None else None
 
     def period_label(self, period_id: str) -> str:
         period = self.period_by_id.get(period_id)
@@ -871,6 +908,8 @@ class PulseSequence:
 
         if not isinstance(reference, PulseFieldRef):
             raise TypeError("reference must be PulseFieldRef")
+        if reference.kind == FIELD_BRACKET_COUNT:
+            return "count"
         if reference.kind == FIELD_DAC:
             return "value"
         if reference.kind == FIELD_DELAY:
@@ -938,16 +977,16 @@ def _available_name(base: str, used: set[str]) -> str:
 
 def group_component(
     sequence: PulseSequence, period_ids: tuple[str, ...], name: str,
-    component_id: str | None = None,
+    component_id: str | None = None, *, bracket_ids: tuple[str, ...] = (),
 ) -> PulseSequence:
-    """Group existing consecutive periods without changing their identity or playback."""
+    """Group the selected periods and brackets without changing their playback."""
     selected = tuple(period_ids)
     if len(selected) != len(set(selected)) or any(key not in sequence.period_by_id for key in selected):
         raise ValueError("component selection must name existing unique periods")
     members = tuple(period.period_id for period in sequence.periods if period.period_id in selected)
     if component_id is None:
         component_id = _available_id("component1", {item.component_id for item in sequence.components})
-    component = PulseComponent(component_id, name, members)
+    component = PulseComponent(component_id, name, members, bracket_ids)
     return replace(sequence, components=sequence.components + (component,))
 
 
@@ -974,12 +1013,8 @@ def ungroup_component(sequence: PulseSequence, component_id: str) -> PulseSequen
 
 
 def _internal_brackets(sequence: PulseSequence, component: PulseComponent) -> tuple[PulseBracket, ...]:
-    ids = tuple(period.period_id for period in sequence.periods)
-    start = ids.index(component.period_ids[0])
-    extent = (start, start + len(component.period_ids))
     return tuple(
-        bracket for bracket, bounds in zip(sequence.brackets, sequence.bracket_bounds, strict=True)
-        if bracket_contains(extent, bounds)
+        bracket for bracket in sequence.brackets if bracket.bracket_id in component.bracket_ids
     )
 
 
@@ -989,8 +1024,15 @@ def extract_subpulse(sequence: PulseSequence, component_id: str) -> Subpulse:
     return Subpulse(
         name=component.name, target=sequence.target, time_step_ns=sequence.time_step_ns,
         periods=tuple(sequence.period_by_id[key] for key in component.period_ids),
-        bindings=tuple(binding for binding in sequence.bindings if binding.field_ref.period_id in component.period_ids),
-        brackets=_internal_brackets(sequence, component),
+        bindings=tuple(binding for binding in sequence.bindings if (
+            binding.field_ref.period_id in component.period_ids
+            or binding.field_ref.bracket_id in component.bracket_ids
+        )),
+        brackets=tuple(replace(
+            bracket,
+            start_period_id=bracket.start_period_id if bracket.start_period_id in component.period_ids else None,
+            end_period_id=bracket.end_period_id if bracket.end_period_id in component.period_ids else None,
+        ) for bracket in _internal_brackets(sequence, component)),
     )
 
 
@@ -1009,13 +1051,22 @@ def _remap_subpulse(
         period, period_id=period_ids[period.period_id],
         name=(period.name if period_ids[period.period_id] == period.period_id else period.name or period.period_id),
     ) for period in subpulse.periods)
+    bracket_ids = {
+        bracket.bracket_id: (
+            bracket.bracket_id if bracket.bracket_id in retained_brackets
+            else _available_id(f"{component_id}_{bracket.bracket_id}", used_brackets)
+        ) for bracket in subpulse.brackets
+    }
     bindings = tuple(replace(
-        binding, field_ref=replace(binding.field_ref, period_id=period_ids[binding.field_ref.period_id]),
+        binding, field_ref=replace(
+            binding.field_ref,
+            period_id=period_ids.get(binding.field_ref.period_id),
+            bracket_id=bracket_ids.get(binding.field_ref.bracket_id),
+        ),
     ) for binding in subpulse.bindings)
     brackets = tuple(replace(
         bracket,
-        bracket_id=(bracket.bracket_id if bracket.bracket_id in retained_brackets
-                    else _available_id(f"{component_id}_{bracket.bracket_id}", used_brackets)),
+        bracket_id=bracket_ids[bracket.bracket_id],
         start_period_id=period_ids.get(bracket.start_period_id, next_period_id),
         end_period_id=period_ids.get(bracket.end_period_id, previous_period_id),
     ) for bracket in subpulse.brackets)
@@ -1051,7 +1102,10 @@ def insert_subpulse(
         previous_period_id=ids[position - 1] if position else None,
         next_period_id=ids[position] if position < len(ids) else None,
     )
-    component = PulseComponent(component_id, name, tuple(period.period_id for period in periods))
+    component = PulseComponent(
+        component_id, name, tuple(period.period_id for period in periods),
+        tuple(bracket.bracket_id for bracket in brackets),
+    )
     if sequence is None:
         return PulseSequence(
             name=subpulse.name, target=subpulse.target, time_step_ns=subpulse.time_step_ns,
@@ -1118,7 +1172,8 @@ def replace_component(sequence: PulseSequence, component_id: str, subpulse: Subp
     new_bindings = {binding.field_ref: binding for binding in bindings}
     merged_bindings = []
     for binding in sequence.bindings:
-        if binding.field_ref.period_id not in component.period_ids:
+        if (binding.field_ref.period_id not in component.period_ids
+                and binding.field_ref.bracket_id not in component.bracket_ids):
             merged_bindings.append(binding)
         elif binding.field_ref in new_bindings:
             merged_bindings.append(new_bindings.pop(binding.field_ref))
@@ -1128,7 +1183,8 @@ def replace_component(sequence: PulseSequence, component_id: str, subpulse: Subp
         bindings=tuple(merged_bindings),
         brackets=_parent_brackets_after_splice(sequence, component, periods) + brackets,
         components=tuple(
-            replace(item, period_ids=tuple(period.period_id for period in periods))
+            replace(item, period_ids=tuple(period.period_id for period in periods),
+                    bracket_ids=tuple(bracket.bracket_id for bracket in brackets))
             if item == component else item for item in sequence.components
         ),
     )
@@ -1142,7 +1198,10 @@ def remove_component(sequence: PulseSequence, component_id: str) -> PulseSequenc
         raise ValueError("removing the only component leaves no periods; use Clear for the whole Pulse")
     return replace(
         sequence, periods=periods,
-        bindings=tuple(binding for binding in sequence.bindings if binding.field_ref.period_id not in component.period_ids),
+        bindings=tuple(binding for binding in sequence.bindings if (
+            binding.field_ref.period_id not in component.period_ids
+            and binding.field_ref.bracket_id not in component.bracket_ids
+        )),
         brackets=_parent_brackets_after_splice(sequence, component, ()),
         components=tuple(item for item in sequence.components if item != component),
     )
@@ -1158,6 +1217,7 @@ __all__ = [
     "FIELD_DAC",
     "FIELD_DELAY",
     "FIELD_DURATION",
+    "FIELD_BRACKET_COUNT",
     "FIELD_KINDS",
     "MAXIMUM_REPEAT_COUNT",
     "MINIMUM_BRACKET_COUNT",

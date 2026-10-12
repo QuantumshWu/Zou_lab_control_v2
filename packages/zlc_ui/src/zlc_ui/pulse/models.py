@@ -153,6 +153,7 @@ class BracketVM:
     #: its posts wear -- the preview draws its loop in the same.
     ordinal: int = 1
     color: str = ""
+    count_field: FieldVM | None = None
 
 
 @dataclass(frozen=True)

@@ -159,6 +159,15 @@ def test_a_calibrations_api_fields_default_to_the_pulses_first_three_in_period_o
     assert [binding.field_id for binding in api_bindings_in_period_order(shuffled)] == [
         "duration:long_before", "duration:short", "duration:long_after",
     ]
+    from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef
+
+    count = PulseBinding(PulseFieldRef("bracket_count", bracket_id="early"), "count", source="api")
+    first_period = shuffled.periods[0].period_id
+    shuffled = replace(
+        shuffled, bindings=(count, *shuffled.bindings),
+        brackets=(*shuffled.brackets, PulseBracket("early", first_period, first_period, 1)),
+    )
+    assert count in api_bindings_in_period_order(shuffled)[:3]
     defaults = CALIBRATION_NODE.resolve_defaults(
         {}, {"pulse_template": SimpleNamespace(value=shuffled)}
     )

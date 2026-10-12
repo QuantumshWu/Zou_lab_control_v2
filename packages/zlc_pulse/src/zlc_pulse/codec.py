@@ -237,6 +237,7 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
                     "kind": binding.field_ref.kind,
                     "period_id": binding.field_ref.period_id,
                     "port": binding.field_ref.port,
+                    "bracket_id": binding.field_ref.bracket_id,
                 },
                 "unit": binding.unit,
                 "scan": binding.scan,
@@ -263,7 +264,7 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
     if sequence.components:
         tree["components"] = [
             {"component_id": component.component_id, "name": component.name,
-             "period_ids": list(component.period_ids)}
+             "period_ids": list(component.period_ids), "bracket_ids": list(component.bracket_ids)}
             for component in sequence.components
         ]
     return tree
@@ -384,7 +385,8 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             item, ("field_ref", "unit", "scan", "source", "config_key"), "pulse binding"
         )
         field = _object(
-            binding["field_ref"], ("kind", "period_id", "port"), "pulse field reference"
+            binding["field_ref"], ("kind", "period_id", "port"), "pulse field reference",
+            optional=("bracket_id",),
         )
         bindings.append(PulseBinding(
             field_ref=PulseFieldRef(**field),
@@ -423,9 +425,10 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             PulseComponent(
                 component_id=component["component_id"], name=component["name"],
                 period_ids=tuple(_array(component["period_ids"], "component period_ids")),
+                bracket_ids=tuple(_array(component["bracket_ids"], "component bracket_ids")),
             )
             for component in (
-                _object(item, ("component_id", "name", "period_ids"), "pulse component")
+                _object(item, ("component_id", "name", "period_ids", "bracket_ids"), "pulse component")
                 for item in _array(tree.get("components", []), "pulse components")
             )
         ),

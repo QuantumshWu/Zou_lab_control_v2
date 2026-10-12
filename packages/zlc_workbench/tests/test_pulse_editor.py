@@ -1324,6 +1324,46 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert view.warnings
         view.warnings.clear()
         bracket, = presenter.sequence.brackets
+        selected_periods = (("period", first.period_id), ("period", last.period_id))
+        view.component_action_requested.emit("group", (
+            ("bracket", bracket.bracket_id + ":start"), *selected_periods,
+        ))
+        assert presenter.sequence is parent
+        assert view.warnings
+        view.warnings.clear()
+        view.component_action_requested.emit("group", selected_periods)
+        period_only, = presenter.sequence.components
+        assert period_only.bracket_ids == ()
+        assert view.schedule_view.schedule.components[0].bracket_ids == ()
+        assert presenter.sequence.brackets == parent.brackets
+        original_order = view.schedule_view.schedule.item_order
+        view.reorder_items_requested.emit(tuple(item for item in original_order if item not in selected_periods)
+                                          + selected_periods)
+        assert presenter.sequence.bracket_bounds[0][0] == presenter.sequence.bracket_bounds[0][1]
+        assert presenter.sequence.components == (period_only,)
+        view.reorder_items_requested.emit(original_order)
+        view.component_action_requested.emit("ungroup", period_only.component_id)
+        assert presenter.sequence == parent
+        view.bracket_add_requested.emit(first.period_id, last.period_id, 3)
+        added_outer = next(b for b in presenter.sequence.brackets if b.bracket_id != bracket.bracket_id)
+        assert presenter.sequence.brackets == (added_outer, bracket)
+        nested_parent = presenter.sequence
+        view.component_action_requested.emit("group", (
+            ("bracket", added_outer.bracket_id + ":start"), *selected_periods,
+            ("bracket", added_outer.bracket_id + ":end"),
+        ))
+        assert presenter.sequence is nested_parent
+        assert view.warnings
+        view.warnings.clear()
+        view.component_action_requested.emit("group", (
+            ("bracket", bracket.bracket_id + ":start"), *selected_periods,
+            ("bracket", bracket.bracket_id + ":end"),
+        ))
+        nested_component, = presenter.sequence.components
+        assert nested_component.bracket_ids == (bracket.bracket_id,)
+        view.component_action_requested.emit("ungroup", nested_component.component_id)
+        view.remove_items_requested.emit((("bracket", added_outer.bracket_id + ":start"),))
+        assert presenter.sequence == parent
         view.component_action_requested.emit("group", (
             ("bracket", bracket.bracket_id + ":start"), ("period", first.period_id),
             ("period", last.period_id), ("bracket", bracket.bracket_id + ":end"),

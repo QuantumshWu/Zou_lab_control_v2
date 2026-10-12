@@ -589,6 +589,39 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
     assert resolved.periods[0].duration == 80
     assert resolve_scan_point(resolved, (100,)).periods[0].duration == 100
 
+    from zlc_pulse import api_parameter_columns_for, field_label, pulse_field_value
+    repeats = PulseFieldRef("bracket_count", bracket_id="repeat")
+    bracketed = replace(base, brackets=(PulseBracket("repeat", "p0", "p1", 2),))
+    for source in ("api", "config"):
+        bound = replace(bracketed, bindings=(PulseBinding(
+            repeats, "count", source=source,
+            config_key="shared_repeat" if source == "config" else "",
+        ),))
+        assert sequence_from_tree(sequence_to_tree(bound)) == bound
+        assert bound.field_unit(repeats) == "count"
+        assert pulse_field_value(bound, repeats, "count") == 2
+        assert field_label(bound, repeats) == "Bracket 1.repeats"
+        if source == "api":
+            supplied = apply_api_values(bound, {"Bracket 1.repeats": (3, "count")})[0]
+            assert api_parameter_columns_for(bound)[0].unit == "count"
+            assert resolve_api_parameters(bound, {repeats.key: 3}).brackets[0].count == 3
+        else:
+            supplied = apply_config_values(bound, {"shared_repeat": (3, "count")})[0]
+            assert apply_config_values(bound, {}, current=supplied)[0].brackets[0].count == 2
+        assert supplied.brackets[0].count == 3 and bound.brackets[0].count == 2
+        assert compile_sequence(resolve_api_parameters(supplied), StreamerParams(max_rows=8, bank_size=2), 50e6).loops == ((0, 1, 3),)
+        apply = apply_api_values if source == "api" else apply_config_values
+        key = repeats.key if source == "api" else "shared_repeat"
+        for number in (0, 1.5, 2**32):
+            with np.testing.assert_raises((TypeError, ValueError)):
+                apply(bound, {key: (number, "count")})
+        with np.testing.assert_raises(ValueError):
+            apply(bound, {key: (3, "ns")})
+    with np.testing.assert_raises_regex(ValueError, "cannot be scanned"):
+        PulseBinding(repeats, "count", scan=True)
+    with np.testing.assert_raises_regex(ValueError, "missing bracket"):
+        replace(base, bindings=(PulseBinding(repeats, "count", source="api"),))
+
 
 
 
@@ -642,6 +675,7 @@ def test_a_spacer_holds_its_dacs_and_takes_only_a_config_duration() -> None:
 def test_component_grouping_and_editing_keep_one_flat_program() -> None:
     from zlc_pulse import (
         field_label, group_component, ungroup_component, extract_subpulse, replace_component,
+        insert_subpulse, remove_component,
     )
 
     authored = replace(
@@ -652,9 +686,16 @@ def test_component_grouping_and_editing_keep_one_flat_program() -> None:
         brackets=(PulseBracket("outer", "p0", "p2", 2), PulseBracket("inner", "p0", "p1", 3)),
         run_repeats=7,
     )
-    grouped = group_component(authored, ("p0", "p1"), "Cooling", "cooling")
+    authored = replace(authored, bindings=authored.bindings + (
+        PulseBinding(PulseFieldRef("bracket_count", bracket_id="outer"), "count", source="api"),
+        PulseBinding(PulseFieldRef("bracket_count", bracket_id="inner"), "count",
+                     source="config", config_key="cooling_repeats"),
+    ))
+    grouped = group_component(authored, ("p0", "p1"), "Cooling", "cooling", bracket_ids=("inner",))
     geometry = StreamerParams(max_rows=8, bank_size=2)
-    assert compile_sequence(grouped, geometry, 50e6) == compile_sequence(authored, geometry, 50e6)
+    assert compile_sequence(resolve_api_parameters(grouped), geometry, 50e6) == compile_sequence(
+        resolve_api_parameters(authored), geometry, 50e6,
+    )
     assert ungroup_component(grouped, "cooling") == authored
     assert grouped.period_label("p0") == "Cooling / p0"
     assert field_label(grouped, grouped.bindings[0].field_ref) == "Cooling / p0.duration"
@@ -663,6 +704,17 @@ def test_component_grouping_and_editing_keep_one_flat_program() -> None:
     assert fragment.to_sequence().periods == authored.periods[:2]
     assert replace_component(grouped, "cooling", fragment) == grouped
     assert not hasattr(fragment, "delays") and not hasattr(fragment, "run_repeats")
+    assert tuple(b.field_ref.bracket_id for b in fragment.bindings if b.kind == "bracket_count") == ("inner",)
+    copies = insert_subpulse(insert_subpulse(None, fragment), fragment)
+    repeat_bindings = tuple(b for b in copies.bindings if b.kind == "bracket_count")
+    assert tuple(b.field_ref.bracket_id for b in repeat_bindings) == tuple(
+        c.bracket_ids[0] for c in copies.components
+    )
+    assert {b.config_key for b in repeat_bindings} == {"cooling_repeats"}
+    remaining = remove_component(copies, copies.components[0].component_id)
+    assert tuple(b for b in remaining.bindings if b.kind == "bracket_count") == repeat_bindings[1:]
+    parent = remove_component(grouped, "cooling")
+    assert tuple(b.field_ref.bracket_id for b in parent.bindings if b.kind == "bracket_count") == ("outer",)
 
 
 def test_subpulse_instances_have_independent_fields_and_shared_config_names() -> None:
@@ -716,6 +768,18 @@ def test_component_boundaries_preserve_parent_brackets_and_reject_partial_crossi
 
     sequence = _sequence()
     grouped = group_component(sequence, ("p0", "p1"), "First", "first")
+    # Selecting all periods of a Bracket leaves its unselected posts outside.
+    wrapped = replace(sequence, brackets=(PulseBracket("outside", "p0", "p1", 3),))
+    period_group = group_component(wrapped, ("p0", "p1"), "First", "first")
+    assert period_group.components[0].bracket_ids == ()
+    assert extract_subpulse(period_group, "first").brackets == ()
+    assert sequence_from_tree(sequence_to_tree(period_group)) == period_group
+    assert compile_sequence(period_group, StreamerParams(), 50e6) == compile_sequence(wrapped, StreamerParams(), 50e6)
+    changed = replace(extract_subpulse(period_group, "first"), periods=sequence.periods[:1])
+    assert replace_component(period_group, "first", changed).bracket_bounds == ((0, 1),)
+    emptied = remove_component(period_group, "first")
+    assert emptied.brackets[0].bracket_id == "outside"
+    assert emptied.bracket_bounds == ((0, 0),)
     for bad in (
         PulseComponent("broken", "Broken", ("p0", "p2")),
         PulseComponent("missing", "Missing", ("unknown",)),
@@ -745,6 +809,11 @@ def test_component_boundaries_preserve_parent_brackets_and_reject_partial_crossi
     )
     inserted = insert_subpulse(sequence, empty_edge, before_period_id="p1")
     assert inserted.bracket_bounds == ((1, 1), (2, 2))
+    edge_component, = inserted.components
+    assert len(edge_component.bracket_ids) == 2
+    extracted_edge = extract_subpulse(inserted, edge_component.component_id)
+    assert extracted_edge.to_sequence().bracket_bounds == ((0, 0), (1, 1))
+    assert replace_component(inserted, edge_component.component_id, extracted_edge) == inserted
     parent_empty = replace(sequence, brackets=(PulseBracket("gap", "p1", "p0", 2),))
     inserted = insert_subpulse(parent_empty, extract_subpulse(grouped, "first"), before_period_id="p1")
     assert inserted.bracket_bounds == ((1, 1),)
@@ -758,7 +827,7 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
 
     authored = group_component(
         replace(_sequence(), brackets=(PulseBracket("inner", "p0", "p1", 2),)),
-        ("p0", "p1"), "Cooling", "cooling",
+        ("p0", "p1"), "Cooling", "cooling", bracket_ids=("inner",),
     )
     assert sequence_from_tree(sequence_to_tree(authored)) == authored
     assert sequence_from_tree(sequence_to_tree(_sequence())).components == ()

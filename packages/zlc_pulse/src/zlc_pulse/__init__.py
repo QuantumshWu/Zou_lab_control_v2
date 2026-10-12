@@ -22,6 +22,7 @@ from .codec import (
 )
 from .model import (
     ANALOG_MODE_CHOICES,
+    FIELD_BRACKET_COUNT,
     MINIMUM_BRACKET_COUNT,
     TIME_UNIT_CHOICES,
     canonical_time_unit,
@@ -116,6 +117,7 @@ __all__ = [
     "PulseTarget",
     "PulseBinding",
     "PulseFieldRef",
+    "FIELD_BRACKET_COUNT",
     "OutputDelay",
     "MINIMUM_BRACKET_COUNT",
     "PULSE_TREE_FORMAT",

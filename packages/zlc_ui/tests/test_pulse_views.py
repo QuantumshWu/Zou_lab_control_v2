@@ -748,11 +748,18 @@ assert start.width() == end.width(), "the two posts match"
 # The count closes the span, so it lives on the end post only -- but both
 # posts keep the line, or they would not stay level with each other.
 start.show(); end.show(); app.processEvents()
-assert not start.count_spin.isVisible()
-assert end.count_spin.isVisible() and end.count_spin.value() == 4
-assert end.count_spin.minimum() == 2, "once is not a repeat"
-assert int(end.count_spin.maximum()) == (1 << 32) - 1
-assert end.count_spin.text() == "4"
+assert not start.count_edit.isVisible()
+assert end.count_edit.isVisible() and end.count_edit.text() == "4"
+assert end.count_edit._numeric_bounds == (2, (1 << 32) - 1, "int")
+bindings = []
+end.binding_committed.connect(lambda scan, source: bindings.append((scan, source)))
+end.count_edit.binding_button.click(); app.processEvents()
+assert not end.count_edit.scan_toggle.isEnabled()
+end.count_edit.source_switch.setState(1)
+assert bindings[-1] == (False, "api")
+end.count_edit.source_switch.setState(2)
+assert bindings[-1] == (False, "config")
+end.count_edit._popup.close()
 
 # In the strip, the posts stand beside cards of the same build.
 view = PulseScheduleView(); view.set_schedule(vm); view.show(); app.processEvents()
@@ -938,8 +945,12 @@ orders.clear()
 assert not drop(("bracket", "b:start"), strip.items()[-1].geometry().right() + 40)
 assert orders == [] and bracket_requests == []
 end_post = next(post for post in strip._posts if post.kind == 'end')
-end_post.count_spin.setValue(7)
+end_post.count_edit.setText("7")
+end_post.count_edit.editingFinished.emit()
 assert bracket_requests == [('b', 'p2', 'p2', 7)], 'retained post used stale bracket anchors'
+end_post.count_edit.setText(str((1 << 32) - 1))
+end_post.count_edit.editingFinished.emit()
+assert bracket_requests[-1] == ('b', 'p2', 'p2', (1 << 32) - 1), 'Qt must not wrap uint32 counts to signed int'
 empty = replace(right_only, revision=5, brackets=(BracketVM('b', 'p2', 'p1', 7),))
 assert view.set_schedule(empty)
 app.processEvents()
@@ -1763,9 +1774,9 @@ from zlc_ui.pulse._layout import px
 app = ensure_qt_app(["post-width"])
 post = BracketPost("b", "end", count=10000)
 post.show(); app.processEvents()
-assert post.width() == post.count_spin.width_for("10000") + 2 * px(7)
-assert post.width() < post.count_spin.sizeHint().width() + 2 * px(7)
-assert post.count_spin.text() == "10000" and not post.count_spin.property("numericError")
+assert post.width() == post.count_edit.width() + 2 * px(7)
+assert post.count_edit.contentsRect().width() - post.count_edit.textMargins().right() >= post.count_edit.fontMetrics().horizontalAdvance("10000")
+assert post.count_edit.text() == "10000" and not post.count_edit.property("numericError")
 post.close(); post.deleteLater()
 """
     )
@@ -1833,10 +1844,18 @@ assert visible[-2] == ("component-end", "mot")
 assert all(item.is_selected() for item in strip.items()[:-1])
 assert not main._cards["p3"].is_selected()
 assert strip.selected_items() == vm.item_order[:-1]
+QtTest.QTest.mouseClick(main._cards["p1"], QtCore.Qt.LeftButton, pos=QtCore.QPoint(5, 5))
+main.bracket_button.click()
+assert actions[-1] == ("bracket_add", ("mot", ("p1", "p1", vm.default_bracket_count))), actions
+outer_brackets = []
+handle.bracket_add_requested.connect(lambda *args: outer_brackets.append(args))
+strip.show_selection(vm.item_order[:-1])
 start_cap = strip.items()[0]
 QtTest.QTest.mouseClick(start_cap, QtCore.Qt.LeftButton,
                        QtCore.Qt.ShiftModifier, QtCore.QPoint(5, 5))
 assert strip.selection_payload() == (("component", "mot"),)
+main.bracket_button.click()
+assert outer_brackets == [("p1", "p2", vm.default_bracket_count)], outer_brackets
 QtTest.QTest.mouseClick(start_cap.name_edit, QtCore.Qt.LeftButton)
 start_cap.name_edit.selectAll()
 QtTest.QTest.keyClicks(start_cap.name_edit, "MOT revised")
