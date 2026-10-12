@@ -13,8 +13,8 @@ from ..world import DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX, SimulationWorld
 from .adapter import VirtualCamera, VirtualCameraConfig
 
 
-#: The configured ROI, as the real cameras configure theirs: four optional
-#: numbers, all blank for the whole sensor.
+#: The ROI the camera opens with, as the real cameras configure theirs: four
+#: optional numbers, all blank for the whole sensor.
 _ROI_FIELDS = (
     AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
     AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),

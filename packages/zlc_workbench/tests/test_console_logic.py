@@ -152,7 +152,7 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
         field.name for field in presenter.logic[node_id].descriptor.authoring_schema.fields
     )
     assert projection["form_values"]["repeat"] == 0
-    # Blank exposure and ROI are the camera's own settings.
+    # Blank exposure and ROI keep the camera's current settings.
     assert projection["form_values"]["exposure_seconds"] is None
     assert projection["device_keys"]["camera"] == "camera"
 
@@ -1458,7 +1458,7 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert any("not-calibration.json" in issue for issue in projection["issues"])
 
 
-def test_slm_feedback_form_shows_a_numeric_exposure_blank_for_the_camera_setting(presenter) -> None:
+def test_slm_feedback_form_shows_a_numeric_exposure_blank_for_the_current_camera_setting(presenter) -> None:
     node_id = presenter.add_logic("slm_feedback")
     projection = presenter.logic_editor_projection(node_id)
     exposure = next(

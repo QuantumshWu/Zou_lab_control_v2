@@ -354,7 +354,7 @@ read before the camera is blamed): the camera's frame count never stands in
 for the board's DONE, and a batch is never repeated at an unchanged phase.
 The Pulse resource is an
 explicit operator selection; camera exposure is a separate visible/editable
-field, blank for the camera's own (Device Manager) exposure. Feedback neither
+field, blank to keep the camera's current exposure. Feedback neither
 derives one from the other nor reuses Calibration exposure.
 
 Calibration contributes registered site centers, its BOX half-width and

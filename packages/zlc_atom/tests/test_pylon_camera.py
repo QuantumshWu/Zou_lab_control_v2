@@ -332,13 +332,12 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
 def test_a_refused_setting_is_not_the_config_and_does_not_block_the_next_one(
     fake_pypylon,
 ) -> None:
-    """The config is the camera's own setting, never what a run asked for.
+    """The config is what the sensor holds, never what it refused.
 
     A refused exposure used to be recorded as the current exposure and then
     re-sent -- and refused again -- by every later ROI change, so one bad
     exposure request locked the ROI until the exposure was set to something
-    the sensor would take.  An accepted ROI used to become the config too, so
-    a run that stated none inherited the previous run's window.
+    the sensor would take.
     """
 
     camera = _FakeCamera()
@@ -364,14 +363,15 @@ def test_a_refused_setting_is_not_the_config_and_does_not_block_the_next_one(
     assert len(camera.ExposureTime.writes) == exposure_writes, (
         "an unchanged exposure was re-sent with the ROI"
     )
-    assert adapter.config.roi_xywh is None
+    assert adapter.config.roi_xywh == (0, 0, 16, 16)
 
+    # A run that states nothing keeps what the camera is set to now -- not
+    # the whole sensor -- and writes nothing to it.
     point = adapter.set_exposure_seconds(0.02)
-    assert point.exposure_seconds == pytest.approx(0.02)
-    assert adapter.config.exposure_seconds == pytest.approx(0.01)
-    # A run that states nothing gets the configured whole sensor and exposure back.
-    assert adapter.set_roi(None).roi_shape_yx == point.sensor_shape_yx
-    assert adapter.set_exposure_seconds(None).exposure_seconds == pytest.approx(0.01)
+    exposure_writes = len(camera.ExposureTime.writes)
+    assert adapter.set_roi(None).roi_shape_yx == (16, 16)
+    assert adapter.set_exposure_seconds(None).exposure_seconds == pytest.approx(0.02)
+    assert len(camera.ExposureTime.writes) == exposure_writes
 
 
 def test_monitor_arm_is_temporarily_free_running_then_restores_external_trigger(fake_pypylon) -> None:

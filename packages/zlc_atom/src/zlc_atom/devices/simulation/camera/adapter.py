@@ -36,8 +36,8 @@ class VirtualCameraConfig:
 
     frame_shape_yx: tuple[int, int] = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
     exposure_seconds: float = 0.02
-    #: The configured ``(x, y, width, height)``, as the real cameras configure
-    #: theirs; None reads the whole sensor.
+    #: The ``(x, y, width, height)`` the camera opens with, as the real
+    #: cameras configure theirs; None reads the whole sensor.
     roi_xywh: tuple[int, int, int, int] | None = None
     frame_dtype: str = "<u2"
     #: What one count is worth, as this sensor's own world applies it going
@@ -143,16 +143,16 @@ class VirtualCamera:
     def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry.
 
-        ``None`` is the exposure this camera is configured with.
+        ``None`` leaves the exposure the camera has now.
         """
 
-        exposure = float(self.config.exposure_seconds if seconds is None else seconds)
-        if not np.isfinite(exposure) or exposure <= 0:
+        exposure = None if seconds is None else float(seconds)
+        if exposure is not None and (not np.isfinite(exposure) or exposure <= 0):
             raise ValueError("exposure_seconds must be positive and finite")
         with self._condition:
             if self._records.armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
-            if self._exposure_seconds != exposure:
+            if exposure is not None and self._exposure_seconds != exposure:
                 self._exposure_seconds = exposure
                 self._settings_epoch += 1
         return self.working_point()
@@ -162,15 +162,15 @@ class VirtualCamera:
     ) -> CameraWorkingPoint:
         """Read this part of the sensor, leaving the exposure.
 
-        ``None`` is the ROI this camera is configured with; a configuration
-        without one reads the whole sensor.
+        ``None`` leaves the ROI the camera has now.
         """
 
-        roi = self._snapped_roi(self.config.roi_xywh if roi_xywh is None else roi_xywh)
+        roi = None if roi_xywh is None else self._snapped_roi(roi_xywh)
         with self._condition:
             if self._records.armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
-            self._roi_xywh = roi
+            if roi is not None:
+                self._roi_xywh = roi
         return self.working_point()
 
     def _snapped_roi(self, roi_xywh: tuple[int, int, int, int] | None) -> tuple[int, int, int, int]:

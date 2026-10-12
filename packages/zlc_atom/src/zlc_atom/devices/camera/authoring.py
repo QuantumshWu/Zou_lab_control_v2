@@ -16,7 +16,7 @@ _ROI_FIELDS = ("roi_x", "roi_y", "roi_width", "roi_height")
 def _validate_measurement(values: dict[str, object]) -> None:
     roi = tuple(values[name] for name in _ROI_FIELDS)
     if any(value is None for value in roi) and not all(value is None for value in roi):
-        raise ValueError("camera ROI requires all four fields, or none for the camera's own ROI")
+        raise ValueError("camera ROI requires all four fields, or none to keep the camera's current ROI")
 
 
 def _spatial_range(selection: SelectionState, role: str) -> SelectionRange | None:
@@ -136,11 +136,10 @@ _IMAGE_AREA_TO_ROI = SelectionMapping(
 
 CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
     (
-        # Blank keeps the camera's own setting (Device Manager); a stated value
-        # applies to this run only.
+        # Blank keeps the camera's current setting.
         AuthoringField(
             "exposure_seconds", "float", "Exposure seconds", None, required=False, minimum=1e-9,
-            description="Blank uses the camera's own exposure.",
+            description="Blank keeps the camera's current exposure.",
         ),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),

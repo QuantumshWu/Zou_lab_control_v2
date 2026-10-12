@@ -1891,7 +1891,7 @@ class SlmFeedbackTask:
                 f"the modes are {', '.join(FEEDBACK_OBSERVABLES)}"
             )
         self.observable = observable
-        # None (and every external mode) keeps the camera's own exposure.
+        # None (and every external mode) keeps the camera's current exposure.
         self.exposure_seconds = None if external or exposure_seconds is None else float(exposure_seconds)
         if self.exposure_seconds is not None and (not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0):
             raise ValueError("feedback exposure_seconds must be finite and positive")

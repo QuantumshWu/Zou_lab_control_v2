@@ -102,7 +102,7 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             None,
             minimum=1e-9,
             enabled_when=_CAMERA_MODES,
-            description="Blank uses the camera's own exposure.",
+            description="Blank keeps the camera's current exposure.",
         ),
         AuthoringField(
             "shots_per_candidate", "int", "qCMOS shots per candidate", 100, minimum=10,

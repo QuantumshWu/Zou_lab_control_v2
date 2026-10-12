@@ -218,13 +218,16 @@ def test_working_point_reuses_applied_readback_and_all_sdk_calls_share_owner(mon
         assert roi_writes and all(name.startswith("SUBARRAY_") for name in roi_writes)
         assert {'attr:SUBARRAY_HPOS', 'attr:SUBARRAY_VPOS',
                 'attr:SUBARRAY_HSIZE', 'attr:SUBARRAY_VSIZE'} <= {name for name, _ in driver.calls}
-        # A run that states nothing gets the configured ROI and exposure, not
-        # the whole sensor and not the previous run's request.
+        # A run that states nothing keeps what the camera is set to now -- not
+        # the whole sensor, not the exposure it was opened with -- and writes
+        # nothing to the sensor.
         adapter.set_exposure_seconds(0.02)
-        configured = adapter.set_roi(None)
-        assert (configured.roi_origin_yx, configured.roi_shape_yx) == ((4, 4), (8, 8))
-        assert adapter.set_exposure_seconds(None).exposure_seconds == pytest.approx(0.01)
-        adapter.set_roi((5, 5, 7, 7))
+        driver.calls.clear()
+        kept = adapter.set_roi(None)
+        assert (kept.roi_origin_yx, kept.roi_shape_yx) == ((4, 4), (8, 8))
+        assert adapter.set_exposure_seconds(None).exposure_seconds == pytest.approx(0.02)
+        assert not [name for name, _thread in driver.calls if name.startswith("set:")]
+        adapter.set_exposure_seconds(0.01)
         original_set = driver.device.set_get_property
         def quantized(property_id, value):
             return original_set(property_id, value + 0.0000244

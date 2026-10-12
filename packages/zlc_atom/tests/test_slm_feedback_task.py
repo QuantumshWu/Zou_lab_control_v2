@@ -659,7 +659,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert defaults["maximum_weight_change"] == pytest.approx(0.5)
     assert defaults["max_updates"] == 12
     assert defaults["feedback_mode"] == "qcmos_bright_dark"
-    # Blank is the camera's own exposure (its Device Manager setting).
+    # Blank keeps the camera's current exposure.
     assert defaults["exposure_seconds"] is None
     assert defaults["pulse_template"] == ""
     template = next(

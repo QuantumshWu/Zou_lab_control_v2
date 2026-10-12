@@ -70,7 +70,7 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
         AuthoringField("before_period", "text", "Before imaging Period", "", required=True),
         AuthoringField("after_period", "text", "After imaging Period", "", required=True),
         AuthoringField("exposure_seconds", "float", "Camera exposure", None, required=False, minimum=1e-9, unit="s",
-                       description="Blank uses the camera's own exposure; the Task does not compare it with Pulse Period lengths."),
+                       description="Blank keeps the camera's current exposure; the Task does not compare it with Pulse Period lengths."),
         AuthoringField("shots", "int", "Shots", 1, minimum=1,
                        description="Pulses fired one after another, each photographed, rearranged and verified on its own. "
                                    "Shots after the first completed one keep their atom-by-atom data, not the phase sequence, optical diagnostics or figures."),

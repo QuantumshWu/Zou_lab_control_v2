@@ -185,6 +185,8 @@ class SlmRearrangementTask:
         self.points = (source, destination)
         self.weights = (weights, self.target_intensity[tuple(destination.T)])
         self.readout_order = order
+        contract = calibration.frame_contract
+        self.roi = contract.roi_xywh
         self._revision = 0
         self._snapshots, self._records, self._detections = {}, [], []
         self._timings, self._playback, self._result, self._plan = {}, None, None, None
@@ -899,7 +901,7 @@ class SlmRearrangementTask:
 
                     node = CameraMeasurementNode(camera=self.camera,
                         request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
-                            roi_xywh=None, repeat=self.recording_frames or 2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
+                            roi_xywh=self.roi, repeat=self.recording_frames or 2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
                         signal_plane=self.signal_plane, producer=f"{self.instance_id}/camera")
                     start = perf_counter(); capture = node.prepare(owns_generation=False, should_stop=stopped)
                     self._timings["camera_arm"] = (perf_counter()-start)*1000

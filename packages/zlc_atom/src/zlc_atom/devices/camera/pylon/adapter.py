@@ -496,11 +496,11 @@ class PylonCameraAdapter:
     def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry.
 
-        ``None`` is the exposure this camera is configured with.
+        ``None`` leaves the exposure the camera has now.
         """
 
         if seconds is None:
-            return self._reconfigure(self.config, "exposure_seconds")
+            return self._current()
         exposure = float(seconds)
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("exposure_seconds must be positive and finite")
@@ -512,15 +512,21 @@ class PylonCameraAdapter:
     ) -> CameraWorkingPoint:
         """Read this part of the sensor, leaving the exposure.
 
-        ``None`` is the ROI this camera is configured with; a configuration
-        without one reads the whole sensor.
+        ``None`` leaves the ROI the camera has now.
         """
 
         if roi_xywh is None:
-            return self._reconfigure(self.config, "roi_xywh")
+            return self._current()
         return self._reconfigure(
             replace(self.config, roi_xywh=roi_request(roi_xywh)), "roi_xywh"
         )
+
+    def _current(self) -> CameraWorkingPoint:
+        """A request that states nothing: the camera as it is now."""
+
+        if self._armed:
+            raise RuntimeError("pylon settings cannot change while armed")
+        return self.working_point()
 
     def _reconfigure(self, candidate: PylonCameraConfig, field: str) -> CameraWorkingPoint:
         """Apply one requested field; keep requested and sensor-quantized facts distinct."""
@@ -551,10 +557,17 @@ class PylonCameraAdapter:
         return point
 
     def _record_readback(self) -> CameraWorkingPoint:
-        """The sensor's own state.  The configuration keeps the configured
-        exposure and ROI, which is what a run that states none asks for."""
+        """The sensor's own state, as the config.  The whole sensor is ``None``."""
 
         point = self._read_working_point()
+        top, left = point.roi_origin_yx
+        height, width = point.roi_shape_yx
+        whole_sensor = (top, left) == (0, 0) and (height, width) == point.sensor_shape_yx
+        self.config = replace(
+            self.config,
+            exposure_seconds=point.exposure_seconds,
+            roi_xywh=None if whole_sensor else (left, top, width, height),
+        )
         self._working_point = point
         return point
 

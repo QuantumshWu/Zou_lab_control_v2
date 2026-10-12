@@ -1272,7 +1272,7 @@ class CalibrationTask:
             # One acquisition implementation for the whole project.  This task
             # says what it needs of it -- three frames a cycle, this many
             # cycles, the exposure its own pulse cuts them with, and the
-            # bench's own geometry (the camera's configured ROI) -- and the camera
+            # geometry the bench is already set to -- and the camera
             # measurement performs it.  Written out here a second time, the
             # arm arguments, the exact read and the timeout drifted from the
             # ones every other measurement uses.
@@ -1281,7 +1281,7 @@ class CalibrationTask:
                 request=CameraMeasurementRequest(
                     camera_key=self.request.camera_key,
                     exposure_seconds=self.request.camera_exposure_seconds,
-                    roi_xywh=None,
+                    roi_xywh=_roi_xywh(self.camera.working_point()),
                     repeat=self.request.repeats,
                     frames_per_cycle=3,
                     photoelectrons=self.request.photoelectrons,

@@ -425,24 +425,27 @@ class DcamCameraAdapter:
 
     def working_point(self) -> CameraWorkingPoint:
         """The latest successful settings/arm readback, not another property scan."""
-        def current() -> CameraWorkingPoint:
-            self._require_device()
-            if self._working_point is None:
-                self._working_point = self._read_working_point_on_owner()
-            return self._working_point
-        return self._lane.call(current)
+        return self._lane.call(self._current_on_owner)
+
+    def _current_on_owner(self) -> CameraWorkingPoint:
+        self._require_device()
+        if self._working_point is None:
+            self._working_point = self._read_working_point_on_owner()
+        return self._working_point
 
     def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry.
 
-        ``None`` is the exposure this camera is configured with.
+        ``None`` leaves the exposure the camera has now.
         """
 
-        requested = self._config.exposure_seconds if seconds is None else positive_real(seconds, "exposure_seconds")
+        requested = None if seconds is None else positive_real(seconds, "exposure_seconds")
 
         def apply() -> CameraWorkingPoint:
             if self._armed:
                 raise RuntimeError("qCMOS settings cannot change while armed")
+            if requested is None:
+                return self._current_on_owner()
             if self._working_point is not None and requested == self._requested_settings.get("exposure_seconds"):
                 return self._working_point
             try:
@@ -465,15 +468,16 @@ class DcamCameraAdapter:
     ) -> CameraWorkingPoint:
         """Read this part of the sensor, leaving the exposure.
 
-        ``None`` is the ROI this camera is configured with; a configuration
-        without one reads the whole sensor.
+        ``None`` leaves the ROI the camera has now.
         """
 
-        candidate = self._config if roi_xywh is None else replace(self._config, roi_xywh=roi_xywh)
+        candidate = None if roi_xywh is None else replace(self._config, roi_xywh=roi_xywh)
 
         def apply() -> CameraWorkingPoint:
             if self._armed:
                 raise RuntimeError("qCMOS settings cannot change while armed")
+            if candidate is None:
+                return self._current_on_owner()
             if (
                 self._working_point is not None
                 and "roi_xywh" in self._requested_settings

@@ -164,18 +164,19 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
     assert exposures == [pytest.approx(0.007)]
     camera.finish_record_capture()
 
-    # A run that states nothing gets the camera's own settings back, not the
-    # whole sensor and not the previous run's request.
+    # A run that states nothing keeps what the camera is set to now: not the
+    # whole sensor, and not the ROI and exposure it was opened with.
     configured = VirtualCamera(
         VirtualCameraConfig(frame_shape_yx=(8, 10), exposure_seconds=0.02, roi_xywh=(1, 1, 5, 4)),
         frame_source=source,
     )
-    assert configured.working_point().roi_shape_yx == (4, 5)
+    point = configured.set_roi(None)
+    assert (point.roi_origin_yx, point.roi_shape_yx) == ((1, 1), (4, 5))
     configured.set_roi((3, 2, 4, 3))
     configured.set_exposure_seconds(0.007)
     point = configured.set_roi(None)
-    assert (point.roi_origin_yx, point.roi_shape_yx) == ((1, 1), (4, 5))
-    assert configured.set_exposure_seconds(None).exposure_seconds == pytest.approx(0.02)
+    assert (point.roi_origin_yx, point.roi_shape_yx) == ((2, 3), (3, 4))
+    assert configured.set_exposure_seconds(None).exposure_seconds == pytest.approx(0.007)
 
 
 def test_virtual_camera_tunable_reports_current_effective_value_and_epoch() -> None:

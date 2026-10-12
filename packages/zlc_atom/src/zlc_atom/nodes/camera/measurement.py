@@ -371,7 +371,7 @@ class CameraMeasurementRequest:
     """One frozen camera selection and acquisition working point."""
 
     camera_key: str
-    #: None keeps the camera's own exposure and ROI (its device configuration).
+    #: None keeps the exposure / ROI the camera has now.
     exposure_seconds: float | None
     roi_xywh: tuple[int, int, int, int] | None
     repeat: int
