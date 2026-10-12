@@ -21,8 +21,10 @@ from dataclasses import dataclass, replace
 
 from .binding import field_label, pulse_field_value, replace_pulse_field
 from .model import (
+    FIELD_BRACKET_COUNT,
     FIELD_DAC,
     FIELD_DELAY,
+    MAXIMUM_REPEAT_COUNT,
     PulseFieldRef,
     PulseSequence,
 )
@@ -99,6 +101,12 @@ def _column_for_field(
     api_parameter: bool,
 ) -> ScanColumnSpec:
     label = field_label(sequence, reference)
+    if reference.kind == FIELD_BRACKET_COUNT:
+        nominal = float(pulse_field_value(sequence, reference, unit))
+        return ScanColumnSpec(
+            name, max(1.0, nominal - 1), min(float(MAXIMUM_REPEAT_COUNT), nominal + 1),
+            unit="count", limit_lo=1, limit_hi=MAXIMUM_REPEAT_COUNT, label=label,
+        )
     if reference.kind == FIELD_DAC:
         # The SIGNED code, which is what the operator types into that same
         # DAC's box three tabs away.  The wire holds offset-binary -- the

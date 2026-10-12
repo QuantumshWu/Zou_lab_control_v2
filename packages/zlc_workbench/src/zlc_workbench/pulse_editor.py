@@ -38,6 +38,7 @@ from zlc_pulse import (
     ANALOG_MODE_CHOICES,
     AnalogStep,
     MINIMUM_BRACKET_COUNT,
+    MAXIMUM_REPEAT_COUNT,
     OutputDelay,
     PERIOD_KIND_SPACER,
     PulseBracket,
@@ -123,7 +124,10 @@ __all__ = [
 _TIME_UNITS = TIME_UNIT_CHOICES
 
 
-def _bracket_vms(sequence: PulseSequence) -> tuple[BracketVM, ...]:
+def _bracket_vms(
+    sequence: PulseSequence,
+    config_values: Mapping[str, tuple[float, str]] | None = None,
+) -> tuple[BracketVM, ...]:
     """Each bracket numbered and inked as the model orders them: outermost first.
 
     The number is what its posts say ("Bracket 2") and the ink is what its
@@ -135,6 +139,15 @@ def _bracket_vms(sequence: PulseSequence) -> tuple[BracketVM, ...]:
         BracketVM(
             b.bracket_id, b.start_period_id, b.end_period_id, b.count,
             ordinal=index + 1, color=bracket_color(index),
+            count_field=FieldVM(
+                str(b.count), can_scan=False, validator_kind=VALIDATOR_INT,
+                validator_lo=MINIMUM_BRACKET_COUNT, validator_hi=MAXIMUM_REPEAT_COUNT,
+                **_binding_field_state(
+                    next((binding for binding in sequence.bindings
+                          if binding.field_ref.bracket_id == b.bracket_id), None),
+                    config_values,
+                ),
+            ),
         )
         for index, b in enumerate(sequence.brackets)
     )
@@ -598,7 +611,7 @@ def project_schedule(
         ports=ports,
         periods=periods,
         analog_mode_choices=ANALOG_MODE_ROWS,
-        brackets=() if sequence is None else _bracket_vms(sequence),
+        brackets=() if sequence is None else _bracket_vms(sequence, config_values),
         components=() if sequence is None else tuple(
             ComponentVM(
                 component.component_id, component.name, component.period_ids,
@@ -646,7 +659,7 @@ def bindings_of(sequence: PulseSequence | None) -> dict[tuple, PulseBinding]:
     if sequence is None:
         return {}
     return {
-        (b.field_ref.kind, b.field_ref.period_id, b.field_ref.port): b
+        (b.field_ref.kind, b.field_ref.period_id, b.field_ref.port, b.field_ref.bracket_id): b
         for b in sequence.bindings
     }
 
@@ -656,8 +669,9 @@ def _binding_for(
     kind: str,
     period_id: str | None = None,
     port: str | None = None,
+    bracket_id: str | None = None,
 ) -> PulseBinding | None:
-    return bindings.get((kind, period_id, port))
+    return bindings.get((kind, period_id, port, bracket_id))
 
 
 def _binding_field_state(
@@ -953,7 +967,7 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
         for position, period in enumerate(sequence.periods)
     }
     positions = {period.period_id: index for index, period in enumerate(sequence.periods)}
-    for (kind, period_id, port_key), binding in bindings_of(sequence).items():
+    for (kind, period_id, port_key, _bracket_id), binding in bindings_of(sequence).items():
         if not binding.scan and binding.source != "api":
             continue
         slot_kind = "scan" if binding.scan else "api"
@@ -1394,13 +1408,20 @@ class PulseEditorPresenter:
                 ids = tuple(key for key in self.sequence.period_by_id if ("period", key) in selected)
                 if not ids:
                     raise ValueError("select the periods to group; Shift-click adds or removes individual items")
+                order = _sequence_item_order(self.sequence)
+                positions = tuple(index for index, item in enumerate(order) if item in selected)
+                if set(order[positions[0]:positions[-1] + 1]) != selected:
+                    raise ValueError("select consecutive complete items; no unselected periods or brackets will be added")
+                brackets = tuple(b.bracket_id for b in self.sequence.brackets if (
+                    ("bracket", bracket_post_key(b.bracket_id, "start")) in selected
+                    and ("bracket", bracket_post_key(b.bracket_id, "end")) in selected
+                ))
+                if any(key.rpartition(":")[0] not in brackets for kind, key in selected if kind == "bracket"):
+                    raise ValueError("select both ends and the complete contents of each selected bracket")
                 name = _unique_id(tuple(c.name for c in self.sequence.components), "Component ")
                 before = {c.component_id for c in self.sequence.components}
-                candidate = group_component(self.sequence, ids, name)
+                candidate = group_component(self.sequence, ids, name, bracket_ids=brackets)
                 created = next(c.component_id for c in candidate.components if c.component_id not in before)
-                included = {b.bracket_id for b in extract_subpulse(candidate, created).brackets}
-                if any(key.rpartition(":")[0] not in included for kind, key in selected if kind == "bracket"):
-                    raise ValueError("select the complete contents of each selected bracket; no unselected periods will be added")
                 self._apply(candidate)
                 self.view.focus_component_name(created)
             elif action in {"ungroup", "remove"}:
@@ -1417,6 +1438,9 @@ class PulseEditorPresenter:
             elif action in {"insert_period", "insert_spacer"}:
                 key, before = payload
                 self._edit_component_contents(str(key), action, (before,))
+            elif action == "bracket_add":
+                key, args = payload
+                self._edit_component_contents(str(key), action, tuple(args))
             else:
                 raise ValueError(f"unknown Component action {action!r}")
         except (TypeError, ValueError, KeyError, OSError) as error:
@@ -1621,7 +1645,7 @@ class PulseEditorPresenter:
                 "Pulse" if component is None else component.name,
             )
             for b in self.sequence.bindings if b.scan or b.source == "api"
-            for component in (self.sequence.component_for_period(b.field_ref.period_id),)
+            for component in (self.sequence.component_for_field(b.field_ref),)
         )
 
     def _config_dirty(self) -> bool:
@@ -1679,7 +1703,7 @@ class PulseEditorPresenter:
                     "Scan table" if b.scan and scan_active else
                     "Using default" if effective is None else "Config override",
                 ))
-                component = self.sequence.component_for_period(b.field_ref.period_id)
+                component = self.sequence.component_for_field(b.field_ref)
                 binding_groups.append((
                     b.field_id, "" if component is None else component.component_id,
                     "Pulse" if component is None else component.name,
@@ -5164,6 +5188,7 @@ def _reordered_sequence(
         first = next((key for kind, key in items[start + 1:] if kind == "period"), None)
         last = next((key for kind, key in reversed(items[:end]) if kind == "period"), None)
         brackets.append(replace(bracket, start_period_id=first, end_period_id=last))
+    bracket_ids = {bracket.bracket_id for bracket in brackets}
     ids = tuple(key for kind, key in items if kind == "period")
     members = {component.component_id: set(component.period_ids) & set(ids)
                for component in sequence.components}
@@ -5179,10 +5204,12 @@ def _reordered_sequence(
     return replace(
         sequence, periods=tuple(by_id[key] for key in ids), brackets=tuple(brackets),
         bindings=tuple(binding for binding in sequence.bindings
-                       if binding.field_ref.period_id is None or binding.field_ref.period_id in by_id),
+                       if (binding.field_ref.period_id is None or binding.field_ref.period_id in by_id)
+                       and (binding.field_ref.bracket_id is None or binding.field_ref.bracket_id in bracket_ids)),
         components=tuple(replace(component, period_ids=tuple(
             key for key in ids if key in members[component.component_id]
-        )) for component in sequence.components if members[component.component_id]),
+        ), bracket_ids=tuple(key for key in component.bracket_ids if key in bracket_ids))
+                         for component in sequence.components if members[component.component_id]),
     )
 
 
@@ -5224,8 +5251,9 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
         kind, period_id, port_key, scan, source = args
         reference = PulseFieldRef(
             "dac" if kind == "analog" else str(kind),
-            period_id=None if kind == "delay" else str(period_id),
-            port=None if kind == "duration" else str(port_key),
+            period_id=str(period_id) if kind in ("duration", "analog", "dac") else None,
+            port=str(port_key) if kind in ("delay", "analog", "dac") else None,
+            bracket_id=str(period_id) if kind == "bracket_count" else None,
         )
         current = next((b for b in sequence.bindings if b.field_ref == reference), None)
         binding = PulseBinding(
@@ -5290,7 +5318,12 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
                 fragment = extract_subpulse(sequence, key)
                 periods.update(p.period_id for p in fragment.periods)
                 brackets.update(b.bracket_id for b in fragment.brackets)
-        retained = replace(sequence, brackets=tuple(b for b in sequence.brackets if b.bracket_id not in brackets))
+        retained = replace(
+            sequence, brackets=tuple(b for b in sequence.brackets if b.bracket_id not in brackets),
+            bindings=tuple(b for b in sequence.bindings if b.field_ref.bracket_id not in brackets),
+            components=tuple(replace(c, bracket_ids=tuple(key for key in c.bracket_ids if key not in brackets))
+                             for c in sequence.components),
+        )
         return _reordered_sequence(
             retained, tuple(item for item in _sequence_item_order(retained) if item[0] != "period" or item[1] not in periods),
             {p.period_id: p for p in retained.periods if p.period_id not in periods},
@@ -5303,7 +5336,9 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
             key, start, end, count = args
         changed = PulseBracket(str(key), None if start is None else str(start),
                                None if end is None else str(end), int(count))
-        brackets = (sequence.brackets + (changed,) if action == "bracket_add" else tuple(
+        # Adding a wrapper around an existing same-span loop makes it the
+        # outer loop; stable model ordering preserves that explicit choice.
+        brackets = ((changed,) + sequence.brackets if action == "bracket_add" else tuple(
             changed if b.bracket_id == key else b for b in sequence.brackets
         ))
         return replace(sequence, brackets=brackets)

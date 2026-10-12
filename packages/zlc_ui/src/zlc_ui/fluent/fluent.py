@@ -1301,6 +1301,12 @@ class FluentLineEdit(QtWidgets.QLineEdit):
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)
 
+    def width_for(self, sample: str) -> int:
+        """Width for complete text, including the actual style and text margins."""
+        self.ensurePolished()
+        chrome = self.width() - _numeric_text_width(self)
+        return self.fontMetrics().horizontalAdvance(str(sample)) + 2 + chrome
+
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
         text = str(text)
         if self.text() == text:

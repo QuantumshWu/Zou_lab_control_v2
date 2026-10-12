@@ -11,6 +11,7 @@ from .model import (
     BINDING_API,
     BINDING_DEFAULT,
     config_parameter_key,
+    FIELD_BRACKET_COUNT,
     FIELD_DAC,
     FIELD_DELAY,
     FIELD_DURATION,
@@ -33,6 +34,13 @@ def pulse_field_value(
     """Read one referenced field in the unit declared by its binding."""
 
     _check_inputs(sequence, reference)
+    if reference.kind == FIELD_BRACKET_COUNT:
+        if unit != "count":
+            raise ValueError("bracket count fields use unit 'count'")
+        for bracket in sequence.brackets:
+            if bracket.bracket_id == reference.bracket_id:
+                return bracket.count
+        raise ValueError(f"no bracket exists with id {reference.bracket_id!r}")
     if reference.kind == FIELD_DELAY:
         delay = next(
             (item for item in sequence.delays if item.port == reference.port), None
@@ -89,7 +97,16 @@ def _replace_pulse_fields(
 
     period_changes: dict[str, dict[str, object]] = {}
     delay_changes: dict[str, OutputDelay] = {}
+    bracket_changes: dict[str, int] = {}
     for reference, value, unit, field_name in fields:
+        if reference.kind == FIELD_BRACKET_COUNT:
+            current = pulse_field_value(sequence, reference, unit)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not float(value).is_integer()):
+                raise ValueError(f"{field_name!r} must be an integer count")
+            if value != current:
+                bracket_changes[reference.bracket_id] = int(value)
+            continue
         if reference.kind == FIELD_DELAY:
             port = sequence.target.by_key.get(reference.port)
             if port is None or port.kind not in (PORT_DIGITAL, PORT_DAC):
@@ -135,6 +152,12 @@ def _replace_pulse_fields(
             changes["analog_steps"][at] = replace(period.analog_steps[at], value=authored)
 
     changes: dict[str, object] = {}
+    if bracket_changes:
+        changes["brackets"] = tuple(
+            replace(bracket, count=bracket_changes[bracket.bracket_id])
+            if bracket.bracket_id in bracket_changes else bracket
+            for bracket in sequence.brackets
+        )
     if period_changes:
         changes["periods"] = tuple(
             replace(period, **period_changes[period.period_id])
@@ -195,13 +218,19 @@ def api_bindings_in_period_order(sequence: PulseSequence) -> tuple[PulseBinding,
     """
 
     positions = {period.period_id: index for index, period in enumerate(sequence.periods)}
-    kind_rank = {FIELD_DURATION: 0, FIELD_DAC: 1, FIELD_DELAY: 2}
+    kind_rank = {FIELD_DURATION: 0, FIELD_DAC: 1, FIELD_BRACKET_COUNT: 2, FIELD_DELAY: 3}
+    bracket_positions = {
+        bracket.bracket_id: bounds[0]
+        for bracket, bounds in zip(sequence.brackets, sequence.bracket_bounds, strict=True)
+    }
 
     def played_at(binding: PulseBinding) -> tuple[int, int, str]:
         reference = binding.field_ref
         position = (
             len(positions)
             if reference.kind == FIELD_DELAY
+            else bracket_positions[reference.bracket_id]
+            if reference.kind == FIELD_BRACKET_COUNT
             else positions.get(reference.period_id, len(positions))
         )
         return (position, kind_rank.get(reference.kind, 3), str(reference.port or ""))
@@ -220,6 +249,13 @@ def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
     """
 
     _check_inputs(sequence, reference)
+    if reference.kind == FIELD_BRACKET_COUNT:
+        for ordinal, bracket in enumerate(sequence.brackets, 1):
+            if bracket.bracket_id == reference.bracket_id:
+                label = f"Bracket {ordinal}.repeats"
+                component = sequence.component_for_field(reference)
+                return label if component is None else f"{component.name} / {label}"
+        raise ValueError(f"no bracket exists with id {reference.bracket_id!r}")
     if reference.kind == FIELD_DELAY:
         return f"{_port_text(sequence, reference.port)}.delay"
     period_text = sequence.period_label(str(reference.period_id))
@@ -358,7 +394,7 @@ def _sequence_of(sequence: PulseSequence) -> PulseSequence:
 
 
 def _check_value_unit(declared: str, supplied: str, label: str) -> None:
-    if (declared == "value") != (supplied == "value"):
+    if declared != supplied and (declared in ("value", "count") or supplied in ("value", "count")):
         raise ValueError(f"{label} is in {supplied!r} where the pulse declares {declared!r}")
 
 

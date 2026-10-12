@@ -344,7 +344,7 @@ _API_FIELD_NAMES = ("reference_before_field", "readout_field", "reference_after_
 
 
 def _default_api_fields(values, resources):
-    """The pulse's first three API parameters, in the order they play.
+    """The pulse's first three API durations, in the order they play.
 
     A calibration pulse is written with exactly these three windows as its
     API parameters, so on a template chosen for the purpose the defaults are
@@ -359,9 +359,13 @@ def _default_api_fields(values, resources):
     sequence = getattr(resource, "value", None)
     if not isinstance(sequence, PulseSequence):
         return {}
+    windows = (
+        binding for binding in api_bindings_in_period_order(sequence)
+        if binding.kind == "duration"
+    )
     return {
         name: binding.field_id
-        for name, binding in zip(_API_FIELD_NAMES, api_bindings_in_period_order(sequence))
+        for name, binding in zip(_API_FIELD_NAMES, windows)
     }
 
 
