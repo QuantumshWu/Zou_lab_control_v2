@@ -22,6 +22,9 @@ Sections:
            (does the GPU start slow and speed up within a sequence?)
   seq      this checkout against de73d721 in one process, alternating: the Fixed task path from the occupancy
            list (plan + compute that samples itself) to the first and the last map, and each map's solve time
+  gap      the lab's timing: 0.65 s of idle GPU (the exposure, only the heater running) before the same Fixed path,
+           for this checkout at heater duty 0.1 (the old heater), 0.25, 0.5 and 1 (the default) and for de73d721
+           with its own heater, against a warm GPU; with a simulated 60 Hz playback of the maps as they get ready
 """
 import argparse
 import contextlib
@@ -591,10 +594,87 @@ def section_seq(cp, mods, s, rounds):
             prepared["close"]()
 
 
+FRAME_MS = 1000 / 60
+EXPOSURE_S = .65
+DUTIES = (.1, .25, .5, 1.)
+
+
+def playback_end(ready_ms):
+    """Photo -> end of a 60 Hz playback that shows each map once it is ready and its predecessor had its frame."""
+    shown = None
+    for ready in ready_ms:
+        shown = ready if shown is None else max(ready, shown + FRAME_MS)
+    return shown + FRAME_MS
+
+
+def section_gap(cp, mods, s, rounds):
+    """The lab's timing: the GPU idles EXPOSURE_S (the exposure) with only the solver's own heater running, then the
+    Fixed task path (plan + compute that samples itself). new: heater duty 0.1 (the old heater), 0.25, 0.5 and 1 (the
+    default); lpi: its own heater. 'warm': the same computation right after a sustained load (the bench's other
+    sections). playback_end_ms simulates 60 Hz playback of the maps as they become ready."""
+    new = mods["new"]
+    default = new._REARRANGEMENT_WARM_DUTY
+    work = {v: prepare(m, s, v == "lpi") for v, m in mods.items()}
+    big = cp.zeros(16 << 20, cp.float32)
+    load = cp.ElementwiseKernel("", "float32 x", "x += 1e-6f", "bench_busy")
+    modes = ([("new", "warm", default)] + [("new", f"idle duty {d:g}", d) for d in DUTIES]
+             + [("lpi", "warm", None), ("lpi", "idle", None)])
+    rows = {f"{v} {mode}": [] for v, mode, _ in modes}
+    try:
+        for r in range(rounds + 1):
+            for v, mode, duty in (modes if r % 2 else modes[::-1]):
+                m, prepared = mods[v], work[v]
+                stamps = []
+                with contextlib.ExitStack() as stack:
+                    for o in mods:  # one heater at a time, as in the product
+                        if o != v:
+                            stack.enter_context(active(mods[o], work[o]))
+                    if duty is not None:
+                        new._REARRANGEMENT_WARM_DUTY = duty
+                    if mode == "warm":
+                        with active(m, prepared):
+                            start = time.perf_counter()
+                            while time.perf_counter() - start < .3:
+                                load(big)
+                                cp.cuda.Device().synchronize()
+                    else:
+                        time.sleep(EXPOSURE_S)  # this workspace's heater runs at its duty
+                    wall = time.strftime("%H:%M:%S")
+                    t0 = time.perf_counter()
+                    plan = m.plan_rearrangement(prepared, s["occupied"])
+                    result = m.compute_rearrangement(
+                        prepared, plan, motion_frames=s["frames"], sampled=None, support_tolerance=1.01,
+                        motion_support_tolerance=1.10, require_converged=False,
+                        frame_ready=lambda i, f: stamps.append(time.perf_counter()))
+                    t1 = time.perf_counter()
+                new._REARRANGEMENT_WARM_DUTY = default
+                if r:
+                    ready = [(x - t0) * 1e3 for x in stamps]
+                    rows[f"{v} {mode}"].append(dict(
+                        wall=wall, photo_first_ms=ready[0], photo_last_ms=ready[-1], playback_end_ms=playback_end(ready),
+                        return_ms=(t1 - t0) * 1e3, map_solve_ms=[float(x) for x in result.get("frame_solve_ms", ())]))
+        summary = {}
+        for key, rs in rows.items():
+            summary[key] = {k: float(np.median([x[k] for x in rs])) for k in ("photo_first_ms", "photo_last_ms",
+                                                                            "playback_end_ms", "return_ms")}
+            summary[key]["map_solve_ms_median"] = np.median([x["map_solve_ms"] for x in rs], axis=0).round(2).tolist()
+        log(f"gap {s['name']} ({len(rs)} rounds, medians; playback = simulated 60 Hz end; nominal playback "
+            f"{len(rows['new warm'][0]['map_solve_ms']) * FRAME_MS:.0f} ms)")
+        for key, sm in summary.items():
+            log("   %-18s photo->first %7.1f ms   photo->last %7.1f ms   photo->playback end %7.1f ms   maps %s" % (
+                key, sm["photo_first_ms"], sm["photo_last_ms"], sm["playback_end_ms"],
+                [round(x, 1) for x in sm["map_solve_ms_median"][:6]]))
+        return dict(exposure_s=EXPOSURE_S, frames=s["frames"], rows=rows, summary=summary)
+    finally:
+        new._REARRANGEMENT_WARM_DUTY = default
+        for prepared in work.values():
+            prepared["close"]()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--rounds", type=int, default=5)
-    ap.add_argument("--sections", default="calib,gemm,kernels,maps,plane,ramp,seq")
+    ap.add_argument("--sections", default="calib,gemm,kernels,maps,plane,ramp,seq,gap")
     args = ap.parse_args()
     sections = args.sections.split(",")
     stamp = f"slm_t400_{platform.node()}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -655,6 +735,8 @@ def main():
                 prepared["close"]()
         for sname in ("real14", "real14c3", "real14p13"):
             run(f"seq:{sname}", lambda sname=sname: section_seq(cp, mods, scenario(sname, new), args.rounds))
+        for sname in ("real14", "real14c3", "real14p13"):
+            run(f"gap:{sname}", lambda sname=sname: section_gap(cp, mods, scenario(sname, new), args.rounds))
     finally:
         if clocks is not None:
             clocks.close()

@@ -2939,6 +2939,11 @@ _EVALUATE_ROWS = 8  # focal rows per evaluate block (ROWS)
 
 _REARRANGEMENT_KEEPERS: dict[int, dict[str, object]] = {}
 _REARRANGEMENT_KEEPERS_CHANGED = Condition()
+# Fraction of the idle time the heater keeps the GPU busy. One 64 MB pass every
+# 20 ms (about 10% on the lab's T400) let the driver drop the SM clock to about
+# 690 MHz during an exposure, so a shot's first maps ran 2-4 times slower than
+# on a busy GPU; the heater now runs back to back until a computation starts.
+_REARRANGEMENT_WARM_DUTY = 1.
 
 
 def _rearrangement_keeper_dispose(keeper):
@@ -2995,14 +3000,20 @@ def _rearrangement_keeper_acquire(cp):
             stream.synchronize()
 
         def run():
+            from time import perf_counter  # noqa: PLC0415
+
             try:
                 with cp.cuda.Device(device), stream:
-                    while not keeper["stop"].wait(.020):
+                    pause = .020
+                    while not keeper["stop"].wait(pause):
                         with keeper["lock"]:
                             if keeper["active"] or keeper["stop"].is_set():
+                                pause = .020
                                 continue
+                            start = perf_counter()
                             kernel(((size // 4 + 255) // 256,), (256,), (keeper["scratch"], np.int32(size // 4)))
                             stream.synchronize()
+                            pause = (perf_counter() - start) * (1 / _REARRANGEMENT_WARM_DUTY - 1)
             except BaseException as error:
                 import logging  # noqa: PLC0415
 
