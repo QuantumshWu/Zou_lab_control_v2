@@ -3558,6 +3558,7 @@ def _rearrangement_propagate(gpu, band, operation):
 # in one CUDA graph like a map's, and the lowest median wins.
 _ANALYSIS_CACHE = "slm_gpu_cache"
 _ANALYSIS_TRIALS = 5
+_ANALYSIS_SETTLE = (1.5, 5.)  # seconds busy before timing: at least, at most
 _ANALYSIS_WARM_BANDS = 256
 
 
@@ -3635,10 +3636,18 @@ def _rearrangement_analysis_choices(gpu, bands, stop_requested=None):
             end.synchronize()
             return cp.cuda.get_elapsed_time(start, end) * 1e3
 
-        # An idle GPU lowers its clock: keep it busy before the first candidate is timed.
+        # An idle GPU lowers its clock and raises it only after some time under load: the lab's T400 timed
+        # its first band counts 1.5 times slow after 0.1 s of it. Keep it busy for _ANALYSIS_SETTLE seconds
+        # and until a launch has stopped getting faster.
+        from time import perf_counter  # noqa: PLC0415
+
         busy = captured(_rearrangement_analysis_launcher(gpu, "cublas", missing[0]), 10)
-        for _ in range(20):
-            timed(busy)
+        settled, given_up = (perf_counter() + seconds for seconds in _ANALYSIS_SETTLE)
+        fastest, steady = float("inf"), 0
+        while (steady < 20 or perf_counter() < settled) and perf_counter() < given_up:
+            elapsed = timed(busy)
+            steady = 0 if elapsed < .99 * fastest else steady + 1
+            fastest = min(fastest, elapsed)
         for band in missing:
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM rearrangement preparation stopped")
