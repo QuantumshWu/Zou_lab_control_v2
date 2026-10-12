@@ -1,7 +1,7 @@
 """SLM rearrangement solver benchmark on this machine's GPU (the lab's NVIDIA T400).
 
-Times this checkout's solver, and commit de73d721 (the LPI solver before the ghost-trap change, taken from git
-history) for the sequence comparison, on run 14 of 2026-10-10 (35 sources, its 16-site target) and on the
+Times this checkout's solver, and commit de73d721 (the LPI solver before the ghost-trap change; its solver.py is
+solver_de73d721.py here, byte for byte) for the sequence comparison, on run 14 of 2026-10-10 (35 sources, its 16-site target) and on the
 lab's current central 3x3 target. bin/slm_t400_bench.bat runs it; close the SLM task console first. Everything
 lands in bench/results/slm_t400_<host>_<time>/ and a .zip of that folder:
 
@@ -41,8 +41,6 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 SHAPE = (1024, 1272)
-LPI_COMMIT = "de73d721"
-SOLVER_PATH = "packages/zlc_atom/src/zlc_atom/devices/slm/solver.py"
 LOG = []
 
 KERNELS = r'''
@@ -130,7 +128,7 @@ class Clocks:
             f.write("\n".join([self.QUERY, *self.rows]) + "\n")
 
 
-def load_solvers(out_dir):
+def load_solvers():
     for src in sorted(os.listdir(os.path.join(ROOT, "packages"))):
         path = os.path.join(ROOT, "packages", src, "src")
         if os.path.isdir(path):
@@ -140,16 +138,34 @@ def load_solvers(out_dir):
     from zlc_atom.devices.slm import solver as new
     log("zou_lab_control:", zou_lab_control.__file__)
     log("solver new:", new.__file__)
-    code = subprocess.run(["git", "-C", ROOT, "show", f"{LPI_COMMIT}:{SOLVER_PATH}"], capture_output=True, check=True).stdout
-    path = os.path.join(out_dir, f"solver_{LPI_COMMIT}.py")
-    with open(path, "wb") as f:
-        f.write(code)
-    spec = importlib.util.spec_from_file_location("zlc_atom.devices.slm._bench_lpi", path)
+    spec = importlib.util.spec_from_file_location("zlc_atom.devices.slm._bench_lpi", os.path.join(HERE, "solver_de73d721.py"))
     lpi = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = lpi
     spec.loader.exec_module(lpi)
-    log(f"solver lpi ({LPI_COMMIT}):", lpi.__file__)
+    log("solver lpi:", lpi.__file__)
     return {"new": new, "lpi": lpi}
+
+
+def git_head():
+    """The checked-out commit, read from .git without needing git on the PATH."""
+    git = os.path.join(ROOT, ".git")
+    try:
+        with open(os.path.join(git, "HEAD")) as f:
+            head = f.read().strip()
+        if not head.startswith("ref: "):
+            return head
+        ref = head[5:]
+        path = os.path.join(git, *ref.split("/"))
+        if os.path.exists(path):
+            with open(path) as f:
+                return f"{ref} {f.read().strip()}"
+        with open(os.path.join(git, "packed-refs")) as f:
+            for line in f:
+                if line.rstrip().endswith(" " + ref):
+                    return f"{ref} {line.split()[0]}"
+        return ref
+    except OSError as error:
+        return f"unknown ({error})"
 
 
 @contextlib.contextmanager
@@ -585,8 +601,7 @@ def main():
     out_dir = os.path.join(ROOT, "bench", "results", stamp)
     os.makedirs(out_dir)
     result = dict(host=platform.node(), python=sys.version, sections={}, started=time.strftime("%Y-%m-%d %H:%M:%S"))
-    result["git_head"] = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    result["git_status"] = subprocess.run(["git", "-C", ROOT, "status", "--short"], capture_output=True, text=True).stdout
+    result["git_head"] = git_head()
     smi = shutil.which("nvidia-smi")
     clocks = None
     if smi:
@@ -617,7 +632,7 @@ def main():
         except ImportError:
             log("This Python has no CuPy: run bin\\install_slm_gpu.bat once, then this benchmark again.")
             raise
-        mods = load_solvers(out_dir)
+        mods = load_solvers()
         result.update(cupy=cp.__version__, cuda_runtime=cp.cuda.runtime.runtimeGetVersion(),
                       driver=cp.cuda.runtime.driverGetVersion(), solvers={k: m.__file__ for k, m in mods.items()})
         new = mods["new"]
