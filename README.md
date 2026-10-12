@@ -73,6 +73,77 @@ bin\migrate_units.bat          one-shot rewrite of saved pulses to one unit
                                spelling (originals kept beside them)
 ```
 
+### Optional AI / MCP access
+
+MCP attaches to this same experiment window and Session; it never opens a
+second hardware connection. Install the optional transport with the **same
+Python used by the experiment**, then start it explicitly:
+
+```powershell
+python -m pip install -c constraints.txt -e ".[mcp]"
+$env:ZLC_MCP_TOKEN = "replace-with-a-long-random-secret"
+.\bin\experiment.bat --mcp-port 18864
+```
+
+Connect a Streamable HTTP MCP client to `http://127.0.0.1:18864/mcp`, with
+`Authorization: Bearer <the same secret>`. The service binds only loopback and
+rejects browser-origin requests. Do not put the secret in a tracked file.
+Use a client tool/HTTP timeout of at least 40 seconds when using `lab_wait`
+(its bounded wait is at most 30 seconds); do not turn transport timeouts into
+automatic write retries. Keep the client connection/session for repeated use.
+With no flag there is no listener or MCP dependency loaded. The command above
+is read-only; add **`--mcp-control`** to authorize experiment mutations. This is
+trusted experiment access, not a Python sandbox: existing plugin expressions
+retain their ordinary capabilities. Hardware limits, ownership and normal
+manual confirmations still apply. The MCP client does not get an independent
+device owner or permission to bypass them.
+
+- `lab_state`: one compact overview of current nodes, signals, panels, errors
+  and readiness. Use `node_id`/`panel_id` for focused follow-ups,
+  `after_sequence` for new messages, and `details=true` for authored values.
+- `lab_catalog`: short node index by default; `api_name` returns one plugin's
+  schema, `node_id`/`panel_id` returns the current editor projection. Units,
+  choices and validation come from the same descriptors as the GUI.
+- `lab_signal`: bounded numeric pages with exact generation/revision,
+  validity, uncertainty and logical-axis coordinates. Default reads the latest
+  publication chunk; `dataset=true` reads the current dataset/retained window.
+  Page offsets refer to physical storage. Live pages can advance between reads;
+  use saved Figure data when a whole fixed dataset is needed.
+- `lab_screenshot`: current Console/Devices window, or an opened `device_id`
+  Control, including its active modal. PNG is returned directly. It captures
+  the actual current UI without re-rendering the experiment or other apps.
+- `lab_wait`: wait for the specified node generation to become ready/terminal;
+  the GUI and Stop remain usable. A timeout does not stop or retry the run.
+- `lab_action`: the normal Logic/Panel operations, plus `view.monitor` and
+  `view.logic` for direct navigation. For example, `logic.add` takes
+  `{"api_name":"camera_measurement","values":{"repeat":1,"frames_per_cycle":3}}`.
+  Read the current draft revision before Start; use the observed generation
+  for Stop. A figure save selects `.png`, `.pdf` or `.svg` and also writes its
+  companion science `.npz`. Check subsequent reports for asynchronous errors.
+- `lab_initialize`, `lab_device_action` and `lab_pulse`: explicitly authorized
+  Init, ordinary Control edits, and bound Pulse Editor Open/Fire/Stop. Prepare
+  the Pulse before arming a triggered camera; waiting indefinitely for an
+  external trigger is not guaranteed by an acquisition's timeout. Fire keeps
+  the Pulse's authored repeats and Config semantics.
+- `lab_device_state` / `lab_pulse_state` read already-open Controls without
+  issuing hardware reads, including in read-only mode.
+- `lab_artifact` reads workspace reports/previews; `lab_health` distinguishes
+  the protocol listener from GUI responsiveness and does not claim hardware
+  readiness.
+
+Accepted/queued is **not** started, ready, successful, saved, or physically safe.
+Inspect the exact run's terminal error and its data validity. A timed-out queued
+GUI request is cancelled before execution; an already-started request with no
+reply has an unknown outcome and must not be automatically replayed. Disconnect
+does not stop, restart or take over an experiment. Human physical actions stay
+human. High-frequency acquisition, Pulse and SLM playback stay entirely local;
+AI/MCP is between experiment decisions, not between frames or shots.
+
+For a hardware-free first trial, add `--template virtual --workspace <an empty
+existing directory>` to the launcher, then use `lab_initialize`. No real device
+is opened by that template. Test screenshots and artifacts belong in that
+workspace, not in Git.
+
 The machine a board or SLM head is plugged into serves it from the bench
 itself: install `sequencer.local` / `slm.hamamatsu_x15213_local` in the Device
 Manager and Init starts the server in-process; once published with Remote,

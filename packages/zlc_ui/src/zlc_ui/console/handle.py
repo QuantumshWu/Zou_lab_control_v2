@@ -295,6 +295,21 @@ class TaskConsoleHandle(QtCore.QObject):
         target = self._window if self._window is not None else self._view
         return save_window_screenshot(target, path)
 
+    def screenshot_png(self, *, include_dialog: bool = True) -> bytes:
+        """Capture this window or its active operator dialog on the Qt owner."""
+        from ..windows import window_screenshot_png
+
+        target = self._window if self._window is not None else self._view
+        return window_screenshot_png(target, include_dialog=include_dialog)
+
+    def show_page(self, page: str) -> None:
+        """Select one of the shell's two permanent pages without editing it."""
+        try:
+            index = {"monitor": 0, "logic": 1}[page]
+        except KeyError:
+            raise ValueError("page must be monitor or logic") from None
+        self._view.tabs.setCurrentIndex(index)
+
     def show_warning(self, title: str, text: str) -> None:
         """Say what was refused, in the one modal this project owns."""
 

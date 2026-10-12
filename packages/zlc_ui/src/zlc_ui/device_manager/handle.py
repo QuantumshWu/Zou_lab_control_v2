@@ -89,6 +89,16 @@ class DeviceControlHandle(QtCore.QObject):
     def show_status(self, text: str, severity: str) -> None:
         self._view.show_status(text, severity)
 
+    def status_snapshot(self) -> dict[str, str]:
+        strip = self._view.status_strip
+        return {"text": strip.message.text(), "severity": strip.current_severity}
+
+    def screenshot_png(self, *, include_dialog: bool = True) -> bytes:
+        from ..windows import window_screenshot_png
+
+        target = self._window if self._window is not None else self._view
+        return window_screenshot_png(target, include_dialog=include_dialog)
+
 
 class DeviceManagerHandle(QtCore.QObject):
     """One device manager, as the outside sees it."""
@@ -186,6 +196,16 @@ class DeviceManagerHandle(QtCore.QObject):
     def window_title(self) -> str:
         target = self._window if self._window is not None else self._view
         return str(target.windowTitle())
+
+    def screenshot_png(self, *, include_dialog: bool = True) -> bytes:
+        from ..windows import window_screenshot_png
+
+        target = self._window if self._window is not None else self._view
+        return window_screenshot_png(target, include_dialog=include_dialog)
+
+    def status_snapshot(self) -> dict[str, str]:
+        strip = self._view.status_strip
+        return {"text": strip.message.text(), "severity": strip.current_severity}
 
     # ------------------------------------------------------------- the page
 

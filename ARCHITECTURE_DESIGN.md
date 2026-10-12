@@ -396,6 +396,9 @@ Node new chunk
 
 ## 6. UI与Lifecycle
 
+- 实验 AI 的 MCP 是可选、显式开启的本机接入，不是第二个实验执行器。它只连接当前 `ExperimentGuiFlow` 的 Session/Console；参数目录来自现有 descriptor，修改、Start/Stop、Panel 与保存走原 owner 准入和异步完成。请求在线程间交给 Qt owner，不从网络线程操作 Qt，不另开设备或绕过 DeviceUse。默认只读，写操作须由启动参数明确授权；loopback 服务还须验证本次配置的 token，拒绝浏览器跨源访问。协议沿官方 MCP SDK，不自造 JSON-RPC。
+- MCP 同时提供结构化状态、精确 generation/publication 身份、当前错误、有限条近期状态、数据切片和按需当前窗口 PNG；大数组不混入状态轮询。截图沿公共窗口捕获，不重建 Plot，不读取其它应用。提交/等待/ready/terminal、Stop 请求/停止完成、软件确认/物理安全必须区分。等待超时不重发副作用，尚未执行的 owner 请求超时后取消；已开始但未得到结果时明确 outcome unknown 并要求查状态。人工物理操作请求只呈现，不由 AI 冒充完成。MCP 断连不重启或接管实验，禁用/退出停止接纳新请求，不改变原实验关闭流程。
+
 - TaskConsole与FigureViewer工具栏的Save image均保存当前整个GUI窗口，复用ConsolePresenter的截图动作、workspace当天目录与公共窗口capture；不依赖已打开的archive或某个active Panel，不在archive旁另存单Plot PNG。Edit的Save figure仍是数据和科学Figure归档，与GUI截图分开。
 - 可编辑数值输入按“真实设备范围→限幅→可见精度舍入”的优先级处理：普通越界不是错误；舍入越界时取该精度小数网格内最靠近边界的合法数，不能仅因原边界尾数写不下就拒绝。显示数就是控件与提交草稿的数，不保留隐藏尾数，不自动改科学计数法、不扩宽；只有整个合法范围确实无可显示数才报错。disabled/read-only数值投影不拥有该值：它保留canonical数值，显示完整数字并由现有文本框处理超宽内容，不得因显示宽度设置`numericError`、舍入值或发送normalization；重新进入editable时才恰好重跑一次原可见精度规则。用户主动单位显示切换在成功前不提交候选ports/单位/值，拒绝时保持原整份显示；设备真实范围更新不能被显示失败回滚，必须保留新范围并明确标记当前输入不可用，不能把过时范围或未显示数值作为可Apply草稿。Decimal步进、步长对齐和单位换算继续共用原实现；同单位族前缀换算在公共单位owner做精确十进制缩放。单位、对应范围及数值在同一控件入口一起更新，不把新单位bounds先套在旧单位数值上。被动规范化只发`valueNormalized`回到草稿通道，不得先以普通`textChanged/valueChanged`冒充用户编辑或Apply；只读科学数据/设备读数不因此改写。Scan保存点列采用最终接受的限幅/舍入结果；浮点尾差不能将等距Range误标custom，真实非线性点列仍保留，Range与Values互不填充。
 - Config与Manual Data等表格复用公共Fluent表格高度策略：不超过2000行时按实际行高纵向展开，只由外层Tab纵向滚动；超过2000行才保留有界的内部纵向滚动。横向溢出仍可滚动，虚拟model不因展开而复制数据或逐格构造控件。InfoTree的末行文字与动作按钮在单元格内保留上下间距；不得靠在外框与滚动条之间加padding掩盖行内容裁切。

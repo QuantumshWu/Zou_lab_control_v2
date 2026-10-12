@@ -1105,6 +1105,7 @@ class PulseEditorPresenter:
         #: Where the Open dialog starts when nothing is open yet.
         self.pulses_directory = str(pulses_directory)
         self.revision = 0
+        self.last_warning = ""
         self._make_preview = make_preview
         # How an existing preview takes new data.  Without one the host is
         # rebuilt, which is correct but slow; the composition root supplies it.
@@ -1236,6 +1237,29 @@ class PulseEditorPresenter:
         """The sequence inside the sole authoring state."""
 
         return self._state.sequence
+
+    @property
+    def dirty(self) -> bool:
+        """Whether loading another Pulse would discard its current draft."""
+        return self._state != self._saved_state
+
+    def execution_snapshot(self) -> dict[str, object]:
+        """Project already-observed command/board facts without device I/O."""
+        from dataclasses import asdict
+
+        return {
+            "path": self.path,
+            "dirty": self.dirty,
+            "revision": self.revision,
+            "operation": self._device_operation,
+            "pending": self._device_busy or self._stop_busy,
+            "stopping": self._stop_busy,
+            "closing": self._preview_close_requested,
+            "running": self.running,
+            "board": asdict(self._board_state),
+            "authored_run_repeats": None if self.sequence is None else self.sequence.run_repeats,
+            "last_warning": self.last_warning,
+        }
 
     def _accept_state(self, candidate: PulseEditorState) -> None:
         """Replace current authoring atomically and invalidate derived views."""
@@ -1516,7 +1540,7 @@ class PulseEditorPresenter:
         )
         view.connection_requested.connect(self._guarded(self._connect_from_view))
         view.device_label_changed.connect(self._guarded(self._set_device_label))
-        view.fire_requested.connect(self._guarded(self._fire_from_view))
+        view.fire_requested.connect(self._guarded(self.request_fire))
         view.stop_requested.connect(self._guarded(self.stop))
         view.sync_requested.connect(self._guarded(self._sync_from_view))
         view.save_requested.connect(self._guarded(self.save_pulse))
@@ -1569,6 +1593,7 @@ class PulseEditorPresenter:
         board's wiring and clock opens as its file has it.
         """
 
+        self.last_warning = ""
         try:
             candidate = read_pulse(path)
         except Exception as error:
@@ -2923,7 +2948,9 @@ class PulseEditorPresenter:
             source = resolve_scan_point(source)
         return source
 
-    def _fire_from_view(self) -> None:
+    def request_fire(self) -> None:
+        """Submit the same nonblocking On Pulse action as the editor button."""
+        self.last_warning = ""
         if not self._check_bracket():
             return
         if self._run_device_work is None:
@@ -3303,6 +3330,7 @@ class PulseEditorPresenter:
         # worker ahead of the retire, which releases any lease it left.
         if self._stop_busy or self._retiring():
             return
+        self.last_warning = ""
         if self._run_safe_work is None:
             self._device_operation += 1
             self._finite_run = None
@@ -5014,6 +5042,7 @@ class PulseEditorPresenter:
         return True
 
     def _warn(self, text: str) -> None:
+        self.last_warning = str(text)
         warn = getattr(self.view, "show_warning", None)
         if warn is not None:
             warn(text)

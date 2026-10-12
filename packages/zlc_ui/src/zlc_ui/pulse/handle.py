@@ -210,6 +210,15 @@ class PulseEditorHandle(QtCore.QObject):
         target = self._window if self._window is not None else self._view
         return str(target.windowTitle())
 
+    def screenshot_png(self, *, include_dialog: bool = True) -> bytes:
+        from ..windows import window_screenshot_png
+
+        target = self._window if self._window is not None else self._view
+        return window_screenshot_png(target, include_dialog=include_dialog)
+
+    def status_snapshot(self) -> dict[str, str]:
+        return {"text": self._view.summary_label.text()}
+
     def set_device_label(self, label: str) -> None:
         self._window.setWindowTitle(f"{label} Pulse Editor")
         self.device_label_changed.emit(str(label))

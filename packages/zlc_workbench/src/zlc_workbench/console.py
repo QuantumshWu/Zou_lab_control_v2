@@ -13,10 +13,13 @@ session below it does not know a window exists.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, TimeoutError as _AnswerTimeout
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from enum import Enum
 import logging
+from math import isfinite
 from operator import attrgetter
 from pathlib import Path
 
@@ -229,6 +232,41 @@ def _display_values(parameters: Mapping, interaction: Mapping) -> dict:
 #: authored VALUES drift between presents (a display echo, an edited fate)
 #: without changing which controls exist.
 _PLOT_IDENTITY = attrgetter("signal", "kind", "cell_kind")
+
+
+def _control_plain(value: object) -> object:
+    """Project declared control metadata without copying scientific arrays."""
+
+    if isinstance(value, Enum):
+        return _control_plain(value.value)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if isfinite(value) else str(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _control_plain(item) for key, item in value.items()
+                if not callable(item) and key not in {"ui_contributions", "run_device_read"}}
+    if isinstance(value, (set, frozenset)):
+        return [_control_plain(item) for item in sorted(value, key=str)]
+    if isinstance(value, (tuple, list)):
+        return [_control_plain(item) for item in value]
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        if value.shape == ():
+            return _control_plain(value.item())
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
+    if is_dataclass(value):
+        return {
+            item.name: (
+                {"count": len(value.cycle_choices)}
+                if item.name == "cycle_choices" and value.cycle_choices is not None
+                else _control_plain(getattr(value, item.name))
+            )
+            for item in fields(value)
+            if not item.name.startswith("_") and not callable(getattr(value, item.name))
+        }
+    return {"type": type(value).__name__}
 
 
 def _same_panel_plot_identity(left: PanelState, right: PanelState) -> bool:
@@ -583,6 +621,10 @@ class ConsolePresenter:
         self._close_wait_reported = False
         self._close_retry_sent = False
         self._saving_panels: set[str] = set()
+        # The same messages the operator sees, bounded for external observers.
+        # This is diagnostics, never a second operation or lifecycle ledger.
+        self._control_reports: deque[dict[str, object]] = deque(maxlen=100)
+        self._control_report_sequence = 0
         #: How often a new panel redraws.  The board's default, kept so a panel
         #: and the card that reports it cannot state different numbers.
         live_policy = DEFAULTS.live
@@ -6929,14 +6971,316 @@ class ConsolePresenter:
         caller that got it wrong.
         """
 
-        show = getattr(self.view, "show_status", None)
-        if show is None:
-            return
         selected = str(severity)
         if selected not in STATUS_SEVERITIES:
             text = f"{text} [internal: unknown status severity {selected!r}]"
             selected = "error"
-        show(text, selected)
+        self._control_report_sequence += 1
+        self._control_reports.append({
+            "sequence": self._control_report_sequence,
+            "severity": selected,
+            "message": str(text),
+        })
+        show = getattr(self.view, "show_status", None)
+        if show is not None:
+            show(text, selected)
+
+    def control_state(
+        self, *, after_sequence: int = 0, node_id: str | None = None,
+        panel_id: str | None = None, details: bool = False,
+    ) -> dict[str, Any]:
+        """Read compact owner facts; explicit details include editable values.
+
+        A node/panel selection visits only those rows and their signals. Both
+        omitted means the board summary. Nothing here polls a device.
+        """
+
+        filtered = node_id is not None or panel_id is not None
+        selected_logic = self.logic.get(node_id)
+        selected_panel = self.panels.get(panel_id)
+        logic_bindings = self.logic.values() if not filtered else (() if selected_logic is None else (selected_logic,))
+        panel_bindings = self.panels.values() if not filtered else (() if selected_panel is None else (selected_panel,))
+        signal_names = set()
+        logic = []
+        for binding in logic_bindings:
+            host = binding.host
+            observed = None if host is None else host.observation
+            request = None if host is None else host.operator_request
+            ready = None
+            if binding.descriptor.reports_ready:
+                ready = False
+                if host is not None and host.running:
+                    try:
+                        ready = host.wait_ready(0)
+                    except (RuntimeError, InterruptedError):
+                        # Stop and a just-sealed worker wake the same event;
+                        # neither is an arm-ready acquisition.
+                        pass
+            pending = binding.pending
+            phase = "idle" if observed is None else observed.phase
+            if binding.removing:
+                phase = "removing"
+            elif pending is not None:
+                phase = "queued"
+            elif request is not None:
+                phase = "requires_human"
+            elif binding.following and (host is None or host.terminal):
+                phase = "waiting_for_source"
+            finalization = binding.finalization
+            logic.append({
+                "node_id": binding.node_id,
+                "api_name": binding.descriptor.api_name,
+                "kind": binding.descriptor.kind.value,
+                "draft_revision": binding.draft_revision,
+                **({"draft": _control_plain(binding.draft)} if details else {}),
+                "status": phase,
+                "generation": None if host is None or host.generation is None else host.generation.value,
+                "observation": _control_plain(observed),
+                "ready": ready,
+                "error": binding.draft_error or (None if observed is None else observed.error),
+                "issues": [] if finalization is None else list(finalization.issues),
+                "following": binding.following,
+                "pending": None if pending is None else {
+                    "node_id": binding.node_id,
+                    "waiting_for": list(pending.waiting_for),
+                    "generation": None if pending.host.generation is None else pending.host.generation.value,
+                },
+                "operator_request": _control_plain(request),
+                "requires_human": request is not None,
+                "run_directory": None if host is None or host.run_directory is None else str(host.run_directory),
+                "artifacts": [] if host is None else _control_plain(host.artifacts),
+                "published_signals": [] if host is None else list(host.published_signals()),
+                "auto_preview": binding.auto_preview,
+            })
+        panels = []
+        for binding in panel_bindings:
+            signal_names.update((binding.state.signal, binding.state.overlay_signal))
+            surface = binding.accepted_surface
+            shown = None if surface is None else getattr(surface.plot_input, "snapshot", surface.plot_input)
+            frozen = binding.frozen_data
+            panels.append({
+                "panel_id": binding.panel_id,
+                "state": (_control_plain(binding.state.document()) if details else {
+                    "signal": binding.state.signal, "kind": binding.state.kind,
+                    "cell_kind": binding.state.cell_kind, "title": binding.state.title,
+                }),
+                "presented": surface is not None,
+                "dataset_ref": _control_plain(getattr(shown, "ref", None)),
+                "publication": _control_plain(None if surface is None or surface.publication is None else surface.publication.event_ref),
+                "frozen_ref": _control_plain(None if frozen is None else frozen.snapshot.ref),
+                "editor_open": binding.editor_open,
+                "refresh_pending": binding.refresh_requested,
+                "configuration_pending": binding.configuration is not None or binding.editor_configuration is not None,
+                "saving": binding.panel_id in self._saving_panels,
+                "error": binding.reported_condition or binding.vacancy or binding.unapplied_display,
+                **self._panel_snapshot_status(binding),
+            })
+        signals = []
+        for description in self.session.signal_plane.describe_signals():
+            if filtered and description.name not in signal_names and not (
+                node_id and (description.owner_id == node_id or description.owner_id.startswith(node_id + "/"))
+            ):
+                continue
+            publication = self.session.signal_plane.latest_publication(description.name)
+            signals.append({
+                "name": description.name,
+                "owner_id": description.owner_id,
+                "kind": description.kind,
+                "contract_id": description.contract_id,
+                "live": description.live,
+                "shape": _control_plain(description.shape),
+                "publication": _control_plain(None if publication is None else publication.event_ref),
+            })
+        reports = [dict(item) for item in self._control_reports if item["sequence"] > after_sequence]
+        return {
+            "workspace": str(self.session.workspace.root),
+            "closing": self._closing,
+            "closed": self._closed,
+            "active_task_id": self._active_task_id,
+            "logic": logic,
+            "panels": panels,
+            "signals": signals,
+            "sequence": self._control_report_sequence,
+            "reports": reports,
+            "reports_truncated": bool(self._control_reports and after_sequence < self._control_reports[0]["sequence"] - 1),
+        }
+
+    def control_catalog(
+        self, *, api_name: str | None = None, node_id: str | None = None,
+        panel_id: str | None = None,
+    ) -> dict[str, Any]:
+        """List names cheaply; request one plugin or editor for full metadata."""
+
+        if node_id is not None:
+            binding = self.logic.get(node_id)
+            if binding is None:
+                raise KeyError(f"unknown logic node {node_id!r}")
+            if api_name is not None and api_name != binding.descriptor.api_name:
+                raise ValueError("api_name does not match the selected logic node")
+            api_name = binding.descriptor.api_name
+        if api_name is not None:
+            descriptor = self.catalog.get(api_name)
+            if descriptor is None:
+                raise KeyError(f"unknown logic plugin {api_name!r}")
+            descriptors = (descriptor,)
+        else:
+            descriptors = ()
+        catalog = []
+        if api_name is None and panel_id is None:
+            catalog = [
+                {"api_name": descriptor.api_name, "kind": descriptor.kind.value,
+                 "outputs": [item.name for item in descriptor.outputs],
+                 "reports_ready": descriptor.reports_ready}
+                for descriptor in self.catalog.by_name.values()
+            ]
+        for descriptor in descriptors:
+            catalog.append({
+                "api_name": descriptor.api_name,
+                "kind": descriptor.kind.value,
+                "fields": _control_plain(descriptor.authoring_schema.fields),
+                "dataset_inputs": _control_plain(dataset_inputs(descriptor)),
+                "artifact_inputs": [
+                    {"name": item.name, "label": item.label, "contract_id": item.contract_id,
+                     "required": item.required, "per_frame": item.per_frame}
+                    for item in artifact_input_specs(descriptor)
+                ],
+                "outputs": _control_plain(descriptor.outputs),
+                "dynamic_outputs": descriptor.declare_outputs is not None,
+                "artifact_outputs": _control_plain(descriptor.artifact_outputs),
+                "device_requirements": _control_plain(descriptor.device_requirements),
+                "workspace_resources": [
+                    {"field_name": item.field_name, "directory": item.directory,
+                     "contract_id": item.contract_id, "suffixes": list(item.suffixes)}
+                    for item in descriptor.workspace_resources
+                ],
+                "reports_ready": descriptor.reports_ready,
+                "acquisition_input": descriptor.acquisition_input,
+                "acquisition_completion": descriptor.acquisition_completion,
+            })
+        result = {"logic": catalog, "panel_kinds": list(self._panel_kinds), "panel_sizes": list(self._sizes)}
+        if node_id is not None:
+            projection = self.logic_editor_projection(node_id)
+            if projection is None:
+                raise KeyError(f"unknown logic node {node_id!r}")
+            # These excluded values hold scientific buffers, callbacks or
+            # plugin views. All editable values/fields/options are retained.
+            result["node"] = _control_plain({
+                key: value for key, value in projection.items()
+                if key not in {"input_bundle", "output_bundle", "source_schema",
+                               "workspace_resources", "ui_contributions", "bench_extras", "run_device_read"}
+            })
+        if panel_id is not None:
+            projection = self.panel_editor_projection(panel_id)
+            if projection is None:
+                raise KeyError(f"unknown panel {panel_id!r}")
+            result["panel"] = _control_plain({
+                key: value for key, value in projection.items()
+                if key not in {"frozen_snapshot", "frozen_publication"}
+            })
+        return result
+
+    def control_action(
+        self, action: str, arguments: Mapping[str, Any] | None = None, *,
+        expected_draft_revision: int | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Forward an external intent on the GUI thread through normal admission.
+
+        Accepted means an intent was accepted, not that a worker or a Save
+        completed. Subsequent control_state observations report that outcome.
+        """
+
+        before = self._control_report_sequence
+        params = dict(arguments or {})
+        node_id = str(params.get("node_id", ""))
+        panel_id = str(params.get("panel_id", ""))
+        accepted = False
+        status = "rejected"
+        error = None
+        try:
+            if self._closing or self._closed:
+                raise RuntimeError("Console is closing")
+            if action.startswith("logic.") and action != "logic.add":
+                binding = self.logic.get(node_id)
+                if binding is None:
+                    raise KeyError(f"unknown logic node {node_id!r}")
+                if expected_draft_revision is not None and expected_draft_revision != binding.draft_revision:
+                    raise ValueError("logic draft changed; read the current draft before submitting")
+                generation = None if binding.host is None or binding.host.generation is None else binding.host.generation.value
+                if expected_generation is not None and expected_generation != generation:
+                    raise ValueError("logic run changed; read the current generation before submitting")
+            if action == "logic.add":
+                node_id = self.add_logic(**params)
+                accepted = bool(node_id)
+            elif action == "logic.update":
+                if set(params) - {"node_id", "values", "source_signal", "device_keys", "artifact_inputs"}:
+                    raise ValueError("logic.update accepts only authored draft fields")
+                accepted = self.update_logic_draft(**params)
+            elif action == "logic.validate":
+                if set(params) != {"node_id"}:
+                    raise ValueError("logic.validate accepts only node_id")
+                self.refresh_logic_files(node_id)
+                accepted = self.logic[node_id].finalization.can_start
+                status = "valid" if accepted else "invalid"
+                if not accepted:
+                    error = self.logic[node_id].finalization.issues[0]
+            elif action == "logic.start":
+                if set(params) != {"node_id"}:
+                    raise ValueError("logic.start accepts only node_id")
+                accepted = self.start_logic(node_id)
+            elif action == "logic.stop":
+                accepted = self.stop_logic(**params)
+            elif action == "logic.remove":
+                removed = self.remove_logic(**params)
+                accepted = removed or (node_id in self.logic and self.logic[node_id].removing)
+                status = "removed" if removed else "removing" if accepted else "rejected"
+            elif action == "panel.add":
+                if set(params) != {"kind"}:
+                    raise ValueError("panel.add accepts kind; configure the returned panel with panel.update")
+                panel = self.add_blank_panel(**params)
+                accepted = panel is not None
+                panel_id = "" if panel is None else panel.panel_id
+            elif action == "panel.update":
+                accepted = self.update_panel_state(**params)
+            elif action == "panel.edit":
+                accepted = self.edit_panel(**params)
+            elif action == "panel.refresh":
+                if set(params) != {"panel_id"}:
+                    raise ValueError("panel.refresh accepts only panel_id")
+                accepted = self.refresh_panel_snapshot(panel_id)
+            elif action == "panel.save":
+                accepted = self.save_panel_figure(**params)
+                status = "saving" if accepted else "rejected"
+            elif action == "panel.remove":
+                if panel_id not in self.panels:
+                    raise KeyError(f"unknown panel {panel_id!r}")
+                self.remove_panel(**params)
+                accepted = panel_id not in self.panels
+                status = "removed" if accepted else "rejected"
+            elif action in {"view.monitor", "view.logic"}:
+                if params:
+                    raise ValueError(f"{action} takes no arguments")
+                show_page = getattr(self.view, "show_page", None)
+                if not callable(show_page):
+                    raise RuntimeError("This console cannot switch its visible page")
+                show_page(action.partition(".")[2])
+                accepted = True
+            else:
+                raise ValueError(f"unknown control action {action!r}")
+        except Exception as failure:
+            error = _error_text(failure)
+            self._report(f"{action}: {error}", severity="error")
+        state = self.control_state(after_sequence=before, node_id=node_id, panel_id=panel_id)
+        if accepted and status == "rejected":
+            status = "accepted"
+            if action in {"logic.start", "logic.stop"}:
+                status = next(item["status"] for item in state["logic"] if item["node_id"] == node_id)
+        if not accepted and error is None:
+            messages = [item["message"] for item in state["reports"] if item["severity"] in {"warning", "error"}]
+            error = messages[-1] if messages else "The requested action was not accepted"
+        return {"action": action, "accepted": accepted, "status": status,
+                "node_id": node_id or None, "panel_id": panel_id or None,
+                "error": error, "state": state}
 
 
     # ------------------------------------------------------------------- logic

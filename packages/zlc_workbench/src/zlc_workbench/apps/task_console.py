@@ -15,6 +15,7 @@ session, not from the window.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -43,6 +44,14 @@ def _parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="build everything and exit without opening a window (a startup smoke test)",
+    )
+    parser.add_argument(
+        "--mcp-port", type=int, default=None,
+        help="serve this GUI session's MCP endpoint on localhost; requires ZLC_MCP_TOKEN",
+    )
+    parser.add_argument(
+        "--mcp-control", action="store_true",
+        help="allow MCP to submit experiment actions (otherwise observation only)",
     )
     return parser
 
@@ -566,6 +575,112 @@ class ExperimentGuiFlow:
         )
         self._adopt_device_control(key, leaf.device, control)
         return control
+
+    def control_device(
+        self, action: str, key: str, *, field: str | None = None,
+        value: object = None, unit: str | None = None,
+    ) -> dict[str, object]:
+        """Use the existing Control actions and project their current outcome.
+
+        Runs on the GUI owner; device reads and writes stay on its serial
+        worker. Acceptance is not completion. Inspect again after ``pending``
+        clears to read the same readback and errors the operator sees.
+        """
+        from dataclasses import asdict
+
+        key = str(key)
+        if self.session is None or key not in self.session.installation.devices:
+            raise ValueError(f"no initialized device {key!r}")
+        if action == "open":
+            self.open_device_control(key)
+        elif action not in {"inspect", "refresh", "unit", "apply"}:
+            raise ValueError("device action must be open, inspect, refresh, unit or apply")
+        model = self._device_control_models.get(key)
+        if action in {"refresh", "unit", "apply"} and model is None:
+            raise RuntimeError("open the generic Control, then inspect its fields before editing")
+        if action == "refresh":
+            self._request_device_control_refresh(key)
+        if action in {"unit", "apply"}:
+            if field not in model["desired"]:
+                raise ValueError(f"unknown device field {field!r}")
+            if action == "unit":
+                if unit is None:
+                    raise ValueError("a display unit is required")
+                self._set_device_control_unit(key, field, unit)
+            else:
+                selected_unit = model["desired"][field][1] if unit is None else str(unit)
+                self._set_device_control_desired(key, field, value, selected_unit)
+                refused = self._queue_device_tune(key, field, value, selected_unit)
+                if refused is not None:
+                    raise RuntimeError(refused[0])
+        result: dict[str, object] = {
+            "device": key,
+            "opening": key in self._device_control_opening,
+            "pending": (
+                key in self._device_control_opening
+                or key in self._device_refresh_active
+                or str(self._device_tune_active or "").startswith(f"{key}:")
+                or any(item[0] == key for item in self._device_tune_pending)
+            ),
+        }
+        if model is None:
+            result["generic_control"] = False
+            result["status"] = self.devices.status_snapshot()
+        else:
+            result.update(self._device_control_projection(key))
+            result["generic_control"] = True
+            result["device_session_id"] = model["device_session_id"]
+            result["settings_epoch"] = model["settings_epoch"]
+            result["schema"] = tuple(asdict(item.metadata) for item in model["tunables"])
+            result["status"] = model["control"].status_snapshot()
+        return result
+
+    def control_pulse(
+        self, action: str, key: str, *, path: str | None = None,
+    ) -> dict[str, object]:
+        """Submit an existing bound Pulse Editor gesture, never a second driver.
+
+        Commands run on the next GUI turn so an ordinary warning dialog cannot
+        hold the external request hostage. The returned acceptance is not a
+        board acknowledgement; inspect the editor's observed state afterward.
+        """
+        from PyQt5 import QtCore
+
+        if action not in {"open", "inspect", "fire", "stop"}:
+            raise ValueError("pulse action must be open, inspect, fire or stop")
+        if path is not None and action != "open":
+            raise ValueError("a Pulse path is only accepted by the open action")
+        if self.session is None:
+            raise RuntimeError("initialize devices before opening Pulse Control")
+        self.session.installation.capability("sequencer.streamer", key=str(key))
+        control = self.device_controls.get(str(key))
+        if control is None:
+            if action != "open":
+                raise RuntimeError("open Pulse Control before inspecting or commanding it")
+            control = self.open_device_control(str(key))
+        presenter = control.presenter
+        if action == "open" and path is not None and presenter.dirty:
+            raise RuntimeError("Pulse Editor has unsaved edits; save or discard them before opening another file")
+        if action == "open" and path is None:
+            control.restore()
+        dispatch = None
+        if action == "open" and path is not None:
+            dispatch = lambda: presenter.open_pulse(str(path))
+        elif action == "fire":
+            dispatch = presenter.request_fire
+        elif action == "stop":
+            dispatch = presenter.stop
+        if dispatch is not None:
+            # The same exception boundary as the editor's real buttons; a
+            # queued Python failure must not escape into Qt and end the app.
+            QtCore.QTimer.singleShot(0, presenter._guarded(dispatch))
+        return {
+            "device": str(key),
+            "accepted": dispatch is not None,
+            "dispatch_pending": dispatch is not None,
+            "status": control.status_snapshot(),
+            **presenter.execution_snapshot(),
+        }
 
     def _adopt_device_control(self, key: str, device: object, control: object) -> None:
         """This control is the one window for ``key`` until it closes."""
@@ -1822,7 +1937,26 @@ def _open_saved_figure(
 
 
 def main(argv: list[str] | None = None) -> int:
-    arguments = _parser().parse_args(argv)
+    parser = _parser()
+    arguments = parser.parse_args(argv)
+    if arguments.mcp_control and arguments.mcp_port is None:
+        parser.error("--mcp-control requires --mcp-port")
+    token = os.environ.get("ZLC_MCP_TOKEN", "")
+    if arguments.mcp_port is not None:
+        if arguments.check:
+            parser.error("--mcp-port requires the running GUI, not --check")
+        if not 1 <= arguments.mcp_port <= 65535:
+            parser.error("--mcp-port must be between 1 and 65535")
+        if not token.strip():
+            parser.error("set ZLC_MCP_TOKEN before enabling MCP")
+        try:
+            from mcp.server import MCPServer  # noqa: F401 -- require the installed optional SDK API
+        except ImportError as error:
+            print(
+                'error: MCP requires python -m pip install -e ".[mcp]"; '
+                f"{error}", file=sys.stderr,
+            )
+            return 2
 
     from zlc_ui import ensure_qt_app
 
@@ -1885,7 +2019,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
     print(f"workspace: {flow.space.root}")
+    close_mcp = None
     try:
+        if arguments.mcp_port is not None:
+            try:
+                from .mcp import start_server
+
+                close_mcp = start_server(
+                    flow, host="127.0.0.1", port=arguments.mcp_port,
+                    token=token, allow_control=arguments.mcp_control,
+                )
+            except (ImportError, OSError, RuntimeError) as error:
+                print(f"error: MCP could not start: {error}", file=sys.stderr)
+                return 2
+            application.aboutToQuit.connect(close_mcp)
+            print(
+                f"MCP: http://127.0.0.1:{arguments.mcp_port}/mcp "
+                f"({'control enabled' if arguments.mcp_control else 'read only'})",
+                flush=True,
+            )
         return int(application.exec_())
     finally:
+        if close_mcp is not None:
+            close_mcp()
         flow.close()

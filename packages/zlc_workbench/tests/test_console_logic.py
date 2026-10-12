@@ -136,7 +136,12 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     """
 
     presenter = bench_presenter
-    node_id = presenter.add_logic("camera_measurement")
+    added = presenter.control_action("logic.add", {"api_name": "camera_measurement"})
+    assert added["accepted"] and added["status"] == "accepted"
+    node_id = added["node_id"]
+    assert added["state"]["logic"][0]["draft_revision"] == 0
+    assert added["state"]["logic"][0]["generation"] is None
+    assert added["state"]["reports"][-1]["message"] == f"added {node_id}"
 
     assert node_id == "camera_measurement"
     assert presenter.view.logic_rows, "the window was never given a row"
@@ -156,9 +161,14 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert projection["form_values"]["exposure_seconds"] is None
     assert projection["device_keys"]["camera"] == "camera"
 
-    assert presenter.update_logic_draft(
-        node_id, values={"repeat": 9, "frames_per_cycle": 2}
-    ) is True
+    updated = presenter.control_action(
+        "logic.update", {"node_id": node_id, "values": {"repeat": 9, "frames_per_cycle": 2}},
+        expected_draft_revision=0,
+    )
+    assert updated["accepted"]
+    assert updated["state"]["logic"][0]["draft_revision"] == 1
+    stale = presenter.control_action("logic.start", {"node_id": node_id}, expected_draft_revision=0)
+    assert not stale["accepted"] and "draft changed" in stale["error"]
     draft = presenter.logic[node_id].draft
     assert set(draft.values) == set(
         presenter.logic[node_id].descriptor.authoring_schema.field_names
@@ -167,6 +177,24 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert draft.values["frames_per_cycle"] == 2
     assert "timeout_seconds" not in draft.values
     assert presenter.logic[node_id].host is None
+    catalog = presenter.control_catalog(node_id=node_id)
+    assert catalog["node"]["form_values"]["repeat"] == 9
+    assert catalog["node"]["device_keys"] == {"camera": "camera"}
+    assert [item["api_name"] for item in catalog["logic"]] == ["camera_measurement"]
+    listing = presenter.control_catalog()
+    assert {item["api_name"] for item in listing["logic"]} == set(presenter.catalog.by_name)
+    assert all(set(item) == {"api_name", "kind", "outputs", "reports_ready"} for item in listing["logic"])
+    assert presenter.control_catalog(api_name="camera_measurement")["logic"][0]["fields"]
+    presenter.add_logic("camera_measurement", node_id="other_camera")
+    selected = presenter.control_state(node_id=node_id)
+    assert [item["node_id"] for item in selected["logic"]] == [node_id]
+    assert "draft" not in selected["logic"][0]
+    assert presenter.control_state(node_id=node_id, details=True)["logic"][0]["draft"]["values"]["repeat"] == 9
+    updated = presenter.control_action("logic.update", {"node_id": node_id, "values": {"repeat": 10}})
+    assert [item["node_id"] for item in updated["state"]["logic"]] == [node_id]
+    assert presenter.logic["other_camera"].draft.values["repeat"] == 0
+    json.dumps(catalog, allow_nan=False)
+    json.dumps(stale, allow_nan=False)
 
 
 def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None:
@@ -177,7 +205,9 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     )
     row = presenter.view._rows[node_id]
 
-    assert presenter.start_logic(node_id) is True
+    started = presenter.control_action("logic.start", {"node_id": node_id}, expected_draft_revision=0)
+    assert started["accepted"]
+    assert started["state"]["logic"][0]["observation"]["running"]
     assert row.state[0] == "running"
     assert "1/1 node(s) running" in presenter.view.summary
     declarations = presenter.logic[node_id].host.dataset_output_declarations
@@ -204,6 +234,11 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     # format_signal_shape writes and what the row and the editor read.
     expected = "(1) × (3) × (96 × 128)"
     assert tuple(value[1] for value in row.publishes) == (expected,)
+    state = presenter.control_state()
+    assert state["logic"][0]["generation"] == presenter.logic[node_id].host.generation.value
+    assert state["logic"][0]["observation"]["terminal"]
+    assert state["signals"][0]["publication"] is not None
+    json.dumps(state, allow_nan=False)
     occupancy_id = presenter.add_logic("occupancy")
     assert presenter.logic_editor_projection(occupancy_id)["source_labels"] == {
         frames_signal: f"frames  [{expected}]"
@@ -215,7 +250,12 @@ def test_stop_reaches_a_running_node(presenter, session) -> None:
     node_id = presenter.add_logic("camera_measurement", values={"repeat": 50})
     presenter.start_logic(node_id)
 
-    presenter.stop_logic(node_id)
+    generation = presenter.logic[node_id].host.generation.value
+    refused = presenter.control_action("logic.stop", {"node_id": node_id}, expected_generation="previous-run")
+    assert not refused["accepted"] and "run changed" in refused["error"]
+    assert not presenter.logic[node_id].host.cancel_requested
+    stopped = presenter.control_action("logic.stop", {"node_id": node_id}, expected_generation=generation)
+    assert stopped["accepted"]
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline and presenter.logic[node_id].host.running:
         presenter.poll_logic()

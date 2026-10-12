@@ -1936,3 +1936,114 @@ def test_a_queued_value_the_drain_refuses_is_said_on_its_field(workspace) -> Non
     started.pop()(RuntimeError("stopped"))
     logic.release()
     coordinator.assert_idle()
+
+
+def test_mcp_uses_current_virtual_session_and_keeps_stop_available(workspace):
+    """The actual HTTP protocol, Qt owner and existing virtual lifecycle agree."""
+    pytest.importorskip("mcp")
+    result = _run_script(r'''
+import asyncio, base64, socket, time
+from threading import Event
+from concurrent.futures import ThreadPoolExecutor
+import httpx2
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from zlc_ui import ensure_qt_app
+from zlc_workbench.apps.task_console import create_experiment_flow
+from zlc_workbench.apps.mcp import start_server
+app = ensure_qt_app([])
+flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
+with socket.socket() as held:
+    held.bind(("127.0.0.1", 0))
+    port = held.getsockname()[1]
+url = f"http://127.0.0.1:{port}/mcp"
+close_mcp = start_server(flow, port=port, token="virtual-test", allow_control=True)
+block_owner, owner_blocked = Event(), Event()
+
+async def client():
+    async with httpx2.AsyncClient() as http:
+        assert (await http.get(url)).status_code == 401
+        assert (await http.get(url, headers={"Authorization":"Bearer virtual-test", "Origin":"https://example.com"})).status_code == 403
+    async with httpx2.AsyncClient(headers={"Authorization":"Bearer virtual-test"}, timeout=10.) as http:
+        async with streamable_http_client(url, http_client=http) as (read, write, *_):
+            async with ClientSession(read, write) as c:
+                await c.initialize()
+                async def call(name, args=None):
+                    result = await c.call_tool(name, args or {})
+                    assert not result.is_error, result.content
+                    assert result.structured_content is not None
+                    return result.structured_content
+                assert not (await call("lab_state"))["session_open"]
+                assert (await call("lab_initialize"))["accepted"]
+                for _ in range(100):
+                    state = await call("lab_state")
+                    if state["session_open"]:
+                        break
+                    await asyncio.sleep(.02)
+                assert state["session_open"]
+                assert "fields" not in (await call("lab_catalog"))["logic"][0]
+                added = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
+                node = added["node_id"]
+                assert added["accepted"]
+                started = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node}})
+                assert started["accepted"]
+                for _ in range(100):
+                    rows = (await call("lab_state", {"node_id":node}))["console"]["logic"]
+                    if rows[0]["ready"]:
+                        break
+                    await asyncio.sleep(.01)
+                generation = rows[0]["generation"]
+                assert rows[0]["ready"]
+                refused = await call("lab_action", {"action":"logic.stop", "arguments":{"node_id":node}, "expected_generation":"old"})
+                assert not refused["accepted"] and "run changed" in refused["error"]
+                waiting = asyncio.create_task(call("lab_wait", {"node_id":node,"generation":generation,"timeout_seconds":5}))
+                await asyncio.sleep(.02)
+                stopped = await call("lab_action", {"action":"logic.stop", "arguments":{"node_id":node}, "expected_generation":generation})
+                assert stopped["accepted"]
+                done = await waiting
+                assert done["reached"] and done["observation"]["terminal"] and done["still_current"]
+                screenshot = await c.call_tool("lab_screenshot", {"window":"devices"})
+                assert not screenshot.is_error
+                image = next(item for item in screenshot.content if item.type == "image")
+                assert base64.b64decode(image.data).startswith(b"\x89PNG")
+                invalid = await c.call_tool("lab_signal", {"signal":"missing"})
+                assert invalid.is_error
+                assert "No publication" in str(invalid.content)
+                # A frozen owner must not execute an old queued write after
+                # the client was explicitly told it timed out/cancelled.
+                block_owner.set()
+                assert await asyncio.to_thread(owner_blocked.wait, 2)
+                timed_out = await c.call_tool("lab_action", {"action":"logic.add", "arguments":{"api_name":"derive"}})
+                assert timed_out.is_error and "cancelled before execution" in str(timed_out.content)
+                await asyncio.sleep(.6)
+                rows = (await call("lab_state"))["console"]["logic"]
+                assert all(row["api_name"] != "derive" for row in rows)
+
+pool = ThreadPoolExecutor(max_workers=1)
+future = pool.submit(lambda: asyncio.run(client()))
+try:
+    deadline = time.monotonic() + 40
+    while not future.done() and time.monotonic() < deadline:
+        if block_owner.is_set():
+            block_owner.clear()
+            owner_blocked.set()
+            time.sleep(5.5)
+        app.processEvents()
+        time.sleep(.002)
+    future.result(timeout=1)
+    print("MCP_ROUNDTRIP_PASS")
+finally:
+    close_mcp()
+    deadline = time.monotonic() + 20
+    while not flow.close() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
+    assert flow.close(), "virtual flow did not close"
+    while not close_mcp() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
+    pool.shutdown(wait=True)
+'''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=75)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MCP_ROUNDTRIP_PASS" in result.stdout

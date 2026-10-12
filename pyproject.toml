@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp==2.3.0",
+]
 slm-gpu = [
     "cupy-cuda12x[ctk]==14.2.0",
     "cuda-bindings==12.9.9",

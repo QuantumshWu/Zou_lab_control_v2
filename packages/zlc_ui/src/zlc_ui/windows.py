@@ -26,17 +26,45 @@ from .fluent import (
 from .qt import ensure_qt_app
 
 
+def _window_screenshot(window: Any, *, include_dialog: bool = False) -> Any:
+    """Capture once on the Qt owner, through the same path for file and bytes."""
+    if include_dialog:
+        from PyQt5 import QtWidgets
+
+        dialog = QtWidgets.QApplication.activeModalWidget()
+        if dialog is not None and window.isAncestorOf(dialog):
+            window = dialog
+    pixmap = window.grab()
+    if pixmap.isNull():
+        raise OSError("the window has no image to capture")
+    return pixmap
+
+
 def save_window_screenshot(window: Any, path: str) -> str:
     """Save the complete visible GUI through the shared window boundary."""
     from pathlib import Path
 
-    pixmap = window.grab()
-    if pixmap.isNull():
-        raise OSError("the window has no image to save")
+    pixmap = _window_screenshot(window)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if not pixmap.save(str(path), "PNG"):
         raise OSError(f"could not save screenshot to {path!r}")
     return str(path)
+
+
+def window_screenshot_png(window: Any, *, include_dialog: bool = False) -> bytes:
+    """Return current GUI pixels, optionally showing its active modal instead.
+
+    This does not resize, switch tabs, advance events or save an image. The
+    caller schedules it on the Qt owner like every other window operation.
+    """
+    from PyQt5 import QtCore
+
+    pixmap = _window_screenshot(window, include_dialog=include_dialog)
+    buffer = QtCore.QBuffer()
+    buffer.open(QtCore.QIODevice.WriteOnly)
+    if not pixmap.save(buffer, "PNG"):
+        raise OSError("could not encode the window screenshot")
+    return bytes(buffer.data())
 
 
 def open_device_control(
@@ -217,6 +245,7 @@ def open_task_console(
 
 __all__ = [
     "save_window_screenshot",
+    "window_screenshot_png",
     "open_device_control",
     "open_device_manager",
     "open_figure_viewer",
