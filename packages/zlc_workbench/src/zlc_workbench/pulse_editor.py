@@ -1106,6 +1106,7 @@ class PulseEditorPresenter:
         self.pulses_directory = str(pulses_directory)
         self.revision = 0
         self.last_warning = ""
+        self._control_validation: dict[str, object] | None = None
         self._make_preview = make_preview
         # How an existing preview takes new data.  Without one the host is
         # rebuilt, which is correct but slow; the composition root supplies it.
@@ -1260,6 +1261,236 @@ class PulseEditorPresenter:
             "authored_run_repeats": None if self.sequence is None else self.sequence.run_repeats,
             "last_warning": self.last_warning,
         }
+
+    def control_catalog(self) -> dict[str, object]:
+        """Describe the existing editor gestures, using this pulse's identities."""
+        sequence = self.sequence
+        return {
+            "editor_kind": "pulse",
+            "actions": {
+                "open": "path: explicit Pulse JSON path; refuses unsaved Pulse changes unless discard_changes=true (default false)",
+                "save": "path: explicit Pulse JSON path; saves the current draft, not a compiled pulse",
+                "validate": "no arguments; compile on the command worker using loaded Config values, without loading or firing; inspect validation afterward",
+                "fire": "no arguments; submit the ordinary asynchronous On Pulse action; inspect pending/board/error afterward",
+                "stop": "no arguments; submit the ordinary asynchronous Stop action",
+                "period_name": "period_id, name: display name; stable period_id does not change",
+                "duration": "period_id, value, unit: time rounded to the existing clock grid",
+                "digital": "period_id, port_key, high: boolean TTL state",
+                "analog": "period_id, port_key, mode, value: signed DAC code; hold removes the step",
+                "delay": "port_key, value, unit: output delay; zero removes it",
+                "binding": "field_kind (duration, analog or delay), period_id (null for delay), port_key (null for duration), scan (bool), source (default, api or config)",
+                "config_binding": "field_id, key: assign an existing Config-source binding to a Config name",
+                "run_repeats": "repeats: complete Pulse runs per point; 0 means infinite",
+                "scan_repeats": "repeats: complete scan-table sweeps; 0 means infinite; independent of Run repeats",
+                "bracket": "bracket_id, start, end, count: inclusive stable period IDs and positive repeat count",
+                "bracket_add": "start, end, count: inclusive stable period IDs; new bracket ID is returned in state",
+                "bracket_remove": "bracket_id: explicitly remove this bracket",
+                "period_add": "before_item: optional [period|bracket, item_id], null appends",
+                "spacer_add": "before_item: optional [period|bracket, item_id], null appends",
+                "period_remove": "period_id: remove one period using ordinary timeline editing",
+                "config.edit": "rows: [[name, numeric value, unit], ...]; edit Config draft only",
+                "config.load": "path: explicit Config JSON path; ordinary asynchronous load and activation; refuses unsaved Config changes unless discard_changes=true (default false)",
+                "config.save": "path: explicit Config JSON path; ordinary asynchronous save and activation of the Config draft",
+                "config.unload": "no arguments; unload active Config, preserving its draft",
+            },
+            "time_units": list(_TIME_UNITS),
+            "analog_modes": [*ANALOG_MODE_CHOICES, HOLD_MODE],
+            "binding_sources": ["default", "api", "config"],
+            "period_ids": [] if sequence is None else list(sequence.period_by_id),
+            "ports": [] if sequence is None else [
+                {"key": p.key, "label": p.label, "kind": p.kind,
+                 "lanes": list(p.lanes), "signed_range": list(p.signed_range) if p.kind == "dac" else None}
+                for p in sequence.target.ports
+            ],
+            "bindings": [] if sequence is None else [
+                {"field_id": b.field_id, "label": field_label(sequence, b.field_ref),
+                 "unit": b.unit, "scan": b.scan, "source": b.source, "config_key": b.config_key}
+                for b in sequence.bindings
+            ],
+            "state": self.control_state(),
+        }
+
+    def control_state(self, details: bool = False) -> dict[str, object]:
+        """Project authoring and cached execution separately, without device I/O."""
+        from dataclasses import asdict
+        from .pulse_state import state_to_tree
+
+        result = self.execution_snapshot()
+        sequence = self.sequence
+        validation = None if self._control_validation is None else dict(self._control_validation)
+        if validation is not None:
+            validation.update(
+                matches_editor_revision=validation["revision"] == self.revision,
+                matches_loaded_config=(validation.get("config_values") == dict(self._active_config_values())
+                                       if "config_values" in validation else None),
+                matches_applied_program=bool(validation.get("digest"))
+                and validation["digest"] == self._board_state.applied_digest,
+            )
+        result["validation"] = validation
+        result["scan"] = {"rows": len(self._state.scan_rows), "repeats": self._state.scan_repeats,
+                          "source_dirty": self._state.scan_source_dirty}
+        result["config"] = {"draft_path": self._config_path, "draft_dirty": self._config_dirty(),
+                            "active_path": self._active_config_path()}
+        if sequence is not None:
+            duration, timing_error = None, None
+            try:
+                sequence.require_nonempty_brackets()
+                duration = sequence.played_nanoseconds() * 1e-9
+            except ValueError as error:
+                timing_error = str(error)
+            result["authored"] = {
+                "name": sequence.name, "time_step_ns": sequence.time_step_ns,
+                "timing_scope": "authored defaults, one complete Pulse including brackets; excludes Run/Scan repeats and Config overrides",
+                "duration_seconds": duration, "timing_error": timing_error,
+                "periods": [{"period_id": p.period_id, "name": p.name, "kind": p.kind,
+                             "duration": p.duration, "unit": p.unit} for p in sequence.periods],
+                "brackets": [asdict(b) for b in sequence.brackets],
+            }
+        if details:
+            result["config"]["draft_rows"] = [list(row) for row in self._config_rows]
+            result["config"]["active_values"] = dict(self._active_config_values())
+            result["config"]["scope"] = "loaded values; unsaved Config draft is not active; Fire rereads the active file"
+            if sequence is not None:
+                try:
+                    result["document"] = state_to_tree(self._state)
+                except ValueError as error:
+                    # Empty brackets are legal edits, but deliberately not a
+                    # serializable/executable pulse. Keep their real anchors
+                    # visible above rather than erasing them to make a file.
+                    result["document_error"] = str(error)
+        elif validation is not None:
+            result["validation"] = {k: v for k, v in validation.items()
+                                    if k not in {"document", "program", "config_values", "scan_rows"}}
+        return result
+
+    def control_action(self, action: str, arguments: Mapping[str, Any]) -> dict[str, object]:
+        """Use the same authoring/command owners without a modal interaction."""
+        self.last_warning = ""
+        accepted = True
+        try:
+            if self._preview_close_requested:
+                raise RuntimeError("the Pulse editor is closing")
+            if action == "open":
+                if self.dirty and arguments.get("discard_changes") is not True:
+                    raise ValueError("Pulse has unsaved changes; save it or explicitly pass discard_changes=true to replace the draft")
+                accepted = self.open_pulse(str(arguments["path"]), present=False)
+            elif action == "save":
+                accepted = bool(self.save_pulse(str(arguments["path"]), present=False))
+            elif action == "validate":
+                accepted = self._validate_control()
+            elif action == "fire":
+                self.request_fire(present=False)
+                accepted = not bool(self.last_warning)
+            elif action == "stop":
+                self.stop(present=False)
+                accepted = not bool(self.last_warning)
+            elif action == "config.edit":
+                if not self._device_available(present=False):
+                    return {"accepted": False, "error": self.last_warning, "state": self.control_state()}
+                rows = arguments["rows"]
+                if any(len(row) != 3 for row in rows):
+                    raise ValueError("Config rows must contain name, value and unit")
+                self.edit_config_entries(rows)
+            elif action in {"config.load", "config.save", "config.unload"}:
+                if action == "config.load":
+                    if self._config_dirty() and arguments.get("discard_changes") is not True:
+                        raise ValueError("Config has unsaved changes; save it or explicitly pass discard_changes=true to replace the draft")
+                    accepted = self.load_config_values(str(arguments["path"]), present=False)
+                elif action == "config.save":
+                    accepted = self.save_config_values(path=str(arguments["path"]), present=False)
+                else:
+                    accepted = self._config_file_operation("", load_draft=False, present=False)
+            else:
+                if self.sequence is None:
+                    raise ValueError("open a pulse before editing it")
+                if action == "scan_repeats":
+                    self.set_scan_repeats(arguments["repeats"])
+                else:
+                    if action == "delay":
+                        candidate = _sequence_edited(self.sequence, "delay", (
+                            arguments["port_key"], arguments["value"], arguments["unit"]))
+                    elif action == "run_repeats":
+                        candidate = replace_sequence(self.sequence, run_repeats=arguments["repeats"])
+                    else:
+                        if action == "period_name":
+                            args = (arguments["period_id"], arguments["name"])
+                        elif action == "duration":
+                            args = (arguments["period_id"], arguments["value"], arguments["unit"])
+                        elif action == "digital":
+                            if not isinstance(arguments["high"], bool):
+                                raise TypeError("high must be a boolean")
+                            args = (arguments["period_id"], arguments["port_key"], arguments["high"])
+                        elif action == "analog":
+                            args = (arguments["period_id"], arguments["port_key"], arguments["mode"], arguments.get("value"))
+                        elif action == "binding":
+                            args = (arguments["field_kind"], arguments.get("period_id"), arguments.get("port_key"),
+                                    arguments["scan"], arguments["source"])
+                        elif action == "config_binding":
+                            args = (arguments["field_id"], arguments["key"])
+                        elif action == "bracket":
+                            args = (arguments["bracket_id"], arguments["start"], arguments["end"], arguments["count"])
+                        elif action == "bracket_add":
+                            args = (arguments["start"], arguments["end"], arguments["count"])
+                        elif action in {"period_add", "spacer_add"}:
+                            action = "insert_period" if action == "period_add" else "insert_spacer"
+                            before = arguments.get("before_item")
+                            args = (None if before is None else tuple(before),)
+                        elif action in {"period_remove", "bracket_remove"}:
+                            item = (("period", arguments["period_id"]) if action == "period_remove" else
+                                    ("bracket", bracket_post_key(arguments["bracket_id"], "start")))
+                            action, args = "remove_items", ((item,),)
+                        else:
+                            raise ValueError(f"unknown Pulse action {action!r}; inspect control_catalog")
+                        candidate = _sequence_edited(self.sequence, action, args)
+                    candidate, dropped = prune_orphaned_bindings(candidate)
+                    self._apply(candidate)
+                    if dropped:
+                        self.last_warning = "unbound " + ", ".join(dropped) + ": the field is no longer set here"
+        except Exception as error:
+            accepted = False
+            self._warn(str(error), present=False)
+        return {"accepted": accepted, "error": None if accepted else self.last_warning,
+                "state": self.control_state()}
+
+    def _validate_control(self) -> bool:
+        """Compile a captured editor request on its existing command worker."""
+        from dataclasses import asdict
+        from zlc_pulse import sequence_to_tree
+
+        if not self._device_available(present=False):
+            return False
+        revision = self.revision
+        source, rows, sweeps = self._execution_request()
+        config = dict(self._active_config_values())
+        self._control_validation = {"revision": revision, "pending": True,
+                                    "scope": "compilation using loaded Config values; not applied board evidence"}
+
+        def work(_operation: int) -> object:
+            resolved = apply_config_values(source, config)[0]
+            resolved, program = self.compile(resolved)
+            return {"document": sequence_to_tree(resolved), "program": asdict(program),
+                    "digest": program.digest, "duration_seconds": program.duration_seconds,
+                    "timing_scope": "one Pulse at nominal scan-slot values; excludes Run/Scan repeats; scan_rows contains wire tick/code values",
+                    "config_values": config, "scan_rows": rows, "scan_repeats": sweeps}
+
+        def delivered(result: object, error: BaseException | None) -> None:
+            self._control_validation = {
+                "revision": revision, "pending": False, "valid": error is None,
+                "scope": "compilation using loaded Config values; not applied board evidence",
+                "error": None if error is None else str(error), **(result or {}),
+            }
+            if error is not None:
+                self._warn(f"cannot compile this pulse: {error}", present=False)
+
+        if self._run_device_work is not None:
+            return self._run_device_command(work, delivered, summary="Validating pulse...", always_deliver=True)
+        try:
+            result = work(0)
+        except Exception as error:
+            delivered(None, error)
+            return False
+        delivered(result, None)
+        return True
 
     def _accept_state(self, candidate: PulseEditorState) -> None:
         """Replace current authoring atomically and invalidate derived views."""
@@ -1584,7 +1815,7 @@ class PulseEditorPresenter:
             return False
         return self.open_pulse(chosen)
 
-    def open_pulse(self, path: str) -> bool:
+    def open_pulse(self, path: str, *, present: bool = True) -> bool:
         """Replace what is being edited with one ``zlc.pulse`` JSON file.
 
         Attached, a pulse written for other wiring is moved onto the board
@@ -1597,13 +1828,13 @@ class PulseEditorPresenter:
         try:
             candidate = read_pulse(path)
         except Exception as error:
-            self._warn(f"cannot open {Path(path).name}: {error}")
+            self._warn(f"cannot open {Path(path).name}: {error}", present=present)
             return False
         self._saved_state = candidate
         self.path = str(path)
         self._accept_state(candidate)
         if self.board is not None and self.sequence is not None:
-            self._align_sequence_to(self.board)
+            self._align_sequence_to(self.board, present=present)
         self.refresh()
         return True
 
@@ -1723,10 +1954,10 @@ class PulseEditorPresenter:
 
     def _config_file_operation(
         self, path: str, *, entries: Mapping[str, tuple[float, str]] | None = None,
-        load_draft: bool = True, activate: bool = True,
+        load_draft: bool = True, activate: bool = True, present: bool = True,
     ) -> bool:
         """Use the ordinary worker for one Config read/save/bind operation."""
-        if not self._device_available():
+        if not self._device_available(present=present):
             return False
         sequencer = self.sequencer
         def work(_operation: int):
@@ -1744,7 +1975,7 @@ class PulseEditorPresenter:
         # offer to save the edits that already went.
         def delivered(values: object, error: BaseException | None) -> None:
             if error is not None:
-                self._warn(f"cannot update Config: {error}")
+                self._warn(f"cannot update Config: {error}", present=present)
                 self._refresh_config_page()
                 return
             if activate:
@@ -1771,16 +2002,16 @@ class PulseEditorPresenter:
         delivered(values, None)
         return True
 
-    def load_config_values(self) -> bool:
-        if not self._discard_config_edits():
+    def load_config_values(self, path: str | None = None, *, present: bool = True) -> bool:
+        if path is None and not self._discard_config_edits():
             return False
         directory = self._config_values_directory()
-        chosen = self.view.ask_open_path(
+        chosen = path if path is not None else self.view.ask_open_path(
             "Load Config", self._config_path or str(directory or ""), "Config (*.json)",
         )
         if not chosen:
             return False
-        return self._config_file_operation(str(Path(chosen).resolve()))
+        return self._config_file_operation(str(Path(chosen).resolve()), present=present)
 
     def refresh_config_values(self) -> bool:
         if not self._config_path or not self._discard_config_edits():
@@ -1792,7 +2023,8 @@ class PulseEditorPresenter:
     def unload_config(self) -> bool:
         return self._config_file_operation("", load_draft=False)
 
-    def save_config_values(self, *, save_as: bool = False) -> bool:
+    def save_config_values(self, *, save_as: bool = False, path: str | None = None,
+                           present: bool = True) -> bool:
         # Only what a mapping cannot say is checked here; the codec's entry
         # rule (a Config name, a finite number, a unit) runs when the file is
         # written, and its refusal reaches the operator as "cannot update".
@@ -1800,16 +2032,16 @@ class PulseEditorPresenter:
         for name, text, unit in self._config_rows:
             key = name.strip()
             if key in entries:
-                self._warn(f"duplicate Config name: {key}")
+                self._warn(f"duplicate Config name: {key}", present=present)
                 return False
             try:
                 value = float(text)
             except ValueError:
-                self._warn(f"Config {key}: value must be a number")
+                self._warn(f"Config {key}: value must be a number", present=present)
                 return False
             entries[key] = (value, unit.strip())
-        target = self._config_path
-        if save_as or not target:
+        target = self._config_path if path is None else path
+        if path is None and (save_as or not target):
             directory = self._config_values_directory()
             target = self.view.ask_save_path(
                 "Save Config", target or str((directory or Path.cwd()) / CURRENT_CONFIG_VALUES),
@@ -1817,7 +2049,8 @@ class PulseEditorPresenter:
             )
             if not target:
                 return False
-        return self._config_file_operation(str(Path(target).with_suffix(".json").resolve()), entries=entries)
+        return self._config_file_operation(str(Path(target).with_suffix(".json").resolve()),
+                                           entries=entries, present=present)
 
     def _save_config_as(self) -> bool:
         return self.save_config_values(save_as=True)
@@ -1958,17 +2191,8 @@ class PulseEditorPresenter:
         self._edit_period(period_id, "analog", port_key, mode, value, ripples_forward=True)
 
     def set_delay(self, port_key: str, value: object, unit: str) -> None:
-        if self.sequence is None:
-            return
-        delays = tuple(item for item in self.sequence.delays if item.port != port_key)
-        # A delay may legitimately be zero, so it rounds with no floor.
-        amount = self._on_grid(value or 0.0, unit, "delay", minimum=None)
-        if amount is None:
-            return
-        if amount:
-            delays = delays + (OutputDelay(str(port_key), amount, str(unit)),)
         self._apply_value(
-            self._rebuilt(delays=delays), port_key=str(port_key)
+            self._edited_candidate("delay", (port_key, value, unit)), port_key=str(port_key)
         )
 
     def insert_period(self, before_item: tuple[str, str] | None) -> None:
@@ -2499,7 +2723,7 @@ class PulseEditorPresenter:
         self._board_target = board.target
         self._board_step_ns = float(board.time_step_ns)
 
-    def _align_sequence_to(self, board) -> None:
+    def _align_sequence_to(self, board, *, present: bool = True) -> None:
         """Move the open pulse onto this board, keeping what still applies.
 
         Matched BY NAME, not by position: two boards that expose the same lane
@@ -2601,7 +2825,7 @@ class PulseEditorPresenter:
             self._warn(
                 f"this pulse does not fit the attached board ({error}); it keeps "
                 "the wiring it was written for, which this board will not load: "
-                "edit it to fit, save it and open it again"
+                "edit it to fit, save it and open it again", present=present
             )
             return
         state_changes: dict[str, Any] = {"sequence": candidate}
@@ -2615,7 +2839,7 @@ class PulseEditorPresenter:
             missing = ", ".join(lost + dropped_ports + dropped_bindings)
             self._warn(
                 f"this board has no matching {missing}; those outputs or bindings were dropped from "
-                "the pulse rather than driven blind"
+                "the pulse rather than driven blind", present=present
             )
 
     def _release(self, *, present: bool = True) -> None:
@@ -2948,30 +3172,30 @@ class PulseEditorPresenter:
             source = resolve_scan_point(source)
         return source
 
-    def request_fire(self) -> None:
+    def request_fire(self, *, present: bool = True) -> None:
         """Submit the same nonblocking On Pulse action as the editor button."""
         self.last_warning = ""
-        if not self._check_bracket():
+        if not self._check_bracket(present=present):
             return
         if self._run_device_work is None:
-            self.fire()
+            self.fire(present=present)
             return
-        if not self._device_available():
+        if not self._device_available(present=present):
             return
         if self.sequence is None:
-            self._warn("no pulse is open")
+            self._warn("no pulse is open", present=present)
             return
         sequencer = self.sequencer
         if sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
+            self._warn("this editor is not connected to a sequencer", present=present)
             return
         authored_revision = self.revision
         try:
             source, rows, sweeps = self._execution_request()
         except Exception as error:
-            self._warn(f"cannot load this pulse: {error}")
+            self._warn(f"cannot load this pulse: {error}", present=present)
             return
-        if not self._acquire_command():
+        if not self._acquire_command(present=present):
             return
         finite = bool(source.run_repeats and sweeps)
         previous_run = self._finite_run
@@ -3024,18 +3248,18 @@ class PulseEditorPresenter:
                     self._watch_completion()
                 message = f"firing stopped: {error}"
                 self.view.set_summary(message)
-                self._warn(message)
+                self._warn(message, present=present)
             self._render_run_state()
 
         self._run_device_command(work, delivered, summary="Starting...", finite_run=finite)
 
-    def _device_available(self) -> bool:
+    def _device_available(self, *, present: bool = True) -> bool:
         if self._preview_close_requested:
             # Closing retires the drive on the SAFE worker; a command taken
             # now would hold its lease past the window that took it.
             return False
         if self._device_busy or self._stop_busy:
-            self._warn("a pulse command is already in progress")
+            self._warn("a pulse command is already in progress", present=present)
             return False
         return True
 
@@ -3174,7 +3398,7 @@ class PulseEditorPresenter:
             return False
         return True
 
-    def fire(self) -> bool:
+    def fire(self, *, present: bool = True) -> bool:
         """On Pulse: load what is on screen and run it the way the pulse says.
 
         ``run_repeats`` belongs to the Pulse and repeats the complete timeline
@@ -3195,24 +3419,24 @@ class PulseEditorPresenter:
         invariant lives with the device that owns it.
         """
 
-        if not self._check_bracket():
+        if not self._check_bracket(present=present):
             return False
         if self.sequence is None:
-            self._warn("no pulse is open")
+            self._warn("no pulse is open", present=present)
             return False
         if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
+            self._warn("this editor is not connected to a sequencer", present=present)
             return False
         try:
             prepared = self._prepare_execution()
         except Exception as error:
-            self._warn(f"cannot load this pulse: {error}")
+            self._warn(f"cannot load this pulse: {error}", present=present)
             return False
-        if not self._acquire_command():
+        if not self._acquire_command(present=present):
             return False
         self._finite_run = None
         self._device_operation += 1
-        if not self._board_ready_for_a_program():
+        if not self._board_ready_for_a_program(present=present):
             return False
         try:
             self._load_prepared(prepared)
@@ -3229,12 +3453,12 @@ class PulseEditorPresenter:
             self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
             self.refresh_preview()
         except Exception as error:
-            self._warn(f"firing stopped: {error}")
-            self._safe_drive(release=True)
+            self._warn(f"firing stopped: {error}", present=present)
+            self._safe_drive(release=True, present=present)
             return False
         return True
 
-    def _board_ready_for_a_program(self) -> bool:
+    def _board_ready_for_a_program(self, *, present: bool = True) -> bool:
         """Bring the board to a state that can accept one, which may mean off.
 
         On Pulse is not "start from idle": it is "play THIS, now", and at the
@@ -3259,10 +3483,10 @@ class PulseEditorPresenter:
         self._poll_board()
         if not self.running:
             return True
-        self._safe_drive(release=False)
+        self._safe_drive(release=False, present=present)
         self._poll_board()
         if self.running:
-            self._warn("the board is still playing and would not stop; not loading over it")
+            self._warn("the board is still playing and would not stop; not loading over it", present=present)
             return False
         return True
 
@@ -3295,7 +3519,7 @@ class PulseEditorPresenter:
                 f"told to stop ({error}). If that server is still running it "
                 "drives the board safe when a client disconnects; if it is "
                 "not, THE SEQUENCE IS STILL PLAYING and the board must be "
-                "stopped another way."
+                "stopped another way.", present=present
             )
             return True
         except Exception as error:
@@ -3315,7 +3539,7 @@ class PulseEditorPresenter:
             return True
         return False
 
-    def stop(self) -> None:
+    def stop(self, *, present: bool = True) -> None:
         """Return the outputs to their safe state, whatever state they are in.
 
         The only way out of a forever run, and it must work from any state --
@@ -3334,10 +3558,10 @@ class PulseEditorPresenter:
         if self._run_safe_work is None:
             self._device_operation += 1
             self._finite_run = None
-            self._safe_drive(release=True)
+            self._safe_drive(release=True, present=present)
             return
         sequencer = self.sequencer
-        if sequencer is None or not self._acquire_command():
+        if sequencer is None or not self._acquire_command(present=present):
             return
         # Only a Stop that goes ahead supersedes the command in progress; one
         # refused its lease must not cancel anything.
@@ -3389,7 +3613,7 @@ class PulseEditorPresenter:
             else:
                 message = f"Stop failed: {error}" if error else "the board did not confirm SAFE"
                 self.view.set_summary(message)
-                self._warn(message)
+                self._warn(message, present=present)
             self._wake_close_guard()
 
         def failed(error: BaseException) -> None:
@@ -3810,18 +4034,18 @@ class PulseEditorPresenter:
             )
         return "dirty-ready" if self.sequence is not None else "idle"
 
-    def save_pulse(self) -> str:
+    def save_pulse(self, path: str | None = None, *, present: bool = True) -> str:
         """Write what is on screen as a ``zlc.pulse`` JSON document."""
 
-        if not self._check_bracket():
+        if not self._check_bracket(present=present):
             return ""
         if self.sequence is None:
-            self._warn("there is no pulse to save")
+            self._warn("there is no pulse to save", present=present)
             return ""
         start = self.path or str(
             Path(self.pulses_directory or "") / f"{self.sequence.name or 'pulse'}.json"
         )
-        chosen = self.view.ask_save_path(
+        chosen = path if path is not None else self.view.ask_save_path(
             "Save pulse", str(Path(start).with_suffix(".json")),
             "ZLC pulse (*.json);;All files (*)",
         )
@@ -3832,7 +4056,7 @@ class PulseEditorPresenter:
             target = target.with_suffix(".json")
         if target.suffix.lower() != ".json":
             self._warn(
-                f"{target.name} is not a JSON pulse; save with a .json suffix"
+                f"{target.name} is not a JSON pulse; save with a .json suffix", present=present
             )
             return ""
         # The file names the pulse.  A document saved as scan.json is "scan"
@@ -3848,12 +4072,15 @@ class PulseEditorPresenter:
             target.parent.mkdir(parents=True, exist_ok=True)
             write_pulse(target, self._state)
         except Exception as error:
-            self._warn(f"cannot save {target.name}: {error}")
+            self._warn(f"cannot save {target.name}: {error}", present=present)
             return ""
         self.path = str(target)
         self._saved_state = self._state
         self._show_connection(self._connection_status)
-        self._done(f"saved {target.name}")
+        if present:
+            self._done(f"saved {target.name}")
+        else:
+            self.view.set_summary(f"saved {target.name}")
         return str(target)
 
     # -------------------------------------------------------------- the target
@@ -5032,19 +5259,19 @@ class PulseEditorPresenter:
             self._warn(str(error))
             return None
 
-    def _check_bracket(self) -> bool:
+    def _check_bracket(self, *, present: bool = True) -> bool:
         try:
             if self.sequence is not None:
                 self.sequence.require_nonempty_brackets()
         except ValueError as error:
-            self._warn(str(error))
+            self._warn(str(error), present=present)
             return False
         return True
 
-    def _warn(self, text: str) -> None:
+    def _warn(self, text: str, *, present: bool = True) -> None:
         self.last_warning = str(text)
         warn = getattr(self.view, "show_warning", None)
-        if warn is not None:
+        if present and warn is not None:
             warn(text)
 
     def _done(self, text: str) -> None:
@@ -5287,6 +5514,15 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
         return replace(sequence, bindings=tuple(
             replace(b, config_key=key) if b.field_id == field_id else b for b in sequence.bindings
         ))
+    if action == "delay":
+        port, value, unit = args
+        # A delay may legitimately be zero, so it rounds with no floor.
+        amount = align_to_grid(float(value or 0.0), str(unit), sequence.time_step_ns,
+                               "delay", minimum=None)
+        delays = tuple(delay for delay in sequence.delays if delay.port != port)
+        if amount:
+            delays += (OutputDelay(str(port), amount, str(unit)),)
+        return replace(sequence, delays=delays)
     if action in {"insert_period", "insert_spacer"}:
         before, = args
         periods = sequence.periods

@@ -1398,6 +1398,16 @@ try:
     assert calls[0][3].startswith('zlc-devices'), calls
     assert [call[1] for call in calls] == [0.05, 0.07]
     assert camera.tunable_fields()[0].current == 0.07
+    previous_desired = dict(flow._device_control_models['camera']['desired'])
+    try:
+        flow.control_device('apply', 'camera', field='exposure', value=-1.0, unit='s')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('invalid programmatic exposure was accepted')
+    assert flow._device_control_models['camera']['desired'] == previous_desired
+    assert flow.control_device('inspect', 'camera')['fields']['exposure']['severity'] == 'error'
+    assert len(calls) == 2, 'invalid Desired reached the device'
     control.close(); application.processEvents()
     assert not control.is_visible()
 
@@ -1986,7 +1996,10 @@ async def client():
                     "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
                 node = added["node_id"]
                 assert added["accepted"]
-                started = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node}})
+                revision = added["state"]["logic"][0]["draft_revision"]
+                await asyncio.sleep(.03)  # The real editor's queued normalization has run.
+                started = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node},
+                                                     "expected_draft_revision":revision})
                 assert started["accepted"]
                 for _ in range(100):
                     rows = (await call("lab_state", {"node_id":node}))["console"]["logic"]
@@ -2003,6 +2016,14 @@ async def client():
                 assert stopped["accepted"]
                 done = await waiting
                 assert done["reached"] and done["observation"]["terminal"] and done["still_current"]
+                derived = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"derive", "source_signal":"@logic/"+node+"/frames",
+                    "values":{"expressions":[{"name":"mean", "code":"a.frames.mean('spatial-y')"}]}}})
+                draft_revision = derived["state"]["logic"][0]["draft_revision"]
+                await asyncio.sleep(.03)
+                draft = (await call("lab_state", {"node_id":derived["node_id"]}))["console"]["logic"][0]
+                assert draft["draft_revision"] == draft_revision, draft
+                assert (await call("lab_action", {"action":"logic.remove", "arguments":{"node_id":derived["node_id"]}}))["accepted"]
                 screenshot = await c.call_tool("lab_screenshot", {"window":"devices"})
                 assert not screenshot.is_error
                 image = next(item for item in screenshot.content if item.type == "image")

@@ -89,7 +89,7 @@ class _Bench:
             dataset_output_declarations=(occupancy.declaration,),
             signal_key=lambda _name: OCCUPANCY,
         )
-        self.derived_tap = self.plane.reserve_follow_processor(
+        _, self.derived_tap = self.plane.reserve_follow_processor(
             self.derived_node,
             source_name=FRAME,
             source_publication=root,

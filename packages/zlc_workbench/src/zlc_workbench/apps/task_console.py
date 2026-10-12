@@ -609,6 +609,13 @@ class ExperimentGuiFlow:
                 self._set_device_control_unit(key, field, unit)
             else:
                 selected_unit = model["desired"][field][1] if unit is None else str(unit)
+                policy = self._device_control_projection(key)["fields"][field]
+                if not policy["editable"]:
+                    note = (str(policy["reason"]), "warning")
+                    model["status"] = {field: note}
+                    model["control"].show_status(*note)
+                    self._project_device_control(key)
+                    raise RuntimeError(note[0])
                 self._set_device_control_desired(key, field, value, selected_unit)
                 refused = self._queue_device_tune(key, field, value, selected_unit)
                 if refused is not None:
@@ -638,14 +645,7 @@ class ExperimentGuiFlow:
     def control_pulse(
         self, action: str, key: str, *, path: str | None = None,
     ) -> dict[str, object]:
-        """Submit an existing bound Pulse Editor gesture, never a second driver.
-
-        Commands run on the next GUI turn so an ordinary warning dialog cannot
-        hold the external request hostage. The returned acceptance is not a
-        board acknowledgement; inspect the editor's observed state afterward.
-        """
-        from PyQt5 import QtCore
-
+        """Use the bound editor's same nonmodal control actions and command worker."""
         if action not in {"open", "inspect", "fire", "stop"}:
             raise ValueError("pulse action must be open, inspect, fire or stop")
         if path is not None and action != "open":
@@ -663,23 +663,16 @@ class ExperimentGuiFlow:
             raise RuntimeError("Pulse Editor has unsaved edits; save or discard them before opening another file")
         if action == "open" and path is None:
             control.restore()
-        dispatch = None
-        if action == "open" and path is not None:
-            dispatch = lambda: presenter.open_pulse(str(path))
-        elif action == "fire":
-            dispatch = presenter.request_fire
-        elif action == "stop":
-            dispatch = presenter.stop
-        if dispatch is not None:
-            # The same exception boundary as the editor's real buttons; a
-            # queued Python failure must not escape into Qt and end the app.
-            QtCore.QTimer.singleShot(0, presenter._guarded(dispatch))
+        reply = (presenter.control_action(action, {} if path is None else {"path": str(path)})
+                 if action != "inspect" and not (action == "open" and path is None) else None)
+        state = presenter.control_state() if reply is None else reply["state"]
         return {
             "device": str(key),
-            "accepted": dispatch is not None,
-            "dispatch_pending": dispatch is not None,
+            "accepted": action == "open" if reply is None else reply["accepted"],
+            "error": None if reply is None else reply["error"],
+            "dispatch_pending": bool(state["pending"]),
             "status": control.status_snapshot(),
-            **presenter.execution_snapshot(),
+            **state,
         }
 
     def _adopt_device_control(self, key: str, device: object, control: object) -> None:
@@ -1176,12 +1169,25 @@ class ExperimentGuiFlow:
         model = self._device_control_models.get(str(key))
         if model is None or str(field) not in dict(model.get("current", {})):
             return
-        desired = dict(model.get("desired", {}))
+        previous = model["desired"]
+        previous_unit_drafts = set(model.get("unit_drafts", ()))
+        desired = dict(previous)
         if desired[str(field)][1] != str(unit):
             model.setdefault("unit_drafts", set()).add(str(field))
         desired[str(field)] = (value, str(unit))
         model["desired"] = desired
-        self._project_device_control(str(key))
+        try:
+            self._project_device_control(str(key))
+        except Exception as error:
+            # The public control can reject a programmatic value just as its
+            # numeric editor can. A failed projection must not leave an
+            # invisible invalid draft beneath an old "Applied" status.
+            model["desired"] = previous
+            model["unit_drafts"] = previous_unit_drafts
+            model["status"] = {str(field): (str(error), "error")}
+            model["control"].show_status(str(error), "error")
+            self._project_device_control(str(key))
+            raise
 
     def _set_device_control_unit(self, key: str, field: str, unit: str) -> None:
         model = self._device_control_models.get(str(key))

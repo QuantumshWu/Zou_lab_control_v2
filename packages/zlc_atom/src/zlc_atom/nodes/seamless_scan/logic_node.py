@@ -51,6 +51,7 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "Pulse template",
             "",
             required=True,
+            description="Pulse filename relative to workspace/pulses (for example imaging.json), or an absolute path.",
         ),
         AuthoringField(
             "plan",
@@ -58,6 +59,15 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "Scan plan",
             "",
             required=True,
+            description=(
+                'JSON text: {"axes":[{"port":"device:rf:frequency","values":[500,501,502],"unit":"MHz"}]}. '
+                'Axes are outermost first; values is the explicit ordered numeric point list, not [start,stop,count]. '
+                'Ports: device:<device_id>:<field>, pulse:param:<scan field_id>, api:<API field_id>, manual:<name>. '
+                'Use device Control metadata or the Pulse field/binding catalog for IDs and units. '
+                'Only authored axes are scanned; omitted Pulse scan slots retain their authored value. '
+                'The optional Values input bank uses mode="values" and value_text="500,501,502" '
+                'while values retains the independent Range bank. Manual axes require the human operator.'
+            ),
         ),
         AuthoringField(
             "acquisition_logic",
@@ -74,6 +84,7 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "text",
             "API values",
             "",
+            description="Optional fixed API overrides, one <field_id> = <number> per line in that field's authored unit; empty keeps the Pulse defaults.",
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
         # repeats x shots): shots override the Pulse's Run repeats while the

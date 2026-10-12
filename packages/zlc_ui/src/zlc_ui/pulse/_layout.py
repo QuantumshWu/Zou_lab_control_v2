@@ -59,8 +59,35 @@ def card_gutter() -> int:
     return px(5, minimum=4)
 
 
-def period_card_width() -> int:
-    return px(PERIOD_CARD_WIDTH, minimum=112)
+def period_card_width(*, ports=(), analog_mode_choices=()) -> int:
+    """Keep the shared compact card wide enough for its actual DAC controls.
+
+    Fonts and binding badges have minimum sizes, so scaling the card alone
+    can leave no room for a legal three-digit DAC code on a small display.
+    Measure the existing controls, including their real style and margins;
+    the Period and closed Component use this same result.
+    """
+    width = px(PERIOD_CARD_WIDTH, minimum=112)
+    codes = [str(int(bound)) for port in ports if port.kind == "dac"
+             for bound in (port.lo, port.hi) if bound is not None]
+    if not codes:
+        return width
+    from zlc_ui.fluent import FluentComboBox
+    from zlc_ui.fluent.fluent import _numeric_text_width
+    from .scan_line_edit import FluentScanLineEdit
+
+    combo, edit = FluentComboBox(), FluentScanLineEdit()
+    try:
+        for choice in analog_mode_choices:
+            combo.addItem(choice.label, choice.value)
+        combo.ensurePolished()
+        edit.ensurePolished()
+        code_width = max(edit.fontMetrics().horizontalAdvance(text) + 2 for text in codes)
+        return max(width, 2 * px(7) + combo.sizeHint().width() + px(4, minimum=3)
+                   + edit.width() - _numeric_text_width(edit) + code_width)
+    finally:
+        combo.deleteLater()
+        edit.deleteLater()
 
 
 def period_control_width(card_width: int) -> int:

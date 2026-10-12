@@ -1402,7 +1402,7 @@ class NodeHost:
         self.validate_processor_source(publication.value(self._source_signal))
         self._active = True
         try:
-            self._data_plane.attach_latest_only_processor(
+            self._generation = self._data_plane.attach_latest_only_processor(
                 self,
                 source_name=self._source_signal,
                 initial_publication=publication,
@@ -1423,7 +1423,7 @@ class NodeHost:
         if source.name != self._source_signal:
             raise ValueError("frozen Processor received another input signal")
         try:
-            self._data_plane.reserve_frozen_processor(
+            self._generation = self._data_plane.reserve_frozen_processor(
                 self,
                 source_name=self._source_signal,
                 source_publication=publication,
@@ -1550,7 +1550,7 @@ class NodeHost:
         if publication is not None:
             self._validate_follow_source(source)
         try:
-            tap = self._data_plane.reserve_follow_processor(
+            self._generation, tap = self._data_plane.reserve_follow_processor(
                 self,
                 source_name=self._source_signal,
                 source_publication=publication,

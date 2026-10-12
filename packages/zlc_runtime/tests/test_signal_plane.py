@@ -1355,7 +1355,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         assert first_root is not None
         first_pixels = weakref.ref(first_root.value("causal-source/frame").snapshot.block.values)
         first_event = first_root.event_ref
-        first_tap = plane.reserve_follow_processor(
+        _, first_tap = plane.reserve_follow_processor(
             first_processor,
             source_name="causal-source/frame",
             source_publication=first_root,
@@ -1420,7 +1420,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
         first_tap.close()
         first_tap = None
 
-        downstream_tap = plane.reserve_follow_processor(
+        _, downstream_tap = plane.reserve_follow_processor(
             downstream,
             source_name="causal-first/history",
             source_publication=latest_derived,
@@ -1735,7 +1735,7 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
 
         # The commit that crashed the bench: a processor over the live
         # worker-fed producer.
-        roi_tap = plane.reserve_follow_processor(
+        _, roi_tap = plane.reserve_follow_processor(
             roi, source_name="measurement/frame", source_publication=measured
         )
         plane.commit_processor(
@@ -1754,7 +1754,7 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         # retained chain -- whose selections were recorded, not re-derived.
         plane.seal_committed(wire)
         plane.begin_generation(wire)
-        fit_tap = plane.reserve_follow_processor(
+        _, fit_tap = plane.reserve_follow_processor(
             fit, source_name="roi/value", source_publication=derived
         )
         plane.commit_processor(

@@ -188,6 +188,7 @@ class SlmEditorControl(QtCore.QObject):
         #: the objective it asks for; ``_flush_brush`` hands it on.
         self._brush: tuple[np.ndarray, str] | None = None
         self._command_active = False
+        self._last_error: str | None = None
         self._close_deadline: float | None = None
         self._window = None
         self._stop = threading.Event()
@@ -508,7 +509,7 @@ class SlmEditorControl(QtCore.QObject):
         )
         self._preset_popup.adjustSize()
 
-    def _apply_preset_popup(self) -> None:
+    def _apply_preset_popup(self) -> bool:
         value = lambda key: self._preset_fields[key].value()
         kind = self._preset_type.currentText()
         grid = (value("rows"), value("columns"))
@@ -547,10 +548,11 @@ class SlmEditorControl(QtCore.QObject):
                     intensity=value("intensity"),
                 )
         except (FileNotFoundError, TypeError, ValueError) as error:
-            self._status.setText(str(error))
-            return
+            self._report_error(error)
+            return False
         self._preset_popup.hide()
         self.set_target(target, objective_kind=objective)
+        return True
 
     def _build_pupil_popup(self, parent: QtWidgets.QWidget) -> None:
         popup, body, form, anchor = self._popup_form(parent, self._pupil_edit)
@@ -717,6 +719,7 @@ class SlmEditorControl(QtCore.QObject):
         self._layer_changed()
 
     def _layer_changed(self, *_args: object) -> None:
+        self._last_error = None
         # An explicit edit: the wavefront is the spins' from here on.
         self._frozen_operator = None
         active = sum(bool(spin.value()) for spin in (
@@ -797,6 +800,8 @@ class SlmEditorControl(QtCore.QObject):
             self._status.setText("Empty target; hardware unchanged")
 
     def set_phase(self, values: object, metadata: object = None) -> None:
+        self._last_error = None
+        self._frozen_operator = None
         self._request_revision += 1
         self._pending = None
         self._phase = freeze_pattern_phase(values, self.shape)
@@ -850,6 +855,216 @@ class SlmEditorControl(QtCore.QObject):
     def command_active(self) -> bool:
         return self._command_active
 
+    def _parameter_controls(self, group: str) -> dict[str, object]:
+        if group == "preset":
+            return self._preset_fields
+        if group == "pupil":
+            return {
+                "enabled": self._pupil_enabled,
+                "center_x": self._pupil_center_x, "center_y": self._pupil_center_y,
+                "diameter_x": self._pupil_diameter_x, "diameter_y": self._pupil_diameter_y,
+            }
+        return {
+            "enabled": self._zernike_enabled,
+            "carrier_x": self._carrier_x, "carrier_y": self._carrier_y,
+            **self._zernike,
+        }
+
+    def control_catalog(self) -> dict[str, object]:
+        """Describe this editor's actual controls without solving or reading hardware."""
+        parameters = {}
+        for group in ("preset", "pupil", "operator"):
+            parameters[group] = {
+                name: (
+                    {"type": "bool", "value": widget.isChecked()}
+                    if name == "enabled" else {
+                        "type": "int" if isinstance(widget, QtWidgets.QSpinBox) else "float",
+                        "value": widget.value(), "minimum": widget.minimum(),
+                        "maximum": widget.maximum(), "description": widget.toolTip(),
+                    }
+                )
+                for name, widget in self._parameter_controls(group).items()
+            }
+        return {
+            "editor_kind": "slm", "shape_yx": list(self.shape),
+            "presets": [self._preset_type.itemText(i) for i in range(self._preset_type.count())],
+            "parameters": parameters,
+            "units": {
+                "target": "zero-based raster x/y pixels, intensity weights",
+                "pupil": "SLM pixels; diameter is 1/e^2 intensity diameter",
+                "operator": "carrier: edge-to-edge waves; Zernike: Noll-normalized waves RMS",
+            },
+            "actions": {
+                "target.preset": "kind (one of presets), values (preset fields), optional text; automatically solves",
+                "target.spots": "spots: [{x,y,intensity}, ...], integer target raster pixels; replaces target and solves",
+                "pupil.update": "values: pupil fields; automatically solves with the updated pupil",
+                "operator.update": "values: operator fields; recomposes current Pattern, does not solve",
+                "solve": "no arguments; solve current target again, without sending",
+                "device.send": "no arguments; apply current solved draft through device ownership",
+                "device.adopt": "no arguments; freeze the known device phase into a 16-bit Pattern draft",
+                "device.refresh": "no arguments; request current device state on the command worker",
+                "target.load": "path: existing zlc.slm.target JSON; automatically solves",
+                "target.save": "path: output zlc.slm.target JSON",
+                "target.import": "path: intensity NPY or image; automatically solves",
+                "context.load": "path: zlc.slm.science-context NPZ; loads exact frozen phase without solving or sending",
+                "context.save": "path: output zlc.slm.science-context NPZ; requires latest solve",
+            },
+        }
+
+    def control_state(self, *, details: bool = False) -> dict[str, object]:
+        """Project the same cached draft/device facts the window currently shows."""
+        command, mapping, applied, receipt = self._device_state
+        result = {
+            "editor_kind": "slm", "device": self.device_key,
+            "shape_yx": list(self.shape), "closed": self._closed,
+            "revision": self._request_revision + self._phase_revision,
+            "request_revision": self._request_revision,
+            "phase_revision": self._phase_revision,
+            "solving": not self.solver_idle, "command_pending": self._command_active,
+            "device_read_pending": self._device_state_in_flight,
+            "pending": not self.solver_idle or self._command_active,
+            "solved": self._phase_request_revision == self._request_revision,
+            "send_enabled": self._send.isEnabled(),
+            "status": self.status_text, "error": self._last_error,
+            "device_status": self._device_status.text(),
+            "device_diverged": self._device_diverged,
+            "command_revision": command, "mapping_revision": mapping,
+            "command_known": applied is not None and receipt.get("outcome") != "unknown",
+            "command_receipt": deepcopy(receipt),
+            "objective_kind": self._objective_kind,
+            "pupil": self._pupil_settings(), "operator": self._operator_settings(),
+        }
+        if details:
+            y, x = np.nonzero(self._target)
+            result["target"] = {
+                "nonzero_count": int(len(x)), "truncated": len(x) > 512,
+                "spots": [
+                    {"x": int(cx), "y": int(cy), "intensity": float(self._target[cy, cx])}
+                    for cy, cx in zip(y[:512], x[:512])
+                ],
+            }
+            result["phase"] = {
+                "minimum_rad": float(np.min(self._phase)),
+                "maximum_rad": float(np.max(self._phase)),
+                "dtype": str(self._phase.dtype),
+            }
+            result["pattern_metadata"] = deepcopy(self._pattern_metadata)
+            result["context_command_receipt"] = deepcopy(self._context_command_receipt)
+        return result
+
+    def control_action(self, action: str, arguments: dict[str, object]) -> dict[str, object]:
+        """Use the same authoring and command paths as this editor's buttons."""
+        if self._closed:
+            raise RuntimeError("SLM Editor is closing")
+        allowed = {
+            "target.preset": {"kind", "values", "text"}, "target.spots": {"spots"},
+            "pupil.update": {"values"}, "operator.update": {"values"},
+            "solve": set(), "device.send": set(), "device.adopt": set(),
+            "device.refresh": set(), "target.load": {"path"},
+            "target.save": {"path"}, "target.import": {"path"},
+            "context.load": {"path"}, "context.save": {"path"},
+        }
+        try:
+            if action not in allowed:
+                raise ValueError(f"unknown SLM editor action {action!r}")
+            if set(arguments) - allowed[action]:
+                raise ValueError(f"unexpected arguments for {action}: {sorted(set(arguments) - allowed[action])}")
+            accepted = True
+            if action in {"target.preset", "pupil.update", "operator.update"}:
+                group = "preset" if action == "target.preset" else action.partition(".")[0]
+                controls = self._parameter_controls(group)
+                values = dict(arguments.get("values", {}))
+                if set(values) - set(controls):
+                    raise ValueError(f"unknown {group} fields: {sorted(set(values) - set(controls))}")
+                normalized = {}
+                for name, value in values.items():
+                    widget = controls[name]
+                    if name == "enabled":
+                        if type(value) is not bool:
+                            raise ValueError("enabled must be true or false")
+                    else:
+                        if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+                            raise ValueError(f"{name} must be a finite number")
+                        if isinstance(widget, QtWidgets.QSpinBox):
+                            if value != int(value):
+                                raise ValueError(f"{name} must be an integer")
+                            value = int(value)
+                        if not widget.minimum() <= value <= widget.maximum():
+                            raise ValueError(f"{name} must be between {widget.minimum()} and {widget.maximum()}")
+                    normalized[name] = value
+                if group == "preset":
+                    kind = arguments.get("kind", self._preset_type.currentText())
+                    if self._preset_type.findText(str(kind)) < 0:
+                        raise ValueError(f"unknown SLM preset {kind!r}")
+                    if "text" in arguments and not isinstance(arguments["text"], str):
+                        raise ValueError("text must be a string")
+                    self._preset_type.setCurrentText(str(kind))
+                    if "text" in arguments:
+                        self._preset_text.setText(arguments["text"])
+                blocked = [(controls[name], controls[name].blockSignals(True)) for name in normalized]
+                try:
+                    for name, value in normalized.items():
+                        widget = controls[name]
+                        widget.setChecked(value) if name == "enabled" else widget.setValue(value)
+                finally:
+                    for widget, previous in blocked:
+                        widget.blockSignals(previous)
+                if group == "preset":
+                    accepted = self._apply_preset_popup()
+                elif group == "pupil":
+                    self._apply_pupil()
+                else:
+                    self._layer_changed()
+            elif action == "target.spots":
+                target = np.zeros(self.shape, dtype=np.float32)
+                used = set()
+                for spot in arguments["spots"]:
+                    if set(spot) != {"x", "y", "intensity"}:
+                        raise ValueError("each spot needs x, y and intensity")
+                    x, y, intensity = spot["x"], spot["y"], spot["intensity"]
+                    if type(x) is not int or type(y) is not int or not (0 <= x < self.shape[1] and 0 <= y < self.shape[0]):
+                        raise ValueError("spot x/y must be integer pixels inside the target raster")
+                    if isinstance(intensity, bool) or not isinstance(intensity, (int, float)) or not np.isfinite(intensity) or intensity < 0:
+                        raise ValueError("spot intensity must be finite and nonnegative")
+                    if (x, y) in used:
+                        raise ValueError("each target pixel may occur only once")
+                    used.add((x, y)); target[y, x] = intensity
+                self.set_target(target, objective_kind="spots")
+            elif action == "solve":
+                self._queue_solve()
+            elif action == "device.send":
+                accepted = self.send()
+            elif action == "device.adopt":
+                accepted = self._adopt_device_command()
+            elif action == "device.refresh":
+                self._sync_device_state()
+            else:
+                file_actions = {
+                    "target.load": "load_target", "target.save": "save_target",
+                    "target.import": "import", "context.load": "load_context",
+                    "context.save": "save_context",
+                }
+                accepted = self.file_action(file_actions[action], arguments["path"])
+            if not accepted:
+                raise RuntimeError(self.status_text)
+        except Exception as error:
+            self._report_error(error)
+            raise
+        self._last_error = None
+        return {"accepted": True, "action": action, "state": self.control_state()}
+
+    def screenshot_png(self, *, include_dialog: bool = True) -> bytes:
+        from zlc_ui.windows import window_screenshot_png
+
+        return window_screenshot_png(self._window or self._body, include_dialog=include_dialog)
+
+    def status_snapshot(self) -> dict[str, object]:
+        return {"text": self.status_text, "error": self._last_error}
+
+    def _report_error(self, error: object) -> None:
+        self._last_error = str(error)
+        self._status.setText(self._last_error)
+
     def _guarded(self, what: str, handler):
         """Wrap one device-touching slot so a defect cannot kill the bench.
 
@@ -866,7 +1081,7 @@ class SlmEditorControl(QtCore.QObject):
             except Exception as error:  # noqa: BLE001 -- the boundary IS total
                 _LOG.exception("SLM editor %s failed", what)
                 try:
-                    self._status.setText(
+                    self._report_error(
                         f"internal error in {what}: "
                         f"{type(error).__name__}: {error}"
                     )
@@ -917,10 +1132,19 @@ class SlmEditorControl(QtCore.QObject):
         if self._closed:
             return
         try:
-            self._device_state = future.result()
+            observed = future.result()
         except Exception as error:
-            self._device_status.setText(f"Device state unavailable: {error}")
+            self._last_error = f"Device state unavailable: {error}"
+            self._device_status.setText(self._last_error)
             return
+        # A poll started before an explicit Adopt/command may arrive afterward.
+        # Device revisions, not callback order, decide which observation is new.
+        if (observed[0] < self._device_state[0]
+                or observed[1] < self._device_state[1]):
+            return
+        self._device_state = observed
+        if self._last_error and self._last_error.startswith("Device state unavailable:"):
+            self._last_error = None
         self._render_device_state()
 
     def _render_device_state(self) -> None:
@@ -949,37 +1173,31 @@ class SlmEditorControl(QtCore.QObject):
         self._adopt.setEnabled(not self._command_active and phase is not None)
         self._sync_send_enabled()
 
-    def _adopt_device_command(self) -> None:
+    def _adopt_device_command(self) -> bool:
         try:
             lease = self.session.acquire_device_command(
                 self, f"{self.device_key} SLM Editor adopt",
                 self.device_key, self.device,
             )
         except Exception as error:
-            self._status.setText(str(error))
-            return
+            self._report_error(error)
+            return False
         try:
-            phase = self.device.last_commanded_phase
-            receipt = dict(self.device.last_command_receipt)
-            revisions = (
-                int(self.device.command_revision), int(self.device.mapping_revision)
-            )
+            observed = self._read_device_state()
         finally:
             lease.release()
+        phase = observed[2]
+        self._device_state = observed
         if phase is None:
-            self._status.setText("Device command outcome is unknown; nothing can be adopted")
-            return
+            self._render_device_state()
+            self._report_error("Device command outcome is unknown; nothing can be adopted")
+            return False
         self.set_phase(phase, {"source": "explicit-device-adopt"})
-        self._context_command_receipt = receipt
-        self._draft_command_revision, self._draft_mapping_revision = revisions
-        self._sync_device_state()
-        self._status.setText(
-            "Device changed after Adopt snapshot; retry"
-            if self._device_diverged
-            else "Device command adopted as an exact authoring draft"
-        )
+        self._status.setText("Device command adopted as a 16-bit frozen Pattern draft")
+        return True
 
     def _queue_solve(self) -> None:
+        self._last_error = None
         optimizer_state = (
             dict(self._spot_optimizer_state or {})
             if self._objective_kind == "spots" else None
@@ -1025,9 +1243,10 @@ class SlmEditorControl(QtCore.QObject):
             pass
         except Exception as error:
             if revision == self._request_revision and not self._closed:
-                self._status.setText(str(error))
+                self._report_error(error)
         else:
             if revision == self._request_revision and not self._closed:
+                self._last_error = None
                 self._pattern_phase = freeze_pattern_phase(phase, self.shape)
                 self._pattern_metadata = dict(metadata)
                 self._spot_optimizer_state = (
@@ -1225,6 +1444,7 @@ class SlmEditorControl(QtCore.QObject):
         self._draft_command_revision, self._draft_mapping_revision = revisions
         self._phase_request_revision = self._request_revision
         self._show_phase(); self._show_wavefront(); self._sync_device_state()
+        self._last_error = None
         self._status.setText("Frozen Science Context loaded; hardware unchanged")
 
     def _save_context_operation(self, path: object):
@@ -1246,12 +1466,12 @@ class SlmEditorControl(QtCore.QObject):
         """Queue the clicked canonical phase; return whether it was accepted."""
 
         if self._phase_request_revision != self._request_revision:
-            self._status.setText("Wait for the latest target solve before Send")
+            self._report_error("Wait for the latest target solve before Send")
             self._sync_send_enabled()
             return False
         self._sync_device_state()
         if self._device_diverged:
-            self._status.setText(
+            self._report_error(
                 "Device command changed externally; Adopt or Load before Send"
             )
             return False
@@ -1266,7 +1486,7 @@ class SlmEditorControl(QtCore.QObject):
         completion: object = None,
     ) -> bool:
         if self._closed or self._command_active:
-            self._status.setText(
+            self._report_error(
                 "SLM Editor is closing" if self._closed
                 else "SLM command already in progress"
             )
@@ -1274,6 +1494,7 @@ class SlmEditorControl(QtCore.QObject):
         command_revision = self._draft_command_revision
         mapping_revision = self._draft_mapping_revision
         self._command_active = True
+        self._last_error = None
         self._sync_send_enabled()
         self._status.setText("Working…")
         try:
@@ -1286,7 +1507,7 @@ class SlmEditorControl(QtCore.QObject):
         except Exception as error:
             self._command_active = False
             self._sync_send_enabled()
-            self._status.setText(str(error))
+            self._report_error(error)
             return False
         future.add_done_callback(
             lambda done: self._command_ready.emit(
@@ -1345,8 +1566,9 @@ class SlmEditorControl(QtCore.QObject):
             elif completion is not None:
                 completion(result)
         except Exception as error:
-            self._status.setText(str(error))
+            self._report_error(error)
         else:
+            self._last_error = None
             if claimed:
                 self._device_state = delivered
                 self._draft_mapping_revision = mapping_revision
@@ -1383,35 +1605,46 @@ class SlmEditorControl(QtCore.QObject):
         path = picker(self._body, action.replace("_", " ").title(), start, filters)
         if path:
             try:
-                if action == "load_target":
-                    operation, completion, label = (
-                        partial(load_target, path),
-                        lambda result: self.set_target(
-                            result[0], objective_kind=result[1]
-                        ), "Target loaded",
-                    )
-                elif action == "load_context":
-                    operation, completion, label = (
-                        partial(load_science_context, path), self._set_context,
-                        "Science Context loaded",
-                    )
-                elif action == "import":
-                    operation, completion, label = (
-                        partial(_read_imported_target, path),
-                        lambda target: self.set_target(target), "Target imported",
-                    )
-                elif action == "save_target":
-                    operation, completion, label = (
-                        self._save_target_operation(path), None, "Target saved",
-                    )
-                else:
-                    operation, completion, label = (
-                        self._save_context_operation(path), None,
-                        "Science Context saved",
-                    )
-                self._queue_work(label, operation, completion=completion)
+                self.file_action(action, path)
             except Exception as error:
-                self._status.setText(str(error))
+                self._report_error(error)
+
+    def file_action(self, action: str, path: object) -> bool:
+        """Submit one explicit file path through the editor's original worker."""
+        if action == "load_target":
+            operation, completion, label = (
+                partial(load_target, path),
+                lambda result: self.set_target(result[0], objective_kind=result[1]),
+                "Target loaded",
+            )
+        elif action == "load_context":
+            operation, completion, label = (
+                partial(load_science_context, path), self._set_context,
+                "Science Context loaded",
+            )
+        elif action == "import":
+            operation, completion, label = (
+                partial(_read_imported_target, path),
+                lambda target: self.set_target(target), "Target imported",
+            )
+        elif action == "save_target":
+            operation, completion, label = (
+                self._save_target_operation(path), None, "Target saved",
+            )
+        elif action == "save_context":
+            operation, completion, label = (
+                self._save_context_operation(path), None, "Science Context saved",
+            )
+        else:
+            raise ValueError(f"unknown SLM file action {action!r}")
+        if action in {"save_target", "save_context"}:
+            write = operation
+
+            def operation():
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                return write()
+
+        return self._queue_work(label, operation, completion=completion)
 
     def _finish_close(self) -> bool:
         if self._cleaned:

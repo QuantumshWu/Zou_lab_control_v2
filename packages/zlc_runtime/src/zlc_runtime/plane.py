@@ -3695,8 +3695,8 @@ class SignalDataPlane:
         initial_publication: SignalPublication,
         coherent: bool = True,
         paused: bool = False,
-    ) -> None:
-        """Attach one reactive latest-only Processor to a live source.
+    ) -> StreamGenerationId:
+        """Attach a latest-only Processor and return its reserved generation.
 
         ``coherent=False`` declares a presentation-paced follower: a route
         whose publications advance only AFTER its source was presented (a
@@ -3778,6 +3778,7 @@ class SignalDataPlane:
                     self._drop_state_locked(state)
                     self._membership_changed = True
             raise
+        return state.generation
 
     def catch_up_latest_only_processor(self, node: object) -> None:
         """Activate one paused route at its source run's current publication."""
@@ -3818,8 +3819,8 @@ class SignalDataPlane:
         *,
         source_name: str,
         source_publication: SignalPublication,
-    ) -> None:
-        """Reserve a one-shot Processor derived from one retained FINAL source."""
+    ) -> StreamGenerationId:
+        """Reserve a one-shot Processor and return its generation before any work."""
 
         source_name = canonical_text(source_name, "processor source name")
         if not isinstance(source_publication, SignalPublication):
@@ -3843,14 +3844,14 @@ class SignalDataPlane:
                 )
             if not source_state.terminal:
                 raise RuntimeError("frozen Processor source generation is still live")
-            self._install_state_locked(
+            return self._install_state_locked(
                 owner_id=owner_id,
                 kind="processor",
                 output_names=output_names,
                 bare_names=bare_names,
                 node=node,
                 source_name=source_name,
-            )
+            ).generation
 
     def reserve_follow_processor(
         self,
@@ -3861,8 +3862,8 @@ class SignalDataPlane:
         source_signals: tuple[str, ...] | None = None,
         max_pending: int = DEFAULT_FOLLOW_MAX_PENDING,
         max_bytes: int | None = None,
-    ) -> FollowTap[SignalPublication]:
-        """Bind one Processor to the current exact publication and its future events.
+    ) -> tuple[StreamGenerationId, FollowTap[SignalPublication]]:
+        """Return the reserved Processor generation and its exact source-follow tap.
 
         ``source_publication`` None binds to an ARMED source that has not
         published yet: the replay starts empty (or from whatever committed
@@ -3929,7 +3930,7 @@ class SignalDataPlane:
                 max_bytes=max_bytes,
             )
             try:
-                self._install_state_locked(
+                state = self._install_state_locked(
                     owner_id=owner_id,
                     kind="processor",
                     output_names=output_names,
@@ -3940,7 +3941,7 @@ class SignalDataPlane:
             except BaseException:
                 tap.close()
                 raise
-        return tap
+        return state.generation, tap
 
     def cancel_latest_only_processor(self, node: object) -> bool:
         idle = self._lane.cancel_processor(node)

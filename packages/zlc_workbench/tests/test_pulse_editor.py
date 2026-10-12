@@ -1203,6 +1203,12 @@ def test_finite_completion_arrives_without_a_status_tick_and_survives_sync(seque
         commands.deliver_until(lambda: not presenter._device_busy)
         assert waiting.wait(1)
         run = presenter._finite_run
+        lease, events = presenter._drive_lease, tuple(board.events)
+        assert presenter.control_action("validate", {})["accepted"]
+        commands.deliver_until(lambda: not presenter._device_busy)
+        assert presenter.control_state()["validation"]["valid"]
+        assert presenter._finite_run == run and presenter._drive_lease is lease
+        assert tuple(board.events) == events, "validation must not load, Fire or query the board"
         view.sync_requested.emit()
         commands.deliver_until(lambda: not presenter._device_busy)
         assert presenter._finite_run == run, "Sync must not cancel completion delivery"
@@ -1848,6 +1854,67 @@ def test_pulse_window_waits_for_asynchronous_retirement(
         if window.is_visible():
             window.close()
             _process_qt_until(application, lambda: not window.is_visible())
+
+
+def test_formal_config_refresh_keeps_dac_codes_readable_at_small_scale(sequence, tmp_path, monkeypatch) -> None:
+    from PyQt5 import QtCore, QtTest
+    from zlc_pulse import AnalogStep, PulseBinding, PulseFieldRef, write_config_values
+    from zlc_ui.fluent import ensure_fluent_scale, set_fluent_scale
+
+    first = sequence.periods[0]
+    dac = next(port for port in sequence.target.ports if port.kind == "dac")
+    period = replace(first, duration=3.0, unit="ms", analog_steps=(AnalogStep(dac.key, "edge", 100),))
+    authored = replace_sequence(sequence, periods=(period, *sequence.periods[1:]), bindings=(
+        PulseBinding(PulseFieldRef("duration", period_id=first.period_id), "ms",
+                     source="config", config_key="load_time"),
+    ))
+    path = tmp_path / "config.json"
+    write_config_values(path, {"load_time": (4.0, "ms")})
+    previous_scale = ensure_fluent_scale()
+    set_fluent_scale(.72)
+    window = None
+    try:
+        app, _qt, window = _formal_pulse_window(tmp_path, monkeypatch, sequence=authored)
+        warnings = []
+        monkeypatch.setattr(window, "show_warning", warnings.append)
+        monkeypatch.setattr(window, "ask_open_path", lambda *_args: str(path))
+        window._window.resize(792, 530)
+        QtTest.QTest.qWait(30)
+        card = window._view.schedule_view._cards[first.period_id]
+        edit = card.bus_value_edits[dac.key]
+        assert edit.text() == "100" and not edit.property("numericError")
+        assert not warnings, warnings
+        window.config_load_requested.emit()
+        _process_qt_until(app, lambda: not window.presenter._device_busy)
+        QtTest.QTest.qWait(20)
+        assert window.presenter.sequence == authored
+        assert window.presenter._active_config_values() == {"load_time": (4.0, "ms")}
+        assert card.duration_edit.text() == "3" and card.unit_combo.currentText() == "ms"
+        assert edit.text() == "100" and not edit.property("numericError")
+        assert not warnings, warnings
+
+        # The same retained row must fit its complete signed range, even
+        # after Config refresh while Edit is hidden and then shown again.
+        edit.setFocus()
+        edit.selectAll()
+        QtTest.QTest.keyClicks(edit, "-512")
+        QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+        accepted = window.presenter.sequence
+        assert accepted.period_by_id[first.period_id].analog_steps[0].value == -512
+        window._view.tabs.setCurrentWidget(window._view.config_view)
+        window.config_load_requested.emit()
+        _process_qt_until(app, lambda: not window.presenter._device_busy)
+        window._view.tabs.setCurrentWidget(window._view.schedule_view)
+        QtTest.QTest.qWait(20)
+        assert edit.text() == "-512" and not edit.property("numericError")
+        assert window.presenter.sequence == accepted
+        assert not warnings, warnings
+    finally:
+        if window is not None:
+            monkeypatch.setattr(window, "confirm_pulse_discard", lambda: True)
+            window.close()
+            _process_qt_until(app, lambda: not window.is_visible(), 5)
+        set_fluent_scale(previous_scale)
 
 
 def test_formal_stop_bypasses_blocked_preview_and_device_command(
@@ -4489,6 +4556,110 @@ def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.config_values() == {} and board.config_source == ""
         assert presenter.sequence is edited
+    finally:
+        presenter.close()
+
+
+def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequence, tmp_path) -> None:
+    """Machine edits share the editor model; compiler evidence is not a Fire receipt."""
+    board, worker, view = _Sequencer(), _DeviceWorker(), _EditorView()
+    presenter = PulseEditorPresenter(
+        view, sequence, sequencer=board, run_device_work=worker,
+        run_safe_work=_run_preview_immediately,
+    )
+    try:
+        catalog = presenter.control_catalog()
+        assert catalog["editor_kind"] == "pulse" and "duration" in catalog["actions"]
+        assert "document" not in catalog["state"]
+        period = sequence.periods[1]
+        ttl = next(p for p in sequence.target.ports if p.kind == "digital")
+        dac = next(p for p in sequence.target.ports if p.kind == "dac")
+        assert presenter.control_action("digital", {"period_id": period.period_id, "port_key": ttl.key, "high": True})["accepted"]
+        assert presenter.control_action("analog", {"period_id": period.period_id, "port_key": dac.key, "mode": "edge", "value": 100})["accepted"]
+        assert presenter.control_action("delay", {"port_key": ttl.key, "value": 1, "unit": "us"})["accepted"]
+        assert presenter.sequence.delays[0].value == 1
+        assert presenter.control_action("bracket_add", {
+            "start": period.period_id, "end": period.period_id, "count": 2,
+        })["accepted"]
+        bracket = presenter.sequence.brackets[0].bracket_id
+        assert presenter.control_action("bracket_remove", {"bracket_id": bracket})["accepted"]
+        assert presenter.control_action("run_repeats", {"repeats": 1})["accepted"]
+        assert presenter.control_action("period_name", {"period_id": period.period_id, "name": "Camera before"})["accepted"]
+        assert presenter.control_action("binding", {
+            "field_kind": "duration", "period_id": period.period_id, "port_key": None,
+            "scan": False, "source": "config",
+        })["accepted"]
+        field = presenter.sequence.config_bindings[0].field_id
+        assert presenter.control_action("config_binding", {"field_id": field, "key": "exposure_window"})["accepted"]
+        default = presenter.sequence.period_by_id[period.period_id].duration
+        assert presenter.control_action("config.edit", {
+            "rows": [["exposure_window", default * 2, period.unit]],
+        })["accepted"]
+        config_path = str(tmp_path / "control-config.json")
+        assert presenter.control_action("config.save", {"path": config_path})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert presenter.control_action("config.edit", {
+            "rows": [["exposure_window", default * 3, period.unit]],
+        })["accepted"]
+        before = presenter.sequence
+        board.events.clear()
+        submitted = presenter.control_action("validate", {})
+        assert submitted["accepted"] and submitted["state"]["validation"]["pending"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        state = presenter.control_state(details=True)
+        assert state["validation"]["valid"]
+        assert state["validation"]["revision"] == presenter.revision
+        assert state["validation"]["matches_editor_revision"]
+        assert state["validation"]["matches_loaded_config"], "unsaved Config rows must not change loaded-value identity"
+        assert not state["validation"]["matches_applied_program"]
+        assert "not applied board evidence" in state["validation"]["scope"]
+        filled = next(p for p in state["validation"]["document"]["periods"] if p["period_id"] == period.period_id)
+        assert filled["duration"] == default * 2
+        assert presenter.sequence is before and presenter.sequence.period_by_id[period.period_id].duration == default
+        assert state["config"]["draft_dirty"] and board.events == []
+        assert state["board"]["loaded"] is False
+
+        # Invalid edits and asynchronous Config failures never summon a modal.
+        view.show_warning = lambda text: pytest.fail(f"machine action opened a warning: {text}")
+        refused = presenter.control_action("duration", {"period_id": period.period_id, "value": "bad", "unit": "ms"})
+        assert not refused["accepted"] and refused["error"]
+        assert presenter.sequence is before
+        rows = presenter.control_state(details=True)["config"]["draft_rows"]
+        refused = presenter.control_action("config.load", {"path": config_path})
+        assert not refused["accepted"] and "discard_changes" in refused["error"]
+        assert presenter.control_state(details=True)["config"]["draft_rows"] == rows
+        assert presenter.control_action("config.load", {
+            "path": str(tmp_path / "missing.json"), "discard_changes": True,
+        })["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert "cannot update Config" in presenter.control_state()["last_warning"]
+        assert presenter.control_state(details=True)["config"]["draft_rows"] == rows
+        assert presenter.control_action("config.load", {
+            "path": config_path, "discard_changes": True,
+        })["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert not presenter.control_state()["config"]["draft_dirty"]
+
+        path = str(tmp_path / "control-pulse.json")
+        assert presenter.control_action("save", {"path": path})["accepted"]
+        assert presenter.control_action("bracket_add", {
+            "start": sequence.periods[1].period_id, "end": sequence.periods[0].period_id, "count": 1,
+        })["accepted"]
+        assert "empty" in presenter.control_state(details=True)["document_error"]
+        assert not presenter.control_state()["validation"]["matches_editor_revision"]
+        assert presenter.control_state()["authored"]["duration_seconds"] is None
+        assert "empty" in presenter.control_catalog()["state"]["authored"]["timing_error"]
+        assert presenter.control_action("validate", {})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert presenter.control_state()["validation"]["valid"] is False
+        assert "empty" in presenter.control_state()["validation"]["error"]
+        refused = presenter.control_action("open", {"path": path})
+        assert not refused["accepted"] and "discard_changes" in refused["error"]
+        assert presenter.sequence.brackets, "refused Open must retain the invalid draft"
+        assert presenter.control_action("open", {"path": path, "discard_changes": True})["accepted"]
+        assert not presenter.sequence.brackets and not presenter.dirty
+        assert presenter.control_action("open", {"path": path})["accepted"]
+        assert presenter.control_state(details=True)["document"] == state_to_tree(presenter.state)
     finally:
         presenter.close()
 

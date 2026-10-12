@@ -1692,7 +1692,7 @@ assert view.set_schedule(replace(vm, periods=(periods[0], spacer, periods[1])))
 view.resize(1200, 700); view.show(); app.processEvents()
 card = view._cards["spacer1"]
 period = view._cards["p1"]
-assert card.width() == spacer_card_width() < period_card_width() == period.width()
+assert card.width() == spacer_card_width() < period_card_width(ports=ports, analog_mode_choices=analog_modes) == period.width()
 assert card.name_edit.text() == "spacer1" and not card.name_edit.isEnabled()
 assert period.name_edit.isEnabled()
 assert card.duration_edit.isEnabled() and card.unit_combo.isEnabled()

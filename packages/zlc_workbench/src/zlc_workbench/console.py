@@ -5793,17 +5793,15 @@ class ConsolePresenter:
             self._report(note, severity="warning")
         return True
 
-    def save_layout(self) -> str:
+    def save_layout(self, path: str | None = None) -> str:
         """Write only the stopped, reusable pipeline/layout document."""
 
-        path = self.view.ask_save_path(
-            "Save TaskConsole layout",
-            # A name, not an empty box: a board is a thing you keep and
-            # reload, so it is named plainly and the dialog warns before it
-            # replaces one.
-            str(Path(self.session.day_folder_path()) / "layout.json"),
-            "Layouts (*.json)",
-        )
+        if path is None:
+            path = self.view.ask_save_path(
+                "Save TaskConsole layout",
+                str(Path(self.session.day_folder_path()) / "layout.json"),
+                "Layouts (*.json)",
+            )
         if not path:
             return ""
         try:
@@ -5816,12 +5814,14 @@ class ConsolePresenter:
         self._report(f"layout saved to {path}", severity="task")
         return str(path)
 
-    def load_layout(self) -> bool:
+    def load_layout(self, path: str | None = None, *, stop_running: bool = False) -> bool:
         """Restore a layout as stopped drafts without building devices."""
 
-        path = self.view.ask_open_path(
-            "Load TaskConsole layout", str(self.session.day_folder_path()), "Layouts (*.json)"
-        )
+        interactive = path is None
+        if interactive:
+            path = self.view.ask_open_path(
+                "Load TaskConsole layout", str(self.session.day_folder_path()), "Layouts (*.json)"
+            )
         if not path:
             return False
         try:
@@ -5831,11 +5831,14 @@ class ConsolePresenter:
                 f"cannot read that layout: {_error_text(error)}", severity="error"
             )
             return False
-        if self._running_logic() and not self._confirm_board_replaced(
-            "Loading this layout", confirm_text="Stop and load"
-        ):
-            return False
-        return self.apply_layout(document, stop_running=True)
+        if self._running_logic() and not stop_running:
+            if not interactive:
+                self._report("Loading this layout needs stop_running=true while Logic is active", severity="warning")
+                return False
+            if not self._confirm_board_replaced("Loading this layout", confirm_text="Stop and load"):
+                return False
+            stop_running = True
+        return self.apply_layout(document, stop_running=stop_running)
 
     def save_screenshot(self) -> str:
         """Save one ordinary image of the whole current board window."""
@@ -7024,7 +7027,7 @@ class ConsolePresenter:
                 phase = "queued"
             elif request is not None:
                 phase = "requires_human"
-            elif binding.following and (host is None or host.terminal):
+            elif binding.following and (host is None or (host.terminal and not observed.error)):
                 phase = "waiting_for_source"
             finalization = binding.finalization
             logic.append({
@@ -7097,6 +7100,7 @@ class ConsolePresenter:
             "closing": self._closing,
             "closed": self._closed,
             "active_task_id": self._active_task_id,
+            "layout_pending": self._pending_board is not None,
             "logic": logic,
             "panels": panels,
             "signals": signals,
@@ -7150,6 +7154,8 @@ class ConsolePresenter:
                 "device_requirements": _control_plain(descriptor.device_requirements),
                 "workspace_resources": [
                     {"field_name": item.field_name, "directory": item.directory,
+                     "relative_to": str(self.session.workspace.root / item.directory),
+                     "path_rule": "relative to this directory, or absolute; do not prepend the directory twice",
                      "contract_id": item.contract_id, "suffixes": list(item.suffixes)}
                     for item in descriptor.workspace_resources
                 ],
@@ -7209,7 +7215,19 @@ class ConsolePresenter:
                 generation = None if binding.host is None or binding.host.generation is None else binding.host.generation.value
                 if expected_generation is not None and expected_generation != generation:
                     raise ValueError("logic run changed; read the current generation before submitting")
-            if action == "logic.add":
+            if action == "layout.save":
+                if set(params) != {"path"}:
+                    raise ValueError("layout.save accepts path")
+                accepted = bool(self.save_layout(params["path"]))
+                status = "saved" if accepted else "rejected"
+            elif action == "layout.load":
+                if set(params) - {"path", "stop_running"} or "path" not in params:
+                    raise ValueError("layout.load accepts path and optional stop_running")
+                if type(params.get("stop_running", False)) is not bool:
+                    raise TypeError("stop_running must be a boolean")
+                accepted = self.load_layout(**params)
+                status = "queued" if self._pending_board is not None else "loaded" if accepted else "rejected"
+            elif action == "logic.add":
                 node_id = self.add_logic(**params)
                 accepted = bool(node_id)
             elif action == "logic.update":
@@ -8077,6 +8095,33 @@ class ConsolePresenter:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
+        if values is not None:
+            from .authoring_form import display_value
+
+            # An editor may echo its initial projection (rows as tuples,
+            # numeric normalization, or an unchanged source choice). Only
+            # actual authoring changes advance the shared draft revision.
+            changed = {}
+            for name, value in values.items():
+                previous = display_value(binding.draft.values.get(name, _UNCHANGED))
+                proposed = display_value(value)
+                if type(previous) is not type(proposed) or previous != proposed:
+                    changed[name] = value
+            values = changed
+        if source_signal is not _UNCHANGED and str(source_signal) == binding.draft.source_signal:
+            source_signal = _UNCHANGED
+        if device_keys is not None:
+            device_keys = {
+                str(name): str(key) for name, key in device_keys.items()
+                if binding.draft.device_keys.get(str(name), _UNCHANGED) != str(key)
+            }
+        if artifact_inputs is not None:
+            artifact_inputs = {
+                str(name): str(path) for name, path in artifact_inputs.items()
+                if binding.draft.artifact_inputs.get(str(name), _UNCHANGED) != str(path)
+            }
+        if not values and source_signal is _UNCHANGED and not device_keys and not artifact_inputs:
+            return True
         outputs_before = tuple(output.name for output in self._logic_outputs(binding))
         if values is not None:
             for name, value in values.items():

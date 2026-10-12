@@ -294,7 +294,7 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
             dataset_output_declarations=(_output("roi", 1).declaration,),
             signal_key=lambda _name: "roi/value",
         )
-        roi_tap = plane.reserve_follow_processor(
+        _, roi_tap = plane.reserve_follow_processor(
             roi_node,
             source_name="camera/frame",
             source_publication=root,
@@ -312,7 +312,7 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
             dataset_output_declarations=(_output("fit", 1).declaration,),
             signal_key=lambda _name: "fit/value",
         )
-        fit_tap = plane.reserve_follow_processor(
+        _, fit_tap = plane.reserve_follow_processor(
             fit_node,
             source_name="roi/value",
             source_publication=roi,

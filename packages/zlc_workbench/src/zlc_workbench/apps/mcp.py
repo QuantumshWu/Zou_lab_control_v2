@@ -112,7 +112,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             raise ValueError("MCP file access is limited to this experiment workspace")
         return selected
 
-    mcp = MCPServer("ZLC experiment", instructions=(
+    mcp = MCPServer("ZLC experiment", log_level="WARNING", instructions=(
         "Operate the currently open experiment, not another device session. Start with lab_state and lab_catalog. "
         "Draft edits are not applied runs. Start acceptance is not ready or completion; use exact generation in lab_wait. "
         "Inspect errors and data validity; do not infer success from screenshots alone. "
@@ -268,6 +268,28 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         return await asyncio.to_thread(read_data)
 
     @tool(annotations=read)
+    async def lab_files(directory: str = ".", offset: int = 0, limit: int = 100) -> dict[str, object]:
+        """Discover workspace files/directories without GUI file dialogs. Paths returned are workspace-relative.
+        Node resource fields may instead resolve relative to their declared resource directory; consult lab_catalog.
+        """
+        if offset < 0 or not 1 <= limit <= 200:
+            raise ValueError("offset must be nonnegative and limit between 1 and 200")
+        selected = workspace_path(directory)
+        def listing():
+            entries = sorted(selected.iterdir(), key=lambda item: item.name.casefold())
+            result = []
+            for entry in entries[offset:offset+limit]:
+                if not entry.resolve().is_relative_to(flow.space.root.resolve()):
+                    continue
+                stat = entry.stat()
+                result.append(dict(path=entry.relative_to(flow.space.root).as_posix(),
+                                   directory=entry.is_dir(), bytes=stat.st_size,
+                                   modified_ns=stat.st_mtime_ns))
+            return dict(directory=directory, entries=result, offset=offset,
+                        next_offset=min(len(entries), offset+limit), total=len(entries))
+        return await asyncio.to_thread(listing)
+
+    @tool(annotations=read)
     async def lab_artifact(path: str, offset: int = 0, limit: int = 16000) -> CallToolResult:
         """Read a workspace report or preview PNG/JPEG. Binary scientific files remain files, not giant JSON arrays."""
         selected = workspace_path(path)
@@ -302,7 +324,44 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         """Inspect an already-open Pulse Control's cached board state, pending commands and last warning; no device I/O."""
         return await owner(lambda: flow.control_pulse("inspect", device_id))
 
+    def editor(device_id):
+        control = flow.device_controls.get(device_id)
+        if control is None:
+            raise RuntimeError("Open this device Control with lab_device_action first")
+        return getattr(control, "presenter", control)
+
+    @tool(annotations=read)
+    async def lab_editor_catalog(device_id: str) -> dict[str, object]:
+        """Discover an opened Pulse/SLM editor's actions, IDs, units and parameter choices from its actual owner."""
+        return await owner(lambda: editor(device_id).control_catalog())
+
+    @tool(annotations=read)
+    async def lab_editor_state(device_id: str, details: bool = False) -> dict[str, object]:
+        """Read the opened editor's draft, pending/error and accepted-device facts. Details includes the actual Pulse
+        document/Config or SLM target summaries. Draft, compiled preview and applied evidence remain distinct.
+        """
+        return await owner(lambda: editor(device_id).control_state(details=details))
+
     if allow_control:
+        @tool()
+        async def lab_editor_action(device_id: str, action: str, arguments: dict[str, object],
+                                    expected_revision: int | None = None) -> dict[str, object]:
+            """Use an opened Pulse/SLM editor's discovered action, via the same authoring/worker as the GUI.
+            Consult lab_editor_catalog; path arguments are workspace-relative or absolute inside the workspace.
+            Saving/applying/solving can be asynchronous; inspect pending/errors afterward. expected_revision rejects
+            edits against a stale draft. This does not override normal device ownership or stale-device protections.
+            """
+            arguments = dict(arguments)
+            if "path" in arguments:
+                arguments["path"] = str(workspace_path(str(arguments["path"])))
+            def submit():
+                selected = editor(device_id)
+                current = selected.control_state()
+                if expected_revision is not None and current.get("revision") != expected_revision:
+                    raise ValueError("Editor revision changed; inspect current state before editing")
+                return selected.control_action(action, arguments)
+            return await owner(submit)
+
         @tool()
         async def lab_initialize() -> dict[str, object]:
             """Initialize the apparatus currently authored in Devices. Never toggles an existing session off.
@@ -322,13 +381,15 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         async def lab_action(action: Literal["logic.add", "logic.update", "logic.validate", "logic.start",
                                             "logic.stop", "logic.remove", "panel.add", "panel.update",
                                             "panel.remove", "panel.edit", "panel.refresh", "panel.save",
-                                            "view.monitor", "view.logic"],
+                                            "view.monitor", "view.logic", "layout.save", "layout.load"],
                              arguments: dict[str, object], expected_draft_revision: int | None = None,
                              expected_generation: str | None = None) -> dict[str, object]:
             """Use the normal experiment action. See lab_catalog first. logic.add: api_name, optional values,
             source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
             source_signal, device_keys, artifact_inputs. Start/Stop: node_id. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
+            layout.save/load take path (workspace JSON); load restores stopped drafts. Loading over active Logic
+            requires explicit stop_running=true; poll state.layout_pending until the replacement completes.
             Panel kind must be one of lab_catalog.panel_kinds (for example image, not Image).
             Save: panel_id,selected workspace image path ending .png/.pdf/.svg; the standard matching science .npz
             is saved too. Saving is asynchronous: inspect subsequent reports/errors. Manual requests stay human.
@@ -337,6 +398,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             arguments = dict(arguments)
             if action == "panel.save":
                 arguments["selected"] = str(workspace_path(arguments["selected"]))
+            if action in {"layout.save", "layout.load"}:
+                arguments["path"] = str(workspace_path(arguments["path"]))
             return await owner(lambda: presenter().control_action(action, arguments,
                 expected_draft_revision=expected_draft_revision, expected_generation=expected_generation))
 

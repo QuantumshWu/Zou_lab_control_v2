@@ -454,6 +454,9 @@
 ### 2.5 Device Control与settings provenance
 
 - 实验 MCP：可选 `.[mcp]` 与 `experiment --mcp-port` 薄接入当前 ExperimentGuiFlow/Console，启用后默认允许操作，仅 `--mcp-read-only` 限制为只读；loopback/token/Origin 边界，复用 schema、设备占用、Start/Stop、精确发布身份、Pulse异步按钮路径和公共截图。状态默认摘要、目录按节点取schema，动作只回相关行，数据页保留三domain坐标/validity/sigma；SDK隐藏的错误通过同一工具错误边界返回具体原因。真实协议测试覆盖认证/异步Stop/错误文本及GUI卡住后超时排队命令不会延后执行。独立agent仅通过MCP完成Virtual相机三帧采集、10ms曝光及ROI变更后重启、精确像素坐标读取、Monitor截图、Figure PNG+NPZ保存及停止；暖态状态/目录中位13–14ms，SDK客户端首次tool另有约1–1.6s开销，不冒充硬实时上界。测试窗口/服务已退出，研究文件不入Git，未触碰真实设备。
+- MCP后续分工黑盒迭代覆盖Pulse时序与Config、SLM、设备Apply、派生/拟合/保存和布局恢复。Pulse公共owner目录/动作复用原编辑数学及command worker；编译预览不Load/Fire，返回TTL/DAC、delay、loop和扫描行，并以原revision/Config/digest判断预览是否仍匹配草稿与设备。SLM沿原Target/Pattern/Context读写与solver/Send；修复Adopt未清除旧frozen operator的问题。无效或受占用保护的设备Apply不留下改变的Desired。Processor generation从原子绑定返回，消除绑定后查身份的退场竞态；相同作者值回显不推进revision，following失败不再被waiting掩盖。
+- 三名独立agent仅通过MCP验收：Config 4→5 ms与未保存草稿区分，带bracket/TTL delay及DAC 100/−512的编译→Fire→Stop且digest一致；RF 500/501 MHz两点扫描的1536个值与相机来源逐值对应；Camera→Derive→Curve Gaussian→Derive链、重启身份/旧操作拒绝、Frozen与保存；SLM preset/离散target/pupil/operator/Send与文件往返、旧revision拒绝；只读端不暴露操作。布局替换运行节点须显式停止，恢复为停止草稿，Panel新ID的Fit下游引用正确重映射并可重跑。另修窄Pulse卡合法DAC数值放不下的真实UI问题，宽度由现有控件尺寸统一计算。最终所有测试GUI/服务已退出；证据留ignored research，不进入Git。以上是虚拟设备与真实Qt/HTTP协议证据，不代替真实硬件电气/光学验收。
+- SLM Adopt采用本次command lease内取得的同一设备快照更新草稿及显示；旧poll按原command/mapping revision拒绝倒退，不新增缓存authority或通信。现有控制用例证明外部apply后不等Qt poll立即Adopt成功，迟到旧poll不能再把已采用相位标成外部冲突；提示明确Pattern按现有16-bit格式冻结，不声称浮点相位逐位相同。
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
 - Generic Control的X复用现有Fluent隐藏机制，保留同一device session的窗口、Desired和单位；隐藏时停止Live debounce、撤回未执行字段写入并跳过周期UI投影，重开只读刷新current，卸载/重建或session结束真正销毁窗口。现有正式flow的单个Qt生命周期用例红/绿通过，验证ms单位与草稿保留、隐藏无周期投影、重开读回及session shutdown释放；未做硬件测试。

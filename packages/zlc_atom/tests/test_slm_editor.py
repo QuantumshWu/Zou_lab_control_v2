@@ -184,6 +184,97 @@ def test_editor_keeps_only_latest_solve_and_clear_does_not_drive_hardware(
         np.testing.assert_array_equal(device.last_commanded_phase, incoming)
 
 
+def test_public_control_actions_share_drafts_files_receipts_and_device_ownership(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    calls = []
+
+    def solve(target, **kwargs):
+        calls.append(target.shape)
+        return _zero_solve(target, **kwargs)
+
+    with _editor(tmp_path, monkeypatch, solve) as (app, session, control):
+        _pump(app, lambda: control.solver_idle)
+        device = session.installation.device("slm")
+        before_calls = len(calls)
+        before_command = device.command_revision
+        assert control.control_catalog()["editor_kind"] == "slm"
+        initial = control.control_state(details=True)
+        assert len(calls) == before_calls
+        assert device.command_revision == before_command
+        with pytest.raises(ValueError, match="center_x"):
+            control.control_action("pupil.update", {"values": {"center_x": -1}})
+        assert control.control_state()["pupil"] == initial["pupil"]
+
+        control.control_action("target.preset", {
+            "kind": "Grid", "values": {"rows": 2, "columns": 2, "spacing_y": 5, "spacing_x": 5},
+        })
+        _pump(app, lambda: control.solver_idle)
+        assert control.control_state(details=True)["target"]["nonzero_count"] == 4
+        revision = control.control_state()["revision"]
+        with pytest.raises(ValueError, match="integer pixels"):
+            control.control_action("target.spots", {"spots": [{"x": -1, "y": 2, "intensity": 1}]})
+        assert control.control_state()["revision"] == revision
+        control.control_action("operator.update", {"values": {"enabled": True, "carrier_x": 0.25}})
+        assert control.control_state()["revision"] > revision
+        assert control.control_action("device.send", {})["accepted"]
+        _pump(app, lambda: not control.command_active)
+        assert control.control_state()["command_known"]
+        np.testing.assert_array_equal(device.last_commanded_phase, control._phase)
+
+        context = tmp_path / "new-folder" / "public-context.npz"
+        target = tmp_path / "public-target.json"
+        for action, path in (("context.save", context), ("target.save", target)):
+            control.control_action(action, {"path": str(path)})
+            _pump(app, lambda: not control.command_active)
+            assert path.is_file()
+            assert control.control_state()["error"] is None
+        count = len(calls)
+        control.control_action("context.load", {"path": str(tmp_path / "missing.npz")})
+        _pump(app, lambda: not control.command_active)
+        assert control.control_state()["error"]
+        control.control_action("context.load", {"path": str(context)})
+        _pump(app, lambda: not control.command_active)
+        assert control.control_state()["error"] is None
+        assert len(calls) == count  # A loaded Context is not silently re-solved.
+
+        lease = session.acquire_device_command(object(), "other experiment", "slm", device)
+        try:
+            control.control_action("device.send", {})
+            _pump(app, lambda: not control.command_active)
+            assert "other experiment" in control.control_state()["error"]
+        finally:
+            lease.release()
+        control.control_action("device.send", {})
+        _pump(app, lambda: not control.command_active)
+        assert control.control_state()["error"] is None
+        assert control.control_state()["command_receipt"]["outcome"] == "known-new"
+        cached = control._device_state
+        external = session.acquire_device_command(object(), "external phase", "slm", device)
+        try:
+            device.apply_phase(np.full(control.shape, 0.37, dtype=np.float32))
+        finally:
+            external.release()
+        assert device.command_revision > cached[0]
+        # No Qt poll between the external write and this explicit adoption.
+        control.control_action("device.adopt", {})
+        assert control.control_state()["command_revision"] == device.command_revision
+        assert not control.control_state()["device_diverged"]
+        from concurrent.futures import Future
+        stale_poll = Future()
+        stale_poll.set_result(cached)
+        control._show_device_state(stale_poll)
+        assert control.control_state()["command_revision"] == device.command_revision
+        assert not control.control_state()["device_diverged"]
+        assert control.control_state()["operator"]["enabled"] is False
+        adopted = tmp_path / "adopted-context.npz"
+        control.control_action("context.save", {"path": str(adopted)})
+        _pump(app, lambda: not control.command_active)
+        from zlc_atom.devices.slm.solver import load_science_context
+        np.testing.assert_array_equal(load_science_context(adopted)["phase"], control._phase)
+        assert control.screenshot_png().startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
     tmp_path: Path, monkeypatch,
 ) -> None:

@@ -3750,10 +3750,15 @@ class _RunningHost:
     def published_signals(self) -> tuple[str, ...]:
         return ()
 
-    def shutdown(self) -> None:
+    @property
+    def terminal(self):
+        return self.observation.terminal
+
+    def shutdown(self) -> bool:
         if self.running:
             raise RuntimeError("cannot close NodeHost before terminal")
         self.shut_down = True
+        return True
 
 
 def test_clearing_the_board_asks_first_and_then_takes_everything_off(

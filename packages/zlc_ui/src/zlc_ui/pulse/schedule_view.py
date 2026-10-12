@@ -104,7 +104,8 @@ class PeriodCard(FluentGroupBox):
 
     def __init__(self, period: PeriodVM, *, index: int = 0, total_periods: int = 1,
                  ports: tuple[PortRowVM, ...] = (),
-                 analog_mode_choices: tuple[FormChoice, ...] = (), parent=None) -> None:
+                 analog_mode_choices: tuple[FormChoice, ...] = (), card_width: int | None = None,
+                 parent=None) -> None:
         if not isinstance(period, PeriodVM):
             raise TypeError("period must be PeriodVM")
         self.kind = period.kind
@@ -118,7 +119,9 @@ class PeriodCard(FluentGroupBox):
         self.bus_value_edits: dict[str, FluentScanLineEdit] = {}
         self.port_rows: dict[str, QtWidgets.QWidget] = {}
 
-        width = spacer_card_width() if spacer else period_card_width()
+        width = spacer_card_width() if spacer else (
+            card_width if card_width is not None else period_card_width(
+                ports=ports, analog_mode_choices=analog_mode_choices))
         self.setFixedWidth(width)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         if spacer:
@@ -188,11 +191,15 @@ class PeriodCard(FluentGroupBox):
 
     def set_period(self, period: PeriodVM, *, index: int, total_periods: int,
                    ports: tuple[PortRowVM, ...],
-                   analog_mode_choices: tuple[FormChoice, ...]) -> None:
+                   analog_mode_choices: tuple[FormChoice, ...], card_width: int | None = None) -> None:
         if period.period_id != self.period_id:
             raise ValueError("period identity cannot change")
         if period.kind != self.kind:
             raise ValueError("a period cannot change kind under its card")
+        if card_width is not None and self.kind != PERIOD_KIND_SPACER:
+            self.setFixedWidth(card_width)
+            for widget in (self.duration_edit, self.unit_combo, self.name_edit):
+                widget.setFixedWidth(period_control_width(card_width))
         self._period = period
         # Spacers are not counted: "Period 2/5" numbers the periods someone
         # wrote, and a spacer is the gap between two of them.
@@ -823,13 +830,15 @@ class ComponentCard(FluentGroupBox):
 
     action_requested = QtCore.pyqtSignal(str, object)
 
-    def __init__(self, component: ComponentVM, parent=None, *, mode: str = "closed") -> None:
+    def __init__(self, component: ComponentVM, parent=None, *, mode: str = "closed",
+                 card_width: int | None = None) -> None:
         super().__init__("Component" if mode == "closed" else "Start" if mode == "start" else "End", parent, title_color=ACCENT)
         self.component_id = component.component_id
         self.mode = mode
         self.key = ("component" if mode == "closed" else f"component-{mode}", component.component_id)
         self._component = component
-        self.setFixedWidth(period_card_width() if mode == "closed" else spacer_card_width())
+        self.setFixedWidth((card_width if card_width is not None else period_card_width())
+                           if mode == "closed" else spacer_card_width())
         self.set_surface(edge=ACCENT)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         column = QtWidgets.QVBoxLayout(self)
@@ -1750,6 +1759,7 @@ class PulseScheduleView(QtWidgets.QWidget):
 
     def _reconcile(self, vm: ScheduleVM) -> None:
         """Update existing rows and move timeline items only when their order changes."""
+        card_width = period_card_width(ports=vm.ports, analog_mode_choices=vm.analog_mode_choices)
         visible_count = sum(1 for port in vm.ports if port.visible)
         self.visible_label.setText(
             f"Visible {visible_count}/{len(vm.ports)} ports | "
@@ -1780,6 +1790,7 @@ class PulseScheduleView(QtWidgets.QWidget):
                     total_periods=len(authored),
                     ports=vm.ports,
                     analog_mode_choices=vm.analog_mode_choices,
+                    card_width=card_width,
                 )
                 self._connect_card(card)
             else:
@@ -1789,6 +1800,7 @@ class PulseScheduleView(QtWidgets.QWidget):
                     total_periods=len(authored),
                     ports=vm.ports,
                     analog_mode_choices=vm.analog_mode_choices,
+                    card_width=card_width,
                 )
             desired[period.period_id] = card
         self._cards = desired
@@ -1801,8 +1813,10 @@ class PulseScheduleView(QtWidgets.QWidget):
                 card_key = ("component" if mode == "closed" else f"component-{mode}", component.component_id)
                 card = self._component_cards.get(card_key)
                 if card is None:
-                    card = ComponentCard(component, mode=mode)
+                    card = ComponentCard(component, mode=mode, card_width=card_width)
                     card.action_requested.connect(self._component_action)
+                elif mode == "closed":
+                    card.setFixedWidth(card_width)
                 card.set_component(component)
                 component_cards[card_key] = card
             key = ("component", component.component_id)

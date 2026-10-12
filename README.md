@@ -105,6 +105,12 @@ device owner or permission to bypass them.
 - `lab_catalog`: short node index by default; `api_name` returns one plugin's
   schema, `node_id`/`panel_id` returns the current editor projection. Units,
   choices and validation come from the same descriptors as the GUI.
+- `lab_files` lists bounded pages of workspace files. A Logic resource field
+  states its own `relative_to` directory: for example, a Pulse resource takes
+  `imaging.json` relative to `pulses/`, while an editor file action takes the
+  workspace-relative `pulses/imaging.json`. Absolute paths inside the workspace
+  are also accepted. Scan Plan and API override formats are documented in the
+  existing Seamless Scan fields, not in a second MCP-specific grammar.
 - `lab_signal`: bounded numeric pages with exact generation/revision,
   validity, uncertainty and logical-axis coordinates. Default reads the latest
   publication chunk; `dataset=true` reads the current dataset/retained window.
@@ -121,6 +127,9 @@ device owner or permission to bypass them.
   Read the current draft revision before Start; use the observed generation
   for Stop. A figure save selects `.png`, `.pdf` or `.svg` and also writes its
   companion science `.npz`. Check subsequent reports for asynchronous errors.
+  `layout.save`/`layout.load` take a workspace JSON `path`; loading restores
+  stopped drafts, never starts an experiment. Replacing active Logic requires
+  explicit `stop_running=true`; `layout_pending` reports pending replacement.
 - `lab_initialize`, `lab_device_action` and `lab_pulse`: explicitly authorized
   Init, ordinary Control edits, and bound Pulse Editor Open/Fire/Stop. Prepare
   the Pulse before arming a triggered camera; waiting indefinitely for an
@@ -128,6 +137,21 @@ device owner or permission to bypass them.
   the Pulse's authored repeats and Config semantics.
 - `lab_device_state` / `lab_pulse_state` read already-open Controls without
   issuing hardware reads, including in read-only mode.
+- `lab_editor_catalog` / `lab_editor_state` / `lab_editor_action` expose the
+  existing specialized Pulse and SLM editors after opening their Control.
+  The catalog supplies valid action names, field IDs, units and arguments.
+  Pulse actions edit periods, TTL/DAC, delays, repeats, brackets and bindings;
+  named Config edit/load/save and explicit Pulse save share the GUI paths.
+  `validate` compiles asynchronously without Load or Fire. Detailed state
+  distinguishes authored defaults, loaded Config, unsaved Config, compiler
+  preview and device-confirmed digest; never infer physical timing from draft
+  period lengths alone. Dirty Pulse/Config replacement requires explicit
+  `discard_changes=true`.
+  SLM actions edit Target/pupil/operator, solve, Send/Adopt, and load/save Target
+  or Science Context. Inspection does not solve or Send, and command receipts
+  do not claim optical settling. `expected_revision` rejects stale editor
+  edits; SLM revision includes both target and operator/phase changes. Large
+  phase arrays stay in their normal artifacts rather than routine JSON replies.
 - `lab_artifact` reads workspace reports/previews; `lab_health` distinguishes
   the protocol listener from GUI responsiveness and does not claim hardware
   readiness.

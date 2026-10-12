@@ -1060,16 +1060,19 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
             assert not host._input_history_leases
             return
         host.start()
+        assert host.generation is not None
         assert _wait(host, wake).phase == "done"
         assert seen == ([(1, [2.0], ((2, 2),))] if view == "event"
                         else [(2, [1.0, 2.0], ((0, 0), (2, 2)))])
         result = plane.current_dataset(host.signal_key("derived"))
+        assert result.ref.stream_generation == host.generation
         assert result.materialize().block.values.reshape(-1).tolist() == [1.0]
         assert not plane.is_generation_live(host.signal_key("derived"))
         source_publication = plane.latest_publication(source.signal_key("frame"))
         for answer in (2.0, 3.0):
             previous = plane.latest_publication(host.signal_key("derived"))
             host.shutdown()
+            assert host.generation == previous.event_ref.generation
             assert plane.latest_publication(host.signal_key("derived")) is previous
             host = _host(
                 Processor(), plane, wake, instance_id=f"processor-{delivery}",
@@ -1079,6 +1082,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
             host.start()
             assert _wait(host, wake).phase == "done"
             current = plane.latest_publication(host.signal_key("derived"))
+            assert host.generation == current.event_ref.generation
             assert current.event_ref.generation != previous.event_ref.generation
             assert current.direct_parent_refs == (source_publication.event_ref,)
             assert plane.current_dataset(host.signal_key("derived")).materialize().block.values.item() == answer
@@ -1327,6 +1331,8 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
         # The derived generation is live BEFORE any source frame exists:
         # this is the fact a scan's armed-source gate reads.
         assert plane.is_generation_live(host.signal_key("derived"))
+        generation = host.generation
+        assert generation is not None
         assert seen == []
         for origin, value in enumerate((4.0, 6.0)):
             plane.commit_live(
@@ -1344,6 +1350,7 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
         plane.seal_committed(source)
         assert _wait(host, wake).phase == "done"
         assert seen == [4.0, 6.0]
+        assert plane.latest_publication(host.signal_key("derived")).event_ref.generation == generation
     finally:
         host.shutdown()
         plane.close()
@@ -1732,6 +1739,40 @@ def test_a_bind_race_ends_cancelled_and_never_strands_starting(monkeypatch) -> N
             host.shutdown()
             plane.close()
 
+    # A successful reservation can lose its source before Start receives
+    # the return value. Its identity must already travel with the tap;
+    # looking it up afterwards introduces another refusal and loses the tap.
+    source = _Source("retiring-source", source_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    reserve = plane.reserve_follow_processor
+    reserved = []
+
+    def retire_after_reserving(*args, **kwargs):
+        result = reserve(*args, **kwargs)
+        reserved.append(result)
+        plane.retire(source)
+        return result
+
+    monkeypatch.setattr(plane, "reserve_follow_processor", retire_after_reserving)
+    wake = Event()
+    host = _host(
+        Processor(), plane, wake, instance_id="retiring-processor", kind="processor",
+        outputs=(derived_declaration,), source=source.signal_key("frame"), delivery="exact",
+    )
+    try:
+        host.start()
+        assert host.generation is not None
+        assert _wait(host, wake).phase == "cancelled"
+        generation, tap = reserved[0]
+        assert host.generation == generation
+        from zlc_runtime.streams import StreamEndedEarly
+        with pytest.raises(StreamEndedEarly, match="tap is closed"):
+            tap.next(0)
+    finally:
+        host.shutdown()
+        plane.close()
+
 
 def test_an_unarmed_exact_source_leaves_the_follow_cancelled() -> None:
     """No generation to follow YET is the source's lifecycle, not a fault.
@@ -1858,6 +1899,7 @@ def test_failure_acceptance_excuses_the_source_lifecycle() -> None:
                 delivery="latest",
             )
             latest.start()
+            assert latest.generation is not None
             # The lane commits the first answer on its own worker, possibly
             # before this tap attaches: replay it rather than race it.
             _, tap = plane.follow_publications(latest.signal_key("derived"), replay=True)
@@ -1873,6 +1915,7 @@ def test_failure_acceptance_excuses_the_source_lifecycle() -> None:
                 assert observation.phase == ("done" if source_error is None else "failed"), observation
                 assert len(seen) == 1
                 assert plane.retains(latest.signal_key("derived"))
+                assert plane.latest_publication(latest.signal_key("derived")).event_ref.generation == latest.generation
                 assert tap.next(0.0).value(latest.signal_key("derived")) is not None
                 with pytest.raises(StreamEndedEarly if source_error is None else SourceFailed):
                     tap.next(0.0)

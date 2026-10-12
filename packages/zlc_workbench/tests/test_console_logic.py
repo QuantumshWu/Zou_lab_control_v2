@@ -193,6 +193,12 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     updated = presenter.control_action("logic.update", {"node_id": node_id, "values": {"repeat": 10}})
     assert [item["node_id"] for item in updated["state"]["logic"]] == [node_id]
     assert presenter.logic["other_camera"].draft.values["repeat"] == 0
+    revision = presenter.logic[node_id].draft_revision
+    assert presenter.update_logic_draft(node_id, values={"repeat": 10}, normalized=True)
+    assert presenter.logic[node_id].draft_revision == revision
+    assert presenter.update_logic_draft(node_id, values={"repeat": 9}, normalized=True)
+    assert presenter.logic[node_id].draft_revision == revision + 1
+    assert presenter.logic[node_id].draft.values["repeat"] == 9
     json.dumps(catalog, allow_nan=False)
     json.dumps(stale, allow_nan=False)
 
